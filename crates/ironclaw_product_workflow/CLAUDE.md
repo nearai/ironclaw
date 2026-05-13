@@ -38,3 +38,36 @@ Enable `test-support` feature for in-memory fakes:
 - `FakeConversationBindingService`
 - `FakeIdempotencyLedger`
 - `FakeInboundTurnService`
+
+## Service ports
+
+The workflow crate defines port traits for each non-`UserMessage` dispatch
+arm. Production wiring (in `src/app.rs` / a composition crate) implements
+these by wrapping existing host-layer services. Tests wire `Fake*` impls
+from the `test-support` feature.
+
+| Trait | Wrapped by production | Closes AC |
+|-------|-----------------------|-----------|
+| `BeforeInboundPolicy` | v1 `HookPoint::BeforeInbound` ported into `inbound_turn.rs` | #3280 AC #8, #9 |
+| `ProductCommandRouter` | Reborn's `AgentCommandService` (#3286 owns the full matrix) | #3280 AC #10 |
+| `ApprovalInteractionService` | `ironclaw_approvals::ApprovalResolver` (#3094) | #3280 AC #11 |
+| `AuthInteractionService` | `ironclaw_authorization::CapabilityDispatchAuthorizer` (#3094) | #3280 AC #11 |
+| `LinkedThreadActionService` | TBD per-product handler | #3280 AC #13 |
+| `MissionService` | `ironclaw_engine` MissionManager once #3278 ships | #3280 AC #12, #13 |
+| `SystemActionService` | TBD typed system action handlers | #3280 AC #15 |
+| `ProjectionSubscriptionAuthority` | `ironclaw_outbound::OutboundPolicyService::authorize_subscription` (#3266 / PR #3542) | #3280 AC #14 |
+
+Each port is **optional** on `DefaultProductWorkflow` (builder methods
+`with_*`). When a port is unset, the corresponding dispatch arm returns a
+redacted permanent `Rejected` ack — adapters must wire the service before
+serving the matching action kind in production.
+
+## No mission auto-attach
+
+`DefaultProductWorkflow` does **not** route `ProductInboundPayload::UserMessage`
+to `MissionService` under any condition. Missions only fire via explicit
+`MissionActionPayload`. The v1 bug shape (`src/bridge/router.rs::fire_event_missions_for_message`
+pattern-matched message text against `MissionCadence::OnEvent` regex and
+side-fired missions) is closed by AC #12 of #3280 and locked in by the
+`ordinary_user_message_text_never_reaches_mission_service` regression test
+in `tests/product_workflow_contract.rs`.

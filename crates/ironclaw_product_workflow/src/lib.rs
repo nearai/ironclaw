@@ -26,6 +26,7 @@ pub mod error;
 pub mod fakes;
 pub mod inbound_turn;
 pub mod ledger;
+pub mod services;
 pub mod workflow;
 
 pub use action::{
@@ -35,7 +36,20 @@ pub use action::{
 pub use binding::{ConversationBindingService, ResolveBindingRequest, ResolvedBinding};
 pub use error::ProductWorkflowError;
 #[cfg(any(test, feature = "test-support"))]
-pub use fakes::{FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService};
+pub use fakes::{
+    FakeApprovalInteractionService, FakeAuthInteractionService, FakeBeforeInboundPolicy,
+    FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService,
+    FakeLinkedThreadActionService, FakeMissionService, FakeProductCommandRouter,
+    FakeProjectionSubscriptionAuthority, FakeSystemActionService,
+};
 pub use inbound_turn::{DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService};
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
+pub use services::{
+    ApprovalInteractionService, ApprovalResolutionOutcome, AuthInteractionService,
+    AuthResolutionOutcome, BeforeInboundOutcome, BeforeInboundPolicy, BeforeInboundRequest,
+    LinkedThreadActionOutcome, LinkedThreadActionService, MissionFireOutcome, MissionFireRef,
+    MissionFireRejectionReason, MissionFireRequest, MissionFireSuppressionReason, MissionService,
+    ProductCommandOutcome, ProductCommandRouter, ProjectionSubscriptionAuthority,
+    ProjectionSubscriptionAuthorityRequest, SystemActionOutcome, SystemActionService,
+};
 pub use workflow::DefaultProductWorkflow;

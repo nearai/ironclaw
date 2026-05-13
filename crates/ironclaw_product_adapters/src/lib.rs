@@ -43,10 +43,12 @@ pub use fakes::{
 pub use identity::{AdapterInstallationId, ProductAdapterId, ProductSurfaceKind};
 pub use inbound::{
     ApprovalDecision, ApprovalResolutionPayload, AuthResolutionPayload, AuthResolutionResult,
-    InboundCommandPayload, InboundRetryDisposition, LinkedThreadActionPayload,
-    ParsedProductInbound, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductRejection, ProductRejectionDisposition, ProductRejectionKind, ProductTriggerReason,
-    ProjectionSubscriptionPayload, TrustedInboundContext, UserMessagePayload,
+    InboundCommandPayload, InboundRetryDisposition, LinkedThreadActionId,
+    LinkedThreadActionPayload, LoopGateRef, MissionActionPayload, MissionFireRef,
+    MissionFireSuppressionReason, ParsedProductInbound, ProductCommandName, ProductInboundAck,
+    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, ProductRejectionDisposition,
+    ProductRejectionKind, ProductTriggerReason, ProjectionSubscriptionPayload, SystemActionPayload,
+    TrustedInboundContext, UserMessagePayload,
 };
 pub use outbound::{
     AuthPromptView, FinalReplyView, GatePromptView, ProductOutboundEnvelope,

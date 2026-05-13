@@ -177,12 +177,29 @@ pub enum ActionPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionDispatchKind {
-    UserMessageTurn { run_id: TurnRunId },
-    Command { command: ProductCommandName },
-    ApprovalResolution { gate_ref: LoopGateRef },
-    AuthResolution { auth_request_ref: AuthRequestRef },
+    UserMessageTurn {
+        run_id: TurnRunId,
+    },
+    Command {
+        command: ProductCommandName,
+    },
+    ApprovalResolution {
+        gate_ref: LoopGateRef,
+    },
+    AuthResolution {
+        auth_request_ref: AuthRequestRef,
+    },
     ProjectionSubscription,
-    LinkedThreadAction { action_id: LinkedThreadActionId },
+    LinkedThreadAction {
+        action_id: LinkedThreadActionId,
+    },
+    MissionAction {
+        mission_intent: String,
+    },
+    SystemAction {
+        system_actor_ref: String,
+        kind: String,
+    },
     NoOp,
 }
 
@@ -210,6 +227,13 @@ impl ActionDispatchKind {
             ProductInboundPayload::LinkedThreadAction(lta) => Ok(Self::LinkedThreadAction {
                 action_id: LinkedThreadActionId::new(lta.action_id.clone())
                     .map_err(|reason| ProductWorkflowError::TurnSubmissionRejected { reason })?,
+            }),
+            ProductInboundPayload::MissionAction(ma) => Ok(Self::MissionAction {
+                mission_intent: ma.mission_intent.clone(),
+            }),
+            ProductInboundPayload::SystemAction(sa) => Ok(Self::SystemAction {
+                system_actor_ref: sa.system_actor_ref.clone(),
+                kind: sa.kind.clone(),
             }),
             ProductInboundPayload::NoOp => Ok(Self::NoOp),
         }
