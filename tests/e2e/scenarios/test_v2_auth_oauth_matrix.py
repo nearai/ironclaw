@@ -1465,19 +1465,6 @@ async def test_wasm_tool_oauth_roundtrip(auth_matrix_server):
     assert readiness["active"] is True, readiness
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Obsolete under the engine-v2 callable-only contract from #2868 "
-        "and the post-#3133 direct-callable contract. When the LLM emits "
-        "a direct call to a not-yet-authed extension, the engine raises "
-        "an Authentication gate via the auth preflight rather than the "
-        "older `gate_required` Authentication event with an auth URL. "
-        "The mock LLM's canned response shape doesn't match the new "
-        "contract; test_settings_first_gmail_auth_then_chat_runs covers "
-        "the same auth flow through the settings UI path."
-    ),
-)
 async def test_wasm_tool_first_chat_auth_attempt_emits_auth_url(auth_matrix_server):
     server = auth_matrix_server
     await _install_extension(server["base_url"], "gmail")
@@ -1721,18 +1708,6 @@ async def test_settings_first_gmail_auth_then_chat_runs(
     )
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "After settings-first MCP install + OAuth + chat, the mock LLM never "
-        "observes a follow-up request containing 'Tool `mock_mcp_mock_search` "
-        "returned', meaning the MCP tool output isn't feeding back to the LLM. "
-        "test_mcp_oauth_roundtrip proves the MCP OAuth flow itself works, and "
-        "test_mcp_oauth_refresh_on_demand proves chat-driven MCP invocation "
-        "does reach the server; the gap is specific to post-auth tool-output "
-        "propagation through the settings-first UI path. Needs deeper debug."
-    ),
-)
 async def test_settings_first_custom_mcp_auth_then_chat_runs(
     auth_matrix_server, auth_matrix_page
 ):
@@ -1774,6 +1749,14 @@ async def test_settings_first_custom_mcp_auth_then_chat_runs(
     await chat_input.press("Enter")
 
     thread_id = await _current_thread_id(page)
+    # Engine v2 gates the first MCP tool call on `approval` before it runs;
+    # the browser fixture has no auto-approve UI, so drive approval through
+    # the API while polling for the tool to land. Same pattern as
+    # test_wasm_tool_oauth_refresh_on_demand and
+    # test_mcp_same_server_multi_user_via_browser (#3235).
+    await _wait_for_tool_call(
+        server["base_url"], thread_id, "mock_mcp_mock_search", timeout=60.0
+    )
     history = await _wait_for_response_contains(
         server["base_url"], thread_id, "Mock MCP search result", timeout=60.0
     )
