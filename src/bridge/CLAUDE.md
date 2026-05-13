@@ -38,8 +38,11 @@ its install + auto-activation behavior is covered by:
 
 Integrations that need user setup (`NeedsSetup`, `Inactive`,
 `AvailableNotInstalled`) surface in the prompt under `Activatable
-Integrations`, but the model cannot enable them itself — it tells the user
-to install/activate them through the IronClaw UI.
+Integrations`. The model installs them by calling `tool_install` directly;
+the engine's auth preflight handles any credential prompt at execute time.
+(Restored in issue #3533 / PR — `tool_install` was previously hidden from
+the model surface, which left "connect my telegram" narrating manual UI
+steps instead of running the actual install.)
 
 ## Auth-flow extension resolution: one place, no re-derivation
 

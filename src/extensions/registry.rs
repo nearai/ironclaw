@@ -270,6 +270,7 @@ pub fn builtin_entries_with_relay(relay_url: Option<String>) -> Vec<RegistryEntr
             fallback_source: None,
             auth_hint: AuthHint::ChannelRelayOAuth,
             version: None,
+            hidden: false,
         });
     }
 
@@ -295,6 +296,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
             version: None,
+            hidden: false,
         };
 
         let score = score_entry(&entry, &["notion".to_string()]);
@@ -319,6 +321,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
             version: None,
+            hidden: false,
         };
 
         let score = score_entry(&entry, &["calendar".to_string()]);
@@ -343,6 +346,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
             version: None,
+            hidden: false,
         };
 
         let score = score_entry(&entry, &["wiki".to_string()]);
@@ -367,6 +371,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
             version: None,
+            hidden: false,
         };
 
         let score = score_entry(&entry, &["xyzfoobar".to_string()]);
@@ -456,6 +461,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
             version: None,
+            hidden: false,
         };
 
         registry.cache_discovered(vec![discovered]).await;
@@ -483,6 +489,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::None,
             version: None,
+            hidden: false,
         };
 
         registry.cache_discovered(vec![entry.clone()]).await;
@@ -509,6 +516,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
                 version: None,
+                hidden: false,
             },
             // Two entries with same name but different kinds should coexist
             RegistryEntry {
@@ -523,6 +531,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::Dcr,
                 version: None,
+                hidden: false,
             },
             RegistryEntry {
                 name: "dual-ext".to_string(),
@@ -538,6 +547,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
                 version: None,
+                hidden: false,
             },
         ];
 
@@ -576,6 +586,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::Dcr,
                 version: None,
+                hidden: false,
             },
             RegistryEntry {
                 name: "test-ext".to_string(),
@@ -589,6 +600,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::Dcr,
                 version: None,
+                hidden: false,
             },
         ];
 
@@ -618,6 +630,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
                 version: None,
+                hidden: false,
             },
             RegistryEntry {
                 name: "telegram".to_string(),
@@ -633,6 +646,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
                 version: None,
+                hidden: false,
             },
         ];
 
@@ -696,6 +710,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::None,
             version: None,
+            hidden: false,
         };
         let channel_entry = RegistryEntry {
             name: "cached-ext".to_string(),
@@ -711,6 +726,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::None,
             version: None,
+            hidden: false,
         };
 
         registry
@@ -755,6 +771,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
                 version: None,
+                hidden: false,
             },
             RegistryEntry {
                 name: "telegram".to_string(),
@@ -770,6 +787,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
                 version: None,
+                hidden: false,
             },
         ];
 
@@ -819,6 +837,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::None,
                 version: None,
+                hidden: false,
             },
             RegistryEntry {
                 name: "myext".to_string(),
@@ -834,6 +853,7 @@ mod tests {
                 fallback_source: None,
                 auth_hint: AuthHint::None,
                 version: None,
+                hidden: false,
             },
         ];
 

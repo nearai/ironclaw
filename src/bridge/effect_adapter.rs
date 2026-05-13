@@ -612,7 +612,12 @@ impl EffectBridgeAdapter {
                         output_value.get("auth_url").and_then(|v| v.as_str()),
                     ),
                 },
-                None,
+                // Carry the install/auth tool's already-computed output
+                // through the gate so the inline-await retry can return
+                // it directly instead of re-running `tool_install` (which
+                // would re-download the WASM and re-raise approval).
+                // Tracked by #3533.
+                Some(output_value.clone()),
                 Some(lease.clone()),
             )),
             _ => None,

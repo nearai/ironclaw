@@ -690,80 +690,97 @@ pub(crate) async fn oauth_callback_handler(
         //    OAuth completed.
         // Both are best-effort — failures are logged inside the bridge
         // helpers and never block the OAuth landing page.
-        let _ =
+        let inline_woken =
             crate::bridge::resolve_inline_gates_for_credential(&flow.user_id, &flow.secret_name)
                 .await;
         let _ =
             crate::bridge::resume_paused_missions_for_credential(&flow.user_id, &flow.secret_name)
                 .await;
 
-        match crate::bridge::resolve_engine_auth_callback(&flow.user_id, &flow.secret_name).await {
-            Ok(crate::bridge::AuthCallbackContinuation::ResolveGateExternal {
-                channel,
-                thread_scope,
-                request_id,
-            }) => {
-                if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
-                    let callback =
-                        crate::agent::submission::Submission::ExternalCallback { request_id };
-                    match serde_json::to_string(&callback) {
-                        Ok(content) => {
-                            let msg = web_incoming_message(
-                                &channel,
-                                &flow.user_id,
-                                content,
-                                thread_scope.as_deref(),
-                            );
-                            if let Err(e) = tx.send(msg).await {
+        // #3533: when the inline-await path already woke a parked
+        // waiter, the engine is already retrying the action that was
+        // blocked on this credential. Sending an `ExternalCallback`
+        // submission down the agent loop in addition to that is
+        // redundant and causes "thread already running" races against
+        // the in-flight retry (and re-dispatches `tool_install` a
+        // second time when the mock LLM pattern-matches the user
+        // turn). Skip the external-callback re-entry in that case;
+        // it stays in place for paths where no inline waiter exists
+        // (mission's child thread already finished, or Tier 0 unwound
+        // before OAuth landed).
+        let skip_external_callback = inline_woken > 0;
+
+        if !skip_external_callback {
+            match crate::bridge::resolve_engine_auth_callback(&flow.user_id, &flow.secret_name)
+                .await
+            {
+                Ok(crate::bridge::AuthCallbackContinuation::ResolveGateExternal {
+                    channel,
+                    thread_scope,
+                    request_id,
+                }) => {
+                    if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
+                        let callback =
+                            crate::agent::submission::Submission::ExternalCallback { request_id };
+                        match serde_json::to_string(&callback) {
+                            Ok(content) => {
+                                let msg = web_incoming_message(
+                                    &channel,
+                                    &flow.user_id,
+                                    content,
+                                    thread_scope.as_deref(),
+                                );
+                                if let Err(e) = tx.send(msg).await {
+                                    tracing::warn!(
+                                        extension = %extension_name,
+                                        user_id = %flow.user_id,
+                                        error = %e,
+                                        "Failed to resolve pending engine auth gate after OAuth callback"
+                                    );
+                                }
+                            }
+                            Err(e) => {
                                 tracing::warn!(
                                     extension = %extension_name,
                                     user_id = %flow.user_id,
                                     error = %e,
-                                    "Failed to resolve pending engine auth gate after OAuth callback"
+                                    "Failed to serialize external callback submission"
                                 );
                             }
                         }
-                        Err(e) => {
+                    }
+                }
+                Ok(crate::bridge::AuthCallbackContinuation::ReplayMessage {
+                    channel,
+                    thread_scope,
+                    content,
+                }) => {
+                    if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
+                        let msg = web_incoming_message(
+                            &channel,
+                            &flow.user_id,
+                            content,
+                            thread_scope.as_deref(),
+                        );
+                        if let Err(e) = tx.send(msg).await {
                             tracing::warn!(
                                 extension = %extension_name,
                                 user_id = %flow.user_id,
                                 error = %e,
-                                "Failed to serialize external callback submission"
+                                "Failed to replay pending engine auth request after OAuth callback"
                             );
                         }
                     }
                 }
-            }
-            Ok(crate::bridge::AuthCallbackContinuation::ReplayMessage {
-                channel,
-                thread_scope,
-                content,
-            }) => {
-                if let Some(tx) = state.msg_tx.read().await.as_ref().cloned() {
-                    let msg = web_incoming_message(
-                        &channel,
-                        &flow.user_id,
-                        content,
-                        thread_scope.as_deref(),
+                Ok(crate::bridge::AuthCallbackContinuation::None) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        extension = %extension_name,
+                        user_id = %flow.user_id,
+                        error = %e,
+                        "Failed to resume pending engine auth gate after OAuth callback"
                     );
-                    if let Err(e) = tx.send(msg).await {
-                        tracing::warn!(
-                            extension = %extension_name,
-                            user_id = %flow.user_id,
-                            error = %e,
-                            "Failed to replay pending engine auth request after OAuth callback"
-                        );
-                    }
                 }
-            }
-            Ok(crate::bridge::AuthCallbackContinuation::None) => {}
-            Err(e) => {
-                tracing::warn!(
-                    extension = %extension_name,
-                    user_id = %flow.user_id,
-                    error = %e,
-                    "Failed to resume pending engine auth gate after OAuth callback"
-                );
             }
         }
     }

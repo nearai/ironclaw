@@ -303,6 +303,31 @@ async def _pin_mock_llm_settings(base_url: str, mock_llm_server: str) -> None:
             )
 
 
+async def _set_tool_permission(
+    base_url: str, tool_name: str, state: str
+) -> None:
+    """Override a tool's permission state via the settings API.
+
+    The seeder writes the seeded default (AskEachTime for `tool_install`) to
+    DB at startup, which the auto-approve check in `effect_adapter` treats
+    as a user-explicit override and refuses to bypass even with
+    `AGENT_AUTO_APPROVE_TOOLS=true`. Test fixtures that need a tool to
+    auto-approve must explicitly set its permission to `always_allow`.
+    """
+    headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+    async with httpx.AsyncClient() as client:
+        response = await client.put(
+            f"{base_url}/api/settings/tool_permissions.{tool_name}",
+            headers=headers,
+            json={"value": state},
+            timeout=15,
+        )
+        assert response.status_code in (200, 201, 204), (
+            f"failed to set tool_permissions.{tool_name}={state}: "
+            f"{response.status_code} {response.text[:300]}"
+        )
+
+
 async def _start_auth_matrix_server(
     ironclaw_binary: str,
     mock_llm_server: str,
@@ -310,6 +335,7 @@ async def _start_auth_matrix_server(
     *,
     exchange_url: str,
     existing_paths: dict | None = None,
+    auto_approve_tools: bool = True,
 ):
     reserved = []
     for _ in range(2):
@@ -381,6 +407,12 @@ async def _start_auth_matrix_server(
             "WASM_TOOLS_DIR": tools_dir,
             "WASM_CHANNELS_DIR": channels_dir,
             "ONBOARD_COMPLETED": "true",
+            # Auto-approve administrative tools so the chat-driven install
+            # path (`tool_install` from chat in #3533) runs without a human
+            # approval prompt. Authentication gates remain active. Tests
+            # that exercise the explicit approval path opt out of this via
+            # the `auto_approve_tools=False` fixture parameter.
+            "AGENT_AUTO_APPROVE_TOOLS": "true" if auto_approve_tools else "false",
             "IRONCLAW_OAUTH_CALLBACK_URL": "https://oauth.test.example/oauth/callback",
             "IRONCLAW_OAUTH_EXCHANGE_URL": exchange_url,
             # The exchange proxy runs on 127.0.0.1 in tests; the SSRF guard
@@ -655,6 +687,41 @@ async def auth_matrix_repl(ironclaw_binary, mock_llm_server):
     finally:
         await _shutdown_auth_matrix_repl(repl)
         await mock_api["runner"].cleanup()
+
+
+@pytest.fixture
+async def auth_matrix_server_no_auto_approve(ironclaw_binary, mock_llm_server):
+    """Sibling of `auth_matrix_server` that disables tool auto-approve.
+
+    Used by `test_chat_install_approval_then_auth_card` so the explicit
+    approval gate for `tool_install` actually fires through to the
+    user-facing approval card.
+    """
+    mock_api = await _start_mock_google_api()
+    server = await _start_auth_matrix_server(
+        ironclaw_binary,
+        mock_llm_server,
+        mock_api["base_url"],
+        exchange_url=mock_llm_server,
+        auto_approve_tools=False,
+    )
+    try:
+        yield server
+    finally:
+        await _shutdown_auth_matrix_server(server)
+        await mock_api["runner"].cleanup()
+
+
+@pytest.fixture
+async def auth_matrix_page_no_auto_approve(browser, auth_matrix_server_no_auto_approve):
+    context = await browser.new_context(viewport={"width": 1280, "height": 720})
+    page = await context.new_page()
+    await page.goto(f"{auth_matrix_server_no_auto_approve['base_url']}/?token={AUTH_TOKEN}")
+    await page.wait_for_selector("#auth-screen", state="hidden", timeout=15000)
+    try:
+        yield page
+    finally:
+        await context.close()
 
 
 @pytest.fixture
@@ -1620,25 +1687,19 @@ async def test_mcp_same_server_multi_user_via_browser(browser, auth_matrix_serve
         await member_context.close()
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Engine does not yet auto-install registry extensions on LLM latent "
-        "action invocation. ensure_extension_ready(UseCapability) surfaces "
-        "NotInstalled intentionally (see src/extensions/manager.rs ~L1680 "
-        "comment: 'path must surface as NotInstalled so the bridge can route "
-        "it through the approval/install gate'), but the bridge-side install/"
-        "approval gate that would turn that into an auth card is not "
-        "implemented in src/bridge/effect_adapter.rs. The chat simply fails "
-        "with 'Extension not installed'. Tracked as a follow-up."
-    ),
-)
 async def test_chat_first_gmail_installs_prompts_and_retries(
     auth_matrix_server, auth_matrix_page
 ):
     server = auth_matrix_server
     page = auth_matrix_page
     await _remove_extension_if_present(server["base_url"], "gmail")
+    # The fixture sets `AGENT_AUTO_APPROVE_TOOLS=true`. Before the
+    # tool-permissions seeded-vs-explicit fix, the seeder's boot-time
+    # write of `tool_install = AskEachTime` was treated as a user-explicit
+    # override that neutered the env knob — this test had to call
+    # `_set_tool_permission(... "always_allow")` to drive the chat-first
+    # install path. Post-fix, a DB value that matches the seeded default
+    # is treated as implicit and `auto_approve_tools` properly bypasses it.
 
     chat_input = page.locator(SEL["chat_input"])
     await chat_input.fill("check gmail unread")
@@ -1671,6 +1732,90 @@ async def test_chat_first_gmail_installs_prompts_and_retries(
     extension = await _wait_for_extension(server["base_url"], "gmail")
     assert extension["authenticated"] is True, extension
     assert extension["active"] is True, extension
+
+
+async def test_chat_install_approval_then_auth_card(
+    auth_matrix_server_no_auto_approve, auth_matrix_page_no_auto_approve
+):
+    """#3533: chat-driven `tool_install` raises an approval gate.
+
+    Sibling to `test_chat_first_gmail_installs_prompts_and_retries`. The
+    other test pre-approves `tool_install` so install completes silently
+    and only the auth card surfaces. This one keeps the seeded
+    `AskEachTime` default so the explicit approval flow is exercised:
+
+      1. User types "check gmail unread".
+      2. Mock LLM dispatches `gmail()` → engine rejects (not installed).
+      3. Mock LLM dispatches `tool_install("gmail")` → engine raises an
+         **Approval gate**, surfacing the `.approval-card`.
+      4. Test clicks the card's Approve button.
+      5. Install completes, gmail registers; the engine retries the next
+         turn with the **Authentication gate** that surfaces the
+         `.auth-card`.
+      6. Test completes OAuth via `/oauth/callback`.
+      7. Gmail tool runs against the mock Google API and the final
+         response contains the canned subject line.
+    """
+    server = auth_matrix_server_no_auto_approve
+    page = auth_matrix_page_no_auto_approve
+    await _remove_extension_if_present(server["base_url"], "gmail")
+    # Note: deliberately NOT pre-approving `tool_install` here so the
+    # approval gate fires and the approval card surfaces in the UI.
+    # The dedicated `_no_auto_approve` fixture also passes
+    # `AGENT_AUTO_APPROVE_TOOLS=false` so the env knob doesn't bypass
+    # the gate after the tool-permissions seeded-vs-explicit fix.
+    # Pre-approve `gmail` so the post-install retry doesn't *also* gate
+    # — this test isolates the explicit-approval path for `tool_install`
+    # specifically. (Gmail has no seeded permission default, so without
+    # `AGENT_AUTO_APPROVE_TOOLS=true` it would otherwise gate too.)
+    await _set_tool_permission(server["base_url"], "gmail", "always_allow")
+
+    chat_input = page.locator(SEL["chat_input"])
+    await chat_input.fill("check gmail unread")
+    await chat_input.press("Enter")
+
+    approval_card = page.locator(".approval-card").first
+    await approval_card.wait_for(state="visible", timeout=20000)
+    assert await approval_card.get_attribute("data-request-id"), (
+        "expected approval gate request id on the approval card"
+    )
+    tool_name_text = await approval_card.locator(".approval-tool-name").text_content()
+    assert tool_name_text and "install" in tool_name_text.lower(), (
+        f"approval card should be for tool_install, got: {tool_name_text!r}"
+    )
+
+    # Single "Approve" click is sufficient. The stack of #3533 fixes
+    # (`resume_output` on InlineGate so inline-await doesn't re-execute
+    # `tool_install`, OAuth callback skipping `ExternalCallback` when an
+    # inline waiter is already in flight, and discarding the matching
+    # Authentication pending-gate row when the inline path delivers
+    # Approved) means no second `tool_install` dispatch fires, so a
+    # plain "Approve" suffices — no "Always" workaround needed.
+    await approval_card.locator("button.approve").click()
+    await approval_card.locator(".approval-resolved").wait_for(
+        state="visible", timeout=10000
+    )
+
+    auth_card = await _wait_for_auth_card(page)
+    assert await auth_card.get_attribute("data-extension-name") in {
+        "gmail",
+        "google_oauth_token",
+    }
+    auth_url = await _auth_oauth_url_from_card(page)
+    assert auth_url, "Expected auth card to expose an OAuth URL"
+    response = await _complete_callback(
+        server["base_url"], auth_url, code="mock_auth_code"
+    )
+    assert response.status_code == 200, response.text[:400]
+    await auth_card.wait_for(state="hidden", timeout=20000)
+
+    thread_id = await _current_thread_id(page)
+    tokens = await _wait_for_mock_google_tokens(server["mock_api_url"], timeout=60.0)
+    assert tokens, "expected Gmail to hit the mock Google API after OAuth replay"
+    history = await _wait_for_response_contains(
+        server["base_url"], thread_id, "Quarterly update", timeout=60.0
+    )
+    assert history.get("pending_gate") is None, history
 
 
 async def test_settings_first_gmail_auth_then_chat_runs(

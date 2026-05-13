@@ -680,13 +680,15 @@ async fn execute_with_inline_gate_retry(
             }
             _ => None,
         };
-        let (gate_name, action_name, call_id, parameters, resume_kind) = match result {
+        let (gate_name, action_name, call_id, parameters, resume_kind, resume_output) = match result
+        {
             Err(EngineError::GatePaused {
                 gate_name,
                 action_name,
                 call_id,
                 parameters,
                 resume_kind,
+                resume_output,
                 ..
             }) if matches!(
                 *resume_kind,
@@ -694,7 +696,14 @@ async fn execute_with_inline_gate_retry(
                     | crate::gate::ResumeKind::Authentication { .. }
             ) =>
             {
-                (gate_name, action_name, call_id, *parameters, *resume_kind)
+                (
+                    gate_name,
+                    action_name,
+                    call_id,
+                    *parameters,
+                    *resume_kind,
+                    resume_output.map(|b| *b),
+                )
             }
             other => return (other, emitted_events),
         };
@@ -761,9 +770,38 @@ async fn execute_with_inline_gate_retry(
             );
         }
 
-        // Approved: re-consume a lease use and mark the next call as
-        // pre-approved so the host's `EffectExecutor` skips its
-        // approval check.
+        // Approved. If the bridge cached the action's output before raising
+        // this gate (post-execution Authentication gate path — see
+        // `effect_adapter::auth_gate_from_extension_result`), the action has
+        // already run and we just needed user-side resolution. Skip
+        // re-execution and synthesize a successful ActionResult from the
+        // cached output. Mirrors the Tier 1 shortcut in
+        // `scripting::drive_inline_gate`. Tracked by #3533.
+        if let Some(cached_output) = resume_output {
+            emitted_events.push(EventKind::ActionExecuted {
+                step_id: exec_ctx.step_id,
+                action_name: action_name.clone(),
+                call_id: call_id.clone(),
+                duration_ms: 0,
+                params_summary: crate::types::event::summarize_params(
+                    &call.action_name,
+                    &parameters,
+                ),
+            });
+            return (
+                Ok(ActionResult {
+                    call_id,
+                    action_name,
+                    output: cached_output,
+                    is_error: false,
+                    duration: std::time::Duration::ZERO,
+                }),
+                emitted_events,
+            );
+        }
+
+        // Re-consume a lease use and mark the next call as pre-approved so
+        // the host's `EffectExecutor` skips its approval check.
         match leases.find_and_consume(thread_id, &call.action_name).await {
             Ok(new_lease) => {
                 current_lease = new_lease;
