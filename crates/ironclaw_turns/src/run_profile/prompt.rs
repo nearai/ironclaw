@@ -15,6 +15,9 @@ use super::skill_context::skill_snippet_model_message_ref;
 const DEFAULT_TEXT_ONLY_MESSAGE_LIMIT: usize = 32;
 const MAX_TEXT_ONLY_MESSAGE_LIMIT: usize = 128;
 
+type CurrentSurfaceVersionLookup =
+    dyn Fn() -> Result<Option<CapabilitySurfaceVersion>, AgentLoopHostError> + Send + Sync;
+
 /// Text-only host-managed prompt bundle port.
 ///
 /// This adapter validates that prompt requests are scoped to the current
@@ -34,7 +37,7 @@ where
     context_port: Arc<C>,
     milestones: LoopHostMilestoneEmitter<S>,
     default_message_limit: usize,
-    current_surface_version: Option<CapabilitySurfaceVersion>,
+    current_surface_version: Option<Arc<CurrentSurfaceVersionLookup>>,
 }
 
 impl<C, S> HostManagedLoopPromptPort<C, S>
@@ -58,10 +61,20 @@ where
     }
 
     pub fn with_current_surface_version(
-        mut self,
+        self,
         current_surface_version: CapabilitySurfaceVersion,
     ) -> Self {
-        self.current_surface_version = Some(current_surface_version);
+        self.with_current_surface_version_lookup(move || Ok(Some(current_surface_version.clone())))
+    }
+
+    pub fn with_current_surface_version_lookup<F>(mut self, lookup: F) -> Self
+    where
+        F: Fn() -> Result<Option<CapabilitySurfaceVersion>, AgentLoopHostError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.current_surface_version = Some(Arc::new(lookup));
         self
     }
 
@@ -94,7 +107,13 @@ where
                     "prompt surface version cannot be validated by this prompt port",
                 ));
             };
-            if surface_version != current_surface_version {
+            let Some(current_surface_version) = current_surface_version()? else {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "prompt surface version cannot be validated by this prompt port",
+                ));
+            };
+            if surface_version != &current_surface_version {
                 return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::StaleSurface,
                     "prompt surface version is stale or unknown",

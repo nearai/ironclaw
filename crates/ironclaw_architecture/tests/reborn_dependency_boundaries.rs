@@ -146,6 +146,14 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     let services =
         std::fs::read_to_string(root.join("crates/ironclaw_host_runtime/src/services.rs"))
             .expect("host runtime services.rs must be readable");
+    let scripts = std::fs::read_to_string(root.join("crates/ironclaw_scripts/src/lib.rs"))
+        .expect("script runtime lib.rs must be readable");
+    let scripts_manifest = std::fs::read_to_string(root.join("crates/ironclaw_scripts/Cargo.toml"))
+        .expect("script runtime Cargo.toml must be readable");
+    let mcp = std::fs::read_to_string(root.join("crates/ironclaw_mcp/src/lib.rs"))
+        .expect("MCP runtime lib.rs must be readable");
+    let mcp_manifest = std::fs::read_to_string(root.join("crates/ironclaw_mcp/Cargo.toml"))
+        .expect("MCP runtime Cargo.toml must be readable");
 
     let forbidden_lib_exports = [
         "RuntimeDispatchProcessExecutor",
@@ -182,6 +190,39 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
             "HostRuntimeServices must not expose lower substrate escape hatch `{pattern}`; keep dispatcher/capability/process handles private to the host-runtime crate"
         );
     }
+
+    let forbidden_script_lane_surface = [
+        "RuntimeAdapter",
+        "pub struct ScriptRuntimeAdapter",
+        "pub fn script_error_kind",
+    ];
+    for pattern in forbidden_script_lane_surface {
+        assert!(
+            !scripts.contains(pattern),
+            "ironclaw_scripts must not expose host-runtime dispatcher composition surface `{pattern}`; compose script dispatch adapters inside ironclaw_host_runtime"
+        );
+    }
+
+    assert!(
+        !scripts_manifest.contains("ironclaw_dispatcher"),
+        "ironclaw_scripts must not depend on ironclaw_dispatcher; script dispatcher adapters are host-runtime-private composition"
+    );
+
+    let forbidden_mcp_lane_surface = [
+        "RuntimeAdapter",
+        "pub struct McpRuntimeAdapter",
+        "pub fn mcp_error_kind",
+    ];
+    for pattern in forbidden_mcp_lane_surface {
+        assert!(
+            !mcp.contains(pattern),
+            "ironclaw_mcp must not expose host-runtime dispatcher composition surface `{pattern}`; compose MCP dispatch adapters inside ironclaw_host_runtime"
+        );
+    }
+    assert!(
+        !mcp_manifest.contains("ironclaw_dispatcher"),
+        "ironclaw_mcp must not depend on ironclaw_dispatcher; MCP dispatcher adapters are host-runtime-private composition"
+    );
 }
 
 #[test]
@@ -252,6 +293,204 @@ fn reborn_turns_public_surface_uses_turn_ids_not_runtime_or_process_ids() {
         "ironclaw_turns public API must use TurnId/TurnRunId instead of lower runtime/process identifiers:\n{}",
         violations.join("\n")
     );
+}
+
+#[test]
+fn wasm_product_adapter_crate_has_local_guardrails() {
+    let guardrails = workspace_root().join("crates/ironclaw_wasm_product_adapters/CLAUDE.md");
+    assert!(
+        guardrails.exists(),
+        "ironclaw_wasm_product_adapters needs local CLAUDE.md guardrails before becoming a Reborn boundary crate"
+    );
+}
+
+#[test]
+fn wasm_product_adapter_crate_keeps_minimal_host_glue_dependencies() {
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+    let package = packages
+        .iter()
+        .find(|package| package["name"] == "ironclaw_wasm_product_adapters")
+        .expect("ironclaw_wasm_product_adapters must be a workspace package");
+    let mut deps = package["dependencies"]
+        .as_array()
+        .expect("dependencies")
+        .iter()
+        .filter(|dependency| is_normal_dependency(dependency))
+        .filter_map(|dependency| dependency["name"].as_str())
+        .collect::<Vec<_>>();
+    deps.sort_unstable();
+
+    // Deliberate additions beyond the original auth/egress primitives:
+    //   * async-trait, tokio  — required by the native ProductAdapter runner
+    //     (async traits, semaphore-based admission control, timeout).
+    //   * chrono              — receive-timestamp for TrustedInboundContext.
+    //   * hex                 — HMAC signature encoding in the auth verifier.
+    //   * tracing             — structured logging for hardened error paths
+    //                           added in the zmanian review.
+    // Every addition is justified by a concrete call site in src/. Adding a
+    // dep here without a matching call site is a contract violation — and
+    // adding workflow/runtime crates beyond this list still requires
+    // updating both the wasm crate's CLAUDE.md and this expected set.
+    let expected = vec![
+        "async-trait",
+        "chrono",
+        "hex",
+        "hmac",
+        "http",
+        "ironclaw_product_adapters",
+        "sha2",
+        "subtle",
+        "thiserror",
+        "tokio",
+        "tracing",
+    ];
+    assert_eq!(
+        deps, expected,
+        "ironclaw_wasm_product_adapters should stay thin host glue; add runtime/workflow dependencies only when a call-site proves they are required"
+    );
+}
+
+#[test]
+fn wasm_product_adapter_wit_preserves_product_adapter_trust_boundary() {
+    let wit = std::fs::read_to_string(
+        workspace_root().join("crates/ironclaw_wasm_product_adapters/wit/product_adapter.wit"),
+    )
+    .expect("product adapter WIT must be readable");
+
+    assert!(
+        wit.contains("record parsed-inbound"),
+        "WIT should name adapter output as ParsedProductInbound, not a trusted envelope"
+    );
+    assert!(
+        wit.contains("result<parsed-inbound, string>"),
+        "parse-inbound should return a parsed inbound payload; host glue stamps TrustedInboundContext and builds ProductInboundEnvelope"
+    );
+    for forbidden in [
+        "result<option<parsed-envelope>",
+        "record parsed-envelope",
+        "envelope-json",
+        "Returns `none`",
+        "ProductInboundEnvelope",
+    ] {
+        assert!(
+            !wit.contains(forbidden),
+            "WIT must not use `{forbidden}`; no-op events are ProductInboundPayload::NoOp and envelopes are host-stamped"
+        );
+    }
+
+    let response_record = wit
+        .split("record egress-response {")
+        .nth(1)
+        .and_then(|rest| rest.split('}').next())
+        .expect("egress-response record must exist");
+    assert!(
+        !response_record.contains("headers"),
+        "WASM egress responses must not expose raw response headers to adapters"
+    );
+}
+
+#[test]
+fn wasm_product_adapter_wit_declares_egress_targets_as_paired_records() {
+    // Henry's review (PR #3352, 2026-05-12T05:04:30Z) flagged that the
+    // WIT manifest previously exposed `declared-egress-hosts: list<string>`
+    // and `declared-credential-handles: list<string>` as independent
+    // lists, which contradicted the Rust `EgressPolicy` that now
+    // requires exact `(host, Option<credential_handle>)` pairs.
+    // Independent lists could not express "Slack token only for Slack",
+    // forcing the future host glue to either reintroduce the cross-pair
+    // leak the Rust policy closes or invent pair metadata the manifest
+    // did not carry.
+    //
+    // The WIT now declares a `declared-egress-target` record and the
+    // manifest carries `declared-egress-targets: list<declared-egress-
+    // target>`. This boundary test pins the new shape — a regression
+    // that splits the pair back into independent lists fails here.
+    let wit = std::fs::read_to_string(
+        workspace_root().join("crates/ironclaw_wasm_product_adapters/wit/product_adapter.wit"),
+    )
+    .expect("product adapter WIT must be readable");
+
+    assert!(
+        wit.contains("record declared-egress-target"),
+        "WIT must declare a paired `declared-egress-target` record so the manifest can express the (host, optional credential_handle) contract the Rust EgressPolicy enforces"
+    );
+    assert!(
+        wit.contains("declared-egress-targets: list<declared-egress-target>"),
+        "adapter-manifest must carry `declared-egress-targets: list<declared-egress-target>` (paired) instead of independent host/handle lists"
+    );
+
+    // Egress-request must reference the paired target by a single
+    // index, not split into separate host/handle indexes — the WIT
+    // shape mirrors the Rust pair-contract.
+    assert!(
+        wit.contains("egress-target-index: u32"),
+        "egress-request must reference a single paired target via `egress-target-index`"
+    );
+
+    // Forbidden: the prior independent-list shape and split indexes
+    // that allowed cross-pair leak by construction.
+    for forbidden in [
+        "declared-egress-hosts: list<string>",
+        "declared-credential-handles: list<string>",
+        "host-index: u32",
+        "credential-handle-index: option<u32>",
+    ] {
+        assert!(
+            !wit.contains(forbidden),
+            "WIT must not carry the prior independent-list / split-index shape `{forbidden}` — it could not express the paired Rust contract and would reintroduce the cross-pair credential leak"
+        );
+    }
+}
+
+#[test]
+fn wasm_product_adapter_wit_pins_json_shim_shape() {
+    // Henry's review on PR #3352 flagged that the WIT carries adapter
+    // payloads as JSON strings (`parsed-json`, `evidence-json`,
+    // `outbound-json`, `egress-request-json`, `capabilities-json`),
+    // which weakens the typed component-model boundary. The host
+    // re-validates every JSON crossing on the Rust side via serde, so
+    // the seal contract still holds — but the typed redesign is a
+    // followup. This test pins the current shim shape so a future
+    // change must EITHER:
+    //   (a) update this test alongside the corresponding typed record
+    //       (deliberate redesign), OR
+    //   (b) fail boundary checks (accidental shape drift).
+    let wit = std::fs::read_to_string(
+        workspace_root().join("crates/ironclaw_wasm_product_adapters/wit/product_adapter.wit"),
+    )
+    .expect("product adapter WIT must be readable");
+
+    // Top-level documentation MUST call out the shim explicitly so a
+    // reviewer doesn't have to infer the intent from the field names.
+    for required_doc in ["TEMPORARY", "JSON-string payload shim", "Follow-up"] {
+        assert!(
+            wit.contains(required_doc),
+            "WIT must document the JSON-shim status (`{required_doc}` missing); \
+             see top-of-file comment block before `package`"
+        );
+    }
+
+    // The five known JSON-shim fields. Each is the temporary surface
+    // covering a typed Rust DTO in `ironclaw_product_adapters`.
+    let shim_fields = [
+        ("parsed-inbound", "parsed-json: string"),
+        ("auth-evidence", "evidence-json: string"),
+        ("outbound-envelope", "outbound-json: string"),
+        ("outbound-render", "egress-request-json: string"),
+        ("adapter-manifest", "capabilities-json: string"),
+    ];
+    for (record, field) in shim_fields {
+        assert!(
+            wit.contains(field),
+            "WIT JSON-shim field `{field}` in record `{record}` is missing. \
+             If you removed it as part of a typed redesign, update this test \
+             to assert the new typed shape instead — otherwise the boundary \
+             is silently drifting"
+        );
+    }
 }
 
 #[test]
@@ -636,6 +875,40 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_secrets",
                 "ironclaw_skills",
                 "ironclaw_tui",
+                "ironclaw_wasm",
+            ],
+        },
+        BoundaryRule {
+            crate_name: "ironclaw_wasm_product_adapters",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_authorization",
+                "ironclaw_approvals",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_threads",
+                "ironclaw_tui",
+                "ironclaw_turns",
                 "ironclaw_wasm",
             ],
         },

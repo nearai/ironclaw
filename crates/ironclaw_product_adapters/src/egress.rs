@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::error::ProductAdapterError;
 use crate::redaction::RedactedString;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct DeclaredEgressHost(String);
 
@@ -45,6 +45,12 @@ impl DeclaredEgressHost {
     }
 }
 
+impl std::fmt::Display for DeclaredEgressHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 impl<'de> Deserialize<'de> for DeclaredEgressHost {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -55,7 +61,7 @@ impl<'de> Deserialize<'de> for DeclaredEgressHost {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct EgressCredentialHandle(String);
 
@@ -85,6 +91,12 @@ impl EgressCredentialHandle {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl std::fmt::Display for EgressCredentialHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -236,15 +248,42 @@ fn validate_header_name(name: &str) -> Result<(), ProductAdapterError> {
         });
     }
     let lower = name.to_ascii_lowercase();
+    // Headers the host owns. Two categories:
+    //
+    //   1. **Identity / proxy metadata** — `host` is set by the host
+    //      from the declared egress target; auth and forwarding
+    //      headers must be controlled by the host's credential
+    //      injection and proxy posture, not adapter input.
+    //
+    //   2. **Hop-by-hop / transport-managed** — these govern the HTTP
+    //      connection lifecycle and message framing (RFC 9110 §7.6.1).
+    //      Letting adapters set them allows a component to influence
+    //      the host's HTTP client semantics (chunked encoding,
+    //      connection pinning, protocol upgrades), which is host
+    //      policy. Per-message body length comes from the
+    //      `EgressRequest` body itself — adapters do not get to lie
+    //      about `content-length`.
     const FORBIDDEN: &[&str] = &[
+        // Identity / proxy metadata.
         "host",
         "authorization",
         "proxy-authorization",
         "cookie",
         "set-cookie",
+        "forwarded",
+        "x-forwarded-for",
         "x-forwarded-host",
         "x-forwarded-proto",
         "x-real-ip",
+        // Hop-by-hop and transport-managed (RFC 9110 §7.6.1).
+        "connection",
+        "content-length",
+        "transfer-encoding",
+        "te",
+        "trailer",
+        "upgrade",
+        "keep-alive",
+        "proxy-connection",
     ];
     if FORBIDDEN.contains(&lower.as_str()) {
         return Err(ProductAdapterError::InvalidIdentifier {
@@ -452,6 +491,112 @@ mod tests {
         assert!(EgressMethod::new("CONNECT").is_err());
         assert!(EgressPath::new("//metadata").is_err());
         assert!(EgressHeader::new("Authorization", "secret").is_err());
+    }
+
+    #[test]
+    fn egress_path_rejects_url_and_header_injection_shapes() {
+        for path in [
+            "http://metadata.local/latest",
+            "https://api.example.com/send",
+            "//metadata",
+            "/path#fragment",
+            "/redirect/http://metadata.local/latest",
+            "/windows\\path",
+            "/line\nbreak",
+            "/carriage\rreturn",
+            "/nul\0byte",
+        ] {
+            let res = EgressPath::new(path);
+            assert!(
+                res.is_err(),
+                "{path:?} must not be accepted as an origin-form egress path"
+            );
+        }
+
+        assert!(EgressPath::new("/v1/messages?chat_id=42").is_ok());
+    }
+
+    #[test]
+    fn egress_header_rejects_host_identity_and_proxy_metadata_headers() {
+        for header in [
+            "host",
+            "Host",
+            "authorization",
+            "proxy-authorization",
+            "cookie",
+            "set-cookie",
+            "forwarded",
+            "x-forwarded-for",
+            "x-forwarded-host",
+            "x-forwarded-proto",
+            "x-real-ip",
+        ] {
+            let res = EgressHeader::new(header, "anything");
+            assert!(
+                res.is_err(),
+                "{header} must be rejected because identity/proxy metadata is host-managed",
+            );
+        }
+    }
+
+    #[test]
+    fn egress_header_rejects_invalid_header_name_syntax() {
+        for header in ["", "Bad Header", "X:Bad", "X/Bad", "X.Bad", "X\r\nInjected"] {
+            let res = EgressHeader::new(header, "anything");
+            assert!(
+                res.is_err(),
+                "{header:?} must be rejected as an invalid header name token"
+            );
+        }
+    }
+
+    #[test]
+    fn egress_header_rejects_hop_by_hop_and_transport_managed_headers() {
+        // Per RFC 9110 §7.6.1 the host's HTTP client owns connection
+        // lifecycle / message framing; adapters must not influence
+        // them. Asserting per-name so a regression that drops one
+        // entry from FORBIDDEN fails with a clear identification of
+        // which header escaped. Each lookup is case-insensitive (the
+        // validator lower-cases before matching) — exercise mixed
+        // case to pin that too.
+        for header in [
+            "connection",
+            "Connection",
+            "content-length",
+            "Content-Length",
+            "transfer-encoding",
+            "TE",
+            "trailer",
+            "upgrade",
+            "Keep-Alive",
+            "proxy-connection",
+        ] {
+            let res = EgressHeader::new(header, "anything");
+            assert!(
+                res.is_err(),
+                "{header} must be rejected by validate_header_name as host-managed",
+            );
+        }
+    }
+
+    #[test]
+    fn egress_header_accepts_application_headers() {
+        // Defense against an over-eager FORBIDDEN list: regular
+        // application headers must still pass. Pin a handful so a
+        // future tightening doesn't silently break adapter egress.
+        for header in [
+            "x-request-id",
+            "content-type",
+            "accept",
+            "user-agent",
+            "x-custom-trace",
+        ] {
+            let res = EgressHeader::new(header, "value");
+            assert!(
+                res.is_ok(),
+                "{header} is a normal application header and must be allowed",
+            );
+        }
     }
 
     #[test]

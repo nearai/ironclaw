@@ -38,6 +38,12 @@ pub enum RuntimeEventKind {
     RuntimeSelected,
     DispatchSucceeded,
     DispatchFailed,
+    ModelStarted,
+    ModelCompleted,
+    ModelFailed,
+    AssistantReplyFinalized,
+    LoopCompleted,
+    LoopFailed,
     ProcessStarted,
     ProcessCompleted,
     ProcessFailed,
@@ -50,8 +56,8 @@ pub enum RuntimeEventKind {
 /// `error_kind` is constrained by [`sanitize_error_kind`] on every wire
 /// crossing:
 ///
-/// - the typed `dispatch_failed` / `process_failed` constructors apply
-///   sanitization at construction time;
+/// - the typed `dispatch_failed` / `model_failed` / `loop_failed` /
+///   `process_failed` constructors apply sanitization at construction time;
 /// - the custom [`Deserialize`] impl re-runs the sanitizer on any inbound
 ///   JSONL/wire payload;
 /// - the custom [`Serialize`] impl re-runs the sanitizer before emitting the
@@ -209,6 +215,77 @@ impl RuntimeEvent {
             process_id: None,
             output_bytes: None,
             error_kind: Some(sanitize_error_kind(error_kind)),
+        })
+    }
+
+    pub fn model_started(scope: ResourceScope, capability_id: CapabilityId) -> Self {
+        Self::new_metadata_only(RuntimeEventKind::ModelStarted, scope, capability_id)
+    }
+
+    pub fn model_completed(scope: ResourceScope, capability_id: CapabilityId) -> Self {
+        Self::new_metadata_only(RuntimeEventKind::ModelCompleted, scope, capability_id)
+    }
+
+    pub fn model_failed(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        error_kind: impl Into<String>,
+    ) -> Self {
+        Self::new(RuntimeEventPayload {
+            kind: RuntimeEventKind::ModelFailed,
+            scope,
+            capability_id,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: None,
+            error_kind: Some(sanitize_error_kind(error_kind)),
+        })
+    }
+
+    pub fn assistant_reply_finalized(scope: ResourceScope, capability_id: CapabilityId) -> Self {
+        Self::new_metadata_only(
+            RuntimeEventKind::AssistantReplyFinalized,
+            scope,
+            capability_id,
+        )
+    }
+
+    pub fn loop_completed(scope: ResourceScope, capability_id: CapabilityId) -> Self {
+        Self::new_metadata_only(RuntimeEventKind::LoopCompleted, scope, capability_id)
+    }
+
+    pub fn loop_failed(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        error_kind: impl Into<String>,
+    ) -> Self {
+        Self::new(RuntimeEventPayload {
+            kind: RuntimeEventKind::LoopFailed,
+            scope,
+            capability_id,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: None,
+            error_kind: Some(sanitize_error_kind(error_kind)),
+        })
+    }
+
+    fn new_metadata_only(
+        kind: RuntimeEventKind,
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+    ) -> Self {
+        Self::new(RuntimeEventPayload {
+            kind,
+            scope,
+            capability_id,
+            provider: None,
+            runtime: None,
+            process_id: None,
+            output_bytes: None,
+            error_kind: None,
         })
     }
 

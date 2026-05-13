@@ -121,6 +121,8 @@ impl ChannelPairingStore for LibSqlBackend {
         meta: Option<serde_json::Value>,
     ) -> Result<PairingRequestRecord, DatabaseError> {
         let channel = crate::pairing::normalize_channel_name(channel);
+        #[cfg(test)]
+        let _test_write_guard = crate::db::libsql::TEST_WRITE_LOCK.lock().await;
         let conn = self.connect().await?;
 
         // safety: BEGIN IMMEDIATE acquires a write lock upfront, preventing concurrent upserts
@@ -218,6 +220,8 @@ impl ChannelPairingStore for LibSqlBackend {
         owner_id: &str,
     ) -> Result<crate::db::PairingApprovalRecord, DatabaseError> {
         let channel = crate::pairing::normalize_channel_name(channel);
+        #[cfg(test)]
+        let _test_write_guard = crate::db::libsql::TEST_WRITE_LOCK.lock().await;
         let conn = self.connect().await?;
 
         // safety: BEGIN IMMEDIATE acquires a write lock upfront, preventing concurrent approvals
@@ -330,6 +334,8 @@ impl ChannelPairingStore for LibSqlBackend {
         &self,
         approval: &crate::db::PairingApprovalRecord,
     ) -> Result<(), DatabaseError> {
+        #[cfg(test)]
+        let _test_write_guard = crate::db::libsql::TEST_WRITE_LOCK.lock().await;
         let conn = self.connect().await?;
         conn.execute("BEGIN IMMEDIATE", ())
             .await

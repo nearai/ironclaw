@@ -284,7 +284,7 @@ async fn production_loop_model_gateway_fails_closed_before_provider_call() {
         .into_iter()
         .map(|milestone| milestone.kind.kind_name())
         .collect::<Vec<_>>();
-    assert_eq!(milestone_kinds, vec!["model_started"]);
+    assert_eq!(milestone_kinds, vec!["model_started", "model_failed"]);
 }
 
 #[tokio::test]

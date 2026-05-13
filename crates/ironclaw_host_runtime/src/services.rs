@@ -1666,7 +1666,7 @@ struct ScriptRuntimeAdapter {
 }
 
 impl ScriptRuntimeAdapter {
-    pub fn from_executor(executor: Arc<dyn ScriptExecutor>) -> Self {
+    fn from_executor(executor: Arc<dyn ScriptExecutor>) -> Self {
         Self { executor }
     }
 }
@@ -1716,7 +1716,7 @@ struct McpRuntimeAdapter {
 }
 
 impl McpRuntimeAdapter {
-    pub fn from_executor(executor: Arc<dyn McpExecutor>) -> Self {
+    fn from_executor(executor: Arc<dyn McpExecutor>) -> Self {
         Self { executor }
     }
 }

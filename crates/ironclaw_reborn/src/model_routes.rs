@@ -19,6 +19,12 @@ pub enum ModelSlot {
 }
 
 impl ModelSlot {
+    const ALL: [Self; 2] = [Self::Default, Self::Mission];
+
+    pub fn all() -> &'static [Self] {
+        &Self::ALL
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Default => "default",

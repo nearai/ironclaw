@@ -30,8 +30,8 @@ use ironclaw_turns::{
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordRecoveryRequiredRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
-        TurnRunTransitionPort,
+        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
     },
 };
 use tokio::{sync::Notify, time::timeout};
@@ -229,6 +229,13 @@ impl TurnRunTransitionPort for FailingClaimTransitions {
         Ok(RecoverExpiredLeasesResponse { recovered: vec![] })
     }
 
+    async fn record_model_route_snapshot(
+        &self,
+        _request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        panic!("failing claim transitions should not record model route snapshots")
+    }
+
     async fn block_run(&self, _request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
         panic!("failing claim transitions should not block runs")
     }
@@ -318,6 +325,13 @@ impl TurnRunTransitionPort for DurableLikeTurnStore {
         self.inner.recover_expired_leases(request).await
     }
 
+    async fn record_model_route_snapshot(
+        &self,
+        request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.inner.record_model_route_snapshot(request).await
+    }
+
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
         self.inner.block_run(request).await
     }
@@ -403,6 +417,13 @@ impl TurnRunTransitionPort for DurableTurnStoreStub {
         _request: RecoverExpiredLeasesRequest,
     ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
         panic!("transition stub should not recover leases")
+    }
+
+    async fn record_model_route_snapshot(
+        &self,
+        _request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        panic!("transition stub should not record model route snapshots")
     }
 
     async fn block_run(&self, _request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
@@ -537,6 +558,13 @@ impl TurnRunTransitionPort for HeartbeatTrackingTransitions {
         self.store.recover_expired_leases(request).await
     }
 
+    async fn record_model_route_snapshot(
+        &self,
+        request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.store.record_model_route_snapshot(request).await
+    }
+
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
         self.store.block_run(request).await
     }
@@ -596,6 +624,13 @@ impl TurnRunTransitionPort for ClaimRecordingTransitions {
         request: RecoverExpiredLeasesRequest,
     ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
         self.store.recover_expired_leases(request).await
+    }
+
+    async fn record_model_route_snapshot(
+        &self,
+        request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        self.store.record_model_route_snapshot(request).await
     }
 
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {

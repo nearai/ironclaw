@@ -12,6 +12,7 @@ libsql = ["dep:libsql", "ironclaw_filesystem/libsql", "ironclaw_resources/libsql
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono-tz = "0.10"
 deadpool-postgres = { version = "0.14", optional = true }
 futures-util = "0.3"
 ironclaw_approvals = { path = "../ironclaw_approvals" }

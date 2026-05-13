@@ -127,12 +127,8 @@ pub trait TurnRunTransitionPort: Send + Sync {
 
     async fn record_model_route_snapshot(
         &self,
-        _request: RecordModelRouteSnapshotRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        Err(TurnError::Unavailable {
-            reason: "model route snapshot persistence is unsupported".to_string(),
-        })
-    }
+        request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError>;
 
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError>;
 

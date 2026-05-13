@@ -158,6 +158,43 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
 }
 
 #[tokio::test]
+async fn host_managed_model_port_returns_response_when_model_started_milestone_fails() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(FailingOnModelStartedMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Ok(LoopModelResponse {
+        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+            safe_text_delta: "safe delta".to_string(),
+        }],
+        output: ParentLoopOutput::AssistantReply(AssistantReply {
+            content: "model response survived start milestone failure".to_string(),
+        }),
+        effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+    }));
+    let port =
+        HostManagedLoopModelPort::new(context.clone(), gateway.clone(), milestone_sink.clone());
+
+    let response = port
+        .stream_model(LoopModelRequest {
+            messages: Vec::new(),
+            surface_version: None,
+            model_preference: None,
+        })
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::AssistantReply(reply) = response.output else {
+        panic!("expected assistant reply");
+    };
+    assert_eq!(
+        reply.content,
+        "model response survived start milestone failure"
+    );
+    assert_eq!(gateway.requests().len(), 1);
+    assert_eq!(milestone_sink.kind_names(), vec!["model_completed"]);
+}
+
+#[tokio::test]
 async fn host_managed_model_port_returns_response_when_model_completed_milestone_fails() {
     let context = claimed_run_context().await;
     let milestone_sink = Arc::new(FailingOnModelCompletedMilestoneSink::default());
@@ -229,7 +266,7 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
             .iter()
             .map(|milestone| milestone.kind.kind_name())
             .collect::<Vec<_>>(),
-        vec!["model_started"]
+        vec!["model_started", "model_failed"]
     );
 }
 
@@ -269,6 +306,58 @@ async fn loop_prompt_port_builds_text_only_bundle_from_context_refs() {
 }
 
 #[tokio::test]
+async fn loop_prompt_port_uses_current_surface_version_lookup_each_build() {
+    let host = Arc::new(RecordingAgentLoopHost::new(claimed_run_context().await));
+    let surface_v1 = CapabilitySurfaceVersion::new("surface:v1").unwrap();
+    let surface_v2 = CapabilitySurfaceVersion::new("surface:v2").unwrap();
+    let current_surface = Arc::new(Mutex::new(Some(surface_v1.clone())));
+    let current_surface_for_lookup = Arc::clone(&current_surface);
+    let port = HostManagedLoopPromptPort::new(
+        host.context.clone(),
+        host.clone(),
+        host.milestone_sink.clone(),
+    )
+    .with_current_surface_version_lookup(move || {
+        current_surface_for_lookup
+            .lock()
+            .map(|current| current.clone())
+            .map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "surface version lookup is unavailable",
+                )
+            })
+    });
+
+    let bundle = port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: Some(surface_v1.clone()),
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+        })
+        .await
+        .unwrap();
+    assert_eq!(bundle.surface_version, Some(surface_v1.clone()));
+
+    *current_surface.lock().unwrap() = Some(surface_v2);
+
+    let error = port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: Some(surface_v1),
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, AgentLoopHostErrorKind::StaleSurface);
+    assert_eq!(host.effects(), vec!["context"]);
+}
+
+#[tokio::test]
 async fn loop_prompt_port_materializes_instruction_snippets_as_system_refs() {
     let host = Arc::new(
         RecordingAgentLoopHost::new(claimed_run_context().await)
@@ -293,11 +382,9 @@ async fn loop_prompt_port_materializes_instruction_snippets_as_system_refs() {
 
     assert_eq!(bundle.messages.len(), 2);
     assert_eq!(bundle.messages[0].role, "system");
-    assert!(
-        bundle.messages[0]
-            .content_ref
-            .as_str()
-            .starts_with("msg:snippet.skill.alpha.")
+    assert_eq!(
+        bundle.messages[0].content_ref,
+        LoopMessageRef::new("msg:snippet.skill.alpha.0.25eba50bef20ee35").unwrap()
     );
     assert_eq!(bundle.messages[1].role, "user");
     assert_eq!(host.effects(), vec!["context"]);
@@ -330,11 +417,9 @@ async fn loop_prompt_port_preserves_mid_conversation_system_message_order() {
 
     assert_eq!(bundle.messages.len(), 3);
     assert_eq!(bundle.messages[0].role, "system");
-    assert!(
-        bundle.messages[0]
-            .content_ref
-            .as_str()
-            .starts_with("msg:snippet.skill.alpha.")
+    assert_eq!(
+        bundle.messages[0].content_ref,
+        LoopMessageRef::new("msg:snippet.skill.alpha.0.25eba50bef20ee35").unwrap()
     );
     assert_eq!(bundle.messages[1].role, "user");
     assert_eq!(
@@ -379,11 +464,9 @@ async fn loop_prompt_port_keeps_identity_before_skill_snippets_and_records_skill
         LoopMessageRef::new("msg:identity").unwrap()
     );
     assert_eq!(bundle.messages[1].role, "system");
-    assert!(
-        bundle.messages[1]
-            .content_ref
-            .as_str()
-            .starts_with("msg:snippet.skill.alpha.")
+    assert_eq!(
+        bundle.messages[1].content_ref,
+        LoopMessageRef::new("msg:snippet.skill.alpha.0.25eba50bef20ee35").unwrap()
     );
     assert_eq!(bundle.messages[2].role, "user");
 
@@ -1135,6 +1218,37 @@ impl AgentLoopDriver for CapabilityDriver {
             host,
         )
         .await
+    }
+}
+
+#[derive(Default)]
+struct FailingOnModelStartedMilestoneSink {
+    kind_names: Mutex<Vec<&'static str>>,
+}
+
+impl FailingOnModelStartedMilestoneSink {
+    fn kind_names(&self) -> Vec<&'static str> {
+        self.kind_names.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl LoopHostMilestoneSink for FailingOnModelStartedMilestoneSink {
+    async fn publish_loop_milestone(
+        &self,
+        milestone: LoopHostMilestone,
+    ) -> Result<(), AgentLoopHostError> {
+        if matches!(milestone.kind, LoopHostMilestoneKind::ModelStarted { .. }) {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "milestone sink unavailable",
+            ));
+        }
+        self.kind_names
+            .lock()
+            .unwrap()
+            .push(milestone.kind.kind_name());
+        Ok(())
     }
 }
 

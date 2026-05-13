@@ -30,14 +30,14 @@ use ironclaw_turns::{
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
-        FinalizeAssistantMessage, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopContextBundle, LoopContextPort, LoopContextRequest, LoopHostMilestoneEmitter,
-        LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor, LoopInputPort, LoopModelMessage,
-        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProcessRef, LoopProgressEvent,
-        LoopProgressPort, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-        ProcessHandleSummary, PromptMode, PromptSkillContextMetadata, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, skill_snippet_model_message_ref,
+        FinalizeAssistantMessage, HostManagedLoopPromptPort, LoopCapabilityPort,
+        LoopCheckpointPort, LoopCheckpointRequest, LoopContextBundle, LoopContextPort,
+        LoopContextRequest, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputBatch,
+        LoopInputCursor, LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopProcessRef, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
+        LoopTranscriptPort, ProcessHandleSummary, UpdateAssistantDraft, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -84,9 +84,6 @@ pub struct RebornLoopDriverHostRequest {
     pub claimed_run: ClaimedTurnRun,
     pub loop_run_context: LoopRunContext,
 }
-
-const DEFAULT_TEXT_ONLY_MESSAGE_LIMIT: usize = 32;
-const MAX_TEXT_ONLY_MESSAGE_LIMIT: usize = 128;
 
 #[derive(Default)]
 struct CapabilitySurfaceState {
@@ -897,7 +894,6 @@ fn blocked_summary(reason: RuntimeBlockedReason) -> &'static str {
         RuntimeBlockedReason::AuthRequired => "capability requires authentication",
         RuntimeBlockedReason::ResourceLimit => "capability is blocked by resource limits",
         RuntimeBlockedReason::ResourceUnavailable => "capability resources are unavailable",
-        _ => "capability is blocked",
     }
 }
 
@@ -914,202 +910,6 @@ fn host_runtime_error(error: HostRuntimeError) -> AgentLoopHostError {
                 "host runtime capability service is unavailable",
             ),
         ),
-    }
-}
-
-struct SurfaceAwareLoopPromptPort {
-    context: LoopRunContext,
-    context_port: Arc<dyn LoopContextPort>,
-    milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-    default_message_limit: usize,
-    surface_state: Arc<CapabilitySurfaceState>,
-}
-
-impl SurfaceAwareLoopPromptPort {
-    fn new(
-        context: LoopRunContext,
-        context_port: Arc<dyn LoopContextPort>,
-        milestone_sink: Arc<dyn LoopHostMilestoneSink>,
-        surface_state: Arc<CapabilitySurfaceState>,
-    ) -> Self {
-        Self {
-            context,
-            context_port,
-            milestone_sink,
-            default_message_limit: DEFAULT_TEXT_ONLY_MESSAGE_LIMIT,
-            surface_state,
-        }
-    }
-
-    fn with_default_message_limit(mut self, default_message_limit: usize) -> Self {
-        self.default_message_limit = default_message_limit.clamp(1, MAX_TEXT_ONLY_MESSAGE_LIMIT);
-        self
-    }
-
-    fn validate_request(
-        &self,
-        request: &LoopPromptBundleRequest,
-    ) -> Result<(), AgentLoopHostError> {
-        if request.mode != PromptMode::TextOnly {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::PolicyDenied,
-                "prompt mode is not supported by the text-only prompt port",
-            ));
-        }
-
-        if request
-            .context_cursor
-            .as_ref()
-            .is_some_and(|cursor| !cursor.is_for_run(&self.context))
-        {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::ScopeMismatch,
-                "prompt context cursor is not scoped to this loop run",
-            ));
-        }
-
-        if let Some(surface_version) = request.surface_version.as_ref() {
-            let Some(current_surface_version) = self.surface_state.current()? else {
-                return Err(AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "prompt surface version cannot be validated by this prompt port",
-                ));
-            };
-            if surface_version != &current_surface_version {
-                return Err(AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::StaleSurface,
-                    "prompt surface version is stale or unknown",
-                ));
-            }
-        }
-
-        if let Some(state_ref) = request.checkpoint_state_ref.as_ref() {
-            let run_prefix = format!("checkpoint:{}:", self.context.run_id);
-            if !state_ref.as_str().starts_with(&run_prefix) {
-                return Err(AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::ScopeMismatch,
-                    "prompt checkpoint state ref is not scoped to this loop run",
-                ));
-            }
-            if !state_ref.is_for_run(&self.context) {
-                return Err(AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "prompt checkpoint state ref is malformed",
-                ));
-            }
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "checkpoint prompt state is not supported by the text-only prompt port",
-            ));
-        }
-
-        if matches!(request.max_messages, Some(0)) {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::BudgetExceeded,
-                "prompt message limit must be greater than zero",
-            ));
-        }
-
-        Ok(())
-    }
-
-    fn message_limit(&self, request: &LoopPromptBundleRequest) -> usize {
-        request
-            .max_messages
-            .map(|messages| messages as usize)
-            .unwrap_or(self.default_message_limit)
-            .clamp(1, MAX_TEXT_ONLY_MESSAGE_LIMIT)
-    }
-
-    fn ensure_supported_context_shape(
-        context: &LoopContextBundle,
-    ) -> Result<(), AgentLoopHostError> {
-        if !context.memory_snippets.is_empty() {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::PolicyDenied,
-                "text-only prompt port cannot materialize memory snippets",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl LoopPromptPort for SurfaceAwareLoopPromptPort {
-    async fn build_prompt_bundle(
-        &self,
-        request: LoopPromptBundleRequest,
-    ) -> Result<LoopPromptBundle, AgentLoopHostError> {
-        self.validate_request(&request)?;
-        let context = self
-            .context_port
-            .load_loop_context(LoopContextRequest {
-                after: request.context_cursor.clone(),
-                limit: self.message_limit(&request),
-            })
-            .await?;
-        Self::ensure_supported_context_shape(&context)?;
-        let mut messages =
-            Vec::with_capacity(context.instruction_snippets.len() + context.messages.len());
-        let mut skill_context = Vec::with_capacity(context.instruction_snippets.len());
-        for (ordinal, snippet) in context.instruction_snippets.into_iter().enumerate() {
-            let content_ref = skill_snippet_model_message_ref(
-                &snippet.snippet_ref,
-                &snippet.safe_summary,
-                ordinal,
-            )?;
-            match snippet.metadata.as_ref() {
-                Some(metadata) => skill_context.push(PromptSkillContextMetadata {
-                    ordinal,
-                    source_name: metadata.source_name.clone(),
-                    trust_level: metadata.trust_level.clone(),
-                }),
-                None if snippet.snippet_ref.starts_with("skill:") => {
-                    return Err(AgentLoopHostError::new(
-                        AgentLoopHostErrorKind::Internal,
-                        "skill instruction snippet metadata is missing",
-                    ));
-                }
-                None => {}
-            }
-            messages.push(LoopModelMessage {
-                role: "system".to_string(),
-                content_ref,
-            });
-        }
-        messages.extend(
-            context
-                .messages
-                .into_iter()
-                .map(|message| LoopModelMessage {
-                    role: message.role,
-                    content_ref: message.message_ref,
-                }),
-        );
-        let bundle = LoopPromptBundle {
-            bundle_ref: LoopPromptBundleRef::for_run(
-                &self.context,
-                CorrelationId::new().to_string(),
-            )
-            .map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Internal,
-                    "loop prompt bundle ref could not be represented",
-                )
-            })?,
-            messages,
-            surface_version: request.surface_version.clone(),
-        };
-        LoopHostMilestoneEmitter::new(self.context.clone(), Arc::clone(&self.milestone_sink))
-            .prompt_bundle_built(
-                bundle.bundle_ref.clone(),
-                request.mode,
-                bundle.surface_version.clone(),
-                bundle.messages.len(),
-                skill_context,
-            )
-            .await?;
-        Ok(bundle)
     }
 }
 
@@ -1208,14 +1008,15 @@ where
             .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
                 reason: error.safe_summary,
             })?;
+        let surface_state_for_prompt = Arc::clone(&surface_state);
         let prompt: Arc<dyn LoopPromptPort> = Arc::new(
-            SurfaceAwareLoopPromptPort::new(
+            HostManagedLoopPromptPort::new(
                 run_context.clone(),
                 Arc::clone(&context),
                 Arc::clone(&self.milestone_sink),
-                surface_state,
             )
-            .with_default_message_limit(max_messages),
+            .with_default_message_limit(max_messages)
+            .with_current_surface_version_lookup(move || surface_state_for_prompt.current()),
         );
         let input: Arc<dyn LoopInputPort> =
             Arc::new(NoExtraLoopInputPort::new(run_context.clone()));

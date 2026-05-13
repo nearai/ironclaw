@@ -19,6 +19,7 @@ mod refs;
 mod resolver;
 mod skill_context;
 mod snapshot;
+mod snippet_ref;
 
 pub use driver::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
@@ -74,3 +75,4 @@ pub use skill_context::{
     skill_snippet_model_message_ref,
 };
 pub use snapshot::ResolvedRunProfile;
+pub use snippet_ref::memory_snippet_display_ref;

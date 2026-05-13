@@ -524,7 +524,7 @@ async fn safe_summary_length_is_bounded() {
 }
 
 #[tokio::test]
-async fn snippet_ref_is_opaque_and_does_not_expose_memory_path() {
+async fn snippet_ref_does_not_expose_raw_memory_path_and_preserves_hash() {
     let results = vec![make_result(
         "t",
         "u",
@@ -543,9 +543,32 @@ async fn snippet_ref_is_opaque_and_does_not_expose_memory_path() {
     let snippet_ref = &snippets[0].snippet_ref;
     assert!(
         snippet_ref.starts_with("memory-snippet:"),
-        "snippet_ref must use opaque memory-snippet prefix"
+        "snippet_ref must use memory-snippet display prefix"
     );
+    assert_eq!(snippet_ref, "memory-snippet:78c92ad79c11620d");
     assert!(!snippet_ref.contains("secrets"));
     assert!(!snippet_ref.contains("api-key"));
     assert!(!snippet_ref.contains("note.md"));
+}
+
+#[tokio::test]
+async fn snippet_ref_preserves_agent_project_hash_fields() {
+    let results = vec![make_result_with_agent(
+        "t",
+        "u",
+        Some("agent"),
+        Some("project"),
+        "note.md",
+        1.0,
+        "some content",
+    )];
+    let service = make_service(MockMemoryBackend::with_results(results));
+
+    let snippets = service
+        .load_memory_snippets(test_request("t", "u", Some("agent"), Some("project"), 10))
+        .await
+        .unwrap();
+
+    assert_eq!(snippets.len(), 1);
+    assert_eq!(snippets[0].snippet_ref, "memory-snippet:940957a16cb30048");
 }

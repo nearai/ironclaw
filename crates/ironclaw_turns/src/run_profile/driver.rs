@@ -28,6 +28,18 @@ impl AgentLoopDriverDescriptor {
         })
     }
 
+    pub fn from_trusted_static(
+        id: &'static str,
+        version: RunProfileVersion,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            id: LoopDriverId::new(id)?,
+            version,
+            checkpoint_schema_id: None,
+            checkpoint_schema_version: None,
+        })
+    }
+
     pub fn with_checkpoint_schema(
         mut self,
         checkpoint_schema_id: impl Into<String>,

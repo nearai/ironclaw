@@ -5,6 +5,24 @@ use ironclaw_turns::{
     RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
 };
 
+#[test]
+fn trusted_static_driver_descriptor_validates_id_in_release() {
+    assert!(
+        AgentLoopDriverDescriptor::from_trusted_static(
+            "UPPERCASE_DRIVER",
+            RunProfileVersion::new(1),
+        )
+        .is_err()
+    );
+
+    let descriptor = AgentLoopDriverDescriptor::from_trusted_static(
+        "reborn:text-only-model-reply",
+        RunProfileVersion::new(1),
+    )
+    .unwrap();
+    assert_eq!(descriptor.id.as_str(), "reborn:text-only-model-reply");
+}
+
 #[tokio::test]
 async fn default_interactive_profile_resolves_stable_driver_and_redacted_snapshot() {
     let resolver = InMemoryRunProfileResolver::default();

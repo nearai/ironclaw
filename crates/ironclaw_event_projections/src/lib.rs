@@ -187,6 +187,12 @@ pub enum TimelineEntryKind {
     RuntimeSelected,
     DispatchSucceeded,
     DispatchFailed,
+    ModelStarted,
+    ModelCompleted,
+    ModelFailed,
+    AssistantReplyFinalized,
+    LoopCompleted,
+    LoopFailed,
     ProcessStarted,
     ProcessCompleted,
     ProcessFailed,
@@ -200,6 +206,12 @@ impl From<RuntimeEventKind> for TimelineEntryKind {
             RuntimeEventKind::RuntimeSelected => Self::RuntimeSelected,
             RuntimeEventKind::DispatchSucceeded => Self::DispatchSucceeded,
             RuntimeEventKind::DispatchFailed => Self::DispatchFailed,
+            RuntimeEventKind::ModelStarted => Self::ModelStarted,
+            RuntimeEventKind::ModelCompleted => Self::ModelCompleted,
+            RuntimeEventKind::ModelFailed => Self::ModelFailed,
+            RuntimeEventKind::AssistantReplyFinalized => Self::AssistantReplyFinalized,
+            RuntimeEventKind::LoopCompleted => Self::LoopCompleted,
+            RuntimeEventKind::LoopFailed => Self::LoopFailed,
             RuntimeEventKind::ProcessStarted => Self::ProcessStarted,
             RuntimeEventKind::ProcessCompleted => Self::ProcessCompleted,
             RuntimeEventKind::ProcessFailed => Self::ProcessFailed,
@@ -1573,7 +1585,17 @@ fn apply_run_event(
         });
 
     run.status = status;
-    run.capability_id = event.capability_id.clone();
+    // Reply-finalized and loop-terminal events are milestones for the same
+    // loop run; keep the primary run capability (`loop.model`) instead of
+    // reclassifying the run as assistant-reply or loop-run metadata.
+    if !matches!(
+        event.kind,
+        RuntimeEventKind::AssistantReplyFinalized
+            | RuntimeEventKind::LoopCompleted
+            | RuntimeEventKind::LoopFailed
+    ) {
+        run.capability_id = event.capability_id.clone();
+    }
     run.thread_id = event.scope.thread_id.clone();
     if event.provider.is_some() {
         run.provider = event.provider.clone();
@@ -1584,7 +1606,12 @@ fn apply_run_event(
     if event.process_id.is_some() {
         run.process_id = event.process_id;
     }
-    if sanitized_error_kind.is_some() {
+    if matches!(
+        event.kind,
+        RuntimeEventKind::AssistantReplyFinalized | RuntimeEventKind::LoopCompleted
+    ) {
+        run.error_kind = None;
+    } else if sanitized_error_kind.is_some() {
         run.error_kind = sanitized_error_kind;
     }
     run.last_cursor = entry.cursor;
@@ -1599,6 +1626,9 @@ fn run_status_for_event(
     match kind {
         RuntimeEventKind::DispatchRequested
         | RuntimeEventKind::RuntimeSelected
+        | RuntimeEventKind::ModelStarted
+        | RuntimeEventKind::ModelCompleted
+        | RuntimeEventKind::ModelFailed
         | RuntimeEventKind::ProcessStarted => RunProjectionStatus::Running,
         RuntimeEventKind::DispatchSucceeded
             if has_active_process && current_status == Some(RunProjectionStatus::Running) =>
@@ -1619,12 +1649,13 @@ fn run_status_for_event(
         {
             current_status.unwrap_or(RunProjectionStatus::Failed)
         }
-        RuntimeEventKind::DispatchSucceeded | RuntimeEventKind::ProcessCompleted => {
-            RunProjectionStatus::Completed
-        }
-        RuntimeEventKind::DispatchFailed | RuntimeEventKind::ProcessFailed => {
-            RunProjectionStatus::Failed
-        }
+        RuntimeEventKind::DispatchSucceeded
+        | RuntimeEventKind::AssistantReplyFinalized
+        | RuntimeEventKind::LoopCompleted
+        | RuntimeEventKind::ProcessCompleted => RunProjectionStatus::Completed,
+        RuntimeEventKind::DispatchFailed
+        | RuntimeEventKind::LoopFailed
+        | RuntimeEventKind::ProcessFailed => RunProjectionStatus::Failed,
         RuntimeEventKind::ProcessKilled => RunProjectionStatus::Killed,
     }
 }

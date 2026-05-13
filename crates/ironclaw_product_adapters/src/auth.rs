@@ -16,10 +16,24 @@ use thiserror::Error;
 use crate::redaction::RedactedString;
 
 /// Host-only seal. Cannot be named or constructed outside this module.
+#[cfg_attr(
+    not(any(test, feature = "test-support", feature = "host-auth-mint")),
+    allow(
+        dead_code,
+        reason = "constructed only by host-auth/test-support feature gates"
+    )
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HostAuthSeal(());
 
 impl HostAuthSeal {
+    #[cfg_attr(
+        not(any(test, feature = "test-support", feature = "host-auth-mint")),
+        allow(
+            dead_code,
+            reason = "constructed only by host-auth/test-support feature gates"
+        )
+    )]
     fn host_only() -> Self {
         Self(())
     }
@@ -54,6 +68,13 @@ pub struct VerifiedAuthClaim {
 }
 
 impl VerifiedAuthClaim {
+    #[cfg_attr(
+        not(any(test, feature = "test-support", feature = "host-auth-mint")),
+        allow(
+            dead_code,
+            reason = "constructed only by host-auth/test-support feature gates"
+        )
+    )]
     pub(crate) fn new(requirement: AuthRequirement, subject: impl Into<String>) -> Self {
         Self {
             requirement,
@@ -70,6 +91,13 @@ impl VerifiedAuthClaim {
     }
 }
 
+#[cfg_attr(
+    not(any(test, feature = "test-support", feature = "host-auth-mint")),
+    allow(
+        dead_code,
+        reason = "verified evidence is host-minted behind feature gates"
+    )
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProtocolAuthEvidenceKind {
     Verified {
@@ -166,6 +194,13 @@ impl<'de> Deserialize<'de> for ProtocolAuthEvidence {
 }
 
 impl ProtocolAuthEvidence {
+    #[cfg_attr(
+        not(any(test, feature = "test-support", feature = "host-auth-mint")),
+        allow(
+            dead_code,
+            reason = "called only by host-auth/test-support feature gates"
+        )
+    )]
     pub(crate) fn host_verified(requirement: AuthRequirement, subject: impl Into<String>) -> Self {
         Self {
             kind: ProtocolAuthEvidenceKind::Verified {

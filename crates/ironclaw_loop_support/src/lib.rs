@@ -142,8 +142,8 @@ where
     thread_scope: ThreadScope,
     run_context: LoopRunContext,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
-    // Only successful milestone publications are recorded here: if publishing
-    // fails after the transcript write, an idempotent retry must try again.
+    // Only successful milestone publications are recorded here: if best-effort
+    // publishing fails after the transcript write, an idempotent retry can try again.
     emitted_assistant_reply_finalized_refs: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -311,9 +311,17 @@ where
 
         let milestones =
             LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(milestone_sink));
-        milestones
+        if let Err(error) = milestones
             .assistant_reply_finalized(message_ref.clone())
-            .await?;
+            .await
+        {
+            tracing::debug!(
+                kind = ?error.kind,
+                diagnostic_ref = ?error.diagnostic_ref,
+                "loop assistant_reply_finalized milestone failed after finalized transcript write"
+            );
+            return Ok(());
+        }
         emitted_refs.insert(message_ref.as_str().to_string());
         Ok(())
     }
@@ -528,8 +536,8 @@ where
                 .clone()
         });
         let resolved_messages = self.resolve_model_messages(request.messages).await?;
-        self.emit_model_started(requested_model_profile_id).await?;
-        let gateway_response = self
+        self.emit_model_started(requested_model_profile_id).await;
+        let gateway_response = match self
             .gateway
             .stream_model(HostManagedModelRequest {
                 model_profile_id: model_profile_id.clone(),
@@ -540,7 +548,14 @@ where
                 turn_id: self.run_context.turn_id,
             })
             .await
-            .map_err(model_gateway_error)?;
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let host_error = model_gateway_error(error);
+                self.emit_model_failed(host_error.kind).await;
+                return Err(host_error);
+            }
+        };
 
         self.emit_model_completed(model_profile_id.clone()).await;
 
@@ -561,16 +576,18 @@ where
     S: SessionThreadService + ?Sized + Send + Sync,
     G: HostManagedModelGateway + ?Sized + Send + Sync,
 {
-    async fn emit_model_started(
-        &self,
-        requested_model_profile_id: Option<ModelProfileId>,
-    ) -> Result<(), AgentLoopHostError> {
+    async fn emit_model_started(&self, requested_model_profile_id: Option<ModelProfileId>) {
         if let Some(milestone_sink) = &self.milestone_sink {
             let milestones =
                 LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(milestone_sink));
-            milestones.model_started(requested_model_profile_id).await?;
+            if let Err(error) = milestones.model_started(requested_model_profile_id).await {
+                tracing::debug!(
+                    kind = ?error.kind,
+                    diagnostic_ref = ?error.diagnostic_ref,
+                    "loop model_started milestone failed before model request"
+                );
+            }
         }
-        Ok(())
     }
 
     async fn emit_model_completed(&self, effective_model_profile_id: ModelProfileId) {
@@ -582,6 +599,20 @@ where
                     kind = ?error.kind,
                     diagnostic_ref = ?error.diagnostic_ref,
                     "loop model_completed milestone failed after successful model response"
+                );
+            }
+        }
+    }
+
+    async fn emit_model_failed(&self, reason_kind: AgentLoopHostErrorKind) {
+        if let Some(milestone_sink) = &self.milestone_sink {
+            let milestones =
+                LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(milestone_sink));
+            if let Err(error) = milestones.model_failed(reason_kind).await {
+                tracing::debug!(
+                    kind = ?error.kind,
+                    diagnostic_ref = ?error.diagnostic_ref,
+                    "loop model_failed milestone failed after model error"
                 );
             }
         }

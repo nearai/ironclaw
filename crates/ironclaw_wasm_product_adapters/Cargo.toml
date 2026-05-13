@@ -1,0 +1,27 @@
+[package]
+name = "ironclaw_wasm_product_adapters"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "WASM v2 host runtime for IronClaw Reborn ProductAdapters (#3285)"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+chrono = "0.4"
+hmac = "0.12"
+hex = "0.4"
+http = "1"
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0", features = ["host-auth-mint"] }
+sha2 = "0.10"
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "sync"] }

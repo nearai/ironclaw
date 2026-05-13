@@ -470,6 +470,16 @@ pub struct ExtensionManager {
     /// instead of opening a browser on the server via `open::that()`.
     /// Set by the web gateway at startup via `enable_gateway_mode()`.
     gateway_mode: std::sync::atomic::AtomicBool,
+    /// Reborn Telegram v2 ProductAdapter (issue #3285) feature flag.
+    ///
+    /// When `true`, [`Self::activate_wasm_channel`] fails closed on the
+    /// legacy `telegram` WASM channel — both paths must not handle the
+    /// same Telegram webhook installation. The runtime-tier startup
+    /// guard in `main.rs` rejects the same conflict at boot; this
+    /// post-startup flag closes the hot-activation bypass Henry flagged
+    /// on PR #3356. Set by the host at startup via
+    /// [`Self::set_reborn_telegram_v2_enabled`].
+    reborn_telegram_v2_enabled: std::sync::atomic::AtomicBool,
     /// The gateway's own base URL for building OAuth redirect URIs.
     /// Set by the web gateway at startup via `enable_gateway_mode()`.
     gateway_base_url: RwLock<Option<String>>,
@@ -702,6 +712,7 @@ impl ExtensionManager {
             relay_signing_secret_cache: Arc::new(std::sync::Mutex::new(None)),
             pairing_store: None,
             gateway_mode: std::sync::atomic::AtomicBool::new(false),
+            reborn_telegram_v2_enabled: std::sync::atomic::AtomicBool::new(false),
             gateway_base_url: RwLock::new(None),
             pending_wechat_logins: RwLock::new(HashMap::new()),
             channel_activation_locks: RwLock::new(HashMap::new()),
@@ -737,6 +748,26 @@ impl ExtensionManager {
         self.gateway_mode
             .store(true, std::sync::atomic::Ordering::Release);
         *self.gateway_base_url.write().await = Some(base_url);
+    }
+
+    /// Set the Reborn Telegram v2 feature flag.
+    ///
+    /// Host calls this once at startup with the resolved value of
+    /// `ChannelsConfig::reborn_telegram_v2_enabled`. When `true`,
+    /// hot-activation of the legacy `telegram` WASM channel is rejected
+    /// — without this guard a user could call
+    /// `/api/extensions/telegram/activate` after a clean v2-only start
+    /// and end up with both paths bound to the same Telegram
+    /// installation (Henry's review on PR #3356).
+    pub fn set_reborn_telegram_v2_enabled(&self, enabled: bool) {
+        self.reborn_telegram_v2_enabled
+            .store(enabled, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Read the Reborn Telegram v2 feature flag.
+    pub fn reborn_telegram_v2_enabled(&self) -> bool {
+        self.reborn_telegram_v2_enabled
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Returns `true` if OAuth should use gateway mode (return auth URL to
@@ -6021,6 +6052,28 @@ impl ExtensionManager {
         name: &str,
         user_id: &str,
     ) -> Result<ActivateResult, ExtensionError> {
+        // Henry's review on PR #3356: the startup-time v1/v2 exclusivity
+        // guard does not run for runtime activations (e.g. a user hits
+        // `/api/extensions/telegram/activate` after a clean v2-only
+        // start). Without this check, both v1 and v2 paths can end up
+        // bound to the same Telegram webhook installation. Canonicalize
+        // the input so non-canonical aliases (` telegram `, `telegram-`
+        // → `telegram`, etc.) cannot bypass the comparison.
+        if self.reborn_telegram_v2_enabled() {
+            let canonical = ironclaw_common::ExtensionName::new(name)
+                .map(|n| n.into_inner())
+                .unwrap_or_else(|_| name.to_string());
+            if canonical == "telegram" {
+                return Err(ExtensionError::ActivationFailed(
+                    "Legacy Telegram channel cannot be activated while \
+                     REBORN_TELEGRAM_V2_ENABLED=true. The v2 ProductAdapter \
+                     has mutually-exclusive ownership of the Telegram \
+                     webhook installation (issue #3285)."
+                        .to_string(),
+                ));
+            }
+        }
+
         let activation_lock = self.channel_activation_lock(name).await;
         let _guard = activation_lock.lock().await;
 
@@ -11271,6 +11324,81 @@ mod tests {
         )?;
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_activate_wasm_channel_rejects_legacy_telegram_when_v2_enabled() {
+        // Henry's review on PR #3356: even after the startup-time
+        // exclusivity check, a user hitting
+        // `/api/extensions/telegram/activate` (or the equivalent
+        // ToolDispatcher call) on a process that booted v2-only would
+        // bypass the guard. The activation path itself must fail closed.
+        let manager = make_manager_with_temp_dirs();
+        manager.set_reborn_telegram_v2_enabled(true);
+
+        let err = manager
+            .activate_wasm_channel("telegram", "test")
+            .await
+            .expect_err("legacy telegram must fail closed when v2 enabled");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("REBORN_TELEGRAM_V2_ENABLED"),
+            "error must name the flag that drives the rejection: {msg}"
+        );
+        // Channel must not have been registered as active.
+        assert!(
+            !manager
+                .active_channel_names
+                .read()
+                .await
+                .contains("telegram")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_activate_wasm_channel_rejects_legacy_telegram_with_whitespace_when_v2_enabled() {
+        // The canonicalization step in the guard must accept the same
+        // non-canonical names that startup activation accepts. A user
+        // calling activate with ` telegram ` should hit the guard, not
+        // bypass it (Copilot's canonicalization concern in the
+        // validator applies equally to the activation path).
+        let manager = make_manager_with_temp_dirs();
+        manager.set_reborn_telegram_v2_enabled(true);
+
+        let err = manager
+            .activate_wasm_channel(" telegram ", "test")
+            .await
+            .expect_err("non-canonical telegram alias must also fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("REBORN_TELEGRAM_V2_ENABLED"),
+            "error must name the flag that drives the rejection: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_activate_wasm_channel_allows_non_telegram_when_v2_enabled() {
+        // The guard is targeted: only the legacy `telegram` channel is
+        // mutually exclusive with v2. Other WASM channels (slack,
+        // discord, …) must still activate normally — proven here by
+        // observing that the rejection path does not fire for `slack`
+        // (the activation may fail for other reasons in this stripped
+        // test rig, but not with the v2 exclusivity message).
+        let manager = make_manager_with_temp_dirs();
+        manager.set_reborn_telegram_v2_enabled(true);
+
+        let outcome = manager.activate_wasm_channel("slack", "test").await;
+        match outcome {
+            Ok(_) => {}
+            Err(err) => {
+                let msg = err.to_string();
+                assert!(
+                    !msg.contains("REBORN_TELEGRAM_V2_ENABLED"),
+                    "v2 exclusivity guard must not fire for non-telegram channels: {msg}"
+                );
+            }
+        }
     }
 
     // ── resolve_env_credentials tests ────────────────────────────────────

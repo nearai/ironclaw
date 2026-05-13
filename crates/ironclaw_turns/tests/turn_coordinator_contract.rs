@@ -3866,6 +3866,13 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
         panic!("cancelled loop-exit application must not recover leases")
     }
 
+    async fn record_model_route_snapshot(
+        &self,
+        _request: RecordModelRouteSnapshotRequest,
+    ) -> Result<TurnRunState, TurnError> {
+        panic!("cancelled loop-exit application must not record model route snapshots")
+    }
+
     async fn block_run(&self, _request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
         panic!("cancelled loop-exit application must not block runs")
     }

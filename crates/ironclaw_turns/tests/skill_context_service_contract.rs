@@ -348,6 +348,22 @@ async fn unsafe_visible_metadata_fails_before_loop_snippet_emission() {
                 "load secret://oauth-token",
             )]),
         ),
+        (
+            "uppercase capability marker in description would leak through safe_summary",
+            SkillRunSnapshot::from_entries(vec![visible_trusted(
+                "alpha",
+                "raw capability handle CAP_file_read_123",
+                "safe prompt",
+            )]),
+        ),
+        (
+            "mixed-case secret marker in prompt would leak through safe_summary",
+            SkillRunSnapshot::from_entries(vec![visible_trusted(
+                "alpha",
+                "safe description",
+                "load Secret://oauth-token",
+            )]),
+        ),
     ];
 
     for (case, snapshot) in cases {

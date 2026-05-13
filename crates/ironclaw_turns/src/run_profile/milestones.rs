@@ -69,6 +69,9 @@ pub enum LoopHostMilestoneKind {
     ModelCompleted {
         effective_model_profile_id: ModelProfileId,
     },
+    ModelFailed {
+        reason_kind: AgentLoopHostErrorKind,
+    },
     CapabilityInvoked {
         capability_id: CapabilityId,
     },
@@ -103,6 +106,7 @@ impl LoopHostMilestoneKind {
             Self::PromptBundleBuilt { .. } => "prompt_bundle_built",
             Self::ModelStarted { .. } => "model_started",
             Self::ModelCompleted { .. } => "model_completed",
+            Self::ModelFailed { .. } => "model_failed",
             Self::CapabilityInvoked { .. } => "capability_invoked",
             Self::CheckpointCreated { .. } => "checkpoint_created",
             Self::AssistantReplyFinalized { .. } => "assistant_reply_finalized",
@@ -206,6 +210,14 @@ where
             effective_model_profile_id,
         })
         .await
+    }
+
+    pub async fn model_failed(
+        &self,
+        reason_kind: AgentLoopHostErrorKind,
+    ) -> Result<(), AgentLoopHostError> {
+        self.publish(LoopHostMilestoneKind::ModelFailed { reason_kind })
+            .await
     }
 
     pub async fn capability_invoked(
