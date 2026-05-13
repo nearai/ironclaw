@@ -847,6 +847,19 @@ impl ironclaw_engine::GateController for AutoApprovingGateController {
         &self,
         request: ironclaw_engine::GatePauseRequest,
     ) -> ironclaw_engine::GateResolution {
+        // Only auto-approve Approval gates. Authentication gates need
+        // an actual credential write — returning Cancelled here makes
+        // the engine fall through to the legacy `ThreadOutcome::GatePaused`
+        // unwind so legacy-path tests (auth resume via thread re-entry)
+        // continue to work alongside the new inline-await Authentication
+        // path covered by `authentication_gate_resolves_inline_via_controller`.
+        if matches!(
+            request.resume_kind,
+            ironclaw_engine::ResumeKind::Authentication { .. }
+        ) {
+            self.pauses.lock().await.push(request);
+            return ironclaw_engine::GateResolution::Cancelled;
+        }
         self.effects.mark_approved(&request.action_name).await;
         self.pauses.lock().await.push(request);
         ironclaw_engine::GateResolution::Approved { always: true }
@@ -950,6 +963,141 @@ async fn approval_gate_resolves_inline_via_controller() {
         )
     });
     assert!(executed, "http should have executed after approval");
+}
+
+/// Issue #3133 / #3166: Tier 0 inline-await for Authentication gates.
+///
+/// Companion to `approval_gate_resolves_inline_via_controller` — same
+/// shape but with `ResumeKind::Authentication` instead of Approval.
+/// Pre-fix the engine's Tier 0 retry loop bailed for Authentication
+/// (returning `Err(GatePaused)` unmodified, which surfaced as
+/// `ThreadOutcome::GatePaused` and required a thread re-entry to
+/// resume). Post-fix Authentication flows through the same inline-
+/// await path: the host controller delivers `Approved` once the
+/// credential is registered (in production this happens via the
+/// OAuth-callback hook in `bridge::resolve_inline_gates_for_credential`),
+/// the action retries inline, and the thread runs to completion in a
+/// single `join_thread`.
+#[tokio::test]
+async fn authentication_gate_resolves_inline_via_controller() {
+    let project_id = ProjectId::new();
+    // `gate_auth_tools = ["http"]` makes the mock return GatePaused
+    // with Authentication resume kind on the first call. The
+    // `AutoApprovingGateController::pause` hook calls
+    // `mark_authenticated` before returning Approved, so the inline
+    // retry sees the credential as present and the action succeeds.
+    let effects = GateMockEffects::new(vec![], vec!["http".into()]);
+
+    let llm = ScriptedLlm::new(vec![
+        LlmOutput {
+            response: LlmResponse::ActionCalls {
+                calls: vec![ironclaw_engine::ActionCall {
+                    id: "call_1".into(),
+                    action_name: "http".into(),
+                    parameters: serde_json::json!({"url": "https://api.example.com"}),
+                }],
+                content: None,
+            },
+            usage: TokenUsage::default(),
+        },
+        LlmOutput {
+            response: LlmResponse::Text("done".into()),
+            usage: TokenUsage::default(),
+        },
+    ]);
+
+    let store = TestStore::new();
+    let mgr = Arc::new(ThreadManager::new(
+        llm,
+        effects.clone(),
+        store.clone() as Arc<dyn Store>,
+        Arc::new(make_caps(false)),
+        Arc::new(LeaseManager::new()),
+        Arc::new(PolicyEngine::new()),
+    ));
+    // Custom auto-approving controller that marks the action as
+    // *authenticated* (not just approved) before returning Approved.
+    // Mirrors the production path where the OAuth callback writes the
+    // credential to the secrets store and then delivers Approved to
+    // the parked waiter — the retry sees the credential as present.
+    struct AuthAutoApprover {
+        effects: Arc<GateMockEffects>,
+        pauses: tokio::sync::Mutex<Vec<ironclaw_engine::GatePauseRequest>>,
+    }
+    #[async_trait::async_trait]
+    impl ironclaw_engine::GateController for AuthAutoApprover {
+        async fn pause(
+            &self,
+            request: ironclaw_engine::GatePauseRequest,
+        ) -> ironclaw_engine::GateResolution {
+            self.effects.mark_authenticated(&request.action_name).await;
+            self.pauses.lock().await.push(request);
+            ironclaw_engine::GateResolution::Approved { always: false }
+        }
+    }
+    let controller = Arc::new(AuthAutoApprover {
+        effects: effects.clone(),
+        pauses: tokio::sync::Mutex::new(Vec::new()),
+    });
+    mgr.set_gate_controller(controller.clone() as Arc<dyn ironclaw_engine::GateController>)
+        .await;
+
+    let tid = mgr
+        .spawn_thread(
+            "fetch from authenticated endpoint",
+            ThreadType::Foreground,
+            project_id,
+            ThreadConfig::default(),
+            None,
+            "test-user",
+        )
+        .await
+        .expect("spawn_thread");
+
+    let outcome = mgr.join_thread(tid).await.expect("join_thread");
+    assert!(
+        matches!(outcome, ThreadOutcome::Completed { .. }),
+        "expected Completed after inline auth resolution, got {outcome:?}"
+    );
+
+    // Controller observed exactly one Authentication pause.
+    let pauses = controller.pauses.lock().await;
+    assert_eq!(pauses.len(), 1, "expected one inline pause");
+    assert_eq!(pauses[0].gate_name, "authentication");
+    assert_eq!(pauses[0].action_name, "http");
+    assert!(
+        matches!(pauses[0].resume_kind, ResumeKind::Authentication { .. }),
+        "pause should carry Authentication resume_kind"
+    );
+
+    // Thread reached Done after the inline retry.
+    let saved = store.load_thread(tid).await.unwrap().unwrap();
+    assert_eq!(saved.state, ThreadState::Done);
+
+    // Both the gate-fired event and the post-resolution retry are
+    // recorded — same audit shape as the Approval inline-await test.
+    let approval_events: Vec<_> = saved
+        .events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e.kind,
+                ironclaw_engine::types::event::EventKind::ApprovalRequested { .. }
+            )
+        })
+        .collect();
+    assert_eq!(approval_events.len(), 1, "exactly one gate raised");
+    let executed = saved.events.iter().any(|e| {
+        matches!(
+            &e.kind,
+            ironclaw_engine::types::event::EventKind::ActionExecuted { action_name, .. }
+                if action_name == "http"
+        )
+    });
+    assert!(
+        executed,
+        "http should have executed after the credential was registered"
+    );
 }
 
 /// GatePaused with Authentication resume kind carries credential info.
@@ -1370,11 +1518,23 @@ async fn approval_chains_directly_into_auth_for_install_flow() {
         other => panic!("expected auth gate after inline approval, got {other:?}"),
     }
 
-    // Inline approval was observed by the controller exactly once.
+    // Both gates went through the controller post-#3133-half-2. The
+    // first is the Approval (inline-handled by AutoApprover), the
+    // second is the Authentication (Cancelled by AutoApprover so the
+    // engine falls through to legacy `ThreadOutcome::GatePaused`).
     let pauses = controller.pauses_seen().await;
-    assert_eq!(pauses.len(), 1);
+    assert_eq!(
+        pauses.len(),
+        2,
+        "expected approval + auth pauses, got {pauses:?}"
+    );
     assert_eq!(pauses[0].action_name, "tool_install");
     assert!(matches!(pauses[0].resume_kind, ResumeKind::Approval { .. }));
+    assert_eq!(pauses[1].action_name, "tool_install");
+    assert!(matches!(
+        pauses[1].resume_kind,
+        ResumeKind::Authentication { .. }
+    ));
 
     // Now drive the legacy auth-resume path (unchanged by this PR).
     effects.mark_authenticated("tool_install").await;

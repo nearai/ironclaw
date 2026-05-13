@@ -976,7 +976,11 @@ mod tests {
                     name: "slack".into(),
                     display_name: Some("Slack".into()),
                     kind: CapabilitySummaryKind::Provider,
-                    status: CapabilityStatus::NeedsAuth,
+                    // NeedsSetup keeps slack visible in the
+                    // Activatable Integrations prompt section.
+                    // NeedsAuth would render in the regular action
+                    // inventory (post-#3133 direct-callable path).
+                    status: CapabilityStatus::NeedsSetup,
                     description: Some("Slack workspace integration".into()),
                     action_preview: vec!["slack_send".into()],
                     routing_hint: None,
@@ -1051,7 +1055,7 @@ mod tests {
         assert!(!system_prompt.contains("## Available tools (call as Python functions)"));
         assert!(system_prompt.contains("`slack` [provider]"));
         assert!(system_prompt.contains("## Activatable Integrations"));
-        assert!(system_prompt.contains("tool_activate(name=\"<integration>\")"));
+        assert!(system_prompt.contains("need user setup before their tools become callable"));
         assert!(!system_prompt.contains("`telegram` [channel]"));
         assert!(system_prompt.contains("## Prior Knowledge (from completed threads)"));
         assert!(system_prompt.contains("GitHub API Skill"));
@@ -1138,7 +1142,11 @@ mod tests {
                     name: "slack".into(),
                     display_name: Some("Slack".into()),
                     kind: CapabilitySummaryKind::Provider,
-                    status: CapabilityStatus::NeedsAuth,
+                    // NeedsSetup keeps slack visible in the
+                    // Activatable Integrations prompt section.
+                    // NeedsAuth would render in the regular action
+                    // inventory (post-#3133 direct-callable path).
+                    status: CapabilityStatus::NeedsSetup,
                     description: Some("Slack workspace integration".into()),
                     action_preview: vec!["slack_send".into()],
                     routing_hint: None,

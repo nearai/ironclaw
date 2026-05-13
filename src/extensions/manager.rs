@@ -3404,10 +3404,56 @@ impl ExtensionManager {
             .await?;
         self.invalidate_latent_wasm_provider_actions_cache().await;
 
+        // Register the WASM tool with the engine's tool registry
+        // immediately so the model can call it without a separate
+        // enablement step. Auth is checked at execute time by
+        // `AuthManager::check_action_auth`, which raises an
+        // `Authentication` gate when the declared credential is
+        // missing — the inline-await machinery (#3133/#3166) parks
+        // the caller until OAuth completes, then retries the action.
+        //
+        // Best-effort: a registration failure here doesn't unwind the
+        // download. The user can retry via the existing /activate
+        // endpoint, or the next ensure_extension_ready cycle picks
+        // it up. We log so a CI failure isn't silent. The
+        // `InstallResult.message` reflects which arm we hit so the
+        // caller / UI can prompt for follow-up instead of optimistically
+        // claiming readiness when activation actually failed.
+        let activated = match self.activate_wasm_tool(name, &self.user_id).await {
+            Ok(_) => {
+                tracing::debug!(
+                    extension = %name,
+                    "Auto-registered WASM tool with registry on install"
+                );
+                true
+            }
+            Err(e) => {
+                tracing::warn!(
+                    extension = %name,
+                    error = %e,
+                    "Failed to auto-register WASM tool on install — \
+                     falling back to lazy activation. The tool will \
+                     not be callable until the user resolves the \
+                     activation error or completes setup."
+                );
+                false
+            }
+        };
+
+        let message = if activated {
+            format!("WASM tool '{}' installed and ready.", name)
+        } else {
+            format!(
+                "WASM tool '{}' installed; activation failed — \
+                 retry via the activate endpoint or complete setup.",
+                name
+            )
+        };
+
         Ok(InstallResult {
             name: name.to_string(),
             kind: ExtensionKind::WasmTool,
-            message: format!("WASM tool '{}' installed. Run activate to load it.", name),
+            message,
         })
     }
 
@@ -5233,6 +5279,18 @@ impl ExtensionManager {
                     .await
                     .map_err(|e| e.to_string())?;
 
+                    // Half-2 of #3133, two-pronged auto-resume. See
+                    // `src/channels/web/features/oauth/mod.rs` for the
+                    // matching wire on the gateway-OAuth path.
+                    let _ =
+                        crate::bridge::resolve_inline_gates_for_credential(&user_id, &secret_name)
+                            .await;
+                    let _ = crate::bridge::resume_paused_missions_for_credential(
+                        &user_id,
+                        &secret_name,
+                    )
+                    .await;
+
                     Ok(())
                 }
                 .await;
@@ -5263,7 +5321,10 @@ impl ExtensionManager {
                 }
 
                 if let Some(ref sse) = sse_manager {
-                    sse.broadcast(ironclaw_common::AppEvent::OnboardingState {
+                    // Scope to the OAuth flow owner — a global broadcast
+                    // would surface this onboarding state to every
+                    // connected tenant tab.
+                    let onboarding_event = ironclaw_common::AppEvent::OnboardingState {
                         extension_name: ironclaw_common::ExtensionName::from_trusted(ext_name),
                         state: if success {
                             ironclaw_common::OnboardingStateDto::Ready
@@ -5277,7 +5338,8 @@ impl ExtensionManager {
                         setup_url: None,
                         onboarding: None,
                         thread_id: None,
-                    });
+                    };
+                    sse.broadcast_for_user(&user_id, onboarding_event); // projection-exempt: channel-lifecycle, WASM extension OAuth completion
                 }
             });
 

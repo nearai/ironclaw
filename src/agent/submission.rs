@@ -155,6 +155,31 @@ impl SubmissionParser {
             }
         }
 
+        // `approve <channel> <code>` — claim a pairing code from the chat
+        // surface. The Telegram bot's pairing reply tells users to type
+        // exactly this; supporting it in chat closes the gap that #3317
+        // surfaced (users pasted the pairing code into TUI/CLI and got
+        // rejected by the LLM). The slash variant is also accepted so the
+        // command can't be intercepted as a UserInput at higher layers.
+        if let Some(rest) = lower
+            .strip_prefix("approve ")
+            .or_else(|| lower.strip_prefix("/approve "))
+        {
+            let mut parts = rest.split_whitespace();
+            if let (Some(channel), Some(code), None) = (parts.next(), parts.next(), parts.next()) {
+                let channel = channel.to_string();
+                // The parser already lowercased the input (`lower`), so both
+                // `channel` and `code` flow through in lowercase. The store
+                // layer is case-insensitive
+                // (`db.libsql.pairing` test_approve_pairing_case_insensitive),
+                // so the on-the-wire upper-case shape still matches.
+                let code = code.to_string();
+                if !channel.is_empty() && !code.is_empty() {
+                    return Submission::PairingClaim { channel, code };
+                }
+            }
+        }
+
         // /thread <uuid> - switch thread
         if let Some(rest) = lower.strip_prefix("/thread ") {
             let rest = rest.trim();
@@ -403,6 +428,21 @@ pub enum Submission {
     Plan {
         /// The plan subcommand.
         sub: PlanSubcommand,
+    },
+
+    /// Claim a pairing code from any chat surface (e.g. `approve telegram CODE`).
+    ///
+    /// The user-facing pairing flow tells users to type exactly this in any
+    /// IronClaw chat. The handler delegates to the same pairing store and
+    /// extension-manager hooks that `POST /api/pairing/{channel}/approve`
+    /// uses, so the TUI/CLI/web/telegram surfaces all behave consistently.
+    PairingClaim {
+        /// Channel name (e.g. `telegram`, `slack-relay`).
+        channel: String,
+        /// Pairing code, lowercased by `SubmissionParser::parse`. The
+        /// pairing store is case-insensitive, so the wire-format
+        /// uppercase shape still matches.
+        code: String,
     },
 }
 
@@ -1045,5 +1085,57 @@ mod tests {
         // "/expected " with no description should fall through to user input
         let submission = SubmissionParser::parse("/expected ");
         assert!(matches!(submission, Submission::UserInput { .. }));
+    }
+
+    // Pairing-claim parser — regression tests for #3317. The Telegram bot's
+    // pairing reply tells users to type `approve telegram CODE` in any
+    // IronClaw chat surface; before this variant existed, the agent
+    // unhelpfully routed those to the LLM and answered "wrong place".
+    #[test]
+    fn test_parser_pairing_claim_bare() {
+        let submission = SubmissionParser::parse("approve telegram ABC12345");
+        assert!(matches!(
+            submission,
+            Submission::PairingClaim { ref channel, ref code }
+                if channel == "telegram" && code == "abc12345"
+        ));
+    }
+
+    #[test]
+    fn test_parser_pairing_claim_slash_prefix() {
+        let submission = SubmissionParser::parse("/approve telegram XYZ99");
+        assert!(matches!(
+            submission,
+            Submission::PairingClaim { ref channel, ref code }
+                if channel == "telegram" && code == "xyz99"
+        ));
+    }
+
+    #[test]
+    fn test_parser_pairing_claim_mixed_case_channel() {
+        // Channel name should round-trip lowercased (the parser uses `lower`).
+        let submission = SubmissionParser::parse("approve Telegram ABCD1234");
+        assert!(matches!(
+            submission,
+            Submission::PairingClaim { ref channel, .. } if channel == "telegram"
+        ));
+    }
+
+    #[test]
+    fn test_parser_pairing_claim_extra_args_falls_through() {
+        // Don't claim `approve foo bar baz` — extra tokens look like a sentence.
+        let submission = SubmissionParser::parse("approve telegram ABC EXTRA");
+        assert!(matches!(submission, Submission::UserInput { .. }));
+    }
+
+    #[test]
+    fn test_parser_approval_alone_is_still_approval() {
+        // `approve` by itself stays an ApprovalResponse; only the two-arg
+        // form is interpreted as a pairing claim.
+        let submission = SubmissionParser::parse("approve");
+        assert!(matches!(
+            submission,
+            Submission::ApprovalResponse { approved: true, .. }
+        ));
     }
 }

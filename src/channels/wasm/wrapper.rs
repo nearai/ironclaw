@@ -4933,6 +4933,15 @@ fn is_loopback_test_rewrite_base(base: &str) -> bool {
     let Some(host) = parsed.host_str() else {
         return false;
     };
+    // The `url` crate keeps IPv6 brackets on `host_str()`. Strip them
+    // so `::1` parses as `IpAddr::V6` — without this, valid IPv6
+    // loopback rewrite targets (`http://[::1]:8443`) silently fall
+    // through and are rejected. Mirror in
+    // `tools::wasm::wrapper::is_loopback_test_rewrite_base`.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|v| v.strip_suffix(']'))
+        .unwrap_or(host);
     host.eq_ignore_ascii_case("localhost")
         || host
             .parse::<std::net::IpAddr>()
@@ -6834,7 +6843,14 @@ mod tests {
             .expect("respond should succeed");
 
         let stored_metadata = channel.last_broadcast_metadata.read().await.clone();
-        assert_eq!(stored_metadata.as_deref(), Some(r#"{"chat_id":12345}"#));
+        // `with_metadata` always sets `user_id` from the IncomingMessage
+        // (overwriting any caller-supplied value) so downstream
+        // `send_status` can route SSE events to the owning tenant
+        // unforgeably. The caller-supplied `chat_id` survives alongside it.
+        assert_eq!(
+            stored_metadata.as_deref(),
+            Some(r#"{"chat_id":12345,"user_id":"owner-scope"}"#)
+        );
 
         channel.shutdown().await.expect("Shutdown should succeed");
     }

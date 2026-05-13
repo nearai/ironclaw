@@ -618,8 +618,9 @@ impl Agent {
                     .await;
 
                 let compactor = ContextCompactor::new(self.llm().clone());
+                let workspace = self.workspace_for_user(&message.user_id);
                 if let Err(e) = compactor
-                    .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
+                    .compact(thread, strategy, workspace.as_deref())
                     .await
                 {
                     tracing::warn!("Auto-compaction failed: {}", e);
@@ -1317,6 +1318,7 @@ impl Agent {
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
         let mut sess = session.lock().await;
+        let user_id = sess.user_id.clone();
         let thread = sess
             .threads
             .get_mut(&thread_id)
@@ -1332,8 +1334,9 @@ impl Agent {
             );
 
         let compactor = ContextCompactor::new(self.llm().clone());
+        let workspace = self.workspace_for_user(&user_id);
         match compactor
-            .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
+            .compact(thread, strategy, workspace.as_deref())
             .await
         {
             Ok(result) => {
@@ -1375,6 +1378,26 @@ impl Agent {
         // Clear undo history too
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         undo_mgr.lock().await.clear();
+
+        // Drain in-flight OAuth flows for this user (#3320). Mirror of the
+        // engine-v2 cleanup in `bridge::router::clear_engine_conversation` so
+        // both code paths give `/clear` a consistent "clean slate" contract.
+        // Pending flows otherwise live until `OAUTH_FLOW_EXPIRY` (5 min) and
+        // can fool a fresh auth attempt's CSRF dedupe or leave a ghost entry
+        // in `pending_oauth_flows()` after the user already moved on.
+        if let Some(ext_mgr) = self.deps.extension_manager.as_ref() {
+            let mut flows = ext_mgr.pending_oauth_flows().write().await;
+            let before = flows.len();
+            flows.retain(|_state, flow| flow.user_id != user_id);
+            let removed = before.saturating_sub(flows.len());
+            if removed > 0 {
+                tracing::debug!(
+                    user_id = %user_id,
+                    removed,
+                    "engine v1: drained pending OAuth flows on /clear"
+                );
+            }
+        }
 
         Ok(SubmissionResult::ok_with_message("Thread cleared."))
     }
@@ -2874,6 +2897,64 @@ mod tests {
         );
 
         (agent, statuses)
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn process_compact_writes_summary_to_session_user_workspace() {
+        let (db, _dir) = crate::agent::test_support::make_libsql_test_db().await;
+        let owner_workspace = Arc::new(crate::workspace::Workspace::new_with_db(
+            "owner-scope",
+            Arc::clone(&db),
+        ));
+        let (mut agent, _statuses) = make_thread_ops_test_agent().await;
+        agent.deps.store = Some(Arc::clone(&db));
+        agent.deps.workspace = Some(owner_workspace);
+
+        let session = Arc::new(Mutex::new(Session::new("alice")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            let thread = sess.create_thread(Some("gateway"));
+            for i in 0..6 {
+                thread.start_turn(format!("msg-{i}"));
+                thread.conclude_turn(TurnOutcome::Completed(format!("resp-{i}")));
+            }
+            thread.id
+        };
+
+        let before_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let result = agent
+            .process_compact(Arc::clone(&session), thread_id)
+            .await
+            .expect("manual compaction should run");
+        let after_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        assert!(
+            matches!(result, SubmissionResult::Ok { .. }),
+            "unexpected compact result: {result:?}"
+        );
+
+        let mut candidate_paths = vec![format!("daily/{before_date}.md")];
+        if after_date != before_date {
+            candidate_paths.push(format!("daily/{after_date}.md"));
+        }
+
+        let alice_ws = crate::workspace::Workspace::new_with_db("alice", Arc::clone(&db));
+        let mut stored = None;
+        for path in &candidate_paths {
+            if let Ok(doc) = alice_ws.read(path).await {
+                stored = Some((path.clone(), doc));
+                break;
+            }
+        }
+        let (path, alice_doc) =
+            stored.expect("compaction summary should be written to the session user's workspace");
+        assert!(alice_doc.content.contains("Context Summary"));
+
+        let owner_ws = crate::workspace::Workspace::new_with_db("owner-scope", Arc::clone(&db));
+        assert!(
+            owner_ws.read(&path).await.is_err(),
+            "compaction summary must not be written to the startup owner workspace"
+        );
     }
 
     #[test]

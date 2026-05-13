@@ -107,7 +107,7 @@ pub struct AuthManager {
 /// Branches (in precedence order):
 ///
 /// 1. **User-influenced** `name` parameter on
-///    `tool_install` / `tool_activate` / `tool_auth` actions. This string
+///    `tool_install` / `tool_auth` actions. This string
 ///    comes from the model's tool arguments, so it must pass
 ///    `ExtensionName::new` — invalid values (path traversal, uppercase,
 ///    etc.) fall through to the next branch instead of tainting the
@@ -138,17 +138,12 @@ pub(crate) async fn resolve_auth_flow_extension_name(
     extension_manager: Option<&crate::extensions::ExtensionManager>,
 ) -> CommonExtensionName {
     // 1. User-influenced: validate via ExtensionName::new, fall through on failure.
-    //    Match both underscore and hyphen variants for every install/activate/auth
+    //    Match both underscore and hyphen variants for every install/auth
     //    action so the hyphenated tool names dispatched from Python land the
     //    same as the canonical underscore form.
     if matches!(
         action_name,
-        "tool_install"
-            | "tool-install"
-            | "tool_activate"
-            | "tool-activate"
-            | "tool_auth"
-            | "tool-auth"
+        "tool_install" | "tool-install" | "tool_auth" | "tool-auth"
     ) && let Some(raw) = parameters.get("name").and_then(|v| v.as_str())
         && let Ok(name) = CommonExtensionName::new(raw)
     {
@@ -256,11 +251,68 @@ impl AuthManager {
                 .await;
         }
 
-        // For non-HTTP tools, we don't have a generic pre-flight mechanism
-        // yet. Extension-level auth (NeedsAuth/NeedsSetup) is handled by
-        // check_tool_readiness() for available_actions() filtering and by
-        // the post-install pipeline.
-        AuthCheckResult::NoAuthRequired
+        // Non-HTTP path: ask the tool itself which credentials it
+        // declares. WASM tools surface this via
+        // `Tool::required_credentials()` reading their
+        // `capabilities.http.credentials` block. Built-in tools default
+        // to empty, so this branch is a no-op for them. When a tool
+        // declares a credential and it's missing, raise an
+        // Authentication gate when the tool's declared credentials
+        // are missing — the call paths flow into the inline-await
+        // machinery (#3133/#3166) and resume after the user completes
+        // OAuth, with no separate enablement step required.
+        let Some(tools) = self.tools.as_ref() else {
+            return AuthCheckResult::NoAuthRequired;
+        };
+        let Some(tool) = tools.get(action_name).await else {
+            return AuthCheckResult::NoAuthRequired;
+        };
+        let required = tool.required_credentials();
+        if required.is_empty() {
+            return AuthCheckResult::NoAuthRequired;
+        }
+
+        let role_lookup = tools.role_lookup().map(Arc::as_ref);
+        let mut missing = Vec::new();
+        for secret_name in required {
+            let oauth_refresh = credential_registry.oauth_refresh_for_secret(&secret_name);
+            match resolve_secret_for_runtime(
+                self.secrets_store.as_ref(),
+                user_id,
+                &secret_name,
+                role_lookup,
+                oauth_refresh.as_ref(),
+                DefaultFallback::AdminOnly,
+            )
+            .await
+            {
+                Ok(_) => {}
+                Err(error) if error.requires_authentication() => {
+                    missing.push(
+                        self.describe_missing_credential(&secret_name, user_id)
+                            .await,
+                    );
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        action = %action_name,
+                        secret = %secret_name,
+                        error = ?error,
+                        "Failed to resolve credential during pre-flight auth — assuming missing"
+                    );
+                    missing.push(MissingCredential {
+                        credential_name: CredentialName::from_trusted(secret_name.clone()),
+                        setup_instructions: None,
+                        auth_url: None,
+                    });
+                }
+            }
+        }
+        if missing.is_empty() {
+            AuthCheckResult::Ready
+        } else {
+            AuthCheckResult::MissingCredentials(missing)
+        }
     }
 
     /// Check HTTP tool credentials by extracting the host and querying

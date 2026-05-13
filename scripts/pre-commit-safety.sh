@@ -427,12 +427,51 @@ if [ -n "$PROJECTION_HITS" ]; then
     echo "$PROJECTION_HITS" | sed 's/^/    /'
 fi
 
+# 10. Cross-tenant safety: an UNSCOPED `sse.broadcast(...)` call (i.e. not
+#     `broadcast_for_user`) delivers the event to every connected
+#     subscriber, regardless of which user owns the underlying state.
+#     In multi-tenant deployments that pattern leaks tool calls, log
+#     lines, and onboarding state across tenants — see the cross-tenant
+#     thread visibility incident and the `dispatch_status_event` fix.
+#
+#     A new `sse.broadcast(...)` line is acceptable only if it is one
+#     of:
+#       (a) Transport-only (heartbeat / stream_chunk) — the canonical
+#           projection-exempt category that already documents the
+#           empty-payload allowlist.
+#       (b) Annotated with `// multi-tenant-safe: <reason>` on the same
+#           line, naming the structural reason the event cannot leak
+#           tenant-bound state (e.g. "single-tenant fallback inside an
+#           explicit multi_tenant_mode=false branch").
+#     Otherwise prefer `broadcast_for_user(uid, ...)` with a known
+#     `user_id` derived from the source-log payload.
+#
+#     This check runs only on `src/**` and `crates/**` — `tests/**` and
+#     `#[cfg(test)]` blocks were already filtered out upstream.
+#     Marker matching: `//.*multi-tenant-safe: <non-whitespace>` — the
+#     `//.*` prefix anchors the marker to a Rust comment but allows
+#     additional annotations on the same line (e.g. when `// projection-
+#     exempt: ...; multi-tenant-safe: ...` carry both markers in one
+#     trailing comment because Rust line comments cannot be nested).
+MT_BROADCAST_HITS=$(echo "$DIFF_OUTPUT_NO_TESTS" | grep -nE '^\+' \
+    | grep -E '(^|[^[:alnum:]_])sse\.broadcast[[:space:]]*\(' \
+    | grep -vE '\.broadcast_for_user' \
+    | grep -vE '// projection-exempt: transport-only,[[:space:]]*[^[:space:]]' \
+    | grep -vE '//.*multi-tenant-safe: [^[:space:]]' \
+    | grep -vE '// safety:|:\+\+\+ ' \
+    | head -5 || true)
+if [ -n "$MT_BROADCAST_HITS" ]; then
+    warn "MULTITENANT" "Unscoped \`sse.broadcast(...)\` in code reachable in multi-tenant mode. Switch to \`broadcast_for_user(&user_id, ...)\` or annotate with '// multi-tenant-safe: <reason>'. See \`dispatch_status_event\` in \`src/channels/web/mod.rs\` and the cross-tenant thread visibility incident."
+    echo "$MT_BROADCAST_HITS" | sed 's/^/    /'
+fi
+
 if [ "$WARNINGS" -gt 0 ]; then
     echo ""
     echo "Found $WARNINGS potential issue(s). Fix them or add '// safety: <reason>' to suppress."
     echo "(For DISPATCH warnings, use '// dispatch-exempt: <reason>' instead.)"
     echo "(For CREDNAME warnings, use '// web-identity-exempt: <reason>' instead.)"
     echo "(For PROJECTION warnings, use '// projection-exempt: <category>, <detail>' instead.)"
+    echo "(For MULTITENANT warnings, use '// multi-tenant-safe: <reason>' instead.)"
     echo ""
     exit 1
 fi

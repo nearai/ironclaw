@@ -1,5 +1,57 @@
 [
   {
+    "id": "nearai",
+    "aliases": [
+      "near_ai",
+      "near"
+    ],
+    "protocol": "nearai",
+    "api_key_env": "NEARAI_API_KEY",
+    "api_key_required": false,
+    "base_url_env": "NEARAI_BASE_URL",
+    "model_env": "NEARAI_MODEL",
+    "default_model": "auto",
+    "description": "multi-model access via NEAR account",
+    "setup": {
+      "kind": "session_token",
+      "display_name": "NEAR AI",
+      "key_url": "https://app.near.ai"
+    }
+  },
+  {
+    "id": "gemini_oauth",
+    "aliases": [
+      "gemini-oauth"
+    ],
+    "protocol": "gemini_oauth",
+    "api_key_required": false,
+    "model_env": "GEMINI_MODEL",
+    "default_model": "gemini-2.5-flash",
+    "description": "Official Gemini API via Gemini CLI OAuth",
+    "setup": {
+      "kind": "file_based_credentials",
+      "display_name": "Gemini CLI",
+      "default_path_hint": "~/.gemini/oauth_creds.json"
+    }
+  },
+  {
+    "id": "openai_codex",
+    "aliases": [
+      "openai-codex",
+      "codex"
+    ],
+    "protocol": "openai_codex",
+    "api_key_required": false,
+    "model_env": "OPENAI_CODEX_MODEL",
+    "default_model": "gpt-5.3-codex",
+    "description": "ChatGPT subscription (Plus/Pro/Max)",
+    "setup": {
+      "kind": "o_auth_device_code",
+      "display_name": "OpenAI Codex",
+      "backend": "openai_codex"
+    }
+  },
+  {
     "id": "openai",
     "aliases": [
       "open_ai"
@@ -445,6 +497,24 @@
       "secret_name": "llm_cloudflare_api_key",
       "display_name": "Cloudflare Workers AI",
       "can_list_models": false
+    }
+  },
+  {
+    "id": "bedrock",
+    "aliases": [
+      "aws_bedrock",
+      "aws"
+    ],
+    "protocol": "bedrock",
+    "api_key_required": false,
+    "model_env": "BEDROCK_MODEL",
+    "default_model": "anthropic.claude-sonnet-4-20250514-v1:0",
+    "description": "Claude & other models via AWS (IAM, SSO)",
+    "setup": {
+      "kind": "aws_credentials",
+      "display_name": "AWS Bedrock",
+      "supports_cross_region": true,
+      "supports_profile": true
     }
   }
 ]

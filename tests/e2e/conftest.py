@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -1552,3 +1553,168 @@ async def telegram_e2e_server_with_routines(
         routines_enabled=True,
     ):
         yield server
+
+
+# ── Mission auto-resume (#3133 / #3166) ──────────────────────────────────
+
+
+@pytest.fixture
+async def mission_gmail_live_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+    request,
+):
+    """Isolated ironclaw instance for the mission auto-resume live test.
+
+    Wires together three runtime pieces:
+
+    1. The `live_llm_proxy.py` record/replay proxy as ironclaw's
+       LLM backend. The proxy is launched with a per-test fixture
+       file in `tests/e2e/fixtures/live/<test_name>.json`. In record
+       mode (`IRONCLAW_LIVE_TEST=1`) it forwards to the upstream
+       LLM and writes the trace; in replay mode it reads the
+       committed trace.
+    2. The existing mock_llm.py for the Gmail HTTP API mocks. The
+       `IRONCLAW_TEST_HTTP_REWRITE_MAP` env var routes
+       `gmail.googleapis.com` at mock_llm.py so the gmail WASM
+       tool's HTTP calls land on deterministic responses (the
+       `/__mock/gmail/state` endpoint exposes counters for
+       assertions). OAuth exchange (`/oauth/exchange`) also lives
+       on mock_llm.py.
+    3. A function-scoped ironclaw process with engine v2 enabled
+       and admin tools auto-approved so the chat-driven
+       `routine_create` + `mission_fire` flow runs without a
+       human in the loop. The *authentication* gate raised by
+       the auth preflight on a direct `gmail` call is still active
+       even with auto-approve — that's the gate the #3133
+       auto-resume path exercises.
+    """
+    from live_harness import start_live_proxy
+
+    proxy_iter = start_live_proxy(request.node.name)
+    proxy = await proxy_iter.__anext__()
+
+    reserved = _reserve_loopback_sockets(2)
+    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-mission-gmail-db-")
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-mission-gmail-home-")
+    channels_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-mission-gmail-channels-")
+    tools_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-mission-gmail-tools-")
+
+    try:
+        gateway_port = reserved[0].getsockname()[1]
+        http_port = reserved[1].getsockname()[1]
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+
+        # Override LLM base URL to the live proxy. _build_gateway_env
+        # bakes in the LLM_BASE_URL from `mock_llm_server`; we override
+        # via extra_env after building the rest of the env block.
+        env = _build_gateway_env(
+            mock_llm_server=mock_llm_server,
+            wasm_tools_dir=tools_tmpdir.name,
+            home_dir=home_tmpdir.name,
+            gateway_port=gateway_port,
+            http_port=http_port,
+            db_path=os.path.join(db_tmpdir.name, "mission-gmail-live.db"),
+            extra_env={
+                "SECRETS_MASTER_KEY": (
+                    "0123456789abcdef0123456789abcdef"
+                    "0123456789abcdef0123456789abcdef"
+                ),
+                "WASM_CHANNELS_DIR": channels_tmpdir.name,
+                # Route LLM through the live proxy.
+                "LLM_BASE_URL": proxy["url"],
+                # Route gmail.googleapis.com at mock_llm so the
+                # gmail WASM tool's HTTP calls land deterministically.
+                "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps(
+                    {"gmail.googleapis.com": mock_llm_server}
+                ),
+                "IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK": "1",
+                "GOOGLE_OAUTH_CLIENT_ID": "hosted-google-client-id",
+                # Auto-approve administrative tools so the chat-driven
+                # mission_create + fire sequence runs without a human
+                # approval prompt. Authentication gates remain active.
+                "AGENT_AUTO_APPROVE_TOOLS": "true",
+                # Engine v2 is required: only v2 missions carry the
+                # `paused_gate` field half-2 keys off of.
+                "ENGINE_V2": "true",
+            },
+        )
+
+        # Tee ironclaw stderr to a debug log so live-test failures are
+        # diagnosable without re-running. Only used during /tests/e2e
+        # live recordings — production paths don't see this.
+        stderr_log_path = os.environ.get("IRONCLAW_E2E_STDERR_LOG")
+        stderr_dest: Any = asyncio.subprocess.PIPE
+        if stderr_log_path:
+            stderr_dest = open(stderr_log_path, "w")  # noqa: SIM115
+        proc = await asyncio.create_subprocess_exec(
+            ironclaw_binary, "--no-onboard",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=stderr_dest,
+            env=env,
+        )
+        startup_kill_attempted = False
+        base_url = f"http://127.0.0.1:{gateway_port}"
+        try:
+            await wait_for_ready(f"{base_url}/api/health", timeout=60)
+            yield {
+                "base_url": base_url,
+                "mock_llm_url": mock_llm_server,
+                "live_proxy_url": proxy["url"],
+                "fixture": str(proxy["fixture"]),
+                "mode": proxy["mode"],
+            }
+        except TimeoutError:
+            if proc.returncode is None:
+                startup_kill_attempted = True
+                await _stop_process(proc, timeout=2)
+            returncode = proc.returncode
+            stderr_bytes = b""
+            if proc.stderr:
+                try:
+                    stderr_bytes = await asyncio.wait_for(
+                        proc.stderr.read(8192), timeout=2
+                    )
+                except asyncio.TimeoutError:
+                    pass
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+            pytest.fail(
+                f"mission_gmail_live_server failed to start on port "
+                f"{gateway_port} (returncode={returncode}).\n"
+                f"stderr:\n{stderr_text}"
+            )
+        finally:
+            if proc.returncode is None:
+                if startup_kill_attempted:
+                    await _stop_process(proc, timeout=2)
+                else:
+                    await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+                    if proc.returncode is None:
+                        await _stop_process(proc, timeout=2)
+    finally:
+        # Tear the proxy down too.
+        try:
+            await proxy_iter.__anext__()
+        except StopAsyncIteration:
+            pass
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+        db_tmpdir.cleanup()
+        home_tmpdir.cleanup()
+        channels_tmpdir.cleanup()
+        tools_tmpdir.cleanup()
+
+
+@pytest.fixture
+async def mission_gmail_live_page(mission_gmail_live_server, browser):
+    """Browser page bound to the mission_gmail_live_server fixture."""
+    context = await browser.new_context(viewport={"width": 1280, "height": 720})
+    pg = await context.new_page()
+    await _open_authed_gateway_page(pg, mission_gmail_live_server["base_url"])
+    yield pg
+    await context.close()

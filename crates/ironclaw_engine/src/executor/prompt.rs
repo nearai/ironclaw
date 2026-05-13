@@ -150,7 +150,11 @@ fn build_codeact_system_prompt_inner(
         prompt.push_str(CODEACT_ACTIVATABLE_INTEGRATIONS_HEADING);
         prompt.push('\n');
         prompt.push_str(
-            "If you need one of these integrations, call `tool_activate(name=\"<integration>\")` first. After it succeeds, its tools will be available on the next turn. If you need parameter details before enabling one, call `tool_info(name=\"<tool>\", detail=\"summary\")` on one of the previewed tools.\n\n",
+            "These integrations need user setup before their tools become callable. \
+             You cannot enable them yourself — tell the user to install or activate them \
+             through the IronClaw UI (or wait for them to do so). \
+             If you need parameter details before suggesting one, call \
+             `tool_info(name=\"<tool>\", detail=\"summary\")` on a preview tool.\n\n",
         );
         for capability in activatable_integrations {
             prompt.push_str(&render_activatable_integration(capability));
@@ -256,13 +260,16 @@ const fn capability_kind_label(kind: CapabilitySummaryKind) -> &'static str {
 }
 
 fn is_activatable_integration(capability: &CapabilitySummary) -> bool {
+    // NeedsAuth is intentionally NOT here: post-#3133, installed-but-unauthed
+    // provider tools are direct-callable (the engine's auth preflight raises
+    // an Authentication gate at execute time) so they live in the regular
+    // action inventory, not in the separate setup-required section.
     matches!(
         capability.kind,
         CapabilitySummaryKind::Provider | CapabilitySummaryKind::Channel
     ) && matches!(
         capability.status,
-        CapabilityStatus::NeedsAuth
-            | CapabilityStatus::NeedsSetup
+        CapabilityStatus::NeedsSetup
             | CapabilityStatus::Inactive
             | CapabilityStatus::Latent
             | CapabilityStatus::AvailableNotInstalled
@@ -522,7 +529,11 @@ mod tests {
                     name: "slack".into(),
                     display_name: None,
                     kind: crate::types::capability::CapabilitySummaryKind::Provider,
-                    status: CapabilityStatus::NeedsAuth,
+                    // NeedsSetup (not NeedsAuth) lands in "Activatable
+                    // Integrations". NeedsAuth tools are direct-callable
+                    // post-#3133, so they live in the regular action
+                    // inventory rather than the setup-required section.
+                    status: CapabilityStatus::NeedsSetup,
                     description: Some("Slack workspace integration".into()),
                     action_preview: vec!["slack_send".into(), "slack_history".into()],
                     routing_hint: None,
@@ -539,7 +550,7 @@ mod tests {
         assert!(prompt.contains("Usable through message"));
         assert!(prompt.contains("## Activatable Integrations"));
         assert!(prompt.contains("`slack` [provider]"));
-        assert!(prompt.contains("tool_activate(name=\"<integration>\")"));
+        assert!(prompt.contains("need user setup before their tools become callable"));
         assert!(prompt.contains("tool_info(name=\"<tool>\", detail=\"summary\")"));
         assert!(prompt.contains("Unlocks: `slack_send`, `slack_history`"));
     }
@@ -551,7 +562,10 @@ mod tests {
                 name: "gmail".into(),
                 display_name: Some("Gmail".into()),
                 kind: CapabilitySummaryKind::Provider,
-                status: CapabilityStatus::NeedsAuth,
+                // NeedsSetup keeps gmail in Activatable Integrations.
+                // NeedsAuth gmail would render in the regular action
+                // inventory instead (post-#3133 direct-callable path).
+                status: CapabilityStatus::NeedsSetup,
                 description: Some("Gmail integration".into()),
                 action_preview: vec!["gmail_send".into()],
                 routing_hint: None,
@@ -590,6 +604,29 @@ mod tests {
         assert!(!prompt.contains("- `http`"));
         assert!(prompt.contains("## Activatable Integrations"));
         assert_eq!(prompt.matches("`gmail` [provider]").count(), 1);
+    }
+
+    #[test]
+    fn needs_auth_capability_is_not_activatable_integration() {
+        // Post-#3133: gmail with NeedsAuth status (installed but missing
+        // OAuth) is direct-callable. The auth gate raises at execute
+        // time, so the capability does NOT belong in the Activatable
+        // Integrations section.
+        let prompt = build_codeact_system_prompt_with_docs(
+            &[CapabilitySummary {
+                name: "gmail".into(),
+                display_name: Some("Gmail".into()),
+                kind: CapabilitySummaryKind::Provider,
+                status: CapabilityStatus::NeedsAuth,
+                description: Some("Gmail integration".into()),
+                action_preview: vec!["gmail_send".into()],
+                routing_hint: None,
+            }],
+            &[],
+            &[],
+            None,
+        );
+        assert!(!prompt.contains("## Activatable Integrations"));
     }
 
     #[test]

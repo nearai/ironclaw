@@ -14,6 +14,11 @@ import time
 import uuid
 from aiohttp import web
 
+DENIAL_PATTERN = re.compile(
+    r"user denied action|user denied tool|denied:\s*",
+    re.IGNORECASE,
+)
+
 CANNED_RESPONSES = [
     (re.compile(r"empty routine response", re.IGNORECASE), ""),
     (re.compile(r"\bhello\b|\bhi\b|\bhey\b", re.IGNORECASE), "Hello! How can I help you today?"),
@@ -866,6 +871,24 @@ def _conversation_has_active_skill(messages: list[dict], skill_name: str) -> boo
     return False
 
 
+def _conversation_uses_codeact(messages: list[dict]) -> bool:
+    for msg in messages:
+        if msg.get("role") != "system":
+            continue
+        text = _message_text(msg)
+        if "Python REPL environment" in text and "```repl" in text:
+            return True
+    return False
+
+
+def _conversation_includes_denial(messages: list[dict]) -> bool:
+    for msg in messages:
+        text = f"{_message_text(msg)}\n{_message_payload_text(msg)}"
+        if DENIAL_PATTERN.search(text):
+            return True
+    return False
+
+
 def _active_skill_names(messages: list[dict]) -> set[str]:
     names = set()
     for msg in messages:
@@ -1036,9 +1059,20 @@ def match_response(messages: list[dict]) -> str:
     resumed = _resumed_action_summary(messages)
     if resumed:
         return resumed
-    if "user denied action" in content.lower():
-        action_match = re.search(r"User denied action '([^']+)'", content)
-        action_name = action_match.group(1) if action_match else "that action"
+    denial_text = f"{content}\n{payload_text}"
+    if DENIAL_PATTERN.search(denial_text):
+        action_match = re.search(
+            r"User denied action '([^']+)'", denial_text, re.IGNORECASE
+        )
+        tool_match = re.search(
+            r"user denied tool '([^']+)'", denial_text, re.IGNORECASE
+        )
+        if action_match:
+            action_name = action_match.group(1)
+        elif tool_match:
+            action_name = tool_match.group(1)
+        else:
+            action_name = "that action"
         return (
             f"The request for {action_name} was denied. "
             "No installation or setup was performed."
@@ -1310,6 +1344,10 @@ def _find_tool_result(messages: list[dict]) -> dict | None:
     """Backward-compat single-result helper used by the special-response path."""
     results = _find_tool_results(messages)
     return results[0] if results else None
+
+
+def _tool_results_include_denial(tool_results: list[dict]) -> bool:
+    return any(DENIAL_PATTERN.search(tr.get("content", "")) for tr in tool_results)
 
 
 def _recent_tool_names(messages: list[dict]) -> set[str]:
@@ -1801,9 +1839,36 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
         if special and _conversation_has_user_trigger(messages, lifecycle_trigger):
             return await _dispatch_special_response(request, cid, stream, special)
 
-    # Tool result(s) in messages -> text summary covering every fresh result
     tool_results = _find_tool_results(messages)
+    if (
+        not tool_results
+        and _conversation_uses_codeact(messages)
+        and re.search(
+            r"list.*(?:google|drive).*files|show.*drive",
+            _last_user_content(messages),
+            re.IGNORECASE,
+        )
+    ):
+        text = (
+            "```repl\n"
+            f"result = await http(method=\"GET\", url=\"{_github_api_url}/drive/v3/files\")\n"
+            "FINAL(str(result))\n"
+            "```"
+        )
+        if not stream:
+            return _text_response(cid, text)
+        return await _stream_text(request, cid, text)
+
+    # Tool result(s) in messages -> text summary covering every fresh result
     if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
+        if _conversation_includes_denial(messages) or _tool_results_include_denial(tool_results):
+            text = (
+                "The request for shell was denied. "
+                "No installation or setup was performed."
+            )
+            if not stream:
+                return _text_response(cid, text)
+            return await _stream_text(request, cid, text)
         recent_tool_names = _recent_tool_names(messages)
         if "shell" in recent_tool_names:
             text = (
@@ -1816,6 +1881,14 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
             return await _stream_text(request, cid, text)
     if tool_results:
         if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
+            if _tool_results_include_denial(tool_results):
+                text = (
+                    "The request for shell was denied. "
+                    "No installation or setup was performed."
+                )
+                if not stream:
+                    return _text_response(cid, text)
+                return await _stream_text(request, cid, text)
             if any(tr["name"] == "shell" for tr in tool_results):
                 text = (
                     "Python dependencies are prepared for the Pika video-meeting skill. "
@@ -2337,6 +2410,111 @@ async def mcp_oauth_token(request: web.Request) -> web.Response:
     })
 
 
+# ── Gmail API mocks (#3133 / #3166) ──────────────────────────────────────
+#
+# Per-app counters that the e2e test for the mission auto-resume path
+# inspects to confirm the gmail WASM tool actually fired against this
+# mock (rather than hitting the real Gmail API or silently no-oping).
+# Stored in `app["gmail_state"]` so each mock_llm instance owns its own
+# counters.
+
+
+def _new_gmail_state() -> dict:
+    return {
+        "drafts_created": 0,
+        "messages_sent": 0,
+        "messages_listed": 0,
+        "last_draft": None,
+        "last_send": None,
+    }
+
+
+async def gmail_create_draft(request: web.Request) -> web.Response:
+    """POST /gmail/v1/users/me/drafts — minimal create-draft mock.
+
+    Maps from the gmail WASM tool's `create_draft` action. The request
+    body shape mirrors the real Gmail API: `{"message": {"raw": "..."}}`.
+    Returns a deterministic draft id so the agent can quote it back.
+    """
+    body = await request.json()
+    state = request.app["gmail_state"]
+    state["drafts_created"] += 1
+    state["last_draft"] = body
+    draft_id = f"mock-draft-{state['drafts_created']}"
+    return web.json_response({
+        "id": draft_id,
+        "message": {
+            "id": f"mock-msg-{state['drafts_created']}",
+            "threadId": f"mock-thread-{state['drafts_created']}",
+            "labelIds": ["DRAFT"],
+        },
+    })
+
+
+async def gmail_send_message(request: web.Request) -> web.Response:
+    """POST /gmail/v1/users/me/messages/send — minimal send mock.
+
+    Maps from the gmail WASM tool's `send_message` and `reply_to_message`
+    actions. Returns the same shape Google does: `{id, threadId, labelIds}`.
+    """
+    body = await request.json()
+    state = request.app["gmail_state"]
+    state["messages_sent"] += 1
+    state["last_send"] = body
+    msg_id = f"mock-msg-{state['messages_sent']}"
+    return web.json_response({
+        "id": msg_id,
+        "threadId": body.get("threadId") or f"mock-thread-{state['messages_sent']}",
+        "labelIds": ["SENT"],
+    })
+
+
+async def gmail_list_messages(request: web.Request) -> web.Response:
+    """GET /gmail/v1/users/me/messages — minimal list mock.
+
+    Returns one canned message id so the agent has something to quote
+    back. The list endpoint only returns ids; the gmail WASM tool then
+    fetches metadata for each, which we serve from `gmail_get_message`.
+    """
+    state = request.app["gmail_state"]
+    state["messages_listed"] += 1
+    return web.json_response({
+        "messages": [{"id": "mock-canned-msg-1", "threadId": "mock-canned-thread-1"}],
+        "resultSizeEstimate": 1,
+    })
+
+
+async def gmail_get_message(request: web.Request) -> web.Response:
+    """GET /gmail/v1/users/me/messages/{id} — minimal get-message mock."""
+    msg_id = request.match_info["id"]
+    return web.json_response({
+        "id": msg_id,
+        "threadId": "mock-canned-thread-1",
+        "labelIds": ["INBOX", "UNREAD"],
+        "snippet": "Mock canned snippet for the e2e test",
+        "payload": {
+            "headers": [
+                {"name": "From", "value": "test@example.com"},
+                {"name": "To", "value": "owner@example.com"},
+                {"name": "Subject", "value": "Mock canned subject"},
+                {"name": "Date", "value": "Mon, 1 Jan 2026 00:00:00 +0000"},
+            ],
+            "body": {"data": ""},
+        },
+    })
+
+
+async def gmail_state_handler(request: web.Request) -> web.Response:
+    """GET /__mock/gmail/state — read the gmail counters in tests."""
+    return web.json_response(request.app["gmail_state"])
+
+
+async def gmail_state_reset(request: web.Request) -> web.Response:
+    """POST /__mock/gmail/reset — clear counters between tests."""
+    request.app["gmail_state"] = _new_gmail_state()
+    return web.json_response({"ok": True})
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=0)
@@ -2344,6 +2522,7 @@ def main():
     app = web.Application()
     app["oauth_state"] = _new_oauth_state()
     app["mcp_state"] = _new_mcp_state()
+    app["gmail_state"] = _new_gmail_state()
     # Register both /v1/ and non-/v1/ paths (rig-core omits the /v1/ prefix)
     app.router.add_post("/v1/chat/completions", chat_completions)
     app.router.add_post("/chat/completions", chat_completions)
@@ -2380,6 +2559,14 @@ def main():
     app.router.add_get("/.well-known/oauth-authorization-server/{tail:.*}", mcp_auth_server_metadata)
     app.router.add_post("/oauth/register", mcp_oauth_register)
     app.router.add_post("/oauth/token", mcp_oauth_token)
+    # Gmail API mocks (consumed by the WASM gmail tool when
+    # IRONCLAW_TEST_HTTP_REWRITE_MAP routes gmail.googleapis.com here).
+    app.router.add_post("/gmail/v1/users/me/drafts", gmail_create_draft)
+    app.router.add_post("/gmail/v1/users/me/messages/send", gmail_send_message)
+    app.router.add_get("/gmail/v1/users/me/messages", gmail_list_messages)
+    app.router.add_get("/gmail/v1/users/me/messages/{id}", gmail_get_message)
+    app.router.add_get("/__mock/gmail/state", gmail_state_handler)
+    app.router.add_post("/__mock/gmail/reset", gmail_state_reset)
 
     async def start():
         runner = web.AppRunner(app)

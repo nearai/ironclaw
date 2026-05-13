@@ -8,13 +8,15 @@
 //! - **MCP servers** — external API integrations via Model Context Protocol
 //!
 //! The agent can search a built-in registry (or discover online), install,
-//! authenticate, and activate extensions at runtime without CLI commands.
+//! and authenticate extensions at runtime without CLI commands.
 //!
 //! ```text
 //!  User: "add telegram"
 //!    -> tool_search("telegram")    -> finds channel in registry
-//!    -> tool_install("telegram")   -> installs and follows through setup/auth/activation when possible
-//!    -> tool_activate("telegram")  -> used only if an installed extension still needs explicit activation
+//!    -> tool_install("telegram")   -> installs and follows through setup/auth when possible
+//!  After install the new tools are direct-callable; missing OAuth tokens
+//!  raise an Authentication gate at execute time (see #3133 / #3166) and
+//!  resume automatically once the user completes the OAuth flow.
 //! ```
 
 pub mod discovery;
