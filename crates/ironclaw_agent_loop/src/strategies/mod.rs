@@ -9,13 +9,18 @@
 //! recovery axis. `Default*` impls land in WS-5; the executor body that
 //! consumes these outcomes lands in WS-6.
 
-pub mod batch;
-pub mod gate;
-pub mod recovery;
+// WS-2 intentionally lands crate-internal contracts before the planner and
+// executor consume them in later workstreams.
+#![allow(dead_code, unused_imports)]
 
-pub use batch::{BatchPolicy, BatchPolicyStrategy, CapabilityCallSummary, ConcurrencyHint};
-pub use gate::{GateHandlingStrategy, GateKind, GateOutcome, GateSummary};
-pub use recovery::{
+pub(crate) mod batch;
+pub(crate) mod gate;
+pub(crate) mod recovery;
+
+pub(crate) use batch::{BatchPolicy, BatchPolicyStrategy, CapabilityCallSummary};
+pub(crate) use gate::{GateHandlingStrategy, GateKind, GateOutcome, GateSummary};
+pub(crate) use ironclaw_turns::run_profile::ConcurrencyHint;
+pub(crate) use recovery::{
     CapabilityErrorClass, CapabilityErrorSummary, ModelErrorClass, ModelErrorSummary,
     RecoveryOutcome, RecoveryStrategy, RetryAlteration,
 };

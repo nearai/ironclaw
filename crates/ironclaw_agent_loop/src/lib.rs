@@ -5,4 +5,4 @@
 //! under `docs/reborn/agent-loop-briefs/`.
 
 pub mod state;
-pub mod strategies;
+pub(crate) mod strategies;
