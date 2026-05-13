@@ -26,9 +26,17 @@ impl PostgresProductIdempotencyLedger {
     }
 }
 
+/// Convert the stored `phase` column value back to an `ActionPhase`.
+/// Exhaustive on the persisted wire spelling — keep in lock-step with
+/// [`phase_to_str`] below.
 fn parse_phase(value: &str) -> Result<ActionPhase, ProductWorkflowError> {
-    serde_json::from_str::<ActionPhase>(&format!("\"{value}\""))
-        .map_err(|e| transient(format!("invalid phase '{value}': {e}")))
+    match value {
+        "received" => Ok(ActionPhase::Received),
+        "dispatched" => Ok(ActionPhase::Dispatched),
+        "settled" => Ok(ActionPhase::Settled),
+        "deduplicated_replay" => Ok(ActionPhase::DeduplicatedReplay),
+        other => Err(transient(format!("invalid phase '{other}'"))),
+    }
 }
 
 fn phase_to_str(phase: ActionPhase) -> &'static str {
@@ -44,9 +52,9 @@ fn row_into_action(
     row: &::tokio_postgres::Row,
     fingerprint: ActionFingerprintKey,
 ) -> Result<ProductInboundAction, ProductWorkflowError> {
-    let action_id_str: String = row.get("action_id");
-    let action_id_uuid = Uuid::parse_str(&action_id_str)
-        .map_err(|e| transient(format!("invalid action_id uuid '{action_id_str}': {e}")))?;
+    // `action_id` is `UUID` in Postgres (see migration V28); tokio-postgres
+    // maps it to `uuid::Uuid` directly when `with-uuid-1` is enabled.
+    let action_id_uuid: Uuid = row.get("action_id");
     let action_id = ProductActionId::from_uuid(action_id_uuid);
 
     let phase_str: String = row.get("phase");
@@ -123,7 +131,7 @@ impl IdempotencyLedger for PostgresProductIdempotencyLedger {
         }
 
         let action = ProductInboundAction::begin(fingerprint, received_at);
-        let action_id_str = action.action_id.as_uuid().to_string();
+        let action_id_uuid = action.action_id.as_uuid();
         client
             .execute(
                 "INSERT INTO product_inbound_actions \
@@ -131,7 +139,7 @@ impl IdempotencyLedger for PostgresProductIdempotencyLedger {
                   phase, dispatch_kind_json, outcome_json, received_at, settled_at) \
                  VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, $7, NULL)",
                 &[
-                    &action_id_str,
+                    &action_id_uuid,
                     &action.fingerprint.adapter_id.as_str(),
                     &action.fingerprint.installation_id.as_str(),
                     &action.fingerprint.source_binding_key.as_str(),

@@ -127,25 +127,42 @@ pub async fn bootstrap_telegram_v2(
         RebornProductRuntimeConfig {
             default_tenant_id: default_tenant_id.clone(),
             default_agent_id: default_agent_id.clone(),
-            telegram_bot_token: bot_token,
+            telegram_bot_token: bot_token.clone(),
             telegram_credential_handle: credential_handle.clone(),
             telegram_declared_hosts: telegram_declared_egress_hosts(),
         },
     )
     .await?;
 
-    // 4. Telegram adapter (stateless given config).
-    //
-    // The tracer uses placeholder bot identity values — group-chat triggers
-    // are not validated end-to-end in this slice (DM-only paths exercise
-    // the same parse/render code). Real installs replace these via a
-    // follow-up that reads bot identity from `getMe` on first activation.
+    // 4. Resolve bot identity via Telegram `getMe`. If this fails (no
+    // network, invalid token, Telegram outage) we fall through with safe
+    // placeholders — DM paths still work; group-chat triggers may misclassify
+    // until the next restart. The host should not crash on transient
+    // network state at boot.
+    let (bot_username, bot_user_id) = match fetch_bot_identity(&bot_token).await {
+        Ok(identity) => {
+            tracing::info!(
+                bot_user_id = identity.id,
+                bot_username = %identity.username,
+                "Reborn Telegram v2: resolved bot identity via getMe"
+            );
+            (identity.username, identity.id)
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "Reborn Telegram v2: getMe failed; falling back to placeholder bot identity. Group-chat triggers may misclassify until restart."
+            );
+            ("ironclaw_telegram_v2_unknown".to_string(), 0)
+        }
+    };
+
     let adapter = TelegramV2Adapter::new(TelegramV2AdapterConfig {
         adapter_id: adapter_id.clone(),
         installation_id: installation_id.clone(),
         group_trigger_policy: GroupTriggerPolicy {
-            bot_username: "ironclaw_tracer_bot".into(),
-            bot_user_id: 0,
+            bot_username,
+            bot_user_id,
             recognized_commands: vec!["start".into(), "help".into()],
         },
         egress_credential_handle: credential_handle.clone(),
@@ -196,7 +213,10 @@ pub async fn bootstrap_telegram_v2(
 
     // 8. Router state — one runner per installation_id key.
     let mut runners: HashMap<String, Arc<NativeProductAdapterRunner>> = HashMap::new();
-    runners.insert(installation_id_str.to_string(), Arc::new(runner));
+    // Key the runner map by the *validated* installation id so the webhook
+    // route lookup matches what the adapter actually sees, not whatever the
+    // operator typed verbatim in env.
+    runners.insert(installation_id.as_str().to_string(), Arc::new(runner));
     let router_state = TelegramV2RouterState {
         runners: Arc::new(runners),
     };
@@ -212,4 +232,53 @@ pub async fn bootstrap_telegram_v2(
         routes,
         channel: Box::new(product_channel),
     }))
+}
+
+/// Minimal Telegram bot identity returned by `getMe`. We only consume the
+/// two fields we need for `GroupTriggerPolicy`; the rest of the response
+/// is ignored.
+struct BotIdentity {
+    id: i64,
+    username: String,
+}
+
+/// Call `GET https://api.telegram.org/bot{token}/getMe` and parse the bot
+/// identity. Returns `Err` on transport failure, non-200 status, malformed
+/// JSON, or missing `id`/`username` fields. Caller is expected to fall back
+/// to placeholder values on `Err` rather than abort boot.
+async fn fetch_bot_identity(bot_token: &str) -> Result<BotIdentity, String> {
+    let client = reqwest::Client::builder()
+        .user_agent("ironclaw-reborn-telegram-v2/0")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("build reqwest client: {e}"))?;
+    let url = format!("https://api.telegram.org/bot{bot_token}/getMe");
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("getMe request failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("getMe returned HTTP {}", response.status()));
+    }
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("parse getMe response: {e}"))?;
+    if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return Err(format!("getMe response not ok: {body}"));
+    }
+    let result = body
+        .get("result")
+        .ok_or_else(|| "getMe response missing 'result'".to_string())?;
+    let id = result
+        .get("id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| "getMe 'result.id' missing or not an integer".to_string())?;
+    let username = result
+        .get("username")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "getMe 'result.username' missing or not a string".to_string())?
+        .to_string();
+    Ok(BotIdentity { id, username })
 }

@@ -48,12 +48,22 @@ struct LedgerRow {
     settled_at: Option<String>,
 }
 
+/// Convert the stored `phase` column value back to an `ActionPhase`.
+/// Exhaustive on the persisted wire spelling — any new variant added to
+/// `ActionPhase` must be added here too, or this stops compiling.
 fn parse_phase(value: &str) -> Result<ActionPhase, ProductWorkflowError> {
-    serde_json::from_str::<ActionPhase>(&format!("\"{value}\""))
-        .map_err(|e| transient(format!("invalid phase '{value}': {e}")))
+    match value {
+        "received" => Ok(ActionPhase::Received),
+        "dispatched" => Ok(ActionPhase::Dispatched),
+        "settled" => Ok(ActionPhase::Settled),
+        "deduplicated_replay" => Ok(ActionPhase::DeduplicatedReplay),
+        other => Err(transient(format!("invalid phase '{other}'"))),
+    }
 }
 
 fn phase_to_str(phase: ActionPhase) -> &'static str {
+    // Keep in lock-step with `parse_phase` above. Both must enumerate every
+    // `ActionPhase` variant or one of them will be silently lossy.
     match phase {
         ActionPhase::Received => "received",
         ActionPhase::Dispatched => "dispatched",

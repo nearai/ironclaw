@@ -10,6 +10,7 @@
 pub mod boot;
 pub mod composition;
 pub mod product_channel;
+pub mod registry;
 pub mod v2_inbound_turn;
 pub mod v2_router;
 
@@ -18,5 +19,6 @@ pub use composition::{
     RebornProductRuntime, RebornProductRuntimeConfig, build_reborn_product_runtime,
 };
 pub use product_channel::{ProductChannel, ProductChannelConfig};
+pub use registry::{RebornChannelWiringInputs, register_reborn_channels};
 pub use v2_inbound_turn::V2InboundTurnService;
 pub use v2_router::{TelegramV2RouterState, telegram_v2_routes};

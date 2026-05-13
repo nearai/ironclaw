@@ -17,6 +17,7 @@ use ironclaw_product_workflow::{
 use ironclaw_threads::{EnsureThreadRequest, SessionThreadService, ThreadScope};
 
 use crate::error::{libsql_error, transient};
+use crate::identifiers::derive_user_id;
 
 #[derive(Clone)]
 pub struct LibSqlConversationBindingService {
@@ -44,22 +45,6 @@ impl LibSqlConversationBindingService {
     async fn connect(&self) -> Result<::libsql::Connection, ProductWorkflowError> {
         self.db.connect().map_err(libsql_error)
     }
-}
-
-/// Derive a canonical Reborn UserId from external actor refs and installation.
-/// Format: `user:{adapter_id}:{installation_id}:{actor_kind}:{actor_id}`.
-/// This is stable across restarts because all inputs are stable.
-fn derive_user_id(request: &ResolveBindingRequest) -> Result<UserId, ProductWorkflowError> {
-    let raw = format!(
-        "{}_{}_{}_{}",
-        request.adapter_id.as_str(),
-        request.installation_id.as_str(),
-        request.external_actor_ref.kind(),
-        request.external_actor_ref.id(),
-    );
-    UserId::new(raw).map_err(|e| ProductWorkflowError::BindingResolutionFailed {
-        reason: e.to_string(),
-    })
 }
 
 #[async_trait]

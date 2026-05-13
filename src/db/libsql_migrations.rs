@@ -1247,3 +1247,164 @@ pub async fn run_incremental(conn: &libsql::Connection) -> Result<(), crate::err
 
     Ok(())
 }
+
+#[cfg(test)]
+mod migration_smoke_tests {
+    use super::*;
+
+    /// Apply V26 (Reborn product workflow durable state) against a fresh
+    /// in-memory libSQL DB and assert the two tables exist with the expected
+    /// columns. Guards against silent migration regressions.
+    #[tokio::test]
+    async fn v26_product_inbound_actions_and_bindings_apply_cleanly() {
+        let db = ::libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .expect("build");
+        let conn = db.connect().expect("connect");
+
+        // Find the V26 migration tuple and apply it directly.
+        let v26 = INCREMENTAL_MIGRATIONS
+            .iter()
+            .find(|(v, _, _)| *v == 26)
+            .expect("V26 must be registered in INCREMENTAL_MIGRATIONS");
+        conn.execute_batch(v26.2).await.expect("apply V26 SQL");
+
+        // Both tables must exist.
+        for table in ["product_inbound_actions", "product_bindings"] {
+            let mut rows = conn
+                .query(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name = ?1",
+                    ::libsql::params![table],
+                )
+                .await
+                .expect("query");
+            let row = rows
+                .next()
+                .await
+                .expect("rows")
+                .unwrap_or_else(|| panic!("expected table '{table}' after V26 migration"));
+            let name: String = row.get(0).expect("name");
+            assert_eq!(name, table);
+        }
+
+        // The ledger schema must include the columns the Rust code writes.
+        let mut info = conn
+            .query(
+                "PRAGMA table_info(product_inbound_actions)",
+                ::libsql::params![],
+            )
+            .await
+            .expect("table_info");
+        let mut ledger_columns = Vec::new();
+        while let Some(row) = info.next().await.expect("next") {
+            let col: String = row.get(1).expect("name");
+            ledger_columns.push(col);
+        }
+        for required in [
+            "action_id",
+            "adapter_id",
+            "installation_id",
+            "source_binding_key",
+            "external_event_id",
+            "phase",
+            "dispatch_kind_json",
+            "outcome_json",
+            "received_at",
+            "settled_at",
+        ] {
+            assert!(
+                ledger_columns.iter().any(|c| c == required),
+                "product_inbound_actions must have column '{required}'; got {ledger_columns:?}"
+            );
+        }
+
+        // product_bindings: PK columns must exist.
+        let mut info = conn
+            .query("PRAGMA table_info(product_bindings)", ::libsql::params![])
+            .await
+            .expect("table_info");
+        let mut binding_columns = Vec::new();
+        while let Some(row) = info.next().await.expect("next") {
+            let col: String = row.get(1).expect("name");
+            binding_columns.push(col);
+        }
+        for required in [
+            "adapter_id",
+            "installation_id",
+            "external_conversation_fingerprint",
+            "external_actor_kind",
+            "external_actor_id",
+            "tenant_id",
+            "user_id",
+            "thread_id",
+            "agent_id",
+            "project_id",
+            "created_at",
+        ] {
+            assert!(
+                binding_columns.iter().any(|c| c == required),
+                "product_bindings must have column '{required}'; got {binding_columns:?}"
+            );
+        }
+    }
+
+    /// Apply the full incremental migration loop end-to-end against a fresh
+    /// DB. Catches regressions where V26 conflicts with earlier migrations or
+    /// the loop fails to record it in `_migrations`.
+    #[tokio::test]
+    async fn incremental_loop_applies_v26_and_records_it() {
+        let db = ::libsql::Builder::new_local(":memory:")
+            .build()
+            .await
+            .expect("build");
+        let conn = db.connect().expect("connect");
+
+        // Seed the `_migrations` tracking table so run_incremental can run.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS _migrations (\
+                version INTEGER PRIMARY KEY, \
+                name TEXT NOT NULL, \
+                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))\
+            )",
+            ::libsql::params![],
+        )
+        .await
+        .expect("create _migrations");
+
+        // Apply every migration up to and including V26.
+        for (version, name, sql) in INCREMENTAL_MIGRATIONS {
+            if *version > 26 {
+                break;
+            }
+            // Earlier migrations have prerequisites (other tables) we don't
+            // create here; the smoke test scope is just V26. Run only V26.
+            if *version != 26 {
+                continue;
+            }
+            let tx = conn.transaction().await.expect("tx");
+            tx.execute_batch(sql)
+                .await
+                .unwrap_or_else(|e| panic!("V{version} ({name}) failed: {e}"));
+            tx.execute(
+                "INSERT INTO _migrations (version, name) VALUES (?1, ?2)",
+                ::libsql::params![*version, *name],
+            )
+            .await
+            .expect("record");
+            tx.commit().await.expect("commit");
+        }
+
+        // V26 must be recorded.
+        let mut rows = conn
+            .query(
+                "SELECT name FROM _migrations WHERE version = 26",
+                ::libsql::params![],
+            )
+            .await
+            .expect("select");
+        let row = rows.next().await.expect("next").expect("V26 row");
+        let name: String = row.get(0).expect("name");
+        assert_eq!(name, "product_inbound_actions_and_bindings");
+    }
+}

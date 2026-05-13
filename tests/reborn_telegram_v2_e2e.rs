@@ -144,11 +144,15 @@ struct Harness {
     product_channel: ProductChannel,
     default_tenant_id: TenantId,
     default_agent_id: AgentId,
+    /// DB handle kept on the harness so tests can SELECT directly to verify
+    /// durable side effects (ledger settle, binding row, ...).
+    db: Arc<libsql::Database>,
     _tempdir: tempfile::TempDir,
 }
 
 async fn build_harness() -> Harness {
     let (db, tempdir) = build_libsql().await;
+    let db_for_harness = Arc::clone(&db);
 
     let thread_service: Arc<dyn SessionThreadService> =
         Arc::new(InMemorySessionThreadService::default());
@@ -235,6 +239,7 @@ async fn build_harness() -> Harness {
         product_channel,
         default_tenant_id,
         default_agent_id,
+        db: db_for_harness,
         _tempdir: tempdir,
     }
 }
@@ -421,6 +426,70 @@ async fn respond_renders_outbound_via_egress_and_records_delivery() {
         attempts[0].status,
         OutboundDeliveryStatus::Delivered
     ));
+}
+
+#[tokio::test]
+async fn accepted_inbound_settles_the_ledger_row() {
+    // The duplicate-update test proves begin_or_replay returns Replay on
+    // re-submission. This test goes the other half of the way: after a
+    // successful inbound, the action row must transition to phase='settled'
+    // with a non-null outcome_json — proving DefaultProductWorkflow actually
+    // calls ledger.settle() after dispatch, not just begin_or_replay().
+    let harness = build_harness().await;
+    let mut stream = harness.product_channel.start().await.expect("start");
+
+    let (status, _) = post_webhook(
+        harness.router.clone(),
+        fixture("private_chat_message.json"),
+        WEBHOOK_SECRET,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    // Drain the bus so the workflow returns and settle() fires.
+    let _msg = tokio::time::timeout(Duration::from_secs(2), stream.next())
+        .await
+        .expect("inbound on bus")
+        .expect("stream alive");
+
+    // Give the workflow a beat to finish its dispatch + settle.
+    // We don't hardcode the external_event_id (its exact value is the
+    // adapter's choice); we instead look for any row in the table and
+    // assert it reached settled.
+    let mut last_row = None;
+    for _ in 0..40 {
+        let conn = harness.db.connect().expect("connect");
+        let mut rows = conn
+            .query(
+                "SELECT external_event_id, phase, outcome_json, settled_at \
+                 FROM product_inbound_actions",
+                libsql::params![],
+            )
+            .await
+            .expect("query");
+        if let Some(row) = rows.next().await.expect("rows.next") {
+            let event_id: String = row.get(0).expect("event_id");
+            let phase: String = row.get(1).expect("phase");
+            let outcome_json: Option<String> = row.get(2).expect("outcome_json");
+            let settled_at: Option<String> = row.get(3).expect("settled_at");
+            if phase == "settled" {
+                last_row = Some((event_id, phase, outcome_json, settled_at));
+                break;
+            }
+            last_row = Some((event_id, phase, outcome_json, settled_at));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let (event_id, phase, outcome_json, settled_at) =
+        last_row.expect("product_inbound_actions must have at least one row");
+    assert_eq!(
+        phase, "settled",
+        "row (event_id={event_id}) must reach settled phase"
+    );
+    assert!(
+        outcome_json.is_some(),
+        "settled row must carry outcome_json"
+    );
+    assert!(settled_at.is_some(), "settled row must have settled_at");
 }
 
 #[tokio::test]

@@ -14,7 +14,8 @@
 --   received | dispatched | settled | deduplicated_replay.
 
 CREATE TABLE IF NOT EXISTS product_inbound_actions (
-    action_id TEXT PRIMARY KEY,
+    -- Native UUID (smaller index/storage than TEXT, also enforces shape).
+    action_id UUID PRIMARY KEY,
     adapter_id TEXT NOT NULL,
     installation_id TEXT NOT NULL,
     source_binding_key TEXT NOT NULL,

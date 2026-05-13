@@ -12,7 +12,8 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_threads::{EnsureThreadRequest, SessionThreadService, ThreadScope};
 
-use crate::error::{pool_error, postgres_error, transient};
+use crate::error::{pool_error, postgres_error};
+use crate::identifiers::derive_user_id;
 
 #[derive(Clone)]
 pub struct PostgresConversationBindingService {
@@ -36,19 +37,6 @@ impl PostgresConversationBindingService {
             default_agent_id,
         }
     }
-}
-
-fn derive_user_id(request: &ResolveBindingRequest) -> Result<UserId, ProductWorkflowError> {
-    let raw = format!(
-        "{}_{}_{}_{}",
-        request.adapter_id.as_str(),
-        request.installation_id.as_str(),
-        request.external_actor_ref.kind(),
-        request.external_actor_ref.id(),
-    );
-    UserId::new(raw).map_err(|e| ProductWorkflowError::BindingResolutionFailed {
-        reason: e.to_string(),
-    })
 }
 
 #[async_trait]
@@ -147,14 +135,22 @@ impl ConversationBindingService for PostgresConversationBindingService {
             })?;
         let thread_id = thread_record.thread_id.clone();
 
-        client
-            .execute(
+        // Single-roundtrip upsert: the `ON CONFLICT ... DO UPDATE SET adapter_id
+        // = EXCLUDED.adapter_id` is a "fake update" that lets us return the
+        // canonical `thread_id` on conflict — when a concurrent inbound beat us
+        // to the insert, we get back the row they wrote, not ours. The actual
+        // column values don't change (the fake update writes the same
+        // `adapter_id` value that was already there).
+        let upsert_row = client
+            .query_one(
                 "INSERT INTO product_bindings \
                  (adapter_id, installation_id, external_conversation_fingerprint, \
                   external_actor_kind, external_actor_id, \
                   tenant_id, user_id, thread_id, agent_id, project_id) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL) \
-                 ON CONFLICT DO NOTHING",
+                 ON CONFLICT (adapter_id, installation_id, external_conversation_fingerprint, external_actor_kind, external_actor_id) \
+                 DO UPDATE SET adapter_id = EXCLUDED.adapter_id \
+                 RETURNING thread_id",
                 &[
                     &request.adapter_id.as_str(),
                     &request.installation_id.as_str(),
@@ -169,30 +165,7 @@ impl ConversationBindingService for PostgresConversationBindingService {
             )
             .await
             .map_err(postgres_error)?;
-
-        // Read-back to handle the concurrent-insert race: if another inbound
-        // beat us to the insert, ON CONFLICT DO NOTHING swallowed the violation
-        // and we need the canonical row.
-        let canonical = client
-            .query_opt(
-                "SELECT thread_id FROM product_bindings \
-                 WHERE adapter_id = $1 \
-                   AND installation_id = $2 \
-                   AND external_conversation_fingerprint = $3 \
-                   AND external_actor_kind = $4 \
-                   AND external_actor_id = $5",
-                &[
-                    &request.adapter_id.as_str(),
-                    &request.installation_id.as_str(),
-                    &conversation_fingerprint.as_str(),
-                    &actor_kind,
-                    &actor_id,
-                ],
-            )
-            .await
-            .map_err(postgres_error)?
-            .ok_or_else(|| transient("binding row missing after insert"))?;
-        let canonical_thread_id_str: String = canonical.get("thread_id");
+        let canonical_thread_id_str: String = upsert_row.get("thread_id");
         let canonical_thread_id = ThreadId::new(canonical_thread_id_str).map_err(|e| {
             ProductWorkflowError::BindingResolutionFailed {
                 reason: e.to_string(),

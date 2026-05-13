@@ -266,6 +266,17 @@ See `.env.example` for all environment variables. LLM backends (`nearai`, `opena
 3. Add config in `src/config/channels.rs`
 4. Wire up in `src/app.rs` channel setup section
 
+## Reborn Channels (Telegram v2 tracer)
+
+A second Telegram channel path lives in `src/channels/reborn/` and is
+default-off behind `REBORN_TELEGRAM_V2_ENABLED`. It wires the Reborn
+`ProductAdapter` / `ProductWorkflow` stack into the running binary
+with a v1 `Channel` bridge for outbound delivery. The v1/v2 exclusivity
+guard at `src/config/channels.rs:517` prevents both paths from being
+active for the same install. See `src/channels/reborn/CLAUDE.md` for
+file map, call paths, bridge seams, operator setup, and the migration
+path once PR #3583 (WASM ProductAdapter component runtime) lands.
+
 ## Everything Goes Through Tools
 
 **Core principle**: all actions originating from gateway handlers, CLI

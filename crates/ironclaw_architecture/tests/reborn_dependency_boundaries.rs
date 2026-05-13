@@ -615,6 +615,30 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // Storage-layer impls (libSQL + Postgres) for the product
+            // workflow. Allowed to depend on backend drivers (libsql,
+            // tokio-postgres, reqwest for the egress shim), the workflow
+            // contract, the threads service, and the outbound state store —
+            // but NOT on host/dispatcher/network policy/secrets/etc.
+            crate_name: "ironclaw_product_workflow_storage",
+            forbidden: vec![
+                "ironclaw_dispatcher",
+                "ironclaw_extensions",
+                "ironclaw_host_runtime",
+                "ironclaw_mcp",
+                "ironclaw_wasm",
+                "ironclaw_scripts",
+                "ironclaw_network",
+                "ironclaw_engine",
+                "ironclaw_gateway",
+                "ironclaw_secrets",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+            ],
+        },
+        BoundaryRule {
             crate_name: "ironclaw_storage",
             forbidden: vec![
                 "ironclaw",

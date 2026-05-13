@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod identifiers;
 
 #[cfg(feature = "libsql")]
 mod binding_libsql;
