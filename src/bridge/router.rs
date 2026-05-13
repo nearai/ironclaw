@@ -5612,10 +5612,26 @@ pub(crate) async fn handle_mission_notification(
     let broadcast_user = notif.notify_user.as_deref().unwrap_or(&notif.user_id);
 
     // Prefer the originating conversation thread when present so results land
-    // in the chat where the user fired the mission. Fall back to the mission's
-    // own execution thread for cron-only / API-imported / learning missions
-    // that have no parent conversation.
-    let target_thread = notif.parent_thread_id.unwrap_or(notif.thread_id);
+    // in the chat where the user fired the mission. Otherwise (cron / learning
+    // / API-imported missions) route to the user's assistant conversation so
+    // the SSE `thread_id` matches the V1 DB conversation the message lands in
+    // — using `notif.thread_id` (the mission's internal execution thread) here
+    // is a bug: the gateway has no way to surface that UUID coherently, and
+    // SSE Response events tagged with it bleed into whatever chat happens to
+    // be active on the frontend.
+    let target_thread = if let Some(parent) = notif.parent_thread_id {
+        parent
+    } else if let Some(db) = db
+        && let Some(channel_name) = notif.notify_channels.first()
+        && let Ok(assistant_conv_id) = db
+            .get_or_create_assistant_conversation(&notif.user_id, channel_name)
+            .await
+    {
+        ironclaw_engine::ThreadId(assistant_conv_id)
+    } else {
+        // Last resort for test harnesses without a DB or notify_channels.
+        notif.thread_id
+    };
 
     for channel_name in &notif.notify_channels {
         // Send via channel broadcast (proactive, no incoming message required)
@@ -5650,33 +5666,30 @@ pub(crate) async fn handle_mission_notification(
         );
     }
 
-    // Write to v1 DB so the history API shows the mission result.
-    //
-    // V1 conversation_id is the same UUID as the v2 thread_id for chat-spawned
+    // Write to v1 DB so the history API shows the mission result. V1
+    // `conversation_id` is the same UUID as the v2 thread_id for chat-spawned
     // threads (the chat URL `#/chat/<id>` queries `conversation_messages WHERE
-    // conversation_id = <id>` directly). When the mission has a parent
-    // conversation thread, write the result there so the user sees it in the
-    // chat where they fired the mission. Otherwise — or if that write fails
-    // (e.g. the parent v1 row was deleted) — fall back to the user's
-    // assistant conversation so cron/learning missions and edge-case
-    // failures still surface their output somewhere visible.
+    // conversation_id = <id>` directly), and `target_thread` above was
+    // resolved to the same row this write targets — so SSE thread_id and the
+    // persisted message stay consistent.
     if let Some(db) = db
         && let Some(channel_name) = notif.notify_channels.first()
     {
-        let parent_write_succeeded = if let Some(parent) = notif.parent_thread_id {
-            db.add_conversation_message(parent.0, "assistant", &full_text)
-                .await
-                .is_ok()
-        } else {
-            false
-        };
-        if !parent_write_succeeded
-            && let Ok(conv_id) = db
+        let write_ok = db
+            .add_conversation_message(target_thread.0, "assistant", &full_text)
+            .await
+            .is_ok();
+        // If the chosen target was a parent conversation thread and the write
+        // failed (e.g. the V1 row was deleted), fall back to the assistant
+        // conversation so the output still surfaces somewhere visible.
+        if !write_ok
+            && notif.parent_thread_id.is_some()
+            && let Ok(assistant_conv_id) = db
                 .get_or_create_assistant_conversation(&notif.user_id, channel_name)
                 .await
         {
             let _ = db
-                .add_conversation_message(conv_id, "assistant", &full_text)
+                .add_conversation_message(assistant_conv_id, "assistant", &full_text)
                 .await;
         }
     }

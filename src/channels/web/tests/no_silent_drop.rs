@@ -301,7 +301,15 @@ async fn mission_notification_same_user_attaches_owner_thread_id() {
         gate: None,
     };
 
-    let owner_thread_id = notif.thread_id.to_string();
+    // With no parent_thread_id, the SSE thread_id must match the assistant
+    // conversation row the V1 DB write lands in — using `notif.thread_id`
+    // (the mission's internal execution thread) was the source of frontend
+    // bleed where cron-fired mission outputs rendered in unrelated chats.
+    let expected_thread_id = store
+        .get_or_create_assistant_conversation(&notif.user_id, "gateway")
+        .await
+        .expect("assistant conv lookup")
+        .to_string();
 
     crate::bridge::handle_mission_notification(
         &notif,
@@ -318,7 +326,8 @@ async fn mission_notification_same_user_attaches_owner_thread_id() {
     // The owner should receive two events:
     // 1. From GatewayChannel::broadcast() (channel path)
     // 2. From direct SSE broadcast_for_user (SSE path)
-    // Both should carry the owner's thread_id.
+    // Both should carry the assistant conversation thread_id (consistent
+    // with the persisted V1 conversation row).
     let event = tokio::time::timeout(std::time::Duration::from_secs(1), stream.next())
         .await
         .expect("should receive SSE event within 1s")
@@ -329,8 +338,14 @@ async fn mission_notification_same_user_attaches_owner_thread_id() {
     };
 
     assert_eq!(
-        thread_id, owner_thread_id,
-        "same-user broadcast should carry the owner's mission thread_id"
+        thread_id, expected_thread_id,
+        "same-user broadcast with no parent must carry the assistant conv \
+         thread_id, not the mission's internal execution thread"
+    );
+    assert_ne!(
+        thread_id,
+        notif.thread_id.to_string(),
+        "mission's internal execution thread_id must NOT be exposed to SSE"
     );
 }
 
@@ -380,7 +395,11 @@ async fn mission_notification_explicit_same_user_attaches_owner_thread_id() {
         gate: None,
     };
 
-    let owner_thread_id = notif.thread_id.to_string();
+    let expected_thread_id = store
+        .get_or_create_assistant_conversation(&notif.user_id, "gateway")
+        .await
+        .expect("assistant conv lookup")
+        .to_string();
 
     crate::bridge::handle_mission_notification(
         &notif,
@@ -404,8 +423,10 @@ async fn mission_notification_explicit_same_user_attaches_owner_thread_id() {
     };
 
     assert_eq!(
-        thread_id, owner_thread_id,
-        "explicit notify_user == user_id should still attach the owner's thread_id"
+        thread_id, expected_thread_id,
+        "explicit notify_user == user_id must attach the assistant conv \
+         thread_id (consistent with the V1 DB row), not the mission's \
+         internal execution thread"
     );
 }
 
