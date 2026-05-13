@@ -1077,11 +1077,37 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
                 "ironclaw_filesystem",
+                "ironclaw_hooks",
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
                 "ironclaw_memory",
                 "ironclaw_network",
                 "ironclaw_processes",
+                "ironclaw_run_state",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_wasm",
+            ],
+        },
+        // The hooks framework depends on `ironclaw_turns` and host primitives
+        // but must not pull in runtime adapters or dispatcher concretions.
+        // This keeps the contract surface narrow and prevents the framework
+        // from acquiring authority it should not have.
+        BoundaryRule {
+            crate_name: "ironclaw_hooks",
+            forbidden: vec![
+                "ironclaw_approvals",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_dispatcher",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_host_runtime",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_processes",
+                "ironclaw_reborn",
                 "ironclaw_run_state",
                 "ironclaw_scripts",
                 "ironclaw_secrets",

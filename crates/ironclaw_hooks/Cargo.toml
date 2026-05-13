@@ -1,0 +1,22 @@
+[package]
+name = "ironclaw_hooks"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Reborn loop hook framework: trust-tiered points/kinds/decisions, sealed witness types, dispatcher contract."
+
+[dependencies]
+async-trait = "0.1"
+blake3 = "1"
+futures = "0.3"
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_turns = { path = "../ironclaw_turns" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["time", "rt", "sync"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+toml = "0.8"
