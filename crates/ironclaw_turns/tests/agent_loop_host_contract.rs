@@ -288,6 +288,7 @@ async fn loop_prompt_port_builds_text_only_bundle_from_context_refs() {
             surface_version: Some(surface_version.clone()),
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -324,6 +325,7 @@ async fn loop_prompt_port_materializes_instruction_snippets_as_system_refs() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -361,6 +363,7 @@ async fn loop_prompt_port_preserves_mid_conversation_system_message_order() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -405,6 +408,7 @@ async fn loop_prompt_port_keeps_identity_before_skill_snippets_and_records_skill
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -472,6 +476,7 @@ async fn loop_prompt_port_rejects_unsupported_prompt_mode() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -502,6 +507,7 @@ async fn loop_prompt_port_rejects_malformed_same_run_checkpoint_ref() {
                 .unwrap(),
             ),
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -534,6 +540,7 @@ async fn loop_prompt_port_rejects_cross_run_checkpoint_ref() {
                 LoopCheckpointStateRef::for_run(&other_context, "foreign-state").unwrap(),
             ),
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -564,6 +571,7 @@ async fn loop_prompt_port_rejects_cross_run_context_cursor() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -592,6 +600,7 @@ async fn loop_prompt_port_rejects_checkpoint_state_ref_until_supported() {
                 LoopCheckpointStateRef::for_run(&host.context, "resume-state").unwrap(),
             ),
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -617,6 +626,7 @@ async fn loop_prompt_port_rejects_unvalidated_surface_version() {
             surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -643,6 +653,7 @@ async fn loop_prompt_port_rejects_stale_surface_version() {
             surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -672,6 +683,7 @@ async fn loop_prompt_port_rejects_memory_snippets_it_cannot_materialize() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -697,6 +709,7 @@ async fn loop_prompt_port_rejects_zero_message_limit() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(0),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -722,6 +735,7 @@ async fn loop_prompt_port_clamps_default_and_requested_message_limits() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -742,6 +756,7 @@ async fn loop_prompt_port_clamps_default_and_requested_message_limits() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -761,6 +776,7 @@ async fn loop_prompt_port_clamps_default_and_requested_message_limits() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(u32::MAX),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -797,6 +813,7 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -1043,6 +1060,7 @@ impl AgentLoopDriver for ReplyDriver {
                 surface_version: Some(surface.version),
                 checkpoint_state_ref: None,
                 max_messages: Some(8),
+                inline_messages: Vec::new(),
             })
             .await
             .map_err(driver_error)?;

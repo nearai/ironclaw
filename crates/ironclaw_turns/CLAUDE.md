@@ -9,3 +9,13 @@
 - Blocked/resumable runs keep the same-thread active lock until resume, cancel, fail, or complete. Running cancellation is two-phase: public cancel requests move to `CancelRequested`, and a trusted runner cancellation completion moves to terminal `Cancelled` and releases the lock exactly once.
 - Store lifecycle metadata and references only. Do not persist raw prompts, assistant content, tool input, secrets, host paths, or backend error details in turn state or events.
 - Keep concrete PostgreSQL/libSQL adapters and product projection/egress wiring out of the core contract unless a scoped follow-up explicitly adds them with parity tests.
+- New loop-framework concerns extend this crate carefully:
+  - `LoopFailureKind` gains framework variants (currently: `NoProgressDetected`, added by WS-0).
+  - `LoopXxxPort` traits are extended by follow-up workstreams (WS-10 adds
+    `load_checkpoint_payload` to `LoopCheckpointPort`; WS-13 adds the cancellation
+    accessor to `AgentLoopDriverHost`). Trait extensions live here; impls live in
+    `ironclaw_loop_support` (host-runtime adapters) or `ironclaw_reborn` (driver-side
+    integration). See `docs/reborn/agent-loop-skeleton.md` §3 + §12.
+  - `LoopPromptBundleRequest` gains `inline_messages: Vec<LoopInlineMessage>` to
+    support nudge-style mid-loop injections produced by `ContextStrategy`
+    implementations in the framework crate.

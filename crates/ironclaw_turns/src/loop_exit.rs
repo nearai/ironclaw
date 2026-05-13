@@ -422,7 +422,7 @@ pub struct LoopFailed {
     pub exit_id: LoopExitId,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopFailureKind {
     ModelError,
@@ -434,6 +434,7 @@ pub enum LoopFailureKind {
     TranscriptWriteFailed,
     DriverBug,
     InterruptedUnexpectedly,
+    NoProgressDetected,
 }
 
 impl LoopFailureKind {
@@ -448,6 +449,7 @@ impl LoopFailureKind {
             Self::TranscriptWriteFailed => "transcript_write_failed",
             Self::DriverBug => "driver_bug",
             Self::InterruptedUnexpectedly => "interrupted_unexpectedly",
+            Self::NoProgressDetected => "no_progress_detected",
         })
     }
 }

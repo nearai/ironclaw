@@ -6,6 +6,14 @@ use crate::{
 use serde_json::json;
 
 #[test]
+fn no_progress_detected_failure_kind_serializes_as_snake_case() {
+    assert_eq!(
+        serde_json::to_value(LoopFailureKind::NoProgressDetected).unwrap(),
+        json!("no_progress_detected")
+    );
+}
+
+#[test]
 fn validation_policy_named_constructors_keep_fail_closed_default_and_host_verified_evidence_explicit()
  {
     let default_policy = LoopExitValidationPolicy::recovery_required();
@@ -689,6 +697,7 @@ fn all_failure_kinds_produce_stable_sanitized_category_strings() {
             LoopFailureKind::InterruptedUnexpectedly,
             "interrupted_unexpectedly",
         ),
+        (LoopFailureKind::NoProgressDetected, "no_progress_detected"),
     ];
 
     for (kind, expected_category) in variants {

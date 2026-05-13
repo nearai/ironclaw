@@ -76,6 +76,13 @@ where
             ));
         }
 
+        if !request.inline_messages.is_empty() {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::PolicyDenied,
+                "inline_messages not yet supported by this prompt builder",
+            ));
+        }
+
         if request
             .context_cursor
             .as_ref()
@@ -238,5 +245,80 @@ fn context_message_to_model_message(message: LoopContextMessage) -> LoopModelMes
     LoopModelMessage {
         role: message.role,
         content_ref: message.message_ref,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+
+    use super::*;
+    use crate::{
+        RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+        run_profile::{
+            InMemoryLoopHostMilestoneSink, LoopInlineMessage, LoopInlineMessageRole,
+            LoopSafeSummary, ResolvedRunProfile,
+        },
+    };
+
+    struct PanicContextPort;
+
+    #[async_trait]
+    impl LoopContextPort for PanicContextPort {
+        async fn load_loop_context(
+            &self,
+            _request: LoopContextRequest,
+        ) -> Result<LoopContextBundle, AgentLoopHostError> {
+            panic!("inline message guard should run before context loading")
+        }
+    }
+
+    #[tokio::test]
+    async fn host_managed_prompt_port_rejects_inline_messages() {
+        let context = test_context();
+        let port = HostManagedLoopPromptPort::new(
+            context,
+            Arc::new(PanicContextPort),
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        );
+
+        let error = port
+            .build_prompt_bundle(LoopPromptBundleRequest {
+                mode: PromptMode::TextOnly,
+                context_cursor: None,
+                surface_version: None,
+                checkpoint_state_ref: None,
+                max_messages: Some(8),
+                inline_messages: vec![LoopInlineMessage {
+                    role: LoopInlineMessageRole::User,
+                    safe_body: LoopSafeSummary::new("safe inline nudge").unwrap(),
+                }],
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+        assert_eq!(
+            error.safe_summary,
+            "inline_messages not yet supported by this prompt builder"
+        );
+    }
+
+    fn test_context() -> LoopRunContext {
+        let scope = TurnScope::new(
+            TenantId::new("tenant-prompt").unwrap(),
+            Some(AgentId::new("agent-prompt").unwrap()),
+            Some(ProjectId::new("project-prompt").unwrap()),
+            ThreadId::new("thread-prompt").unwrap(),
+        );
+        let resolved_run_profile = ResolvedRunProfile::legacy_compatibility(
+            RunProfileId::interactive_default(),
+            RunProfileVersion::new(1),
+            true,
+        );
+        LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved_run_profile)
     }
 }

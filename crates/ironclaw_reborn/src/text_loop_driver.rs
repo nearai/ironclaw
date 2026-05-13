@@ -69,6 +69,7 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
                 surface_version: None,
                 checkpoint_state_ref: None,
                 max_messages: Some(context_limit_hint(self.config.context_limit)),
+                inline_messages: Vec::new(),
             })
             .await
             .map_err(|error| map_host_error("prompt", error))?;
@@ -215,6 +216,7 @@ fn loop_failure_kind_name(kind: LoopFailureKind) -> &'static str {
         LoopFailureKind::TranscriptWriteFailed => "transcript_write_failed",
         LoopFailureKind::DriverBug => "driver_bug",
         LoopFailureKind::InterruptedUnexpectedly => "interrupted_unexpectedly",
+        LoopFailureKind::NoProgressDetected => "no_progress_detected",
     }
 }
 

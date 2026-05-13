@@ -956,6 +956,13 @@ impl SurfaceAwareLoopPromptPort {
             ));
         }
 
+        if !request.inline_messages.is_empty() {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::PolicyDenied,
+                "inline_messages not yet supported by this prompt builder",
+            ));
+        }
+
         if request
             .context_cursor
             .as_ref()

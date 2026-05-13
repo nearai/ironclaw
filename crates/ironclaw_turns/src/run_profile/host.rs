@@ -777,6 +777,20 @@ impl PromptMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopInlineMessageRole {
+    System,
+    User,
+    Assistant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopInlineMessage {
+    pub role: LoopInlineMessageRole,
+    pub safe_body: LoopSafeSummary,
+}
+
 /// Request for a host-managed prompt bundle.
 ///
 /// The optional cursor and checkpoint refs are run-scoped and are validated by
@@ -789,6 +803,8 @@ pub struct LoopPromptBundleRequest {
     pub surface_version: Option<CapabilitySurfaceVersion>,
     pub checkpoint_state_ref: Option<LoopCheckpointStateRef>,
     pub max_messages: Option<u32>,
+    #[serde(default)]
+    pub inline_messages: Vec<LoopInlineMessage>,
 }
 
 /// Prompt bundle returned to a driver.
@@ -1110,6 +1126,16 @@ pub trait LoopCheckpointPort: Send + Sync {
         &self,
         request: LoopCheckpointRequest,
     ) -> Result<TurnCheckpointId, AgentLoopHostError>;
+
+    async fn load_checkpoint_payload(
+        &self,
+        _checkpoint_id: TurnCheckpointId,
+    ) -> Result<Vec<u8>, AgentLoopHostError> {
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "load_checkpoint_payload not implemented",
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

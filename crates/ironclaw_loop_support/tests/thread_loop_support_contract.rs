@@ -375,6 +375,7 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -462,6 +463,7 @@ async fn prompt_port_records_installed_skill_trust_metadata_without_prompt_paylo
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -521,6 +523,7 @@ async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -586,6 +589,7 @@ async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
