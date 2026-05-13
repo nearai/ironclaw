@@ -1248,13 +1248,14 @@ impl SetupWizard {
         crate::config::profile::apply_profile(&mut self.settings)
             .map_err(|e| SetupError::Config(e.to_string()))?;
 
-        // Quick-mode override: the `local` profile sets
-        // `gateway_enabled = false`, which makes the web UI undiscoverable
-        // for first-run users. Re-enable it here so quick onboarding
-        // produces a working browser-or-TUI experience by default. Users
-        // who want a headless terminal-only install can disable the gateway
-        // via the full wizard's Step 6 or `GATEWAY_ENABLED=false`.
-        self.settings.channels.gateway_enabled = true;
+        // Note (#3500): we used to override `gateway_enabled = true` here
+        // because `profiles/local.toml` disabled the gateway. That override
+        // didn't survive a restart — on the next config load, the profile
+        // re-applied `gateway_enabled = false` and `merge_from` couldn't
+        // restore `true` from the DB because `true` equals the hardcoded
+        // default (see `merge_non_default` in `settings.rs`). The fix lives
+        // in `profiles/local.toml`: the profile itself now enables the
+        // gateway on loopback.
 
         self.selected_deployment_profile = Some(profile.to_string());
         Ok(())
@@ -4200,14 +4201,20 @@ mod tests {
             .apply_quick_local_profile(QUICK_PROFILE_LOCAL)
             .expect("apply_quick_local_profile should succeed");
 
-        // Quick-mode override: even though the `local` profile sets
-        // `gateway_enabled = false`, quick onboarding must re-enable the
-        // web UI so it's discoverable on first run (issue #3500).
-        // Regression guard — removing the override line in
-        // `apply_quick_local_profile` would silently revert the fix.
+        // Quick onboarding must leave the web UI discoverable on first
+        // run (#3500). The fix lives in `profiles/local.toml` rather
+        // than a wizard override (the override didn't survive config
+        // reload — see comment in `apply_quick_local_profile`). Pin
+        // both the enable flag and the loopback host so a regression
+        // in either trips this test.
         assert!(
             wizard.settings.channels.gateway_enabled,
-            "quick-mode override must leave gateway_enabled=true after applying the local profile"
+            "local profile must leave gateway_enabled=true so quick onboarding produces a working web UI on first run"
+        );
+        assert_eq!(
+            wizard.settings.channels.gateway_host.as_deref(),
+            Some("127.0.0.1"),
+            "local profile must pin gateway_host to loopback so quick onboarding doesn't expose the gateway on the LAN"
         );
 
         // Profile applies its own database_backend (libsql) which overwrites

@@ -231,7 +231,10 @@ mod tests {
     }
 
     #[test]
-    fn local_profile_disables_gateway_and_sandbox() {
+    fn local_profile_enables_loopback_gateway_and_disables_sandbox() {
+        // Updated for #3500: the local profile now enables the web gateway
+        // bound to loopback so the browser UI is discoverable on first run.
+        // Sandbox stays off to keep the install dependency-free.
         let _guard = lock_env();
         unsafe { std::env::set_var("IRONCLAW_PROFILE", "local") };
 
@@ -240,13 +243,70 @@ mod tests {
 
         unsafe { std::env::remove_var("IRONCLAW_PROFILE") };
 
-        assert!(!settings.channels.gateway_enabled);
+        assert!(
+            settings.channels.gateway_enabled,
+            "local profile must enable the web gateway (#3500)"
+        );
+        assert_eq!(
+            settings.channels.gateway_host.as_deref(),
+            Some("127.0.0.1"),
+            "local profile must pin gateway to loopback so quick onboarding can't accidentally expose it on the LAN"
+        );
         assert!(!settings.sandbox.enabled);
         assert!(settings.heartbeat.enabled);
         assert!(settings.routines.enabled);
         assert!(settings.hygiene.enabled);
         assert_eq!(settings.channels.cli_mode.as_deref(), Some("tui"));
         assert_eq!(settings.database_backend.as_deref(), Some("libsql"));
+    }
+
+    #[test]
+    fn local_profile_survives_admin_db_overlay_with_gateway_enabled() {
+        // Regression for #3500. Reproduces the runtime load order in
+        // `Config::load_db_backed_settings`:
+        //
+        //   1. Settings::default()
+        //   2. apply_profile("local")
+        //   3. merge_from(admin DB settings)
+        //
+        // The first iteration of #3500 wrote `gateway_enabled = true` to
+        // the DB but the profile *also* needed to leave the same value
+        // intact, because `merge_non_default` only overlays fields that
+        // differ from the hardcoded default. With `gateway_enabled`'s
+        // default being `true`, a DB-stored `true` couldn't restore a
+        // profile-set `false` on reload — meaning quick onboarding's
+        // intent was silently lost on the second startup. The profile
+        // change in `profiles/local.toml` makes the post-profile state
+        // already match user intent; this test pins that contract so a
+        // future profile edit can't quietly reintroduce the regression.
+        let _guard = lock_env();
+        unsafe { std::env::set_var("IRONCLAW_PROFILE", "local") };
+
+        let mut settings = Settings::default();
+        apply_profile(&mut settings).expect("local profile should load");
+
+        unsafe { std::env::remove_var("IRONCLAW_PROFILE") };
+
+        // Simulate an admin-scope DB overlay containing only fields the
+        // user explicitly changed (the typical shape — `merge_from`
+        // ignores defaults). The overlay must NOT clobber gateway state.
+        let mut admin_overlay = Settings::default();
+        admin_overlay.channels.signal_enabled = true;
+        settings.merge_from(&admin_overlay);
+
+        assert!(
+            settings.channels.gateway_enabled,
+            "gateway must remain enabled after profile + admin-DB overlay (#3500 reload regression)"
+        );
+        assert_eq!(
+            settings.channels.gateway_host.as_deref(),
+            Some("127.0.0.1"),
+            "loopback host must survive the overlay"
+        );
+        assert!(
+            settings.channels.signal_enabled,
+            "admin overlay's non-default field must still apply"
+        );
     }
 
     #[test]

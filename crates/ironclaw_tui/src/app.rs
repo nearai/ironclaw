@@ -1701,9 +1701,14 @@ impl Drop for RawModeGuard {
 /// single keypress without requiring Enter. Raw mode is restored on
 /// every exit path, including panics.
 ///
-/// Skips the wait when stdin isn't a terminal — piped or
-/// headless-CI invocations would otherwise block forever. The prompt
-/// still prints so logs capture any surfaced URL.
+/// Skips the wait when either stdin or stdout isn't a terminal:
+/// - **stdin not TTY** (piped, headless CI) would block forever waiting
+///   for input that can't arrive.
+/// - **stdout not TTY** (`ironclaw > out.txt`) means the prompt isn't
+///   visible to a human, so blocking on a keypress looks like a hang.
+///
+/// The prompt still prints in both cases so logs/redirected output
+/// capture any surfaced URL.
 #[cfg(not(test))]
 fn wait_for_any_key_with_prompt(prompt: &str) -> io::Result<()> {
     use ratatui::crossterm::event::{Event, KeyEventKind, poll, read};
@@ -1712,7 +1717,7 @@ fn wait_for_any_key_with_prompt(prompt: &str) -> io::Result<()> {
     println!("{prompt}");
     io::Write::flush(&mut io::stdout())?;
 
-    if !io::stdin().is_terminal() {
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Ok(());
     }
 

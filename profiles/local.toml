@@ -1,8 +1,9 @@
 # IronClaw Profile: local
 #
-# Configuration for solo developers working locally.
-# Disables server-oriented gateway and Docker sandbox features while keeping
-# personal-assistant background tasks enabled.
+# Configuration for solo developers working locally on one machine.
+# Enables both the TUI and a loopback-bound web gateway so the browser UI
+# is discoverable on first run. Disables Docker sandbox to keep the
+# install dependency-free; personal-assistant background tasks stay on.
 #
 # Usage: set IRONCLAW_PROFILE=local in your environment or .env file.
 #
@@ -12,7 +13,11 @@
 database_backend = "libsql"
 
 [channels]
-gateway_enabled = false
+gateway_enabled = true
+# Bind the web gateway to loopback. The local profile is single-machine
+# by design; if you need LAN/remote access, use the `server` profile or
+# override `GATEWAY_HOST` explicitly.
+gateway_host = "127.0.0.1"
 cli_mode = "tui"
 
 [sandbox]
