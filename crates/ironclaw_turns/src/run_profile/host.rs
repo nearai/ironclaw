@@ -947,6 +947,37 @@ pub struct CapabilityInvocation {
 pub struct CapabilityBatchInvocation {
     pub invocations: Vec<CapabilityInvocation>,
     pub stop_on_first_suspension: bool,
+    /// Host execution mode for the batch. Forwarded by the executor
+    /// from `BatchPolicyStrategy::policy(..)` so the host can choose
+    /// between serial and concurrent dispatch. Defaults to
+    /// `Sequential` for wire compatibility with hosts that pre-date
+    /// this field — the conservative choice when `BatchPolicy` is
+    /// missing on the wire is "do not parallelize".
+    ///
+    /// Distinct from `ironclaw_agent_loop::BatchPolicy` to keep the
+    /// dependency arrow pointing `ironclaw_agent_loop` ->
+    /// `ironclaw_turns`; the loop framework maps between the two at
+    /// the executor boundary, the same way it maps
+    /// `CapabilityConcurrency` -> `ConcurrencyHint`.
+    #[serde(default)]
+    pub policy: BatchExecutionPolicy,
+}
+
+/// Host-facing batch execution mode. Wire-stable: this field
+/// participates in observability events and any host that persists the
+/// invocation request, so the snake_case names are part of the public
+/// contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchExecutionPolicy {
+    /// Run invocations one at a time, in original order. Default for
+    /// wire compatibility with hosts that omit the field.
+    #[default]
+    Sequential,
+    /// Run invocations concurrently. The host MAY still serialize for
+    /// safety (e.g. when `stop_on_first_suspension = true` makes
+    /// concurrent cancellation hard to support cleanly).
+    Parallel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

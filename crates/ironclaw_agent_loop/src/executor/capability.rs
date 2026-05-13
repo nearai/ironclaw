@@ -6,9 +6,10 @@ use std::collections::HashSet;
 use ironclaw_turns::{
     LoopFailureKind,
     run_profile::{
-        AgentLoopDriverHost, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityCallCandidate, CapabilityConcurrency, CapabilityFailure, CapabilityInvocation,
-        CapabilityOutcome, CapabilityResultMessage, VisibleCapabilitySurface,
+        AgentLoopDriverHost, AgentLoopHostErrorKind, BatchExecutionPolicy,
+        CapabilityBatchInvocation, CapabilityCallCandidate, CapabilityConcurrency,
+        CapabilityFailure, CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -85,6 +86,7 @@ impl CanonicalAgentLoopExecutor {
                 .invoke_capability_batch(CapabilityBatchInvocation {
                     invocations: host_invocations,
                     stop_on_first_suspension,
+                    policy: batch_policy_to_host(policy),
                 })
                 .await
                 .map_err(|_| AgentLoopExecutorError::HostUnavailable {
@@ -423,6 +425,18 @@ pub(super) fn capability_summaries(
             }
         })
         .collect()
+}
+
+/// Map the loop-side `BatchPolicy` (a strategy decision local to the
+/// framework) to the host-facing `BatchExecutionPolicy` (carried on the
+/// wire as part of `CapabilityBatchInvocation`). Two distinct enums
+/// exist so the dependency arrow stays `ironclaw_agent_loop` ->
+/// `ironclaw_turns`; this function is the single boundary mapper.
+pub(super) fn batch_policy_to_host(policy: BatchPolicy) -> BatchExecutionPolicy {
+    match policy {
+        BatchPolicy::Sequential => BatchExecutionPolicy::Sequential,
+        BatchPolicy::Parallel => BatchExecutionPolicy::Parallel,
+    }
 }
 
 pub(super) fn capability_invocation_from_candidate(

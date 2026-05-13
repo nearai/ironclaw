@@ -14,12 +14,15 @@ use crate::{
 
 use super::capability::apply_capability_filter;
 use super::drain::{FollowupDrainOutcome, ack_inputs_after_state_advance};
-use super::model::{ModelStep, model_preference_id};
-use super::util::{system_time_now_unix_ms, wall_clock_limit_exceeded};
+use super::model::{ModelStep, model_preference_id, synthesize_stale_surface_summary};
+use super::util::{
+    MAX_STALE_SURFACE_RELOADS_PER_ITERATION, system_time_now_unix_ms, wall_clock_limit_exceeded,
+};
 use super::{
     AgentLoopExecutorError, CancelledKind, CanonicalAgentLoopExecutor, CompletionKind, FailureKind,
-    HostStage, LoopExit,
+    HostStage, LoopExit, lifecycle::failure_kind_to_exit,
 };
+use crate::strategies::RecoveryOutcome;
 
 pub(super) enum Step {
     Continue(LoopExecutionState),
@@ -45,7 +48,24 @@ impl CanonicalAgentLoopExecutor {
             next.started_at_unix_ms = Some(system_time_now_unix_ms());
         }
 
+        // Per-iteration counter for consecutive `StaleSurface` reloads.
+        // `StaleSurface` restarts the same iteration without bumping
+        // `next.iteration`, so iteration_limit / wall_clock_limit / no-
+        // progress detection cannot trip on this path. The cap below
+        // routes the over-budget case through `RecoveryStrategy::on_model_error`
+        // so the executor never loops here forever even with a buggy
+        // host that always returns `StaleSurface`. Tracked outside the
+        // loop body and reset whenever the observed iteration changes
+        // (i.e. any other path advanced the iteration counter), so a
+        // stale-surface burst inside one tick is bounded but does not
+        // pollute later, healthy ticks.
+        let mut consecutive_stale_surface_reloads: u32 = 0;
+        let mut last_observed_iteration: u32 = next.iteration;
         loop {
+            if next.iteration != last_observed_iteration {
+                consecutive_stale_surface_reloads = 0;
+                last_observed_iteration = next.iteration;
+            }
             if next.iteration >= planner.budget().iteration_limit(&next) {
                 // Take `Final` before failing so profiles with
                 // `require_final_checkpoint = true` don't reject the
@@ -121,6 +141,46 @@ impl CanonicalAgentLoopExecutor {
                     // restart from the same tick.
                     next = reloaded_state;
                     next.surface_version = None;
+                    consecutive_stale_surface_reloads =
+                        consecutive_stale_surface_reloads.saturating_add(1);
+                    if consecutive_stale_surface_reloads > MAX_STALE_SURFACE_RELOADS_PER_ITERATION {
+                        // Defense-in-depth: the host has reported
+                        // `StaleSurface` more times than we are willing
+                        // to spin on inside one tick. Synthesize a
+                        // `Transient` model error and run it through
+                        // recovery so the per-class budget consumes the
+                        // failure. `Retry` is treated as
+                        // `SkipIteration` (we will NOT re-issue the
+                        // model call from inside this branch — that
+                        // would resume the same spin); `SkipResult`
+                        // advances the iteration so the outer caps
+                        // eventually trip; `Abort` exits with the
+                        // recovery-chosen failure kind.
+                        let summary = synthesize_stale_surface_summary();
+                        let outcome = planner.recovery().on_model_error(&next, &summary).await;
+                        match outcome {
+                            RecoveryOutcome::Retry { recovery, .. }
+                            | RecoveryOutcome::SkipResult { recovery } => {
+                                next.recovery_state = recovery;
+                                next.iteration = next.iteration.saturating_add(1);
+                                *state = next.clone();
+                                continue;
+                            }
+                            RecoveryOutcome::Abort {
+                                recovery,
+                                failure_kind,
+                            } => {
+                                next.recovery_state = recovery;
+                                let exit = LoopExit::Failed {
+                                    kind: failure_kind_to_exit(failure_kind),
+                                };
+                                let (checked, exit) =
+                                    self.final_checkpoint_for_failure(host, next, exit).await?;
+                                *state = checked;
+                                return Ok(exit);
+                            }
+                        }
+                    }
                     *state = next.clone();
                     continue;
                 }

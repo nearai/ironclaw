@@ -12,6 +12,17 @@ pub(super) const NO_PROGRESS_THRESHOLD: usize = 3;
 /// indefinitely returns `Retry`.
 pub(super) const MAX_RETRIES_PER_CALL: u32 = 8;
 
+/// Defense-in-depth cap on consecutive `StaleSurface` reloads inside a
+/// single tick. `StaleSurface` restarts the iteration without bumping
+/// `LoopExecutionState::iteration`, so a buggy host that always claims
+/// the surface drifted would otherwise spin forever inside one tick:
+/// `iteration_limit`, `wall_clock_limit`, and the no-progress detector
+/// never observe a fresh tick. After this many consecutive reloads we
+/// synthesize a `Transient` model error and route it through
+/// `RecoveryStrategy::on_model_error` so the per-class budget consumes
+/// the failure and `SkipResult` / `Abort` eventually fires.
+pub(super) const MAX_STALE_SURFACE_RELOADS_PER_ITERATION: u32 = 3;
+
 /// Wall-clock distance from `start` to `Instant::now()`. Exists so the
 /// executor's tick prologue stays readable and so tests on a paused tokio
 /// clock can validate the wall-clock budget path.

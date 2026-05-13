@@ -102,6 +102,11 @@ struct MockHost {
     /// would otherwise return `Parallel`.
     batch_requests: Mutex<Vec<CapabilityBatchInvocation>>,
     batch_executed_capability_ids: Mutex<Vec<CapabilityId>>,
+    /// When set, every `stream_model` call returns a `StaleSurface`
+    /// host error. Exercises the per-iteration cap on consecutive
+    /// `StaleSurface` reloads (master spec §10) — without the cap the
+    /// executor would loop forever inside one iteration on a buggy host.
+    always_stale_surface: Mutex<bool>,
 }
 
 impl MockHost {
@@ -127,7 +132,12 @@ impl MockHost {
             legacy_checkpoint_only: Mutex::new(false),
             batch_requests: Mutex::new(Vec::new()),
             batch_executed_capability_ids: Mutex::new(Vec::new()),
+            always_stale_surface: Mutex::new(false),
         }
+    }
+
+    fn enable_always_stale_surface(&self) {
+        *self.always_stale_surface.lock().unwrap() = true;
     }
 
     fn fail_final_checkpoint_store(&self) {
@@ -304,6 +314,12 @@ impl LoopModelPort for MockHost {
         _request: LoopModelRequest,
     ) -> Result<LoopModelResponse, AgentLoopHostError> {
         *self.model_calls.lock().unwrap() += 1;
+        if *self.always_stale_surface.lock().unwrap() {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::StaleSurface,
+                "surface always stale",
+            ));
+        }
         if let Some(error) = self.model_errors.lock().unwrap().pop_front() {
             return Err(error);
         }
@@ -1269,6 +1285,47 @@ async fn transient_model_error_routes_through_recovery_then_aborts() {
     // Three model calls — one initial + two retries — before recovery
     // aborts.
     assert_eq!(host.model_call_count(), 3);
+}
+
+/// A buggy host that returns `StaleSurface` on every model call must
+/// NOT cause the executor to spin forever inside a single iteration.
+/// `StaleSurface` restarts the same tick without bumping
+/// `LoopExecutionState::iteration`, so neither `iteration_limit` nor
+/// `wall_clock_limit` nor the no-progress detector can trip. The cap
+/// in `executor::canonical` synthesizes a `Transient` model error
+/// after `MAX_STALE_SURFACE_RELOADS_PER_ITERATION` consecutive reloads
+/// and routes it through `RecoveryStrategy::on_model_error`. With the
+/// default recovery (2 retries on `Transient` before `Abort` with
+/// `ModelError`), the run terminates within a bounded number of model
+/// calls — this test asserts that and rules out the infinite-loop
+/// failure mode entirely.
+#[tokio::test]
+async fn unbounded_stale_surface_reloads_terminate_via_recovery() {
+    let host = MockHost::new(vec![]);
+    host.enable_always_stale_surface();
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = run(&host, &mut state, 8).await;
+
+    // Bounded termination — the run must end, NOT spin forever.
+    match exit {
+        LoopExit::Failed { .. } | LoopExit::Cancelled(_) => {}
+        other => panic!("expected bounded failure exit, got {other:?}"),
+    }
+    // Cap is `MAX_STALE_SURFACE_RELOADS_PER_ITERATION = 3` per
+    // iteration. Default recovery allows 2 retries on `Transient`
+    // before aborting. Each iteration burns 4 model calls (3 reloads
+    // up to the cap + 1 cap-triggering call); recovery `Retry`
+    // re-enters the loop and bumps the iteration, eventually `Abort`
+    // fires. The exact ceiling depends on recovery state shape, but
+    // it MUST be a small finite multiple of the cap. A generous upper
+    // bound rules out spinning without coupling to the recovery
+    // strategy's internal accounting.
+    assert!(
+        host.model_call_count() <= 64,
+        "model call count {} suggests an unbounded spin; cap should keep it small",
+        host.model_call_count()
+    );
 }
 
 /// A page containing BOTH `FollowUp` and a control event
@@ -2714,6 +2771,67 @@ async fn parallel_policy_with_all_safe_summaries_stops_on_suspension() {
         requests[0].stop_on_first_suspension,
         "stop_on_first_suspension must stay true even when policy is \
          Parallel AND all summaries are SafeForParallel"
+    );
+    // The planner's `Parallel` batch policy must reach the host on the
+    // wire — without this forwarding the host has no way to honor the
+    // `BatchExecutionPolicy::Parallel` contract and would always run
+    // serial.
+    assert_eq!(
+        requests[0].policy,
+        ironclaw_turns::run_profile::BatchExecutionPolicy::Parallel,
+        "DefaultBatchPolicyStrategy returned Parallel for an all-SafeForParallel \
+         batch; the executor must forward that decision to the host"
+    );
+}
+
+/// When the planner returns `BatchPolicy::Sequential` (the default for
+/// any batch containing an `Exclusive` summary), the executor must
+/// forward `BatchExecutionPolicy::Sequential` to the host. The
+/// host-side `policy` field is a `#[serde(default)]` addition; this
+/// test prevents accidental regression of the executor-side forwarding
+/// step that turns an Exclusive descriptor into a Sequential host hint.
+#[tokio::test]
+async fn sequential_policy_forwards_to_host_when_any_descriptor_exclusive() {
+    let surface = VisibleCapabilitySurface {
+        version: surface_version(),
+        descriptors: vec![
+            descriptor("demo.read", CapabilityConcurrency::SafeForParallel),
+            descriptor("demo.write", CapabilityConcurrency::Exclusive),
+        ],
+    };
+    let calls = vec![
+        CapabilityCallCandidate {
+            surface_version: surface_version(),
+            capability_id: CapabilityId::new("demo.read").unwrap(),
+            input_ref: CapabilityInputRef::new("input:read").unwrap(),
+        },
+        CapabilityCallCandidate {
+            surface_version: surface_version(),
+            capability_id: CapabilityId::new("demo.write").unwrap(),
+            input_ref: CapabilityInputRef::new("input:write").unwrap(),
+        },
+    ];
+    let host = MockHost::new(vec![ParentLoopOutput::CapabilityCalls(calls)])
+        .with_capability_surface(surface)
+        .with_batch(CapabilityBatchOutcome {
+            outcomes: vec![
+                completed_result("read", "ok"),
+                completed_result("write", "ok"),
+            ],
+            stopped_on_suspension: false,
+        });
+
+    let mut state = LoopExecutionState::initial_for_run(host.run_context());
+    let _ = run(&host, &mut state, 8).await;
+
+    let requests = host.recorded_batch_requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].policy,
+        ironclaw_turns::run_profile::BatchExecutionPolicy::Sequential,
+        "DefaultBatchPolicyStrategy returned Sequential for a batch \
+         containing an Exclusive descriptor; the executor must forward \
+         that to the host as BatchExecutionPolicy::Sequential"
     );
 }
 

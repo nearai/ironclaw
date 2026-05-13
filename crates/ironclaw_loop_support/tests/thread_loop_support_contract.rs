@@ -1018,6 +1018,7 @@ async fn empty_capability_batch_returns_typed_denial_reason() {
                 input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
             }],
             stop_on_first_suspension: true,
+            policy: ironclaw_turns::run_profile::BatchExecutionPolicy::Sequential,
         })
         .await
         .unwrap();
@@ -1041,6 +1042,7 @@ async fn empty_capability_batch_rejects_stale_surface() {
                 input_ref: CapabilityInputRef::new("input:opaque").unwrap(),
             }],
             stop_on_first_suspension: true,
+            policy: ironclaw_turns::run_profile::BatchExecutionPolicy::Sequential,
         })
         .await
         .unwrap_err();

@@ -1563,6 +1563,7 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
                 input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
             }],
             stop_on_first_suspension: true,
+            policy: ironclaw_turns::run_profile::BatchExecutionPolicy::Sequential,
         })
         .await
         .unwrap();
@@ -2170,6 +2171,7 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
                 },
             ],
             stop_on_first_suspension: true,
+            policy: ironclaw_turns::run_profile::BatchExecutionPolicy::Sequential,
         })
         .await
         .unwrap();
@@ -2665,6 +2667,64 @@ async fn text_only_host_rejects_previous_surface_after_refetch() {
     assert!(runtime.invocations().is_empty());
 }
 
+/// The host honors `BatchExecutionPolicy::Parallel` from the
+/// executor when `stop_on_first_suspension = false`. The
+/// `stop_on_first_suspension = true` branch deliberately keeps the
+/// serial loop today — cancelling concurrent in-flight invocations on
+/// first suspension requires a `JoinSet`-with-abort pattern that
+/// hasn't shipped yet. See PR #3586 follow-up. This test asserts the
+/// contract surface: the host accepts a `Parallel` request, processes
+/// all invocations, and returns the outcomes in original-call order
+/// (even if completion order may differ). It also re-asserts the
+/// serial-path defaults so a regression that drops the policy field
+/// silently is caught here.
+#[tokio::test]
+async fn host_accepts_parallel_batch_policy_and_returns_outcomes_in_order() {
+    let fixture = HostFixture::new("thread-host-parallel-batch", "hi").await;
+    let host = fixture.build_host().await;
+    let surface = host
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .unwrap();
+
+    let outcome = host
+        .invoke_capability_batch(ironclaw_turns::run_profile::CapabilityBatchInvocation {
+            invocations: vec![
+                CapabilityInvocation {
+                    surface_version: surface.version.clone(),
+                    capability_id: CapabilityId::new("demo.first").unwrap(),
+                    input_ref: CapabilityInputRef::new("input:opaque-first").unwrap(),
+                },
+                CapabilityInvocation {
+                    surface_version: surface.version.clone(),
+                    capability_id: CapabilityId::new("demo.second").unwrap(),
+                    input_ref: CapabilityInputRef::new("input:opaque-second").unwrap(),
+                },
+            ],
+            // Parallel is honored only when stop_on_first_suspension is false.
+            stop_on_first_suspension: false,
+            policy: ironclaw_turns::run_profile::BatchExecutionPolicy::Parallel,
+        })
+        .await
+        .unwrap();
+
+    // The text-only fixture has no installed surface, so each
+    // invocation comes back as `Denied(EmptySurface)`. The point of
+    // this test is positional integrity: the host accepted
+    // `policy = Parallel`, processed BOTH invocations (not just the
+    // first), and the outcome vector is the same length and order as
+    // the input. Concurrency itself is not wall-clock asserted because
+    // that would be flaky in CI.
+    assert_eq!(outcome.outcomes.len(), 2);
+    assert!(!outcome.stopped_on_suspension);
+    for entry in &outcome.outcomes {
+        assert!(matches!(
+            entry,
+            CapabilityOutcome::Denied(denied) if denied.reason_kind == CapabilityDeniedReasonKind::EmptySurface
+        ));
+    }
+}
+
 #[tokio::test]
 async fn text_only_host_empty_capability_surface_denies_invocation() {
     let fixture = HostFixture::new("thread-host-capability", "hello").await;
@@ -2682,6 +2742,7 @@ async fn text_only_host_empty_capability_surface_denies_invocation() {
                 input_ref: CapabilityInputRef::new("input:opaque-tool-input").unwrap(),
             }],
             stop_on_first_suspension: true,
+            policy: ironclaw_turns::run_profile::BatchExecutionPolicy::Sequential,
         })
         .await
         .unwrap();

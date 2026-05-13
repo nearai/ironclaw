@@ -216,3 +216,16 @@ pub(super) fn model_error_summary(
         diagnostic_ref: error.diagnostic_ref.clone(),
     }
 }
+
+/// Synthesize a `Transient` `ModelErrorSummary` representing the
+/// "host kept returning `StaleSurface` past the per-tick cap" condition.
+/// The classification matches what a transient model port failure would
+/// produce, so `RecoveryStrategy::on_model_error` can apply its standard
+/// per-class budget without a stale-surface-specific code path.
+pub(super) fn synthesize_stale_surface_summary() -> ModelErrorSummary {
+    ModelErrorSummary {
+        class: ModelErrorClass::Transient,
+        safe_summary: "host repeatedly reported stale capability surface".to_string(),
+        diagnostic_ref: None,
+    }
+}

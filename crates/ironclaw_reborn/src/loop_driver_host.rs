@@ -27,8 +27,9 @@ use ironclaw_turns::{
     LoopResultRef, PutCheckpointStateRequest, PutLoopCheckpointRequest, RunProfileId,
     TurnCheckpointId, TurnError, TurnStatus,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
-        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityConcurrency, CapabilityDenied,
+        AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef,
+        BatchExecutionPolicy, BeginAssistantDraft, CapabilityBatchInvocation,
+        CapabilityBatchOutcome, CapabilityConcurrency, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
         FinalizeAssistantMessage, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
@@ -692,6 +693,38 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         &self,
         request: CapabilityBatchInvocation,
     ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        // Decide between serial and concurrent dispatch. `Parallel` is
+        // only honored when `stop_on_first_suspension == false`; the
+        // executor today always sets it to `true` (see
+        // `executor::capability::handle_capability_calls` — suspension
+        // outcomes are dynamic host state and can arise even for
+        // `SafeForParallel` descriptors). Cancelling in-flight
+        // concurrent invocations on first-suspension would require a
+        // `JoinSet`-with-abort pattern; keeping the fallback to the
+        // serial loop in that case is strictly better than today's
+        // "always serial" state — the contract surface is correct, and
+        // when WS-7+ flips a profile to `stop_on_first_suspension =
+        // false` the parallel branch becomes live with no further
+        // wiring. See PR #3586 follow-up.
+        let want_parallel = matches!(request.policy, BatchExecutionPolicy::Parallel)
+            && !request.stop_on_first_suspension;
+        if want_parallel {
+            let invocations = request.invocations;
+            let futures = invocations
+                .into_iter()
+                .map(|invocation| self.invoke_capability(invocation));
+            let results: Vec<Result<CapabilityOutcome, AgentLoopHostError>> =
+                futures_util::future::join_all(futures).await;
+            let mut outcomes = Vec::with_capacity(results.len());
+            for result in results {
+                outcomes.push(result?);
+            }
+            return Ok(CapabilityBatchOutcome {
+                outcomes,
+                stopped_on_suspension: false,
+            });
+        }
+
         let mut outcomes = Vec::new();
         let mut stopped_on_suspension = false;
         for invocation in request.invocations {
