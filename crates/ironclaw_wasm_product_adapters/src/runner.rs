@@ -99,11 +99,14 @@ impl WebhookAuth {
                     header_name,
                     timestamp_header_name: Some(timestamp_header_name),
                 },
-            ) => v.signature_header == *header_name && v.timestamp_header == *timestamp_header_name,
+            ) => {
+                header_name_matches(&v.signature_header, header_name)
+                    && header_name_matches(&v.timestamp_header, timestamp_header_name)
+            }
             (
                 WebhookAuth::SharedSecretHeader(v),
                 AuthRequirement::SharedSecretHeader { header_name },
-            ) => v.header_name == *header_name,
+            ) => header_name_matches(&v.header_name, header_name),
             _ => false,
         }
     }
@@ -136,6 +139,10 @@ pub fn evidence_from_session_subject(subject: impl Into<String>) -> ProtocolAuth
 
 pub fn evidence_from_bearer_subject(subject: impl Into<String>) -> ProtocolAuthEvidence {
     mark_bearer_token_verified(subject)
+}
+
+fn header_name_matches(configured: &str, required: &str) -> bool {
+    configured.eq_ignore_ascii_case(required)
 }
 
 pub const DEFAULT_WEBHOOK_WORKFLOW_TIMEOUT: Duration = Duration::from_secs(55);
@@ -653,6 +660,49 @@ mod tests {
                 .as_slice(),
             &[ProductInboundPayload::NoOp]
         );
+    }
+
+    #[tokio::test]
+    async fn process_webhook_accepts_case_insensitive_shared_secret_header_match() {
+        let adapter = StaticAdapter::new(sample_parsed()).with_auth_requirement(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "x-test-secret".into(),
+            },
+        );
+        let runner = NativeProductAdapterRunner::with_config(
+            Arc::new(adapter),
+            Arc::new(AckWorkflow),
+            shared_secret_auth(),
+            test_config(1, Duration::from_secs(1)),
+        );
+
+        let outcome = runner
+            .process_webhook(&auth_headers(), b"{}")
+            .await
+            .expect("case-only header-name differences should not reject matching auth");
+
+        assert!(matches!(
+            outcome,
+            WebhookProcessOutcome::Acknowledged {
+                ack: ProductInboundAck::NoOp
+            }
+        ));
+    }
+
+    #[test]
+    fn webhook_auth_matches_hmac_requirement_header_names_case_insensitively() {
+        let auth = WebhookAuth::Hmac(HmacWebhookAuth::new(
+            "X-Signature",
+            "X-Timestamp",
+            b"topsecret".to_vec(),
+            "telegram_install_alpha",
+        ));
+        let requirement = AuthRequirement::RequestSignature {
+            header_name: "x-signature".into(),
+            timestamp_header_name: Some("x-timestamp".into()),
+        };
+
+        assert!(auth.matches_requirement(&requirement));
     }
 
     #[tokio::test]
