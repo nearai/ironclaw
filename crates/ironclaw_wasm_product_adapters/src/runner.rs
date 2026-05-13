@@ -25,9 +25,10 @@ use ironclaw_product_adapters::auth::{
     mark_bearer_token_verified, mark_request_signature_verified, mark_session_verified,
     mark_shared_secret_header_verified,
 };
+use ironclaw_product_adapters::redaction::RedactedString;
 use ironclaw_product_adapters::{
-    ProductAdapter, ProductAdapterError, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductWorkflow, ProtocolAuthEvidence, ProtocolAuthFailure,
+    AuthRequirement, ProductAdapter, ProductAdapterError, ProductInboundAck,
+    ProductInboundEnvelope, ProductWorkflow, ProtocolAuthEvidence, ProtocolAuthFailure,
     TrustedInboundContext,
 };
 use thiserror::Error;
@@ -77,9 +78,9 @@ impl RunnerError {
 pub enum WebhookProcessOutcome {
     /// Auth succeeded, adapter parsed an envelope, workflow accepted it.
     Acknowledged { ack: ProductInboundAck },
-    /// Auth succeeded but the adapter chose to drop the message (group
-    /// ambient, edited message, unsupported event kind, ...). The protocol
-    /// layer should respond 200 OK no-op.
+    /// Reserved for host/protocol paths that acknowledge without a product
+    /// workflow envelope. Parsed `ProductInboundPayload::NoOp` events still
+    /// flow through `ProductWorkflow` and return `Acknowledged`.
     NoOp,
 }
 
@@ -90,6 +91,23 @@ pub enum WebhookAuth {
 }
 
 impl WebhookAuth {
+    pub fn matches_requirement(&self, requirement: &AuthRequirement) -> bool {
+        match (self, requirement) {
+            (
+                WebhookAuth::Hmac(v),
+                AuthRequirement::RequestSignature {
+                    header_name,
+                    timestamp_header_name: Some(timestamp_header_name),
+                },
+            ) => v.signature_header == *header_name && v.timestamp_header == *timestamp_header_name,
+            (
+                WebhookAuth::SharedSecretHeader(v),
+                AuthRequirement::SharedSecretHeader { header_name },
+            ) => v.header_name == *header_name,
+            _ => false,
+        }
+    }
+
     fn verify(&self, headers: &http::HeaderMap, body: &[u8]) -> VerificationOutcome {
         match self {
             WebhookAuth::Hmac(v) => v.verify(headers, body),
@@ -212,6 +230,18 @@ impl NativeProductAdapterRunner {
         headers: &http::HeaderMap,
         body: &[u8],
     ) -> Result<WebhookProcessOutcome, RunnerError> {
+        if !self
+            .auth
+            .matches_requirement(self.adapter.auth_requirement())
+        {
+            return Err(RunnerError::AuthenticationFailed {
+                failure: ProtocolAuthFailure::Other {
+                    detail: RedactedString::new(
+                        "configured webhook auth strategy does not match adapter auth requirement",
+                    ),
+                },
+            });
+        }
         let evidence = match self.auth.verify(headers, body) {
             VerificationOutcome::Verified { subject } => self.auth.mint_evidence(subject),
             VerificationOutcome::Failed { failure } => {
@@ -240,12 +270,6 @@ impl NativeProductAdapterRunner {
             &evidence,
         )?;
         let envelope = ProductInboundEnvelope::from_trusted_parse(context, parsed)?;
-        // Authenticated-but-ignored events surface as `NoOp` payloads, not as
-        // an out-of-band `None` parse result. The protocol layer still acks
-        // 200 OK so the upstream webhook does not retry.
-        if matches!(envelope.payload(), ProductInboundPayload::NoOp) {
-            return Ok(WebhookProcessOutcome::NoOp);
-        }
         let workflow = Arc::clone(&self.workflow);
         let mut workflow_task =
             tokio::spawn(async move { workflow.accept_inbound(envelope).await });
@@ -269,7 +293,8 @@ impl NativeProductAdapterRunner {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -306,6 +331,7 @@ mod tests {
         capabilities: ProductAdapterCapabilities,
         auth_requirement: AuthRequirement,
         parsed: ParsedProductInbound,
+        parse_count: Option<Arc<AtomicUsize>>,
     }
 
     impl StaticAdapter {
@@ -316,7 +342,18 @@ mod tests {
                 capabilities: ProductAdapterCapabilities::empty(),
                 auth_requirement: stub_auth_requirement(),
                 parsed,
+                parse_count: None,
             }
+        }
+
+        fn with_auth_requirement(mut self, auth_requirement: AuthRequirement) -> Self {
+            self.auth_requirement = auth_requirement;
+            self
+        }
+
+        fn with_parse_count(mut self, parse_count: Arc<AtomicUsize>) -> Self {
+            self.parse_count = Some(parse_count);
+            self
         }
     }
 
@@ -347,6 +384,9 @@ mod tests {
             _raw_payload: &[u8],
             _auth_evidence: &ProtocolAuthEvidence,
         ) -> Result<ParsedProductInbound, ProductAdapterError> {
+            if let Some(parse_count) = &self.parse_count {
+                parse_count.fetch_add(1, Ordering::SeqCst);
+            }
             Ok(self.parsed.clone())
         }
 
@@ -449,6 +489,31 @@ mod tests {
         }
     }
 
+    struct RecordingWorkflow {
+        seen_payloads: Arc<Mutex<Vec<ProductInboundPayload>>>,
+    }
+
+    #[async_trait]
+    impl ProductWorkflow for RecordingWorkflow {
+        async fn accept_inbound(
+            &self,
+            envelope: ProductInboundEnvelope,
+        ) -> Result<ProductInboundAck, ProductAdapterError> {
+            self.seen_payloads
+                .lock()
+                .expect("seen payloads mutex should not be poisoned")
+                .push(envelope.payload().clone());
+            Ok(ProductInboundAck::NoOp)
+        }
+
+        async fn resolve_projection_subscription(
+            &self,
+            _envelope: ProductInboundEnvelope,
+        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
+            Err(projection_subscription_unimplemented())
+        }
+    }
+
     struct PendingWorkflow;
 
     #[async_trait]
@@ -511,10 +576,7 @@ mod tests {
         }
     }
 
-    /// Sample `ParsedProductInbound` with a non-NoOp payload. The runner's
-    /// success-path tests need the workflow to actually be invoked, so the
-    /// payload must NOT be `ProductInboundPayload::NoOp` (which would short-
-    /// circuit before `accept_inbound`).
+    /// Sample `ParsedProductInbound` with a non-NoOp payload.
     fn sample_parsed() -> ParsedProductInbound {
         ParsedProductInbound::new(
             ExternalEventId::new("update:42").expect("valid"),
@@ -525,6 +587,17 @@ mod tests {
                 UserMessagePayload::new("hello", Vec::new(), ProductTriggerReason::DirectChat)
                     .expect("valid"),
             ),
+        )
+        .expect("valid parsed")
+    }
+
+    fn sample_noop_parsed() -> ParsedProductInbound {
+        ParsedProductInbound::new(
+            ExternalEventId::new("update:noop").expect("valid"),
+            ExternalActorRef::new("telegram_user", "777", None::<String>).expect("valid"),
+            ExternalConversationRef::new(None, "12345", Some("topic-7"), Some("msg-100"))
+                .expect("valid"),
+            ProductInboundPayload::NoOp,
         )
         .expect("valid parsed")
     }
@@ -548,6 +621,70 @@ mod tests {
             timeout,
             std::num::NonZeroUsize::new(max_in_flight).expect("nonzero"),
         )
+    }
+
+    #[tokio::test]
+    async fn process_webhook_routes_noop_payload_through_workflow() {
+        let seen_payloads = Arc::new(Mutex::new(Vec::new()));
+        let runner = NativeProductAdapterRunner::with_config(
+            Arc::new(StaticAdapter::new(sample_noop_parsed())),
+            Arc::new(RecordingWorkflow {
+                seen_payloads: Arc::clone(&seen_payloads),
+            }),
+            shared_secret_auth(),
+            test_config(1, Duration::from_secs(1)),
+        );
+
+        let outcome = runner
+            .process_webhook(&auth_headers(), b"{}")
+            .await
+            .expect("NoOp payload should still be acknowledged by workflow");
+
+        assert_eq!(
+            outcome,
+            WebhookProcessOutcome::Acknowledged {
+                ack: ProductInboundAck::NoOp
+            }
+        );
+        assert_eq!(
+            seen_payloads
+                .lock()
+                .expect("seen payloads mutex should not be poisoned")
+                .as_slice(),
+            &[ProductInboundPayload::NoOp]
+        );
+    }
+
+    #[tokio::test]
+    async fn process_webhook_rejects_auth_strategy_mismatch_before_parse() {
+        let parse_count = Arc::new(AtomicUsize::new(0));
+        let adapter = StaticAdapter::new(sample_parsed())
+            .with_auth_requirement(AuthRequirement::RequestSignature {
+                header_name: "X-Signature".into(),
+                timestamp_header_name: Some("X-Timestamp".into()),
+            })
+            .with_parse_count(Arc::clone(&parse_count));
+        let runner = NativeProductAdapterRunner::with_config(
+            Arc::new(adapter),
+            Arc::new(AckWorkflow),
+            shared_secret_auth(),
+            test_config(1, Duration::from_secs(1)),
+        );
+
+        let err = runner
+            .process_webhook(&auth_headers(), b"{}")
+            .await
+            .expect_err("auth strategy mismatch should fail closed");
+
+        assert!(err.is_auth_failure());
+        assert!(!err.is_retryable());
+        assert!(matches!(
+            err,
+            RunnerError::AuthenticationFailed {
+                failure: ProtocolAuthFailure::Other { .. }
+            }
+        ));
+        assert_eq!(parse_count.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

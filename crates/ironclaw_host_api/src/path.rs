@@ -63,10 +63,16 @@ impl fmt::Display for MountAlias {
 
 const VIRTUAL_ROOTS: &[&str] = &[
     "/engine",
+    "/system/settings",
     "/system/extensions",
+    "/system/skills",
     "/users",
     "/projects",
     "/memory",
+    "/artifacts",
+    "/tmp",
+    "/secrets",
+    "/events",
 ];
 
 /// Common raw host-path prefixes rejected before scoped-path normalization.
@@ -90,6 +96,8 @@ const RAW_HOST_PREFIXES: &[&str] = &[
     "/proc/",
     "/sys/",
 ];
+
+const REDACTED_PATH_VALUE: &str = "<redacted path>";
 
 impl Serialize for VirtualPath {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -179,11 +187,14 @@ impl ScopedPath {
     pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {
         let raw = value.into();
         if looks_like_url(&raw) {
-            return Err(HostApiError::invalid_path(raw, "URLs are not scoped paths"));
+            return Err(HostApiError::invalid_path(
+                REDACTED_PATH_VALUE,
+                "URLs are not scoped paths",
+            ));
         }
         if looks_like_windows_path(&raw) {
             return Err(HostApiError::invalid_path(
-                raw,
+                REDACTED_PATH_VALUE,
                 "Windows host paths are not scoped paths",
             ));
         }
@@ -192,7 +203,7 @@ impl ScopedPath {
             .any(|prefix| raw.starts_with(prefix))
         {
             return Err(HostApiError::invalid_path(
-                raw,
+                REDACTED_PATH_VALUE,
                 "raw host paths are not scoped paths",
             ));
         }
