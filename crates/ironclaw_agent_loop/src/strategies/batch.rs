@@ -11,6 +11,7 @@
 //! sees raw tool input — only the sanitized projection).
 
 use ironclaw_host_api::CapabilityId;
+use ironclaw_turns::run_profile::ConcurrencyHint;
 
 use crate::state::LoopExecutionState;
 
@@ -19,7 +20,7 @@ use crate::state::LoopExecutionState;
 /// `&self` only — the strategy is value-immutable. The host's per-capability
 /// concurrency hints (from descriptors) override this batch-level default
 /// for any individual call that declares itself [`ConcurrencyHint::Exclusive`].
-pub trait BatchPolicyStrategy: Send + Sync {
+pub(crate) trait BatchPolicyStrategy: Send + Sync {
     fn policy(&self, state: &LoopExecutionState, calls: &[CapabilityCallSummary]) -> BatchPolicy;
 }
 
@@ -28,7 +29,7 @@ pub trait BatchPolicyStrategy: Send + Sync {
 /// public contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BatchPolicy {
+pub(crate) enum BatchPolicy {
     Sequential,
     Parallel,
 }
@@ -38,21 +39,9 @@ pub enum BatchPolicy {
 /// `contracts/turns-agent-loop.md` §6 — sanitization happens at the host port
 /// boundary).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct CapabilityCallSummary {
-    pub name: CapabilityId,
-    pub concurrency_hint: ConcurrencyHint,
-}
-
-/// Per-call concurrency hint. The exact source (capability descriptor field,
-/// host call-time annotation, etc.) is the responsibility of the executor
-/// wiring in WS-6 — WS-2 only defines the loop-side projection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConcurrencyHint {
-    /// Read-only or otherwise safe to run alongside others in this batch.
-    SafeForParallel,
-    /// Must run alone (filesystem write, shell, exclusive resource).
-    Exclusive,
+pub(crate) struct CapabilityCallSummary {
+    pub(crate) name: CapabilityId,
+    pub(crate) concurrency_hint: ConcurrencyHint,
 }
 
 #[cfg(test)]
@@ -76,19 +65,6 @@ mod tests {
             let value = serde_json::to_value(variant).expect("serialize");
             assert_eq!(value, json!(wire));
             let restored: BatchPolicy = serde_json::from_value(value).expect("deserialize");
-            assert_eq!(restored, variant);
-        }
-    }
-
-    #[test]
-    fn concurrency_hint_round_trips_snake_case() {
-        for (variant, wire) in [
-            (ConcurrencyHint::SafeForParallel, "safe_for_parallel"),
-            (ConcurrencyHint::Exclusive, "exclusive"),
-        ] {
-            let value = serde_json::to_value(variant).expect("serialize");
-            assert_eq!(value, json!(wire));
-            let restored: ConcurrencyHint = serde_json::from_value(value).expect("deserialize");
             assert_eq!(restored, variant);
         }
     }
