@@ -206,6 +206,28 @@ impl HookDispatcher {
         registry.insert(binding)
     }
 
+    /// Count of bindings whose `owning_extension` matches `extension`
+    /// across every attach point. Used by the registrar to enforce the
+    /// per-extension cap cumulatively across multiple `install()` calls.
+    pub(crate) fn count_bindings_for_extension(
+        &self,
+        extension: &ironclaw_host_api::ExtensionId,
+    ) -> usize {
+        let registry = self.registry.lock().expect("hook registry mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
+        registry.count_for_extension(extension)
+    }
+
+    /// Same as [`Self::count_bindings_for_extension`] but restricted to
+    /// one attach point. Powers the D4 (per-extension-per-kind) cap.
+    pub(crate) fn count_bindings_for_extension_at(
+        &self,
+        extension: &ironclaw_host_api::ExtensionId,
+        point: HookPointSpec,
+    ) -> usize {
+        let registry = self.registry.lock().expect("hook registry mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
+        registry.count_for_extension_at(extension, point)
+    }
+
     /// Update an already-inserted binding's `priority` field. The registrar
     /// uses this to apply the manifest-declared priority after the
     /// tier-specific installer creates the binding with the default. No-op
@@ -218,7 +240,7 @@ impl HookDispatcher {
     /// the only caller that knows the manifest priority, so it sets it
     /// post-insert.
     pub(crate) fn set_binding_priority(&mut self, hook_id: HookId, priority: HookPriority) {
-        let mut registry = self.registry.lock().expect("hook registry mutex poisoned");
+        let mut registry = self.registry.lock().expect("hook registry mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
         registry.set_priority(hook_id, priority);
     }
 
@@ -741,13 +763,12 @@ impl HookDispatcher {
     }
 
     fn ordered_bindings(&self, point: HookPointSpec) -> Vec<(HookOrderKey, HookBinding)> {
-        let registry = self.registry.lock().expect("hooks registry mutex poisoned");
+        let registry = self.registry.lock().expect("hooks registry mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
         let mut out: Vec<_> = registry
             .active_at(point)
             .cloned()
             .map(|b| {
-                let key =
-                    HookOrderKey::new(b.phase, crate::ordering::HookPriority::DEFAULT, b.hook_id);
+                let key = HookOrderKey::new(b.phase, b.priority, b.hook_id);
                 (key, b)
             })
             .collect();
@@ -1285,12 +1306,21 @@ mod tests {
     }
 
     fn installed_binding(id: HookId, point: HookPointSpec, phase: HookPhase) -> HookBinding {
+        installed_binding_with_priority(id, point, phase, HookPriority::DEFAULT)
+    }
+
+    fn installed_binding_with_priority(
+        id: HookId,
+        point: HookPointSpec,
+        phase: HookPhase,
+        priority: HookPriority,
+    ) -> HookBinding {
         HookBinding {
             hook_id: id,
             hook_version: HookVersion::ONE,
             trust_class: HookTrustClass::Installed,
             phase,
-            priority: HookPriority::DEFAULT,
+            priority,
             point,
             owning_extension: None,
             scope: HookBindingScope::Global,
@@ -2351,6 +2381,63 @@ mod tests {
             &kinds,
             "missing_impl",
             ExpectedTerminator::FailureWithoutDispatch,
+        );
+    }
+
+    /// Regression for Firat's HIGH priority finding: the dispatcher must
+    /// respect `HookBinding.priority` in the sort key. Install two
+    /// `BeforeCapability` Policy hooks with `HookPriority::FIRST` and
+    /// `HookPriority::LAST`; the FIRST hook must dispatch before the LAST
+    /// hook regardless of their content-addressed hook ids.
+    #[tokio::test]
+    async fn priority_overrides_hook_id_tiebreaker_in_dispatch_order() {
+        let first_id = ext_hook_id("priority-first");
+        let last_id = ext_hook_id("priority-last");
+
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(installed_binding_with_priority(
+                first_id,
+                HookPointSpec::BeforeCapability,
+                HookPhase::Policy,
+                HookPriority::FIRST,
+            ))
+            .expect("ok");
+        registry
+            .insert(installed_binding_with_priority(
+                last_id,
+                HookPointSpec::BeforeCapability,
+                HookPhase::Policy,
+                HookPriority::LAST,
+            ))
+            .expect("ok");
+        let mut dispatcher = HookDispatcher::new(registry);
+        dispatcher.install_before_capability(
+            first_id,
+            BeforeCapabilityHookImpl::Privileged(Box::new(AllowingBuiltinHook)),
+        );
+        dispatcher.install_before_capability(
+            last_id,
+            BeforeCapabilityHookImpl::Privileged(Box::new(AllowingBuiltinHook)),
+        );
+
+        let (dispatcher, sink) = install_milestone_sink(dispatcher);
+        let _ = dispatcher.dispatch_before_capability(&ctx()).await;
+        let kinds = sink.kinds();
+
+        // Pull out the dispatched-event order; with two hooks both producing
+        // Allow there's no short-circuit, so both must appear in priority order.
+        let dispatched: Vec<String> = kinds
+            .iter()
+            .filter_map(|k| match k {
+                LoopHostMilestoneKind::HookDispatched { hook_id, .. } => Some(hook_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            dispatched,
+            vec![first_id.to_hex(), last_id.to_hex()],
+            "FIRST must dispatch before LAST regardless of hook-id tiebreaker"
         );
     }
 

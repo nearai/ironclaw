@@ -15,4 +15,5 @@
 - Preserve typed `ironclaw_turns::TurnError` values across this boundary instead of flattening turn failures to strings.
 - Automatic first-contact binding must not trust raw adapter-supplied agent/project scope hints; use explicit linking or a future trusted thread-creation seam for scoped thread selection.
 - Explicit links are idempotent only for the same target thread; never silently retarget an already-bound external conversation to another thread.
-- Keep durable PostgreSQL/libSQL adapters out of this crate until the transcript/thread storage boundary has a scoped implementation plan with parity tests.
+- Current durable PostgreSQL/libSQL adapters in this crate are limited to conversation binding, accepted-message idempotency, and turn-submission state-store records; keep transcript content and thread storage behind their owning storage boundaries.
+- Any future durable adapter expansion must name the scoped storage boundary first, keep raw message content out of turn-facing rows, and add PostgreSQL/libSQL parity tests with migration coverage.

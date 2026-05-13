@@ -26,7 +26,7 @@ use crate::evaluator::PredicateEvaluator;
 use crate::identity::{ExtensionId, HookId, HookVersion};
 use crate::installed_hook::PredicateBackedBeforeCapabilityHook;
 use crate::manifest::{HookManifestBody, HookManifestEntry, HookManifestKind, HookManifestScope};
-use crate::registry::HookBindingScope;
+use crate::registry::{HookBindingScope, HookPointSpec};
 
 /// Maximum number of hooks a single extension may register, summed across
 /// every attach-point kind. Prevents a malicious or buggy extension from
@@ -78,7 +78,7 @@ impl HookRegistrar {
         // (validated, comparable across the host); `crate::identity::ExtensionId`
         // is a transparent string newtype the hash derivation consumes.
         let identity_extension = ExtensionId(extension.as_str().to_string());
-        Self::enforce_registration_caps(&extension, &entries)?;
+        Self::enforce_registration_caps(&extension, &entries, builder.dispatcher_mut())?;
         let mut installed = Vec::with_capacity(entries.len());
         for entry in entries {
             let hook_id = self.install_one(
@@ -98,31 +98,47 @@ impl HookRegistrar {
     /// Pre-flight rejection is required so a partially-installed batch
     /// can't slip past the cap (the registrar otherwise inserts entries
     /// one at a time without rollback).
+    ///
+    /// **Cumulative across calls**: the caps apply to the total of
+    /// already-installed bindings for `extension` plus the new batch. A
+    /// repeated `install()` for the same extension (hot-reload, paginated
+    /// manifest, multi-source loader) cannot bypass the cap by splitting
+    /// the registrations into multiple batches.
     fn enforce_registration_caps(
         extension: &ironclaw_host_api::ExtensionId,
         entries: &[HookManifestEntry],
+        dispatcher: &crate::dispatch::HookDispatcher,
     ) -> Result<(), HookError> {
-        if entries.len() > MAX_HOOKS_PER_EXTENSION {
+        let already_total = dispatcher.count_bindings_for_extension(extension);
+        if already_total + entries.len() > MAX_HOOKS_PER_EXTENSION {
             return Err(HookError::RegistryConstruction(format!(
-                "extension `{}` declared {} hooks; the per-extension cap is {} \
-                 (threat-model finding D3 / hook registration flood)",
+                "extension `{}` would exceed the per-extension cap of {} hooks \
+                 ({} already installed + {} in this batch); the cap is \
+                 cumulative across `install()` calls (threat-model finding D3 \
+                 / hook registration flood)",
                 extension.as_str(),
+                MAX_HOOKS_PER_EXTENSION,
+                already_total,
                 entries.len(),
-                MAX_HOOKS_PER_EXTENSION
             )));
         }
         let mut per_kind: HashMap<HookManifestKind, usize> = HashMap::new();
         for entry in entries {
             let count = per_kind.entry(entry.kind).or_insert(0);
             *count += 1;
-            if *count > MAX_HOOKS_PER_EXTENSION_PER_KIND {
+            let already_at_kind = dispatcher
+                .count_bindings_for_extension_at(extension, manifest_kind_to_point(entry.kind));
+            if already_at_kind + *count > MAX_HOOKS_PER_EXTENSION_PER_KIND {
                 return Err(HookError::RegistryConstruction(format!(
-                    "extension `{}` declared more than {} hooks at attach point \
-                     {:?}; the per-kind cap is {} (threat-model finding D4)",
+                    "extension `{}` would exceed the per-kind cap of {} hooks at \
+                     attach point {:?} ({} already installed + {} in this batch); \
+                     the cap is cumulative across `install()` calls \
+                     (threat-model finding D4)",
                     extension.as_str(),
                     MAX_HOOKS_PER_EXTENSION_PER_KIND,
                     entry.kind,
-                    MAX_HOOKS_PER_EXTENSION_PER_KIND
+                    already_at_kind,
+                    *count,
                 )));
             }
         }
@@ -199,6 +215,16 @@ impl HookRegistrar {
 /// Map the manifest-declared scope to the dispatcher's runtime scope. The
 /// manifest enum is parsed at install time; the dispatcher consults the
 /// runtime enum on every invocation, so we eagerly translate here.
+fn manifest_kind_to_point(kind: HookManifestKind) -> HookPointSpec {
+    match kind {
+        HookManifestKind::BeforeCapability => HookPointSpec::BeforeCapability,
+        HookManifestKind::BeforePrompt => HookPointSpec::BeforePrompt,
+        HookManifestKind::AfterModel => HookPointSpec::AfterModel,
+        HookManifestKind::AfterCapability => HookPointSpec::AfterCapability,
+        HookManifestKind::AfterCheckpoint => HookPointSpec::AfterCheckpoint,
+    }
+}
+
 fn manifest_scope_to_binding_scope(scope: HookManifestScope) -> HookBindingScope {
     match scope {
         HookManifestScope::OwnCapabilities => HookBindingScope::OwnCapabilities,
@@ -412,6 +438,47 @@ mod tests {
             .install(extension(), "0.1.0".to_string(), entries, builder)
             .expect("at-cap install must succeed");
         assert_eq!(ids.len(), MAX_HOOKS_PER_EXTENSION_PER_KIND);
+    }
+
+    /// Regression for Firat's D3-per-call finding: repeated `install()`
+    /// calls for the same extension must not bypass the cap by splitting
+    /// the registrations across batches. The second call sees the first
+    /// call's bindings via dispatcher.count_bindings_for_extension and
+    /// rejects when the cumulative total would exceed
+    /// `MAX_HOOKS_PER_EXTENSION_PER_KIND`.
+    #[tokio::test]
+    async fn install_cumulative_cap_rejects_second_batch_over_per_kind() {
+        let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
+        let mut builder = HookDispatcherBuilder::new(HookRegistry::new());
+        // First batch: half the per-kind cap. Should succeed.
+        let first_batch: Vec<HookManifestEntry> = (0..MAX_HOOKS_PER_EXTENSION_PER_KIND)
+            .map(|i| predicate_entry(&format!("first-{i}")))
+            .collect();
+        let (b, ids) = registrar
+            .install(extension(), "0.1.0".to_string(), first_batch, builder)
+            .expect("first at-cap install must succeed");
+        assert_eq!(ids.len(), MAX_HOOKS_PER_EXTENSION_PER_KIND);
+        builder = b;
+        // Second batch: one more entry on top of an already-at-cap extension.
+        // The cumulative check must reject this even though the second batch
+        // by itself is small (just 1 entry).
+        let second_batch = vec![predicate_entry("overflow")];
+        let err = registrar
+            .install(extension(), "0.1.0".to_string(), second_batch, builder)
+            .expect_err("cumulative over-cap install must be rejected");
+        match err {
+            HookError::RegistryConstruction(msg) => {
+                assert!(
+                    msg.contains("per-kind cap") && msg.contains("D4"),
+                    "expected D4 cap rejection, got: {msg}"
+                );
+                assert!(
+                    msg.contains("already installed"),
+                    "msg should cite cumulative state, got: {msg}"
+                );
+            }
+            other => panic!("expected RegistryConstruction, got {other:?}"),
+        }
     }
 
     #[tokio::test]

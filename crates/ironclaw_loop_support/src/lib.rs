@@ -36,8 +36,9 @@ use ironclaw_turns::{
         LoopContextBundle, LoopContextMessage, LoopContextPort, LoopContextRequest,
         LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage,
         LoopModelPort, LoopModelRequest, LoopModelResponse, LoopRunContext, LoopRunInfoPort,
-        LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
+        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        sanitize_model_visible_text,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -575,7 +576,9 @@ where
             chunks: gateway_response
                 .safe_text_deltas
                 .into_iter()
-                .map(|safe_text_delta| ModelStreamChunk { safe_text_delta })
+                .map(|safe_text_delta| ModelStreamChunk {
+                    safe_text_delta: sanitize_model_visible_text(safe_text_delta),
+                })
                 .collect(),
             output: gateway_response.output,
             effective_model_profile_id: model_profile_id,
@@ -849,7 +852,7 @@ impl HostManagedModelResponse {
     pub fn assistant_reply(content: impl Into<String>) -> Self {
         let content = content.into();
         Self {
-            safe_text_deltas: vec![content.clone()],
+            safe_text_deltas: vec![sanitize_model_visible_text(content.clone())],
             output: ParentLoopOutput::AssistantReply(AssistantReply { content }),
         }
     }
@@ -862,6 +865,8 @@ pub enum HostManagedModelErrorKind {
     PolicyDenied,
     ConfigurationError,
     BudgetExceeded,
+    /// Provider credentials are missing, expired, or otherwise unavailable.
+    CredentialUnavailable,
     Unavailable,
     Cancelled,
 }
@@ -1096,7 +1101,12 @@ fn transcript_write_error(_error: SessionThreadError) -> AgentLoopHostError {
 }
 
 fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
-    AgentLoopHostError::new(model_error_kind(error.kind), error.safe_summary)
+    let safe_summary = if LoopSafeSummary::new(error.safe_summary.clone()).is_ok() {
+        error.safe_summary
+    } else {
+        safe_model_summary(error.kind).to_string()
+    };
+    AgentLoopHostError::new(model_error_kind(error.kind), safe_summary)
 }
 
 fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
@@ -1105,6 +1115,9 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
         HostManagedModelErrorKind::PolicyDenied => AgentLoopHostErrorKind::PolicyDenied,
         HostManagedModelErrorKind::ConfigurationError => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::BudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
+        HostManagedModelErrorKind::CredentialUnavailable => {
+            AgentLoopHostErrorKind::CredentialUnavailable
+        }
         HostManagedModelErrorKind::Unavailable => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::Cancelled => AgentLoopHostErrorKind::Cancelled,
     }
@@ -1116,6 +1129,7 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
         HostManagedModelErrorKind::PolicyDenied => "model profile is not permitted",
         HostManagedModelErrorKind::ConfigurationError => "model route configuration is invalid",
         HostManagedModelErrorKind::BudgetExceeded => "model request exceeded its budget",
+        HostManagedModelErrorKind::CredentialUnavailable => "model credentials are unavailable",
         HostManagedModelErrorKind::Unavailable => "model service is unavailable",
         HostManagedModelErrorKind::Cancelled => "model request was cancelled",
     }

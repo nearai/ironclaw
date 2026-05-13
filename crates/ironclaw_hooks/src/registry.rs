@@ -212,6 +212,32 @@ impl HookRegistry {
             .filter(|b| !b.poisoned)
     }
 
+    /// Count of bindings whose `owning_extension` matches `extension`,
+    /// summed across every attach point. Used by the registrar to enforce
+    /// the per-extension cap cumulatively across multiple `install()`
+    /// calls — threat-model finding D3 / hook registration flood.
+    pub fn count_for_extension(&self, extension: &ExtensionId) -> usize {
+        self.by_point
+            .values()
+            .flat_map(|bindings| bindings.iter())
+            .filter(|b| b.owning_extension.as_ref() == Some(extension))
+            .count()
+    }
+
+    /// Like [`Self::count_for_extension`] but restricted to one attach
+    /// point. Used by D4 (per-extension-per-kind cap).
+    pub fn count_for_extension_at(&self, extension: &ExtensionId, point: HookPointSpec) -> usize {
+        self.by_point
+            .get(&point)
+            .map(|bindings| {
+                bindings
+                    .iter()
+                    .filter(|b| b.owning_extension.as_ref() == Some(extension))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
     /// Mark a hook's slot poisoned for the rest of the run.
     pub fn poison(&mut self, hook_id: HookId) {
         for bindings in self.by_point.values_mut() {

@@ -453,7 +453,7 @@ fn production_wiring_validation_classifies_combined_store_as_run_state_and_appro
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_run_state_approval_store(Arc::new(
+    .with_local_only_run_state_approval_store(Arc::new(
         InMemoryRecordingCombinedRunStateApprovalStore::new(),
     ));
 

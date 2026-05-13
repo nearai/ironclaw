@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -26,12 +27,12 @@ use ironclaw_turns::{
         LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata,
         LoopDriverId, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneEmitter,
         LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor,
-        LoopInputCursorToken, LoopInputPort, LoopModelGateway, LoopModelGatewayError,
-        LoopModelGatewayRequest, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
-        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopTranscriptPort, ParentLoopOutput, PromptMode,
-        PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
+        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
+        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
+        LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, ModelCallOutcome, ParentLoopOutput,
+        PromptMode, PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -2114,5 +2115,585 @@ fn driver_run_request(host: &RecordingAgentLoopHost) -> ironclaw_turns::AgentLoo
 fn driver_error(error: AgentLoopHostError) -> AgentLoopDriverError {
     AgentLoopDriverError::Failed {
         reason_kind: error.kind.as_str().to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers for budget accountant and policy guard
+// ---------------------------------------------------------------------------
+
+/// A policy guard that always denies model calls.
+struct DenyAllPolicyGuard;
+
+#[async_trait]
+impl LoopModelPolicyGuard for DenyAllPolicyGuard {
+    async fn check_model_policy(
+        &self,
+        _context: &LoopRunContext,
+        _request: &LoopModelRequest,
+    ) -> Result<(), LoopModelGatewayError> {
+        Err(LoopModelGatewayError::new(
+            AgentLoopHostErrorKind::PolicyDenied,
+            "model denied by policy",
+        )
+        .expect("safe summary is valid"))
+    }
+}
+
+/// A recording budget accountant that tracks pre/post calls and can be
+/// configured to reject pre-call.
+struct RecordingBudgetAccountant {
+    pre_called: AtomicBool,
+    post_called: AtomicBool,
+    reject_pre: AtomicBool,
+    reject_post: AtomicBool,
+    post_saw_failure: AtomicBool,
+}
+
+impl RecordingBudgetAccountant {
+    fn new() -> Self {
+        Self {
+            pre_called: AtomicBool::new(false),
+            post_called: AtomicBool::new(false),
+            reject_pre: AtomicBool::new(false),
+            reject_post: AtomicBool::new(false),
+            post_saw_failure: AtomicBool::new(false),
+        }
+    }
+
+    fn rejecting() -> Self {
+        let accountant = Self::new();
+        accountant.reject_pre.store(true, Ordering::SeqCst);
+        accountant
+    }
+
+    fn rejecting_post() -> Self {
+        let accountant = Self::new();
+        accountant.reject_post.store(true, Ordering::SeqCst);
+        accountant
+    }
+
+    fn was_pre_called(&self) -> bool {
+        self.pre_called.load(Ordering::SeqCst)
+    }
+
+    fn was_post_called(&self) -> bool {
+        self.post_called.load(Ordering::SeqCst)
+    }
+
+    fn post_saw_failure(&self) -> bool {
+        self.post_saw_failure.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
+    async fn pre_model_call(
+        &self,
+        _context: &LoopRunContext,
+        _request: &LoopModelRequest,
+    ) -> Result<(), LoopModelGatewayError> {
+        self.pre_called.store(true, Ordering::SeqCst);
+        if self.reject_pre.load(Ordering::SeqCst) {
+            return Err(LoopModelGatewayError::new(
+                AgentLoopHostErrorKind::BudgetExceeded,
+                "model call budget exceeded",
+            )
+            .expect("safe summary is valid"));
+        }
+        Ok(())
+    }
+
+    async fn post_model_call(
+        &self,
+        _context: &LoopRunContext,
+        _request: &LoopModelRequest,
+        outcome: ModelCallOutcome<'_>,
+    ) -> Result<(), LoopModelGatewayError> {
+        self.post_called.store(true, Ordering::SeqCst);
+        if matches!(outcome, ModelCallOutcome::Failure(_)) {
+            self.post_saw_failure.store(true, Ordering::SeqCst);
+        }
+        if self.reject_post.load(Ordering::SeqCst) {
+            return Err(LoopModelGatewayError::new(
+                AgentLoopHostErrorKind::BudgetExceeded,
+                "model call accounting failed",
+            )
+            .expect("safe summary is valid"));
+        }
+        Ok(())
+    }
+}
+
+fn simple_model_request(context: &LoopRunContext) -> LoopModelRequest {
+    LoopModelRequest {
+        messages: vec![LoopModelMessage {
+            role: "user".to_string(),
+            content_ref: LoopMessageRef::new("msg:user-message").unwrap(),
+        }],
+        surface_version: None,
+        model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+    }
+}
+
+fn success_response(context: &LoopRunContext) -> LoopModelResponse {
+    LoopModelResponse {
+        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+            safe_text_delta: "safe delta".to_string(),
+        }],
+        output: ParentLoopOutput::AssistantReply(AssistantReply {
+            content: "hello".to_string(),
+        }),
+        effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KB-006 acceptance criteria tests
+// ---------------------------------------------------------------------------
+
+/// Denied policy rejects without calling the downstream provider gateway.
+#[tokio::test]
+async fn denied_policy_rejects_without_calling_gateway() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Ok(success_response(&context)));
+
+    let port = HostManagedLoopModelPort::with_guards(
+        context.clone(),
+        gateway.clone(),
+        milestone_sink.clone(),
+        Arc::new(RecordingBudgetAccountant::new()),
+        Arc::new(DenyAllPolicyGuard),
+    );
+
+    let error = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert!(error.safe_summary.contains("model denied by policy"));
+    // Gateway was never called.
+    assert_eq!(gateway.requests().len(), 0);
+    // No milestones emitted.
+    assert!(milestone_sink.milestones().is_empty());
+}
+
+/// Missing/unavailable credential returns a stable sanitized error with the
+/// CredentialUnavailable kind, containing no raw credential strings.
+#[tokio::test]
+async fn missing_credential_returns_sanitized_credential_unavailable_error() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Err(LoopModelGatewayError::new(
+        AgentLoopHostErrorKind::CredentialUnavailable,
+        "credential not available for requested model",
+    )
+    .unwrap()));
+
+    let port =
+        HostManagedLoopModelPort::new(context.clone(), gateway.clone(), milestone_sink.clone());
+
+    let error = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::CredentialUnavailable);
+    let serialized = serde_json::to_string(&error).unwrap();
+    let debug_output = format!("{:?}", error);
+    // No raw credential strings leak.
+    for sentinel in ["sk-test", "OPENAI_API_KEY", "Bearer ", "authorization:"] {
+        assert!(
+            !serialized.contains(sentinel),
+            "serialized error must not contain `{sentinel}`"
+        );
+        assert!(
+            !debug_output.contains(sentinel),
+            "debug output must not contain `{sentinel}`"
+        );
+    }
+}
+
+/// Redaction sentinel test: push a response/error containing known sentinels
+/// and verify they don't appear in serialized errors, debug output, deltas,
+/// milestone metadata, or safe summaries.
+#[tokio::test]
+async fn redaction_sentinels_never_leak_through_serialized_surfaces() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+
+    // Success path: response content has a sentinel, but milestones must not expose it.
+    gateway.push_response(Ok(LoopModelResponse {
+        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+            safe_text_delta: "RAW_CREDENTIAL_SENTINEL visible in chunk".to_string(),
+        }],
+        output: ParentLoopOutput::AssistantReply(AssistantReply {
+            content: "sk-test-key-12345 leaked content".to_string(),
+        }),
+        effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+    }));
+
+    let port =
+        HostManagedLoopModelPort::new(context.clone(), gateway.clone(), milestone_sink.clone());
+
+    let response = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap();
+
+    // Milestones must not contain the sentinels.
+    let serialized_milestones = serde_json::to_string(&milestone_sink.milestones()).unwrap();
+    for sentinel in ["RAW_CREDENTIAL_SENTINEL", "sk-test-key-12345"] {
+        assert!(
+            !serialized_milestones.contains(sentinel),
+            "milestone serialization must not contain `{sentinel}`"
+        );
+    }
+
+    let serialized_response = serde_json::to_string(&response).unwrap();
+    let debug_response = format!("{:?}", response);
+    for sentinel in ["RAW_CREDENTIAL_SENTINEL", "sk-test-key-12345"] {
+        assert!(
+            response
+                .chunks
+                .iter()
+                .all(|chunk| !chunk.safe_text_delta.contains(sentinel)),
+            "model chunks must not contain `{sentinel}`"
+        );
+        assert!(
+            !serialized_response.contains(sentinel),
+            "serialized response must not contain `{sentinel}`"
+        );
+        assert!(
+            !debug_response.contains(sentinel),
+            "debug response must not contain `{sentinel}`"
+        );
+    }
+
+    let debug_milestones = format!("{:?}", milestone_sink.milestones());
+    for sentinel in ["RAW_CREDENTIAL_SENTINEL", "sk-test-key-12345"] {
+        assert!(
+            !debug_milestones.contains(sentinel),
+            "milestone debug output must not contain `{sentinel}`"
+        );
+    }
+
+    // Error path: push a gateway error and verify it is clean.
+    let gateway2 = Arc::new(RecordingLoopModelGateway::default());
+    gateway2.push_response(Err(LoopModelGatewayError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "model unavailable",
+    )
+    .unwrap()));
+    let milestone_sink2 = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let port2 =
+        HostManagedLoopModelPort::new(context.clone(), gateway2.clone(), milestone_sink2.clone());
+
+    let error = port2
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap_err();
+
+    let serialized_error = serde_json::to_string(&error).unwrap();
+    let debug_error = format!("{:?}", error);
+    for sentinel in [
+        "RAW_CREDENTIAL_SENTINEL",
+        "sk-test-key-12345",
+        "api_key",
+        "secret",
+    ] {
+        assert!(
+            !serialized_error.contains(sentinel),
+            "serialized error must not contain `{sentinel}`"
+        );
+        assert!(
+            !debug_error.contains(sentinel),
+            "debug error must not contain `{sentinel}`"
+        );
+    }
+}
+
+/// LoopSafeSummary rejects API-key-like tokens and known credential patterns.
+#[test]
+fn safe_summary_validation_rejects_credential_patterns() {
+    // sk-prefixed tokens
+    assert!(
+        LoopModelGatewayError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "token:sk-test-secret-key"
+        )
+        .is_err()
+    );
+    // "api key" family
+    assert!(
+        LoopModelGatewayError::new(
+            AgentLoopHostErrorKind::Unauthorized,
+            "openai request failed: invalid api key"
+        )
+        .is_err()
+    );
+    // "bearer " prefix
+    assert!(
+        LoopModelGatewayError::new(
+            AgentLoopHostErrorKind::Unauthorized,
+            "authorization: bearer xyz"
+        )
+        .is_err()
+    );
+    // But clean summaries pass
+    assert!(
+        LoopModelGatewayError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable")
+            .is_ok()
+    );
+}
+
+/// Budget accounting on success: both pre and post hooks fire with correct context.
+#[tokio::test]
+async fn budget_accounting_on_success_invokes_pre_and_post() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Ok(success_response(&context)));
+    let accountant = Arc::new(RecordingBudgetAccountant::new());
+
+    let port = HostManagedLoopModelPort::with_accountant(
+        context.clone(),
+        gateway.clone(),
+        milestone_sink.clone(),
+        accountant.clone(),
+    );
+
+    let _response = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap();
+
+    assert!(accountant.was_pre_called());
+    assert!(accountant.was_post_called());
+    assert!(!accountant.post_saw_failure());
+    // Gateway was called.
+    assert_eq!(gateway.requests().len(), 1);
+}
+
+/// Post-call accounting failure after provider success fails closed instead of
+/// returning an unaccounted successful response.
+#[tokio::test]
+async fn post_accounting_failure_after_success_fails_closed() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Ok(success_response(&context)));
+    let accountant = Arc::new(RecordingBudgetAccountant::rejecting_post());
+
+    let port = HostManagedLoopModelPort::with_accountant(
+        context.clone(),
+        gateway.clone(),
+        milestone_sink.clone(),
+        accountant.clone(),
+    );
+
+    let error = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    assert_eq!(error.safe_summary, "model call accounting failed");
+    assert!(accountant.was_pre_called());
+    assert!(accountant.was_post_called());
+    assert!(!accountant.post_saw_failure());
+    assert_eq!(gateway.requests().len(), 1);
+}
+
+/// Model-started milestone projection failures are non-fatal; accounting still
+/// wraps the provider call and records its actual outcome.
+#[tokio::test]
+async fn model_started_failure_still_accounts_provider_outcome() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(FailingOnModelStartedMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Ok(success_response(&context)));
+    let accountant = Arc::new(RecordingBudgetAccountant::new());
+
+    let port = HostManagedLoopModelPort::with_accountant(
+        context.clone(),
+        gateway.clone(),
+        milestone_sink.clone(),
+        accountant.clone(),
+    );
+
+    let response = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.effective_model_profile_id,
+        context.resolved_run_profile.model_profile_id
+    );
+    assert!(accountant.was_pre_called());
+    assert!(accountant.was_post_called());
+    assert!(!accountant.post_saw_failure());
+    assert_eq!(gateway.requests().len(), 1);
+    assert_eq!(milestone_sink.kind_names(), vec!["model_completed"]);
+}
+
+/// Budget accounting on failure: post hook still fires.
+#[tokio::test]
+async fn budget_accounting_on_failure_still_fires_post() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Err(LoopModelGatewayError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "model unavailable",
+    )
+    .unwrap()));
+    let accountant = Arc::new(RecordingBudgetAccountant::new());
+
+    let port = HostManagedLoopModelPort::with_accountant(
+        context.clone(),
+        gateway.clone(),
+        milestone_sink.clone(),
+        accountant.clone(),
+    );
+
+    let error = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    assert!(accountant.was_pre_called());
+    assert!(accountant.was_post_called());
+    assert!(accountant.post_saw_failure());
+}
+
+/// Post-call accounting failure after provider failure must fail closed so
+/// reservation cleanup/reconciliation loss cannot hide behind the model error.
+#[tokio::test]
+async fn post_accounting_failure_after_gateway_failure_fails_closed() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Err(LoopModelGatewayError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "model unavailable",
+    )
+    .unwrap()));
+    let accountant = Arc::new(RecordingBudgetAccountant::rejecting_post());
+
+    let port = HostManagedLoopModelPort::with_accountant(
+        context.clone(),
+        gateway.clone(),
+        milestone_sink.clone(),
+        accountant.clone(),
+    );
+
+    let error = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    assert_eq!(error.safe_summary, "model call accounting failed");
+    assert!(accountant.was_pre_called());
+    assert!(accountant.was_post_called());
+    assert!(accountant.post_saw_failure());
+    assert_eq!(gateway.requests().len(), 1);
+    assert_eq!(
+        milestone_sink
+            .milestones()
+            .iter()
+            .map(|milestone| milestone.kind.kind_name())
+            .collect::<Vec<_>>(),
+        vec!["model_started", "model_failed"]
+    );
+}
+
+/// Budget-exceeded pre-call rejection prevents gateway call.
+#[tokio::test]
+async fn budget_exceeded_pre_call_rejects_without_calling_gateway() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Ok(success_response(&context)));
+    let accountant = Arc::new(RecordingBudgetAccountant::rejecting());
+
+    let port = HostManagedLoopModelPort::with_accountant(
+        context.clone(),
+        gateway.clone(),
+        milestone_sink.clone(),
+        accountant.clone(),
+    );
+
+    let error = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    assert!(error.safe_summary.contains("budget exceeded"));
+    // Gateway was never called.
+    assert_eq!(gateway.requests().len(), 0);
+    // No milestones emitted.
+    assert!(milestone_sink.milestones().is_empty());
+    // Pre was called, post was not (pre rejected before gateway).
+    assert!(accountant.was_pre_called());
+    assert!(!accountant.was_post_called());
+}
+
+/// Error kind mapping: verify all gateway error kinds map correctly through
+/// HostManagedLoopModelPort to the corresponding AgentLoopHostError kinds.
+#[tokio::test]
+async fn error_kind_mapping_through_host_managed_port() {
+    let context = claimed_run_context().await;
+
+    let kinds_and_summaries = [
+        (AgentLoopHostErrorKind::Unavailable, "model unavailable"),
+        (
+            AgentLoopHostErrorKind::Unauthorized,
+            "model call unauthorized",
+        ),
+        (
+            AgentLoopHostErrorKind::BudgetExceeded,
+            "model call budget exceeded",
+        ),
+        (
+            AgentLoopHostErrorKind::PolicyDenied,
+            "model denied by policy",
+        ),
+        (
+            AgentLoopHostErrorKind::CredentialUnavailable,
+            "credential not available for requested model",
+        ),
+    ];
+
+    for (expected_kind, summary) in kinds_and_summaries {
+        let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+        let gateway = Arc::new(RecordingLoopModelGateway::default());
+        gateway.push_response(Err(
+            LoopModelGatewayError::new(expected_kind, summary).unwrap()
+        ));
+
+        let port =
+            HostManagedLoopModelPort::new(context.clone(), gateway.clone(), milestone_sink.clone());
+
+        let error = port
+            .stream_model(simple_model_request(&context))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.kind, expected_kind,
+            "expected {expected_kind:?} but got {:?}",
+            error.kind
+        );
+        assert_eq!(error.safe_summary, summary);
     }
 }

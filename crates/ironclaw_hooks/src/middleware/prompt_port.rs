@@ -177,11 +177,11 @@ fn synthesize_hook_message_ref(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ordering::HookPriority;
     use crate::dispatch::BeforePromptHookImpl;
     use crate::identity::{ExtensionId, HookId, HookLocalId, HookVersion};
     use crate::kinds::mutator::PatchOrdinalHint;
     use crate::ordering::HookPhase;
+    use crate::ordering::HookPriority;
     use crate::registry::{HookBinding, HookPointSpec, HookRegistry};
     use crate::sink::{
         PrivilegedBeforePromptHook, PrivilegedMutatorSink, RestrictedBeforePromptHook,

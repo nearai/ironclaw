@@ -94,11 +94,11 @@ impl LoopTranscriptPort for HookedLoopTranscriptPort {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ordering::HookPriority;
     use crate::dispatch::ObserverHookImpl;
     use crate::identity::{HookId, HookVersion};
     use crate::kinds::observer::NoteCategory;
     use crate::ordering::HookPhase;
+    use crate::ordering::HookPriority;
     use crate::points::ObserverHookContext;
     use crate::registry::{HookBinding, HookRegistry};
     use crate::sink::{ObserverHook, ObserverSink};

@@ -62,7 +62,7 @@ impl HookId {
         use std::fmt::Write;
         let mut s = String::with_capacity(64);
         for byte in self.0 {
-            write!(s, "{byte:02x}").expect("writing to String never fails");
+            write!(s, "{byte:02x}").expect("writing to String never fails"); // safety: std::fmt::Write for String is infallible
         }
         s
     }

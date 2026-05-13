@@ -41,7 +41,8 @@ pub use host::{
     LoopProgressPort, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
     LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
     ModelStreamChunk, ParentLoopOutput, ProcessHandleSummary, PromptMode, UpdateAssistantDraft,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, validate_model_route_component_value,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
+    validate_model_route_component_value,
 };
 pub use instruction_bundle::{
     InMemoryInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,
@@ -58,7 +59,9 @@ pub use milestones::{
     RunScopedHookMilestoneSink,
 };
 pub use model::{
-    HostManagedLoopModelPort, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,
+    HostManagedLoopModelPort, LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,
+    LoopModelGatewayRequest, LoopModelPolicyGuard, ModelCallOutcome, NoOpBudgetAccountant,
+    NoOpPolicyGuard,
 };
 pub use policy::{
     CancellationPolicy, CheckpointPolicy, PrivilegedRunProfileDimension,

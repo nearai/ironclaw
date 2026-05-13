@@ -160,7 +160,7 @@ impl PredicateEvaluator {
                         let mut history = self
                             .invocation_history
                             .lock()
-                            .expect("predicate history mutex poisoned");
+                            .expect("predicate history mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
                         if !history.contains_key(&key) && history.len() >= MAX_HISTORY_KEYS {
                             evict_lru_invocation(&mut history, &self.evictions);
                         }
@@ -228,7 +228,7 @@ impl PredicateEvaluator {
                         let mut history = self
                             .value_history
                             .lock()
-                            .expect("predicate value history mutex poisoned");
+                            .expect("predicate value history mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
                         if !history.contains_key(&key) && history.len() >= MAX_HISTORY_KEYS {
                             evict_lru_value(&mut history, &self.evictions);
                         }

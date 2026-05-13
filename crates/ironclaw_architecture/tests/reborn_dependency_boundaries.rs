@@ -1250,22 +1250,8 @@ fn assert_no_normal_workspace_deps<'a>(
         // The landing plan introduces Reborn crates in grouped PRs. Boundary
         // rules become active as soon as their crate is present in the
         // workspace, while absent future crates are ignored in earlier slices.
-        //
-        // Fail closed when the crate directory is on disk but missing from
-        // `cargo metadata` — that combination means the crate exists but
-        // was never registered as a workspace member, so its forbidden
-        // edges would otherwise silently pass without ever being checked.
-        let crate_manifest = workspace_root()
-            .join("crates")
-            .join(crate_name)
-            .join("Cargo.toml");
-        assert!(
-            !crate_manifest.exists(),
-            "{crate_name} has a Cargo.toml at {} but is not in `cargo metadata` output; \
-             add it to the root `Cargo.toml` `workspace.members` so the boundary rule \
-             actually runs against its dependencies",
-            crate_manifest.display()
-        );
+        // `reborn_boundary_rules_active_crates_are_workspace_members` covers
+        // present-on-disk crates that are missing from `cargo metadata`.
         return;
     };
     for forbidden in forbidden {

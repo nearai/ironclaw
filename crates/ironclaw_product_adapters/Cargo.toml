@@ -34,5 +34,4 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dev-dependencies]
-ironclaw_product_adapters = { path = ".", features = ["test-support"] }
 tokio = { version = "1", features = ["macros", "rt", "sync"] }

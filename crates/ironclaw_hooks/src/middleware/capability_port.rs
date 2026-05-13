@@ -192,6 +192,16 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
                 Some(translated) => translated,
                 None => self.inner.invoke_capability(invocation).await?,
             };
+            // Fire AfterCapability observers per batch entry, mirroring the
+            // single-invocation path. Telemetry must reflect every batched
+            // invocation regardless of whether the hook short-circuited.
+            let _ = self
+                .dispatcher
+                .dispatch_observer_at(
+                    crate::registry::HookPointSpec::AfterCapability,
+                    self.tenant_id.clone(),
+                )
+                .await;
             if outcome.is_suspension() && stop_on_first_suspension {
                 stopped_on_suspension = true;
             }
@@ -223,7 +233,7 @@ impl HookedLoopCapabilityPort {
             GateDecisionInner::Deny { reason } => {
                 Some(CapabilityOutcome::Denied(CapabilityDenied {
                     reason_kind: CapabilityDeniedReasonKind::unknown("hook_denied")
-                        .expect("hook_denied is a valid loop-safe identifier"),
+                        .expect("hook_denied is a valid loop-safe identifier"), // safety: literal ASCII identifier, validated by LoopGateRef constructor contract
                     safe_summary: reason.as_str().to_string(),
                 }))
             }
@@ -260,7 +270,7 @@ impl HookedLoopCapabilityPort {
 fn fail_closed_gate_ref_unavailable(sanitized_reason: &str) -> CapabilityOutcome {
     CapabilityOutcome::Denied(CapabilityDenied {
         reason_kind: CapabilityDeniedReasonKind::unknown("hook_gate_ref_unavailable")
-            .expect("hook_gate_ref_unavailable is a valid loop-safe identifier"),
+            .expect("hook_gate_ref_unavailable is a valid loop-safe identifier"), // safety: literal ASCII identifier, validated by LoopGateRef constructor contract
         safe_summary: sanitized_reason.to_string(),
     })
 }
@@ -274,7 +284,11 @@ fn invocation_arguments_digest(invocation: &CapabilityInvocation) -> [u8; 32] {
     let cap = invocation.capability_id.to_string();
     hasher.update(&(cap.len() as u64).to_le_bytes());
     hasher.update(cap.as_bytes());
-    let input = format!("{:?}", invocation.input_ref);
+    // `as_str()` is the stable accessor for `CapabilityInputRef`. We avoid
+    // `format!("{:?}", ...)` because `Debug` is not a stability contract —
+    // a field rename or stdlib formatter change would silently shift the
+    // digest, breaking any repetition-detection hook keyed on it.
+    let input = invocation.input_ref.as_str();
     hasher.update(&(input.len() as u64).to_le_bytes());
     hasher.update(input.as_bytes());
     hasher.finalize().into()
@@ -283,10 +297,10 @@ fn invocation_arguments_digest(invocation: &CapabilityInvocation) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ordering::HookPriority;
     use crate::dispatch::BeforeCapabilityHookImpl;
     use crate::identity::{ExtensionId, HookId, HookLocalId, HookVersion};
     use crate::ordering::HookPhase;
+    use crate::ordering::HookPriority;
     use crate::registry::{HookBinding, HookBindingScope, HookPointSpec, HookRegistry};
     use crate::sink::{RestrictedBeforeCapabilityHook, RestrictedGateSink};
     use crate::trust::HookTrustClass;

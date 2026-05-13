@@ -517,6 +517,10 @@ impl LoopRunContext {
 #[serde(rename_all = "snake_case")]
 pub enum AgentLoopHostErrorKind {
     Unauthorized,
+    /// Host-owned credential acquisition failed for the requested provider/model.
+    /// The error summary must stay sanitized and must not expose secret material,
+    /// token refresh details, or backend-specific credential-store errors.
+    CredentialUnavailable,
     ScopeMismatch,
     StaleSurface,
     InvalidInvocation,
@@ -533,6 +537,7 @@ impl AgentLoopHostErrorKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Unauthorized => "unauthorized",
+            Self::CredentialUnavailable => "credential_unavailable",
             Self::ScopeMismatch => "scope_mismatch",
             Self::StaleSurface => "stale_surface",
             Self::InvalidInvocation => "invalid_invocation",
@@ -829,6 +834,49 @@ pub struct LoopModelResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelStreamChunk {
     pub safe_text_delta: String,
+}
+
+/// Redact credential-looking tokens before model deltas cross public/loggable
+/// loop surfaces.
+pub fn sanitize_model_visible_text(value: impl Into<String>) -> String {
+    let value = value.into();
+    let mut sanitized = String::with_capacity(value.len());
+    let mut token = String::new();
+
+    for character in value.chars() {
+        if character.is_whitespace() {
+            flush_sanitized_model_token(&mut sanitized, &mut token);
+            sanitized.push(character);
+        } else {
+            token.push(character);
+        }
+    }
+    flush_sanitized_model_token(&mut sanitized, &mut token);
+
+    sanitized
+}
+
+fn flush_sanitized_model_token(sanitized: &mut String, token: &mut String) {
+    if token.is_empty() {
+        return;
+    }
+    if model_token_needs_redaction(token) {
+        sanitized.push_str("[redacted]");
+    } else {
+        sanitized.push_str(token);
+    }
+    token.clear();
+}
+
+fn model_token_needs_redaction(token: &str) -> bool {
+    let normalized = token
+        .trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .to_ascii_lowercase();
+    normalized.starts_with("sk-")
+        || normalized.contains("api_key")
+        || normalized.contains("access_token")
+        || normalized.contains("raw_credential_sentinel")
+        || normalized.contains("raw_provider_secret")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
