@@ -4,14 +4,18 @@ use ironclaw_product_adapters::{
     AdapterInstallationId, AuthRequirement, DeclaredEgressHost, DeclaredEgressTarget,
     EgressCredentialHandle, ProductAdapterCapabilities, ProductAdapterId, ProtocolAuthEvidence,
 };
+use ironclaw_wasm_sandbox_core::{
+    SandboxError, add_minimal_wasi_to_linker, component_engine,
+    configure_store as configure_sandbox_store, elapsed_millis,
+};
 use serde_json::Value;
 use wasmtime::component::Linker;
-use wasmtime::{Config, Engine, Store};
+use wasmtime::{Engine, Store};
 
 use crate::bindings;
 use crate::bindings::exports::near::product_adapter::product_adapter;
 use crate::config::{
-    EPOCH_TICK_INTERVAL, PRODUCT_ADAPTER_WIT_VERSION, ProductAdapterComponentLimits,
+    PRODUCT_ADAPTER_WIT_VERSION, ProductAdapterComponentLimits,
     ProductAdapterComponentRuntimeConfig,
 };
 use crate::egress_policy::{EgressPolicy, EgressPolicyTarget};
@@ -41,6 +45,16 @@ pub enum RuntimeError {
         field: &'static str,
         message: String,
     },
+}
+
+impl From<SandboxError> for RuntimeError {
+    fn from(error: SandboxError) -> Self {
+        match error {
+            SandboxError::EngineCreationFailed(message) => Self::EngineCreationFailed(message),
+            SandboxError::StoreConfiguration(message) => Self::StoreConfiguration(message),
+            SandboxError::LinkerConfiguration(message) => Self::LinkerConfiguration(message),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,16 +118,7 @@ pub struct ProductAdapterComponentRuntime {
 
 impl ProductAdapterComponentRuntime {
     pub fn new(config: ProductAdapterComponentRuntimeConfig) -> Result<Self, RuntimeError> {
-        let mut wasmtime_config = Config::new();
-        wasmtime_config.wasm_component_model(true);
-        wasmtime_config.wasm_threads(false);
-        wasmtime_config.consume_fuel(true);
-        wasmtime_config.epoch_interruption(true);
-        wasmtime_config.debug_info(false);
-
-        let engine = Engine::new(&wasmtime_config)
-            .map_err(|error| RuntimeError::EngineCreationFailed(error.to_string()))?;
-        spawn_epoch_ticker(engine.clone())?;
+        let engine = component_engine("reborn-product-adapter-wasm-epoch-ticker")?;
 
         Ok(Self { engine, config })
     }
@@ -373,37 +378,17 @@ fn validate_rendered_egress_request(
         })
 }
 
-fn spawn_epoch_ticker(engine: Engine) -> Result<(), RuntimeError> {
-    std::thread::Builder::new()
-        .name("reborn-product-adapter-wasm-epoch-ticker".into())
-        .spawn(move || {
-            loop {
-                std::thread::sleep(EPOCH_TICK_INTERVAL);
-                engine.increment_epoch();
-            }
-        })
-        .map(|_| ())
-        .map_err(|error| RuntimeError::EngineCreationFailed(error.to_string()))
-}
-
 fn configure_store(
     store: &mut Store<StoreData>,
     limits: &ProductAdapterComponentLimits,
 ) -> Result<(), RuntimeError> {
-    store
-        .set_fuel(limits.fuel)
-        .map_err(|error| RuntimeError::StoreConfiguration(error.to_string()))?;
-    store.epoch_deadline_trap();
-    let ticks = (limits.timeout.as_millis() / EPOCH_TICK_INTERVAL.as_millis()).max(1) as u64;
-    store.set_epoch_deadline(ticks);
-    store.limiter(|data| &mut data.limiter);
+    configure_sandbox_store(store, limits)?;
     Ok(())
 }
 
 fn create_linker(engine: &Engine) -> Result<Linker<StoreData>, RuntimeError> {
     let mut linker = Linker::new(engine);
-    wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
-        .map_err(|error| RuntimeError::LinkerConfiguration(error.to_string()))?;
+    add_minimal_wasi_to_linker(&mut linker)?;
     bindings::ProductAdapterComponent::add_to_linker::<_, wasmtime::component::HasSelf<_>>(
         &mut linker,
         |state: &mut StoreData| state,
@@ -426,10 +411,6 @@ fn ensure_execution_not_timed_out(
         ));
     }
     Ok(())
-}
-
-fn elapsed_millis(started: Instant) -> u64 {
-    started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn execution_failed(message: String, store: &Store<StoreData>) -> RuntimeError {

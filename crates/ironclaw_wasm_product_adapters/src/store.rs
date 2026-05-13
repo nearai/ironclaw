@@ -1,10 +1,11 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use ironclaw_wasm_sandbox_core::{
+    MinimalWasiCtxView, MinimalWasiView, SandboxStoreCore, SandboxStoreData, WasmResourceLimiter,
+};
 
 use crate::bindings;
 use crate::config::{MAX_LOG_MESSAGE_BYTES, MAX_LOGS_PER_EXECUTION};
-use crate::limiter::WasmResourceLimiter;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComponentLogLevel {
@@ -22,36 +23,36 @@ pub struct ComponentLogRecord {
 }
 
 pub(crate) struct StoreData {
-    pub(crate) limiter: WasmResourceLimiter,
-    wasi: WasiCtx,
-    table: ResourceTable,
+    sandbox: SandboxStoreCore,
     pub(crate) logs: Vec<ComponentLogRecord>,
-    deadline: Option<Instant>,
 }
 
 impl StoreData {
     pub(crate) fn new(memory_limit: u64, timeout: Duration) -> Self {
         Self {
-            limiter: WasmResourceLimiter::new(memory_limit),
-            wasi: WasiCtxBuilder::new().build(),
-            table: ResourceTable::new(),
+            sandbox: SandboxStoreCore::new(memory_limit, timeout),
             logs: Vec::new(),
-            deadline: Instant::now().checked_add(timeout),
         }
     }
 
     pub(crate) fn deadline_exceeded(&self) -> bool {
-        self.deadline
-            .is_some_and(|deadline| Instant::now() >= deadline)
+        self.sandbox.deadline_exceeded()
+    }
+
+    pub(crate) fn limiter_mut(&mut self) -> &mut WasmResourceLimiter {
+        self.sandbox.limiter_mut()
     }
 }
 
-impl WasiView for StoreData {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.wasi,
-            table: &mut self.table,
-        }
+impl SandboxStoreData for StoreData {
+    fn sandbox_limiter(&mut self) -> &mut WasmResourceLimiter {
+        self.limiter_mut()
+    }
+}
+
+impl MinimalWasiView for StoreData {
+    fn ctx(&mut self) -> MinimalWasiCtxView<'_> {
+        self.sandbox.ctx()
     }
 }
 

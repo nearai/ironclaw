@@ -35,7 +35,6 @@ mod bindings;
 pub mod component_runtime;
 pub mod config;
 pub mod egress_policy;
-mod limiter;
 pub mod runner;
 pub mod store;
 
