@@ -218,7 +218,11 @@ fn pause_approval_dispatcher() -> Arc<HookDispatcher> {
     );
     let mut dispatcher = HookDispatcher::new(HookRegistry::new());
     dispatcher
-        .install_installed_before_capability(hook_id, HookPhase::Policy, Box::new(PauseApprovalHook))
+        .install_installed_before_capability(
+            hook_id,
+            HookPhase::Policy,
+            Box::new(PauseApprovalHook),
+        )
         .expect("install pause-approval hook");
     Arc::new(dispatcher)
 }

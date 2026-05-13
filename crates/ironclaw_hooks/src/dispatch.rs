@@ -1000,11 +1000,8 @@ mod tests {
             _ctx: &BeforePromptHookContext,
             sink: &mut dyn RestrictedMutatorSink,
         ) {
-            sink.add_envelope_snippet(
-                "Untrusted hook content: safety".to_string(),
-                PatchOrdinalHint::Last,
-            )
-            .expect("ok");
+            sink.add_envelope_snippet("safety".to_string(), PatchOrdinalHint::Last)
+                .expect("ok");
         }
     }
 
