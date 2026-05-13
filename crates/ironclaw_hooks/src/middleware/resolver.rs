@@ -14,6 +14,7 @@
 //! unresolved case.
 
 use async_trait::async_trait;
+use ironclaw_host_api::ExtensionId;
 use ironclaw_turns::run_profile::CapabilityInvocation;
 
 /// Resolves a [`CapabilityInvocation`]'s input ref to a sanitized JSON view.
@@ -43,6 +44,41 @@ impl CapabilityInputResolver for NullCapabilityInputResolver {
     }
 }
 
+/// Resolves a capability id to the extension that provides it, when known.
+///
+/// The hook crate cannot know which capabilities are owned by which
+/// extensions — that knowledge lives in the host's capability registry. The
+/// middleware accepts an `Arc<dyn CapabilityProviderResolver>` and consults
+/// it on every invocation; the resolved provider is threaded into
+/// [`crate::points::BeforeCapabilityHookContext::provider`] and the dispatcher
+/// uses it to enforce manifest-declared hook scope.
+///
+/// Implementations should return:
+///
+/// - `Some(ext)` when the capability is known to be provided by extension
+///   `ext`.
+/// - `None` when the provider is unknown or the capability is host-internal
+///   (e.g., a Builtin capability with no `ExtensionId`). Hooks with scope
+///   [`crate::registry::HookBindingScope::OwnCapabilities`] will NOT fire
+///   against such invocations — the conservative default.
+#[async_trait]
+pub trait CapabilityProviderResolver: Send + Sync {
+    async fn provider_for(&self, capability_id: &str) -> Option<ExtensionId>;
+}
+
+/// Default provider resolver that never resolves a provider. Used when the
+/// middleware composer hasn't wired in a production resolver. With this
+/// resolver in place, `OwnCapabilities`-scoped hooks effectively never fire,
+/// which is the conservative default until the host can answer the question.
+pub struct NullCapabilityProviderResolver;
+
+#[async_trait]
+impl CapabilityProviderResolver for NullCapabilityProviderResolver {
+    async fn provider_for(&self, _capability_id: &str) -> Option<ExtensionId> {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,5 +94,11 @@ mod tests {
             input_ref: CapabilityInputRef::new("input:x").expect("ok"),
         };
         assert!(resolver.resolve(&invocation).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn null_provider_resolver_returns_none() {
+        let resolver = NullCapabilityProviderResolver;
+        assert!(resolver.provider_for("cap.x").await.is_none());
     }
 }

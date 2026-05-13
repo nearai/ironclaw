@@ -243,6 +243,8 @@ mod tests {
             trust_class,
             phase: HookPhase::Policy,
             point: HookPointSpec::BeforePrompt,
+            owning_extension: None,
+            scope: crate::registry::HookBindingScope::Global,
             poisoned: false,
         };
         let mut registry = HookRegistry::new();

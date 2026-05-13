@@ -23,7 +23,7 @@ use crate::kinds::mutator::HookPatch;
 use crate::kinds::observer::ObserverFact;
 use crate::ordering::{HookOrderKey, HookPhase};
 use crate::points::{BeforeCapabilityHookContext, BeforePromptHookContext, ObserverHookContext};
-use crate::registry::{HookBinding, HookPointSpec, HookRegistry};
+use crate::registry::{HookBinding, HookBindingScope, HookPointSpec, HookRegistry};
 use crate::sink::{
     GateSinkState, ObserverHook, PrivilegedBeforeCapabilityHook, PrivilegedBeforePromptHook,
     RecordingGateSink, RecordingMutatorSink, RecordingObserverSink, RestrictedBeforeCapabilityHook,
@@ -184,6 +184,15 @@ impl HookDispatcher {
         }
     }
 
+    /// Test-only accessor for inspecting registered bindings. The registry
+    /// itself remains private to enforce the dispatcher-as-authority model;
+    /// this hatch only exists so other crates' tests (e.g. the registrar's)
+    /// can assert on binding shape after install.
+    #[doc(hidden)]
+    pub fn registry_for_test(&self) -> &Mutex<HookRegistry> {
+        &self.registry
+    }
+
     /// Insert a new binding into the dispatcher's registry. Used by the
     /// [`crate::registrar::HookRegistrar`] to wire manifest entries into a
     /// live dispatcher. Returns the same errors as
@@ -238,6 +247,8 @@ impl HookDispatcher {
             trust_class: HookTrustClass::Builtin,
             phase,
             point: HookPointSpec::BeforeCapability,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
             poisoned: false,
         };
         self.insert_binding(binding)?;
@@ -259,6 +270,8 @@ impl HookDispatcher {
             trust_class: HookTrustClass::Trusted,
             phase,
             point: HookPointSpec::BeforeCapability,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
             poisoned: false,
         };
         self.insert_binding(binding)?;
@@ -269,10 +282,18 @@ impl HookDispatcher {
     /// Install an `Installed`-tier `before_capability` hook. The impl trait is
     /// `RestrictedBeforeCapabilityHook`, whose sink cannot mint `allow` — this
     /// makes "Installed cannot Allow" a type-level fact.
+    ///
+    /// `owning_extension` is the [`ironclaw_host_api::ExtensionId`] of the
+    /// extension that authored the hook (from the manifest), and `scope`
+    /// reflects the manifest-declared scope. The dispatcher consults both at
+    /// invocation time to filter out hooks that shouldn't fire against the
+    /// current capability's provider.
     pub(crate) fn install_installed_before_capability(
         &mut self,
         hook_id: HookId,
         phase: HookPhase,
+        owning_extension: ironclaw_host_api::ExtensionId,
+        scope: HookBindingScope,
         hook: Box<dyn RestrictedBeforeCapabilityHook>,
     ) -> Result<(), crate::error::HookError> {
         let binding = HookBinding {
@@ -281,6 +302,8 @@ impl HookDispatcher {
             trust_class: HookTrustClass::Installed,
             phase,
             point: HookPointSpec::BeforeCapability,
+            owning_extension: Some(owning_extension),
+            scope,
             poisoned: false,
         };
         self.insert_binding(binding)?;
@@ -302,6 +325,8 @@ impl HookDispatcher {
             trust_class: HookTrustClass::Builtin,
             phase,
             point: HookPointSpec::BeforePrompt,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
             poisoned: false,
         };
         self.insert_binding(binding)?;
@@ -321,6 +346,8 @@ impl HookDispatcher {
             trust_class: HookTrustClass::Trusted,
             phase,
             point: HookPointSpec::BeforePrompt,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
             poisoned: false,
         };
         self.insert_binding(binding)?;
@@ -332,6 +359,8 @@ impl HookDispatcher {
         &mut self,
         hook_id: HookId,
         phase: HookPhase,
+        owning_extension: ironclaw_host_api::ExtensionId,
+        scope: HookBindingScope,
         hook: Box<dyn RestrictedBeforePromptHook>,
     ) -> Result<(), crate::error::HookError> {
         let binding = HookBinding {
@@ -340,6 +369,8 @@ impl HookDispatcher {
             trust_class: HookTrustClass::Installed,
             phase,
             point: HookPointSpec::BeforePrompt,
+            owning_extension: Some(owning_extension),
+            scope,
             poisoned: false,
         };
         self.insert_binding(binding)?;
@@ -354,12 +385,15 @@ impl HookDispatcher {
     // generic `install_observer` accepts an explicit trust class; the
     // tier-specific helpers make the common case ergonomic.
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn install_observer(
         &mut self,
         hook_id: HookId,
         phase: HookPhase,
         point: HookPointSpec,
         trust_class: HookTrustClass,
+        owning_extension: Option<ironclaw_host_api::ExtensionId>,
+        scope: HookBindingScope,
         hook: Box<dyn ObserverHook>,
     ) -> Result<(), crate::error::HookError> {
         let binding = HookBinding {
@@ -368,6 +402,8 @@ impl HookDispatcher {
             trust_class,
             phase,
             point,
+            owning_extension,
+            scope,
             poisoned: false,
         };
         self.insert_binding(binding)?;
@@ -382,7 +418,15 @@ impl HookDispatcher {
         point: HookPointSpec,
         hook: Box<dyn ObserverHook>,
     ) -> Result<(), crate::error::HookError> {
-        self.install_observer(hook_id, phase, point, HookTrustClass::Builtin, hook)
+        self.install_observer(
+            hook_id,
+            phase,
+            point,
+            HookTrustClass::Builtin,
+            None,
+            HookBindingScope::Global,
+            hook,
+        )
     }
 
     pub(crate) fn install_trusted_observer(
@@ -392,7 +436,15 @@ impl HookDispatcher {
         point: HookPointSpec,
         hook: Box<dyn ObserverHook>,
     ) -> Result<(), crate::error::HookError> {
-        self.install_observer(hook_id, phase, point, HookTrustClass::Trusted, hook)
+        self.install_observer(
+            hook_id,
+            phase,
+            point,
+            HookTrustClass::Trusted,
+            None,
+            HookBindingScope::Global,
+            hook,
+        )
     }
 
     pub(crate) fn install_installed_observer(
@@ -400,9 +452,19 @@ impl HookDispatcher {
         hook_id: HookId,
         phase: HookPhase,
         point: HookPointSpec,
+        owning_extension: ironclaw_host_api::ExtensionId,
+        scope: HookBindingScope,
         hook: Box<dyn ObserverHook>,
     ) -> Result<(), crate::error::HookError> {
-        self.install_observer(hook_id, phase, point, HookTrustClass::Installed, hook)
+        self.install_observer(
+            hook_id,
+            phase,
+            point,
+            HookTrustClass::Installed,
+            Some(owning_extension),
+            scope,
+            hook,
+        )
     }
 
     /// Dispatch `before_capability`. Hooks run in `(phase, priority, hook_id)`
@@ -427,6 +489,19 @@ impl HookDispatcher {
             // top of the loop, so without this check a binding poisoned mid-
             // dispatch would still be invoked.
             if self.is_poisoned(binding.hook_id) {
+                continue;
+            }
+            // Scope filtering (audit finding C3). The binding's manifest-
+            // declared scope is converted to `HookBindingScope` at install
+            // time; here we just compare against the resolved capability
+            // provider. A hook that doesn't permit the current provider is
+            // inert for this invocation — no sink call, no failure, no
+            // poisoning. `OwnCapabilities` with an unresolved provider does
+            // not fire (conservative default; see `HookBindingScope::permits`).
+            if !binding
+                .scope
+                .permits(binding.owning_extension.as_ref(), ctx.provider.as_ref())
+            {
                 continue;
             }
             let Some(hook) = self.before_capability.get(&binding.hook_id) else {
@@ -1013,10 +1088,12 @@ impl HookDispatcherBuilder {
         mut self,
         hook_id: HookId,
         phase: HookPhase,
+        owning_extension: ironclaw_host_api::ExtensionId,
+        scope: HookBindingScope,
         hook: Box<dyn RestrictedBeforeCapabilityHook>,
     ) -> Result<Self, crate::error::HookError> {
         self.dispatcher
-            .install_installed_before_capability(hook_id, phase, hook)?;
+            .install_installed_before_capability(hook_id, phase, owning_extension, scope, hook)?;
         Ok(self)
     }
 
@@ -1046,23 +1123,35 @@ impl HookDispatcherBuilder {
         mut self,
         hook_id: HookId,
         phase: HookPhase,
+        owning_extension: ironclaw_host_api::ExtensionId,
+        scope: HookBindingScope,
         hook: Box<dyn RestrictedBeforePromptHook>,
     ) -> Result<Self, crate::error::HookError> {
         self.dispatcher
-            .install_installed_before_prompt(hook_id, phase, hook)?;
+            .install_installed_before_prompt(hook_id, phase, owning_extension, scope, hook)?;
         Ok(self)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn install_observer(
         mut self,
         hook_id: HookId,
         phase: HookPhase,
         point: HookPointSpec,
         trust_class: HookTrustClass,
+        owning_extension: Option<ironclaw_host_api::ExtensionId>,
+        scope: HookBindingScope,
         hook: Box<dyn ObserverHook>,
     ) -> Result<Self, crate::error::HookError> {
-        self.dispatcher
-            .install_observer(hook_id, phase, point, trust_class, hook)?;
+        self.dispatcher.install_observer(
+            hook_id,
+            phase,
+            point,
+            trust_class,
+            owning_extension,
+            scope,
+            hook,
+        )?;
         Ok(self)
     }
 
@@ -1095,10 +1184,12 @@ impl HookDispatcherBuilder {
         hook_id: HookId,
         phase: HookPhase,
         point: HookPointSpec,
+        owning_extension: ironclaw_host_api::ExtensionId,
+        scope: HookBindingScope,
         hook: Box<dyn ObserverHook>,
     ) -> Result<Self, crate::error::HookError> {
         self.dispatcher
-            .install_installed_observer(hook_id, phase, point, hook)?;
+            .install_installed_observer(hook_id, phase, point, owning_extension, scope, hook)?;
         Ok(self)
     }
 
@@ -1135,6 +1226,10 @@ mod tests {
         ironclaw_host_api::TenantId::new("alpha").expect("tenant ok")
     }
 
+    fn host_ext() -> ironclaw_host_api::ExtensionId {
+        ironclaw_host_api::ExtensionId::new("ext").expect("ext id ok")
+    }
+
     fn ext_hook_id(local: &str) -> HookId {
         HookId::derive(
             &ExtensionId("ext".to_string()),
@@ -1151,6 +1246,8 @@ mod tests {
             trust_class: HookTrustClass::Installed,
             phase,
             point,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
             poisoned: false,
         }
     }
@@ -1385,6 +1482,8 @@ mod tests {
             trust_class: HookTrustClass::Builtin,
             phase: HookPhase::Validation,
             point: HookPointSpec::BeforeCapability,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
             poisoned: false,
         };
         let mut registry = HookRegistry::new();
@@ -1494,6 +1593,8 @@ mod tests {
                 trust_class: HookTrustClass::Installed,
                 phase: HookPhase::Policy,
                 point: HookPointSpec::BeforePrompt,
+                owning_extension: None,
+                scope: HookBindingScope::Global,
                 poisoned: false,
             })
             .expect("ok");
@@ -1520,6 +1621,8 @@ mod tests {
                 trust_class: HookTrustClass::Builtin,
                 phase: HookPhase::Telemetry,
                 point: HookPointSpec::AfterModel,
+                owning_extension: None,
+                scope: HookBindingScope::Global,
                 poisoned: false,
             })
             .expect("ok");
@@ -1587,6 +1690,8 @@ mod tests {
             .install_installed_before_capability(
                 installed_id,
                 HookPhase::Policy,
+                host_ext(),
+                HookBindingScope::Global,
                 Box::new(PassingInstalledHook),
             )
             .expect("installed installs at policy");
@@ -1624,6 +1729,8 @@ mod tests {
             .install_installed_before_capability(
                 id,
                 HookPhase::Policy,
+                host_ext(),
+                HookBindingScope::Global,
                 Box::new(DenyingInstalledHook),
             )
             .expect("installed installs at policy");
@@ -1684,6 +1791,8 @@ mod tests {
             .install_installed_before_capability(
                 installed_cap,
                 HookPhase::Policy,
+                ironclaw_host_api::ExtensionId::new("loader-installed").expect("valid ext"),
+                crate::registry::HookBindingScope::Global,
                 Box::new(PassingInstalledHook),
             )
             .expect("install_installed_before_capability signature stable");
@@ -1723,6 +1832,8 @@ mod tests {
             .install_installed_before_prompt(
                 installed_prompt,
                 HookPhase::Policy,
+                ironclaw_host_api::ExtensionId::new("loader-installed").expect("valid ext"),
+                crate::registry::HookBindingScope::Global,
                 Box::new(EnvelopePatchHook),
             )
             .expect("install_installed_before_prompt signature stable");
@@ -1770,7 +1881,13 @@ mod tests {
         let id = ext_hook_id("c5-poisoner");
         let mut dispatcher = HookDispatcher::new(HookRegistry::new());
         dispatcher
-            .install_installed_before_capability(id, HookPhase::Policy, Box::new(AlwaysPanicHook))
+            .install_installed_before_capability(
+                id,
+                HookPhase::Policy,
+                host_ext(),
+                HookBindingScope::Global,
+                Box::new(AlwaysPanicHook),
+            )
             .expect("installs ok");
 
         let first = dispatcher.dispatch_before_capability(&ctx()).await;
@@ -1900,6 +2017,8 @@ mod tests {
                 trust_class: HookTrustClass::Installed,
                 phase: HookPhase::Policy,
                 point: HookPointSpec::BeforePrompt,
+                owning_extension: None,
+                scope: HookBindingScope::Global,
                 poisoned: false,
             })
             .expect("ok");
@@ -2321,5 +2440,190 @@ mod tests {
         // No `with_milestone_sink` call.
         let outcome = dispatcher.dispatch_before_capability(&ctx()).await;
         assert!(!outcome.decision.permits());
+    }
+
+    // ── C3 regression: manifest-declared scope enforced at dispatch time ────
+
+    fn host_ext_named(name: &str) -> ironclaw_host_api::ExtensionId {
+        ironclaw_host_api::ExtensionId::new(name).expect("valid ext id")
+    }
+
+    fn ctx_with_provider(
+        capability: &str,
+        provider: Option<ironclaw_host_api::ExtensionId>,
+    ) -> BeforeCapabilityHookContext {
+        BeforeCapabilityHookContext::new(
+            tenant(),
+            capability.to_string(),
+            [0u8; 32],
+            crate::points::SanitizedArguments::unresolved(),
+            provider,
+        )
+    }
+
+    #[tokio::test]
+    async fn own_capabilities_scope_filters_out_cross_extension_invocation() {
+        // Installed hook authored by ext-A, scoped to OwnCapabilities. The
+        // capability under invocation is provided by ext-B; the hook must
+        // not fire and the composed decision is allow.
+        let id = ext_hook_id("c3-own-A");
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+        dispatcher
+            .install_installed_before_capability(
+                id,
+                HookPhase::Policy,
+                host_ext_named("ext-a"),
+                HookBindingScope::OwnCapabilities,
+                Box::new(DenyingInstalledHook),
+            )
+            .expect("install installed hook");
+
+        let outcome = dispatcher
+            .dispatch_before_capability(&ctx_with_provider(
+                "cap.foo",
+                Some(host_ext_named("ext-b")),
+            ))
+            .await;
+        assert!(
+            outcome.decision.permits(),
+            "OwnCapabilities-scoped hook from ext-A must not fire on a cap provided by ext-B"
+        );
+        assert!(
+            outcome.failures.is_empty(),
+            "scope filtering is inert — no failure recorded"
+        );
+    }
+
+    #[tokio::test]
+    async fn own_capabilities_scope_fires_for_matching_extension() {
+        let id = ext_hook_id("c3-own-A-self");
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+        dispatcher
+            .install_installed_before_capability(
+                id,
+                HookPhase::Policy,
+                host_ext_named("ext-a"),
+                HookBindingScope::OwnCapabilities,
+                Box::new(DenyingInstalledHook),
+            )
+            .expect("install installed hook");
+
+        let outcome = dispatcher
+            .dispatch_before_capability(&ctx_with_provider(
+                "cap.foo",
+                Some(host_ext_named("ext-a")),
+            ))
+            .await;
+        assert!(
+            !outcome.decision.permits(),
+            "OwnCapabilities-scoped hook from ext-A must fire on a cap provided by ext-A"
+        );
+    }
+
+    #[tokio::test]
+    async fn own_capabilities_scope_does_not_fire_when_provider_unresolved() {
+        // Conservative default: with no resolver wired in, the provider is
+        // None and OwnCapabilities-scoped hooks stay inert. This is the
+        // documented behavior (see `HookBindingScope::permits`).
+        let id = ext_hook_id("c3-own-unresolved");
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+        dispatcher
+            .install_installed_before_capability(
+                id,
+                HookPhase::Policy,
+                host_ext_named("ext-a"),
+                HookBindingScope::OwnCapabilities,
+                Box::new(DenyingInstalledHook),
+            )
+            .expect("install installed hook");
+
+        let outcome = dispatcher
+            .dispatch_before_capability(&ctx_with_provider("cap.foo", None))
+            .await;
+        assert!(
+            outcome.decision.permits(),
+            "OwnCapabilities-scoped hook must NOT fire when provider is unresolved"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_tenant_scope_fires_regardless_of_provider() {
+        let id = ext_hook_id("c3-same-tenant");
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+        dispatcher
+            .install_installed_before_capability(
+                id,
+                HookPhase::Policy,
+                host_ext_named("ext-a"),
+                HookBindingScope::SameTenant,
+                Box::new(DenyingInstalledHook),
+            )
+            .expect("install installed hook");
+
+        // ext-B provider — must still fire.
+        let outcome_b = dispatcher
+            .dispatch_before_capability(&ctx_with_provider(
+                "cap.foo",
+                Some(host_ext_named("ext-b")),
+            ))
+            .await;
+        assert!(
+            !outcome_b.decision.permits(),
+            "SameTenant hook fires regardless of provider (ext-B)"
+        );
+
+        // Unresolved provider — must also fire.
+        let outcome_none = dispatcher
+            .dispatch_before_capability(&ctx_with_provider("cap.foo", None))
+            .await;
+        assert!(
+            !outcome_none.decision.permits(),
+            "SameTenant hook fires even when provider is unresolved"
+        );
+    }
+
+    /// Builtin hook that always denies — used to verify "did the hook
+    /// actually fire?" by inspecting whether the composed decision flipped
+    /// away from allow.
+    struct DenyingBuiltin;
+    #[async_trait]
+    impl PrivilegedBeforeCapabilityHook for DenyingBuiltin {
+        async fn evaluate(
+            &self,
+            _ctx: &BeforeCapabilityHookContext,
+            sink: &mut dyn PrivilegedGateSink,
+        ) {
+            sink.deny("builtin-fires");
+        }
+    }
+
+    #[tokio::test]
+    async fn builtin_global_scope_always_fires() {
+        let id = HookId::for_builtin("test::c3::builtin::deny", HookVersion::ONE);
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+        dispatcher
+            .install_builtin_before_capability(id, HookPhase::Validation, Box::new(DenyingBuiltin))
+            .expect("install builtin deny hook");
+
+        // Foreign provider — must fire.
+        let outcome_b = dispatcher
+            .dispatch_before_capability(&ctx_with_provider(
+                "cap.foo",
+                Some(host_ext_named("ext-b")),
+            ))
+            .await;
+        assert!(
+            !outcome_b.decision.permits(),
+            "Builtin (Global) hook must fire regardless of provider"
+        );
+
+        // Unresolved provider — must also fire.
+        let outcome_none = dispatcher
+            .dispatch_before_capability(&ctx_with_provider("cap.foo", None))
+            .await;
+        assert!(
+            !outcome_none.decision.permits(),
+            "Builtin (Global) hook must fire even when provider is unresolved"
+        );
     }
 }

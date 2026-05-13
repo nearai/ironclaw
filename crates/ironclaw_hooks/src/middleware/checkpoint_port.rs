@@ -150,6 +150,8 @@ mod tests {
                 trust_class: HookTrustClass::Builtin,
                 phase: HookPhase::Telemetry,
                 point: HookPointSpec::AfterCheckpoint,
+                owning_extension: None,
+                scope: crate::registry::HookBindingScope::Global,
                 poisoned: false,
             })
             .expect("ok");

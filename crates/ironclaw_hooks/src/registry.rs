@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use ironclaw_host_api::ExtensionId;
 use serde::{Deserialize, Serialize};
 
 use crate::error::HookError;
@@ -27,9 +28,82 @@ pub struct HookBinding {
     /// implementation (the trait object) is stored separately so this type
     /// remains serializable for checkpoint payloads.
     pub point: HookPointSpec,
+    /// Extension that authored this hook. `None` for `Builtin` and `Trusted`
+    /// hooks (which observe globally). `Some` for `Installed` hooks; the
+    /// dispatcher consults this in combination with [`Self::scope`] to decide
+    /// whether the hook fires against a given capability invocation.
+    #[serde(default)]
+    pub owning_extension: Option<ExtensionId>,
+    /// Scope of capability invocations this hook fires against. Combined with
+    /// [`Self::owning_extension`] to enforce manifest-declared scope at
+    /// dispatch time. Defaults to [`HookBindingScope::Global`] so existing
+    /// checkpoint payloads (pre-C3) deserialize to "always fire" behavior,
+    /// which is the conservative interpretation for Builtin/Trusted bindings.
+    #[serde(default)]
+    pub scope: HookBindingScope,
     /// `true` if the dispatcher poisoned this slot during the current run.
     /// Persisted so resume cannot re-enable a hook that already crashed.
     pub poisoned: bool,
+}
+
+/// Runtime scope of a hook binding. Distinct from
+/// [`crate::manifest::HookManifestScope`]: the manifest scope is what the
+/// extension *declared*; this is what the dispatcher *enforces*. The two are
+/// related but not identical because `Builtin` and `Trusted` hooks have no
+/// manifest and are intrinsically `Global`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookBindingScope {
+    /// Hook fires against every capability invocation regardless of provider.
+    /// Used by `Builtin` and `Trusted` hooks, and by `Installed` hooks
+    /// granted host-wide observation.
+    #[default]
+    Global,
+    /// Hook fires only when `ctx.provider == binding.owning_extension`. When
+    /// the provider cannot be resolved (capability has no known provider, or
+    /// the middleware has no resolver wired in), the hook does NOT fire — the
+    /// conservative default.
+    OwnCapabilities,
+    /// Hook fires regardless of capability provider, but still scoped to the
+    /// current tenant. Today the dispatcher is per-tenant already, so this
+    /// variant behaves like `Global` in terms of capability filtering. It is
+    /// preserved as a distinct variant so audit / replay can tell the two
+    /// authorities apart.
+    SameTenant,
+}
+
+impl HookBindingScope {
+    /// Returns `true` if a hook with this scope should fire against an
+    /// invocation whose resolved provider is `invocation_provider`.
+    ///
+    /// `owning_extension` is the binding's declared author. For `Global` and
+    /// `SameTenant` this is ignored and the hook always fires. For
+    /// `OwnCapabilities` the hook fires only when both the binding's owning
+    /// extension and the invocation's provider are `Some` and equal.
+    ///
+    /// The `OwnCapabilities` case is intentionally conservative: when the
+    /// invocation provider is `None` (capability without a known provider,
+    /// e.g., no resolver wired in), the hook does not fire. This is the
+    /// documented behavior — see this crate's `CLAUDE.md` and audit finding
+    /// C3.
+    pub fn permits(
+        &self,
+        owning_extension: Option<&ExtensionId>,
+        invocation_provider: Option<&ExtensionId>,
+    ) -> bool {
+        match self {
+            HookBindingScope::Global | HookBindingScope::SameTenant => true,
+            HookBindingScope::OwnCapabilities => {
+                match (owning_extension, invocation_provider) {
+                    (Some(owner), Some(provider)) => owner == provider,
+                    // Conservative default: refuse to fire when either side
+                    // is unknown. An attacker cannot bypass scope by stripping
+                    // provider info from the descriptor.
+                    _ => false,
+                }
+            }
+        }
+    }
 }
 
 /// Identifies which dispatcher point a binding registers against.
@@ -157,6 +231,8 @@ mod tests {
             trust_class: HookTrustClass::Installed,
             phase,
             point,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
             poisoned: false,
         }
     }
@@ -206,6 +282,8 @@ mod tests {
             trust_class: HookTrustClass::Installed,
             phase: HookPhase::Policy,
             point: HookPointSpec::BeforeCapability,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
             poisoned: false,
         };
         match registry.insert(dup) {
@@ -229,6 +307,8 @@ mod tests {
             trust_class: HookTrustClass::Installed,
             phase: HookPhase::Telemetry,
             point: HookPointSpec::AfterCapability,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
             poisoned: false,
         };
         assert!(matches!(

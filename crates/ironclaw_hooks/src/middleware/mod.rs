@@ -22,5 +22,8 @@ pub use checkpoint_port::HookedLoopCheckpointPort;
 pub use gate_ref::{HookGateRefFactory, UuidHookGateRefFactory};
 pub use model_port::HookedLoopModelPort;
 pub use prompt_port::HookedLoopPromptPort;
-pub use resolver::{CapabilityInputResolver, NullCapabilityInputResolver};
+pub use resolver::{
+    CapabilityInputResolver, CapabilityProviderResolver, NullCapabilityInputResolver,
+    NullCapabilityProviderResolver,
+};
 pub use transcript_port::HookedLoopTranscriptPort;

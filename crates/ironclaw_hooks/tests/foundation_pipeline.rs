@@ -15,7 +15,7 @@ use ironclaw_hooks::{
     ordering::{HookPhase, HookPriority},
     points::BeforeCapabilityHookContext,
     predicate::{CapabilityPredicate, HookPredicateSpec, OnExceededAction, ValueOrRateBound},
-    registry::HookRegistry,
+    registry::{HookBindingScope, HookRegistry},
     sink::{RestrictedBeforeCapabilityHook, RestrictedGateSink},
 };
 
@@ -85,6 +85,12 @@ async fn manifest_to_dispatch_pipeline() {
         .install_installed_before_capability(
             hook_id,
             manifest_entry.phase,
+            ironclaw_host_api::ExtensionId::new("polymarket-trader").expect("valid ext id"),
+            // Use Global so the dispatcher fires the hook regardless of the
+            // ctx's `provider` field (the dispatch ctx in this test has no
+            // provider configured). Scope filtering itself is covered by
+            // dedicated tests in `dispatch.rs`.
+            HookBindingScope::Global,
             Box::new(DenyEverythingFromManifest),
         )
         .expect("installed-tier hook installs at policy phase")

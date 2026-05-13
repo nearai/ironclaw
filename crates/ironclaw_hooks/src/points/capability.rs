@@ -1,6 +1,6 @@
 //! Context for the `before_capability` hook point.
 
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::{ExtensionId, TenantId};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
@@ -34,27 +34,36 @@ pub struct BeforeCapabilityHookContext {
     /// that requires numeric extraction fails closed when this is
     /// [`SanitizedArguments::is_resolved`] = `false`.
     pub arguments: SanitizedArguments,
+    /// Capability provider extension, when known. `None` means the middleware
+    /// could not resolve a provider for this capability (e.g. host-supplied
+    /// builtin, or no resolver wired in). Hook scope enforcement treats the
+    /// `None` case conservatively: an `OwnCapabilities`-scoped Installed hook
+    /// will not fire when the provider is unknown.
+    pub provider: Option<ExtensionId>,
 }
 
 impl BeforeCapabilityHookContext {
-    /// Construct a context with an explicit [`SanitizedArguments`] view.
+    /// Construct a context with an explicit [`SanitizedArguments`] view and
+    /// resolved capability provider.
     pub fn new(
         tenant_id: TenantId,
         capability_name: String,
         arguments_digest: [u8; 32],
         arguments: SanitizedArguments,
+        provider: Option<ExtensionId>,
     ) -> Self {
         Self {
             tenant_id,
             capability_name,
             arguments_digest,
             arguments,
+            provider,
         }
     }
 
     /// Convenience constructor for callers (mostly tests and middleware
     /// without a configured resolver) where the arguments view is
-    /// intentionally unresolved.
+    /// intentionally unresolved and the provider is unknown.
     pub fn new_unresolved(
         tenant_id: TenantId,
         capability_name: String,
@@ -65,6 +74,7 @@ impl BeforeCapabilityHookContext {
             capability_name,
             arguments_digest,
             SanitizedArguments::unresolved(),
+            None,
         )
     }
 }

@@ -334,6 +334,7 @@ mod tests {
             capability.to_string(),
             [0u8; 32],
             crate::points::SanitizedArguments::from_json(args),
+            None,
         )
     }
 
@@ -347,6 +348,7 @@ mod tests {
             capability.to_string(),
             [0u8; 32],
             crate::points::SanitizedArguments::from_json(args),
+            None,
         )
     }
 

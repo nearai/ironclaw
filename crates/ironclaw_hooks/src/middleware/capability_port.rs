@@ -36,7 +36,10 @@ use ironclaw_turns::run_profile::{
 use crate::dispatch::{BeforeCapabilityDispatchOutcome, HookDispatcher};
 use crate::kinds::gate::GateDecisionInner;
 use crate::middleware::gate_ref::{HookGateRefFactory, UuidHookGateRefFactory};
-use crate::middleware::resolver::{CapabilityInputResolver, NullCapabilityInputResolver};
+use crate::middleware::resolver::{
+    CapabilityInputResolver, CapabilityProviderResolver, NullCapabilityInputResolver,
+    NullCapabilityProviderResolver,
+};
 use crate::points::{BeforeCapabilityHookContext, SanitizedArguments};
 
 /// Wraps an inner `LoopCapabilityPort`, fires `before_capability` hooks ahead
@@ -47,6 +50,7 @@ pub struct HookedLoopCapabilityPort {
     dispatcher: Arc<HookDispatcher>,
     tenant_id: TenantId,
     resolver: Arc<dyn CapabilityInputResolver>,
+    provider_resolver: Arc<dyn CapabilityProviderResolver>,
     gate_ref_factory: Arc<dyn HookGateRefFactory>,
 }
 
@@ -65,6 +69,7 @@ impl HookedLoopCapabilityPort {
             dispatcher,
             tenant_id,
             resolver: Arc::new(NullCapabilityInputResolver),
+            provider_resolver: Arc::new(NullCapabilityProviderResolver),
             gate_ref_factory: Arc::new(UuidHookGateRefFactory),
         }
     }
@@ -74,6 +79,21 @@ impl HookedLoopCapabilityPort {
     #[must_use]
     pub fn with_resolver(mut self, resolver: Arc<dyn CapabilityInputResolver>) -> Self {
         self.resolver = resolver;
+        self
+    }
+
+    /// Override the resolver used to populate
+    /// [`crate::points::BeforeCapabilityHookContext::provider`] with the
+    /// extension that owns the invoked capability. Required for
+    /// `OwnCapabilities`-scoped Installed hooks to fire — without a
+    /// production resolver the bundled [`NullCapabilityProviderResolver`]
+    /// returns `None` and those hooks never see their own capabilities.
+    #[must_use]
+    pub fn with_provider_resolver(
+        mut self,
+        provider_resolver: Arc<dyn CapabilityProviderResolver>,
+    ) -> Self {
+        self.provider_resolver = provider_resolver;
         self
     }
 
@@ -93,11 +113,16 @@ impl HookedLoopCapabilityPort {
             Some(value) => SanitizedArguments::from_json(value),
             None => SanitizedArguments::unresolved(),
         };
+        let provider = self
+            .provider_resolver
+            .provider_for(&invocation.capability_id.to_string())
+            .await;
         BeforeCapabilityHookContext::new(
             self.tenant_id.clone(),
             invocation.capability_id.to_string(),
             invocation_arguments_digest(invocation),
             arguments,
+            provider,
         )
     }
 
@@ -249,7 +274,7 @@ mod tests {
     use crate::dispatch::BeforeCapabilityHookImpl;
     use crate::identity::{ExtensionId, HookId, HookLocalId, HookVersion};
     use crate::ordering::HookPhase;
-    use crate::registry::{HookBinding, HookPointSpec, HookRegistry};
+    use crate::registry::{HookBinding, HookBindingScope, HookPointSpec, HookRegistry};
     use crate::sink::{RestrictedBeforeCapabilityHook, RestrictedGateSink};
     use crate::trust::HookTrustClass;
     use async_trait::async_trait;
@@ -381,6 +406,8 @@ mod tests {
             trust_class: HookTrustClass::Installed,
             phase: HookPhase::Policy,
             point: HookPointSpec::BeforeCapability,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
             poisoned: false,
         };
         let mut registry = HookRegistry::new();
@@ -436,6 +463,8 @@ mod tests {
             trust_class: HookTrustClass::Installed,
             phase: HookPhase::Policy,
             point: HookPointSpec::BeforeCapability,
+            owning_extension: None,
+            scope: HookBindingScope::Global,
             poisoned: false,
         };
         let mut registry = HookRegistry::new();
@@ -597,5 +626,94 @@ mod tests {
         for entry in &outcome.outcomes {
             assert!(matches!(entry, CapabilityOutcome::Completed(_)));
         }
+    }
+
+    // ── C3 regression: provider resolver populates hook context ────────────
+
+    use crate::middleware::resolver::CapabilityProviderResolver;
+    use crate::points::BeforeCapabilityHookContext as HookCtxForTest;
+    use ironclaw_host_api::ExtensionId as HostExtensionId;
+
+    /// Resolver that records every capability_id it was queried for and
+    /// returns a fixed provider for each call.
+    struct RecordingProviderResolver {
+        provider: HostExtensionId,
+        queried: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl CapabilityProviderResolver for RecordingProviderResolver {
+        async fn provider_for(&self, capability_id: &str) -> Option<HostExtensionId> {
+            self.queried
+                .lock()
+                .expect("recording resolver not poisoned")
+                .push(capability_id.to_string());
+            Some(self.provider.clone())
+        }
+    }
+
+    /// Hook that records the provider observed in `ctx.provider`. Always
+    /// passes (no opinion) so the inner port still runs.
+    struct ProviderRecordingHook {
+        observed: Arc<Mutex<Option<Option<HostExtensionId>>>>,
+    }
+
+    #[async_trait]
+    impl RestrictedBeforeCapabilityHook for ProviderRecordingHook {
+        async fn evaluate(&self, ctx: &HookCtxForTest, sink: &mut dyn RestrictedGateSink) {
+            *self.observed.lock().expect("observed mutex ok") = Some(ctx.provider.clone());
+            sink.pass();
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_resolver_populates_hook_context() {
+        let provider = HostExtensionId::new("ext-resolver-test").expect("valid ext id");
+        let resolver = Arc::new(RecordingProviderResolver {
+            provider: provider.clone(),
+            queried: Mutex::new(Vec::new()),
+        });
+
+        // Use Global scope so the hook fires; we're testing the *context*,
+        // not the scope filter.
+        let hook_id = HookId::derive(
+            &ExtensionId("ext".to_string()),
+            "1.0",
+            &HookLocalId("recording".to_string()),
+            HookVersion::ONE,
+        );
+        let observed = Arc::new(Mutex::new(None));
+        let hook = ProviderRecordingHook {
+            observed: Arc::clone(&observed),
+        };
+        let mut dispatcher = HookDispatcher::new(HookRegistry::new());
+        dispatcher
+            .install_installed_before_capability(
+                hook_id,
+                HookPhase::Policy,
+                HostExtensionId::new("ext-resolver-test").expect("valid"),
+                crate::registry::HookBindingScope::Global,
+                Box::new(hook),
+            )
+            .expect("install ok");
+
+        let inner = Arc::new(AlwaysCompletedPort::new());
+        let wrapped = HookedLoopCapabilityPort::new(inner.clone(), Arc::new(dispatcher), tenant())
+            .with_provider_resolver(Arc::clone(&resolver) as Arc<_>);
+
+        let _ = wrapped
+            .invoke_capability(invocation("cap.x"))
+            .await
+            .expect("ok");
+
+        let observed = observed.lock().expect("observed mutex ok").clone();
+        assert_eq!(
+            observed,
+            Some(Some(provider.clone())),
+            "hook ctx must carry the resolver-supplied provider"
+        );
+
+        let queried = resolver.queried.lock().expect("queries").clone();
+        assert_eq!(queried, vec!["cap.x".to_string()]);
     }
 }

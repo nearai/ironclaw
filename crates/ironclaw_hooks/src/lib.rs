@@ -35,7 +35,7 @@ pub use failure_policy::{FailureCategory, FailureDisposition};
 pub use identity::{ExtensionId, HookId, HookLocalId, HookVersion};
 pub use ordering::{HookPhase, HookPriority};
 pub use registrar::HookRegistrar;
-pub use registry::{HookBinding, HookRegistry};
+pub use registry::{HookBinding, HookBindingScope, HookRegistry};
 pub use self_authored::{
     GenerationTraceRef, SelfAuthoredBeforeCapabilityHook, SelfAuthoredEvaluator,
     SelfAuthoredHookSink, SelfAuthoredHookSpec, SelfAuthoredReason, SelfAuthorshipProvenance,
