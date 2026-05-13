@@ -5,6 +5,7 @@
 //! under `docs/reborn/agent-loop-briefs/`.
 
 pub mod default_planner;
+pub mod executor;
 pub mod families;
 pub mod family;
 pub mod planner;
