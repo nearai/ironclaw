@@ -131,6 +131,12 @@ impl RuntimeSecretInjectionStore {
         Ok(secrets.keys().any(|key| key.matches_scope(&scope_key)))
     }
 
+    #[cfg(test)]
+    fn prune_expired(&self) -> Result<usize, RuntimeSecretInjectionStoreError> {
+        let mut secrets = self.lock()?;
+        Ok(prune_expired_entries(&mut secrets, Instant::now()))
+    }
+
     fn lock(
         &self,
     ) -> Result<
@@ -1834,5 +1840,223 @@ fn obligation_label(obligation: &Obligation) -> Option<&'static str> {
         Obligation::ReserveResources { .. } => Some("reserve_resources"),
         Obligation::UseScopedMounts { .. } => Some("use_scoped_mounts"),
         Obligation::EnforceResourceCeiling { .. } => Some("enforce_resource_ceiling"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use ironclaw_events::InMemoryAuditSink;
+    use ironclaw_host_api::{
+        AgentId, CapabilitySet, CorrelationId, ExecutionContext, ExtensionId, InvocationId,
+        NetworkScheme, NetworkTargetPattern, ProjectId, ResourceReservationId, RuntimeKind,
+        TenantId, TrustClass, UserId,
+    };
+    use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
+    use ironclaw_secrets::InMemorySecretStore;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn runtime_secret_injection_store_prunes_expired_handoffs() {
+        let store = RuntimeSecretInjectionStore::with_ttl(Duration::from_millis(5));
+        let scope = resource_scope_with_agent("agent-a");
+        let capability_id = capability_id();
+        let handle = SecretHandle::new("api_token").unwrap();
+
+        store
+            .insert(
+                &scope,
+                &capability_id,
+                &handle,
+                SecretMaterial::from("runtime-secret"),
+            )
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert_eq!(store.prune_expired().unwrap(), 1);
+        assert!(
+            store
+                .take(&scope, &capability_id, &handle)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn network_obligation_policy_store_isolates_agent_scope() {
+        let store = NetworkObligationPolicyStore::new();
+        let (agent_a, agent_b) = same_invocation_agent_scopes();
+        let capability_id = capability_id();
+
+        store.insert(&agent_a, &capability_id, allowed_network_policy());
+
+        assert!(store.take(&agent_b, &capability_id).is_none());
+        assert!(store.take(&agent_a, &capability_id).is_some());
+    }
+
+    #[test]
+    fn runtime_secret_injection_store_isolates_agent_scope() {
+        let store = RuntimeSecretInjectionStore::new();
+        let (agent_a, agent_b) = same_invocation_agent_scopes();
+        let capability_id = capability_id();
+        let handle = SecretHandle::new("api_token").unwrap();
+
+        store
+            .insert(
+                &agent_a,
+                &capability_id,
+                &handle,
+                SecretMaterial::from("runtime-secret"),
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .take(&agent_b, &capability_id, &handle)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .take(&agent_a, &capability_id, &handle)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn builtin_obligation_handler_satisfy_release_preserves_staged_handoffs() {
+        let network_policies = Arc::new(NetworkObligationPolicyStore::new());
+        let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let governor = Arc::new(InMemoryResourceGovernor::new());
+        let services = BuiltinObligationServices::with_handoff_stores(
+            Arc::new(InMemoryAuditSink::new()),
+            network_policies.clone(),
+            secret_store.clone(),
+            secret_injections.clone(),
+            governor.clone(),
+        );
+        let handler = services.obligation_handler();
+        let context = execution_context();
+        let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
+        let capability_id = capability_id();
+        let handle = SecretHandle::new("api_token").unwrap();
+        let estimate = ResourceEstimate {
+            concurrency_slots: Some(1),
+            ..ResourceEstimate::default()
+        };
+        secret_store
+            .put(
+                context.resource_scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("runtime-secret"),
+            )
+            .await
+            .unwrap();
+        let obligations = vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: allowed_network_policy(),
+            },
+            Obligation::InjectSecretOnce {
+                handle: handle.clone(),
+            },
+            Obligation::ReserveResources {
+                reservation_id: ResourceReservationId::new(),
+            },
+        ];
+
+        handler
+            .satisfy(CapabilityObligationRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(governor.reserved_for(&account).concurrency_slots, 0);
+        assert!(
+            network_policies
+                .take(&context.resource_scope, &capability_id)
+                .is_some()
+        );
+        assert!(
+            secret_injections
+                .take(&context.resource_scope, &capability_id, &handle)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    fn same_invocation_agent_scopes() -> (ResourceScope, ResourceScope) {
+        let mut agent_a = resource_scope_with_agent("agent-a");
+        agent_a.invocation_id = InvocationId::new();
+        let mut agent_b = agent_a.clone();
+        agent_b.agent_id = Some(AgentId::new("agent-b").unwrap());
+        (agent_a, agent_b)
+    }
+
+    fn resource_scope_with_agent(agent_id: &str) -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("tenant1").unwrap(),
+            user_id: UserId::new("user1").unwrap(),
+            agent_id: Some(AgentId::new(agent_id).unwrap()),
+            project_id: Some(ProjectId::new("project1").unwrap()),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    fn execution_context() -> ExecutionContext {
+        let invocation_id = InvocationId::new();
+        let resource_scope = ResourceScope {
+            tenant_id: TenantId::new("tenant1").unwrap(),
+            user_id: UserId::new("user1").unwrap(),
+            agent_id: Some(AgentId::new("agent-a").unwrap()),
+            project_id: Some(ProjectId::new("project1").unwrap()),
+            mission_id: None,
+            thread_id: None,
+            invocation_id,
+        };
+        ExecutionContext {
+            invocation_id,
+            correlation_id: CorrelationId::new(),
+            process_id: None,
+            parent_process_id: None,
+            tenant_id: resource_scope.tenant_id.clone(),
+            user_id: resource_scope.user_id.clone(),
+            agent_id: resource_scope.agent_id.clone(),
+            project_id: resource_scope.project_id.clone(),
+            mission_id: resource_scope.mission_id.clone(),
+            thread_id: resource_scope.thread_id.clone(),
+            extension_id: ExtensionId::new("caller").unwrap(),
+            runtime: RuntimeKind::Wasm,
+            trust: TrustClass::Sandbox,
+            grants: CapabilitySet::default(),
+            mounts: MountView::default(),
+            resource_scope,
+        }
+    }
+
+    fn capability_id() -> CapabilityId {
+        CapabilityId::new("echo.say").unwrap()
+    }
+
+    fn allowed_network_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "api.example.test".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: Some(1024),
+        }
     }
 }
