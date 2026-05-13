@@ -591,10 +591,10 @@ async fn hook_dispatch_emits_milestones_into_host_sink() {
             LoopHostMilestoneKind::HookDispatched { point, .. } if point == "before_capability" => {
                 saw_dispatched = true;
             }
-            LoopHostMilestoneKind::HookDecisionEmitted { decision, .. } => {
-                if decision.kind_name() == "deny" {
-                    saw_deny_decision = true;
-                }
+            LoopHostMilestoneKind::HookDecisionEmitted { decision, .. }
+                if decision.kind_name() == "deny" =>
+            {
+                saw_deny_decision = true;
             }
             _ => {}
         }
