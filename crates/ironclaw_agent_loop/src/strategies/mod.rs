@@ -18,19 +18,19 @@
 //! state such as grant history, auth flow status, route health, or
 //! circuit-breaker counters.
 
-// WS-1/2/3 land crate-internal contracts before WS-4/5/6 compose and execute
-// them. Keep the unused lint local to these forward-declared contracts.
+// WS-1/2/3 land crate-private strategy contracts before WS-4/5/6 compose and
+// execute them. Keep the unused lint local to these forward-declared contracts.
 #![allow(dead_code, unused_imports)]
 
 pub(crate) mod batch;
-pub(crate) mod budget;
+mod budget;
 mod capability;
 mod context;
-pub(crate) mod drain;
+mod drain;
 pub(crate) mod gate;
 mod model;
 pub(crate) mod recovery;
-pub(crate) mod stop;
+mod stop;
 
 pub(crate) use batch::{BatchPolicy, BatchPolicyStrategy, CapabilityCallSummary};
 pub(crate) use budget::BudgetStrategy;

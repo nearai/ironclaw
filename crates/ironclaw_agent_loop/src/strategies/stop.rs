@@ -3,14 +3,14 @@
 use async_trait::async_trait;
 use ironclaw_turns::{LoopFailureKind, LoopMessageRef, LoopResultRef};
 
-use crate::state::{ControlStrategyState, LoopExecutionState};
+use crate::state::{LoopExecutionState, StopStrategyState};
 
 /// Decides whether the loop should stop after the current turn finishes.
 ///
-/// Implementations return a new `control_state` slot value. Async because
+/// Implementations return a new `stop_state` slot value. Async because
 /// future strategies may consult host state for milestone tracking.
 #[async_trait]
-pub trait StopConditionStrategy: Send + Sync {
+pub(crate) trait StopConditionStrategy: Send + Sync {
     /// Called after a turn completes.
     async fn should_stop_after_turn(
         &self,
@@ -24,7 +24,7 @@ pub trait StopConditionStrategy: Send + Sync {
 /// This carries refs only. Strategies that need content must read it through
 /// host ports so host-side redaction and scope policy remain authoritative.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct TurnSummary {
+pub(crate) struct TurnSummary {
     pub kind: TurnEndKind,
     pub assistant_message_ref: Option<LoopMessageRef>,
     pub batch_result_refs: Vec<LoopResultRef>,
@@ -32,7 +32,7 @@ pub struct TurnSummary {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TurnEndKind {
+pub(crate) enum TurnEndKind {
     /// The model returned a reply and no capability batch executed this turn.
     ReplyOnly,
     /// The model returned capability calls and the listed refs are the
@@ -40,22 +40,22 @@ pub enum TurnEndKind {
     AfterCapabilityBatch,
 }
 
-/// Strategy decision plus the new `control_state` slot value.
+/// Strategy decision plus the new `stop_state` slot value.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum StopOutcome {
+pub(crate) enum StopOutcome {
     Continue {
-        control: ControlStrategyState,
+        stop: StopStrategyState,
     },
     Stop {
-        control: ControlStrategyState,
+        stop: StopStrategyState,
         kind: StopKind,
     },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum StopKind {
+pub(crate) enum StopKind {
     /// Strategy is satisfied; the executor maps this to graceful completion.
     GracefulStop,
     /// Safety-net escape for repeated calls or repeated failures.
@@ -85,7 +85,7 @@ mod tests {
                 _: &TurnSummary,
             ) -> StopOutcome {
                 StopOutcome::Continue {
-                    control: ControlStrategyState::default(),
+                    stop: StopStrategyState::default(),
                 }
             }
         }
@@ -96,7 +96,7 @@ mod tests {
     #[test]
     fn stop_outcome_round_trips_through_json() {
         let outcome = StopOutcome::Stop {
-            control: ControlStrategyState {
+            stop: StopStrategyState {
                 turns_completed: 3,
                 terminate_hints_in_last_batch: 1,
                 last_batch_total: 2,
@@ -119,7 +119,7 @@ mod tests {
         assert_eq!(deserialized, outcome);
 
         let continue_outcome = StopOutcome::Continue {
-            control: ControlStrategyState::default(),
+            stop: StopStrategyState::default(),
         };
         let continue_value = serde_json::to_value(&continue_outcome).unwrap();
         assert!(
@@ -133,11 +133,11 @@ mod tests {
     }
 
     #[test]
-    fn aborted_stop_kind_preserves_failure_variant_tag() {
-        let kind = StopKind::Aborted(LoopFailureKind::ModelError);
+    fn aborted_stop_kind_preserves_policy_denied_variant_tag() {
+        let kind = StopKind::Aborted(LoopFailureKind::PolicyDenied);
         let value = serde_json::to_value(kind).unwrap();
 
-        assert_eq!(value, json!({ "aborted": "model_error" }));
+        assert_eq!(value, json!({ "aborted": "policy_denied" }));
         assert_eq!(serde_json::from_value::<StopKind>(value).unwrap(), kind);
     }
 }
