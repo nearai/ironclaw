@@ -405,10 +405,8 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Initialize tracing with a reloadable EnvFilter so the gateway can switch
     // log levels at runtime without restarting.
-    let suppress_stderr = config.channels.cli.enabled
-        && config.channels.tui.is_some()
-        && cli.message.is_none()
-        && cfg!(feature = "tui");
+    let suppress_stderr =
+        config.channels.tui.is_some() && cli.message.is_none() && cfg!(feature = "tui");
     let log_level_handle = ironclaw::channels::web::log_layer::init_tracing(
         Arc::clone(&log_broadcaster),
         suppress_stderr,
@@ -507,8 +505,9 @@ async fn async_main() -> anyhow::Result<()> {
         Arc<WasmChannelRouter>,
     )> = None;
 
-    // Create CLI channel (REPL or TUI — mutually exclusive, both claim stdin)
-    let tui_mode = config.channels.cli.enabled && config.channels.tui.is_some();
+    // Create stdin channel (REPL or TUI — mutually exclusive, both claim stdin).
+    // TUI has its own config, so it must not depend on the CLI channel being enabled.
+    let tui_mode = config.channels.tui.is_some();
 
     #[cfg(feature = "tui")]
     if tui_mode && cli.message.is_none() {
@@ -618,7 +617,7 @@ async fn async_main() -> anyhow::Result<()> {
     #[cfg(not(feature = "tui"))]
     if tui_mode {
         tracing::warn!(
-            "CLI_MODE=tui requested but the 'tui' feature is not enabled. Falling back to REPL."
+            "TUI mode is configured but the 'tui' feature is not enabled. Falling back to REPL if CLI is enabled."
         );
     }
 

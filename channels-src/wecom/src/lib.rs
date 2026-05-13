@@ -253,7 +253,7 @@ struct PendingWebsocketMediaBatch {
     errors: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct PendingWebsocketMediaSend {
     id: String,
     batch_id: String,
@@ -275,6 +275,16 @@ struct PendingWebsocketMediaSend {
     upload_id: Option<String>,
     #[serde(default)]
     media_id: Option<String>,
+}
+
+struct PendingWebsocketMediaOutbound {
+    send_id: String,
+    payload: String,
+}
+
+enum PendingWebsocketMediaAdvance {
+    Send(PendingWebsocketMediaOutbound, PendingWebsocketMediaSend),
+    Complete,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1039,11 +1049,22 @@ fn build_websocket_command_payload(
         },
         "body": body,
     }))
-    .map_err(|e| format!("Failed to serialize WeCom websocket command: {e}"))
+        .map_err(|e| format!("Failed to serialize WeCom websocket command: {e}"))
+}
+
+fn websocket_req_id_now_millis() -> u64 {
+    #[cfg(test)]
+    {
+        1
+    }
+    #[cfg(not(test))]
+    {
+        channel_host::now_millis()
+    }
 }
 
 fn websocket_control_req_id(cmd: &str, seed: &str) -> String {
-    let now = channel_host::now_millis();
+    let now = websocket_req_id_now_millis();
     let mut hasher = Sha1::new();
     hasher.update(cmd.as_bytes());
     hasher.update(seed.as_bytes());
@@ -1289,31 +1310,25 @@ fn build_websocket_active_markdown_payload(chat_id: &str, content: &str) -> Resu
     )
 }
 
-fn send_next_websocket_media_chunk(send: &mut PendingWebsocketMediaSend) -> Result<(), String> {
+fn prepare_next_websocket_media_chunk(send: &mut PendingWebsocketMediaSend) -> Result<String, String> {
     let req_id = websocket_control_req_id(
         WECOM_WS_UPLOAD_MEDIA_CHUNK_CMD,
         &format!("{}:{}", send.id, send.next_chunk_index),
     );
     send.chunk_req_id = Some(req_id);
-    let payload = build_websocket_media_chunk_payload(send)?;
-    channel_host::websocket_send_text(&payload)
-        .map_err(|e| format!("Failed to send WeCom websocket media chunk: {e}"))
+    build_websocket_media_chunk_payload(send)
 }
 
-fn send_websocket_media_finish(send: &mut PendingWebsocketMediaSend) -> Result<(), String> {
+fn prepare_websocket_media_finish(send: &mut PendingWebsocketMediaSend) -> Result<String, String> {
     let req_id = websocket_control_req_id(WECOM_WS_UPLOAD_MEDIA_FINISH_CMD, &send.id);
     send.finish_req_id = Some(req_id);
-    let payload = build_websocket_media_finish_payload(send)?;
-    channel_host::websocket_send_text(&payload)
-        .map_err(|e| format!("Failed to send WeCom websocket media finish: {e}"))
+    build_websocket_media_finish_payload(send)
 }
 
-fn send_websocket_active_media(send: &mut PendingWebsocketMediaSend) -> Result<(), String> {
+fn prepare_websocket_active_media(send: &mut PendingWebsocketMediaSend) -> Result<String, String> {
     let req_id = websocket_control_req_id(WECOM_WS_SEND_MSG_CMD, &send.id);
     send.send_req_id = Some(req_id);
-    let payload = build_websocket_active_media_payload(send)?;
-    channel_host::websocket_send_text(&payload)
-        .map_err(|e| format!("Failed to send WeCom websocket media message: {e}"))
+    build_websocket_active_media_payload(send)
 }
 
 fn send_websocket_active_markdown(chat_id: &str, content: &str) -> Result<(), String> {
@@ -1342,16 +1357,17 @@ fn start_websocket_media_batch(
 
     let batch_id = websocket_media_batch_id(metadata);
     let mut sends = Vec::new();
+    let mut outbound_payloads = Vec::new();
     let mut errors = Vec::new();
     for (index, attachment) in attachments.iter().enumerate() {
         match build_pending_websocket_media_send(&batch_id, &chat_id, attachment, index) {
-            Ok((send, payload)) => match channel_host::websocket_send_text(&payload) {
-                Ok(()) => sends.push(send),
-                Err(error) => errors.push(format!(
-                    "Failed to send WeCom websocket media init for '{}': {error}",
-                    attachment.filename
-                )),
-            },
+            Ok((send, payload)) => {
+                outbound_payloads.push(PendingWebsocketMediaOutbound {
+                    send_id: send.id.clone(),
+                    payload,
+                });
+                sends.push(send);
+            }
             Err(error) => errors.push(error),
         }
     }
@@ -1372,10 +1388,20 @@ fn start_websocket_media_batch(
         });
         state.sends.extend(sends);
         if let Err(error) = persist_pending_websocket_media_state(&state) {
+            errors.push(format!("Failed to persist WeCom websocket media state: {error}"));
             channel_host::log(
                 channel_host::LogLevel::Warn,
                 &format!("Failed to persist WeCom websocket media state: {error}"),
             );
+            return WebsocketMediaStartResult { started: 0, errors };
+        }
+
+        for outbound in outbound_payloads {
+            if let Err(error) = channel_host::websocket_send_text(&outbound.payload) {
+                let error = format!("Failed to send WeCom websocket media init: {error}");
+                fail_persisted_websocket_media_send(&outbound.send_id, error.clone());
+                errors.push(error);
+            }
         }
     }
 
@@ -1420,6 +1446,26 @@ fn fail_pending_websocket_media(
         &format!("WeCom websocket media send failed: {error}"),
     );
     complete_websocket_media_batch(state, &send.batch_id, Err(error));
+}
+
+fn fail_persisted_websocket_media_send(send_id: &str, error: String) {
+    let mut state = load_pending_websocket_media_state();
+    let Some(pos) = state.sends.iter().position(|send| send.id == send_id) else {
+        channel_host::log(
+            channel_host::LogLevel::Warn,
+            &format!("WeCom websocket media send failed after state was already cleared: {error}"),
+        );
+        return;
+    };
+
+    let send = state.sends.remove(pos);
+    fail_pending_websocket_media(&mut state, &send, error);
+    if let Err(error) = persist_pending_websocket_media_state(&state) {
+        channel_host::log(
+            channel_host::LogLevel::Warn,
+            &format!("Failed to persist WeCom websocket media failure state: {error}"),
+        );
+    }
 }
 
 fn complete_websocket_media_batch(
@@ -1479,7 +1525,7 @@ fn complete_websocket_media_batch(
 fn advance_pending_websocket_media(
     mut send: PendingWebsocketMediaSend,
     ack: &WecomWsAckFrame,
-) -> Result<Option<PendingWebsocketMediaSend>, String> {
+) -> Result<PendingWebsocketMediaAdvance, String> {
     let req_id = ack.headers.req_id.as_str();
 
     if send.init_req_id == req_id {
@@ -1487,33 +1533,45 @@ fn advance_pending_websocket_media(
             .ok_or_else(|| "WeCom websocket upload init ack missing upload_id".to_string())?;
         send.upload_id = Some(upload_id);
         send.next_chunk_index = 0;
-        send_next_websocket_media_chunk(&mut send)?;
-        return Ok(Some(send));
+        let payload = prepare_next_websocket_media_chunk(&mut send)?;
+        let outbound = PendingWebsocketMediaOutbound {
+            send_id: send.id.clone(),
+            payload,
+        };
+        return Ok(PendingWebsocketMediaAdvance::Send(outbound, send));
     }
 
     if send.chunk_req_id.as_deref() == Some(req_id) {
         send.next_chunk_index += 1;
-        if send.next_chunk_index < send.total_chunks {
-            send_next_websocket_media_chunk(&mut send)?;
+        let payload = if send.next_chunk_index < send.total_chunks {
+            prepare_next_websocket_media_chunk(&mut send)?
         } else {
-            send_websocket_media_finish(&mut send)?;
-        }
-        return Ok(Some(send));
+            prepare_websocket_media_finish(&mut send)?
+        };
+        let outbound = PendingWebsocketMediaOutbound {
+            send_id: send.id.clone(),
+            payload,
+        };
+        return Ok(PendingWebsocketMediaAdvance::Send(outbound, send));
     }
 
     if send.finish_req_id.as_deref() == Some(req_id) {
         let media_id = json_body_string(&ack.body, "media_id")
             .ok_or_else(|| "WeCom websocket upload finish ack missing media_id".to_string())?;
         send.media_id = Some(media_id);
-        send_websocket_active_media(&mut send)?;
-        return Ok(Some(send));
+        let payload = prepare_websocket_active_media(&mut send)?;
+        let outbound = PendingWebsocketMediaOutbound {
+            send_id: send.id.clone(),
+            payload,
+        };
+        return Ok(PendingWebsocketMediaAdvance::Send(outbound, send));
     }
 
     if send.send_req_id.as_deref() == Some(req_id) {
-        return Ok(None);
+        return Ok(PendingWebsocketMediaAdvance::Complete);
     }
 
-    Ok(Some(send))
+    Err("WeCom websocket ack matched send but no media phase advanced".to_string())
 }
 
 fn parse_websocket_ack_frame(frame: &str) -> Option<WecomWsAckFrame> {
@@ -1522,45 +1580,78 @@ fn parse_websocket_ack_frame(frame: &str) -> Option<WecomWsAckFrame> {
     serde_json::from_value(value).ok()
 }
 
-fn handle_websocket_ack_frame(ack: WecomWsAckFrame) {
-    let mut state = load_pending_websocket_media_state();
+enum WebsocketAckApplyResult {
+    Unknown,
+    Applied {
+        outbound: Option<PendingWebsocketMediaOutbound>,
+    },
+}
+
+fn apply_websocket_ack_to_media_state(
+    state: &mut PendingWebsocketMediaState,
+    ack: &WecomWsAckFrame,
+) -> WebsocketAckApplyResult {
     let Some(pos) = state
         .sends
         .iter()
         .position(|send| pending_websocket_media_matches_req(send, &ack.headers.req_id))
     else {
-        return;
+        return WebsocketAckApplyResult::Unknown;
     };
 
     let send = state.sends.remove(pos);
     let batch_id = send.batch_id.clone();
+    let mut outbound = None;
     if ack.errcode != 0 {
         let error = format!(
             "req_id={} errcode={} errmsg={}",
             ack.headers.req_id, ack.errcode, ack.errmsg
         );
-        fail_pending_websocket_media(&mut state, &send, error);
+        fail_pending_websocket_media(state, &send, error);
     } else {
         match advance_pending_websocket_media(send, &ack) {
-            Ok(Some(next)) => state.sends.push(next),
-            Ok(None) => {
-                complete_websocket_media_batch(&mut state, &batch_id, Ok(()));
+            Ok(PendingWebsocketMediaAdvance::Send(next_outbound, next)) => {
+                outbound = Some(next_outbound);
+                state.sends.push(next);
+            }
+            Ok(PendingWebsocketMediaAdvance::Complete) => {
+                complete_websocket_media_batch(state, &batch_id, Ok(()));
             }
             Err(error) => {
                 channel_host::log(
                     channel_host::LogLevel::Warn,
                     &format!("Failed to advance WeCom websocket media send: {error}"),
                 );
-                complete_websocket_media_batch(&mut state, &batch_id, Err(error));
+                complete_websocket_media_batch(state, &batch_id, Err(error));
             }
         }
     }
+
+    WebsocketAckApplyResult::Applied { outbound }
+}
+
+fn handle_websocket_ack_frame(ack: WecomWsAckFrame) {
+    let mut state = load_pending_websocket_media_state();
+    let outbound = match apply_websocket_ack_to_media_state(&mut state, &ack) {
+        WebsocketAckApplyResult::Unknown => return,
+        WebsocketAckApplyResult::Applied { outbound } => outbound,
+    };
 
     if let Err(error) = persist_pending_websocket_media_state(&state) {
         channel_host::log(
             channel_host::LogLevel::Warn,
             &format!("Failed to persist WeCom websocket media state: {error}"),
         );
+        return;
+    }
+
+    if let Some(outbound) = outbound {
+        if let Err(error) = channel_host::websocket_send_text(&outbound.payload) {
+            fail_persisted_websocket_media_send(
+                &outbound.send_id,
+                format!("Failed to send WeCom websocket media command: {error}"),
+            );
+        }
     }
 }
 
@@ -2254,6 +2345,17 @@ mod tests {
             .to_vec()
     }
 
+    fn websocket_ack_for_test(req_id: &str, body: JsonValue) -> WecomWsAckFrame {
+        WecomWsAckFrame {
+            headers: WecomWsHeaders {
+                req_id: req_id.to_string(),
+            },
+            errcode: 0,
+            errmsg: String::new(),
+            body,
+        }
+    }
+
     #[test]
     fn capabilities_are_bot_only() {
         let caps: serde_json::Value =
@@ -2378,6 +2480,74 @@ mod tests {
         assert_eq!(
             media["body"]["image"]["media_id"],
             serde_json::json!("media-2")
+        );
+    }
+
+    #[test]
+    fn websocket_media_ack_updates_state_before_returning_next_payload() {
+        let attachment = make_outbound_attachment(
+            "cat.jpg",
+            "image/jpeg",
+            WEBSOCKET_MEDIA_CHUNK_SIZE + 1,
+        );
+        let (send, _init_payload) =
+            build_pending_websocket_media_send("batch-1", "chat-1", &attachment, 0)
+                .expect("pending send");
+        let init_req_id = send.init_req_id.clone();
+        let mut state = PendingWebsocketMediaState {
+            sends: vec![send],
+            batches: vec![PendingWebsocketMediaBatch {
+                id: "batch-1".to_string(),
+                chat_id: "chat-1".to_string(),
+                response_req_id: "reply-1".to_string(),
+                response_cmd: WECOM_WS_REPLY_CMD.to_string(),
+                final_text: "done".to_string(),
+                remaining_media: 1,
+                sent_media: 0,
+                failed_media: 0,
+                errors: Vec::new(),
+            }],
+        };
+
+        let first = apply_websocket_ack_to_media_state(
+            &mut state,
+            &websocket_ack_for_test(&init_req_id, serde_json::json!({"upload_id": "upload-1"})),
+        );
+        let first_payload = match first {
+            WebsocketAckApplyResult::Applied {
+                outbound: Some(outbound),
+            } => outbound.payload,
+            _ => panic!("init ack should prepare first chunk"),
+        };
+
+        let first_chunk_req_id = state.sends[0]
+            .chunk_req_id
+            .clone()
+            .expect("chunk req id must be persisted before send");
+        assert!(
+            first_payload.contains(&first_chunk_req_id),
+            "payload should use the req_id already present in state"
+        );
+
+        let second = apply_websocket_ack_to_media_state(
+            &mut state,
+            &websocket_ack_for_test(&first_chunk_req_id, serde_json::json!({})),
+        );
+        let second_payload = match second {
+            WebsocketAckApplyResult::Applied {
+                outbound: Some(outbound),
+            } => outbound.payload,
+            _ => panic!("first chunk ack should prepare second chunk"),
+        };
+
+        let second_chunk_req_id = state.sends[0]
+            .chunk_req_id
+            .as_deref()
+            .expect("next chunk req id must be persisted before send");
+        assert_ne!(first_chunk_req_id, second_chunk_req_id);
+        assert!(
+            second_payload.contains(second_chunk_req_id),
+            "next payload should use the req_id already present in state"
         );
     }
 

@@ -7904,26 +7904,32 @@ impl ExtensionManager {
             }
 
             if all_placeholders_resolved {
-                crate::tools::builtin::skill_tools::validate_fetch_url(&validation_url)
-                    .map_err(|e| ExtensionError::Other(format!("SSRF blocked: {}", e)))?;
-                let mut response = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(10))
-                    .build()
-                    .map_err(|e| ExtensionError::Other(e.to_string()))?
-                    .get(&validation_url)
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        // Log the raw error at debug level (may contain sensitive URL paths)
-                        // but return a generic message to callers.
-                        tracing::debug!(
-                            is_timeout = e.is_timeout(),
-                            is_connect = e.is_connect(),
-                            status = e.status().map(|s| s.as_u16()),
-                            "Token validation request failed"
-                        );
-                        ExtensionError::Other("Token validation request failed".to_string())
-                    })?;
+                let parsed_validation_url =
+                    crate::tools::builtin::skill_tools::validate_fetch_url(&validation_url)
+                        .map_err(|e| ExtensionError::Other(format!("SSRF blocked: {}", e)))?;
+                let validation_target =
+                    crate::tools::wasm::validate_and_resolve_http_target(&validation_url)
+                        .await
+                        .map_err(|e| ExtensionError::Other(format!("SSRF blocked: {}", e)))?;
+                let mut response =
+                    crate::tools::wasm::ssrf_safe_client_builder_for_target(&validation_target)
+                        .timeout(std::time::Duration::from_secs(10))
+                        .build()
+                        .map_err(|e| ExtensionError::Other(e.to_string()))?
+                        .get(parsed_validation_url)
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            // Log the raw error at debug level (may contain sensitive URL paths)
+                            // but return a generic message to callers.
+                            tracing::debug!(
+                                is_timeout = e.is_timeout(),
+                                is_connect = e.is_connect(),
+                                status = e.status().map(|s| s.as_u16()),
+                                "Token validation request failed"
+                            );
+                            ExtensionError::Other("Token validation request failed".to_string())
+                        })?;
                 let status = response.status();
                 if !status.is_success() {
                     return Err(ExtensionError::ValidationFailed(format!(
