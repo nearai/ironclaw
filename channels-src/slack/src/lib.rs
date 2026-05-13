@@ -1771,7 +1771,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_markdown_to_mrkdwn_preserves_slack_native_formatting() {
         let input = "<@U123> <https://e.com|e> <#C123|chan>";
