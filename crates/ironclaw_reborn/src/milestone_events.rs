@@ -195,8 +195,12 @@ impl DurableLoopHostMilestoneSink {
                 capability_id(LOOP_RUN_CAPABILITY_ID)?,
                 loop_failure_kind(reason_kind),
             ),
-            LoopHostMilestoneKind::PromptBundleBuilt { .. }
+            LoopHostMilestoneKind::IterationStarted { .. }
+            | LoopHostMilestoneKind::PromptBundleBuilt { .. }
             | LoopHostMilestoneKind::CapabilityInvoked { .. }
+            | LoopHostMilestoneKind::CapabilityBatchStarted { .. }
+            | LoopHostMilestoneKind::CapabilityBatchCompleted { .. }
+            | LoopHostMilestoneKind::GateBlocked { .. }
             | LoopHostMilestoneKind::CheckpointCreated { .. }
             | LoopHostMilestoneKind::Blocked { .. }
             | LoopHostMilestoneKind::DriverNote { .. } => return Ok(None),

@@ -37,9 +37,10 @@ use ironclaw_turns::{
     RunProfileVersion, SourceBindingRef, TurnId, TurnLeaseToken, TurnRunId, TurnRunState,
     TurnRunnerId, TurnScope, TurnStatus,
     run_profile::{
-        AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopDriverId, LoopHostMilestone,
-        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopModelPort,
-        LoopModelRequest, LoopRunContext, LoopTranscriptPort, ParentLoopOutput,
+        AgentLoopHostErrorKind, BatchPolicyKind, FinalizeAssistantMessage, LoopDriverId,
+        LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind,
+        LoopHostMilestoneSink, LoopModelPort, LoopModelRequest, LoopRunContext, LoopTranscriptPort,
+        ParentLoopOutput,
     },
     runner::ClaimedTurnRun,
 };
@@ -203,6 +204,77 @@ async fn durable_milestone_sink_rejects_mismatched_thread_or_run_binding() {
         .await
         .unwrap();
     assert!(snapshot.timeline.entries.is_empty());
+}
+
+#[tokio::test]
+async fn durable_milestone_sink_drops_metadata_only_loop_progress_milestones() {
+    let events: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let thread_scope = ThreadScope {
+        tenant_id: tenant_id(),
+        agent_id: agent_id(),
+        project_id: Some(project_id()),
+        owner_user_id: Some(user_id()),
+        mission_id: Some(mission_id()),
+    };
+    let thread_id = ThreadId::new("thread-loop-events-progress").unwrap();
+    let run_id = TurnRunId::new();
+    let sink = DurableLoopHostMilestoneSink::new(
+        Arc::clone(&events),
+        DurableLoopHostMilestoneScope::from_thread_scope_for_run(
+            &thread_scope,
+            thread_id.clone(),
+            run_id,
+        )
+        .unwrap(),
+    );
+    let scope = TurnScope::new(
+        tenant_id(),
+        Some(agent_id()),
+        Some(project_id()),
+        thread_id.clone(),
+    );
+
+    for kind in [
+        LoopHostMilestoneKind::IterationStarted { iteration: 1 },
+        LoopHostMilestoneKind::CapabilityBatchStarted {
+            iteration: 1,
+            call_count: 2,
+            policy: BatchPolicyKind::Parallel,
+        },
+        LoopHostMilestoneKind::CapabilityBatchCompleted {
+            iteration: 1,
+            result_count: 1,
+            denied_count: 0,
+            gated_count: 1,
+            failed_count: 0,
+        },
+        LoopHostMilestoneKind::GateBlocked {
+            iteration: 1,
+            gate_kind: LoopGateKind::Approval,
+        },
+    ] {
+        sink.publish_loop_milestone(LoopHostMilestone {
+            scope: scope.clone(),
+            turn_id: TurnId::new(),
+            run_id,
+            loop_driver_id: LoopDriverId::new("test-driver").unwrap(),
+            kind,
+        })
+        .await
+        .unwrap();
+    }
+
+    let manager = event_stream_manager(events, Arc::new(InMemoryDurableAuditLog::new()));
+    let snapshot = manager
+        .runtime_snapshot(ProjectionRequest {
+            scope: projection_scope_for_thread(thread_id),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert!(snapshot.timeline.entries.is_empty());
+    assert!(snapshot.runs.is_empty());
 }
 
 async fn drive_model_reply_milestones_and_assert_projection(

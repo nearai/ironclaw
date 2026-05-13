@@ -74,12 +74,12 @@ use ironclaw_turns::{
     TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        CapabilityDeniedReasonKind, CapabilityFailureKind, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
-        FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-        LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopCheckpointStateRef, LoopContextRequest, LoopDriverId, LoopDriverNoteKind,
-        LoopHostMilestone, LoopInlineMessage, LoopInlineMessageRole, LoopInputCursor,
+        BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityFailureKind, CapabilityInputRef,
+        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion, FinalizeAssistantMessage,
+        InMemoryLoopHostMilestoneSink, InstructionSafetyContext, LoopCapabilityPort,
+        LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
+        LoopContextRequest, LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
+        LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageRole, LoopInputCursor,
         LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError,
         LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent,
         LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelCallOutcome,
@@ -305,6 +305,178 @@ async fn text_only_host_factory_invokes_model_budget_accountant() {
     assert!(accountant.was_post_called());
     assert!(!accountant.post_saw_failure());
     assert_eq!(fixture.gateway.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn progress_port_routes_loop_progress_milestones() {
+    let fixture = HostFixture::new("thread-progress-route", "hello progress").await;
+    let host = fixture.build_host().await;
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::IterationStarted { iteration: 2 })
+        .await
+        .unwrap();
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::CapabilityBatchStarted {
+            iteration: 2,
+            call_count: 3,
+            policy: BatchPolicyKind::Parallel,
+        })
+        .await
+        .unwrap();
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::CapabilityBatchCompleted {
+            iteration: 2,
+            result_count: 1,
+            denied_count: 1,
+            gated_count: 1,
+            failed_count: 0,
+        })
+        .await
+        .unwrap();
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::GateBlocked {
+            iteration: 2,
+            gate_kind: LoopGateKind::Approval,
+        })
+        .await
+        .unwrap();
+
+    let milestones = fixture.milestones();
+    assert!(matches!(
+        milestones[0].kind,
+        LoopHostMilestoneKind::IterationStarted { iteration: 2 }
+    ));
+    assert!(matches!(
+        milestones[1].kind,
+        LoopHostMilestoneKind::CapabilityBatchStarted {
+            iteration: 2,
+            call_count: 3,
+            policy: BatchPolicyKind::Parallel,
+        }
+    ));
+    assert!(matches!(
+        milestones[2].kind,
+        LoopHostMilestoneKind::CapabilityBatchCompleted {
+            iteration: 2,
+            result_count: 1,
+            denied_count: 1,
+            gated_count: 1,
+            failed_count: 0,
+        }
+    ));
+    assert!(matches!(
+        milestones[3].kind,
+        LoopHostMilestoneKind::GateBlocked {
+            iteration: 2,
+            gate_kind: LoopGateKind::Approval,
+        }
+    ));
+    assert!(milestones.iter().all(|milestone| {
+        milestone.scope == fixture.context.scope
+            && milestone.turn_id == fixture.context.turn_id
+            && milestone.run_id == fixture.context.run_id
+    }));
+}
+
+#[tokio::test]
+async fn progress_port_checkpoint_written_does_not_double_emit() {
+    let fixture = HostFixture::new("thread-progress-checkpoint", "hello progress").await;
+    let host = fixture.build_host().await;
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::CheckpointWritten {
+            iteration: 0,
+            kind: LoopCheckpointKind::BeforeModel,
+        })
+        .await
+        .unwrap();
+
+    assert!(fixture.milestones().is_empty());
+}
+
+#[tokio::test]
+async fn progress_port_prompt_bundle_built_does_not_double_emit() {
+    let fixture = HostFixture::new("thread-progress-prompt", "hello progress").await;
+    let host = fixture.build_host().await;
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+
+    let prompt_bundle = host_dyn
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+        })
+        .await
+        .unwrap();
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::PromptBundleBuilt {
+            iteration: 0,
+            bundle_ref: prompt_bundle.bundle_ref,
+            mode: PromptMode::TextOnly,
+            surface_version: prompt_bundle.surface_version,
+            message_count: prompt_bundle.messages.len() as u32,
+            identity_message_count: prompt_bundle.identity_message_count,
+            instruction_snippet_count: prompt_bundle.instruction_snippet_count,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(fixture.milestone_names(), vec!["prompt_bundle_built"]);
+}
+
+#[tokio::test]
+async fn progress_event_serde_roundtrip_all_variants() {
+    let fixture = HostFixture::new("thread-progress-serde", "hello progress").await;
+    let context = fixture.context.clone();
+    let bundle_ref = ironclaw_turns::run_profile::LoopPromptBundleRef::for_run(&context, "bundle")
+        .expect("bundle ref");
+    let surface_version = CapabilitySurfaceVersion::new("surface:v1").expect("surface version");
+
+    let events = vec![
+        LoopProgressEvent::driver_note(LoopDriverNoteKind::Planning, "safe note").unwrap(),
+        LoopProgressEvent::IterationStarted { iteration: 1 },
+        LoopProgressEvent::PromptBundleBuilt {
+            iteration: 1,
+            bundle_ref,
+            mode: PromptMode::TextOnly,
+            surface_version: Some(surface_version),
+            message_count: 4,
+            identity_message_count: 1,
+            instruction_snippet_count: 2,
+        },
+        LoopProgressEvent::CapabilityBatchStarted {
+            iteration: 1,
+            call_count: 2,
+            policy: BatchPolicyKind::Sequential,
+        },
+        LoopProgressEvent::CapabilityBatchCompleted {
+            iteration: 1,
+            result_count: 1,
+            denied_count: 0,
+            gated_count: 1,
+            failed_count: 0,
+        },
+        LoopProgressEvent::GateBlocked {
+            iteration: 1,
+            gate_kind: LoopGateKind::ResourceWait,
+        },
+        LoopProgressEvent::CheckpointWritten {
+            iteration: 1,
+            kind: LoopCheckpointKind::Final,
+        },
+    ];
+
+    for event in events {
+        let value = serde_json::to_value(&event).expect("serialize");
+        let restored: LoopProgressEvent = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(restored, event);
+    }
 }
 
 #[tokio::test]
