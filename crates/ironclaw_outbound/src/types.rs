@@ -101,7 +101,7 @@ pub struct ThreadProjectionAccessClaim {
 ///
 /// [`OutboundPolicyService`]: crate::OutboundPolicyService
 /// [`OutboundPolicyService::authorize_subscription`]: crate::OutboundPolicyService::authorize_subscription
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ThreadProjectionAccessGrant {
     pub(crate) actor: TurnActor,
     pub(crate) scope: ProjectionScope,
@@ -230,7 +230,7 @@ pub struct ReplyTargetBindingClaim {
 ///
 /// [`OutboundPolicyService`]: crate::OutboundPolicyService
 /// [`OutboundPolicyService::prepare_delivery_attempt`]: crate::OutboundPolicyService::prepare_delivery_attempt
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ValidatedReplyTargetBinding {
     pub(crate) target: ReplyTargetBindingRef,
 }
@@ -264,7 +264,7 @@ pub struct OutboundDeliveryAttempt {
     pub failure_kind: Option<DeliveryFailureKind>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutboundDeliveryDecision {
     Authorized {
