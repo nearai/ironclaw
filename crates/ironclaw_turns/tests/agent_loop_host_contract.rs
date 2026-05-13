@@ -15,7 +15,7 @@ use ironclaw_turns::{
     events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
+        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityConcurrency, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
         FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
@@ -1314,6 +1314,7 @@ impl RecordingAgentLoopHost {
                     runtime: RuntimeKind::Wasm,
                     safe_name: "Echo".to_string(),
                     safe_description: "Returns an opaque result ref".to_string(),
+                    concurrency: CapabilityConcurrency::SafeForParallel,
                 }],
             },
             context_message_safe_summary: "hello".to_string(),

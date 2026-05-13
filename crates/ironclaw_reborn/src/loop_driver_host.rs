@@ -7,8 +7,8 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityId, CorrelationId, ExecutionContext, ExtensionId, InvocationId, ResourceEstimate,
-    sha256_digest_token,
+    CapabilityDescriptor, CapabilityId, CorrelationId, EffectKind, ExecutionContext, ExtensionId,
+    InvocationId, PermissionMode, ResourceEstimate, sha256_digest_token,
 };
 use ironclaw_host_runtime::{
     HostRuntime, HostRuntimeError, IdempotencyKey, RuntimeBlockedReason, RuntimeCapabilityOutcome,
@@ -24,20 +24,22 @@ use crate::model_routes::{ModelRouteError, ModelRouteResolver, ModelSlot};
 
 use ironclaw_turns::{
     CheckpointStateStore, GetCheckpointStateRequest, LoopCheckpointStore, LoopGateRef,
-    LoopResultRef, PutLoopCheckpointRequest, RunProfileId, TurnCheckpointId, TurnError, TurnStatus,
+    LoopResultRef, PutCheckpointStateRequest, PutLoopCheckpointRequest, RunProfileId,
+    TurnCheckpointId, TurnError, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
-        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
+        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityConcurrency, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
         FinalizeAssistantMessage, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopContextBundle, LoopContextPort, LoopContextRequest, LoopHostMilestoneEmitter,
-        LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor, LoopInputPort, LoopModelMessage,
-        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProcessRef, LoopProgressEvent,
-        LoopProgressPort, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-        LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-        ProcessHandleSummary, PromptMode, PromptSkillContextMetadata, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface, skill_snippet_model_message_ref,
+        LoopCheckpointStateRef, LoopContextBundle, LoopContextPort, LoopContextRequest,
+        LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor,
+        LoopInputPort, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopProcessRef, LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleRef,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
+        LoopTranscriptPort, ProcessHandleSummary, PromptMode, PromptSkillContextMetadata,
+        StoreLoopCheckpointPayload, UpdateAssistantDraft, VisibleCapabilityRequest,
+        VisibleCapabilitySurface, skill_snippet_model_message_ref,
     },
     runner::ClaimedTurnRun,
 };
@@ -556,12 +558,14 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                         estimate: capability.estimated_resources.clone(),
                     },
                 );
+                let concurrency = capability_concurrency_for(&capability.descriptor);
                 CapabilityDescriptorView {
                     capability_id,
                     provider: Some(capability.descriptor.provider),
                     runtime: capability.descriptor.runtime,
                     safe_name: capability.descriptor.id.as_str().to_string(),
                     safe_description: capability.descriptor.description,
+                    concurrency,
                 }
             })
             .collect();
@@ -753,6 +757,40 @@ fn invocation_idempotency_key(
         sha256_digest_token(payload.as_bytes())
     ))
     .map_err(host_runtime_error)
+}
+
+/// Derive a `CapabilityConcurrency` from a registry `CapabilityDescriptor`.
+///
+/// Iter-8 finding 1 fix: the loop framework's batch policy needs to know which
+/// calls inside a batch must run alone (filesystem writes, shell, approval-
+/// gated work). Mirror the conservative-default rule from the executor here:
+/// any side-effecting effect or `default_permission = Ask` forces `Exclusive`.
+/// Read-only descriptors keep `SafeForParallel` so simple read fan-outs still
+/// parallelize.
+fn capability_concurrency_for(descriptor: &CapabilityDescriptor) -> CapabilityConcurrency {
+    if matches!(descriptor.default_permission, PermissionMode::Ask) {
+        return CapabilityConcurrency::Exclusive;
+    }
+    let exclusive_effect = descriptor.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            EffectKind::WriteFilesystem
+                | EffectKind::DeleteFilesystem
+                | EffectKind::SpawnProcess
+                | EffectKind::ExecuteCode
+                | EffectKind::ExternalWrite
+                | EffectKind::Financial
+                | EffectKind::ModifyExtension
+                | EffectKind::ModifyApproval
+                | EffectKind::ModifyBudget
+                | EffectKind::DispatchCapability
+        )
+    });
+    if exclusive_effect {
+        CapabilityConcurrency::Exclusive
+    } else {
+        CapabilityConcurrency::SafeForParallel
+    }
 }
 
 fn loop_surface_version(
@@ -1446,6 +1484,13 @@ impl LoopCheckpointPort for RebornLoopDriverHost {
     ) -> Result<TurnCheckpointId, AgentLoopHostError> {
         self.checkpoint.checkpoint(request).await
     }
+
+    async fn store_checkpoint_payload(
+        &self,
+        request: StoreLoopCheckpointPayload,
+    ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
+        self.checkpoint.store_checkpoint_payload(request).await
+    }
 }
 
 #[async_trait]
@@ -1575,6 +1620,40 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
             .checkpoint_created(checkpoint.checkpoint_id, request.kind)
             .await?;
         Ok(checkpoint.checkpoint_id)
+    }
+
+    async fn store_checkpoint_payload(
+        &self,
+        request: StoreLoopCheckpointPayload,
+    ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
+        // Iter-5 finding 3: thread the active run profile's
+        // `max_checkpoint_bytes` cap into the store so profiles that opt
+        // into larger checkpoints (durable mission = 256 KiB) aren't
+        // silently rejected by the legacy 64 KiB default in
+        // `CheckpointStateStore`. The store still enforces an absolute
+        // system ceiling on top of this.
+        let profile_cap = self
+            .run_context
+            .resolved_run_profile
+            .checkpoint_policy
+            .max_checkpoint_bytes;
+        let record = self
+            .checkpoint_state_store
+            .put_checkpoint_state(
+                PutCheckpointStateRequest::new(
+                    self.run_context.scope.clone(),
+                    self.run_context.turn_id,
+                    self.run_context.run_id,
+                    self.run_context.checkpoint_schema_id.clone(),
+                    self.run_context.checkpoint_schema_version,
+                    request.kind,
+                    request.payload,
+                )
+                .with_max_payload_bytes(profile_cap),
+            )
+            .await
+            .map_err(turn_error_to_host_error)?;
+        Ok(record.state_ref)
     }
 }
 

@@ -10,7 +10,16 @@ use crate::{
     TurnCheckpointId, TurnError, TurnId, TurnRunId, TurnScope, TurnTimestamp,
 };
 
-pub const MAX_CHECKPOINT_STATE_PAYLOAD_BYTES: usize = 64 * 1024;
+/// Absolute system ceiling on a checkpoint payload. Individual run profiles
+/// declare their own (typically smaller) cap via
+/// `CheckpointPolicy::max_checkpoint_bytes`; the per-request validator
+/// enforces the *minimum* of this constant and the profile-supplied cap.
+///
+/// 256 KiB matches the durable-mission profile's declared cap (see
+/// `crates/ironclaw_turns/src/run_profile/resolver.rs`). Iter-5 finding 3
+/// raised the constant from 64 KiB so the absolute ceiling no longer
+/// silently shadows profiles that legitimately allow larger checkpoints.
+pub const MAX_CHECKPOINT_STATE_PAYLOAD_BYTES: usize = 256 * 1024;
 
 /// Internal loop checkpoint payload bytes.
 ///
@@ -73,6 +82,13 @@ pub struct PutCheckpointStateRequest {
     pub schema_version: RunProfileVersion,
     pub kind: LoopCheckpointKind,
     payload: Vec<u8>,
+    /// Iter-5 finding 3: per-profile cap on the payload, sourced from
+    /// `CheckpointPolicy::max_checkpoint_bytes`. The store enforces
+    /// `min(MAX_CHECKPOINT_STATE_PAYLOAD_BYTES, max_payload_bytes)`; a
+    /// `None` here means "fall back to the absolute system ceiling" (used
+    /// only by legacy/test call sites that have no run-profile context).
+    /// New production call sites must pass the profile cap explicitly.
+    max_payload_bytes: Option<u64>,
 }
 
 impl PutCheckpointStateRequest {
@@ -93,7 +109,22 @@ impl PutCheckpointStateRequest {
             schema_version,
             kind,
             payload: payload.into(),
+            max_payload_bytes: None,
         }
+    }
+
+    /// Iter-5 finding 3: attach the active run profile's checkpoint-size cap
+    /// to this request so the store enforces the profile-declared limit
+    /// rather than the absolute system ceiling. Production loop hosts must
+    /// thread the profile cap through; tests + legacy callers may omit it.
+    #[must_use]
+    pub fn with_max_payload_bytes(mut self, max_payload_bytes: u64) -> Self {
+        self.max_payload_bytes = Some(max_payload_bytes);
+        self
+    }
+
+    pub fn max_payload_bytes(&self) -> Option<u64> {
+        self.max_payload_bytes
     }
 
     pub fn payload_len(&self) -> usize {
@@ -210,7 +241,7 @@ impl CheckpointStateStore for InMemoryCheckpointStateStore {
         &self,
         request: PutCheckpointStateRequest,
     ) -> Result<CheckpointStateRecord, TurnError> {
-        validate_checkpoint_payload_len(request.payload.len())
+        validate_checkpoint_payload_len_with_cap(request.payload.len(), request.max_payload_bytes)
             .map_err(|reason| TurnError::InvalidRequest { reason })?;
         let state_ref = new_state_ref()?;
         let payload = RedactedCheckpointPayload::new(request.payload)
@@ -330,6 +361,27 @@ fn validate_checkpoint_payload_len(len: usize) -> Result<(), String> {
         return Err(format!(
             "checkpoint payload must be at most {MAX_CHECKPOINT_STATE_PAYLOAD_BYTES} bytes"
         ));
+    }
+    Ok(())
+}
+
+/// Iter-5 finding 3: enforce both the absolute system ceiling
+/// (`MAX_CHECKPOINT_STATE_PAYLOAD_BYTES`) AND the profile-declared cap (if
+/// provided) as the *minimum* of the two. The system ceiling is a hard upper
+/// bound; the profile cap is the per-run policy bound. Requests without a
+/// profile cap fall back to the system ceiling alone (legacy/test path).
+fn validate_checkpoint_payload_len_with_cap(
+    len: usize,
+    profile_cap: Option<u64>,
+) -> Result<(), String> {
+    validate_checkpoint_payload_len(len)?;
+    if let Some(cap) = profile_cap {
+        let effective_cap = (cap as usize).min(MAX_CHECKPOINT_STATE_PAYLOAD_BYTES);
+        if len > effective_cap {
+            return Err(format!(
+                "checkpoint payload must be at most {effective_cap} bytes for this run profile"
+            ));
+        }
     }
     Ok(())
 }

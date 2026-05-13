@@ -221,7 +221,13 @@ bounded_loop_ref!(
 bounded_loop_ref!(LoopProcessRef, "loop process ref", "process:", 256);
 
 impl LoopCheckpointStateRef {
-    pub(crate) fn legacy_unknown() -> Self {
+    /// Sentinel ref used by the canonical executor when a host's
+    /// `LoopCheckpointPort::store_checkpoint_payload` returns `Unavailable`
+    /// (the default trait impl for legacy hosts that have not yet migrated
+    /// to the store-then-checkpoint contract). The legacy host's
+    /// `checkpoint()` impl is expected to ignore the ref entirely. Master
+    /// spec §10 / WS-6 iter-7 finding 3.
+    pub fn legacy_unknown() -> Self {
         Self("checkpoint:unknown".to_string())
     }
 
@@ -887,6 +893,48 @@ pub struct CapabilityDescriptorView {
     pub runtime: RuntimeKind,
     pub safe_name: String,
     pub safe_description: String,
+    /// Whether this capability is safe to invoke in parallel with sibling
+    /// capabilities inside the same batch, or must run alone. Mirrors the
+    /// `ConcurrencyHint` enum in `ironclaw_agent_loop`; lives here so it can be
+    /// surfaced on the host port without forcing `ironclaw_turns` to take a
+    /// dependency on the loop-framework crate (the dependency arrow points the
+    /// other way).
+    ///
+    /// Hosts should derive this conservatively from the underlying
+    /// `CapabilityDescriptor` — capabilities whose effects include
+    /// `WriteFilesystem` / `DeleteFilesystem` / `SpawnProcess` / `ExecuteCode`
+    /// / `ExternalWrite` / `Financial` / `ModifyExtension` / `ModifyApproval`
+    /// / `ModifyBudget`, or whose `default_permission` is `Ask`, must report
+    /// `Exclusive`. If the host can't tell, `Exclusive` is the safe default.
+    ///
+    /// Iter-9 finding 2: `#[serde(default)]` so older
+    /// `VisibleCapabilitySurface` payloads, recorded events, and pre-WS-6
+    /// hosts that don't populate this field still deserialize. The default
+    /// of `CapabilityConcurrency::Exclusive` is the conservative choice —
+    /// missing data is treated as "must run alone".
+    #[serde(default)]
+    pub concurrency: CapabilityConcurrency,
+}
+
+/// Per-capability concurrency disclosure surfaced to the loop framework via
+/// `CapabilityDescriptorView`. Wire-stable; serialized into checkpoints and
+/// observability events, so the snake_case names are part of the public
+/// contract.
+///
+/// Distinct from `ironclaw_agent_loop::ConcurrencyHint` to keep the dependency
+/// arrow pointing from `ironclaw_agent_loop` -> `ironclaw_turns`; the loop
+/// framework maps between the two at the executor boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CapabilityConcurrency {
+    /// Read-only or otherwise safe to run alongside sibling capabilities in
+    /// the same batch.
+    SafeForParallel,
+    /// Must run alone — filesystem write, shell, approval-gated, or other
+    /// exclusive resource. Default so a host that omits the field stays on
+    /// the conservative side.
+    #[default]
+    Exclusive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1120,6 +1168,18 @@ impl LoopCheckpointKind {
     }
 }
 
+/// Host request to persist a checkpoint payload before taking a checkpoint.
+///
+/// The payload is opaque bytes (typically a JSON-encoded driver-side state
+/// object scoped by `schema_id`). The host validates length and scope, then
+/// allocates and returns a `LoopCheckpointStateRef` the driver passes back via
+/// `LoopCheckpointRequest::state_ref`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreLoopCheckpointPayload {
+    pub kind: LoopCheckpointKind,
+    pub payload: Vec<u8>,
+}
+
 #[async_trait]
 pub trait LoopCheckpointPort: Send + Sync {
     async fn checkpoint(
@@ -1134,6 +1194,25 @@ pub trait LoopCheckpointPort: Send + Sync {
         Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::Unavailable,
             "load_checkpoint_payload not implemented",
+        ))
+    }
+
+    /// Persist a checkpoint payload and return the allocated state ref.
+    ///
+    /// The canonical executor calls this immediately before `checkpoint()` so
+    /// the host can validate the payload exists before recording the
+    /// checkpoint marker (`HostManagedLoopCheckpointPort::checkpoint` rejects
+    /// unknown state refs by design — master spec §10).
+    ///
+    /// Default impl returns `Unavailable` so legacy drivers that build their
+    /// own state refs out-of-band continue to compile during migration.
+    async fn store_checkpoint_payload(
+        &self,
+        _request: StoreLoopCheckpointPayload,
+    ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "store_checkpoint_payload not implemented",
         ))
     }
 }
@@ -1217,4 +1296,31 @@ fn unsupported_host_method(method: &'static str) -> AgentLoopHostError {
         AgentLoopHostErrorKind::Unavailable,
         format!("agent loop host method {method} is unavailable"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Iter-9 finding 2: `CapabilityDescriptorView::concurrency` must
+    /// `#[serde(default)]` so older payloads (pre-WS-6 hosts, recorded
+    /// events, persisted surface snapshots) deserialize. Missing field
+    /// → `CapabilityConcurrency::Exclusive`, the conservative default
+    /// per the field doc.
+    #[test]
+    fn capability_descriptor_view_missing_concurrency_defaults_to_exclusive() {
+        let legacy_json = serde_json::json!({
+            "capability_id": "test.legacy_cap",
+            "provider": null,
+            "runtime": "wasm",
+            "safe_name": "test",
+            "safe_description": "test capability"
+            // NOTE: `concurrency` field intentionally absent — this is
+            // exactly the shape a pre-WS-6 host or replayed older event
+            // would produce.
+        });
+        let view: CapabilityDescriptorView = serde_json::from_value(legacy_json)
+            .expect("legacy payload without concurrency must deserialize");
+        assert_eq!(view.concurrency, CapabilityConcurrency::Exclusive);
+    }
 }

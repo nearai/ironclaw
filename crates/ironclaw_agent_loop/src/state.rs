@@ -46,6 +46,24 @@ pub struct LoopExecutionState {
     pub model_state: ModelStrategyState,
     pub recovery_state: RecoveryStrategyState,
     pub control_state: ControlStrategyState,
+    /// Wall-clock anchor for `BudgetStrategy::wall_clock_limit` enforcement.
+    ///
+    /// Iter-6 finding 1: persisted so the run's effective start time
+    /// survives `Blocked`, process restart, or checkpoint reload — the
+    /// pre-iter-6 executor anchored each `execute()` entry to a fresh
+    /// `tokio::time::Instant`, which is monotonic-only and resets across
+    /// restarts. A run that resumed after a long suspension was handed a
+    /// brand-new wall-clock budget while keeping its old iteration count.
+    ///
+    /// Captured once on the first `execute()` entry from
+    /// `SystemTime::now()`; on resume the field is already `Some(t)` and
+    /// the executor compares against `SystemTime::now()` to detect
+    /// budget exhaustion. `#[serde(default)]` so checkpoints written by
+    /// pre-iter-6 builds (none expected in production, but defensive)
+    /// deserialize as `None` and the executor sets the anchor on first
+    /// entry rather than failing to load.
+    #[serde(default)]
+    pub started_at_unix_ms: Option<u64>,
 }
 
 impl LoopExecutionState {
@@ -72,6 +90,12 @@ impl LoopExecutionState {
             model_state: ModelStrategyState::default(),
             recovery_state: RecoveryStrategyState::default(),
             control_state: ControlStrategyState::default(),
+            // Iter-6 finding 1: anchor is set on first `execute()` entry
+            // (so tests that build state without entering the executor see
+            // `None`). The executor's tick prologue captures
+            // `SystemTime::now()` only when this field is `None`,
+            // preserving the anchor across resumes.
+            started_at_unix_ms: None,
         }
     }
 

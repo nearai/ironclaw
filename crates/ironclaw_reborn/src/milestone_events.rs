@@ -217,6 +217,7 @@ fn loop_failure_kind(reason_kind: &LoopFailureKind) -> &'static str {
         LoopFailureKind::DriverBug => "driver_bug",
         LoopFailureKind::InterruptedUnexpectedly => "interrupted_unexpectedly",
         LoopFailureKind::NoProgressDetected => "no_progress_detected",
+        LoopFailureKind::WallClockLimit => "wall_clock_limit",
     }
 }
 

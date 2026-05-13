@@ -698,6 +698,7 @@ fn all_failure_kinds_produce_stable_sanitized_category_strings() {
             "interrupted_unexpectedly",
         ),
         (LoopFailureKind::NoProgressDetected, "no_progress_detected"),
+        (LoopFailureKind::WallClockLimit, "wall_clock_limit"),
     ];
 
     for (kind, expected_category) in variants {

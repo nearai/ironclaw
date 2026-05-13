@@ -435,6 +435,10 @@ pub enum LoopFailureKind {
     DriverBug,
     InterruptedUnexpectedly,
     NoProgressDetected,
+    /// `BudgetStrategy::wall_clock_limit` exceeded before the loop reached a
+    /// natural terminal state. Distinct from `IterationLimit` so callers can
+    /// tell time-bound vs step-bound exhaustion apart.
+    WallClockLimit,
 }
 
 impl LoopFailureKind {
@@ -450,6 +454,7 @@ impl LoopFailureKind {
             Self::DriverBug => "driver_bug",
             Self::InterruptedUnexpectedly => "interrupted_unexpectedly",
             Self::NoProgressDetected => "no_progress_detected",
+            Self::WallClockLimit => "wall_clock_limit",
         })
     }
 }

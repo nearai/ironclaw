@@ -5,11 +5,13 @@
 //! under `docs/reborn/agent-loop-briefs/`.
 
 pub mod default_planner;
+pub mod executor;
 pub mod planner;
 pub mod state;
 pub mod strategies;
 
 pub use default_planner::DefaultPlanner;
+pub use executor::{AgentLoopExecutor, CanonicalAgentLoopExecutor};
 pub use planner::{AgentLoopPlanner, PlannerId, PlannerIdError};
 pub use strategies::{
     BatchPolicy, BatchPolicyStrategy, BudgetStrategy, CapabilityCallSummary, CapabilityErrorClass,
