@@ -1239,25 +1239,6 @@ impl LoopHostMilestoneSink for FailingOnModelCompletedMilestoneSink {
 }
 
 #[derive(Default)]
-struct FailingOnModelStartedMilestoneSink;
-
-#[async_trait]
-impl LoopHostMilestoneSink for FailingOnModelStartedMilestoneSink {
-    async fn publish_loop_milestone(
-        &self,
-        milestone: LoopHostMilestone,
-    ) -> Result<(), AgentLoopHostError> {
-        if matches!(milestone.kind, LoopHostMilestoneKind::ModelStarted { .. }) {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Unavailable,
-                "milestone sink unavailable",
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[derive(Default)]
 struct RecordingLoopModelGateway {
     requests: Mutex<Vec<LoopModelGatewayRequest>>,
     responses: Mutex<Vec<Result<LoopModelResponse, LoopModelGatewayError>>>,
@@ -2096,12 +2077,12 @@ async fn post_accounting_failure_after_success_fails_closed() {
     assert_eq!(gateway.requests().len(), 1);
 }
 
-/// If a model-started milestone fails after pre-call reservation, post-call
-/// accounting receives a failure outcome so reservations can be released.
+/// Model-started milestone projection failures are non-fatal; accounting still
+/// wraps the provider call and records its actual outcome.
 #[tokio::test]
-async fn model_started_failure_releases_pre_call_reservation_without_gateway_call() {
+async fn model_started_failure_still_accounts_provider_outcome() {
     let context = claimed_run_context().await;
-    let milestone_sink = Arc::new(FailingOnModelStartedMilestoneSink);
+    let milestone_sink = Arc::new(FailingOnModelStartedMilestoneSink::default());
     let gateway = Arc::new(RecordingLoopModelGateway::default());
     gateway.push_response(Ok(success_response(&context)));
     let accountant = Arc::new(RecordingBudgetAccountant::new());
@@ -2109,20 +2090,24 @@ async fn model_started_failure_releases_pre_call_reservation_without_gateway_cal
     let port = HostManagedLoopModelPort::with_accountant(
         context.clone(),
         gateway.clone(),
-        milestone_sink,
+        milestone_sink.clone(),
         accountant.clone(),
     );
 
-    let error = port
+    let response = port
         .stream_model(simple_model_request(&context))
         .await
-        .unwrap_err();
+        .unwrap();
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    assert_eq!(
+        response.effective_model_profile_id,
+        context.resolved_run_profile.model_profile_id
+    );
     assert!(accountant.was_pre_called());
     assert!(accountant.was_post_called());
-    assert!(accountant.post_saw_failure());
-    assert_eq!(gateway.requests().len(), 0);
+    assert!(!accountant.post_saw_failure());
+    assert_eq!(gateway.requests().len(), 1);
+    assert_eq!(milestone_sink.kind_names(), vec!["model_completed"]);
 }
 
 /// Budget accounting on failure: post hook still fires.

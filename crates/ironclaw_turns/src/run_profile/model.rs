@@ -90,22 +90,6 @@ impl LoopModelGatewayError {
         self
     }
 
-    fn from_host_error(error: AgentLoopHostError) -> Self {
-        let diagnostic_ref = error.diagnostic_ref;
-        let mut converted = match Self::new(error.kind, error.safe_summary) {
-            Ok(error) => error,
-            Err(_) => Self {
-                kind: error.kind,
-                safe_summary: LoopSafeSummary::model_gateway_failed(),
-                diagnostic_ref: None,
-            },
-        };
-        if let Some(diagnostic_ref) = diagnostic_ref {
-            converted = converted.with_diagnostic_ref(diagnostic_ref);
-        }
-        converted
-    }
-
     fn into_host_error(self) -> AgentLoopHostError {
         let mut error = AgentLoopHostError::new(self.kind, self.safe_summary.as_str().to_string());
         if let Some(diagnostic_ref) = self.diagnostic_ref {
