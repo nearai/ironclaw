@@ -1,0 +1,23 @@
+[package]
+name = "ironclaw_product_adapter_runtime_catalog"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Runtime-facing ProductAdapter activation catalog for IronClaw Reborn"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[dependencies]
+ironclaw_product_adapter_registry = { path = "../ironclaw_product_adapter_registry", version = "0.1.0" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
+thiserror = "2"
+
+[dev-dependencies]
+async-trait = "0.1"
+chrono = "0.4"
+ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
+semver = "1"
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
