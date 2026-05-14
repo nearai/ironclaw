@@ -77,11 +77,9 @@ impl RunnerError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WebhookProcessOutcome {
     /// Auth succeeded, adapter parsed an envelope, workflow accepted it.
+    /// Parsed `ProductInboundPayload::NoOp` events still flow through
+    /// `ProductWorkflow` and return `Acknowledged` with a no-op ack.
     Acknowledged { ack: ProductInboundAck },
-    /// Reserved for host/protocol paths that acknowledge without a product
-    /// workflow envelope. Parsed `ProductInboundPayload::NoOp` events still
-    /// flow through `ProductWorkflow` and return `Acknowledged`.
-    NoOp,
 }
 
 /// Webhook auth strategy.
@@ -107,7 +105,23 @@ impl WebhookAuth {
                 WebhookAuth::SharedSecretHeader(v),
                 AuthRequirement::SharedSecretHeader { header_name },
             ) => header_name_matches(&v.header_name, header_name),
-            _ => false,
+            (
+                WebhookAuth::Hmac(_),
+                AuthRequirement::RequestSignature {
+                    timestamp_header_name: None,
+                    ..
+                },
+            ) => {
+                // Intentionally unsupported: current webhook callers must bind
+                // HMAC verification to both signature and timestamp headers.
+                false
+            }
+            (WebhookAuth::Hmac(_), AuthRequirement::SharedSecretHeader { .. })
+            | (WebhookAuth::Hmac(_), AuthRequirement::SessionCookie { .. })
+            | (WebhookAuth::Hmac(_), AuthRequirement::BearerToken)
+            | (WebhookAuth::SharedSecretHeader(_), AuthRequirement::RequestSignature { .. })
+            | (WebhookAuth::SharedSecretHeader(_), AuthRequirement::SessionCookie { .. })
+            | (WebhookAuth::SharedSecretHeader(_), AuthRequirement::BearerToken) => false,
         }
     }
 

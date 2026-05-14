@@ -235,23 +235,30 @@ enum PathKind {
 }
 
 fn normalize_absolute_path(raw: String, kind: PathKind) -> Result<String, HostApiError> {
+    let invalid_value = invalid_path_error_value(&raw, kind);
     if raw.is_empty() {
-        return Err(HostApiError::invalid_path(raw, "path must not be empty"));
+        return Err(HostApiError::invalid_path(
+            invalid_value,
+            "path must not be empty",
+        ));
     }
     if raw.contains('\0') || raw.chars().any(char::is_control) {
         return Err(HostApiError::invalid_path(
-            raw,
+            invalid_value,
             "NUL/control characters are not allowed",
         ));
     }
     if raw.contains('\\') {
         return Err(HostApiError::invalid_path(
-            raw,
+            invalid_value,
             "backslashes are not allowed",
         ));
     }
     if !raw.starts_with('/') {
-        return Err(HostApiError::invalid_path(raw, "path must be absolute"));
+        return Err(HostApiError::invalid_path(
+            invalid_value,
+            "path must be absolute",
+        ));
     }
 
     let mut parts = Vec::new();
@@ -260,7 +267,7 @@ fn normalize_absolute_path(raw: String, kind: PathKind) -> Result<String, HostAp
             "" | "." => {}
             ".." => {
                 return Err(HostApiError::invalid_path(
-                    raw,
+                    invalid_value,
                     "`..` segments are not allowed",
                 ));
             }
@@ -270,7 +277,7 @@ fn normalize_absolute_path(raw: String, kind: PathKind) -> Result<String, HostAp
 
     if parts.is_empty() {
         return Err(HostApiError::invalid_path(
-            raw,
+            invalid_value,
             "root path is not valid here",
         ));
     }
@@ -283,6 +290,13 @@ fn normalize_absolute_path(raw: String, kind: PathKind) -> Result<String, HostAp
         ));
     }
     Ok(normalized)
+}
+
+fn invalid_path_error_value(raw: &str, kind: PathKind) -> String {
+    match kind {
+        PathKind::Scoped => REDACTED_PATH_VALUE.to_string(),
+        PathKind::Virtual | PathKind::MountAlias => raw.to_string(),
+    }
 }
 
 fn looks_like_url(value: &str) -> bool {

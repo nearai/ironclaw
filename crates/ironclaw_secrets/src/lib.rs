@@ -245,7 +245,9 @@ impl CredentialSessionId {
         Uuid::parse_str(value).map(Self)
     }
 
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
+    // Keep this helper feature-agnostic so private DTO conversion code does not
+    // depend on backend feature gates. It may be unused in featureless builds.
+    #[allow(dead_code)]
     pub(crate) fn to_private_storage_string(self) -> String {
         self.0.to_string()
     }

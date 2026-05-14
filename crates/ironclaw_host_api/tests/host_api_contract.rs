@@ -232,8 +232,14 @@ fn scoped_path_rejects_raw_host_paths_urls_and_traversal() {
 }
 
 #[test]
-fn scoped_path_redacts_host_looking_values_in_error_display() {
+fn scoped_path_redacts_all_rejected_values_in_error_display() {
     for invalid in [
+        "",
+        "relative/path",
+        "/workspace/../../secret",
+        "/workspace/has\0nul",
+        "\\server\\share\\private.txt",
+        "\\\\server\\share\\private.txt",
         "file:///etc/passwd",
         "https://example.com/private/file",
         "/Users/alice/project/private.txt",
@@ -244,7 +250,7 @@ fn scoped_path_redacts_host_looking_values_in_error_display() {
     ] {
         let message = ScopedPath::new(invalid).unwrap_err().to_string();
         assert!(
-            !message.contains(invalid),
+            invalid.is_empty() || !message.contains(invalid),
             "{invalid:?} must not be echoed in {message:?}"
         );
         assert!(
@@ -252,12 +258,6 @@ fn scoped_path_redacts_host_looking_values_in_error_display() {
             "{invalid:?} should use redacted placeholder in {message:?}"
         );
     }
-
-    let non_sensitive = ScopedPath::new("relative/path").unwrap_err().to_string();
-    assert!(
-        non_sensitive.contains("relative/path"),
-        "non-sensitive validation errors should still include useful value"
-    );
 }
 
 #[test]
