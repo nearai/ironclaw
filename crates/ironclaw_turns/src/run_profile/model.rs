@@ -331,5 +331,8 @@ fn sanitize_model_response(mut response: LoopModelResponse) -> LoopModelResponse
         chunk.safe_text_delta =
             sanitize_model_visible_text(std::mem::take(&mut chunk.safe_text_delta));
     }
+    if let super::host::ParentLoopOutput::AssistantReply(reply) = &mut response.output {
+        reply.content = sanitize_model_visible_text(std::mem::take(&mut reply.content));
+    }
     response
 }
