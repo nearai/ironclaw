@@ -1,0 +1,13 @@
+[package]
+name = "ironclaw_gateway_reborn"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Reborn WebChat frontend assets for IronClaw"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[dependencies]

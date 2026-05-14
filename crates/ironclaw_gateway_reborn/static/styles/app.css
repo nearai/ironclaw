@@ -1,0 +1,377 @@
+/* ════════════════════════════════════════════════════════════════════
+   app.css — design tokens + global resets only.
+   All component-level visual styling lives in JS design-system files.
+   ════════════════════════════════════════════════════════════════════ */
+
+/* ── Light theme ─────────────────────────────────────────────────── */
+:root {
+  color-scheme: light;
+
+  /* Canvas / surfaces */
+  --v2-canvas:        #f4f7fb;
+  --v2-canvas-strong: #ffffff;
+  --v2-surface:       #ffffff;
+  --v2-surface-soft:  #eef4fa;
+  --v2-surface-muted: #e4edf5;
+
+  /* Card tokens — used by Card component */
+  --v2-card-bg:     rgba(255, 255, 255, 0.92);
+  --v2-card-border: rgba(19, 45, 68, 0.12);
+  --v2-card-shadow: none;
+
+  /* Panel border (nav items, dividers, form borders) */
+  --v2-panel-border: rgba(19, 45, 68, 0.12);
+
+  /* Rail (input bg in dark) */
+  --v2-rail:    #edf3f8;
+  --v2-input-bg: #ffffff;
+
+  /* Typography */
+  --v2-text:        #243244;
+  --v2-text-strong: #0f1720;
+  --v2-text-muted:  #5f7183;
+  --v2-text-faint:  #8a9aab;
+  --v2-inverse:     #ffffff;
+  --v2-ink:         #0f1720;
+
+  /* Controls */
+  --v2-select-chevron: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20viewBox%3D%270%200%2012%2012%27%20fill%3D%27none%27%20stroke%3D%27%235f7183%27%20stroke-width%3D%271.8%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M2.5%204.5%206%208l3.5-3.5%27/%3E%3C/svg%3E");
+
+  /* Accent — signal blue */
+  --v2-accent:       #2e9de2;
+  --v2-accent-strong:#1678bd;
+  --v2-accent-soft:  rgba(76, 167, 230, 0.12);
+  --v2-accent-text:  #146fae;
+
+  /* Semantic colours */
+  --v2-positive-soft: rgba(32, 210, 154, 0.13);
+  --v2-positive-text: #087a5d;
+  --v2-warning-soft:  rgba(245, 193, 91, 0.18);
+  --v2-warning-text:  #8b5b00;
+  --v2-danger-soft:   rgba(255, 100, 128, 0.12);
+  --v2-danger-text:   #b42342;
+  --v2-info-soft:     rgba(76, 167, 230, 0.12);
+  --v2-info-text:     #146fae;
+
+  background: var(--v2-canvas);
+}
+
+/* ── Dark theme ─────────────────────────────────────────────────── */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --v2-canvas:        var(--bg-canvas, #111114);
+  --v2-canvas-strong: #0d0d10;
+  --v2-surface:       var(--bg-surface, #1b1b1f);
+  --v2-surface-soft:  var(--bg-surface-subtle, rgba(255, 255, 255, 0.03));
+  --v2-surface-muted: rgba(255, 255, 255, 0.07);
+
+  /* Card tokens in dark: transparent border + drop shadow */
+  --v2-card-bg:     #1b1b1f;
+  --v2-card-border: rgba(255, 255, 255, 0);
+  --v2-card-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+
+  --v2-panel-border: rgba(255, 255, 255, 0.1);
+
+  --v2-rail:     #151519;
+  --v2-input-bg: #151519;
+
+  --v2-text:        rgba(255, 255, 255, 0.82);
+  --v2-text-strong: var(--text-primary, #ffffff);
+  --v2-text-muted:  var(--text-secondary, rgba(255, 255, 255, 0.6));
+  --v2-text-faint:  var(--text-tertiary, rgba(255, 255, 255, 0.45));
+  --v2-inverse:     var(--text-inverse, #111111);
+  --v2-ink:         var(--accent-primary, #4ca7e6);
+
+  --v2-select-chevron: url("data:image/svg+xml,%3Csvg%20xmlns%3D%27http%3A//www.w3.org/2000/svg%27%20width%3D%2712%27%20height%3D%2712%27%20viewBox%3D%270%200%2012%2012%27%20fill%3D%27none%27%20stroke%3D%27%23ffffff%27%20stroke-opacity%3D%270.55%27%20stroke-width%3D%271.8%27%20stroke-linecap%3D%27round%27%20stroke-linejoin%3D%27round%27%3E%3Cpath%20d%3D%27M2.5%204.5%206%208l3.5-3.5%27/%3E%3C/svg%3E");
+
+  --v2-accent:        var(--accent-primary,        #4ca7e6);
+  --v2-accent-strong: var(--accent-primary-strong, #2882c8);
+  --v2-accent-soft:   rgba(76, 167, 230, 0.14);
+  --v2-accent-text:   var(--text-brand,            #8fc8f2);
+
+  --v2-positive-soft: rgba(32, 210, 154, 0.13);
+  --v2-positive-text: var(--text-positive, #20d29a);
+  --v2-warning-soft:  rgba(245, 193, 91, 0.14);
+  --v2-warning-text:  var(--accent-warning, #f5c15b);
+  --v2-danger-soft:   rgba(255, 100, 128, 0.13);
+  --v2-danger-text:   var(--text-danger, #ff6480);
+  --v2-info-soft:     rgba(76, 167, 230, 0.14);
+  --v2-info-text:     var(--accent-primary-soft, #8fc8f2);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+/* ── Global resets ───────────────────────────────────────────────── */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--v2-canvas);
+  scroll-behavior: auto;
+}
+
+/* Slightly tighter type scale on large screens */
+@media (min-width: 1024px) {
+  html { font-size: 15px; }
+}
+
+body {
+  overflow: hidden;
+  margin: 0;
+  letter-spacing: 0;
+  background: var(--v2-canvas);
+  color: var(--v2-text);
+}
+
+/* Font inheritance for form elements */
+button, input, select, textarea {
+  font: inherit;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+  cursor: pointer;
+}
+
+::selection {
+  background: var(--v2-info-soft);
+  color: var(--v2-info-text);
+}
+
+/* ── Global input theming ────────────────────────────────────────── */
+/* Applied to raw <input> elements not using our Input component.    */
+
+input, select, textarea {
+  color:            var(--v2-text-strong);
+  background-color: var(--v2-input-bg);
+  border-color:     var(--v2-panel-border);
+}
+
+input::placeholder, textarea::placeholder {
+  color: var(--v2-text-faint);
+}
+
+input:focus, select:focus, textarea:focus {
+  outline: none;
+  border-color: var(--v2-accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--v2-accent) 28%, transparent);
+}
+
+/* ── Animation keyframes ─────────────────────────────────────────── */
+
+@keyframes v2-breathe {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
+
+/* ── Scrollbars ──────────────────────────────────────────────────── */
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--v2-text-faint) 42%, transparent);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--v2-text-muted) 52%, transparent);
+}
+
+/* ── Tailwind colour-alias compat ────────────────────────────────── */
+/* Existing page components use iron-*, signal, copper utility classes. */
+/* These overrides let them respect the current theme without a rebuild. */
+
+.text-white,
+.text-iron-100,
+.text-iron-200,
+[class~="hover:text-white"]:hover      { color: var(--v2-text-strong) !important; }
+
+.text-iron-300,
+.text-iron-400,
+.text-iron-700                         { color: var(--v2-text-muted) !important; }
+
+.text-signal, .text-mint,
+[class~="hover:text-signal"]:hover     { color: var(--v2-accent-text) !important; }
+.text-copper                           { color: var(--v2-warning-text) !important; }
+.text-red-200, .text-red-300,
+[class~="hover:text-red-200"]:hover    { color: var(--v2-danger-text) !important; }
+
+[class~="bg-iron-950"],[class~="bg-iron-950/60"],[class~="bg-iron-950/72"],
+[class~="bg-iron-950/76"],[class~="bg-iron-950/80"],[class~="bg-iron-950/84"],
+[class~="bg-iron-950/88"],[class~="bg-iron-950/90"] {
+  background-color: color-mix(in srgb, var(--v2-canvas-strong) 88%, transparent) !important;
+}
+
+[class~="bg-iron-900"],[class~="bg-iron-900/50"],[class~="bg-iron-900/86"],
+[class~="bg-iron-800"],[class~="bg-iron-800/58"],[class~="bg-iron-700"],
+[class~="bg-iron-700/50"],[class~="bg-white/[0.02]"],[class~="bg-white/[0.03]"],
+[class~="bg-white/[0.035]"],[class~="bg-white/[0.04]"],[class~="bg-white/[0.045]"],
+[class~="bg-white/[0.05]"],[class~="bg-white/[0.06]"],
+[class~="hover:bg-white/[0.035]"]:hover,[class~="hover:bg-white/[0.045]"]:hover,
+[class~="hover:bg-white/[0.05]"]:hover {
+  background-color: var(--v2-surface-soft) !important;
+}
+
+[class~="bg-signal"],[class~="bg-signal/60"] {
+  background-color: var(--v2-accent) !important; color: #ffffff !important;
+}
+[class~="bg-signal/10"],[class~="bg-signal/12"],[class~="bg-signal/15"],
+[class~="hover:bg-signal/10"]:hover,[class~="hover:bg-signal/15"]:hover {
+  background-color: var(--v2-accent-soft) !important;
+}
+[class~="bg-copper"],[class~="bg-copper/10"] {
+  background-color: var(--v2-warning-soft) !important;
+}
+[class~="bg-red-500"],[class~="bg-red-500/10"],[class~="bg-red-500/20"],
+[class~="hover:bg-red-500/30"]:hover {
+  background-color: var(--v2-danger-soft) !important;
+}
+
+[class~="border-white/8"],[class~="border-white/10"],[class~="border-white/12"],
+[class~="border-white/15"],[class~="border-white/20"],[class~="border-white/[0.06]"],
+[class~="border-white/[0.08]"],[class~="border-iron-700"],[class~="border-iron-700/50"],
+[class~="hover:border-white/10"]:hover,[class~="hover:border-white/15"]:hover,
+[class~="hover:border-white/20"]:hover {
+  border-color: var(--v2-panel-border) !important;
+}
+
+[class~="border-signal/25"],[class~="border-signal/30"],[class~="border-signal/35"],
+[class~="border-signal/40"],[class~="border-signal/45"],
+[class~="hover:border-signal/25"]:hover,[class~="hover:border-signal/30"]:hover,
+[class~="hover:border-signal/35"]:hover,[class~="hover:border-signal/40"]:hover,
+[class~="hover:border-signal/45"]:hover,
+[class~="focus:border-signal"]:focus,[class~="focus:border-signal/45"]:focus,
+[class~="focus:border-signal/60"]:focus,[class~="focus:border-signal/70"]:focus {
+  border-color: color-mix(in srgb, var(--v2-accent) 44%, var(--v2-panel-border)) !important;
+}
+
+[class~="border-copper/20"],[class~="border-copper/30"],[class~="border-copper/35"] {
+  border-color: color-mix(in srgb, var(--v2-warning-text) 35%, var(--v2-panel-border)) !important;
+}
+[class~="border-red-300/30"],[class~="border-red-400/20"],[class~="border-red-400/30"],
+[class~="hover:border-red-400/30"]:hover {
+  border-color: color-mix(in srgb, var(--v2-danger-text) 36%, var(--v2-panel-border)) !important;
+}
+
+/* ── Bridge stubs — progressively migrated to Card/Input/Button components ── */
+/* These CSS classes are kept as compatibility shims while page files are     */
+/* being updated to use the React design-system components.                   */
+
+.v2-panel {
+  background: var(--v2-card-bg);
+  border: 1px solid var(--v2-card-border);
+  box-shadow: var(--v2-card-shadow);
+  border-radius: 1.25rem;
+}
+
+.v2-skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--v2-surface-muted),
+    color-mix(in srgb, var(--v2-surface-muted) 64%, var(--v2-accent-soft)),
+    var(--v2-surface-muted)
+  );
+  animation: none;
+  border-radius: 6px;
+}
+
+@keyframes v2-skeleton-shimmer {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.55; }
+}
+
+.v2-chat-composer {
+  border: 1px solid var(--v2-panel-border);
+  background: var(--v2-card-bg);
+  box-shadow: var(--v2-card-shadow);
+  border-radius: 1.25rem;
+}
+
+/* Base button reset — kept for components still using raw <button>/<label> with v2-button */
+.v2-button {
+  display: inline-flex;
+  cursor: pointer;
+  font: inherit;
+  transition: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Consistent select chevron + inset (native chevrons sit too tight). */
+.v2-select {
+  -webkit-appearance: none;
+  appearance: none;
+  padding-right: 2.25rem;
+  background-repeat: no-repeat;
+  background-position: right 0.75rem center;
+  background-size: 0.9rem 0.9rem;
+  background-image: var(--v2-select-chevron);
+}
+.v2-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.v2-button-primary {
+  background: radial-gradient(ellipse 100% 100% at 50% 130%, #4CA7E6 0%, #2882c8 65%);
+  border: 1px solid rgba(76, 167, 230, 0.72);
+  color: #ffffff;
+}
+.v2-button-primary:hover {
+  background: radial-gradient(ellipse 200% 220% at 50% 110%, #5BBAF5 0%, #2882c8 60%);
+}
+
+/* Page-level animation wrapper */
+.v2-page-entrance {
+  animation: none;
+}
+@keyframes v2-page-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Breathing dot indicator */
+.v2-breathing-dot {
+  animation: none;
+}
+
+/* ── Motion policy ───────────────────────────────────────────────── */
+/* The v2 UI is intended to be fully static: no CSS transitions/animations. */
+*, *::before, *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
+/* ── Markdown body ───────────────────────────────────────────────── */
+
+.markdown-body h1,.markdown-body h2,.markdown-body h3,.markdown-body h4 {
+  margin-top: 1em; margin-bottom: 0.5em; font-weight: 600;
+  color: var(--v2-text-strong);
+}
+.markdown-body p              { margin-bottom: 0.75em; line-height: 1.65; }
+.markdown-body ul,.markdown-body ol { margin-bottom: 0.75em; padding-left: 1.5em; }
+.markdown-body li             { margin-bottom: 0.25em; }
+.markdown-body code {
+  font-family: "Geist Mono","SF Mono","JetBrains Mono",ui-monospace,monospace;
+  font-size: 0.875em; background: var(--v2-surface-muted);
+  padding: 0.15em 0.4em; border-radius: 4px;
+}
+.markdown-body pre {
+  background: var(--v2-surface-soft); border: 1px solid var(--v2-panel-border);
+  border-radius: 8px; padding: 0.75em 1em; overflow-x: auto; margin-bottom: 0.75em;
+}
+.markdown-body pre code { background: transparent; padding: 0; border-radius: 0; font-size: 0.8125em; }
+.markdown-body blockquote {
+  border-left: 3px solid var(--v2-panel-border); padding-left: 1em;
+  margin-left: 0; margin-bottom: 0.75em; color: var(--v2-text-muted);
+}
+.markdown-body a { color: var(--v2-info-text); text-decoration: none; }
+.markdown-body a:hover { text-decoration: underline; }
+.markdown-body table { width: 100%; border-collapse: collapse; margin-bottom: 0.75em; }
+.markdown-body th,.markdown-body td {
+  border: 1px solid var(--v2-panel-border); padding: 0.4em 0.6em; text-align: left;
+}
+.markdown-body th { background: var(--v2-surface-soft); font-weight: 600; }
+.markdown-body hr { border: 0; border-top: 1px solid var(--v2-panel-border); margin: 1em 0; }
