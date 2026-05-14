@@ -4,14 +4,30 @@ use crate::default_planner::DefaultPlanner;
 use crate::family::{ComponentDigest, LoopFamily};
 use crate::planner::AgentLoopPlanner;
 
-/// Stable digest: SHA-256 of
-/// `ironclaw_agent_loop.default_family.v1:planner=DefaultLoopFamilyPlanner;schema=component_identity_v1;family_id=default`.
+pub const DEFAULT_FAMILY_DIGEST_SEED: &str = concat!(
+    "ironclaw_agent_loop.default_family.v1:",
+    "family_id=default;",
+    "identity=component_identity_v1;",
+    "planner=DefaultPlanner;",
+    "strategies=",
+    "context:DefaultContextStrategy,",
+    "capability:DefaultCapabilityStrategy,",
+    "model:DefaultModelStrategy,",
+    "batch:DefaultBatchPolicyStrategy,",
+    "gate:DefaultGateHandlingStrategy,",
+    "recovery:DefaultRecoveryStrategy,",
+    "stop:DefaultStopConditionStrategy,",
+    "drain:DefaultInputDrainStrategy,",
+    "budget:DefaultBudgetStrategy",
+);
+
+/// Stable digest: SHA-256 of `DEFAULT_FAMILY_DIGEST_SEED`.
 ///
 /// Update this digest when the default family composition, planner behavior, or
 /// identity schema changes in a replay-relevant way.
 pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
-    0xf5, 0xa3, 0x2b, 0xd7, 0x15, 0x2f, 0xf4, 0x9a, 0x2b, 0xb7, 0x92, 0xee, 0x97, 0xe2, 0xa4, 0x54,
-    0x35, 0x4f, 0x0d, 0xab, 0x6a, 0x81, 0xcc, 0x3a, 0xbe, 0x35, 0xe9, 0x33, 0x55, 0xc9, 0x2a, 0xcf,
+    0x12, 0x0d, 0xb1, 0x6b, 0x2b, 0x95, 0xe8, 0xde, 0x59, 0x51, 0x7e, 0x8a, 0x2e, 0x30, 0xeb, 0x98,
+    0x60, 0xf9, 0xb9, 0x74, 0xc1, 0xb2, 0xd0, 0x57, 0x92, 0x55, 0x01, 0x8f, 0x9c, 0xaa, 0xf2, 0x82,
 ]);
 
 /// The default loop family: the text-tool-use baseline once the planner and
@@ -26,6 +42,8 @@ pub fn default() -> LoopFamily {
 
 #[cfg(test)]
 mod tests {
+    use sha2::{Digest, Sha256};
+
     use super::*;
 
     #[test]
@@ -36,5 +54,15 @@ mod tests {
         assert_eq!(family.version().id, "default");
         assert_ne!(family.version().digest, ComponentDigest([0; 32]));
         assert_eq!(family.version().digest, DEFAULT_FAMILY_DIGEST);
+    }
+
+    #[test]
+    fn default_family_digest_matches_current_seed() {
+        let actual: [u8; 32] = Sha256::digest(DEFAULT_FAMILY_DIGEST_SEED)
+            .as_slice()
+            .try_into()
+            .expect("sha256 digest length is 32 bytes");
+
+        assert_eq!(DEFAULT_FAMILY_DIGEST, ComponentDigest(actual));
     }
 }
