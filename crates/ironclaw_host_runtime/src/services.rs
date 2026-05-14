@@ -7,7 +7,7 @@
 //! lifecycle, and runtime execution semantics remain in their owning crates.
 
 use std::{
-    any::type_name,
+    any::{TypeId, type_name},
     collections::HashMap,
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex, MutexGuard},
@@ -16,19 +16,22 @@ use std::{
 use async_trait::async_trait;
 use futures_util::FutureExt;
 use ironclaw_approvals::ApprovalResolver;
-use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
+use ironclaw_authorization::{
+    CapabilityLeaseStore, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
+};
 use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
 };
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
+    InMemoryAuditSink, InMemoryEventSink,
 };
 use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime};
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
-use ironclaw_filesystem::RootFilesystem;
+use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::{
     CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId, DispatchError,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
@@ -37,8 +40,9 @@ use ironclaw_host_api::{
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{
-    BackgroundFailureStage, ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult,
-    ProcessExecutor, ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
+    BackgroundFailureStage, InMemoryProcessResultStore, InMemoryProcessStore,
+    ProcessExecutionError, ProcessExecutionRequest, ProcessExecutionResult, ProcessExecutor,
+    ProcessManager, ProcessResultStore, ProcessServices, ProcessStore,
 };
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
@@ -48,7 +52,7 @@ use ironclaw_reborn_event_store::{
 use ironclaw_resources::LibSqlResourceGovernorStore;
 #[cfg(feature = "postgres")]
 use ironclaw_resources::PostgresResourceGovernorStore;
-use ironclaw_resources::ResourceGovernor;
+use ironclaw_resources::{InMemoryResourceGovernor, ResourceGovernor};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_resources::{PersistentResourceGovernor, ResourceError};
 #[cfg(feature = "libsql")]
@@ -57,21 +61,26 @@ use ironclaw_run_state::LibSqlRunStateApprovalStore;
 use ironclaw_run_state::PostgresRunStateApprovalStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_run_state::RunStateError;
-use ironclaw_run_state::{ApprovalRequestStore, RunStateApprovalStore, RunStateStore};
+use ironclaw_run_state::{
+    ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
+    RunStateApprovalStore, RunStateStore,
+};
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
-use ironclaw_secrets::SecretStore;
+use ironclaw_secrets::{InMemorySecretStore, SecretStore};
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 #[cfg(feature = "libsql")]
 use ironclaw_turns::LibSqlTurnStateStore;
 #[cfg(feature = "postgres")]
 use ironclaw_turns::PostgresTurnStateStore;
 use ironclaw_turns::{
-    DefaultTurnCoordinator, TurnRunWakeNotifier, TurnStateStore, runner::TurnRunTransitionPort,
+    DefaultTurnCoordinator, InMemoryTurnStateStore, NoopTurnRunWakeNotifier, TurnRunWakeNotifier,
+    TurnStateStore, runner::TurnRunTransitionPort,
 };
 use ironclaw_wasm::{
-    DenyWasmHostHttp, PreparedWitTool, WasmError, WasmRuntimeCredentialProvider,
-    WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WasmStagedRuntimeCredentials, WitToolHost,
-    WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
+    DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,
+    WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder,
+    WasmStagedRuntimeCredentials, WitToolHost, WitToolRequest, WitToolRuntime,
+    WitToolRuntimeConfig,
 };
 
 use thiserror::Error;
@@ -245,42 +254,91 @@ impl ProductionWiringReport {
 
 #[derive(Debug, Clone)]
 struct ProductionComponentTypes {
-    trust_policy: Option<&'static str>,
+    trust_policy: Option<ProductionComponentType>,
     trust_policy_verified: bool,
-    filesystem: &'static str,
-    resource_governor: &'static str,
-    process_store: &'static str,
-    process_result_store: &'static str,
-    run_state: Option<&'static str>,
-    approval_requests: Option<&'static str>,
-    capability_leases: Option<&'static str>,
-    event_sink: Option<&'static str>,
-    audit_sink: Option<&'static str>,
-    secret_store: Option<&'static str>,
-    runtime_http_egress: Option<&'static str>,
+    filesystem: ProductionComponentType,
+    resource_governor: ProductionComponentType,
+    process_store: ProductionComponentType,
+    process_result_store: ProductionComponentType,
+    run_state: Option<ProductionComponentType>,
+    approval_requests: Option<ProductionComponentType>,
+    capability_leases: Option<ProductionComponentType>,
+    event_sink: Option<ProductionComponentType>,
+    audit_sink: Option<ProductionComponentType>,
+    secret_store: Option<ProductionComponentType>,
+    runtime_http_egress: Option<ProductionComponentType>,
     runtime_http_egress_verified: bool,
-    wasm_credential_provider: Option<&'static str>,
+    wasm_credential_provider: Option<ProductionComponentType>,
     wasm_credential_provider_verified: bool,
     wasm_runtime_credential_provider_captured: bool,
-    script_runtime: Option<&'static str>,
-    mcp_runtime: Option<&'static str>,
-    first_party_runtime: Option<&'static str>,
-    turn_state: Option<&'static str>,
-    turn_run_transition_port: Option<&'static str>,
+    script_runtime: Option<ProductionComponentType>,
+    mcp_runtime: Option<ProductionComponentType>,
+    first_party_runtime: Option<ProductionComponentType>,
+    turn_state: Option<ProductionComponentType>,
+    turn_run_transition_port: Option<ProductionComponentType>,
     turn_run_transition_port_verified: bool,
-    turn_run_wake_notifier: Option<&'static str>,
+    turn_run_wake_notifier: Option<ProductionComponentType>,
 }
 
-fn is_local_only_component(type_name: &str) -> bool {
-    type_name.contains("InMemory")
-        || type_name.contains("Noop")
-        || type_name.contains("DenyWasm")
-        || type_name.contains("EmptyWasm")
-        || type_name.contains("LocalFilesystem")
+#[derive(Debug, Clone, Copy)]
+struct ProductionComponentType {
+    implementation: &'static str,
+    readiness: ProductionImplementationReadiness,
 }
 
-fn is_erased_durable_sink_wrapper(type_name: &str) -> bool {
-    type_name.contains("DurableEventSink") || type_name.contains("DurableAuditSink")
+impl ProductionComponentType {
+    fn of<T: 'static>() -> Self {
+        Self {
+            implementation: type_name::<T>(),
+            readiness: classify_component_type::<T>(),
+        }
+    }
+
+    fn named(implementation: &'static str, readiness: ProductionImplementationReadiness) -> Self {
+        Self {
+            implementation,
+            readiness,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProductionImplementationReadiness {
+    ProductionCandidate,
+    LocalOnly,
+    ErasedDurableSinkWrapper,
+}
+
+fn component_name(component: Option<ProductionComponentType>) -> Option<&'static str> {
+    component.map(|component| component.implementation)
+}
+
+fn classify_component_type<T: 'static>() -> ProductionImplementationReadiness {
+    let type_id = TypeId::of::<T>();
+    match () {
+        () if type_id == TypeId::of::<LocalFilesystem>()
+            || type_id == TypeId::of::<InMemoryResourceGovernor>()
+            || type_id == TypeId::of::<InMemoryProcessStore>()
+            || type_id == TypeId::of::<InMemoryProcessResultStore>()
+            || type_id == TypeId::of::<InMemoryRunStateStore>()
+            || type_id == TypeId::of::<InMemoryApprovalRequestStore>()
+            || type_id == TypeId::of::<InMemoryCapabilityLeaseStore>()
+            || type_id == TypeId::of::<InMemoryEventSink>()
+            || type_id == TypeId::of::<InMemoryAuditSink>()
+            || type_id == TypeId::of::<InMemorySecretStore>()
+            || type_id == TypeId::of::<EmptyWasmRuntimeCredentials>()
+            || type_id == TypeId::of::<InMemoryTurnStateStore>()
+            || type_id == TypeId::of::<NoopTurnRunWakeNotifier>() =>
+        {
+            ProductionImplementationReadiness::LocalOnly
+        }
+        () if type_id == TypeId::of::<DurableEventSink>()
+            || type_id == TypeId::of::<DurableAuditSink>() =>
+        {
+            ProductionImplementationReadiness::ErasedDurableSinkWrapper
+        }
+        () => ProductionImplementationReadiness::ProductionCandidate,
+    }
 }
 
 /// Concrete composition bundle for one Reborn host-runtime vertical slice.
@@ -383,10 +441,10 @@ where
             component_types: ProductionComponentTypes {
                 trust_policy: None,
                 trust_policy_verified: false,
-                filesystem: type_name::<F>(),
-                resource_governor: type_name::<G>(),
-                process_store: type_name::<S>(),
-                process_result_store: type_name::<R>(),
+                filesystem: ProductionComponentType::of::<F>(),
+                resource_governor: ProductionComponentType::of::<G>(),
+                process_store: ProductionComponentType::of::<S>(),
+                process_result_store: ProductionComponentType::of::<R>(),
                 run_state: None,
                 approval_requests: None,
                 capability_leases: None,
@@ -445,7 +503,7 @@ where
             turn_run_wake_notifier,
             mut component_types,
         } = self;
-        component_types.filesystem = type_name::<T>();
+        component_types.filesystem = ProductionComponentType::of::<T>();
         HostRuntimeServices {
             registry,
             trust_policy,
@@ -541,7 +599,7 @@ where
         if let Some(event_sink) = &event_sink {
             process_lifecycle_store.set_event_sink(Arc::clone(event_sink));
         }
-        component_types.resource_governor = type_name::<T>();
+        component_types.resource_governor = ProductionComponentType::of::<T>();
         HostRuntimeServices {
             registry,
             trust_policy,
@@ -612,7 +670,7 @@ where
     where
         T: TrustPolicy + 'static,
     {
-        self.component_types.trust_policy = Some(type_name::<T>());
+        self.component_types.trust_policy = Some(ProductionComponentType::of::<T>());
         self.component_types.trust_policy_verified = true;
         self.trust_policy = trust_policy;
         self.trust_policy_configured = true;
@@ -620,7 +678,10 @@ where
     }
 
     pub fn with_trust_policy_dyn(mut self, trust_policy: Arc<dyn TrustPolicy>) -> Self {
-        self.component_types.trust_policy = Some("dyn TrustPolicy");
+        self.component_types.trust_policy = Some(ProductionComponentType::named(
+            "dyn TrustPolicy",
+            ProductionImplementationReadiness::ProductionCandidate,
+        ));
         self.component_types.trust_policy_verified = false;
         self.trust_policy = trust_policy;
         self.trust_policy_configured = true;
@@ -631,7 +692,7 @@ where
     where
         T: RunStateStore + 'static,
     {
-        self.component_types.run_state = Some(type_name::<T>());
+        self.component_types.run_state = Some(ProductionComponentType::of::<T>());
         self.run_state = Some(run_state);
         self.run_state_approval_store = None;
         self
@@ -641,18 +702,46 @@ where
     where
         T: ApprovalRequestStore + 'static,
     {
-        self.component_types.approval_requests = Some(type_name::<T>());
+        self.component_types.approval_requests = Some(ProductionComponentType::of::<T>());
         self.approval_requests = Some(approval_requests);
         self.run_state_approval_store = None;
         self
     }
 
-    pub fn with_run_state_approval_store<T>(mut self, store: Arc<T>) -> Self
+    pub fn with_run_state_approval_store<T>(self, store: Arc<T>) -> Self
     where
         T: RunStateApprovalStore + 'static,
     {
-        self.component_types.run_state = Some(type_name::<T>());
-        self.component_types.approval_requests = Some(type_name::<T>());
+        self.with_run_state_approval_store_readiness(store, ProductionComponentType::of::<T>())
+    }
+
+    /// Attaches a combined run-state/approval store that is explicitly marked
+    /// local-only by the composition root. This avoids relying on implementation
+    /// type-name strings for custom test/local stores while preserving a typed
+    /// production-readiness classification.
+    pub fn with_local_only_run_state_approval_store<T>(self, store: Arc<T>) -> Self
+    where
+        T: RunStateApprovalStore + 'static,
+    {
+        self.with_run_state_approval_store_readiness(
+            store,
+            ProductionComponentType::named(
+                type_name::<T>(),
+                ProductionImplementationReadiness::LocalOnly,
+            ),
+        )
+    }
+
+    fn with_run_state_approval_store_readiness<T>(
+        mut self,
+        store: Arc<T>,
+        component_type: ProductionComponentType,
+    ) -> Self
+    where
+        T: RunStateApprovalStore + 'static,
+    {
+        self.component_types.run_state = Some(component_type);
+        self.component_types.approval_requests = Some(component_type);
         self.run_state = Some(store.clone());
         self.approval_requests = Some(store.clone());
         self.run_state_approval_store = Some(store);
@@ -687,7 +776,7 @@ where
     where
         T: CapabilityLeaseStore + 'static,
     {
-        self.component_types.capability_leases = Some(type_name::<T>());
+        self.component_types.capability_leases = Some(ProductionComponentType::of::<T>());
         self.capability_leases = Some(capability_leases);
         self
     }
@@ -696,7 +785,7 @@ where
     where
         T: TurnStateStore + 'static,
     {
-        self.component_types.turn_state = Some(type_name::<T>());
+        self.component_types.turn_state = Some(ProductionComponentType::of::<T>());
         self.component_types.turn_run_transition_port = None;
         self.component_types.turn_run_transition_port_verified = false;
         self.turn_state = Some(turn_state);
@@ -708,8 +797,8 @@ where
     where
         T: TurnStateStore + TurnRunTransitionPort + 'static,
     {
-        self.component_types.turn_state = Some(type_name::<T>());
-        self.component_types.turn_run_transition_port = Some(type_name::<T>());
+        self.component_types.turn_state = Some(ProductionComponentType::of::<T>());
+        self.component_types.turn_run_transition_port = Some(ProductionComponentType::of::<T>());
         self.component_types.turn_run_transition_port_verified = true;
         let state: Arc<dyn TurnStateStore> = turn_state.clone();
         let transition_port: Arc<dyn TurnRunTransitionPort> = turn_state;
@@ -722,7 +811,7 @@ where
     where
         T: TurnRunTransitionPort + 'static,
     {
-        self.component_types.turn_run_transition_port = Some(type_name::<T>());
+        self.component_types.turn_run_transition_port = Some(ProductionComponentType::of::<T>());
         self.component_types.turn_run_transition_port_verified = false;
         self.turn_run_transition_port = Some(transition_port);
         self
@@ -752,7 +841,7 @@ where
     where
         T: TurnRunWakeNotifier + 'static,
     {
-        self.component_types.turn_run_wake_notifier = Some(type_name::<T>());
+        self.component_types.turn_run_wake_notifier = Some(ProductionComponentType::of::<T>());
         self.turn_run_wake_notifier = Some(notifier);
         self
     }
@@ -761,7 +850,7 @@ where
     where
         T: EventSink + 'static,
     {
-        self.component_types.event_sink = Some(type_name::<T>());
+        self.component_types.event_sink = Some(ProductionComponentType::of::<T>());
         let event_sink: Arc<dyn EventSink> = event_sink;
         self.process_lifecycle_store
             .set_event_sink(Arc::clone(&event_sink));
@@ -773,7 +862,7 @@ where
     where
         T: DurableEventLog + 'static,
     {
-        self.component_types.event_sink = Some(type_name::<T>());
+        self.component_types.event_sink = Some(ProductionComponentType::of::<T>());
         let event_log: Arc<dyn DurableEventLog> = event_log;
         let event_sink: Arc<dyn EventSink> = Arc::new(DurableEventSink::new(event_log));
         self.process_lifecycle_store
@@ -786,7 +875,7 @@ where
     where
         T: AuditSink + 'static,
     {
-        self.component_types.audit_sink = Some(type_name::<T>());
+        self.component_types.audit_sink = Some(ProductionComponentType::of::<T>());
         self.audit_sink = Some(audit_sink);
         self
     }
@@ -795,7 +884,7 @@ where
     where
         T: DurableAuditLog + 'static,
     {
-        self.component_types.audit_sink = Some(type_name::<T>());
+        self.component_types.audit_sink = Some(ProductionComponentType::of::<T>());
         let audit_log: Arc<dyn DurableAuditLog> = audit_log;
         self.audit_sink = Some(Arc::new(DurableAuditSink::new(audit_log)));
         self
@@ -816,13 +905,17 @@ where
         production_verified: bool,
     ) -> Self {
         if production_verified {
-            self.component_types.event_sink = Some(type_name::<RebornEventStores>());
-            self.component_types.audit_sink = Some(type_name::<RebornEventStores>());
+            self.component_types.event_sink =
+                Some(ProductionComponentType::of::<RebornEventStores>());
+            self.component_types.audit_sink =
+                Some(ProductionComponentType::of::<RebornEventStores>());
         } else {
             // Prebuilt/LocalDev/Test stores are useful for tests and lower-level
             // composition, but must not silently satisfy production guardrails.
-            self.component_types.event_sink = Some(type_name::<DurableEventSink>());
-            self.component_types.audit_sink = Some(type_name::<DurableAuditSink>());
+            self.component_types.event_sink =
+                Some(ProductionComponentType::of::<DurableEventSink>());
+            self.component_types.audit_sink =
+                Some(ProductionComponentType::of::<DurableAuditSink>());
         }
         self.event_sink = Some(Arc::new(DurableEventSink::new(stores.events)));
         self.audit_sink = Some(Arc::new(DurableAuditSink::new(stores.audit)));
@@ -845,7 +938,7 @@ where
     where
         T: SecretStore + 'static,
     {
-        self.component_types.secret_store = Some(type_name::<T>());
+        self.component_types.secret_store = Some(ProductionComponentType::of::<T>());
         self.secret_store = Some(secret_store);
         self
     }
@@ -854,7 +947,7 @@ where
     where
         T: RuntimeHttpEgress + 'static,
     {
-        self.component_types.runtime_http_egress = Some(type_name::<T>());
+        self.component_types.runtime_http_egress = Some(ProductionComponentType::of::<T>());
         self.component_types.runtime_http_egress_verified = false;
         let runtime_http_egress: Arc<dyn RuntimeHttpEgress> = runtime_http_egress;
         set_runtime_http_egress(&self.runtime_http_egress, runtime_http_egress);
@@ -872,8 +965,9 @@ where
         N: NetworkHttpEgress + 'static,
         SecretBackend: SecretStore + 'static,
     {
-        self.component_types.runtime_http_egress =
-            Some(type_name::<crate::HostHttpEgressService<N, SecretBackend>>());
+        self.component_types.runtime_http_egress = Some(ProductionComponentType::of::<
+            crate::HostHttpEgressService<N, SecretBackend>,
+        >());
         self.component_types.runtime_http_egress_verified = runtime_http_egress
             .is_production_wired_with(&self.network_policy_store, &self.secret_injection_store);
         let runtime_http_egress: Arc<dyn RuntimeHttpEgress> = runtime_http_egress;
@@ -893,7 +987,7 @@ where
     where
         T: WasmRuntimeCredentialProvider + 'static,
     {
-        self.component_types.wasm_credential_provider = Some(type_name::<T>());
+        self.component_types.wasm_credential_provider = Some(ProductionComponentType::of::<T>());
         self.component_types.wasm_credential_provider_verified = false;
         let provider: Arc<dyn WasmRuntimeCredentialProvider> = provider;
         self.wasm_credential_provider = Some(provider);
@@ -907,7 +1001,7 @@ where
         provider: Arc<WasmStagedRuntimeCredentials>,
     ) -> Self {
         self.component_types.wasm_credential_provider =
-            Some(type_name::<WasmStagedRuntimeCredentials>());
+            Some(ProductionComponentType::of::<WasmStagedRuntimeCredentials>());
         self.component_types.wasm_credential_provider_verified = !provider.credentials().is_empty();
         let provider: Arc<dyn WasmRuntimeCredentialProvider> = provider;
         self.wasm_credential_provider = Some(provider);
@@ -943,7 +1037,7 @@ where
     where
         T: ScriptExecutor + 'static,
     {
-        self.component_types.script_runtime = Some(type_name::<T>());
+        self.component_types.script_runtime = Some(ProductionComponentType::of::<T>());
         self.script_runtime = Some(runtime);
         self
     }
@@ -952,7 +1046,7 @@ where
     where
         T: McpExecutor + 'static,
     {
-        self.component_types.mcp_runtime = Some(type_name::<T>());
+        self.component_types.mcp_runtime = Some(ProductionComponentType::of::<T>());
         self.mcp_runtime = Some(runtime);
         self
     }
@@ -962,7 +1056,7 @@ where
         registry: Arc<FirstPartyCapabilityRegistry>,
     ) -> Self {
         self.component_types.first_party_runtime =
-            Some(type_name::<FirstPartyCapabilityRegistry>());
+            Some(ProductionComponentType::of::<FirstPartyCapabilityRegistry>());
         self.first_party_runtime = Some(registry);
         self
     }
@@ -1057,7 +1151,7 @@ where
                     &mut issues,
                     ProductionWiringComponent::RuntimeHttpEgress,
                     ProductionWiringIssueKind::UnverifiedProductionImplementation,
-                    self.component_types.runtime_http_egress,
+                    component_name(self.component_types.runtime_http_egress),
                 );
             }
         }
@@ -1074,7 +1168,7 @@ where
                     &mut issues,
                     ProductionWiringComponent::WasmCredentialProvider,
                     ProductionWiringIssueKind::UnverifiedProductionImplementation,
-                    self.component_types.wasm_credential_provider,
+                    component_name(self.component_types.wasm_credential_provider),
                 );
             }
             if self.wasm_runtime.is_some()
@@ -1087,7 +1181,7 @@ where
                     &mut issues,
                     ProductionWiringComponent::WasmCredentialProvider,
                     ProductionWiringIssueKind::UnverifiedProductionImplementation,
-                    self.component_types.wasm_credential_provider,
+                    component_name(self.component_types.wasm_credential_provider),
                 );
             }
         }
@@ -1144,7 +1238,7 @@ where
                 &mut issues,
                 ProductionWiringComponent::TrustPolicy,
                 ProductionWiringIssueKind::UnverifiedProductionImplementation,
-                self.component_types.trust_policy,
+                component_name(self.component_types.trust_policy),
             );
         }
         self.push_local_only(
@@ -1250,23 +1344,23 @@ where
         &self,
         issues: &mut Vec<ProductionWiringIssue>,
         component: ProductionWiringComponent,
-        implementation: Option<&'static str>,
+        implementation: Option<ProductionComponentType>,
     ) {
         if let Some(implementation) = implementation {
-            if is_local_only_component(implementation) {
-                self.push_issue(
+            match implementation.readiness {
+                ProductionImplementationReadiness::LocalOnly => self.push_issue(
                     issues,
                     component,
                     ProductionWiringIssueKind::LocalOnlyImplementation,
-                    Some(implementation),
-                );
-            } else if is_erased_durable_sink_wrapper(implementation) {
-                self.push_issue(
+                    Some(implementation.implementation),
+                ),
+                ProductionImplementationReadiness::ErasedDurableSinkWrapper => self.push_issue(
                     issues,
                     component,
                     ProductionWiringIssueKind::UnverifiedProductionImplementation,
-                    Some(implementation),
-                );
+                    Some(implementation.implementation),
+                ),
+                ProductionImplementationReadiness::ProductionCandidate => {}
             }
         }
     }
@@ -1354,7 +1448,7 @@ where
                 &mut issues,
                 ProductionWiringComponent::TurnState,
                 ProductionWiringIssueKind::UnverifiedProductionImplementation,
-                self.component_types.turn_run_transition_port,
+                component_name(self.component_types.turn_run_transition_port),
             );
         }
         if self.turn_run_transition_port.is_none() {
@@ -1362,7 +1456,7 @@ where
                 &mut issues,
                 ProductionWiringComponent::TurnState,
                 ProductionWiringIssueKind::UnsupportedRequirement,
-                self.component_types.turn_state,
+                component_name(self.component_types.turn_state),
             );
         }
         if !issues.is_empty() {
@@ -1372,7 +1466,7 @@ where
             return Err(production_wiring_report(
                 ProductionWiringComponent::TurnState,
                 ProductionWiringIssueKind::UnsupportedRequirement,
-                self.component_types.turn_state,
+                component_name(self.component_types.turn_state),
             ));
         };
         Ok(TurnRunScheduler::new(
@@ -1684,7 +1778,7 @@ struct ScriptRuntimeAdapter {
 }
 
 impl ScriptRuntimeAdapter {
-    pub fn from_executor(executor: Arc<dyn ScriptExecutor>) -> Self {
+    fn from_executor(executor: Arc<dyn ScriptExecutor>) -> Self {
         Self { executor }
     }
 }
@@ -1734,7 +1828,7 @@ struct McpRuntimeAdapter {
 }
 
 impl McpRuntimeAdapter {
-    pub fn from_executor(executor: Arc<dyn McpExecutor>) -> Self {
+    fn from_executor(executor: Arc<dyn McpExecutor>) -> Self {
         Self { executor }
     }
 }

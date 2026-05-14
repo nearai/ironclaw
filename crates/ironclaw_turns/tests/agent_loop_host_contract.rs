@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -19,17 +20,19 @@ use ironclaw_turns::{
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
         FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
-        InMemoryLoopHostMilestoneSink, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
+        InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
+        InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
+        InstructionSafetyContext, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage,
         LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata,
         LoopDriverId, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneEmitter,
         LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor,
-        LoopInputCursorToken, LoopInputPort, LoopModelGateway, LoopModelGatewayError,
-        LoopModelGatewayRequest, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
-        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopTranscriptPort, ParentLoopOutput, PromptMode,
-        PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
+        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
+        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
+        LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, ModelCallOutcome, ParentLoopOutput,
+        PromptMode, PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -271,6 +274,325 @@ async fn host_managed_model_port_sanitizes_gateway_errors() {
 }
 
 #[tokio::test]
+async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministically() {
+    let context = claimed_run_context().await;
+    let surface = VisibleCapabilitySurface {
+        version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        descriptors: vec![CapabilityDescriptorView {
+            capability_id: CapabilityId::new("demo.echo").unwrap(),
+            provider: None,
+            runtime: RuntimeKind::FirstParty,
+            safe_name: "Echo".to_string(),
+            safe_description: "Echo safe input".to_string(),
+        }],
+    };
+    let request = InstructionBundleRequest {
+        context_bundle: LoopContextBundle {
+            identity_messages: vec![LoopContextMessage {
+                message_ref: LoopMessageRef::new("msg:identity").unwrap(),
+                role: "system".to_string(),
+                safe_summary: "identity safe".to_string(),
+            }],
+            messages: vec![LoopContextMessage {
+                message_ref: LoopMessageRef::new("msg:user-message").unwrap(),
+                role: "user".to_string(),
+                safe_summary: "user safe".to_string(),
+            }],
+            instruction_snippets: vec![
+                LoopContextSnippet {
+                    snippet_ref: "instruction:project".to_string(),
+                    safe_summary: "project rule".to_string(),
+                    metadata: None,
+                },
+                LoopContextSnippet {
+                    snippet_ref: "skill:alpha".to_string(),
+                    safe_summary: "alpha skill".to_string(),
+                    metadata: Some(LoopContextSnippetMetadata {
+                        source_name: "alpha".to_string(),
+                        trust_level: "trusted".to_string(),
+                    }),
+                },
+                LoopContextSnippet {
+                    snippet_ref: "instruction:system".to_string(),
+                    safe_summary: "system rule".to_string(),
+                    metadata: None,
+                },
+                LoopContextSnippet {
+                    snippet_ref: "instruction:user".to_string(),
+                    safe_summary: "user rule".to_string(),
+                    metadata: None,
+                },
+                LoopContextSnippet {
+                    snippet_ref: "instruction:agent".to_string(),
+                    safe_summary: "agent rule".to_string(),
+                    metadata: None,
+                },
+            ],
+            memory_snippets: vec![LoopContextSnippet {
+                snippet_ref: "memory:project-summary".to_string(),
+                safe_summary: "project memory".to_string(),
+                metadata: None,
+            }],
+        },
+        visible_surface: Some(surface),
+        safety_context: Some(
+            InstructionSafetyContext::new("safety:prompt-write", "prompt write safety enforced")
+                .unwrap(),
+        ),
+    };
+
+    let builder = InstructionBundleBuilder::new(context);
+    let first = builder.build(request.clone()).unwrap();
+    let second = builder.build(request).unwrap();
+
+    assert_eq!(first.fingerprint, second.fingerprint);
+    assert_eq!(first.messages, second.messages);
+    assert_eq!(
+        first
+            .messages
+            .iter()
+            .map(|message| message.content_ref.as_str().to_string())
+            .collect::<Vec<_>>(),
+        vec![
+            "msg:identity".to_string(),
+            first.messages[1].content_ref.as_str().to_string(),
+            first.messages[2].content_ref.as_str().to_string(),
+            first.messages[3].content_ref.as_str().to_string(),
+            first.messages[4].content_ref.as_str().to_string(),
+            first.messages[5].content_ref.as_str().to_string(),
+            first.messages[6].content_ref.as_str().to_string(),
+            first.messages[7].content_ref.as_str().to_string(),
+            first.messages[8].content_ref.as_str().to_string(),
+            "msg:user-message".to_string(),
+        ]
+    );
+    assert!(
+        first.messages[1]
+            .content_ref
+            .as_str()
+            .starts_with("msg:instruction.instruction.system.")
+    );
+    assert!(
+        first.messages[2]
+            .content_ref
+            .as_str()
+            .starts_with("msg:instruction.instruction.user.")
+    );
+    assert!(
+        first.messages[3]
+            .content_ref
+            .as_str()
+            .starts_with("msg:instruction.instruction.agent.")
+    );
+    assert!(
+        first.messages[4]
+            .content_ref
+            .as_str()
+            .starts_with("msg:instruction.instruction.project.")
+    );
+    assert!(
+        first.messages[5]
+            .content_ref
+            .as_str()
+            .starts_with("msg:snippet.skill.alpha.")
+    );
+    assert!(
+        first.messages[6]
+            .content_ref
+            .as_str()
+            .starts_with("msg:memory.memory.project-summary.")
+    );
+    assert!(
+        first.messages[7]
+            .content_ref
+            .as_str()
+            .starts_with("msg:safety.safety.prompt-write.")
+    );
+    assert!(
+        first.messages[8]
+            .content_ref
+            .as_str()
+            .starts_with("msg:surface.surface-v1.")
+    );
+    assert_eq!(first.skill_context.len(), 1);
+    assert_eq!(first.skill_context[0].source_name, "alpha");
+}
+
+#[test]
+fn instruction_bundle_fingerprint_deserialize_rejects_invalid_values() {
+    let error = serde_json::from_value::<InstructionBundleFingerprint>(serde_json::json!(
+        "not-a-sha256-fingerprint"
+    ))
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("instruction bundle fingerprint must start with sha256:")
+    );
+}
+
+#[tokio::test]
+async fn instruction_bundle_builder_allows_safe_domain_terms_in_summaries() {
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+
+    builder
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                instruction_snippets: vec![LoopContextSnippet {
+                    snippet_ref: "instruction:system".to_string(),
+                    safe_summary: "Explain how to rotate a secret without exposing values"
+                        .to_string(),
+                    metadata: None,
+                }],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn instruction_bundle_builder_allows_terms_inside_larger_words() {
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+
+    builder
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                instruction_snippets: vec![LoopContextSnippet {
+                    snippet_ref: "instruction:system".to_string(),
+                    safe_summary: "Explain preauthorization sync behavior".to_string(),
+                    metadata: None,
+                }],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn instruction_bundle_builder_rejects_secret_credential_phrases() {
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+
+    let error = builder
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                instruction_snippets: vec![LoopContextSnippet {
+                    snippet_ref: "instruction:system".to_string(),
+                    safe_summary: "client secret should not appear in prompt context".to_string(),
+                    metadata: None,
+                }],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+        })
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+}
+
+#[tokio::test]
+async fn instruction_bundle_builder_allows_tool_result_reference_context_messages() {
+    let host = Arc::new(
+        RecordingAgentLoopHost::new(claimed_run_context().await).with_context_tail_message(
+            "tool_result_reference",
+            "msg:tool-result-reference",
+            "tool result reference safe summary",
+        ),
+    );
+    let port = HostManagedLoopPromptPort::new(
+        host.context.clone(),
+        host.clone(),
+        host.milestone_sink.clone(),
+    );
+
+    let bundle = port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+        })
+        .await
+        .unwrap();
+
+    assert!(bundle.messages.iter().any(|message| {
+        message.role == "tool_result_reference"
+            && message.content_ref.as_str() == "msg:tool-result-reference"
+    }));
+}
+
+#[tokio::test]
+async fn instruction_bundle_serialization_hides_materialized_content() {
+    let context = claimed_run_context().await;
+    let bundle = InstructionBundleBuilder::new(context)
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                instruction_snippets: vec![LoopContextSnippet {
+                    snippet_ref: "instruction:system".to_string(),
+                    safe_summary: "RAW_MATERIALIZED_PROMPT_SENTINEL".to_string(),
+                    metadata: None,
+                }],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+        })
+        .unwrap();
+
+    assert!(
+        bundle
+            .materialized_messages
+            .iter()
+            .any(|message| message.safe_content == "RAW_MATERIALIZED_PROMPT_SENTINEL")
+    );
+    let wire = serde_json::to_string(&bundle).unwrap();
+    assert!(!wire.contains("RAW_MATERIALIZED_PROMPT_SENTINEL"));
+    assert!(!wire.contains("materialized_messages"));
+}
+
+#[tokio::test]
+async fn instruction_bundle_builder_rejects_unsafe_instruction_context() {
+    let context = claimed_run_context().await;
+    let builder = InstructionBundleBuilder::new(context);
+
+    let error = builder
+        .build(InstructionBundleRequest {
+            context_bundle: LoopContextBundle {
+                identity_messages: Vec::new(),
+                messages: Vec::new(),
+                instruction_snippets: vec![LoopContextSnippet {
+                    snippet_ref: "instruction:system".to_string(),
+                    safe_summary: "leaks /Users/alice/.ssh/id_rsa path".to_string(),
+                    metadata: None,
+                }],
+                memory_snippets: Vec::new(),
+            },
+            visible_surface: None,
+            safety_context: None,
+        })
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+}
+
+#[tokio::test]
 async fn loop_prompt_port_builds_text_only_bundle_from_context_refs() {
     let host = Arc::new(RecordingAgentLoopHost::new(claimed_run_context().await));
     let surface_version = CapabilitySurfaceVersion::new("surface-v1").unwrap();
@@ -306,6 +628,58 @@ async fn loop_prompt_port_builds_text_only_bundle_from_context_refs() {
 }
 
 #[tokio::test]
+async fn loop_prompt_port_uses_current_surface_version_lookup_each_build() {
+    let host = Arc::new(RecordingAgentLoopHost::new(claimed_run_context().await));
+    let surface_v1 = CapabilitySurfaceVersion::new("surface:v1").unwrap();
+    let surface_v2 = CapabilitySurfaceVersion::new("surface:v2").unwrap();
+    let current_surface = Arc::new(Mutex::new(Some(surface_v1.clone())));
+    let current_surface_for_lookup = Arc::clone(&current_surface);
+    let port = HostManagedLoopPromptPort::new(
+        host.context.clone(),
+        host.clone(),
+        host.milestone_sink.clone(),
+    )
+    .with_current_surface_version_lookup(move || {
+        current_surface_for_lookup
+            .lock()
+            .map(|current| current.clone())
+            .map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "surface version lookup is unavailable",
+                )
+            })
+    });
+
+    let bundle = port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: Some(surface_v1.clone()),
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+        })
+        .await
+        .unwrap();
+    assert_eq!(bundle.surface_version, Some(surface_v1.clone()));
+
+    *current_surface.lock().unwrap() = Some(surface_v2);
+
+    let error = port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: Some(surface_v1),
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, AgentLoopHostErrorKind::StaleSurface);
+    assert_eq!(host.effects(), vec!["context"]);
+}
+
+#[tokio::test]
 async fn loop_prompt_port_materializes_instruction_snippets_as_system_refs() {
     let host = Arc::new(
         RecordingAgentLoopHost::new(claimed_run_context().await)
@@ -330,11 +704,9 @@ async fn loop_prompt_port_materializes_instruction_snippets_as_system_refs() {
 
     assert_eq!(bundle.messages.len(), 2);
     assert_eq!(bundle.messages[0].role, "system");
-    assert!(
-        bundle.messages[0]
-            .content_ref
-            .as_str()
-            .starts_with("msg:snippet.skill.alpha.")
+    assert_eq!(
+        bundle.messages[0].content_ref,
+        LoopMessageRef::new("msg:snippet.skill.alpha.0.25eba50bef20ee35").unwrap()
     );
     assert_eq!(bundle.messages[1].role, "user");
     assert_eq!(host.effects(), vec!["context"]);
@@ -367,11 +739,9 @@ async fn loop_prompt_port_preserves_mid_conversation_system_message_order() {
 
     assert_eq!(bundle.messages.len(), 3);
     assert_eq!(bundle.messages[0].role, "system");
-    assert!(
-        bundle.messages[0]
-            .content_ref
-            .as_str()
-            .starts_with("msg:snippet.skill.alpha.")
+    assert_eq!(
+        bundle.messages[0].content_ref,
+        LoopMessageRef::new("msg:snippet.skill.alpha.0.25eba50bef20ee35").unwrap()
     );
     assert_eq!(bundle.messages[1].role, "user");
     assert_eq!(
@@ -396,7 +766,10 @@ async fn loop_prompt_port_keeps_identity_before_skill_snippets_and_records_skill
         host.context.clone(),
         host.clone(),
         host.milestone_sink.clone(),
-    );
+    )
+    .with_instruction_materialization_store(Arc::new(
+        InMemoryInstructionMaterializationStore::default(),
+    ));
 
     let bundle = port
         .build_prompt_bundle(LoopPromptBundleRequest {
@@ -416,11 +789,9 @@ async fn loop_prompt_port_keeps_identity_before_skill_snippets_and_records_skill
         LoopMessageRef::new("msg:identity").unwrap()
     );
     assert_eq!(bundle.messages[1].role, "system");
-    assert!(
-        bundle.messages[1]
-            .content_ref
-            .as_str()
-            .starts_with("msg:snippet.skill.alpha.")
+    assert_eq!(
+        bundle.messages[1].content_ref,
+        LoopMessageRef::new("msg:snippet.skill.alpha.0.25eba50bef20ee35").unwrap()
     );
     assert_eq!(bundle.messages[2].role, "user");
 
@@ -653,11 +1024,10 @@ async fn loop_prompt_port_rejects_stale_surface_version() {
 }
 
 #[tokio::test]
-async fn loop_prompt_port_rejects_memory_snippets_it_cannot_materialize() {
+async fn loop_prompt_port_rejects_unstored_synthetic_instruction_refs() {
     let host = Arc::new(
         RecordingAgentLoopHost::new(claimed_run_context().await)
-            .with_context_instruction_snippet("instruction:system", "system instruction available")
-            .with_context_memory_snippet("memory:project", "project memory available"),
+            .with_context_instruction_snippet("instruction:system", "system instruction available"),
     );
     let port = HostManagedLoopPromptPort::new(
         host.context.clone(),
@@ -676,9 +1046,72 @@ async fn loop_prompt_port_rejects_memory_snippets_it_cannot_materialize() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+}
+
+#[tokio::test]
+async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_refs() {
+    let host = Arc::new(
+        RecordingAgentLoopHost::new(claimed_run_context().await)
+            .with_context_instruction_snippet("instruction:system", "system instruction available")
+            .with_context_memory_snippet("memory:project", "project memory available"),
+    );
+    let surface = VisibleCapabilitySurface {
+        version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        descriptors: vec![CapabilityDescriptorView {
+            capability_id: CapabilityId::new("demo.echo").unwrap(),
+            provider: None,
+            runtime: RuntimeKind::FirstParty,
+            safe_name: "Echo".to_string(),
+            safe_description: "Echo safe input".to_string(),
+        }],
+    };
+    let port = HostManagedLoopPromptPort::new(
+        host.context.clone(),
+        host.clone(),
+        host.milestone_sink.clone(),
+    )
+    .with_instruction_materialization_store(Arc::new(
+        InMemoryInstructionMaterializationStore::default(),
+    ))
+    .with_current_surface(surface.clone())
+    .with_safety_context(
+        InstructionSafetyContext::new("safety:prompt-write", "prompt write safety enforced")
+            .unwrap(),
+    );
+
+    let bundle = port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: Some(surface.version),
+            checkpoint_state_ref: None,
+            max_messages: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(bundle.messages.iter().any(|message| {
+        message
+            .content_ref
+            .as_str()
+            .starts_with("msg:memory.memory.project.")
+    }));
+    assert!(bundle.messages.iter().any(|message| {
+        message
+            .content_ref
+            .as_str()
+            .starts_with("msg:safety.safety.prompt-write.")
+    }));
+    assert!(bundle.messages.iter().any(|message| {
+        message
+            .content_ref
+            .as_str()
+            .starts_with("msg:surface.surface-v1.")
+    }));
+    assert!(bundle.instruction_fingerprint.is_some());
     assert_eq!(host.effects(), vec!["context"]);
-    assert!(host.milestones().is_empty());
+    assert_eq!(host.milestone_kind_names(), vec!["prompt_bundle_built"]);
 }
 
 #[tokio::test]
@@ -782,7 +1215,7 @@ fn capability_surface_versions_are_public_safe_tokens() {
 async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
     let host = Arc::new(
         RecordingAgentLoopHost::new(claimed_run_context().await)
-            .with_context_message_safe_summary("RAW_PROMPT_SENTINEL /host/path secret"),
+            .with_context_message_safe_summary("safe prompt summary"),
     );
     let port = HostManagedLoopPromptPort::new(
         host.context.clone(),
@@ -1491,6 +1924,7 @@ impl LoopPromptPort for RecordingAgentLoopHost {
                 })
                 .collect(),
             surface_version: request.surface_version,
+            instruction_fingerprint: None,
         };
         self.milestone_emitter()
             .prompt_bundle_built(
@@ -1681,5 +2115,585 @@ fn driver_run_request(host: &RecordingAgentLoopHost) -> ironclaw_turns::AgentLoo
 fn driver_error(error: AgentLoopHostError) -> AgentLoopDriverError {
     AgentLoopDriverError::Failed {
         reason_kind: error.kind.as_str().to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers for budget accountant and policy guard
+// ---------------------------------------------------------------------------
+
+/// A policy guard that always denies model calls.
+struct DenyAllPolicyGuard;
+
+#[async_trait]
+impl LoopModelPolicyGuard for DenyAllPolicyGuard {
+    async fn check_model_policy(
+        &self,
+        _context: &LoopRunContext,
+        _request: &LoopModelRequest,
+    ) -> Result<(), LoopModelGatewayError> {
+        Err(LoopModelGatewayError::new(
+            AgentLoopHostErrorKind::PolicyDenied,
+            "model denied by policy",
+        )
+        .expect("safe summary is valid"))
+    }
+}
+
+/// A recording budget accountant that tracks pre/post calls and can be
+/// configured to reject pre-call.
+struct RecordingBudgetAccountant {
+    pre_called: AtomicBool,
+    post_called: AtomicBool,
+    reject_pre: AtomicBool,
+    reject_post: AtomicBool,
+    post_saw_failure: AtomicBool,
+}
+
+impl RecordingBudgetAccountant {
+    fn new() -> Self {
+        Self {
+            pre_called: AtomicBool::new(false),
+            post_called: AtomicBool::new(false),
+            reject_pre: AtomicBool::new(false),
+            reject_post: AtomicBool::new(false),
+            post_saw_failure: AtomicBool::new(false),
+        }
+    }
+
+    fn rejecting() -> Self {
+        let accountant = Self::new();
+        accountant.reject_pre.store(true, Ordering::SeqCst);
+        accountant
+    }
+
+    fn rejecting_post() -> Self {
+        let accountant = Self::new();
+        accountant.reject_post.store(true, Ordering::SeqCst);
+        accountant
+    }
+
+    fn was_pre_called(&self) -> bool {
+        self.pre_called.load(Ordering::SeqCst)
+    }
+
+    fn was_post_called(&self) -> bool {
+        self.post_called.load(Ordering::SeqCst)
+    }
+
+    fn post_saw_failure(&self) -> bool {
+        self.post_saw_failure.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl LoopModelBudgetAccountant for RecordingBudgetAccountant {
+    async fn pre_model_call(
+        &self,
+        _context: &LoopRunContext,
+        _request: &LoopModelRequest,
+    ) -> Result<(), LoopModelGatewayError> {
+        self.pre_called.store(true, Ordering::SeqCst);
+        if self.reject_pre.load(Ordering::SeqCst) {
+            return Err(LoopModelGatewayError::new(
+                AgentLoopHostErrorKind::BudgetExceeded,
+                "model call budget exceeded",
+            )
+            .expect("safe summary is valid"));
+        }
+        Ok(())
+    }
+
+    async fn post_model_call(
+        &self,
+        _context: &LoopRunContext,
+        _request: &LoopModelRequest,
+        outcome: ModelCallOutcome<'_>,
+    ) -> Result<(), LoopModelGatewayError> {
+        self.post_called.store(true, Ordering::SeqCst);
+        if matches!(outcome, ModelCallOutcome::Failure(_)) {
+            self.post_saw_failure.store(true, Ordering::SeqCst);
+        }
+        if self.reject_post.load(Ordering::SeqCst) {
+            return Err(LoopModelGatewayError::new(
+                AgentLoopHostErrorKind::BudgetExceeded,
+                "model call accounting failed",
+            )
+            .expect("safe summary is valid"));
+        }
+        Ok(())
+    }
+}
+
+fn simple_model_request(context: &LoopRunContext) -> LoopModelRequest {
+    LoopModelRequest {
+        messages: vec![LoopModelMessage {
+            role: "user".to_string(),
+            content_ref: LoopMessageRef::new("msg:user-message").unwrap(),
+        }],
+        surface_version: None,
+        model_preference: Some(context.resolved_run_profile.model_profile_id.clone()),
+    }
+}
+
+fn success_response(context: &LoopRunContext) -> LoopModelResponse {
+    LoopModelResponse {
+        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+            safe_text_delta: "safe delta".to_string(),
+        }],
+        output: ParentLoopOutput::AssistantReply(AssistantReply {
+            content: "hello".to_string(),
+        }),
+        effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KB-006 acceptance criteria tests
+// ---------------------------------------------------------------------------
+
+/// Denied policy rejects without calling the downstream provider gateway.
+#[tokio::test]
+async fn denied_policy_rejects_without_calling_gateway() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Ok(success_response(&context)));
+
+    let port = HostManagedLoopModelPort::with_guards(
+        context.clone(),
+        gateway.clone(),
+        milestone_sink.clone(),
+        Arc::new(RecordingBudgetAccountant::new()),
+        Arc::new(DenyAllPolicyGuard),
+    );
+
+    let error = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert!(error.safe_summary.contains("model denied by policy"));
+    // Gateway was never called.
+    assert_eq!(gateway.requests().len(), 0);
+    // No milestones emitted.
+    assert!(milestone_sink.milestones().is_empty());
+}
+
+/// Missing/unavailable credential returns a stable sanitized error with the
+/// CredentialUnavailable kind, containing no raw credential strings.
+#[tokio::test]
+async fn missing_credential_returns_sanitized_credential_unavailable_error() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Err(LoopModelGatewayError::new(
+        AgentLoopHostErrorKind::CredentialUnavailable,
+        "credential not available for requested model",
+    )
+    .unwrap()));
+
+    let port =
+        HostManagedLoopModelPort::new(context.clone(), gateway.clone(), milestone_sink.clone());
+
+    let error = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::CredentialUnavailable);
+    let serialized = serde_json::to_string(&error).unwrap();
+    let debug_output = format!("{:?}", error);
+    // No raw credential strings leak.
+    for sentinel in ["sk-test", "OPENAI_API_KEY", "Bearer ", "authorization:"] {
+        assert!(
+            !serialized.contains(sentinel),
+            "serialized error must not contain `{sentinel}`"
+        );
+        assert!(
+            !debug_output.contains(sentinel),
+            "debug output must not contain `{sentinel}`"
+        );
+    }
+}
+
+/// Redaction sentinel test: push a response/error containing known sentinels
+/// and verify they don't appear in serialized errors, debug output, deltas,
+/// milestone metadata, or safe summaries.
+#[tokio::test]
+async fn redaction_sentinels_never_leak_through_serialized_surfaces() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+
+    // Success path: response content has a sentinel, but milestones must not expose it.
+    gateway.push_response(Ok(LoopModelResponse {
+        chunks: vec![ironclaw_turns::run_profile::ModelStreamChunk {
+            safe_text_delta: "RAW_CREDENTIAL_SENTINEL visible in chunk".to_string(),
+        }],
+        output: ParentLoopOutput::AssistantReply(AssistantReply {
+            content: "sk-test-key-12345 leaked content".to_string(),
+        }),
+        effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+    }));
+
+    let port =
+        HostManagedLoopModelPort::new(context.clone(), gateway.clone(), milestone_sink.clone());
+
+    let response = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap();
+
+    // Milestones must not contain the sentinels.
+    let serialized_milestones = serde_json::to_string(&milestone_sink.milestones()).unwrap();
+    for sentinel in ["RAW_CREDENTIAL_SENTINEL", "sk-test-key-12345"] {
+        assert!(
+            !serialized_milestones.contains(sentinel),
+            "milestone serialization must not contain `{sentinel}`"
+        );
+    }
+
+    let serialized_response = serde_json::to_string(&response).unwrap();
+    let debug_response = format!("{:?}", response);
+    for sentinel in ["RAW_CREDENTIAL_SENTINEL", "sk-test-key-12345"] {
+        assert!(
+            response
+                .chunks
+                .iter()
+                .all(|chunk| !chunk.safe_text_delta.contains(sentinel)),
+            "model chunks must not contain `{sentinel}`"
+        );
+        assert!(
+            !serialized_response.contains(sentinel),
+            "serialized response must not contain `{sentinel}`"
+        );
+        assert!(
+            !debug_response.contains(sentinel),
+            "debug response must not contain `{sentinel}`"
+        );
+    }
+
+    let debug_milestones = format!("{:?}", milestone_sink.milestones());
+    for sentinel in ["RAW_CREDENTIAL_SENTINEL", "sk-test-key-12345"] {
+        assert!(
+            !debug_milestones.contains(sentinel),
+            "milestone debug output must not contain `{sentinel}`"
+        );
+    }
+
+    // Error path: push a gateway error and verify it is clean.
+    let gateway2 = Arc::new(RecordingLoopModelGateway::default());
+    gateway2.push_response(Err(LoopModelGatewayError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "model unavailable",
+    )
+    .unwrap()));
+    let milestone_sink2 = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let port2 =
+        HostManagedLoopModelPort::new(context.clone(), gateway2.clone(), milestone_sink2.clone());
+
+    let error = port2
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap_err();
+
+    let serialized_error = serde_json::to_string(&error).unwrap();
+    let debug_error = format!("{:?}", error);
+    for sentinel in [
+        "RAW_CREDENTIAL_SENTINEL",
+        "sk-test-key-12345",
+        "api_key",
+        "secret",
+    ] {
+        assert!(
+            !serialized_error.contains(sentinel),
+            "serialized error must not contain `{sentinel}`"
+        );
+        assert!(
+            !debug_error.contains(sentinel),
+            "debug error must not contain `{sentinel}`"
+        );
+    }
+}
+
+/// LoopSafeSummary rejects API-key-like tokens and known credential patterns.
+#[test]
+fn safe_summary_validation_rejects_credential_patterns() {
+    // sk-prefixed tokens
+    assert!(
+        LoopModelGatewayError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "token:sk-test-secret-key"
+        )
+        .is_err()
+    );
+    // "api key" family
+    assert!(
+        LoopModelGatewayError::new(
+            AgentLoopHostErrorKind::Unauthorized,
+            "openai request failed: invalid api key"
+        )
+        .is_err()
+    );
+    // "bearer " prefix
+    assert!(
+        LoopModelGatewayError::new(
+            AgentLoopHostErrorKind::Unauthorized,
+            "authorization: bearer xyz"
+        )
+        .is_err()
+    );
+    // But clean summaries pass
+    assert!(
+        LoopModelGatewayError::new(AgentLoopHostErrorKind::Unavailable, "model unavailable")
+            .is_ok()
+    );
+}
+
+/// Budget accounting on success: both pre and post hooks fire with correct context.
+#[tokio::test]
+async fn budget_accounting_on_success_invokes_pre_and_post() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Ok(success_response(&context)));
+    let accountant = Arc::new(RecordingBudgetAccountant::new());
+
+    let port = HostManagedLoopModelPort::with_accountant(
+        context.clone(),
+        gateway.clone(),
+        milestone_sink.clone(),
+        accountant.clone(),
+    );
+
+    let _response = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap();
+
+    assert!(accountant.was_pre_called());
+    assert!(accountant.was_post_called());
+    assert!(!accountant.post_saw_failure());
+    // Gateway was called.
+    assert_eq!(gateway.requests().len(), 1);
+}
+
+/// Post-call accounting failure after provider success fails closed instead of
+/// returning an unaccounted successful response.
+#[tokio::test]
+async fn post_accounting_failure_after_success_fails_closed() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Ok(success_response(&context)));
+    let accountant = Arc::new(RecordingBudgetAccountant::rejecting_post());
+
+    let port = HostManagedLoopModelPort::with_accountant(
+        context.clone(),
+        gateway.clone(),
+        milestone_sink.clone(),
+        accountant.clone(),
+    );
+
+    let error = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    assert_eq!(error.safe_summary, "model call accounting failed");
+    assert!(accountant.was_pre_called());
+    assert!(accountant.was_post_called());
+    assert!(!accountant.post_saw_failure());
+    assert_eq!(gateway.requests().len(), 1);
+}
+
+/// Model-started milestone projection failures are non-fatal; accounting still
+/// wraps the provider call and records its actual outcome.
+#[tokio::test]
+async fn model_started_failure_still_accounts_provider_outcome() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(FailingOnModelStartedMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Ok(success_response(&context)));
+    let accountant = Arc::new(RecordingBudgetAccountant::new());
+
+    let port = HostManagedLoopModelPort::with_accountant(
+        context.clone(),
+        gateway.clone(),
+        milestone_sink.clone(),
+        accountant.clone(),
+    );
+
+    let response = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.effective_model_profile_id,
+        context.resolved_run_profile.model_profile_id
+    );
+    assert!(accountant.was_pre_called());
+    assert!(accountant.was_post_called());
+    assert!(!accountant.post_saw_failure());
+    assert_eq!(gateway.requests().len(), 1);
+    assert_eq!(milestone_sink.kind_names(), vec!["model_completed"]);
+}
+
+/// Budget accounting on failure: post hook still fires.
+#[tokio::test]
+async fn budget_accounting_on_failure_still_fires_post() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Err(LoopModelGatewayError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "model unavailable",
+    )
+    .unwrap()));
+    let accountant = Arc::new(RecordingBudgetAccountant::new());
+
+    let port = HostManagedLoopModelPort::with_accountant(
+        context.clone(),
+        gateway.clone(),
+        milestone_sink.clone(),
+        accountant.clone(),
+    );
+
+    let error = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    assert!(accountant.was_pre_called());
+    assert!(accountant.was_post_called());
+    assert!(accountant.post_saw_failure());
+}
+
+/// Post-call accounting failure after provider failure must fail closed so
+/// reservation cleanup/reconciliation loss cannot hide behind the model error.
+#[tokio::test]
+async fn post_accounting_failure_after_gateway_failure_fails_closed() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Err(LoopModelGatewayError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "model unavailable",
+    )
+    .unwrap()));
+    let accountant = Arc::new(RecordingBudgetAccountant::rejecting_post());
+
+    let port = HostManagedLoopModelPort::with_accountant(
+        context.clone(),
+        gateway.clone(),
+        milestone_sink.clone(),
+        accountant.clone(),
+    );
+
+    let error = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    assert_eq!(error.safe_summary, "model call accounting failed");
+    assert!(accountant.was_pre_called());
+    assert!(accountant.was_post_called());
+    assert!(accountant.post_saw_failure());
+    assert_eq!(gateway.requests().len(), 1);
+    assert_eq!(
+        milestone_sink
+            .milestones()
+            .iter()
+            .map(|milestone| milestone.kind.kind_name())
+            .collect::<Vec<_>>(),
+        vec!["model_started", "model_failed"]
+    );
+}
+
+/// Budget-exceeded pre-call rejection prevents gateway call.
+#[tokio::test]
+async fn budget_exceeded_pre_call_rejects_without_calling_gateway() {
+    let context = claimed_run_context().await;
+    let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let gateway = Arc::new(RecordingLoopModelGateway::default());
+    gateway.push_response(Ok(success_response(&context)));
+    let accountant = Arc::new(RecordingBudgetAccountant::rejecting());
+
+    let port = HostManagedLoopModelPort::with_accountant(
+        context.clone(),
+        gateway.clone(),
+        milestone_sink.clone(),
+        accountant.clone(),
+    );
+
+    let error = port
+        .stream_model(simple_model_request(&context))
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::BudgetExceeded);
+    assert!(error.safe_summary.contains("budget exceeded"));
+    // Gateway was never called.
+    assert_eq!(gateway.requests().len(), 0);
+    // No milestones emitted.
+    assert!(milestone_sink.milestones().is_empty());
+    // Pre was called, post was not (pre rejected before gateway).
+    assert!(accountant.was_pre_called());
+    assert!(!accountant.was_post_called());
+}
+
+/// Error kind mapping: verify all gateway error kinds map correctly through
+/// HostManagedLoopModelPort to the corresponding AgentLoopHostError kinds.
+#[tokio::test]
+async fn error_kind_mapping_through_host_managed_port() {
+    let context = claimed_run_context().await;
+
+    let kinds_and_summaries = [
+        (AgentLoopHostErrorKind::Unavailable, "model unavailable"),
+        (
+            AgentLoopHostErrorKind::Unauthorized,
+            "model call unauthorized",
+        ),
+        (
+            AgentLoopHostErrorKind::BudgetExceeded,
+            "model call budget exceeded",
+        ),
+        (
+            AgentLoopHostErrorKind::PolicyDenied,
+            "model denied by policy",
+        ),
+        (
+            AgentLoopHostErrorKind::CredentialUnavailable,
+            "credential not available for requested model",
+        ),
+    ];
+
+    for (expected_kind, summary) in kinds_and_summaries {
+        let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
+        let gateway = Arc::new(RecordingLoopModelGateway::default());
+        gateway.push_response(Err(
+            LoopModelGatewayError::new(expected_kind, summary).unwrap()
+        ));
+
+        let port =
+            HostManagedLoopModelPort::new(context.clone(), gateway.clone(), milestone_sink.clone());
+
+        let error = port
+            .stream_model(simple_model_request(&context))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error.kind, expected_kind,
+            "expected {expected_kind:?} but got {:?}",
+            error.kind
+        );
+        assert_eq!(error.safe_summary, summary);
     }
 }

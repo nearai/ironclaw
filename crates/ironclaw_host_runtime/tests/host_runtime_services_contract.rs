@@ -457,7 +457,7 @@ fn production_wiring_validation_classifies_combined_store_as_run_state_and_appro
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_run_state_approval_store(Arc::new(
+    .with_local_only_run_state_approval_store(Arc::new(
         InMemoryRecordingCombinedRunStateApprovalStore::new(),
     ));
 
@@ -2839,6 +2839,64 @@ async fn host_runtime_services_installs_builtin_obligation_handler_with_audit_si
 }
 
 #[tokio::test]
+async fn host_runtime_services_maps_script_exit_failure_through_private_adapter() {
+    let script_runtime = Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        ExitFailureScriptBackend,
+    ));
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ObligatingAuthorizer::new(Vec::new())),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_script_runtime(script_runtime);
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant(script_capability_id()),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"message": "fail through services"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Process);
+}
+
+#[tokio::test]
+async fn host_runtime_services_maps_mcp_client_failure_through_private_adapter() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(MCP_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ObligatingAuthorizer::new(Vec::new())),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_mcp_runtime(Arc::new(ClientErrorMcpExecutor));
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant(mcp_capability_id()),
+            mcp_capability_id(),
+            ResourceEstimate::default(),
+            json!({"query": "fail through services"}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Backend);
+}
+
+#[tokio::test]
 async fn host_runtime_services_applies_scoped_mount_obligation_to_script_runtime() {
     let scoped_mounts = mount_view(
         "/workspace",
@@ -5003,6 +5061,19 @@ impl ScriptExecutor for RecordingScriptExecutor {
     }
 }
 
+struct ExitFailureScriptBackend;
+
+impl ScriptBackend for ExitFailureScriptBackend {
+    fn execute(&self, _request: ScriptBackendRequest) -> Result<ScriptBackendOutput, String> {
+        Ok(ScriptBackendOutput {
+            exit_code: 2,
+            stdout: Vec::new(),
+            stderr: b"simulated script failure".to_vec(),
+            wall_clock_ms: 1,
+        })
+    }
+}
+
 struct EchoScriptBackend;
 
 impl ScriptBackend for EchoScriptBackend {
@@ -5718,6 +5789,21 @@ impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
     }
 }
 
+struct ClientErrorMcpExecutor;
+
+#[async_trait]
+impl McpExecutor for ClientErrorMcpExecutor {
+    async fn execute_extension_json(
+        &self,
+        _governor: &dyn ResourceGovernor,
+        _request: McpExecutionRequest<'_>,
+    ) -> Result<McpExecutionResult, McpError> {
+        Err(McpError::Client {
+            reason: "simulated MCP client failure".to_string(),
+        })
+    }
+}
+
 struct PanicMcpExecutor;
 
 #[async_trait]
@@ -5939,6 +6025,10 @@ fn script_extension_id() -> ExtensionId {
 
 fn script_capability_id() -> CapabilityId {
     CapabilityId::new("script.echo").unwrap()
+}
+
+fn mcp_capability_id() -> CapabilityId {
+    CapabilityId::new("mcp.search").unwrap()
 }
 
 struct WasmRuntimeFixture {

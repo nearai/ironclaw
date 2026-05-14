@@ -116,6 +116,36 @@ impl std::fmt::Display for RuntimeDispatchErrorKind {
     }
 }
 
+/// Stable, redacted dispatch failure categories surfaced above the neutral dispatch port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchFailureKind {
+    UnknownCapability,
+    UnknownProvider,
+    RuntimeMismatch,
+    MissingRuntimeBackend,
+    UnsupportedRuntime,
+    Runtime(RuntimeDispatchErrorKind),
+}
+
+impl DispatchFailureKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownCapability => "UnknownCapability",
+            Self::UnknownProvider => "UnknownProvider",
+            Self::RuntimeMismatch => "RuntimeMismatch",
+            Self::MissingRuntimeBackend => "MissingRuntimeBackend",
+            Self::UnsupportedRuntime => "UnsupportedRuntime",
+            Self::Runtime(kind) => kind.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for DispatchFailureKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Runtime dispatch failures surfaced through the neutral host API port.
 #[derive(Debug, Error)]
 pub enum DispatchError {
@@ -151,6 +181,22 @@ pub enum DispatchError {
     Wasm { kind: RuntimeDispatchErrorKind },
     #[error("first-party dispatch failed: {kind}")]
     FirstParty { kind: RuntimeDispatchErrorKind },
+}
+
+impl DispatchError {
+    pub const fn failure_kind(&self) -> DispatchFailureKind {
+        match self {
+            Self::UnknownCapability { .. } => DispatchFailureKind::UnknownCapability,
+            Self::UnknownProvider { .. } => DispatchFailureKind::UnknownProvider,
+            Self::RuntimeMismatch { .. } => DispatchFailureKind::RuntimeMismatch,
+            Self::MissingRuntimeBackend { .. } => DispatchFailureKind::MissingRuntimeBackend,
+            Self::UnsupportedRuntime { .. } => DispatchFailureKind::UnsupportedRuntime,
+            Self::Mcp { kind }
+            | Self::Script { kind }
+            | Self::Wasm { kind }
+            | Self::FirstParty { kind } => DispatchFailureKind::Runtime(*kind),
+        }
+    }
 }
 
 /// Interface for already-authorized runtime dispatch.

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use crate::bootstrap::ironclaw_base_dir;
@@ -32,6 +32,14 @@ pub struct ChannelsConfig {
     /// Per-channel owner user IDs. When set, the channel only responds to this user.
     /// Key: channel name (e.g., "telegram"), Value: owner user ID.
     pub wasm_channel_owner_ids: HashMap<String, i64>,
+    /// Reborn Telegram WASM v2 ProductAdapter (#3285) tracer-bullet flag.
+    ///
+    /// **Default off.** When false, legacy v1 Telegram (`channels-src/telegram`)
+    /// runs unchanged through the v1 channel manager. When true, the v2
+    /// ProductAdapter path takes mutually-exclusive ownership of the
+    /// telegram webhook installation; the v1 path must NOT be active for
+    /// the same installation in that mode.
+    pub reborn_telegram_v2_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -409,7 +417,7 @@ impl ChannelsConfig {
             None
         };
 
-        Ok(Self {
+        let cfg = Self {
             cli: CliConfig {
                 enabled: cli_enabled,
             },
@@ -448,7 +456,276 @@ impl ChannelsConfig {
                 }
                 ids
             },
-        })
+            reborn_telegram_v2_enabled: parse_bool_env("REBORN_TELEGRAM_V2_ENABLED", false)?,
+        };
+        // Config-time check: only the env-var view of v1 is available here.
+        // The runtime startup path re-runs the validator with the
+        // persisted-active set so an installation whose `activated_channels`
+        // row carries telegram (independently of `WASM_CHANNELS`) also
+        // fails closed (issue #3285, follow-up to PR #3356 review).
+        validate_telegram_v1_v2_exclusivity(&cfg, None)?;
+        Ok(cfg)
+    }
+}
+
+/// Mutual-exclusion guard for Telegram v1/v2 paths.
+///
+/// Returns an error when both v1 and v2 would handle the same telegram
+/// installation. Called twice during startup so the invariant is
+/// enforced fail-closed:
+///
+/// 1. [`ChannelsConfig::resolve`] invokes it with `persisted_active = None`
+///    so env-level misconfigurations fail during `Config::from_env` /
+///    `Config::from_db` before any runtime state loads.
+/// 2. The runtime startup path (see `src/main.rs` ahead of
+///    `setup_wasm_channels`) invokes it again with the persisted-active
+///    set fed in. The setup helper auto-loads persisted-active WASM
+///    channels independently of `configured_wasm_channels`, so the
+///    env-only check would let v1 stand up alongside v2 for an install
+///    whose persisted `activated_channels` row carries `telegram` while
+///    the env var omits it (Henry's review on PR #3356).
+///
+/// v1 is considered active when [`ChannelsConfig::wasm_channels_enabled`]
+/// is true AND either [`ChannelsConfig::configured_wasm_channels`] lists
+/// `"telegram"` OR the persisted-active set contains `"telegram"`. v2 is
+/// the value of [`ChannelsConfig::reborn_telegram_v2_enabled`]. Both
+/// rules are derived here so callers cannot drift from the invariant
+/// (issue #3285).
+pub fn validate_telegram_v1_v2_exclusivity(
+    channels: &ChannelsConfig,
+    persisted_active_wasm_channels: Option<&HashSet<String>>,
+) -> Result<(), ConfigError> {
+    // Canonicalize via `ExtensionName` so the same membership test runs
+    // here that startup activation runs in `ExtensionManager`. Without
+    // this, non-canonical inputs like ` telegram ` or `tele-gram` slip
+    // past the validator while still normalizing to `telegram` at
+    // activation time, letting v1 and v2 stand up for the same
+    // installation (Copilot review on PR #3356).
+    fn is_telegram_after_canonicalize(name: &str) -> bool {
+        ironclaw_common::ExtensionName::new(name)
+            .map(|n| n.as_str() == "telegram")
+            .unwrap_or(false)
+    }
+    let v1_telegram_configured = channels
+        .configured_wasm_channels
+        .iter()
+        .any(|c| is_telegram_after_canonicalize(c));
+    let v1_telegram_persisted = persisted_active_wasm_channels
+        .is_some_and(|active| active.iter().any(|c| is_telegram_after_canonicalize(c)));
+    let v1_active =
+        channels.wasm_channels_enabled && (v1_telegram_configured || v1_telegram_persisted);
+    let v2_active = channels.reborn_telegram_v2_enabled;
+    if v1_active && v2_active {
+        return Err(ConfigError::InvalidValue {
+            key: "REBORN_TELEGRAM_V2_ENABLED".to_string(),
+            message:
+                "Telegram v2 ProductAdapter is enabled while the legacy v1 Telegram channel is also \
+                 configured. v1 and v2 must not handle the same telegram installation \
+                 simultaneously; disable one or the other (see issue #3285)."
+                    .to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod telegram_v2_tests {
+    use super::*;
+    use crate::config::helpers::lock_env;
+
+    fn channels_cfg(v1_active: bool, v2_active: bool) -> ChannelsConfig {
+        ChannelsConfig {
+            cli: CliConfig { enabled: false },
+            http: None,
+            gateway: None,
+            signal: None,
+            tui: None,
+            wasm_channels_dir: PathBuf::from("/tmp/channels"),
+            wasm_channels_enabled: v1_active,
+            configured_wasm_channels: if v1_active {
+                vec!["telegram".to_string()]
+            } else {
+                Vec::new()
+            },
+            wasm_channel_owner_ids: HashMap::new(),
+            reborn_telegram_v2_enabled: v2_active,
+        }
+    }
+
+    fn persisted_with(names: &[&str]) -> HashSet<String> {
+        names.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn v2_disabled_with_v1_active_is_ok() {
+        validate_telegram_v1_v2_exclusivity(&channels_cfg(true, false), None)
+            .expect("v1 alone is fine");
+    }
+
+    #[test]
+    fn v2_enabled_with_v1_inactive_is_ok() {
+        validate_telegram_v1_v2_exclusivity(&channels_cfg(false, true), None)
+            .expect("v2 alone is fine");
+    }
+
+    #[test]
+    fn neither_active_is_ok() {
+        validate_telegram_v1_v2_exclusivity(&channels_cfg(false, false), None)
+            .expect("neither is fine");
+    }
+
+    #[test]
+    fn both_active_fails_closed() {
+        let err = validate_telegram_v1_v2_exclusivity(&channels_cfg(true, true), None)
+            .expect_err("must reject");
+        assert!(
+            matches!(err, ConfigError::InvalidValue { ref key, .. } if key == "REBORN_TELEGRAM_V2_ENABLED")
+        );
+    }
+
+    #[test]
+    fn v1_configured_but_wasm_channels_disabled_allows_v2() {
+        // configured_wasm_channels contains "telegram" but
+        // wasm_channels_enabled = false means v1 is NOT active for startup.
+        let mut cfg = channels_cfg(false, true);
+        cfg.configured_wasm_channels = vec!["telegram".to_string()];
+        validate_telegram_v1_v2_exclusivity(&cfg, None)
+            .expect("disabled v1 list does not block v2");
+    }
+
+    #[test]
+    fn v1_enabled_without_telegram_listed_allows_v2() {
+        // wasm_channels_enabled = true but the telegram channel is not in
+        // configured_wasm_channels — v1 is not handling telegram, so v2 OK.
+        let mut cfg = channels_cfg(false, true);
+        cfg.wasm_channels_enabled = true;
+        cfg.configured_wasm_channels = vec!["discord".to_string(), "slack".to_string()];
+        validate_telegram_v1_v2_exclusivity(&cfg, None)
+            .expect("non-telegram v1 channels do not block v2");
+    }
+
+    #[test]
+    fn persisted_active_telegram_blocks_v2_even_when_not_in_configured_list() {
+        // Henry's #3356 finding: an existing install can have telegram in
+        // persisted `activated_channels` while the env var `WASM_CHANNELS`
+        // does NOT list it. The env-only guard would let v2 stand up
+        // alongside v1; this case must fail closed when persisted state
+        // is fed in.
+        let mut cfg = channels_cfg(false, true);
+        cfg.wasm_channels_enabled = true;
+        cfg.configured_wasm_channels = Vec::new();
+        let persisted = persisted_with(&["telegram"]);
+        let err = validate_telegram_v1_v2_exclusivity(&cfg, Some(&persisted))
+            .expect_err("persisted v1 + v2 must reject");
+        assert!(
+            matches!(err, ConfigError::InvalidValue { ref key, .. } if key == "REBORN_TELEGRAM_V2_ENABLED")
+        );
+    }
+
+    #[test]
+    fn persisted_active_without_telegram_allows_v2() {
+        // Persisted-active set carries other WASM channels but not telegram.
+        let mut cfg = channels_cfg(false, true);
+        cfg.wasm_channels_enabled = true;
+        cfg.configured_wasm_channels = Vec::new();
+        let persisted = persisted_with(&["slack", "discord"]);
+        validate_telegram_v1_v2_exclusivity(&cfg, Some(&persisted))
+            .expect("non-telegram persisted set does not block v2");
+    }
+
+    #[test]
+    fn persisted_active_telegram_with_wasm_channels_disabled_allows_v2() {
+        // `wasm_channels_enabled = false` means setup_wasm_channels never
+        // runs; the persisted set is moot in that case. v2 is fine.
+        let mut cfg = channels_cfg(false, true);
+        cfg.wasm_channels_enabled = false;
+        let persisted = persisted_with(&["telegram"]);
+        validate_telegram_v1_v2_exclusivity(&cfg, Some(&persisted))
+            .expect("wasm channels disabled — persisted list is dormant");
+    }
+
+    #[test]
+    fn non_canonical_telegram_name_in_configured_list_still_blocks_v2() {
+        // Copilot review on PR #3356: startup activation canonicalizes
+        // channel names via `ExtensionName` (trims whitespace, folds
+        // hyphens). The validator must apply the same canonicalization
+        // before testing membership, otherwise non-canonical inputs
+        // like ` telegram ` would pass the env-level check but still
+        // activate as `telegram` and conflict with v2.
+        let mut cfg = channels_cfg(false, true);
+        cfg.wasm_channels_enabled = true;
+        cfg.configured_wasm_channels = vec![" telegram ".to_string()];
+        let err = validate_telegram_v1_v2_exclusivity(&cfg, None)
+            .expect_err("whitespace-padded telegram must canonicalize and block");
+        assert!(
+            matches!(err, ConfigError::InvalidValue { ref key, .. } if key == "REBORN_TELEGRAM_V2_ENABLED")
+        );
+    }
+
+    #[test]
+    fn non_canonical_telegram_name_in_persisted_set_still_blocks_v2() {
+        let mut cfg = channels_cfg(false, true);
+        cfg.wasm_channels_enabled = true;
+        cfg.configured_wasm_channels = Vec::new();
+        // Hypothetical hyphenated alias that canonicalizes to "telegram".
+        // `tele-gram` would actually canonicalize to `tele_gram`, but
+        // a future legacy alias might collide; pin the canonicalization
+        // contract by feeding a leading/trailing-whitespace variant.
+        let persisted = persisted_with(&[" telegram"]);
+        let err = validate_telegram_v1_v2_exclusivity(&cfg, Some(&persisted))
+            .expect_err("non-canonical persisted telegram must block");
+        assert!(
+            matches!(err, ConfigError::InvalidValue { ref key, .. } if key == "REBORN_TELEGRAM_V2_ENABLED")
+        );
+    }
+
+    #[test]
+    fn resolve_rejects_v1_and_v2_telegram_together() {
+        let _guard = lock_env();
+        // Save-and-restore so a process that already exported the env var
+        // (e.g. a developer shell with REBORN_TELEGRAM_V2_ENABLED set) does
+        // not lose its value when the test ends (Copilot #2 on PR #3356).
+        let _env_guard = ScopedEnv::set("REBORN_TELEGRAM_V2_ENABLED", "true");
+        let mut settings = Settings::default();
+        settings.channels.wasm_channels_enabled = true;
+        settings.channels.wasm_channels = vec!["telegram".to_string()];
+        let err = ChannelsConfig::resolve(&settings, "owner").expect_err("must reject");
+        assert!(
+            matches!(err, ConfigError::InvalidValue { ref key, .. } if key == "REBORN_TELEGRAM_V2_ENABLED"),
+            "expected REBORN_TELEGRAM_V2_ENABLED InvalidValue, got: {err:?}"
+        );
+    }
+
+    /// Test-only RAII guard that scopes a `std::env` set/remove to the
+    /// guard's lifetime. Used together with `lock_env()` so concurrent
+    /// tests do not race on the process-wide environment, and so a
+    /// developer's existing env-var value is restored after the test.
+    struct ScopedEnv {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            // SAFETY: callers hold `lock_env()` so the process-wide env is
+            // serialized for the lifetime of this guard.
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            // SAFETY: same lock as above; held until the test function returns.
+            unsafe {
+                if let Some(ref prev) = self.previous {
+                    std::env::set_var(self.key, prev);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
     }
 }
 
@@ -629,6 +906,7 @@ mod tests {
             wasm_channels_enabled: true,
             configured_wasm_channels: Vec::new(),
             wasm_channel_owner_ids: HashMap::new(),
+            reborn_telegram_v2_enabled: false,
         };
         assert!(cfg.cli.enabled);
         assert!(cfg.http.is_none());
@@ -637,6 +915,7 @@ mod tests {
         assert_eq!(cfg.wasm_channels_dir, PathBuf::from("/tmp/channels"));
         assert!(cfg.wasm_channels_enabled);
         assert!(cfg.wasm_channel_owner_ids.is_empty());
+        assert!(!cfg.reborn_telegram_v2_enabled);
     }
 
     #[test]
@@ -655,6 +934,7 @@ mod tests {
             wasm_channels_enabled: false,
             configured_wasm_channels: vec!["telegram".to_string()],
             wasm_channel_owner_ids: ids,
+            reborn_telegram_v2_enabled: false,
         };
         assert_eq!(cfg.wasm_channel_owner_ids.get("telegram"), Some(&12345));
         assert_eq!(cfg.wasm_channel_owner_ids.get("slack"), Some(&67890));

@@ -32,11 +32,13 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome,
-        CapabilitySurfaceVersion, FinalizeAssistantMessage, LoopContextBundle, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
-        LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
-        LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
+        CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
+        LoopContextBundle, LoopContextMessage, LoopContextPort, LoopContextRequest,
+        LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage,
+        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopRunContext, LoopRunInfoPort,
+        LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
         UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        sanitize_model_visible_text,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -457,6 +459,7 @@ where
     max_messages: usize,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -479,6 +482,7 @@ where
             max_messages,
             milestone_sink: None,
             skill_context_source: None,
+            instruction_materialization_store: None,
         }
     }
 
@@ -498,11 +502,20 @@ where
             max_messages,
             milestone_sink: Some(milestone_sink),
             skill_context_source: None,
+            instruction_materialization_store: None,
         }
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
+        self
+    }
+
+    pub fn with_instruction_materialization_store(
+        mut self,
+        store: Arc<dyn InstructionMaterializationStore>,
+    ) -> Self {
+        self.instruction_materialization_store = Some(store);
         self
     }
 }
@@ -563,7 +576,9 @@ where
             chunks: gateway_response
                 .safe_text_deltas
                 .into_iter()
-                .map(|safe_text_delta| ModelStreamChunk { safe_text_delta })
+                .map(|safe_text_delta| ModelStreamChunk {
+                    safe_text_delta: sanitize_model_visible_text(safe_text_delta),
+                })
                 .collect(),
             output: gateway_response.output,
             effective_model_profile_id: model_profile_id,
@@ -649,9 +664,21 @@ where
         }
 
         let mut messages_by_ref = context_messages_by_ref(context.messages);
-        let needs_history_lookup = requested_messages
-            .iter()
-            .any(|message| !messages_by_ref.contains_key(message.content_ref.as_str()));
+        let mut needs_history_lookup = false;
+        for message in &requested_messages {
+            if messages_by_ref.contains_key(message.content_ref.as_str()) {
+                continue;
+            }
+            if let Some(materialization_store) = self.instruction_materialization_store.as_ref()
+                && materialization_store
+                    .get_materialized_message(&self.run_context, &message.content_ref)?
+                    .is_some()
+            {
+                continue;
+            }
+            needs_history_lookup = true;
+            break;
+        }
         let snippet_messages_by_ref = if requested_messages
             .iter()
             .any(|message| skill_context::is_snippet_model_message_ref(&message.content_ref))
@@ -675,6 +702,26 @@ where
         let mut resolved = Vec::with_capacity(requested_messages.len());
         for message in requested_messages {
             let requested_role = HostManagedModelMessageRole::from_loop_role(&message.role)?;
+            if let Some(materialization_store) = self.instruction_materialization_store.as_ref()
+                && let Some(materialized) = materialization_store
+                    .get_materialized_message(&self.run_context, &message.content_ref)?
+            {
+                let materialized_role =
+                    HostManagedModelMessageRole::from_loop_role(&materialized.role)?;
+                if requested_role != materialized_role {
+                    return Err(AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::InvalidInvocation,
+                        "model message role does not match materialized instruction context",
+                    ));
+                }
+                resolved.push(HostManagedModelMessage {
+                    role: materialized_role,
+                    content: materialized.safe_content,
+                    content_ref: message.content_ref,
+                });
+                continue;
+            }
+
             if let Some(snippet_message) = snippet_messages_by_ref.get(message.content_ref.as_str())
             {
                 if requested_role != snippet_message.role {
@@ -805,7 +852,7 @@ impl HostManagedModelResponse {
     pub fn assistant_reply(content: impl Into<String>) -> Self {
         let content = content.into();
         Self {
-            safe_text_deltas: vec![content.clone()],
+            safe_text_deltas: vec![sanitize_model_visible_text(content.clone())],
             output: ParentLoopOutput::AssistantReply(AssistantReply { content }),
         }
     }
@@ -818,6 +865,8 @@ pub enum HostManagedModelErrorKind {
     PolicyDenied,
     ConfigurationError,
     BudgetExceeded,
+    /// Provider credentials are missing, expired, or otherwise unavailable.
+    CredentialUnavailable,
     Unavailable,
     Cancelled,
 }
@@ -1052,7 +1101,12 @@ fn transcript_write_error(_error: SessionThreadError) -> AgentLoopHostError {
 }
 
 fn model_gateway_error(error: HostManagedModelError) -> AgentLoopHostError {
-    AgentLoopHostError::new(model_error_kind(error.kind), error.safe_summary)
+    let safe_summary = if LoopSafeSummary::new(error.safe_summary.clone()).is_ok() {
+        error.safe_summary
+    } else {
+        safe_model_summary(error.kind).to_string()
+    };
+    AgentLoopHostError::new(model_error_kind(error.kind), safe_summary)
 }
 
 fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
@@ -1061,6 +1115,9 @@ fn model_error_kind(kind: HostManagedModelErrorKind) -> AgentLoopHostErrorKind {
         HostManagedModelErrorKind::PolicyDenied => AgentLoopHostErrorKind::PolicyDenied,
         HostManagedModelErrorKind::ConfigurationError => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::BudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
+        HostManagedModelErrorKind::CredentialUnavailable => {
+            AgentLoopHostErrorKind::CredentialUnavailable
+        }
         HostManagedModelErrorKind::Unavailable => AgentLoopHostErrorKind::Unavailable,
         HostManagedModelErrorKind::Cancelled => AgentLoopHostErrorKind::Cancelled,
     }
@@ -1072,6 +1129,7 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
         HostManagedModelErrorKind::PolicyDenied => "model profile is not permitted",
         HostManagedModelErrorKind::ConfigurationError => "model route configuration is invalid",
         HostManagedModelErrorKind::BudgetExceeded => "model request exceeded its budget",
+        HostManagedModelErrorKind::CredentialUnavailable => "model credentials are unavailable",
         HostManagedModelErrorKind::Unavailable => "model service is unavailable",
         HostManagedModelErrorKind::Cancelled => "model request was cancelled",
     }

@@ -38,6 +38,7 @@ use thiserror::Error;
 
 use crate::LoopMessageRef;
 
+use super::snippet_ref::stable_skill_snippet_display_hash;
 use super::{
     AgentLoopHostError, AgentLoopHostErrorKind, LoopContextSnippet, LoopContextSnippetMetadata,
 };
@@ -130,8 +131,6 @@ impl SkillTrustLevel {
 const EMPTY_SNAPSHOT_VERSION: &str = "empty";
 const DEFAULT_MAX_SKILL_SNIPPET_BYTES: usize = 8 * 1024;
 const DEFAULT_MAX_SKILL_CONTEXT_BYTES: usize = 32 * 1024;
-const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-const FNV_PRIME: u64 = 0x00000100000001B3;
 
 /// Byte budgets for model-visible skill context produced by [`SkillContextService`].
 ///
@@ -407,7 +406,8 @@ pub fn skill_snippet_model_message_ref(
     ordinal: usize,
 ) -> Result<LoopMessageRef, AgentLoopHostError> {
     let slug = sanitize_ref_suffix(snippet_ref);
-    let hash = stable_snippet_ref_hash(snippet_ref, safe_summary, ordinal);
+    let ordinal = ordinal.to_string();
+    let hash = stable_skill_snippet_display_hash([snippet_ref, safe_summary, &ordinal]);
     LoopMessageRef::new(format!("msg:snippet.{slug}.{ordinal}.{hash:016x}")).map_err(|_| {
         AgentLoopHostError::new(
             AgentLoopHostErrorKind::Internal,
@@ -418,6 +418,21 @@ pub fn skill_snippet_model_message_ref(
 
 pub fn is_skill_snippet_model_message_ref(content_ref: &LoopMessageRef) -> bool {
     content_ref.as_str().starts_with("msg:snippet.")
+}
+
+#[cfg(test)]
+mod snippet_ref_tests {
+    use super::*;
+
+    #[test]
+    fn skill_snippet_model_message_ref_preserves_existing_hash() {
+        let content_ref =
+            skill_snippet_model_message_ref("skill:alpha", "summary", 0).expect("valid ref");
+        assert_eq!(
+            content_ref.as_str(),
+            "msg:snippet.skill.alpha.0.6e54cb74d742607c"
+        );
+    }
 }
 
 fn sanitize_ref_suffix(value: &str) -> String {
@@ -440,23 +455,6 @@ fn sanitize_ref_suffix(value: &str) -> String {
     }
 }
 
-fn stable_snippet_ref_hash(snippet_ref: &str, safe_summary: &str, ordinal: usize) -> u64 {
-    let mut hash = FNV_OFFSET;
-    feed_hash(&mut hash, snippet_ref.as_bytes());
-    feed_hash(&mut hash, &[0xFF]);
-    feed_hash(&mut hash, safe_summary.as_bytes());
-    feed_hash(&mut hash, &[0xFF]);
-    feed_hash(&mut hash, ordinal.to_string().as_bytes());
-    hash
-}
-
-fn feed_hash(hash: &mut u64, bytes: &[u8]) {
-    for &byte in bytes {
-        *hash ^= u64::from(byte);
-        *hash = hash.wrapping_mul(FNV_PRIME);
-    }
-}
-
 fn validate_snapshot(snapshot: &SkillRunSnapshot) -> Result<(), SkillContextError> {
     if snapshot.snapshot_version.is_empty() {
         return Err(SkillContextError::TrustDataMissing);
@@ -469,9 +467,13 @@ fn validate_snapshot(snapshot: &SkillRunSnapshot) -> Result<(), SkillContextErro
         return Err(SkillContextError::InvalidSnapshotVersion);
     }
 
-    let mut sorted_entries = snapshot.entries.clone();
-    sorted_entries.sort_by(compare_skill_entries);
-    let expected_version = compute_snapshot_version(&sorted_entries);
+    let expected_version = if entries_are_sorted_by_key(&snapshot.entries) {
+        compute_snapshot_version(&snapshot.entries)
+    } else {
+        let mut sorted_entries = snapshot.entries.clone();
+        sorted_entries.sort_by(compare_skill_entries);
+        compute_snapshot_version(&sorted_entries)
+    };
     if snapshot.snapshot_version != expected_version {
         return Err(SkillContextError::InvalidSnapshotVersion);
     }
@@ -488,6 +490,12 @@ fn validate_budget(budget: SkillContextBudget) -> Result<(), SkillContextError> 
     }
 
     Ok(())
+}
+
+fn entries_are_sorted_by_key(entries: &[InstalledSkillSnapshot]) -> bool {
+    entries
+        .windows(2)
+        .all(|pair| compare_skill_entries(&pair[0], &pair[1]) != Ordering::Greater)
 }
 
 fn compare_visible_skill_entries(
@@ -573,8 +581,22 @@ fn contains_raw_host_path(text: &str) -> bool {
 }
 
 fn contains_internal_handle_marker(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    lower.contains("cap_") || lower.contains("secret://") || lower.contains("secret:")
+    contains_ascii_case_insensitive(text, "cap_")
+        || contains_ascii_case_insensitive(text, "secret://")
+        || contains_ascii_case_insensitive(text, "secret:")
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    !needle.is_empty()
+        && haystack.len() >= needle.len()
+        && haystack.windows(needle.len()).any(|window| {
+            window
+                .iter()
+                .zip(needle)
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+        })
 }
 
 fn checked_context_total_bytes(
@@ -647,5 +669,32 @@ mod tests {
     fn context_byte_accumulator_reports_arithmetic_overflow() {
         let err = checked_context_total_bytes(usize::MAX, 1, 0, usize::MAX).unwrap_err();
         assert_eq!(err, SkillContextError::ContextBudgetExceeded);
+    }
+
+    #[test]
+    fn entries_are_sorted_detects_sorted_and_unsorted_snapshots() {
+        let alpha = InstalledSkillSnapshot {
+            name: "alpha".to_string(),
+            trust: SkillTrustLevel::Trusted,
+            visibility: SkillVisibility::Visible,
+            prompt_content: Some("prompt".to_string()),
+            safe_description: "description".to_string(),
+            ordering_key: "alpha".to_string(),
+        };
+        let beta = InstalledSkillSnapshot {
+            name: "beta".to_string(),
+            ordering_key: "beta".to_string(),
+            ..alpha.clone()
+        };
+
+        assert!(entries_are_sorted_by_key(&[alpha.clone(), beta.clone()]));
+        assert!(!entries_are_sorted_by_key(&[beta, alpha]));
+    }
+
+    #[test]
+    fn internal_handle_marker_search_is_case_insensitive_without_lowercase_copy() {
+        assert!(contains_internal_handle_marker("uses CAP_file_read"));
+        assert!(contains_internal_handle_marker("uses Secret://oauth"));
+        assert!(!contains_internal_handle_marker("capacity planning"));
     }
 }

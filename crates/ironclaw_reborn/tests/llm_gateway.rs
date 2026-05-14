@@ -243,6 +243,115 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
 }
 
 #[tokio::test]
+async fn production_loop_model_gateway_sanitizes_provider_output_before_public_chunks() {
+    let fixture = ThreadFixture::new().await;
+    let provider = Arc::new(RecordingLlmProvider::reply(
+        "RAW_CREDENTIAL_SENTINEL sk-production-secret",
+    ));
+    let provider_gateway = Arc::new(LlmProviderModelGateway::new(
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    ));
+    let model_gateway = Arc::new(ThreadBackedLoopModelGateway::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        provider_gateway,
+        16,
+    ));
+    let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let port = HostManagedLoopModelPort::new(
+        fixture.run_context.clone(),
+        model_gateway,
+        milestones.clone(),
+    );
+
+    let response = port
+        .stream_model(LoopModelRequest {
+            messages: vec![LoopModelMessage {
+                role: "user".to_string(),
+                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
+                    .unwrap(),
+            }],
+            surface_version: None,
+            model_preference: None,
+        })
+        .await
+        .unwrap();
+
+    let serialized = serde_json::to_string(&response).unwrap();
+    for sentinel in ["RAW_CREDENTIAL_SENTINEL", "sk-production-secret"] {
+        assert!(
+            response
+                .chunks
+                .iter()
+                .all(|chunk| !chunk.safe_text_delta.contains(sentinel)),
+            "model chunks must not contain `{sentinel}`"
+        );
+        assert!(
+            !serialized.contains(sentinel),
+            "serialized response must not contain `{sentinel}`"
+        );
+    }
+    assert!(provider.requests.lock().unwrap().len() == 1);
+}
+
+#[tokio::test]
+async fn production_loop_model_gateway_maps_provider_auth_and_session_to_credential_unavailable() {
+    for provider_error in [
+        LlmError::AuthFailed {
+            provider: "openai".to_string(),
+        },
+        LlmError::SessionExpired {
+            provider: "openai".to_string(),
+        },
+    ] {
+        let fixture = ThreadFixture::new().await;
+        let provider = Arc::new(RecordingLlmProvider::fail(provider_error));
+        let provider_gateway = Arc::new(LlmProviderModelGateway::new(
+            provider.clone(),
+            LlmModelProfilePolicy::new()
+                .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+        ));
+        let model_gateway = Arc::new(ThreadBackedLoopModelGateway::new(
+            Arc::clone(&fixture.thread_service),
+            fixture.thread_scope.clone(),
+            provider_gateway,
+            16,
+        ));
+        let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
+        let port = HostManagedLoopModelPort::new(
+            fixture.run_context.clone(),
+            model_gateway,
+            milestones.clone(),
+        );
+
+        let error = port
+            .stream_model(LoopModelRequest {
+                messages: vec![LoopModelMessage {
+                    role: "user".to_string(),
+                    content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
+                        .unwrap(),
+                }],
+                surface_version: None,
+                model_preference: None,
+            })
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::CredentialUnavailable);
+        assert_eq!(error.safe_summary, "model credentials are unavailable");
+        assert!(provider.requests.lock().unwrap().len() == 1);
+        let serialized = serde_json::to_string(&error).unwrap();
+        let debug = format!("{:?}", error);
+        for sentinel in ["OPENAI_API_KEY", "sk-test", "Bearer "] {
+            assert!(!serialized.contains(sentinel));
+            assert!(!debug.contains(sentinel));
+        }
+    }
+}
+
+#[tokio::test]
 async fn production_loop_model_gateway_fails_closed_before_provider_call() {
     let fixture = ThreadFixture::new().await;
     let provider = Arc::new(RecordingLlmProvider::reply("unused"));
@@ -318,7 +427,7 @@ async fn production_loop_model_gateway_preserves_error_kind_when_summary_is_resa
         .unwrap_err();
 
     assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
-    assert_eq!(error.safe_summary, "model gateway failed");
+    assert_eq!(error.safe_summary, "model profile is not permitted");
 }
 
 #[tokio::test]

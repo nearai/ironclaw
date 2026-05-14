@@ -1,8 +1,10 @@
 //! InboundTurnService — the user-message turn submission path.
 //!
 //! This is the narrower user-message subset of [`ProductWorkflow`]. It
-//! resolves the conversation binding, accepts the inbound message into the
-//! session thread, and submits the turn to the coordinator.
+//! resolves product adapter envelopes into a thread-bound accepted message, then
+//! hands off to the accepted-message turn submission seam. Keeping replay and
+//! submit/deferred handling behind that seam prevents adapter-specific binding
+//! code from owning the whole inbound turn pipeline.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -183,18 +185,15 @@ where
                 reason: format!("failed to accept inbound message: {e}"),
             })?;
 
-        submit_accepted_message(
-            &self.thread_service,
-            &self.turn_coordinator,
-            AcceptedSubmission {
-                binding,
-                message_id: accepted.message_id,
-                source_binding_id,
-                reply_target_binding_id,
-                idempotency_key_raw: submit_idempotency_key,
-                received_at: envelope.received_at(),
-            },
-        )
+        ProductInboundTurnHandoff::NeedsSubmission(AcceptedProductInboundTurn {
+            binding,
+            message_id: accepted.message_id,
+            source_binding_id,
+            reply_target_binding_id,
+            idempotency_key_raw: submit_idempotency_key,
+            received_at: envelope.received_at(),
+        })
+        .submit_or_replay(&self.thread_service, &self.turn_coordinator)
         .await
     }
 }
@@ -210,66 +209,107 @@ where
     T: SessionThreadService,
     C: TurnCoordinator,
 {
-    let binding = binding_from_replay(&replay)?;
-    let accepted_message_ref = accepted_message_ref(replay.message_id)?;
+    ProductInboundTurnHandoff::from_replay(replay, submit_idempotency_key, received_at)?
+        .submit_or_replay(thread_service, turn_coordinator)
+        .await
+}
 
-    if replay.status == MessageStatus::Submitted {
-        let Some(turn_run_id) = replay.turn_run_id.as_deref() else {
-            return Err(ProductWorkflowError::TurnSubmissionRejected {
-                reason: "submitted replay missing turn_run_id".into(),
+enum ProductInboundTurnHandoff {
+    AlreadySubmitted {
+        accepted_message_ref: AcceptedMessageRef,
+        submitted_run_id: TurnRunId,
+        binding: ResolvedBinding,
+    },
+    NeedsSubmission(AcceptedProductInboundTurn),
+}
+
+impl ProductInboundTurnHandoff {
+    fn from_replay(
+        replay: AcceptedInboundMessageReplay,
+        submit_idempotency_key: String,
+        received_at: DateTime<Utc>,
+    ) -> Result<Self, ProductWorkflowError> {
+        let binding = binding_from_replay(&replay)?;
+        let accepted_message_ref = accepted_message_ref(replay.message_id)?;
+
+        if replay.status == MessageStatus::Submitted {
+            let Some(turn_run_id) = replay.turn_run_id.as_deref() else {
+                return Err(ProductWorkflowError::TurnSubmissionRejected {
+                    reason: "submitted replay missing turn_run_id".into(),
+                });
+            };
+            let submitted_run_id = Uuid::parse_str(turn_run_id)
+                .map(TurnRunId::from_uuid)
+                .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
+                    reason: format!("invalid submitted turn_run_id: {e}"),
+                })?;
+            return Ok(Self::AlreadySubmitted {
+                accepted_message_ref,
+                submitted_run_id,
+                binding,
             });
-        };
-        let submitted_run_id = Uuid::parse_str(turn_run_id)
-            .map(TurnRunId::from_uuid)
-            .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
-                reason: format!("invalid submitted turn_run_id: {e}"),
-            })?;
-        return Ok(InboundTurnOutcome::Submitted {
-            accepted_message_ref,
-            submitted_run_id,
-            binding,
-        });
-    }
-
-    if !matches!(
-        replay.status,
-        MessageStatus::Accepted | MessageStatus::DeferredBusy
-    ) {
-        return Err(ProductWorkflowError::TurnSubmissionRejected {
-            reason: format!(
-                "cannot resubmit inbound message replay in {:?} status",
-                replay.status
-            ),
-        });
-    }
-
-    let source_binding_id = replay.source_binding_id.clone().ok_or_else(|| {
-        ProductWorkflowError::TurnSubmissionRejected {
-            reason: "accepted replay missing source_binding_id".into(),
         }
-    })?;
-    let reply_target_binding_id = replay.reply_target_binding_id.clone().ok_or_else(|| {
-        ProductWorkflowError::TurnSubmissionRejected {
-            reason: "accepted replay missing reply_target_binding_id".into(),
-        }
-    })?;
 
-    submit_accepted_message(
-        thread_service,
-        turn_coordinator,
-        AcceptedSubmission {
+        if !matches!(
+            replay.status,
+            MessageStatus::Accepted | MessageStatus::DeferredBusy
+        ) {
+            return Err(ProductWorkflowError::TurnSubmissionRejected {
+                reason: format!(
+                    "cannot resubmit inbound message replay in {:?} status",
+                    replay.status
+                ),
+            });
+        }
+
+        let source_binding_id = replay.source_binding_id.clone().ok_or_else(|| {
+            ProductWorkflowError::TurnSubmissionRejected {
+                reason: "accepted replay missing source_binding_id".into(),
+            }
+        })?;
+        let reply_target_binding_id = replay.reply_target_binding_id.clone().ok_or_else(|| {
+            ProductWorkflowError::TurnSubmissionRejected {
+                reason: "accepted replay missing reply_target_binding_id".into(),
+            }
+        })?;
+
+        Ok(Self::NeedsSubmission(AcceptedProductInboundTurn {
             binding,
             message_id: replay.message_id,
             source_binding_id,
             reply_target_binding_id,
             idempotency_key_raw: submit_idempotency_key,
             received_at,
-        },
-    )
-    .await
+        }))
+    }
+
+    async fn submit_or_replay<T, C>(
+        self,
+        thread_service: &T,
+        turn_coordinator: &C,
+    ) -> Result<InboundTurnOutcome, ProductWorkflowError>
+    where
+        T: SessionThreadService,
+        C: TurnCoordinator,
+    {
+        match self {
+            Self::AlreadySubmitted {
+                accepted_message_ref,
+                submitted_run_id,
+                binding,
+            } => Ok(InboundTurnOutcome::Submitted {
+                accepted_message_ref,
+                submitted_run_id,
+                binding,
+            }),
+            Self::NeedsSubmission(submission) => {
+                submission.submit(thread_service, turn_coordinator).await
+            }
+        }
+    }
 }
 
-struct AcceptedSubmission {
+struct AcceptedProductInboundTurn {
     binding: ResolvedBinding,
     message_id: ThreadMessageId,
     source_binding_id: String,
@@ -278,84 +318,86 @@ struct AcceptedSubmission {
     received_at: DateTime<Utc>,
 }
 
-async fn submit_accepted_message<T, C>(
-    thread_service: &T,
-    turn_coordinator: &C,
-    submission: AcceptedSubmission,
-) -> Result<InboundTurnOutcome, ProductWorkflowError>
-where
-    T: SessionThreadService,
-    C: TurnCoordinator,
-{
-    let AcceptedSubmission {
-        binding,
-        message_id,
-        source_binding_id,
-        reply_target_binding_id,
-        idempotency_key_raw,
-        received_at,
-    } = submission;
-    let thread_scope = thread_scope_from_binding(&binding)?;
-    let turn_scope = TurnScope::new(
-        binding.tenant_id.clone(),
-        binding.agent_id.clone(),
-        binding.project_id.clone(),
-        binding.thread_id.clone(),
-    );
-    let actor = TurnActor::new(binding.user_id.clone());
-    let source_binding_ref = bounded_ref::<SourceBindingRef>("src", &source_binding_id)?;
-    let accepted_message_ref = accepted_message_ref(message_id)?;
-    let reply_target_binding_ref =
-        bounded_ref::<ReplyTargetBindingRef>("reply", &reply_target_binding_id)?;
-    let idempotency_key = bounded_ref::<IdempotencyKey>("turn", &idempotency_key_raw)?;
+impl AcceptedProductInboundTurn {
+    async fn submit<T, C>(
+        self,
+        thread_service: &T,
+        turn_coordinator: &C,
+    ) -> Result<InboundTurnOutcome, ProductWorkflowError>
+    where
+        T: SessionThreadService,
+        C: TurnCoordinator,
+    {
+        let Self {
+            binding,
+            message_id,
+            source_binding_id,
+            reply_target_binding_id,
+            idempotency_key_raw,
+            received_at,
+        } = self;
+        let thread_scope = thread_scope_from_binding(&binding)?;
+        let turn_scope = TurnScope::new(
+            binding.tenant_id.clone(),
+            binding.agent_id.clone(),
+            binding.project_id.clone(),
+            binding.thread_id.clone(),
+        );
+        let actor = TurnActor::new(binding.user_id.clone());
+        let source_binding_ref = bounded_ref::<SourceBindingRef>("src", &source_binding_id)?;
+        let accepted_message_ref = accepted_message_ref(message_id)?;
+        let reply_target_binding_ref =
+            bounded_ref::<ReplyTargetBindingRef>("reply", &reply_target_binding_id)?;
+        let idempotency_key = bounded_ref::<IdempotencyKey>("turn", &idempotency_key_raw)?;
 
-    let request = SubmitTurnRequest {
-        scope: turn_scope,
-        actor,
-        accepted_message_ref: accepted_message_ref.clone(),
-        source_binding_ref,
-        reply_target_binding_ref,
-        requested_run_profile: None,
-        idempotency_key,
-        received_at,
-    };
+        let request = SubmitTurnRequest {
+            scope: turn_scope,
+            actor,
+            accepted_message_ref: accepted_message_ref.clone(),
+            source_binding_ref,
+            reply_target_binding_ref,
+            requested_run_profile: None,
+            idempotency_key,
+            received_at,
+        };
 
-    match turn_coordinator.submit_turn(request).await {
-        Ok(SubmitTurnResponse::Accepted {
-            turn_id, run_id, ..
-        }) => {
-            thread_service
-                .mark_message_submitted(
-                    &thread_scope,
-                    &binding.thread_id,
-                    message_id,
-                    turn_id.to_string(),
-                    run_id.to_string(),
-                )
-                .await
-                .map_err(|e| ProductWorkflowError::Transient {
-                    reason: format!("failed to mark message submitted: {e}"),
-                })?;
-            Ok(InboundTurnOutcome::Submitted {
-                accepted_message_ref,
-                submitted_run_id: run_id,
-                binding,
-            })
+        match turn_coordinator.submit_turn(request).await {
+            Ok(SubmitTurnResponse::Accepted {
+                turn_id, run_id, ..
+            }) => {
+                thread_service
+                    .mark_message_submitted(
+                        &thread_scope,
+                        &binding.thread_id,
+                        message_id,
+                        turn_id.to_string(),
+                        run_id.to_string(),
+                    )
+                    .await
+                    .map_err(|e| ProductWorkflowError::Transient {
+                        reason: format!("failed to mark message submitted: {e}"),
+                    })?;
+                Ok(InboundTurnOutcome::Submitted {
+                    accepted_message_ref,
+                    submitted_run_id: run_id,
+                    binding,
+                })
+            }
+            Err(TurnError::ThreadBusy(busy)) => {
+                thread_service
+                    .mark_message_deferred_busy(&thread_scope, &binding.thread_id, message_id)
+                    .await
+                    .map_err(|e| ProductWorkflowError::Transient {
+                        reason: format!("failed to mark message deferred: {e}"),
+                    })?;
+                Ok(InboundTurnOutcome::DeferredBusy {
+                    accepted_message_ref,
+                    active_run_id: busy.active_run_id,
+                    binding,
+                })
+            }
+            Err(error) => Err(ProductWorkflowError::TurnSubmissionFailed { error }),
         }
-        Err(TurnError::ThreadBusy(busy)) => {
-            thread_service
-                .mark_message_deferred_busy(&thread_scope, &binding.thread_id, message_id)
-                .await
-                .map_err(|e| ProductWorkflowError::Transient {
-                    reason: format!("failed to mark message deferred: {e}"),
-                })?;
-            Ok(InboundTurnOutcome::DeferredBusy {
-                accepted_message_ref,
-                active_run_id: busy.active_run_id,
-                binding,
-            })
-        }
-        Err(error) => Err(ProductWorkflowError::TurnSubmissionFailed { error }),
     }
 }
 
@@ -463,4 +505,114 @@ fn bounded_ref<T: RefFactory>(prefix: &str, raw: &str) -> Result<T, ProductWorkf
     T::build(value).map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
         reason: format!("invalid {prefix} ref: {e}"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::TimeZone;
+    use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+    use ironclaw_threads::ThreadScope;
+
+    use super::*;
+
+    #[test]
+    fn submitted_replay_becomes_already_submitted_handoff() {
+        let submitted_run_id = TurnRunId::new();
+        let message_id = ThreadMessageId::new();
+        let handoff = ProductInboundTurnHandoff::from_replay(
+            replay(
+                message_id,
+                MessageStatus::Submitted,
+                Some("src:alpha"),
+                Some("reply:alpha"),
+                Some(submitted_run_id.to_string()),
+            ),
+            "turn-key".to_string(),
+            received_at(),
+        )
+        .expect("submitted replay handoff");
+
+        let ProductInboundTurnHandoff::AlreadySubmitted {
+            accepted_message_ref: actual_message_ref,
+            submitted_run_id: actual_run_id,
+            binding,
+        } = handoff
+        else {
+            panic!("expected submitted replay to short-circuit turn submission")
+        };
+
+        assert_eq!(actual_run_id, submitted_run_id);
+        assert_eq!(
+            actual_message_ref,
+            accepted_message_ref(message_id).unwrap()
+        );
+        assert_eq!(binding.thread_id, thread_id());
+    }
+
+    #[test]
+    fn deferred_replay_becomes_needs_submission_handoff() {
+        let message_id = ThreadMessageId::new();
+        let handoff = ProductInboundTurnHandoff::from_replay(
+            replay(
+                message_id,
+                MessageStatus::DeferredBusy,
+                Some("src:alpha"),
+                Some("reply:alpha"),
+                None,
+            ),
+            "turn-key".to_string(),
+            received_at(),
+        )
+        .expect("deferred replay handoff");
+
+        let ProductInboundTurnHandoff::NeedsSubmission(submission) = handoff else {
+            panic!("expected deferred replay to require a new turn submission")
+        };
+
+        assert_eq!(submission.message_id, message_id);
+        assert_eq!(submission.source_binding_id, "src:alpha");
+        assert_eq!(submission.reply_target_binding_id, "reply:alpha");
+    }
+
+    fn replay(
+        message_id: ThreadMessageId,
+        status: MessageStatus,
+        source_binding_id: Option<&str>,
+        reply_target_binding_id: Option<&str>,
+        turn_run_id: Option<String>,
+    ) -> AcceptedInboundMessageReplay {
+        AcceptedInboundMessageReplay {
+            scope: ThreadScope {
+                tenant_id: tenant_id(),
+                agent_id: AgentId::new("agent:alpha").unwrap(),
+                project_id: None,
+                owner_user_id: Some(user_id()),
+                mission_id: None,
+            },
+            thread_id: thread_id(),
+            message_id,
+            sequence: 1,
+            status,
+            actor_id: None,
+            source_binding_id: source_binding_id.map(str::to_string),
+            reply_target_binding_id: reply_target_binding_id.map(str::to_string),
+            turn_run_id,
+        }
+    }
+
+    fn received_at() -> DateTime<Utc> {
+        Utc.timestamp_opt(0, 0).single().unwrap()
+    }
+
+    fn tenant_id() -> TenantId {
+        TenantId::new("tenant:alpha").unwrap()
+    }
+
+    fn user_id() -> UserId {
+        UserId::new("user:alpha").unwrap()
+    }
+
+    fn thread_id() -> ThreadId {
+        ThreadId::new("thread:alpha").unwrap()
+    }
 }

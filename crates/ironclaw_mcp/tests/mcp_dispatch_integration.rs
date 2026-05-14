@@ -1,19 +1,14 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_dispatcher::{
-    RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
-};
-use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage};
-use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
 use ironclaw_mcp::*;
 use ironclaw_resources::*;
 use serde_json::json;
 
 #[tokio::test]
-async fn mcp_lane_dispatches_manifest_transport_and_reconciles_through_dispatcher() {
+async fn mcp_lane_executes_manifest_transport_and_reconciles_resources() {
     let client = RecordingMcpClient::new(Ok(McpClientOutput {
         output: json!({"items":["issue-1"]}),
         usage: ResourceUsage {
@@ -22,19 +17,18 @@ async fn mcp_lane_dispatches_manifest_transport_and_reconciles_through_dispatche
         },
         output_bytes: None,
     }));
-    let adapter = Arc::new(McpRuntimeAdapter::new(client.clone()));
-    let (dispatcher, governor, events, account) = dispatcher_with_mcp_adapter(adapter);
+    let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client.clone());
+    let (governor, account) = mcp_governor();
 
-    let result = dispatcher
-        .dispatch_json(dispatch_request(json!({"query":"ironclaw"})))
+    let result = runtime
+        .execute_extension_json(&governor, mcp_request(json!({"query":"ironclaw"})))
         .await
         .unwrap();
 
-    assert_eq!(result.runtime, RuntimeKind::Mcp);
-    assert_eq!(result.output, json!({"items":["issue-1"]}));
+    assert_eq!(result.result.output, json!({"items":["issue-1"]}));
     assert_eq!(result.receipt.status, ReservationStatus::Reconciled);
-    assert_eq!(result.usage.process_count, 0);
-    assert_eq!(result.usage.wall_clock_ms, 9);
+    assert_eq!(result.result.usage.process_count, 0);
+    assert_eq!(result.result.usage.wall_clock_ms, 9);
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert!(governor.usage_for(&account).output_bytes > 0);
 
@@ -48,144 +42,47 @@ async fn mcp_lane_dispatches_manifest_transport_and_reconciles_through_dispatche
     assert_eq!(requests[0].command, None);
     assert!(requests[0].args.is_empty());
     assert_eq!(requests[0].input, json!({"query":"ironclaw"}));
-
-    assert_event_kinds(
-        &events,
-        &[
-            RuntimeEventKind::DispatchRequested,
-            RuntimeEventKind::RuntimeSelected,
-            RuntimeEventKind::DispatchSucceeded,
-        ],
-    );
 }
 
 #[tokio::test]
-async fn mcp_lane_client_failure_releases_reservation_and_emits_sanitized_failure() {
+async fn mcp_lane_client_failure_releases_reservation() {
     let client = RecordingMcpClient::new(Err("server disconnected with raw stderr".to_string()));
-    let adapter = Arc::new(McpRuntimeAdapter::new(client));
-    let (dispatcher, governor, events, account) = dispatcher_with_mcp_adapter(adapter);
+    let runtime = McpRuntime::new(McpRuntimeConfig::for_testing(), client);
+    let (governor, account) = mcp_governor();
 
-    let err = dispatcher
-        .dispatch_json(dispatch_request(json!({"query":"fail"})))
+    let err = runtime
+        .execute_extension_json(&governor, mcp_request(json!({"query":"fail"})))
         .await
         .unwrap_err();
 
-    assert!(matches!(
-        err,
-        DispatchError::Mcp {
-            kind: RuntimeDispatchErrorKind::Client
-        }
-    ));
+    assert!(matches!(err, McpError::Client { .. }));
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
-    assert_event_kinds(
-        &events,
-        &[
-            RuntimeEventKind::DispatchRequested,
-            RuntimeEventKind::RuntimeSelected,
-            RuntimeEventKind::DispatchFailed,
-        ],
-    );
-    let recorded = events.events();
-    assert_eq!(recorded[2].error_kind.as_deref(), Some("client"));
 }
 
 #[tokio::test]
-async fn mcp_lane_output_limit_releases_reservation_and_emits_output_too_large_failure() {
+async fn mcp_lane_output_limit_releases_reservation() {
     let client = RecordingMcpClient::new(Ok(McpClientOutput {
         output: json!({"large":"this output is too large for the adapter limit"}),
         usage: ResourceUsage::default(),
         output_bytes: Some(1_000),
     }));
-    let adapter = Arc::new(McpRuntimeAdapter::with_config(
+    let runtime = McpRuntime::new(
         McpRuntimeConfig {
             max_output_bytes: 8,
         },
         client,
-    ));
-    let (dispatcher, governor, events, account) = dispatcher_with_mcp_adapter(adapter);
+    );
+    let (governor, account) = mcp_governor();
 
-    let err = dispatcher
-        .dispatch_json(dispatch_request(json!({"query":"large"})))
+    let err = runtime
+        .execute_extension_json(&governor, mcp_request(json!({"query":"large"})))
         .await
         .unwrap_err();
 
-    assert!(matches!(
-        err,
-        DispatchError::Mcp {
-            kind: RuntimeDispatchErrorKind::OutputTooLarge
-        }
-    ));
+    assert!(matches!(err, McpError::OutputLimitExceeded { .. }));
     assert_eq!(governor.reserved_for(&account), ResourceTally::default());
     assert_eq!(governor.usage_for(&account), ResourceTally::default());
-    assert_event_kinds(
-        &events,
-        &[
-            RuntimeEventKind::DispatchRequested,
-            RuntimeEventKind::RuntimeSelected,
-            RuntimeEventKind::DispatchFailed,
-        ],
-    );
-    let recorded = events.events();
-    assert_eq!(recorded[2].error_kind.as_deref(), Some("output_too_large"));
-}
-
-#[derive(Clone)]
-struct McpRuntimeAdapter<C> {
-    runtime: McpRuntime<C>,
-}
-
-impl<C> McpRuntimeAdapter<C>
-where
-    C: McpClient,
-{
-    fn new(client: C) -> Self {
-        Self::with_config(McpRuntimeConfig::for_testing(), client)
-    }
-
-    fn with_config(config: McpRuntimeConfig, client: C) -> Self {
-        Self {
-            runtime: McpRuntime::new(config, client),
-        }
-    }
-}
-
-#[async_trait]
-impl<C> RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for McpRuntimeAdapter<C>
-where
-    C: McpClient + Send + Sync,
-{
-    async fn dispatch_json(
-        &self,
-        request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
-    ) -> Result<RuntimeAdapterResult, DispatchError> {
-        let execution = self
-            .runtime
-            .execute_extension_json(
-                request.governor,
-                McpExecutionRequest {
-                    package: request.package,
-                    capability_id: request.capability_id,
-                    scope: request.scope,
-                    estimate: request.estimate,
-                    resource_reservation: request.resource_reservation,
-                    invocation: McpInvocation {
-                        input: request.input,
-                    },
-                },
-            )
-            .await
-            .map_err(|error| DispatchError::Mcp {
-                kind: mcp_error_kind(&error),
-            })?;
-
-        Ok(RuntimeAdapterResult {
-            output: execution.result.output,
-            usage: execution.result.usage,
-            receipt: execution.receipt,
-            output_bytes: execution.result.output_bytes,
-        })
-    }
 }
 
 #[derive(Clone)]
@@ -219,49 +116,16 @@ impl McpClient for RecordingMcpClient {
     }
 }
 
-fn dispatcher_with_mcp_adapter<T>(
-    adapter: Arc<T>,
-) -> (
-    RuntimeDispatcher<'static, LocalFilesystem, InMemoryResourceGovernor>,
-    Arc<InMemoryResourceGovernor>,
-    InMemoryEventSink,
-    ResourceAccount,
-)
-where
-    T: RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> + 'static,
-{
+fn mcp_governor() -> (InMemoryResourceGovernor, ResourceAccount) {
     let account = sample_account();
-    let registry = Arc::new(registry_with_package(MCP_MANIFEST));
-    let filesystem = Arc::new(mounted_empty_extension_root());
-    let governor = Arc::new(governor_with_default_limit(account.clone()));
-    let events = InMemoryEventSink::new();
-    let dispatcher = RuntimeDispatcher::from_arcs(registry, filesystem, Arc::clone(&governor))
-        .with_runtime_adapter_arc(RuntimeKind::Mcp, adapter)
-        .with_event_sink_arc(Arc::new(events.clone()));
-    (dispatcher, governor, events, account)
-}
-
-fn registry_with_package(manifest: &str) -> ironclaw_extensions::ExtensionRegistry {
-    let mut registry = ironclaw_extensions::ExtensionRegistry::new();
-    registry.insert(package_from_manifest(manifest)).unwrap();
-    registry
+    let governor = governor_with_default_limit(account.clone());
+    (governor, account)
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
     let manifest = ExtensionManifest::parse(manifest).unwrap();
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
-}
-
-fn mounted_empty_extension_root() -> LocalFilesystem {
-    let storage = tempfile::tempdir().unwrap().keep();
-    let mut fs = LocalFilesystem::new();
-    fs.mount_local(
-        VirtualPath::new("/system/extensions").unwrap(),
-        HostPath::from_path_buf(storage),
-    )
-    .unwrap();
-    fs
 }
 
 fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGovernor {
@@ -280,9 +144,12 @@ fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGove
     governor
 }
 
-fn dispatch_request(input: serde_json::Value) -> CapabilityDispatchRequest {
-    CapabilityDispatchRequest {
-        capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+fn mcp_request(input: serde_json::Value) -> McpExecutionRequest<'static> {
+    let package = Box::leak(Box::new(package_from_manifest(MCP_MANIFEST)));
+    let capability_id = Box::leak(Box::new(CapabilityId::new("github-mcp.search").unwrap()));
+    McpExecutionRequest {
+        package,
+        capability_id,
         scope: sample_scope(),
         estimate: ResourceEstimate {
             concurrency_slots: Some(1),
@@ -290,9 +157,8 @@ fn dispatch_request(input: serde_json::Value) -> CapabilityDispatchRequest {
             output_bytes: Some(10_000),
             ..ResourceEstimate::default()
         },
-        mounts: None,
         resource_reservation: None,
-        input,
+        invocation: McpInvocation { input },
     }
 }
 
@@ -310,32 +176,6 @@ fn sample_scope() -> ResourceScope {
 
 fn sample_account() -> ResourceAccount {
     ResourceAccount::tenant(TenantId::new("tenant-a").unwrap())
-}
-
-fn assert_event_kinds(events: &InMemoryEventSink, expected: &[RuntimeEventKind]) {
-    let actual = events
-        .events()
-        .into_iter()
-        .map(|event| event.kind)
-        .collect::<Vec<_>>();
-    assert_eq!(actual, expected);
-}
-
-fn mcp_error_kind(error: &McpError) -> RuntimeDispatchErrorKind {
-    match error {
-        McpError::Resource(_) => RuntimeDispatchErrorKind::Resource,
-        McpError::Client { .. } => RuntimeDispatchErrorKind::Client,
-        McpError::UnsupportedTransport { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
-        McpError::HostHttpEgressRequired { .. } => RuntimeDispatchErrorKind::NetworkDenied,
-        McpError::ExternalStdioTransportUnsupported => RuntimeDispatchErrorKind::UnsupportedRunner,
-        McpError::ExtensionRuntimeMismatch { .. } => {
-            RuntimeDispatchErrorKind::ExtensionRuntimeMismatch
-        }
-        McpError::CapabilityNotDeclared { .. } => RuntimeDispatchErrorKind::UndeclaredCapability,
-        McpError::DescriptorMismatch { .. } => RuntimeDispatchErrorKind::Manifest,
-        McpError::InvalidInvocation { .. } => RuntimeDispatchErrorKind::InputEncode,
-        McpError::OutputLimitExceeded { .. } => RuntimeDispatchErrorKind::OutputTooLarge,
-    }
 }
 
 const MCP_MANIFEST: &str = r#"

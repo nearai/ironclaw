@@ -45,6 +45,7 @@ use std::{collections::BTreeMap, fmt, sync::Arc};
 use thiserror::Error;
 
 mod first_party;
+mod first_party_tools;
 pub mod memory_context;
 mod obligations;
 mod planner;
@@ -56,6 +57,10 @@ mod turn_scheduler;
 pub use first_party::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
+};
+pub use first_party_tools::{
+    BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools, ECHO_CAPABILITY_ID, JSON_CAPABILITY_ID,
+    TIME_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, ProcessObligationLifecycleStore,

@@ -102,6 +102,91 @@ fn local_default_resource_scope_uses_default_agent_and_bootstrap_project() {
 }
 
 #[test]
+fn dispatch_errors_preserve_typed_failure_kind() {
+    let capability = CapabilityId::new("test.cap").unwrap();
+    let provider = ExtensionId::new("test").unwrap();
+
+    assert_eq!(
+        DispatchError::UnknownCapability {
+            capability: capability.clone(),
+        }
+        .failure_kind(),
+        DispatchFailureKind::UnknownCapability
+    );
+    assert_eq!(
+        DispatchError::UnknownProvider {
+            capability: capability.clone(),
+            provider,
+        }
+        .failure_kind(),
+        DispatchFailureKind::UnknownProvider
+    );
+    assert_eq!(
+        DispatchError::RuntimeMismatch {
+            capability: capability.clone(),
+            descriptor_runtime: RuntimeKind::Wasm,
+            package_runtime: RuntimeKind::Mcp,
+        }
+        .failure_kind(),
+        DispatchFailureKind::RuntimeMismatch
+    );
+    assert_eq!(
+        DispatchError::MissingRuntimeBackend {
+            runtime: RuntimeKind::Script,
+        }
+        .failure_kind(),
+        DispatchFailureKind::MissingRuntimeBackend
+    );
+    assert_eq!(
+        DispatchError::UnsupportedRuntime {
+            capability,
+            runtime: RuntimeKind::Wasm,
+        }
+        .failure_kind(),
+        DispatchFailureKind::UnsupportedRuntime
+    );
+    assert_eq!(
+        DispatchError::Wasm {
+            kind: RuntimeDispatchErrorKind::Guest,
+        }
+        .failure_kind(),
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
+    );
+}
+
+#[test]
+fn dispatch_failure_kind_display_preserves_stable_literals() {
+    assert_eq!(
+        DispatchFailureKind::UnknownCapability.as_str(),
+        "UnknownCapability"
+    );
+    assert_eq!(
+        DispatchFailureKind::UnknownProvider.as_str(),
+        "UnknownProvider"
+    );
+    assert_eq!(
+        DispatchFailureKind::RuntimeMismatch.as_str(),
+        "RuntimeMismatch"
+    );
+    assert_eq!(
+        DispatchFailureKind::MissingRuntimeBackend.as_str(),
+        "MissingRuntimeBackend"
+    );
+    assert_eq!(
+        DispatchFailureKind::UnsupportedRuntime.as_str(),
+        "UnsupportedRuntime"
+    );
+    assert_eq!(
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied).as_str(),
+        "NetworkDenied"
+    );
+    assert_eq!(
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied).to_string(),
+        "NetworkDenied"
+    );
+}
+
+#[test]
 fn runtime_dispatch_error_kinds_have_safe_event_tokens() {
     for (kind, token) in [
         (RuntimeDispatchErrorKind::Backend, "backend"),

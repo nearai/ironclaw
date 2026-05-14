@@ -23,8 +23,8 @@ use ironclaw_capabilities::{
 };
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
 use ironclaw_host_api::{
-    ApprovalRequestId, CapabilityDispatcher, CapabilityId, InvocationId, PackageSource,
-    ResourceScope, RuntimeKind,
+    ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
+    PackageSource, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind,
 };
 use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
@@ -1009,33 +1009,54 @@ pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFai
         CapabilityInvocationError::Lease(_)
         | CapabilityInvocationError::RunState(_)
         | CapabilityInvocationError::Process(_) => RuntimeFailureKind::Backend,
-        CapabilityInvocationError::Dispatch { kind } => dispatch_kind_to_failure(kind),
+        CapabilityInvocationError::Dispatch { kind } => dispatch_kind_to_failure(*kind),
     }
 }
 
-fn dispatch_kind_to_failure(kind: &str) -> RuntimeFailureKind {
+fn dispatch_kind_to_failure(kind: DispatchFailureKind) -> RuntimeFailureKind {
     match kind {
-        "UnknownCapability"
-        | "UnknownProvider"
-        | "MissingRuntimeBackend"
-        | "UnsupportedRuntime"
-        | "ExtensionRuntimeMismatch" => RuntimeFailureKind::MissingRuntime,
-        "RuntimeMismatch" => RuntimeFailureKind::Backend,
-        "Memory" | "Resource" => RuntimeFailureKind::Resource,
-        "NetworkDenied" => RuntimeFailureKind::Network,
-        "OutputTooLarge" => RuntimeFailureKind::OutputTooLarge,
-        "FilesystemDenied" => RuntimeFailureKind::Authorization,
-        "ExitFailure" => RuntimeFailureKind::Process,
-        "InputEncode" | "OutputDecode" | "InvalidResult" => RuntimeFailureKind::InvalidInput,
-        "Backend"
-        | "Client"
-        | "Executor"
-        | "Guest"
-        | "Manifest"
-        | "MethodMissing"
-        | "UndeclaredCapability"
-        | "UnsupportedRunner" => RuntimeFailureKind::Backend,
-        _ => RuntimeFailureKind::Unknown,
+        DispatchFailureKind::UnknownCapability
+        | DispatchFailureKind::UnknownProvider
+        | DispatchFailureKind::MissingRuntimeBackend
+        | DispatchFailureKind::UnsupportedRuntime => RuntimeFailureKind::MissingRuntime,
+        DispatchFailureKind::RuntimeMismatch => RuntimeFailureKind::Backend,
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExtensionRuntimeMismatch) => {
+            RuntimeFailureKind::MissingRuntime
+        }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Memory)
+        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Resource) => {
+            RuntimeFailureKind::Resource
+        }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::NetworkDenied) => {
+            RuntimeFailureKind::Network
+        }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputTooLarge) => {
+            RuntimeFailureKind::OutputTooLarge
+        }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::FilesystemDenied) => {
+            RuntimeFailureKind::Authorization
+        }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure) => {
+            RuntimeFailureKind::Process
+        }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InputEncode)
+        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::OutputDecode)
+        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::InvalidResult) => {
+            RuntimeFailureKind::InvalidInput
+        }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend)
+        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Client)
+        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Executor)
+        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Guest)
+        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Manifest)
+        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::MethodMissing)
+        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UndeclaredCapability)
+        | DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::UnsupportedRunner) => {
+            RuntimeFailureKind::Backend
+        }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Unknown) => {
+            RuntimeFailureKind::Unknown
+        }
     }
 }
 
@@ -1044,25 +1065,21 @@ mod tests {
     //! Pinning tests for the host-runtime failure-kind and sanitized-message
     //! mappings.
     //!
-    //! The dispatch-kind strings come from
-    //! [`ironclaw_host_api::RuntimeDispatchErrorKind::as_str`] and from
-    //! [`ironclaw_capabilities::error::dispatch_error_kind`]. Both are
-    //! treated as part of the public contract surface; if an upstream rename
-    //! drops a string, this module fails closed instead of silently
-    //! degrading to [`RuntimeFailureKind::Unknown`].
+    //! The dispatch failure kinds come from typed
+    //! [`ironclaw_host_api::DispatchFailureKind`] values. Their display
+    //! strings remain part of the public observability contract, but runtime
+    //! failure mapping stays type-directed instead of reparsing strings.
 
     use super::*;
     use ironclaw_capabilities::CapabilityInvocationError;
-    use ironclaw_host_api::{CapabilityId, RuntimeDispatchErrorKind};
+    use ironclaw_host_api::{CapabilityId, DispatchFailureKind, RuntimeDispatchErrorKind};
 
     fn cap() -> CapabilityId {
         CapabilityId::new("test.cap").unwrap()
     }
 
-    fn dispatch(kind: &str) -> CapabilityInvocationError {
-        CapabilityInvocationError::Dispatch {
-            kind: kind.to_string(),
-        }
+    fn dispatch(kind: DispatchFailureKind) -> CapabilityInvocationError {
+        CapabilityInvocationError::Dispatch { kind }
     }
 
     #[test]
@@ -1145,7 +1162,7 @@ mod tests {
             ),
         ];
         for (variant, expected) in cases {
-            let kind = variant.as_str();
+            let kind = DispatchFailureKind::Runtime(*variant);
             let actual = dispatch_kind_to_failure(kind);
             assert_eq!(
                 actual, *expected,
@@ -1155,43 +1172,32 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_kind_to_failure_pins_dispatch_error_top_level_strings() {
-        // These strings come from `dispatch_error_kind` for non-runtime
-        // DispatchError variants (UnknownCapability, UnknownProvider, ...).
+    fn dispatch_kind_to_failure_pins_dispatch_error_top_level_kinds() {
         assert_eq!(
-            dispatch_kind_to_failure("UnknownCapability"),
+            dispatch_kind_to_failure(DispatchFailureKind::UnknownCapability),
             RuntimeFailureKind::MissingRuntime
         );
         assert_eq!(
-            dispatch_kind_to_failure("UnknownProvider"),
+            dispatch_kind_to_failure(DispatchFailureKind::UnknownProvider),
             RuntimeFailureKind::MissingRuntime
         );
         assert_eq!(
-            dispatch_kind_to_failure("MissingRuntimeBackend"),
+            dispatch_kind_to_failure(DispatchFailureKind::MissingRuntimeBackend),
             RuntimeFailureKind::MissingRuntime
         );
         assert_eq!(
-            dispatch_kind_to_failure("UnsupportedRuntime"),
+            dispatch_kind_to_failure(DispatchFailureKind::UnsupportedRuntime),
             RuntimeFailureKind::MissingRuntime
         );
         assert_eq!(
-            dispatch_kind_to_failure("RuntimeMismatch"),
+            dispatch_kind_to_failure(DispatchFailureKind::RuntimeMismatch),
             RuntimeFailureKind::Backend
         );
     }
 
     #[test]
-    fn dispatch_kind_to_failure_unknown_strings_fall_back_to_unknown() {
-        assert_eq!(
-            dispatch_kind_to_failure("some_future_kind_name"),
-            RuntimeFailureKind::Unknown
-        );
-        assert_eq!(dispatch_kind_to_failure(""), RuntimeFailureKind::Unknown);
-    }
-
-    #[test]
     fn failure_kind_from_dispatch_unknown_capability_maps_to_missing_runtime() {
-        let error = dispatch("UnknownCapability");
+        let error = dispatch(DispatchFailureKind::UnknownCapability);
         assert_eq!(
             failure_kind_from(&error),
             RuntimeFailureKind::MissingRuntime
@@ -1209,7 +1215,9 @@ mod tests {
 
     #[test]
     fn sanitized_failure_message_redacts_dispatch_kind_to_stable_form() {
-        let error = dispatch("NetworkDenied");
+        let error = dispatch(DispatchFailureKind::Runtime(
+            RuntimeDispatchErrorKind::NetworkDenied,
+        ));
         let message = sanitized_failure_message(&error).expect("dispatch produces a message");
         // Stable form: relies only on the redacted kind token, never on raw
         // backend strings.

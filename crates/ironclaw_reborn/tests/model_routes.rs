@@ -29,6 +29,11 @@ fn llm_config_resolves_to_default_model_route_settings() {
 }
 
 #[test]
+fn model_slots_are_exposed_in_cli_display_order() {
+    assert_eq!(ModelSlot::all(), &[ModelSlot::Default, ModelSlot::Mission]);
+}
+
+#[test]
 fn model_slots_cover_builtin_interactive_and_mission_profiles() {
     let interactive_model =
         ironclaw_turns::run_profile::ModelProfileId::new("interactive_model").unwrap();

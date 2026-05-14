@@ -188,11 +188,11 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
         AgentLoopHostErrorKind::TranscriptWriteFailed => AgentLoopDriverError::Failed {
             reason_kind: loop_failure_kind_name(LoopFailureKind::TranscriptWriteFailed).to_string(),
         },
-        AgentLoopHostErrorKind::BudgetExceeded | AgentLoopHostErrorKind::PolicyDenied => {
-            AgentLoopDriverError::Failed {
-                reason_kind: loop_failure_kind_name(LoopFailureKind::ModelError).to_string(),
-            }
-        }
+        AgentLoopHostErrorKind::BudgetExceeded
+        | AgentLoopHostErrorKind::CredentialUnavailable
+        | AgentLoopHostErrorKind::PolicyDenied => AgentLoopDriverError::Failed {
+            reason_kind: loop_failure_kind_name(LoopFailureKind::ModelError).to_string(),
+        },
         AgentLoopHostErrorKind::CheckpointRejected => AgentLoopDriverError::Failed {
             reason_kind: loop_failure_kind_name(LoopFailureKind::CheckpointRejected).to_string(),
         },

@@ -3,17 +3,24 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::host::{
-    AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, LoopContextBundle,
-    LoopContextMessage, LoopContextPort, LoopContextRequest, LoopModelMessage, LoopPromptBundle,
-    LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, PromptMode,
+    AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, LoopContextPort,
+    LoopContextRequest, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
+    LoopPromptPort, LoopRunContext, PromptMode, VisibleCapabilitySurface,
 };
-use super::milestones::{
-    LoopHostMilestoneEmitter, LoopHostMilestoneSink, PromptSkillContextMetadata,
+use super::instruction_bundle::{
+    InstructionBundleBuilder, InstructionBundleRequest, InstructionMaterializationStore,
+    InstructionSafetyContext,
 };
-use super::skill_context::skill_snippet_model_message_ref;
+use super::milestones::LoopHostMilestoneEmitter;
+use super::milestones::LoopHostMilestoneSink;
 
 const DEFAULT_TEXT_ONLY_MESSAGE_LIMIT: usize = 32;
 const MAX_TEXT_ONLY_MESSAGE_LIMIT: usize = 128;
+
+type CurrentSurfaceVersionLookup =
+    dyn Fn() -> Result<Option<CapabilitySurfaceVersion>, AgentLoopHostError> + Send + Sync;
+type CurrentSurfaceLookup =
+    dyn Fn() -> Result<Option<VisibleCapabilitySurface>, AgentLoopHostError> + Send + Sync;
 
 /// Text-only host-managed prompt bundle port.
 ///
@@ -21,9 +28,9 @@ const MAX_TEXT_ONLY_MESSAGE_LIMIT: usize = 128;
 /// [`LoopRunContext`], loads bounded transcript context through a
 /// [`LoopContextPort`], returns model-message references, and emits a
 /// `prompt_bundle_built` milestone containing only metadata. It currently
-/// supports [`PromptMode::TextOnly`] only; checkpoint-backed prompt state and
-/// memory snippet materialization fail closed until dedicated host stores are
-/// wired. Instruction snippets are surfaced as host-owned system message refs.
+/// supports [`PromptMode::TextOnly`] only; checkpoint-backed prompt state fails
+/// closed until dedicated host stores are wired. Instruction and memory snippets
+/// are surfaced as host-owned system message refs.
 #[derive(Clone)]
 pub struct HostManagedLoopPromptPort<C, S>
 where
@@ -34,7 +41,10 @@ where
     context_port: Arc<C>,
     milestones: LoopHostMilestoneEmitter<S>,
     default_message_limit: usize,
-    current_surface_version: Option<CapabilitySurfaceVersion>,
+    current_surface_version: Option<Arc<CurrentSurfaceVersionLookup>>,
+    current_surface: Option<Arc<CurrentSurfaceLookup>>,
+    safety_context: Option<InstructionSafetyContext>,
+    instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
 }
 
 impl<C, S> HostManagedLoopPromptPort<C, S>
@@ -49,6 +59,9 @@ where
             milestones: LoopHostMilestoneEmitter::new(context, milestone_sink),
             default_message_limit: DEFAULT_TEXT_ONLY_MESSAGE_LIMIT,
             current_surface_version: None,
+            current_surface: None,
+            safety_context: None,
+            instruction_materialization_store: None,
         }
     }
 
@@ -58,10 +71,58 @@ where
     }
 
     pub fn with_current_surface_version(
-        mut self,
+        self,
         current_surface_version: CapabilitySurfaceVersion,
     ) -> Self {
-        self.current_surface_version = Some(current_surface_version);
+        self.with_current_surface_version_lookup(move || Ok(Some(current_surface_version.clone())))
+    }
+
+    pub fn with_current_surface_version_lookup<F>(mut self, lookup: F) -> Self
+    where
+        F: Fn() -> Result<Option<CapabilitySurfaceVersion>, AgentLoopHostError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.current_surface_version = Some(Arc::new(lookup));
+        self
+    }
+
+    pub fn with_current_surface(mut self, current_surface: VisibleCapabilitySurface) -> Self {
+        let current_surface_for_version = current_surface.clone();
+        self.current_surface_version = Some(Arc::new(move || {
+            Ok(Some(current_surface_for_version.version.clone()))
+        }));
+        self.current_surface = Some(Arc::new(move || Ok(Some(current_surface.clone()))));
+        self
+    }
+
+    pub fn with_current_surface_lookup<F>(mut self, lookup: F) -> Self
+    where
+        F: Fn() -> Result<Option<VisibleCapabilitySurface>, AgentLoopHostError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let lookup = Arc::new(lookup);
+        let lookup_for_version = Arc::clone(&lookup);
+        self.current_surface_version = Some(Arc::new(move || {
+            Ok(lookup_for_version()?.map(|surface| surface.version))
+        }));
+        self.current_surface = Some(lookup);
+        self
+    }
+
+    pub fn with_safety_context(mut self, safety_context: InstructionSafetyContext) -> Self {
+        self.safety_context = Some(safety_context);
+        self
+    }
+
+    pub fn with_instruction_materialization_store(
+        mut self,
+        store: Arc<dyn InstructionMaterializationStore>,
+    ) -> Self {
+        self.instruction_materialization_store = Some(store);
         self
     }
 
@@ -94,7 +155,13 @@ where
                     "prompt surface version cannot be validated by this prompt port",
                 ));
             };
-            if surface_version != current_surface_version {
+            let Some(current_surface_version) = current_surface_version()? else {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "prompt surface version cannot be validated by this prompt port",
+                ));
+            };
+            if surface_version != &current_surface_version {
                 return Err(AgentLoopHostError::new(
                     AgentLoopHostErrorKind::StaleSurface,
                     "prompt surface version is stale or unknown",
@@ -140,16 +207,8 @@ where
             .clamp(1, MAX_TEXT_ONLY_MESSAGE_LIMIT)
     }
 
-    fn ensure_supported_context_shape(
-        context: &LoopContextBundle,
-    ) -> Result<(), AgentLoopHostError> {
-        if !context.memory_snippets.is_empty() {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::PolicyDenied,
-                "text-only prompt port cannot materialize memory snippets",
-            ));
-        }
-        Ok(())
+    fn instruction_builder(&self) -> InstructionBundleBuilder {
+        InstructionBundleBuilder::new(self.context.clone())
     }
 }
 
@@ -171,55 +230,35 @@ where
                 limit: self.message_limit(&request),
             })
             .await?;
-        Self::ensure_supported_context_shape(&context)?;
-        let mut messages = Vec::with_capacity(
-            context.identity_messages.len()
-                + context.instruction_snippets.len()
-                + context.messages.len(),
-        );
-        messages.extend(
-            context
-                .identity_messages
-                .into_iter()
-                .map(context_message_to_model_message),
-        );
-
-        let mut skill_context = Vec::with_capacity(context.instruction_snippets.len());
-        for (ordinal, snippet) in context.instruction_snippets.into_iter().enumerate() {
-            let content_ref = skill_snippet_model_message_ref(
-                &snippet.snippet_ref,
-                &snippet.safe_summary,
-                ordinal,
-            )?;
-            match snippet.metadata.as_ref() {
-                Some(metadata) => skill_context.push(PromptSkillContextMetadata {
-                    ordinal,
-                    source_name: metadata.source_name.clone(),
-                    trust_level: metadata.trust_level.clone(),
-                }),
-                None if snippet.snippet_ref.starts_with("skill:") => {
-                    return Err(AgentLoopHostError::new(
-                        AgentLoopHostErrorKind::Internal,
-                        "skill instruction snippet metadata is missing",
-                    ));
-                }
-                None => {}
+        let visible_surface = if request.surface_version.is_some() {
+            match self.current_surface.as_ref() {
+                Some(current_surface) => current_surface()?,
+                None => None,
             }
-            messages.push(LoopModelMessage {
-                role: "system".to_string(),
-                content_ref,
-            });
+        } else {
+            None
+        };
+        let instruction_bundle = self.instruction_builder().build(InstructionBundleRequest {
+            context_bundle: context,
+            visible_surface,
+            safety_context: self.safety_context.clone(),
+        })?;
+        if let Some(store) = self.instruction_materialization_store.as_ref() {
+            store.put_materialized_messages(
+                &self.context,
+                instruction_bundle.materialized_messages.clone(),
+            )?;
+        } else if instruction_bundle.requires_materialization_store {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "instruction materialization store is required for this prompt bundle",
+            ));
         }
-        messages.extend(
-            context
-                .messages
-                .into_iter()
-                .map(context_message_to_model_message),
-        );
         let bundle = LoopPromptBundle {
             bundle_ref: LoopPromptBundleRef::fresh_for_run(&self.context),
-            messages,
+            messages: instruction_bundle.messages,
             surface_version: request.surface_version.clone(),
+            instruction_fingerprint: Some(instruction_bundle.fingerprint),
         };
         self.milestones
             .prompt_bundle_built(
@@ -227,16 +266,9 @@ where
                 request.mode,
                 bundle.surface_version.clone(),
                 bundle.messages.len(),
-                skill_context,
+                instruction_bundle.skill_context,
             )
             .await?;
         Ok(bundle)
-    }
-}
-
-fn context_message_to_model_message(message: LoopContextMessage) -> LoopModelMessage {
-    LoopModelMessage {
-        role: message.role,
-        content_ref: message.message_ref,
     }
 }

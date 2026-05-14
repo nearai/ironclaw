@@ -16,6 +16,7 @@ use ironclaw_memory::{
 use ironclaw_turns::run_profile::{
     AgentLoopHostError, AgentLoopHostErrorKind, ContextProfileId, LoopContextSnippet,
     LoopSafeSummary, MemoryPromptContextRequest, MemoryPromptContextService,
+    memory_snippet_display_ref,
 };
 
 /// Maximum byte length for a snippet safe summary, matching `LoopSafeSummary`
@@ -251,25 +252,13 @@ fn map_search_result_to_snippet(result: MemorySearchResult) -> Option<LoopContex
 }
 
 fn snippet_ref_for_path(path: &MemoryDocumentPath) -> String {
-    // FNV-1a keeps refs deterministic and opaque for model display only. It is
-    // unkeyed and not collision-resistant, so callers must never use
-    // `snippet_ref` for authorization, tenancy checks, or backend lookup.
-    let mut hash = 0xcbf29ce484222325_u64;
-    update_hash(&mut hash, path.tenant_id());
-    update_hash(&mut hash, path.user_id());
-    update_hash(&mut hash, path.agent_id().unwrap_or(""));
-    update_hash(&mut hash, path.project_id().unwrap_or(""));
-    update_hash(&mut hash, path.relative_path());
-    format!("memory-snippet:{hash:016x}")
-}
-
-fn update_hash(hash: &mut u64, value: &str) {
-    for byte in value.as_bytes() {
-        *hash ^= u64::from(*byte);
-        *hash = hash.wrapping_mul(0x100000001b3);
-    }
-    *hash ^= 0xff;
-    *hash = hash.wrapping_mul(0x100000001b3);
+    memory_snippet_display_ref([
+        path.tenant_id(),
+        path.user_id(),
+        path.agent_id().unwrap_or(""),
+        path.project_id().unwrap_or(""),
+        path.relative_path(),
+    ])
 }
 
 /// Sanitize a raw snippet string into a model-safe summary.

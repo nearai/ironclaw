@@ -715,6 +715,20 @@ async fn async_main() -> anyhow::Result<()> {
             startup_active_channels.iter().cloned().collect()
         };
 
+        // Runtime-tier Telegram v1/v2 exclusivity check. The config-resolve
+        // call earlier (in `ChannelsConfig::resolve`) only sees the env-var
+        // view of v1. Persisted `activated_channels` rows can carry
+        // `telegram` independently of `WASM_CHANNELS`, and
+        // `setup_wasm_channels` auto-loads them — so an env-only guard
+        // would let v1 stand up alongside v2 for the same webhook
+        // installation. Re-running the validator here with the persisted
+        // set closes that gap (issue #3285, follow-up to PR #3356 review
+        // by @henrypark133).
+        ironclaw::config::validate_telegram_v1_v2_exclusivity(
+            &config.channels,
+            Some(&startup_active_wasm_channels),
+        )?;
+
         let wasm_result = ironclaw::channels::wasm::setup_wasm_channels(
             &config,
             &components.secrets_store,

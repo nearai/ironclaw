@@ -856,7 +856,9 @@ async fn capability_host_revokes_claimed_lease_when_dispatch_fails_after_resume(
 
     assert!(matches!(
         err,
-        CapabilityInvocationError::Dispatch { ref kind } if kind == "Backend"
+        CapabilityInvocationError::Dispatch {
+            kind: DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::Backend)
+        }
     ));
     let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Failed);

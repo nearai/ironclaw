@@ -152,6 +152,14 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
     let host_runtime_contract =
         std::fs::read_to_string(root.join("docs/reborn/contracts/host-runtime.md"))
             .expect("host runtime contract must be readable");
+    let scripts = std::fs::read_to_string(root.join("crates/ironclaw_scripts/src/lib.rs"))
+        .expect("script runtime lib.rs must be readable");
+    let scripts_manifest = std::fs::read_to_string(root.join("crates/ironclaw_scripts/Cargo.toml"))
+        .expect("script runtime Cargo.toml must be readable");
+    let mcp = std::fs::read_to_string(root.join("crates/ironclaw_mcp/src/lib.rs"))
+        .expect("MCP runtime lib.rs must be readable");
+    let mcp_manifest = std::fs::read_to_string(root.join("crates/ironclaw_mcp/Cargo.toml"))
+        .expect("MCP runtime Cargo.toml must be readable");
 
     let forbidden_lib_exports = [
         "RuntimeDispatchProcessExecutor",
@@ -254,6 +262,39 @@ fn reborn_host_runtime_services_do_not_expose_lower_substrate_handles() {
             "host-runtime contract should document `{required_phrase}` so raw handoff store seams are not mistaken for upper Reborn APIs"
         );
     }
+
+    let forbidden_script_lane_surface = [
+        "RuntimeAdapter",
+        "pub struct ScriptRuntimeAdapter",
+        "pub fn script_error_kind",
+    ];
+    for pattern in forbidden_script_lane_surface {
+        assert!(
+            !scripts.contains(pattern),
+            "ironclaw_scripts must not expose host-runtime dispatcher composition surface `{pattern}`; compose script dispatch adapters inside ironclaw_host_runtime"
+        );
+    }
+
+    assert!(
+        !scripts_manifest.contains("ironclaw_dispatcher"),
+        "ironclaw_scripts must not depend on ironclaw_dispatcher; script dispatcher adapters are host-runtime-private composition"
+    );
+
+    let forbidden_mcp_lane_surface = [
+        "RuntimeAdapter",
+        "pub struct McpRuntimeAdapter",
+        "pub fn mcp_error_kind",
+    ];
+    for pattern in forbidden_mcp_lane_surface {
+        assert!(
+            !mcp.contains(pattern),
+            "ironclaw_mcp must not expose host-runtime dispatcher composition surface `{pattern}`; compose MCP dispatch adapters inside ironclaw_host_runtime"
+        );
+    }
+    assert!(
+        !mcp_manifest.contains("ironclaw_dispatcher"),
+        "ironclaw_mcp must not depend on ironclaw_dispatcher; MCP dispatcher adapters are host-runtime-private composition"
+    );
 }
 
 fn extract_pub_use_block<'a>(contents: &'a str, start_marker: &str) -> &'a str {
@@ -1266,22 +1307,8 @@ fn assert_no_normal_workspace_deps<'a>(
         // The landing plan introduces Reborn crates in grouped PRs. Boundary
         // rules become active as soon as their crate is present in the
         // workspace, while absent future crates are ignored in earlier slices.
-        //
-        // Fail closed when the crate directory is on disk but missing from
-        // `cargo metadata` — that combination means the crate exists but
-        // was never registered as a workspace member, so its forbidden
-        // edges would otherwise silently pass without ever being checked.
-        let crate_manifest = workspace_root()
-            .join("crates")
-            .join(crate_name)
-            .join("Cargo.toml");
-        assert!(
-            !crate_manifest.exists(),
-            "{crate_name} has a Cargo.toml at {} but is not in `cargo metadata` output; \
-             add it to the root `Cargo.toml` `workspace.members` so the boundary rule \
-             actually runs against its dependencies",
-            crate_manifest.display()
-        );
+        // `reborn_boundary_rules_active_crates_are_workspace_members` covers
+        // present-on-disk crates that are missing from `cargo metadata`.
         return;
     };
     for forbidden in forbidden {
