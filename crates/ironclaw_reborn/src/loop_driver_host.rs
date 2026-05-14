@@ -25,6 +25,7 @@ use ironclaw_loop_support::{
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
 use crate::driver_registry::{DriverRequirements, LoopDriverRegistryKey, RequirementLevel};
+use crate::hook_gate_refs::HookGateInvocationScopePort;
 use crate::model_routes::{ModelRouteError, ModelRouteResolver, ModelSlot};
 use crate::text_loop_driver::{TEXT_ONLY_DRIVER_ID, TEXT_ONLY_DRIVER_VERSION};
 
@@ -790,7 +791,12 @@ where
                     ));
                 hooked = hooked.with_resolver(adapter);
             }
-            capabilities = Arc::new(hooked);
+            let hooked: Arc<dyn LoopCapabilityPort> = Arc::new(hooked);
+            capabilities = if self.hook_gate_ref_factory.is_some() {
+                Arc::new(HookGateInvocationScopePort::new(hooked))
+            } else {
+                hooked
+            };
         }
         capabilities
             .visible_capabilities(VisibleCapabilityRequest)
