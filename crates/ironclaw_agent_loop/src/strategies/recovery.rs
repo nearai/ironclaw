@@ -11,7 +11,7 @@
 //! happens at the host port.
 
 use async_trait::async_trait;
-use ironclaw_turns::{LoopDiagnosticRef, LoopFailureKind};
+use ironclaw_turns::{LoopDiagnosticRef, LoopFailureKind, run_profile::LoopSafeSummary};
 
 use crate::state::{LoopExecutionState, RecoveryStrategyState};
 
@@ -41,17 +41,37 @@ pub(crate) trait RecoveryStrategy: Send + Sync {
 fn _recovery_strategy_object_safe(_: &dyn RecoveryStrategy) {}
 
 /// Sanitized, strategy-visible error summary text.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(transparent)]
 pub(crate) struct SanitizedStrategySummary(String);
 
 impl SanitizedStrategySummary {
+    pub(crate) fn new(summary: impl Into<String>) -> Result<Self, String> {
+        let summary = summary.into();
+        LoopSafeSummary::new(summary.clone()).map(|_| Self(summary))
+    }
+
     pub(crate) fn from_trusted_static(summary: &'static str) -> Self {
-        Self(summary.to_string())
+        // Invariant: callers pass reviewed hard-coded summaries, so failure
+        // here is a programming error in a literal rather than runtime input.
+        match Self::new(summary) {
+            Ok(summary) => summary,
+            Err(reason) => panic!("invalid trusted static strategy summary: {reason}"),
+        }
     }
 
     pub(crate) fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for SanitizedStrategySummary {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let summary = <String as serde::Deserialize>::deserialize(deserializer)?;
+        Self::new(summary).map_err(serde::de::Error::custom)
     }
 }
 
@@ -217,12 +237,39 @@ mod tests {
 
     #[test]
     fn sanitized_strategy_summary_serializes_as_string() {
-        let summary = SanitizedStrategySummary::from_trusted_static("provider unavailable");
+        let summary = SanitizedStrategySummary::new("provider unavailable").expect("valid");
         let value = serde_json::to_value(&summary).expect("serialize");
         assert_eq!(value, serde_json::json!("provider unavailable"));
         let restored: SanitizedStrategySummary =
             serde_json::from_value(value).expect("deserialize");
         assert_eq!(restored.as_str(), "provider unavailable");
+    }
+
+    #[test]
+    fn sanitized_strategy_summary_rejects_unsafe_dynamic_values() {
+        assert!(SanitizedStrategySummary::new("").is_err());
+        assert!(SanitizedStrategySummary::new("/Users/alice/.ssh/id_rsa").is_err());
+        assert!(SanitizedStrategySummary::new("provider returned sk-live-secret").is_err());
+        assert!(SanitizedStrategySummary::new("a".repeat(513)).is_err());
+    }
+
+    #[test]
+    fn sanitized_strategy_summary_validates_during_deserialization() {
+        for unsafe_summary in [
+            "",
+            "/Users/alice/.ssh/id_rsa",
+            "provider returned sk-live-secret",
+        ] {
+            let result = serde_json::from_value::<SanitizedStrategySummary>(serde_json::json!(
+                unsafe_summary
+            ));
+            assert!(result.is_err(), "accepted unsafe summary: {unsafe_summary}");
+        }
+
+        let oversized = "a".repeat(513);
+        let result =
+            serde_json::from_value::<SanitizedStrategySummary>(serde_json::json!(oversized));
+        assert!(result.is_err(), "accepted oversized summary");
     }
 
     #[test]
@@ -263,7 +310,7 @@ mod tests {
     fn capability_error_summary_round_trips() {
         let summary = CapabilityErrorSummary {
             class: CapabilityErrorClass::Transient,
-            safe_summary: SanitizedStrategySummary::from_trusted_static("upstream timed out"),
+            safe_summary: SanitizedStrategySummary::new("upstream timed out").expect("valid"),
             diagnostic_ref: Some(LoopDiagnosticRef::new("diag:cap-1").expect("valid")),
         };
         let value = serde_json::to_value(&summary).expect("serialize");
@@ -280,7 +327,7 @@ mod tests {
     fn model_error_summary_round_trips() {
         let summary = ModelErrorSummary {
             class: ModelErrorClass::ContextOverflow,
-            safe_summary: SanitizedStrategySummary::from_trusted_static("context window exceeded"),
+            safe_summary: SanitizedStrategySummary::new("context window exceeded").expect("valid"),
             diagnostic_ref: None,
         };
         let value = serde_json::to_value(&summary).expect("serialize");
