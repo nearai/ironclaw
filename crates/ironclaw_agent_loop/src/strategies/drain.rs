@@ -17,19 +17,17 @@ pub(crate) trait InputDrainStrategy: Send + Sync {
     async fn drain_followup(&self, state: &LoopExecutionState) -> bool;
 }
 
+#[allow(dead_code)]
+fn assert_input_drain_strategy_object_safe(_: &dyn InputDrainStrategy) {}
+
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
-
-    use crate::strategies::{TurnEndKind, TurnSummary};
-    use ironclaw_turns::{LoopMessageRef, LoopResultRef};
 
     use super::*;
 
     #[test]
     fn drain_strategy_is_object_safe() {
-        fn _check(_: &dyn InputDrainStrategy) {}
-
         struct NeverDrain;
 
         #[async_trait]
@@ -43,23 +41,6 @@ mod tests {
             }
         }
 
-        _check(&NeverDrain);
-    }
-
-    #[test]
-    fn turn_summary_round_trips_through_json() {
-        let summary = TurnSummary {
-            kind: TurnEndKind::AfterCapabilityBatch,
-            assistant_message_ref: Some(LoopMessageRef::new("msg:assistant-1").unwrap()),
-            batch_result_refs: vec![
-                LoopResultRef::new("result:call-1").unwrap(),
-                LoopResultRef::new("result:call-2").unwrap(),
-            ],
-        };
-
-        let serialized = serde_json::to_string(&summary).unwrap();
-        let deserialized = serde_json::from_str::<TurnSummary>(&serialized).unwrap();
-
-        assert_eq!(deserialized, summary);
+        assert_input_drain_strategy_object_safe(&NeverDrain);
     }
 }

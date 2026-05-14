@@ -19,6 +19,9 @@ pub(crate) trait StopConditionStrategy: Send + Sync {
     ) -> StopOutcome;
 }
 
+#[allow(dead_code)]
+fn assert_stop_condition_strategy_object_safe(_: &dyn StopConditionStrategy) {}
+
 /// Loop-side projection of what just happened in the completed turn.
 ///
 /// This carries refs only. Strategies that need content must read it through
@@ -31,6 +34,7 @@ pub(crate) struct TurnSummary {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TurnEndKind {
     /// The model returned a reply and no capability batch executed this turn.
@@ -42,11 +46,14 @@ pub(crate) enum TurnEndKind {
 
 /// Strategy decision plus the new `stop_state` slot value.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StopOutcome {
     Continue {
         stop: StopStrategyState,
     },
+    /// Carries the final stop slot for checkpoint, observability, and final
+    /// state assembly even though no later strategy consumes it after exit.
     Stop {
         stop: StopStrategyState,
         kind: StopKind,
@@ -54,11 +61,14 @@ pub(crate) enum StopOutcome {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StopKind {
     /// Strategy is satisfied; the executor maps this to graceful completion.
     GracefulStop,
-    /// Safety-net escape for repeated calls or repeated failures.
+    /// Safety-net escape for repeated calls or repeated failures; default
+    /// logic should read `state.recent_call_signatures` and
+    /// `state.recent_failure_kinds`.
     NoProgressDetected,
     /// Strategy aborts with an explicit failure kind.
     Aborted(LoopFailureKind),
@@ -67,14 +77,13 @@ pub(crate) enum StopKind {
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
+    use ironclaw_turns::{LoopMessageRef, LoopResultRef};
     use serde_json::json;
 
     use super::*;
 
     #[test]
     fn stop_condition_strategy_is_object_safe() {
-        fn _check(_: &dyn StopConditionStrategy) {}
-
         struct AlwaysContinue;
 
         #[async_trait]
@@ -90,7 +99,24 @@ mod tests {
             }
         }
 
-        _check(&AlwaysContinue);
+        assert_stop_condition_strategy_object_safe(&AlwaysContinue);
+    }
+
+    #[test]
+    fn turn_summary_round_trips_through_json() {
+        let summary = TurnSummary {
+            kind: TurnEndKind::AfterCapabilityBatch,
+            assistant_message_ref: Some(LoopMessageRef::new("msg:assistant-1").unwrap()),
+            batch_result_refs: vec![
+                LoopResultRef::new("result:call-1").unwrap(),
+                LoopResultRef::new("result:call-2").unwrap(),
+            ],
+        };
+
+        let serialized = serde_json::to_string(&summary).unwrap();
+        let deserialized = serde_json::from_str::<TurnSummary>(&serialized).unwrap();
+
+        assert_eq!(deserialized, summary);
     }
 
     #[test]

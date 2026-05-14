@@ -4,9 +4,13 @@ use std::time::Duration;
 
 use crate::state::LoopExecutionState;
 
-/// Hard caps on loop execution.
+/// Hard caps on loop execution iterations and elapsed wall-clock time.
 ///
-/// This is sync, read-only policy. The executor owns enforcement.
+/// Model-call and capability-call caps belong to
+/// `ResolvedRunProfile.resource_budget_policy` / `ResourceBudgetPolicy`, not
+/// this strategy. This stays sync because it is pure read-only policy with no
+/// host consult; tenant/profile-backed budget logic should be resolved into
+/// the run profile, or added later behind an explicit async contract change.
 pub(crate) trait BudgetStrategy: Send + Sync {
     /// Maximum number of iterations before the loop is forcibly failed.
     fn iteration_limit(&self, state: &LoopExecutionState) -> u32;
@@ -14,6 +18,9 @@ pub(crate) trait BudgetStrategy: Send + Sync {
     /// Optional wall-clock cap. `None` means no time limit.
     fn wall_clock_limit(&self, state: &LoopExecutionState) -> Option<Duration>;
 }
+
+#[allow(dead_code)]
+fn assert_budget_strategy_object_safe(_: &dyn BudgetStrategy) {}
 
 #[cfg(test)]
 mod tests {
@@ -33,9 +40,7 @@ mod tests {
 
     #[test]
     fn budget_strategy_is_object_safe() {
-        fn _check(_: &dyn BudgetStrategy) {}
-
-        _check(&FixedBudget);
+        assert_budget_strategy_object_safe(&FixedBudget);
     }
 
     #[test]
