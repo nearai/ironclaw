@@ -611,6 +611,44 @@ const WASM_PROMPT_SINK_OVERFLOW: &str = r#"
 )
 "#;
 
+const WASM_PROMPT_HUGE_STRING_LEN: &str = r#"
+(module
+  (import "ic:hooks/before-prompt@1" "add_envelope_snippet"
+    (func $add_envelope_snippet (param i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (func (export "evaluate")
+    i32.const 0
+    i32.const 2147483647
+    i32.const 0
+    call $add_envelope_snippet
+    drop)
+)
+"#;
+
+const WASM_PROMPT_METADATA_BYTE_OVERFLOW: &str = r#"
+(module
+  (import "ic:hooks/before-prompt@1" "add_milestone_metadata"
+    (func $add_milestone_metadata (param i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 8) "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+  (func (export "evaluate")
+    (local $i i32)
+    (loop $again
+      i32.const 0
+      i32.const 8
+      i32.const 65
+      call $add_milestone_metadata
+      drop
+      local.get $i
+      i32.const 1
+      i32.add
+      local.tee $i
+      i32.const 64
+      i32.lt_s
+      br_if $again))
+)
+"#;
+
 const WASM_UNSUPPORTED_IMPORT: &str = r#"
 (module
   (import "ic:hooks/before-capability@1" "not_allowed" (func $not_allowed))
@@ -1000,6 +1038,62 @@ async fn wasm_sink_call_budget_overflow_is_malformed_and_fails_closed() {
     assert_eq!(
         failure.reason.as_str(),
         "wasm hook exceeded sink-call budget"
+    );
+}
+
+#[tokio::test]
+async fn wasm_huge_guest_string_len_is_malformed_without_host_allocation() {
+    let dispatcher = wasm_before_prompt_dispatcher_from_wat(
+        "wasm-huge-string-len",
+        WASM_PROMPT_HUGE_STRING_LEN,
+        WasmBudget::default(),
+    );
+    let ctx = BeforePromptHookContext::new(
+        TenantId::new("tenant-hooks-integration").expect("valid tenant"),
+        4 * 1024,
+    );
+
+    let outcome = dispatcher.dispatch_before_prompt(&ctx).await;
+
+    assert!(
+        outcome.patches.is_empty(),
+        "malformed prompt hook output must not be applied"
+    );
+    assert_eq!(outcome.failures.len(), 1, "expected one hook failure");
+    let failure = &outcome.failures[0];
+    assert_eq!(failure.category, FailureCategory::Malformed);
+    assert_eq!(failure.disposition, FailureDisposition::FailClosed);
+    assert_eq!(
+        failure.reason.as_str(),
+        "wasm hook supplied an invalid string pointer"
+    );
+}
+
+#[tokio::test]
+async fn wasm_metadata_byte_budget_overflow_is_malformed_and_fails_closed() {
+    let dispatcher = wasm_before_prompt_dispatcher_from_wat(
+        "wasm-metadata-byte-overflow",
+        WASM_PROMPT_METADATA_BYTE_OVERFLOW,
+        WasmBudget::default(),
+    );
+    let ctx = BeforePromptHookContext::new(
+        TenantId::new("tenant-hooks-integration").expect("valid tenant"),
+        4 * 1024,
+    );
+
+    let outcome = dispatcher.dispatch_before_prompt(&ctx).await;
+
+    assert!(
+        outcome.patches.is_empty(),
+        "malformed prompt hook output must not be applied"
+    );
+    assert_eq!(outcome.failures.len(), 1, "expected one hook failure");
+    let failure = &outcome.failures[0];
+    assert_eq!(failure.category, FailureCategory::Malformed);
+    assert_eq!(failure.disposition, FailureDisposition::FailClosed);
+    assert_eq!(
+        failure.reason.as_str(),
+        "wasm hook exceeded total prompt-patch byte budget"
     );
 }
 

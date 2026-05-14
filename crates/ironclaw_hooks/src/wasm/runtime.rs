@@ -25,6 +25,7 @@ use crate::{dispatch::GateHookOutcome, error::SanitizedReason};
 const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_SINK_CALLS_PER_INVOCATION: u32 = 64;
 const MAX_TOTAL_PATCH_BYTES: u32 = 4 * 1024;
+const MAX_GUEST_STRING_BYTES: usize = MAX_TOTAL_PATCH_BYTES as usize;
 const MAX_OBSERVER_FACTS_PER_INVOCATION: u32 = 32;
 const MAX_DECISION_CALLS_PER_INVOCATION: u32 = 1;
 
@@ -688,9 +689,20 @@ fn add_milestone_metadata(
             "wasm hook supplied an invalid metadata key",
         ));
     };
-    caller
-        .data_mut()
-        .output
+    let Some(byte_count) = u32::try_from(value.len()).ok() else {
+        return caller.data_mut().fail(WasmHookFailure::malformed(
+            "wasm hook exceeded total prompt-patch byte budget",
+        ));
+    };
+    let data = caller.data_mut();
+    let total = data.budget.total_patch_bytes.saturating_add(byte_count);
+    if total > MAX_TOTAL_PATCH_BYTES {
+        return data.fail(WasmHookFailure::malformed(
+            "wasm hook exceeded total prompt-patch byte budget",
+        ));
+    }
+    data.budget.total_patch_bytes = total;
+    data.output
         .patches
         .push(HookPatch::add_milestone_metadata(key, value));
     STATUS_OK
@@ -729,9 +741,12 @@ fn add_observer_note(caller: &mut Caller<'_, HookStoreData>, category: i32, summ
 fn read_guest_string(caller: &mut Caller<'_, HookStoreData>, ptr: i32, len: i32) -> Option<String> {
     let ptr = usize::try_from(ptr).ok()?;
     let len = usize::try_from(len).ok()?;
+    if len > MAX_GUEST_STRING_BYTES {
+        return None;
+    }
     let memory = caller.get_export("memory")?.into_memory()?;
-    let mut bytes = vec![0u8; len];
-    memory.read(&mut *caller, ptr, &mut bytes).ok()?;
+    let end = ptr.checked_add(len)?;
+    let bytes = memory.data(&*caller).get(ptr..end)?.to_vec();
     String::from_utf8(bytes).ok()
 }
 
