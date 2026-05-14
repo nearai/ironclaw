@@ -733,13 +733,6 @@ pub async fn create_response_handler(
             "invalid_request_error",
         ));
     }
-    if req.temperature.is_some() {
-        return Err(api_error(
-            StatusCode::BAD_REQUEST,
-            "Per-request 'temperature' is not supported on this endpoint; configure the default via settings",
-            "invalid_request_error",
-        ));
-    }
     if req.max_output_tokens.is_some() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
@@ -788,6 +781,9 @@ pub async fn create_response_handler(
     });
     if let Some(ref ctx) = req.x_context {
         metadata["context"] = ctx.clone();
+    }
+    if let Some(t) = req.temperature {
+        metadata["temperature"] = serde_json::json!(t);
     }
     let msg = crate::channels::web::util::web_incoming_message_with_metadata(
         "gateway",

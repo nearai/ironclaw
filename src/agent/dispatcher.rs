@@ -604,26 +604,40 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // to avoid repeated DB lookups within the same agentic loop).
         // Uses admin-fallback so admin-set defaults propagate to members
         // who haven't overridden the value themselves.
-        if iteration == 0
-            && let Some(store) = self.tenant.store()
-        {
-            // Model override: "selected_model" — the same key the /model command
-            // persists to via SettingsStore (per-user scoped via TenantScope).
-            if let Ok(Some(value)) = store
-                .get_setting_with_admin_fallback("selected_model")
-                .await
-                && let Some(model) = selected_model_override(&value)
-            {
-                reason_ctx.model_override = Some(model);
-            }
-
-            // Temperature override from user or admin settings. Per-request
-            // values already on the context take precedence over settings.
-            if let Ok(setting) = store.get_setting_with_admin_fallback("temperature").await
-                && let Some(t) =
-                    resolve_settings_temperature(reason_ctx.temperature, setting.as_ref())
+        if iteration == 0 {
+            // Per-request temperature from the inbound message metadata
+            // (e.g. Responses API `temperature` field). Wins over both the
+            // settings-level default and the hardcoded reasoning default.
+            if reason_ctx.temperature.is_none()
+                && let Some(t) = self
+                    .message
+                    .metadata
+                    .get("temperature")
+                    .and_then(|v| v.as_f64())
+                    .map(|f| f as f32)
             {
                 reason_ctx.temperature = Some(t);
+            }
+
+            if let Some(store) = self.tenant.store() {
+                // Model override: "selected_model" — the same key the /model command
+                // persists to via SettingsStore (per-user scoped via TenantScope).
+                if let Ok(Some(value)) = store
+                    .get_setting_with_admin_fallback("selected_model")
+                    .await
+                    && let Some(model) = selected_model_override(&value)
+                {
+                    reason_ctx.model_override = Some(model);
+                }
+
+                // Temperature override from user or admin settings. Per-request
+                // values already on the context take precedence over settings.
+                if let Ok(setting) = store.get_setting_with_admin_fallback("temperature").await
+                    && let Some(t) =
+                        resolve_settings_temperature(reason_ctx.temperature, setting.as_ref())
+                {
+                    reason_ctx.temperature = Some(t);
+                }
             }
         }
 
