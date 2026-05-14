@@ -135,6 +135,12 @@ pub struct LoopFamilyRegistry {
     families: HashMap<LoopFamilyId, Arc<LoopFamily>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LoopFamilyRegistryError {
+    #[error("duplicate loop family id: {id}")]
+    DuplicateFamilyId { id: LoopFamilyId },
+}
+
 impl LoopFamilyRegistry {
     pub fn get(&self, id: &LoopFamilyId) -> Option<Arc<LoopFamily>> {
         self.families.get(id).cloned()
@@ -144,14 +150,18 @@ impl LoopFamilyRegistry {
         self.families.keys()
     }
 
-    pub fn with_families(families: Vec<Arc<LoopFamily>>) -> Arc<Self> {
+    pub fn with_families(
+        families: Vec<Arc<LoopFamily>>,
+    ) -> Result<Arc<Self>, LoopFamilyRegistryError> {
         let mut map = HashMap::with_capacity(families.len());
         for family in families {
             let id = family.id().clone();
-            assert!(!map.contains_key(&id), "duplicate loop family id: {id}");
+            if map.contains_key(&id) {
+                return Err(LoopFamilyRegistryError::DuplicateFamilyId { id });
+            }
             map.insert(id, family);
         }
-        Arc::new(Self { families: map })
+        Ok(Arc::new(Self { families: map }))
     }
 }
 
@@ -218,7 +228,7 @@ mod tests {
             ComponentIdentity::from_static("default", ComponentDigest([0; 32])),
             Arc::new(TestPlanner),
         ));
-        let registry = LoopFamilyRegistry::with_families(vec![family]);
+        let registry = LoopFamilyRegistry::with_families(vec![family]).expect("valid registry");
 
         assert!(registry.get(&LoopFamilyId::DEFAULT).is_some());
         assert!(
@@ -230,7 +240,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "duplicate loop family id: default")]
     fn registry_rejects_duplicate_family_ids() {
         let family_a = Arc::new(LoopFamily::new(
             LoopFamilyId::DEFAULT,
@@ -243,6 +252,16 @@ mod tests {
             Arc::new(TestPlanner),
         ));
 
-        let _registry = LoopFamilyRegistry::with_families(vec![family_a, family_b]);
+        let error = match LoopFamilyRegistry::with_families(vec![family_a, family_b]) {
+            Ok(_) => panic!("expected duplicate family id error"),
+            Err(error) => error,
+        };
+
+        assert_eq!(
+            error,
+            LoopFamilyRegistryError::DuplicateFamilyId {
+                id: LoopFamilyId::DEFAULT
+            }
+        );
     }
 }
