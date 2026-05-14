@@ -7,7 +7,7 @@
 use chrono::{DateTime, Utc};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalEventId, ProductAdapterId, ProductInboundAck,
-    ProductInboundPayload,
+    ProductInboundPayload, ProductRejectionKind,
 };
 use ironclaw_turns::{LoopGateRef, TurnRunId};
 use serde::{Deserialize, Serialize};
@@ -183,6 +183,7 @@ pub enum ActionDispatchKind {
     AuthResolution { auth_request_ref: AuthRequestRef },
     ProjectionSubscription,
     LinkedThreadAction { action_id: LinkedThreadActionId },
+    Rejected { kind: ProductRejectionKind },
     NoOp,
 }
 

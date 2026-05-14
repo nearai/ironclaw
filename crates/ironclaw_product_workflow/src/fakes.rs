@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
-use ironclaw_product_adapters::ProductInboundEnvelope;
+use ironclaw_product_adapters::{ProductInboundEnvelope, ProductRejection, UserMessagePayload};
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
 use crate::action::{ActionFingerprintKey, ProductInboundAction};
@@ -14,6 +14,7 @@ use crate::binding::{ConversationBindingService, ResolveBindingRequest, Resolved
 use crate::error::ProductWorkflowError;
 use crate::inbound_turn::{InboundTurnOutcome, InboundTurnService};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
+use crate::policy::{BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest};
 
 // ---------------------------------------------------------------------------
 // FakeConversationBindingService
@@ -226,6 +227,108 @@ impl IdempotencyLedger for FakeIdempotencyLedger {
         }
         state.in_flight.remove(&action.fingerprint);
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FakeBeforeInboundPolicy
+// ---------------------------------------------------------------------------
+
+/// In-memory fake for before-inbound policy checks.
+#[derive(Clone)]
+pub struct FakeBeforeInboundPolicy {
+    state: Arc<Mutex<FakeBeforeInboundPolicyState>>,
+}
+
+#[derive(Default)]
+struct FakeBeforeInboundPolicyState {
+    requests: Vec<BeforeInboundPolicyRequest>,
+    outcome: Option<Result<BeforeInboundPolicyOutcome, ProductWorkflowError>>,
+}
+
+impl FakeBeforeInboundPolicy {
+    pub fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(FakeBeforeInboundPolicyState::default())),
+        }
+    }
+
+    /// Allow all messages without modification.
+    pub fn allow(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
+        state.outcome = Some(Ok(BeforeInboundPolicyOutcome::Allow));
+    }
+
+    /// Rewrite all user-message payloads.
+    pub fn rewrite_user_message(&self, payload: UserMessagePayload) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
+        state.outcome = Some(Ok(BeforeInboundPolicyOutcome::RewriteUserMessage(payload)));
+    }
+
+    /// Reject all user messages.
+    pub fn reject(&self, rejection: ProductRejection) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
+        state.outcome = Some(Ok(BeforeInboundPolicyOutcome::Reject(rejection)));
+    }
+
+    /// Fail all policy checks.
+    pub fn force_failure(&self, error: ProductWorkflowError) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
+        state.outcome = Some(Err(error));
+    }
+
+    /// How many user messages reached policy checks.
+    pub fn request_count(&self) -> usize {
+        let state = self
+            .state
+            .lock()
+            .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
+        state.requests.len()
+    }
+
+    /// Recorded policy requests.
+    pub fn requests(&self) -> Vec<BeforeInboundPolicyRequest> {
+        let state = self
+            .state
+            .lock()
+            .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
+        state.requests.clone()
+    }
+}
+
+impl Default for FakeBeforeInboundPolicy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl BeforeInboundPolicy for FakeBeforeInboundPolicy {
+    async fn check_user_message(
+        &self,
+        request: BeforeInboundPolicyRequest,
+    ) -> Result<BeforeInboundPolicyOutcome, ProductWorkflowError> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
+        state.requests.push(request);
+        state
+            .outcome
+            .clone()
+            .unwrap_or(Ok(BeforeInboundPolicyOutcome::Allow))
     }
 }
 

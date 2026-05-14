@@ -26,6 +26,7 @@ pub mod error;
 pub mod fakes;
 pub mod inbound_turn;
 pub mod ledger;
+pub mod policy;
 pub mod workflow;
 
 pub use action::{
@@ -35,7 +36,14 @@ pub use action::{
 pub use binding::{ConversationBindingService, ResolveBindingRequest, ResolvedBinding};
 pub use error::ProductWorkflowError;
 #[cfg(any(test, feature = "test-support"))]
-pub use fakes::{FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService};
+pub use fakes::{
+    FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
+    FakeInboundTurnService,
+};
 pub use inbound_turn::{DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService};
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
+pub use policy::{
+    BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
+    NoopBeforeInboundPolicy,
+};
 pub use workflow::DefaultProductWorkflow;

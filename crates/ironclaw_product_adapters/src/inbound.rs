@@ -485,6 +485,21 @@ impl ProductInboundEnvelope {
         &self.payload
     }
 
+    /// Preserve host-stamped trusted context while replacing only the
+    /// user-message payload after workflow-owned before-inbound policy rewrite.
+    pub fn with_rewritten_user_message(&self, payload: UserMessagePayload) -> Self {
+        Self {
+            adapter_id: self.adapter_id.clone(),
+            installation_id: self.installation_id.clone(),
+            external_event_id: self.external_event_id.clone(),
+            external_actor_ref: self.external_actor_ref.clone(),
+            external_conversation_ref: self.external_conversation_ref.clone(),
+            auth_claim: self.auth_claim.clone(),
+            received_at: self.received_at,
+            payload: ProductInboundPayload::UserMessage(payload),
+        }
+    }
+
     pub fn source_binding_key(&self) -> String {
         self.external_conversation_ref.conversation_fingerprint()
     }

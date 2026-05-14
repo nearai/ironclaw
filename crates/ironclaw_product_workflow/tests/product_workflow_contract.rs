@@ -9,14 +9,15 @@ use ironclaw_product_adapters::{
     AuthResolutionPayload, AuthResolutionResult, ExternalActorRef, ExternalConversationRef,
     ExternalEventId, InboundCommandPayload, LinkedThreadActionPayload, ParsedProductInbound,
     ProductAdapterError, ProductAdapterId, ProductInboundAck, ProductInboundEnvelope,
-    ProductInboundPayload, ProductRejectionDisposition, ProductTriggerReason, ProductWorkflow,
-    ProductWorkflowRejectionKind, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
+    ProductInboundPayload, ProductRejection, ProductRejectionDisposition, ProductRejectionKind,
+    ProductTriggerReason, ProductWorkflow, ProductWorkflowRejectionKind, ProtocolAuthEvidence,
+    TrustedInboundContext, UserMessagePayload,
 };
 use ironclaw_product_workflow::{
     ActionDispatchKind, ActionFingerprintKey, AuthRequestRef, DefaultProductWorkflow,
-    FakeIdempotencyLedger, FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger,
-    InboundTurnOutcome, LinkedThreadActionId, ProductCommandName, ProductWorkflowError,
-    ResolvedBinding, SourceBindingKey,
+    FakeBeforeInboundPolicy, FakeIdempotencyLedger, FakeInboundTurnService, IdempotencyDecision,
+    IdempotencyLedger, InboundTurnOutcome, LinkedThreadActionId, ProductCommandName,
+    ProductWorkflowError, ResolvedBinding, SourceBindingKey,
 };
 use ironclaw_turns::{AcceptedMessageRef, LoopGateRef, TurnError, TurnRunId};
 
@@ -182,6 +183,20 @@ fn build_workflow() -> (
     (workflow, inbound, ledger)
 }
 
+fn build_workflow_with_policy() -> (
+    DefaultProductWorkflow,
+    Arc<FakeInboundTurnService>,
+    Arc<FakeIdempotencyLedger>,
+    Arc<FakeBeforeInboundPolicy>,
+) {
+    let inbound = Arc::new(FakeInboundTurnService::new());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let policy = Arc::new(FakeBeforeInboundPolicy::new());
+    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone())
+        .with_before_inbound_policy(policy.clone());
+    (workflow, inbound, ledger, policy)
+}
+
 #[tokio::test]
 async fn user_message_dispatches_through_inbound_turn_service() {
     let (workflow, inbound, ledger) = build_workflow();
@@ -192,6 +207,102 @@ async fn user_message_dispatches_through_inbound_turn_service() {
     assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
     assert_eq!(inbound.accepted_count(), 1);
     assert_eq!(ledger.settled_count(), 1);
+}
+
+#[tokio::test]
+async fn before_inbound_policy_rewrite_reaches_inbound_turn_service() {
+    let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
+    policy.rewrite_user_message(
+        UserMessagePayload::new(
+            "rewritten by policy",
+            vec![],
+            ProductTriggerReason::DirectChat,
+        )
+        .expect("valid rewrite"),
+    );
+    let envelope = sample_envelope("policy-rewrite");
+
+    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+
+    assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
+    assert_eq!(policy.request_count(), 1);
+    assert_eq!(policy.requests()[0].user_message.text, "hello");
+    let accepted = inbound.accepted_envelopes();
+    assert_eq!(accepted.len(), 1);
+    let ProductInboundPayload::UserMessage(payload) = accepted[0].payload() else {
+        panic!("expected rewritten user message payload")
+    };
+    assert_eq!(payload.text, "rewritten by policy");
+    assert_eq!(ledger.settled_count(), 1);
+}
+
+#[tokio::test]
+async fn before_inbound_policy_rejection_skips_transcript_and_turn_path() {
+    let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
+    policy.reject(ProductRejection::permanent(
+        ProductRejectionKind::PolicyDenied,
+        "blocked by before-inbound policy",
+    ));
+    let envelope = sample_envelope("policy-reject");
+
+    let ack = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect("policy rejection ack");
+
+    let ProductInboundAck::Rejected(rejection) = ack else {
+        panic!("expected rejected ack")
+    };
+    assert_eq!(rejection.kind, ProductRejectionKind::PolicyDenied);
+    assert_eq!(
+        rejection.disposition(),
+        ProductRejectionDisposition::Permanent
+    );
+    assert_eq!(policy.request_count(), 1);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 1);
+    let actions = ledger.settled_actions();
+    assert_eq!(
+        actions[0].dispatch_kind,
+        Some(ActionDispatchKind::Rejected {
+            kind: ProductRejectionKind::PolicyDenied
+        })
+    );
+
+    let replay = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect("policy rejection replay");
+    assert!(matches!(replay, ProductInboundAck::Duplicate { .. }));
+    assert_eq!(policy.request_count(), 1);
+    assert_eq!(inbound.accepted_count(), 0);
+}
+
+#[tokio::test]
+async fn before_inbound_policy_transient_failure_releases_fingerprint() {
+    let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
+    policy.force_failure(ProductWorkflowError::Transient {
+        reason: "policy store unavailable".into(),
+    });
+    let envelope = sample_envelope("policy-transient");
+
+    let first = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect_err("policy failure should be retryable");
+    assert!(first.is_retryable());
+    assert_eq!(policy.request_count(), 1);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+
+    let second = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect_err("released fingerprint should retry policy");
+    assert!(second.is_retryable());
+    assert_eq!(policy.request_count(), 2);
+    assert_eq!(inbound.accepted_count(), 0);
 }
 
 #[tokio::test]
