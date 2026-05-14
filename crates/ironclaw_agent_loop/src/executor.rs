@@ -160,9 +160,7 @@ impl CanonicalAgentLoopExecutor {
                     state,
                     LoopModelRequest {
                         messages: prompt_bundle.messages,
-                        surface_version: prompt_bundle
-                            .surface_version
-                            .or(Some(surface.version.clone())),
+                        surface_version: Some(surface.version.clone()),
                         model_preference,
                         context_summaries: prompt_bundle.context_summaries,
                     },
@@ -326,7 +324,7 @@ impl CanonicalAgentLoopExecutor {
         surface: &VisibleCapabilitySurface,
         calls: Vec<CapabilityCallCandidate>,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
-        state.stop_state.last_batch_total = calls.len() as u32;
+        state.stop_state.last_batch_total = 0;
         state.stop_state.terminate_hints_in_last_batch = 0;
 
         let summaries = calls
@@ -367,6 +365,7 @@ impl CanonicalAgentLoopExecutor {
             }
         }
 
+        state.stop_state.last_batch_total = visible_calls.len() as u32;
         if visible_calls.is_empty() {
             return Ok(BatchStep::Continue(state));
         }
@@ -917,6 +916,9 @@ fn capability_is_visible(
     surface: &VisibleCapabilitySurface,
     call: &CapabilityCallCandidate,
 ) -> bool {
+    if call.surface_version != surface.version {
+        return false;
+    }
     surface
         .descriptors
         .iter()
@@ -1018,12 +1020,15 @@ mod tests {
     struct MockHost {
         context: LoopRunContext,
         model_responses: Arc<Mutex<VecDeque<LoopModelResponse>>>,
+        model_requests: Arc<Mutex<Vec<LoopModelRequest>>>,
         batch_outcomes: Arc<Mutex<VecDeque<ironclaw_turns::run_profile::CapabilityBatchOutcome>>>,
         single_outcomes: Arc<Mutex<VecDeque<CapabilityOutcome>>>,
         checkpoints: Arc<Mutex<Vec<LoopCheckpointKind>>>,
         batch_invocations: Arc<Mutex<Vec<CapabilityBatchInvocation>>>,
         single_invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
         staged_payloads: Arc<Mutex<Vec<StageCheckpointPayloadRequest>>>,
+        prompt_surface_version: Option<CapabilitySurfaceVersion>,
+        visible_surface_version: CapabilitySurfaceVersion,
     }
 
     impl MockHost {
@@ -1031,13 +1036,24 @@ mod tests {
             Self {
                 context: test_run_context(),
                 model_responses: Arc::new(Mutex::new(model_responses.into())),
+                model_requests: Arc::new(Mutex::new(Vec::new())),
                 batch_outcomes: Arc::new(Mutex::new(VecDeque::new())),
                 single_outcomes: Arc::new(Mutex::new(VecDeque::new())),
                 checkpoints: Arc::new(Mutex::new(Vec::new())),
                 batch_invocations: Arc::new(Mutex::new(Vec::new())),
                 single_invocations: Arc::new(Mutex::new(Vec::new())),
                 staged_payloads: Arc::new(Mutex::new(Vec::new())),
+                prompt_surface_version: Some(surface_version()),
+                visible_surface_version: surface_version(),
             }
+        }
+
+        fn with_prompt_surface_version(
+            mut self,
+            version: Option<CapabilitySurfaceVersion>,
+        ) -> Self {
+            self.prompt_surface_version = version;
+            self
         }
 
         fn with_batch_outcomes(
@@ -1063,6 +1079,10 @@ mod tests {
 
         fn single_invocations(&self) -> Vec<CapabilityInvocation> {
             self.single_invocations.lock().expect("lock").clone()
+        }
+
+        fn model_requests(&self) -> Vec<LoopModelRequest> {
+            self.model_requests.lock().expect("lock").clone()
         }
 
         fn staged_payloads(&self) -> Vec<StageCheckpointPayloadRequest> {
@@ -1114,7 +1134,7 @@ mod tests {
                     role: "user".to_string(),
                     content_ref: LoopMessageRef::new("msg:user").expect("valid"),
                 }],
-                surface_version: Some(surface_version()),
+                surface_version: self.prompt_surface_version.clone(),
                 context_summaries: std::collections::HashMap::<String, LoopContextSummary>::new(),
             })
         }
@@ -1142,8 +1162,9 @@ mod tests {
     impl ironclaw_turns::run_profile::LoopModelPort for MockHost {
         async fn stream_model(
             &self,
-            _request: LoopModelRequest,
+            request: LoopModelRequest,
         ) -> Result<LoopModelResponse, AgentLoopHostError> {
+            self.model_requests.lock().expect("lock").push(request);
             self.model_responses
                 .lock()
                 .expect("lock")
@@ -1164,7 +1185,7 @@ mod tests {
             _request: VisibleCapabilityRequest,
         ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
             Ok(VisibleCapabilitySurface {
-                version: surface_version(),
+                version: self.visible_surface_version.clone(),
                 descriptors: vec![CapabilityDescriptorView {
                     capability_id: capability_id(),
                     provider: None,
@@ -1373,6 +1394,95 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_request_uses_current_visible_surface_not_prompt_bundle_version() {
+        let host = MockHost::new(vec![reply_response()])
+            .with_prompt_surface_version(Some(stale_surface_version()));
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        assert!(matches!(exit, LoopExit::Completed(_)));
+        let requests = host.model_requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].surface_version, Some(surface_version()));
+    }
+
+    #[tokio::test]
+    async fn stale_surface_capability_call_is_policy_denied_before_host_invocation() {
+        let host = MockHost::new(vec![stale_surface_calls_response(), reply_response()]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        assert!(matches!(exit, LoopExit::Completed(_)));
+        assert!(host.batch_invocations().is_empty());
+        assert!(host.single_invocations().is_empty());
+
+        let staged_states = host
+            .staged_payloads()
+            .into_iter()
+            .map(|request| {
+                LoopExecutionState::from_checkpoint_payload(
+                    &request.payload,
+                    checkpoint_kind_from_host(request.kind),
+                )
+                .expect("checkpoint payload")
+            })
+            .collect::<Vec<_>>();
+        assert!(staged_states.iter().any(|state| {
+            state
+                .recent_failure_kinds
+                .iter()
+                .any(|kind| *kind == LoopFailureKind::PolicyDenied)
+        }));
+        assert!(
+            staged_states
+                .iter()
+                .any(|state| state.stop_state.last_batch_total == 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn last_batch_total_counts_only_visible_invoked_calls() {
+        let host = MockHost::new(vec![mixed_surface_calls_response()]).with_batch_outcomes(vec![
+            ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                    result_ref: LoopResultRef::new("result:visible").expect("valid"),
+                    safe_summary: "visible call completed".to_string(),
+                    terminate_hint: true,
+                })],
+                stopped_on_suspension: false,
+            },
+        ]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        assert!(matches!(exit, LoopExit::Completed(_)));
+        assert_eq!(host.model_requests().len(), 1);
+
+        let batch_invocations = host.batch_invocations();
+        assert_eq!(batch_invocations.len(), 1);
+        assert_eq!(batch_invocations[0].invocations.len(), 1);
+        assert_eq!(
+            batch_invocations[0].invocations[0].surface_version,
+            surface_version()
+        );
+    }
+
+    #[tokio::test]
     async fn checkpoint_payload_rehydrates_with_written_marker() {
         let host = MockHost::new(vec![reply_response()]);
         let executor = CanonicalAgentLoopExecutor;
@@ -1459,12 +1569,47 @@ mod tests {
         }
     }
 
+    fn stale_surface_calls_response() -> LoopModelResponse {
+        LoopModelResponse {
+            chunks: Vec::new(),
+            output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+                surface_version: stale_surface_version(),
+                capability_id: capability_id(),
+                input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
+            }]),
+            effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        }
+    }
+
+    fn mixed_surface_calls_response() -> LoopModelResponse {
+        LoopModelResponse {
+            chunks: Vec::new(),
+            output: ParentLoopOutput::CapabilityCalls(vec![
+                CapabilityCallCandidate {
+                    surface_version: stale_surface_version(),
+                    capability_id: capability_id(),
+                    input_ref: CapabilityInputRef::new("input:stale").expect("valid"),
+                },
+                CapabilityCallCandidate {
+                    surface_version: surface_version(),
+                    capability_id: capability_id(),
+                    input_ref: CapabilityInputRef::new("input:visible").expect("valid"),
+                },
+            ]),
+            effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        }
+    }
+
     fn capability_id() -> CapabilityId {
         CapabilityId::new("demo.echo").expect("valid")
     }
 
     fn surface_version() -> CapabilitySurfaceVersion {
         CapabilitySurfaceVersion::new("surface:v1").expect("valid")
+    }
+
+    fn stale_surface_version() -> CapabilitySurfaceVersion {
+        CapabilitySurfaceVersion::new("surface:stale").expect("valid")
     }
 
     fn family_with_capability_filter(filter: CapabilityFilter) -> LoopFamily {
