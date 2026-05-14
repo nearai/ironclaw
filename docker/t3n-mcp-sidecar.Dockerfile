@@ -19,14 +19,6 @@ RUN apk add --no-cache dumb-init \
 #   /app/shared/bin/   <- client/shared/bin
 #   /shared -> /app/shared  (symlink so ../../shared from /app resolves)
 
-# Bundle the t3n-sdk at the location the mcp package.json's `link:../../t3n-sdk`
-# resolves to from /app: that is, /t3n-sdk. Copy package.json + lockfile first
-# so pnpm install on the SDK is cached, then overlay source + built dist.
-COPY --from=trinity_sdk package.json /t3n-sdk/package.json
-COPY --from=trinity_sdk pnpm-lock.yaml /t3n-sdk/pnpm-lock.yaml
-RUN cd /t3n-sdk && pnpm install --frozen-lockfile
-COPY --from=trinity_sdk . /t3n-sdk
-
 COPY --from=trinity_mcp package.json ./package.json
 COPY --from=trinity_mcp pnpm-lock.yaml ./pnpm-lock.yaml
 
@@ -39,13 +31,8 @@ COPY --from=trinity_mcp tsconfig.prod.json ./tsconfig.prod.json
 COPY --from=trinity_mcp config.json ./config.json
 COPY --from=trinity_mcp config.production.json ./config.production.json
 COPY --from=trinity_mcp config.staging.json ./config.staging.json
-# config.local.json is needed when T3N_SDK_ENV=local (e.g. the payroll-v2
-# runbook). Trinity's root .dockerignore has `**/config.local.*` but that
-# file is NOT ignored here: the `trinity_mcp` additional context is rooted at
-# client/mcp/t3n-mcp, which has no .dockerignore of its own, so Docker applies
-# no filter from the parent. The values in config.local.json (localhost URLs)
-# are overridden at runtime by T3N_MCP_RPC_URL / T3N_MCP_DASHBOARD_URL env vars.
-COPY --from=trinity_mcp config.local.json ./config.local.json
+# config.local.json omitted: the sidecar only ever runs in staging or
+# production mode, and trinity's .dockerignore blocks config.local.* anyway.
 COPY --from=trinity_shared bin ./shared/bin
 RUN ln -s /app/shared /shared
 
