@@ -871,7 +871,7 @@ impl Fixture {
             tenant_id: tenant_id.clone(),
             agent_id: agent_id.clone(),
             project_id: Some(project_id.clone()),
-            owner_user_id: None,
+            owner_user_id: Some(user_id.clone()),
             mission_id: None,
         };
         thread_service
@@ -1470,6 +1470,87 @@ async fn event_triggered_own_capabilities_matches_hook_failed_with_carried_provi
     assert_eq!(events.len(), 1, "exactly one own-provider event must fire");
     assert_eq!(events[0].kind, RuntimeEventKind::HookFailed);
     assert_eq!(events[0].provider.as_ref(), Some(&ext_a));
+}
+
+/// serrrfirat HIGH #1 on PR #3640: subscription stream/read-scope must be
+/// bound to the host's run scope. A subscription pointing at a foreign
+/// tenant's stream must fail the host build instead of silently dispatching
+/// foreign events through this host's dispatcher.
+#[tokio::test]
+async fn event_triggered_subscription_with_foreign_tenant_stream_fails_host_build() {
+    let fixture = Fixture::new().await;
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let foreign_tenant = ironclaw_host_api::TenantId::new("tenant-foreign").expect("valid tenant");
+    let our_user = fixture.user_id.clone();
+    let our_agent = fixture
+        .context
+        .scope
+        .agent_id
+        .clone()
+        .expect("fixture sets an agent");
+    // Stream keyed to a different tenant — must be rejected.
+    let foreign_stream = EventStreamKey::new(foreign_tenant, our_user, Some(our_agent));
+
+    let dispatcher = event_triggered_dispatcher(
+        RuntimeEventKind::HookFailed,
+        Arc::new(Mutex::new(Vec::new())),
+    );
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let err = fixture
+        .factory()
+        .with_hook_dispatcher(dispatcher)
+        .with_event_subscription(event_log_subscription(
+            Arc::clone(&log),
+            foreign_stream,
+            RuntimeEventCursor::origin(),
+        ))
+        .build_text_only_host_with_capabilities(fixture.request(), inner)
+        .await
+        .expect_err("host build must reject foreign-tenant subscription");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("tenant_id"),
+        "expected error to cite tenant_id mismatch; got {msg}"
+    );
+}
+
+/// Same property, but for the user dimension: stream keyed to a different
+/// user than the thread owner must be rejected.
+#[tokio::test]
+async fn event_triggered_subscription_with_foreign_user_stream_fails_host_build() {
+    let fixture = Fixture::new().await;
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let foreign_user = ironclaw_host_api::UserId::new("user-foreign").expect("valid user");
+    let our_tenant = fixture.thread_scope.tenant_id.clone();
+    let our_agent = fixture
+        .context
+        .scope
+        .agent_id
+        .clone()
+        .expect("fixture sets an agent");
+    let foreign_stream = EventStreamKey::new(our_tenant, foreign_user, Some(our_agent));
+
+    let dispatcher = event_triggered_dispatcher(
+        RuntimeEventKind::HookFailed,
+        Arc::new(Mutex::new(Vec::new())),
+    );
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let err = fixture
+        .factory()
+        .with_hook_dispatcher(dispatcher)
+        .with_event_subscription(event_log_subscription(
+            Arc::clone(&log),
+            foreign_stream,
+            RuntimeEventCursor::origin(),
+        ))
+        .build_text_only_host_with_capabilities(fixture.request(), inner)
+        .await
+        .expect_err("host build must reject foreign-user subscription");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("user_id"),
+        "expected error to cite user_id mismatch; got {msg}"
+    );
 }
 
 #[tokio::test]

@@ -437,6 +437,84 @@ impl EventTriggeredHookSubscription {
         self
     }
 
+    /// Verify that this subscription's stream key and read-scope filter are
+    /// consistent with the host's run scope. The subscription stream
+    /// partitions events by `(tenant, user, agent)`; `ReadScope` filters by
+    /// `(project, mission, thread, process)`. If a caller wires a host for
+    /// tenant A but supplies a subscription pointing at tenant B's stream
+    /// (or to a stream-key that names a foreign user), the host would
+    /// dispatch B's hook events into A's dispatcher with A's context tenant
+    /// — a cross-tenant trust-boundary break (serrrfirat HIGH #1 on PR
+    /// #3640). Same for `ReadScope` filter dimensions: any `Some(want)` in
+    /// the filter must match the corresponding value in the run scope, so
+    /// the subscription never observes events outside the host's authority.
+    fn validate_against_run_scope(
+        &self,
+        run_scope: &ironclaw_turns::TurnScope,
+        thread_scope: &ironclaw_threads::ThreadScope,
+    ) -> Result<(), String> {
+        if self.stream.tenant_id != run_scope.tenant_id {
+            return Err(format!(
+                "event subscription stream tenant_id={} does not match run scope tenant_id={}",
+                self.stream.tenant_id.as_str(),
+                run_scope.tenant_id.as_str(),
+            ));
+        }
+        if self.stream.agent_id != run_scope.agent_id {
+            return Err(format!(
+                "event subscription stream agent_id={:?} does not match run scope agent_id={:?}",
+                self.stream.agent_id.as_ref().map(|a| a.as_str()),
+                run_scope.agent_id.as_ref().map(|a| a.as_str()),
+            ));
+        }
+        // The user dimension is carried on the thread scope (owner). Treat a
+        // thread without an owner conservatively — refuse to bind the
+        // subscription since we cannot verify the stream's user matches.
+        let Some(owner) = thread_scope.owner_user_id.as_ref() else {
+            return Err(
+                "event subscription cannot bind to thread without an owner user".to_string(),
+            );
+        };
+        if &self.stream.user_id != owner {
+            return Err(format!(
+                "event subscription stream user_id={} does not match thread owner user_id={}",
+                self.stream.user_id.as_str(),
+                owner.as_str(),
+            ));
+        }
+        // ReadScope tightens the stream; any Some(want) must equal the
+        // corresponding run/thread scope value. None is permissive and is
+        // acceptable (the run scope owns the dimension authoritatively).
+        if let Some(want) = self.read_scope.project_id.as_ref()
+            && run_scope.project_id.as_ref() != Some(want)
+        {
+            return Err(format!(
+                "event subscription read_scope.project_id={} does not match run scope project_id={:?}",
+                want.as_str(),
+                run_scope.project_id.as_ref().map(|p| p.as_str()),
+            ));
+        }
+        if let Some(want) = self.read_scope.mission_id.as_ref()
+            && thread_scope.mission_id.as_ref() != Some(want)
+        {
+            return Err(format!(
+                "event subscription read_scope.mission_id={} does not match thread scope mission_id={:?}",
+                want.as_str(),
+                thread_scope.mission_id.as_ref().map(|m| m.as_str()),
+            ));
+        }
+        if let Some(want) = self.read_scope.thread_id.as_ref()
+            && &run_scope.thread_id != want
+        {
+            return Err(format!(
+                "event subscription read_scope.thread_id={} does not match run scope thread_id={}",
+                want.as_str(),
+                run_scope.thread_id.as_str(),
+            ));
+        }
+        Ok(())
+    }
+
     fn spawn(
         self,
         dispatcher: Arc<HookDispatcher>,
@@ -956,11 +1034,21 @@ where
             per_build_dispatcher.as_ref(),
             self.event_subscription.as_ref(),
         ) {
-            (Some(dispatcher), Some(subscription)) => Some(
+            (Some(dispatcher), Some(subscription)) => {
+                // serrrfirat HIGH #1 on PR #3640: bind subscription
+                // stream/read-scope to this host's run scope. Otherwise a
+                // caller wiring tenant A's host with tenant B's stream
+                // would silently dispatch B's hook events into A's
+                // dispatcher with A's context tenant.
                 subscription
-                    .clone()
-                    .spawn(Arc::clone(dispatcher), run_context.scope.tenant_id.clone()),
-            ),
+                    .validate_against_run_scope(&run_context.scope, &self.thread_scope)
+                    .map_err(|reason| RebornLoopDriverHostError::ScopeMismatch { reason })?;
+                Some(
+                    subscription
+                        .clone()
+                        .spawn(Arc::clone(dispatcher), run_context.scope.tenant_id.clone()),
+                )
+            }
             _ => None,
         };
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
