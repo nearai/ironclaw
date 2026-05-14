@@ -191,6 +191,11 @@ async fn dispatch_payload(
                     let dispatch_kind = ActionDispatchKind::Rejected {
                         kind: rejection.kind.clone(),
                     };
+                    debug!(
+                        rejection_kind = ?rejection.kind,
+                        disposition = ?rejection.disposition(),
+                        "before-inbound policy rejected user message"
+                    );
                     return Ok(DispatchedAction {
                         ack: ProductInboundAck::Rejected(rejection),
                         dispatch_kind,
@@ -201,7 +206,7 @@ async fn dispatch_payload(
                 .accept_user_message(envelope_for_turn)
                 .await?;
             let ack = outcome.to_ack();
-            let dispatch_kind = dispatch_kind_from_ack(&ack, envelope.payload())?;
+            let dispatch_kind = dispatch_kind_from_ack(&ack, envelope_for_turn.payload())?;
             Ok(DispatchedAction { ack, dispatch_kind })
         }
         ProductInboundPayload::Command(cmd) => {

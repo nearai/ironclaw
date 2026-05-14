@@ -279,6 +279,91 @@ async fn before_inbound_policy_rejection_skips_transcript_and_turn_path() {
 }
 
 #[tokio::test]
+async fn before_inbound_policy_retryable_rejection_releases_fingerprint() {
+    let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
+    policy.reject(ProductRejection::retryable(
+        ProductRejectionKind::PolicyDenied,
+        "transient policy refusal",
+    ));
+    let envelope = sample_envelope("policy-reject-retryable");
+
+    let first = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect("retryable rejection still returns an ack");
+    let ProductInboundAck::Rejected(rejection) = first else {
+        panic!("expected rejected ack")
+    };
+    assert_eq!(
+        rejection.disposition(),
+        ProductRejectionDisposition::Retryable
+    );
+    assert_eq!(policy.request_count(), 1);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+
+    // Re-submitting the same envelope must re-invoke the policy (no duplicate
+    // replay caching), because retryable rejections release the fingerprint.
+    let second = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect("released fingerprint should let retryable rejection re-run policy");
+    assert!(matches!(second, ProductInboundAck::Rejected(_)));
+    assert_eq!(policy.request_count(), 2);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+}
+
+#[tokio::test]
+async fn before_inbound_policy_rewrite_replays_rewritten_outcome_on_duplicate() {
+    let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
+    policy.rewrite_user_message(
+        UserMessagePayload::new(
+            "rewritten by policy",
+            vec![],
+            ProductTriggerReason::DirectChat,
+        )
+        .expect("valid rewrite"),
+    );
+    let envelope = sample_envelope("policy-rewrite-dup");
+
+    let first = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect("first accept");
+    let ProductInboundAck::Accepted {
+        submitted_run_id: first_run,
+        ..
+    } = first
+    else {
+        panic!("expected accepted ack on first dispatch")
+    };
+    assert_eq!(policy.request_count(), 1);
+    assert_eq!(inbound.accepted_count(), 1);
+    assert_eq!(ledger.settled_count(), 1);
+
+    let replay = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect("duplicate replay");
+    let ProductInboundAck::Duplicate { prior } = replay else {
+        panic!("expected duplicate ack on replay")
+    };
+    let ProductInboundAck::Accepted {
+        submitted_run_id: prior_run,
+        ..
+    } = *prior
+    else {
+        panic!("expected replayed prior accepted ack")
+    };
+    assert_eq!(prior_run, first_run);
+    // Policy and inbound must NOT be re-invoked on duplicate replay.
+    assert_eq!(policy.request_count(), 1);
+    assert_eq!(inbound.accepted_count(), 1);
+}
+
+#[tokio::test]
 async fn before_inbound_policy_transient_failure_releases_fingerprint() {
     let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
     policy.force_failure(ProductWorkflowError::Transient {

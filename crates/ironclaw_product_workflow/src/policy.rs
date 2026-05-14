@@ -37,6 +37,21 @@ pub enum BeforeInboundPolicyOutcome {
 }
 
 /// Policy port that runs before user-message staging.
+///
+/// Implementations must be bounded: the workflow runs `check_user_message`
+/// inline on the inbound dispatch path while holding an in-flight idempotency
+/// fingerprint, so a slow or stuck policy will stall inbound submissions for
+/// the same `(adapter, installation, source binding, external event)` tuple.
+/// Callers are responsible for enforcing wall-clock timeouts on any
+/// production policy implementation (for example by wrapping the port in a
+/// `tokio::time::timeout` decorator).
+///
+/// Returning a transient [`ProductWorkflowError`] causes the workflow to
+/// release the idempotency fingerprint so the inbound can be retried.
+/// Returning [`BeforeInboundPolicyOutcome::Reject`] with a permanent
+/// disposition settles the action with a redacted rejection ack; a
+/// retryable-disposition reject also releases the fingerprint and lets the
+/// adapter re-deliver.
 #[async_trait]
 pub trait BeforeInboundPolicy: Send + Sync {
     async fn check_user_message(
