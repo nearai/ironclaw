@@ -165,6 +165,20 @@ docker compose exec t3claw \
 
 ---
 
+## Local iteration
+
+When editing Rust crates or the sidecar bridge, `docker compose up -d` on its own
+will not rebuild the images. The `Makefile` exposes two targets that combine the
+build and restart steps:
+
+- `make rebuild-claw` — rebuild `t3claw` + `t3n-mcp-sidecar`, then `up -d`.
+- `make rebuild-sidecar` — rebuild `t3n-mcp-sidecar` only, then restart
+  `t3claw` so the lazy-spawn re-execs the new sidecar binary.
+
+`make help` lists every target.
+
+---
+
 ## Multi-tenancy
 
 To run a shared instance with per-user isolation, add to `.env`:

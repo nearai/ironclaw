@@ -4,6 +4,7 @@
 #   make up              – start the full stack including t3n-mcp sidecar (detached)
 #   make build           – build / rebuild all images including t3n-mcp sidecar
 #   make rebuild         – build then restart (use after code changes)
+#   make rebuild-claw    – rebuild t3claw + t3n-mcp-sidecar, then up
 #   make rebuild-sidecar – rebuild only the t3n-mcp sidecar, recreate it, refresh t3claw
 #   make up-no-t3n       – start stack without the t3n-mcp sidecar (no trinity needed)
 #   make build-no-t3n    – build without the t3n-mcp sidecar
@@ -40,7 +41,7 @@ SIDECAR_SERVICE := t3n-mcp-sidecar
 SIDECAR_REGISTRY_IMAGE := ghcr.io/terminal-3/t3n-mcp-sidecar:latest
 SIDECAR_RUNTIME_IMAGE := t3claw/t3n-mcp-sidecar:local
 
-.PHONY: up build rebuild up-no-t3n build-no-t3n rebuild-no-t3n build-sidecar rebuild-sidecar push-sidecar-gcp pull-sidecar down wipe wipe-all restart logs shell status help
+.PHONY: up build rebuild rebuild-claw up-no-t3n build-no-t3n rebuild-no-t3n build-sidecar rebuild-sidecar push-sidecar-gcp pull-sidecar down wipe wipe-all restart logs shell status help
 
 ## Start the full stack (detached). Builds images if they don't exist yet.
 up:
@@ -54,6 +55,14 @@ build:
 
 ## Build images then restart the stack — use this after code changes.
 rebuild: build
+	$(COMPOSE) up -d
+
+## Rebuild t3claw + t3n-mcp-sidecar images and bring the stack up.
+## Use after edits to either Rust crate or the sidecar bridge. `up -d` recreates
+## containers whose images changed, so the new code is picked up immediately.
+rebuild-claw:
+	@echo "Using DOCKER_GID=$(DOCKER_GID)"
+	$(COMPOSE) build $(SERVICE) $(SIDECAR_SERVICE)
 	$(COMPOSE) up -d
 
 # TODO: remove the three -no-t3n targets below once the t3n-mcp sidecar image
