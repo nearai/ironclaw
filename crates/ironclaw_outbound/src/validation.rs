@@ -112,12 +112,24 @@ pub(crate) fn validate_advance_request(
 pub(crate) fn validate_delivery_attempt(
     attempt: &OutboundDeliveryAttempt,
 ) -> Result<(), OutboundError> {
-    if attempt.scope.thread_id != attempt.candidate.thread_id {
+    validate_delivery_scope_candidate(&attempt.scope, &attempt.candidate)?;
+    validate_delivery_status(attempt.status, attempt.failure_kind)
+}
+
+pub(crate) fn validate_delivery_scope_candidate(
+    scope: &ironclaw_turns::TurnScope,
+    candidate: &crate::OutboundPushCandidate,
+) -> Result<(), OutboundError> {
+    if scope.tenant_id != candidate.tenant_id
+        || scope.agent_id != candidate.agent_id
+        || scope.project_id != candidate.project_id
+        || scope.thread_id != candidate.thread_id
+    {
         return Err(OutboundError::InvalidRequest {
-            reason: "delivery candidate thread does not match scope",
+            reason: "delivery candidate scope does not match request scope",
         });
     }
-    validate_delivery_status(attempt.status, attempt.failure_kind)
+    Ok(())
 }
 
 pub(crate) fn validate_delivery_status_request(

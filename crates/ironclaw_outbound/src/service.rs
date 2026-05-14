@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 
+use crate::validation::validate_delivery_scope_candidate;
 use crate::{
     DeliveryFailureKind, OutboundDeliveryAttempt, OutboundDeliveryDecision, OutboundDeliveryId,
     OutboundDeliveryStatus, OutboundError, OutboundStateStore, PrepareOutboundDeliveryRequest,
@@ -88,11 +89,7 @@ impl<'a> OutboundPolicyService<'a> {
                 reason: "outbound push candidate must require reply target revalidation",
             });
         }
-        if request.scope.thread_id != request.candidate.thread_id {
-            return Err(OutboundError::InvalidRequest {
-                reason: "delivery candidate thread does not match scope",
-            });
-        }
+        validate_delivery_scope_candidate(&request.scope, &request.candidate)?;
 
         let validation = self
             .reply_target_validator
@@ -104,11 +101,7 @@ impl<'a> OutboundPolicyService<'a> {
 
         match validation {
             Ok(claim) => {
-                if claim.target != request.candidate.target {
-                    return Err(OutboundError::InvalidRequest {
-                        reason: "validated reply target does not match push candidate",
-                    });
-                }
+                claim.validate_against(&request.candidate)?;
                 let target = ValidatedReplyTargetBinding::from_claim(claim);
                 let attempt = OutboundDeliveryAttempt {
                     delivery_id: OutboundDeliveryId::new(),
@@ -172,5 +165,11 @@ fn validate_access_claim(
 /// retried; backend/serialization failures become recorded delivery
 /// attempts so the saga can retry without losing the audit trail.
 fn is_transient_validator_error(error: &OutboundError) -> bool {
-    matches!(error, OutboundError::Backend | OutboundError::Serialization)
+    match error {
+        OutboundError::Backend | OutboundError::Serialization => true,
+        OutboundError::InvalidRequest { .. }
+        | OutboundError::SubscriptionScopeMismatch
+        | OutboundError::AccessDenied
+        | OutboundError::DeliveryNotFound => false,
+    }
 }

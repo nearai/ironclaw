@@ -1,9 +1,9 @@
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
-use ironclaw_host_api::{ThreadId, Timestamp};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp};
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
 
-use crate::{OutboundDeliveryId, ProjectionSubscriptionId, ProjectionUpdateRef};
+use crate::{OutboundDeliveryId, OutboundError, ProjectionSubscriptionId, ProjectionUpdateRef};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -59,6 +59,9 @@ pub struct OutboundPushTargetRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboundPushCandidate {
+    pub tenant_id: TenantId,
+    pub agent_id: Option<AgentId>,
+    pub project_id: Option<ProjectId>,
     pub thread_id: ThreadId,
     pub turn_run_id: Option<TurnRunId>,
     pub target: ReplyTargetBindingRef,
@@ -216,9 +219,29 @@ pub struct ReplyTargetValidationRequest {
 ///
 /// [`ReplyTargetBindingValidator`]: crate::ReplyTargetBindingValidator
 /// [`OutboundPolicyService`]: crate::OutboundPolicyService
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplyTargetBindingClaim {
     pub target: ReplyTargetBindingRef,
+}
+
+impl ReplyTargetBindingClaim {
+    pub fn new(target: ReplyTargetBindingRef) -> Self {
+        Self { target }
+    }
+
+    pub(crate) fn validate_against(
+        &self,
+        candidate: &OutboundPushCandidate,
+    ) -> Result<(), OutboundError> {
+        let Self { target } = self;
+        if target != &candidate.target {
+            return Err(OutboundError::InvalidRequest {
+                reason: "validated reply target does not match push candidate",
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Trust-bearing record that the [`OutboundPolicyService`] has authorized a
@@ -237,9 +260,8 @@ pub struct ValidatedReplyTargetBinding {
 
 impl ValidatedReplyTargetBinding {
     pub(crate) fn from_claim(claim: ReplyTargetBindingClaim) -> Self {
-        Self {
-            target: claim.target,
-        }
+        let ReplyTargetBindingClaim { target } = claim;
+        Self { target }
     }
 
     pub fn target(&self) -> &ReplyTargetBindingRef {

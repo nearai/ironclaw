@@ -187,6 +187,41 @@ async fn delivery_preparation_rejects_validator_target_substitution() {
 }
 
 #[tokio::test]
+async fn delivery_preparation_rejects_scope_candidate_mismatch_before_validator_io() {
+    let store = InMemoryOutboundStateStore::default();
+    let access_policy = FakeThreadProjectionAccessPolicy::default();
+    let validator = FakeReplyTargetBindingValidator::default();
+    let service = OutboundPolicyService::new(&store, &access_policy, &validator);
+    let scope = turn_scope("thread-1");
+    let other_scope = TurnScope::new(
+        TenantId::new("tenant-b").expect("valid tenant"),
+        Some(AgentId::new("agent-b").expect("valid agent")),
+        Some(ProjectId::new("project-b").expect("valid project")),
+        thread_id("thread-1"),
+    );
+    let candidate = candidate(&other_scope, "reply-default", OutboundPushKind::FinalReply);
+
+    let err = service
+        .prepare_delivery_attempt(PrepareOutboundDeliveryRequest {
+            scope: scope.clone(),
+            candidate,
+            attempted_at: now(),
+        })
+        .await
+        .expect_err("scope/candidate mismatch must fail before validator IO");
+    assert!(matches!(err, OutboundError::InvalidRequest { .. }));
+    assert_eq!(validator.calls(), 0);
+    assert!(
+        store
+            .list_delivery_attempts(scope)
+            .await
+            .expect("list delivery attempts")
+            .is_empty(),
+        "structurally inconsistent candidates must not leave phantom attempt rows"
+    );
+}
+
+#[tokio::test]
 async fn delivery_preparation_fails_closed_when_candidate_skips_revalidation() {
     let store = InMemoryOutboundStateStore::default();
     let access_policy = FakeThreadProjectionAccessPolicy::default();
@@ -405,7 +440,7 @@ impl ReplyTargetBindingValidator for FakeReplyTargetBindingValidator {
             .get(&request.candidate.target)
             .cloned()
         {
-            return Ok(ReplyTargetBindingClaim { target });
+            return Ok(ReplyTargetBindingClaim::new(target));
         }
         if self
             .allowed
@@ -413,9 +448,7 @@ impl ReplyTargetBindingValidator for FakeReplyTargetBindingValidator {
             .expect("fake validator lock poisoned")
             .contains(&request.candidate.target)
         {
-            Ok(ReplyTargetBindingClaim {
-                target: request.candidate.target,
-            })
+            Ok(ReplyTargetBindingClaim::new(request.candidate.target))
         } else {
             Err(OutboundError::AccessDenied)
         }
@@ -424,6 +457,9 @@ impl ReplyTargetBindingValidator for FakeReplyTargetBindingValidator {
 
 fn candidate(scope: &TurnScope, target: &str, kind: OutboundPushKind) -> OutboundPushCandidate {
     OutboundPushCandidate {
+        tenant_id: scope.tenant_id.clone(),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
         thread_id: scope.thread_id.clone(),
         turn_run_id: Some(TurnRunId::new()),
         target: reply_ref(target),

@@ -115,6 +115,9 @@ fn push_candidate(
         return;
     }
     candidates.push(OutboundPushCandidate {
+        tenant_id: request.scope.tenant_id.clone(),
+        agent_id: request.scope.agent_id.clone(),
+        project_id: request.scope.project_id.clone(),
         thread_id: request.scope.thread_id.clone(),
         turn_run_id: request.turn_run_id,
         target,

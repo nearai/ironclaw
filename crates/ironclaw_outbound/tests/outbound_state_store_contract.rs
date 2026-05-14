@@ -515,6 +515,9 @@ async fn delivery_status_rejects_inconsistent_failure_kind(store: &impl Outbound
         delivery_id,
         scope: scope.clone(),
         candidate: OutboundPushCandidate {
+            tenant_id: scope.tenant_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
             thread_id: scope.thread_id.clone(),
             turn_run_id: Some(TurnRunId::new()),
             target: reply_ref("reply-status-validation"),
