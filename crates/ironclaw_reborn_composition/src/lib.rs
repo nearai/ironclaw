@@ -20,7 +20,7 @@ use ironclaw_filesystem::PostgresRootFilesystem;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{ResourceScope, SecretHandle};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostHttpEgressService, HostRuntimeServices};
+use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -153,7 +153,7 @@ where
     ));
     capability_leases.run_migrations().await?;
 
-    let mut services = HostRuntimeServices::new(
+    let services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
         filesystem,
         governor,
@@ -172,15 +172,14 @@ where
     .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
     .await?;
 
-    let http_egress = Arc::new(
-        HostHttpEgressService::new(
-            PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::default()),
-            (*secret_store).clone(),
-        )
-        .with_network_policy_store(services.network_policy_store())
-        .with_secret_injection_store(services.secret_injection_store()),
-    );
-    services = services.with_host_http_egress_service(http_egress);
+    // Safety: `with_secret_store` is called unconditionally above on the same
+    // builder chain, so `try_with_host_http_egress` cannot return a
+    // `Missing(SecretStore)` wiring report here.
+    let services = services
+        .try_with_host_http_egress(PolicyNetworkHttpEgress::new(
+            ReqwestNetworkTransport::default(),
+        ))
+        .expect("secret_store wired above guarantees host HTTP egress is buildable");
 
     Ok(services)
 }
@@ -216,7 +215,7 @@ where
     ));
     capability_leases.run_migrations().await?;
 
-    let mut services = HostRuntimeServices::new(
+    let services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
         filesystem,
         governor,
@@ -235,15 +234,14 @@ where
     .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
     .await?;
 
-    let http_egress = Arc::new(
-        HostHttpEgressService::new(
-            PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::default()),
-            (*secret_store).clone(),
-        )
-        .with_network_policy_store(services.network_policy_store())
-        .with_secret_injection_store(services.secret_injection_store()),
-    );
-    services = services.with_host_http_egress_service(http_egress);
+    // Safety: `with_secret_store` is called unconditionally above on the same
+    // builder chain, so `try_with_host_http_egress` cannot return a
+    // `Missing(SecretStore)` wiring report here.
+    let services = services
+        .try_with_host_http_egress(PolicyNetworkHttpEgress::new(
+            ReqwestNetworkTransport::default(),
+        ))
+        .expect("secret_store wired above guarantees host HTTP egress is buildable");
 
     Ok(services)
 }
@@ -282,7 +280,10 @@ fn secrets_crypto(
     Ok(Arc::new(SecretsCrypto::new(master_key)?))
 }
 
-// TODO(#3571): remove this adapter when HostHttpEgressService accepts Arc<dyn SecretStore>.
+// TODO(#3571): remove this adapter when the host-runtime services builder
+// accepts `Arc<dyn SecretStore>` directly. Until then, this newtype lets the
+// composition root pass a single concrete `SecretStore` impl to both the
+// substrate wiring and any future per-store adapters.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 #[derive(Clone)]
 struct SharedSecretStore {
