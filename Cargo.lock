@@ -4569,6 +4569,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures-util",
+ "ironclaw_agent_loop",
  "ironclaw_authorization",
  "ironclaw_event_projections",
  "ironclaw_events",

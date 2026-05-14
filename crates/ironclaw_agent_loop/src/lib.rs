@@ -4,5 +4,7 @@
 //! architecture is `docs/reborn/agent-loop-skeleton.md`; workstream briefs live
 //! under `docs/reborn/agent-loop-briefs/`.
 
+pub mod families;
+pub mod family;
 pub mod state;
 pub(crate) mod strategies;
