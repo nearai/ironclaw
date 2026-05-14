@@ -468,8 +468,9 @@ pub async fn start_server(
             auth_middleware,
         ));
 
-    // CORS: restrict to same-origin by default. Only localhost/127.0.0.1
-    // origins are allowed, since the gateway is a local-first service.
+    // CORS: restrict to same-origin by default. The gateway is a
+    // local-first service; only same-origin requests are permitted out
+    // of the box.
     //
     // `SocketAddr`'s `Display` handles IPv6 bracketing correctly
     // (`[::1]:8080` rather than `::1:8080`), so building the origin off the
@@ -477,6 +478,13 @@ pub async fn start_server(
     // mean the `SocketAddr` itself produced an invalid HTTP origin — a
     // startup bug, not a request-time error — so we fail the bootstrap
     // with `ChannelError::StartupFailed` rather than panic.
+    //
+    // Operators running a separate FE on a different localhost port
+    // (e.g. the trinity payroll-v2 FE on :3200, per the runbook's #24)
+    // must opt in via `T3CLAW_ALLOWED_ORIGINS` — a comma-separated
+    // list of fully-qualified origins like `http://localhost:3200`.
+    // Each entry is parsed independently; an invalid value is logged
+    // and skipped rather than aborting startup.
     let ip_origin = format!("http://{addr}").parse().map_err(|e| {
         crate::error::ChannelError::StartupFailed {
             name: "gateway".to_string(),
@@ -489,8 +497,25 @@ pub async fn start_server(
             name: "gateway".to_string(),
             reason: format!("Invalid CORS origin for localhost:{}: {e}", addr.port()),
         })?;
+    let mut allowed_origins: Vec<header::HeaderValue> = vec![ip_origin, localhost_origin];
+    if let Ok(extra) = std::env::var("T3CLAW_ALLOWED_ORIGINS") {
+        for raw in extra.split(',') {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            match trimmed.parse::<header::HeaderValue>() {
+                Ok(origin) => allowed_origins.push(origin),
+                Err(err) => tracing::warn!(
+                    %err,
+                    origin = trimmed,
+                    "T3CLAW_ALLOWED_ORIGINS entry rejected as invalid origin"
+                ),
+            }
+        }
+    }
     let cors = CorsLayer::new()
-        .allow_origin([ip_origin, localhost_origin])
+        .allow_origin(allowed_origins)
         .allow_methods([
             axum::http::Method::GET,
             axum::http::Method::POST,
