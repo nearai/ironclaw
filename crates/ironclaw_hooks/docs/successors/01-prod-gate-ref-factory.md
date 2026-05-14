@@ -100,3 +100,40 @@ installed:
 
 Medium. Most of the complexity is in the cross-crate seam to the
 approval gateway, not in the factory itself.
+
+## Codex review addenda (2026-05-14)
+
+Codex flagged two scope-shaping issues during the design review pass:
+
+### Critical: actor/session binding
+
+The original scope binds reservations to `(run, thread, tenant)` but
+not to the *resolving user/session*. In a multi-user / multi-session
+deployment that's a same-tenant approval-bypass vector: user B inside
+tenant α can resolve a gate-ref issued for user A's pending action.
+
+**Mitigation**: the gateway reservation must carry the actor
+identity (or session id) that originated the suspension, and the
+gateway's resolution check must compare the resolving actor against
+the reservation. The implementation PR will:
+
+- Bind `LoopRunContext.scope.{tenant_id, actor_id, session_id?}`
+  (or the channel-equivalent) into the reservation.
+- Add a caller-level negative test: ext-A's gate-ref issued in
+  user-A's session is rejected when user-B resolves it.
+
+### Recommendation: capability + arguments digest in reservation
+
+The original scope binds `reason` (free-form text). The gateway can
+show better context — and reject more replay vectors — if the
+reservation includes the *exact* capability id + arguments digest
+the hook intended to gate. That way:
+
+- The user-facing approval UI displays "approve calling
+  `polymarket.place_order` with args digest XXXX", not a free-form
+  string.
+- A future call that doesn't match the reserved digest cannot
+  consume the gate-ref even if it shares the same capability id.
+
+The implementation PR will include both fields in the reservation
+payload alongside `reason`.
