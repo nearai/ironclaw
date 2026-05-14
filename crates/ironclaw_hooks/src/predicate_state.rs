@@ -143,28 +143,27 @@ pub trait PredicateStateBackend: Send + Sync {
 ///
 /// State is per-instance; cross-process consistency + restart survival
 /// require a durable backend (separate PR).
-/// Per-key entry tracking both the timestamp ring and a small bounded
-/// set of recently-seen `event_id`s for replay dedup. Implementations
-/// keep at most `RECENT_EVENT_ID_CAP` ids per key; older ones age out
-/// with the timestamp ring (a re-emitted event much older than the
-/// window is treated as a fresh record, which is the right behavior
-/// for windowed predicates).
+/// Per-key entry tracking timestamps + their originating `event_id`s.
+///
+/// Each entry stores `(timestamp, event_id)`. Dedup is "does any
+/// in-window entry have this id?" — so the dedup memory is exactly
+/// the in-window entry set. This guarantees:
+///
+/// 1. **No silent dedup loss under load** (codex P1 #1): no
+///    fixed-size dedup ring that can age out an id whose timestamp
+///    is still live in the window.
+/// 2. **Empty buckets get removed** (codex P1 #2): when `entries` is
+///    trimmed to empty, the bucket is dropped from the outer map so
+///    it can't become a zombie LRU-skip.
 #[derive(Debug, Default)]
 struct InvocationBucket {
-    entries: VecDeque<Instant>,
-    recent_ids: VecDeque<PredicateEventId>,
+    entries: VecDeque<(Instant, PredicateEventId)>,
 }
 
 #[derive(Debug, Default)]
 struct ValueBucket {
-    entries: VecDeque<(Instant, Decimal)>,
-    recent_ids: VecDeque<PredicateEventId>,
+    entries: VecDeque<(Instant, Decimal, PredicateEventId)>,
 }
-
-/// Cap on recently-seen event-id memory per key. Bigger than typical
-/// in-window event volume, small enough that LRU pressure on the
-/// outer history map dominates the memory budget.
-const RECENT_EVENT_ID_CAP: usize = 256;
 
 pub struct InMemoryPredicateStateBackend {
     invocation_history: Mutex<HashMap<InvocationKey, InvocationBucket>>,
@@ -211,22 +210,35 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
         }
         let bucket = history.entry(key.clone()).or_default();
         let cutoff = now.checked_sub(window).unwrap_or(now);
-        while let Some(front) = bucket.entries.front() {
-            if *front < cutoff {
+        // Trim entries outside the window. The (timestamp, event_id) pair
+        // ages together, so a re-emitted event whose original timestamp
+        // is older than `window` is correctly treated as a fresh record.
+        while let Some((front_ts, _)) = bucket.entries.front() {
+            if *front_ts < cutoff {
                 bucket.entries.pop_front();
             } else {
                 break;
             }
         }
-        let duplicate = bucket.recent_ids.contains(event_id);
+        // Dedup against any in-window entry's event_id (codex P1 #1: no
+        // fixed-size dedup ring; the dedup memory is exactly the
+        // in-window entry set).
+        let duplicate = bucket
+            .entries
+            .iter()
+            .any(|(_, prior_id)| prior_id == event_id);
         if !duplicate {
-            bucket.entries.push_back(now);
-            bucket.recent_ids.push_back(event_id.clone());
-            while bucket.recent_ids.len() > RECENT_EVENT_ID_CAP {
-                bucket.recent_ids.pop_front();
-            }
+            bucket.entries.push_back((now, event_id.clone()));
         }
-        Ok(bucket.entries.len() as u32)
+        let count = bucket.entries.len() as u32;
+        // Drop empty buckets so they can't become zombie LRU-skip keys
+        // (codex P1 #2). A bucket gets here empty only if the trim above
+        // removed every entry AND `duplicate` was true (so we didn't add
+        // a new one).
+        if bucket.entries.is_empty() {
+            history.remove(key);
+        }
+        Ok(count)
     }
 
     fn record_value(
@@ -246,22 +258,25 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
         }
         let bucket = history.entry(key.clone()).or_default();
         let cutoff = now.checked_sub(window).unwrap_or(now);
-        while let Some((ts, _)) = bucket.entries.front() {
+        while let Some((ts, _, _)) = bucket.entries.front() {
             if *ts < cutoff {
                 bucket.entries.pop_front();
             } else {
                 break;
             }
         }
-        let duplicate = bucket.recent_ids.contains(event_id);
+        let duplicate = bucket
+            .entries
+            .iter()
+            .any(|(_, _, prior_id)| prior_id == event_id);
         if !duplicate {
-            bucket.entries.push_back((now, value));
-            bucket.recent_ids.push_back(event_id.clone());
-            while bucket.recent_ids.len() > RECENT_EVENT_ID_CAP {
-                bucket.recent_ids.pop_front();
-            }
+            bucket.entries.push_back((now, value, event_id.clone()));
         }
-        Ok(bucket.entries.iter().map(|(_, v)| *v).sum())
+        let sum: Decimal = bucket.entries.iter().map(|(_, v, _)| *v).sum();
+        if bucket.entries.is_empty() {
+            history.remove(key);
+        }
+        Ok(sum)
     }
 
     fn evictions_observed(&self) -> u64 {
@@ -271,16 +286,30 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
 
 /// Evict the entry with the earliest "front" timestamp — that is, the key
 /// whose oldest retained sample is older than any other key's oldest
-/// sample. Conservative LRU approximation.
+/// sample.
+///
+/// Empty buckets (entries deque == 0) are the *first* victims —
+/// historically they were skipped by `filter_map`, which let zombie
+/// keys accumulate past `MAX_HISTORY_KEYS` (codex P1 #2). The record
+/// paths now drop empty buckets eagerly, so this is defense-in-depth:
+/// if a concurrent code path leaves an empty bucket, the LRU still
+/// drains it.
 fn evict_lru_invocation(
     history: &mut HashMap<InvocationKey, InvocationBucket>,
     evictions: &AtomicU64,
 ) {
-    let victim = history
+    // First: any empty bucket?
+    let empty_victim = history
         .iter()
-        .filter_map(|(k, v)| v.entries.front().map(|ts| (k.clone(), *ts)))
-        .min_by_key(|(_, ts)| *ts)
-        .map(|(k, _)| k);
+        .find(|(_, v)| v.entries.is_empty())
+        .map(|(k, _)| k.clone());
+    let victim = empty_victim.or_else(|| {
+        history
+            .iter()
+            .filter_map(|(k, v)| v.entries.front().map(|(ts, _)| (k.clone(), *ts)))
+            .min_by_key(|(_, ts)| *ts)
+            .map(|(k, _)| k)
+    });
     if let Some(k) = victim {
         history.remove(&k);
         evictions.fetch_add(1, AtomicOrdering::Relaxed);
@@ -288,11 +317,17 @@ fn evict_lru_invocation(
 }
 
 fn evict_lru_value(history: &mut HashMap<ValueKey, ValueBucket>, evictions: &AtomicU64) {
-    let victim = history
+    let empty_victim = history
         .iter()
-        .filter_map(|(k, v)| v.entries.front().map(|(ts, _)| (k.clone(), *ts)))
-        .min_by_key(|(_, ts)| *ts)
-        .map(|(k, _)| k);
+        .find(|(_, v)| v.entries.is_empty())
+        .map(|(k, _)| k.clone());
+    let victim = empty_victim.or_else(|| {
+        history
+            .iter()
+            .filter_map(|(k, v)| v.entries.front().map(|(ts, _, _)| (k.clone(), *ts)))
+            .min_by_key(|(_, ts)| *ts)
+            .map(|(k, _)| k)
+    });
     if let Some(k) = victim {
         history.remove(&k);
         evictions.fetch_add(1, AtomicOrdering::Relaxed);
@@ -514,5 +549,110 @@ mod tests {
             "duplicate event-A must not double-count the value"
         );
         assert_eq!(sum_3, Decimal::from(125));
+    }
+
+    /// codex P1 #1 regression: dedup memory must be tied to the window,
+    /// not a fixed-size ring. Under high-throughput keys (>256 distinct
+    /// in-window events), an event re-emitted from far back in the
+    /// window was previously silently re-counted because its event-id
+    /// had aged out of the `recent_ids` ring. Now dedup checks against
+    /// every in-window entry, so this can't happen.
+    #[test]
+    fn dedup_memory_covers_full_window_under_high_throughput() {
+        let backend = InMemoryPredicateStateBackend::new();
+        let key = InvocationKey {
+            hook_id: hook_id(),
+            tenant_id: tenant(),
+            capability: "cap.busy".to_string(),
+        };
+        let t0 = Instant::now();
+        let window = Duration::from_secs(3600);
+        // Push 512 distinct events into the bucket within the window.
+        // The old implementation capped the dedup ring at 256, so
+        // event-0's id had aged out — a replay would have silently
+        // counted again. With the new design (dedup vs in-window
+        // entries), every replay is a no-op.
+        for i in 0..512u32 {
+            let _ = backend
+                .record_invocation(
+                    &key,
+                    &ev(&format!("event-{i}")),
+                    t0 + Duration::from_millis(i as u64),
+                    window,
+                )
+                .expect("ok");
+        }
+        let count_after_inserts = backend
+            .record_invocation(
+                &key,
+                &ev("event-fresh"),
+                t0 + Duration::from_secs(1),
+                window,
+            )
+            .expect("ok");
+        assert_eq!(count_after_inserts, 513);
+
+        // Replay the FIRST event id — should be a no-op because
+        // event-0's timestamp is still in the window.
+        let count_after_replay = backend
+            .record_invocation(&key, &ev("event-0"), t0 + Duration::from_secs(2), window)
+            .expect("ok");
+        assert_eq!(
+            count_after_replay, 513,
+            "replay of an event still in the window must be a no-op even after >256 distinct events"
+        );
+    }
+
+    /// codex P1 #2: in the prior design, `recent_ids` was a separate
+    /// ring from `entries`. A duplicate-replay after the window expired
+    /// would trim `entries` to empty, then the duplicate check would
+    /// hit `recent_ids` (still populated) and skip the new entry —
+    /// leaving the bucket empty AND retained, where the LRU search
+    /// filtered it out as a zombie. The new design dedupes against
+    /// `entries` directly, so once `entries` is empty there are no
+    /// dedup hits and the call adds a fresh entry. The unreachable-by-
+    /// record-flow empty-bucket case is still defended at the LRU
+    /// level (see `lru_evicts_empty_buckets_first`).
+    ///
+    /// LRU defense-in-depth: even if some path leaves an empty bucket,
+    /// the LRU eviction must prefer it as the first victim instead of
+    /// skipping it (which would let zombies accumulate).
+    #[test]
+    fn lru_evicts_empty_buckets_first() {
+        let backend = InMemoryPredicateStateBackend::new();
+        let empty_key = InvocationKey {
+            hook_id: hook_id(),
+            tenant_id: tenant(),
+            capability: "cap.empty".to_string(),
+        };
+        let live_key = InvocationKey {
+            hook_id: hook_id(),
+            tenant_id: tenant(),
+            capability: "cap.live".to_string(),
+        };
+        // Manually craft an empty bucket alongside a live one to
+        // simulate the bug condition.
+        {
+            let mut map = backend.invocation_history.lock().expect("ok");
+            map.insert(empty_key.clone(), InvocationBucket::default());
+            let mut live = InvocationBucket::default();
+            live.entries.push_back((Instant::now(), ev("live-evt")));
+            map.insert(live_key.clone(), live);
+        }
+        // Force an LRU pass.
+        {
+            let mut map = backend.invocation_history.lock().expect("ok");
+            evict_lru_invocation(&mut map, &backend.evictions);
+        }
+        let map = backend.invocation_history.lock().expect("ok");
+        assert!(
+            !map.contains_key(&empty_key),
+            "empty bucket should be the first LRU victim"
+        );
+        assert!(
+            map.contains_key(&live_key),
+            "live bucket should be retained"
+        );
+        assert_eq!(backend.evictions_observed(), 1);
     }
 }
