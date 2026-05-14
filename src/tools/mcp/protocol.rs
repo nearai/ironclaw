@@ -279,14 +279,14 @@ pub struct ServerInfo {
 
 /// Result of listing tools.
 ///
-/// MCP 2024-11-05 defines a single `tools` field on this result. We close the
-/// shape so a server returning a paginated `nextCursor` (or another evolution
-/// of the spec) fails loud at deserialise time rather than silently dropping
-/// data the runtime is meant to act on.
+/// `nextCursor` is the MCP 2024-11-05 pagination cursor; we receive it but do
+/// not currently follow pages — page 1 is sufficient for our callers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListToolsResult {
     pub tools: Vec<McpTool>,
+    #[serde(default, rename = "nextCursor", skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 /// Result of calling a tool.

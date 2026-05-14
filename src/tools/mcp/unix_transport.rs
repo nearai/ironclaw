@@ -85,9 +85,11 @@ impl UnixMcpTransport {
     /// the reader task. Any pending waiters are drained so they wake
     /// immediately with an error rather than hanging.
     async fn reconnect(&self) -> Result<(), ToolError> {
-        // Serialise concurrent reconnect attempts — only the first caller
-        // does the real work; subsequent callers block here and then return
-        // once the first reconnect has completed.
+        // Serialise concurrent reconnect attempts. Only the first caller does
+        // the real work. Subsequent callers wait on the lock, then find their
+        // pending oneshots already cleared by `pending.lock().await.clear()`
+        // below and return an error to their caller. Operators should expect a
+        // burst of errors after a sidecar restart, not transparent recovery.
         let _guard = self.reconnect_lock.lock().await;
 
         tracing::debug!(
