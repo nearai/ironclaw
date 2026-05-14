@@ -176,6 +176,15 @@ async fn dispatch_payload(
 ) -> Result<DispatchedAction, ProductWorkflowError> {
     match envelope.payload() {
         ProductInboundPayload::UserMessage(payload) => {
+            if let Some(outcome) = inbound_turn_service
+                .replay_accepted_user_message(envelope)
+                .await?
+            {
+                let ack = outcome.to_ack();
+                let dispatch_kind = dispatch_kind_from_ack(&ack, envelope.payload())?;
+                return Ok(DispatchedAction { ack, dispatch_kind });
+            }
+
             let policy_request = BeforeInboundPolicyRequest::new(envelope, payload);
             let policy_outcome = before_inbound_policy
                 .check_user_message(policy_request)

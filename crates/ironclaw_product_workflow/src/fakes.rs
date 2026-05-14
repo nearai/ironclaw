@@ -344,8 +344,10 @@ pub struct FakeInboundTurnService {
 #[derive(Default)]
 struct FakeInboundTurnState {
     attempts: usize,
+    replay_attempts: usize,
     accepted: Vec<ProductInboundEnvelope>,
     fail_with: Option<ProductWorkflowError>,
+    programmed_replay: Option<InboundTurnOutcome>,
     programmed_outcome: Option<InboundTurnOutcome>,
 }
 
@@ -365,6 +367,15 @@ impl FakeInboundTurnService {
         state.programmed_outcome = Some(outcome);
     }
 
+    /// Program an already-staged accepted-message replay outcome.
+    pub fn program_replay_outcome(&self, outcome: InboundTurnOutcome) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake inbound turn state lock poisoned"); // safety: test-support fake
+        state.programmed_replay = Some(outcome);
+    }
+
     /// Force all submissions to fail.
     pub fn force_failure(&self, error: ProductWorkflowError) {
         let mut state = self
@@ -381,6 +392,15 @@ impl FakeInboundTurnService {
             .lock()
             .expect("fake inbound turn state lock poisoned"); // safety: test-support fake
         state.attempts
+    }
+
+    /// How many replay probes reached this fake.
+    pub fn replay_attempt_count(&self) -> usize {
+        let state = self
+            .state
+            .lock()
+            .expect("fake inbound turn state lock poisoned"); // safety: test-support fake
+        state.replay_attempts
     }
 
     /// Get all envelopes that were accepted.
@@ -406,6 +426,18 @@ impl Default for FakeInboundTurnService {
 
 #[async_trait]
 impl InboundTurnService for FakeInboundTurnService {
+    async fn replay_accepted_user_message(
+        &self,
+        _envelope: &ProductInboundEnvelope,
+    ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake inbound turn state lock poisoned"); // safety: test-support fake
+        state.replay_attempts += 1;
+        Ok(state.programmed_replay.clone())
+    }
+
     async fn accept_user_message(
         &self,
         envelope: &ProductInboundEnvelope,

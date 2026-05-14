@@ -386,6 +386,57 @@ async fn before_inbound_policy_rewrite_replays_rewritten_outcome_on_duplicate() 
 }
 
 #[tokio::test]
+async fn before_inbound_policy_does_not_block_staged_deferred_retry() {
+    let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
+    policy.allow();
+    let accepted_message_ref = AcceptedMessageRef::new("msg:policy-busy").expect("valid msg ref");
+    let busy_run = TurnRunId::new();
+    inbound.program_outcome(InboundTurnOutcome::DeferredBusy {
+        accepted_message_ref: accepted_message_ref.clone(),
+        active_run_id: busy_run,
+        binding: fake_binding(),
+    });
+    let envelope = sample_envelope("policy-busy-retry");
+
+    let first = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect("busy ack");
+    assert!(matches!(first, ProductInboundAck::DeferredBusy { .. }));
+    assert_eq!(policy.request_count(), 1);
+    assert_eq!(inbound.attempt_count(), 1);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+
+    let submitted_run_id = TurnRunId::new();
+    inbound.program_replay_outcome(InboundTurnOutcome::Submitted {
+        accepted_message_ref,
+        submitted_run_id,
+        binding: fake_binding(),
+    });
+    policy.reject(ProductRejection::permanent(
+        ProductRejectionKind::PolicyDenied,
+        "policy changed after message was staged",
+    ));
+
+    let second = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect("staged message replay should bypass policy");
+    assert!(matches!(
+        second,
+        ProductInboundAck::Accepted {
+            submitted_run_id: run_id,
+            ..
+        } if run_id == submitted_run_id
+    ));
+    assert_eq!(policy.request_count(), 1);
+    assert_eq!(inbound.replay_attempt_count(), 2);
+    assert_eq!(inbound.attempt_count(), 1);
+    assert_eq!(ledger.settled_count(), 1);
+}
+
+#[tokio::test]
 async fn before_inbound_policy_transient_failure_releases_fingerprint() {
     let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
     policy.force_failure(ProductWorkflowError::Transient {

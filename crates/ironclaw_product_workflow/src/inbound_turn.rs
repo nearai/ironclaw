@@ -73,6 +73,17 @@ impl InboundTurnOutcome {
 /// session thread service, and turn submission to the coordinator.
 #[async_trait]
 pub trait InboundTurnService: Send + Sync {
+    /// Replay an already-accepted inbound message, if one exists.
+    ///
+    /// The product workflow calls this before before-inbound policy so retries
+    /// of staged messages are not blocked by later policy changes.
+    async fn replay_accepted_user_message(
+        &self,
+        _envelope: &ProductInboundEnvelope,
+    ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError> {
+        Ok(None)
+    }
+
     /// Accept a user message envelope: resolve binding, stage message, submit turn.
     async fn accept_user_message(
         &self,
@@ -110,6 +121,38 @@ where
     T: SessionThreadService,
     C: TurnCoordinator,
 {
+    async fn replay_accepted_user_message(
+        &self,
+        envelope: &ProductInboundEnvelope,
+    ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError> {
+        let source_binding_id = product_source_binding_id(envelope);
+        let submit_idempotency_key = submit_idempotency_key(envelope);
+
+        let Some(replay) = self
+            .thread_service
+            .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
+                source_binding_id,
+                external_event_id: envelope.external_event_id().as_str().to_string(),
+            })
+            .await
+            .map_err(|e| ProductWorkflowError::Transient {
+                reason: format!("failed to replay accepted inbound message: {e}"),
+            })?
+        else {
+            return Ok(None);
+        };
+
+        submit_or_replay_accepted_message(
+            &self.thread_service,
+            &self.turn_coordinator,
+            replay,
+            submit_idempotency_key,
+            envelope.received_at(),
+        )
+        .await
+        .map(Some)
+    }
+
     async fn accept_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
@@ -122,25 +165,8 @@ where
         let source_binding_id = product_source_binding_id(envelope);
         let submit_idempotency_key = submit_idempotency_key(envelope);
 
-        if let Some(replay) = self
-            .thread_service
-            .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
-                source_binding_id: source_binding_id.clone(),
-                external_event_id: envelope.external_event_id().as_str().to_string(),
-            })
-            .await
-            .map_err(|e| ProductWorkflowError::Transient {
-                reason: format!("failed to replay accepted inbound message: {e}"),
-            })?
-        {
-            return submit_or_replay_accepted_message(
-                &self.thread_service,
-                &self.turn_coordinator,
-                replay,
-                submit_idempotency_key.clone(),
-                envelope.received_at(),
-            )
-            .await;
+        if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
+            return Ok(outcome);
         }
 
         let binding = self
