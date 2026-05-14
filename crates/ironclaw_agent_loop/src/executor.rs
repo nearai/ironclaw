@@ -341,9 +341,39 @@ impl CanonicalAgentLoopExecutor {
             .await?
             .state;
 
+        let mut signatures = HashSet::new();
+        let mut visible_calls = Vec::new();
+        for call in calls {
+            if capability_is_visible(surface, &call) {
+                visible_calls.push(call);
+                continue;
+            }
+
+            push_call_signature_once(&mut state, &mut signatures, &call)?;
+            state
+                .recent_failure_kinds
+                .push(LoopFailureKind::PolicyDenied);
+            let summary = CapabilityErrorSummary {
+                class: CapabilityErrorClass::PolicyDenied,
+                safe_summary: "capability is not visible in the filtered surface".to_string(),
+                diagnostic_ref: None,
+            };
+            match self
+                .handle_capability_error(planner, host, state, call, summary)
+                .await?
+            {
+                BatchStep::Continue(next) => state = next,
+                BatchStep::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+            }
+        }
+
+        if visible_calls.is_empty() {
+            return Ok(BatchStep::Continue(state));
+        }
+
         let batch = host
             .invoke_capability_batch(CapabilityBatchInvocation {
-                invocations: calls
+                invocations: visible_calls
                     .iter()
                     .cloned()
                     .map(capability_invocation_from_candidate)
@@ -355,16 +385,15 @@ impl CanonicalAgentLoopExecutor {
                 stage: HostStage::Capability,
             })?;
 
-        if batch.outcomes.len() > calls.len()
-            || (!batch.stopped_on_suspension && batch.outcomes.len() != calls.len())
+        if batch.outcomes.len() > visible_calls.len()
+            || (!batch.stopped_on_suspension && batch.outcomes.len() != visible_calls.len())
         {
             return Err(AgentLoopExecutorError::PlannerContract {
                 detail: "capability batch outcome count does not match invocations",
             });
         }
 
-        let mut signatures = HashSet::new();
-        for (call, outcome) in calls.into_iter().zip(batch.outcomes) {
+        for (call, outcome) in visible_calls.into_iter().zip(batch.outcomes) {
             push_call_signature_once(&mut state, &mut signatures, &call)?;
             match self
                 .handle_capability_outcome(planner, host, state, call, outcome)
@@ -645,6 +674,10 @@ impl CanonicalAgentLoopExecutor {
         mut state: LoopExecutionState,
         kind: CheckpointKind,
     ) -> Result<CheckpointWrite, AgentLoopExecutorError> {
+        state.last_checkpoint = Some(crate::state::CheckpointMarker {
+            kind,
+            iteration_at_checkpoint: state.iteration,
+        });
         let payload = serde_json::to_vec(&state)
             .map_err(|_| AgentLoopExecutorError::CheckpointFailed { stage: kind })?;
         let host_kind = checkpoint_kind_to_host(kind);
@@ -663,10 +696,6 @@ impl CanonicalAgentLoopExecutor {
             })
             .await
             .map_err(|_| AgentLoopExecutorError::CheckpointFailed { stage: kind })?;
-        state.last_checkpoint = Some(crate::state::CheckpointMarker {
-            kind,
-            iteration_at_checkpoint: state.iteration,
-        });
         Ok(CheckpointWrite {
             state,
             checkpoint_id,
@@ -884,6 +913,16 @@ fn capability_summary(
     }
 }
 
+fn capability_is_visible(
+    surface: &VisibleCapabilitySurface,
+    call: &CapabilityCallCandidate,
+) -> bool {
+    surface
+        .descriptors
+        .iter()
+        .any(|descriptor| descriptor.capability_id == call.capability_id)
+}
+
 fn apply_capability_filter(surface: &mut VisibleCapabilitySurface, filter: &CapabilityFilter) {
     match filter {
         CapabilityFilter::All => {}
@@ -961,9 +1000,14 @@ mod tests {
             LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort, ModelProfileId,
             ModelStreamChunk, RedactedRunProfileProvenance, ResolvedRunProfile,
             ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
-            RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
+            RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest,
+            SteeringPolicy,
         },
     };
+
+    use crate::default_planner::DefaultPlanner;
+    use crate::family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId};
+    use crate::strategies::CapabilityStrategy;
 
     use super::*;
 
@@ -977,6 +1021,9 @@ mod tests {
         batch_outcomes: Arc<Mutex<VecDeque<ironclaw_turns::run_profile::CapabilityBatchOutcome>>>,
         single_outcomes: Arc<Mutex<VecDeque<CapabilityOutcome>>>,
         checkpoints: Arc<Mutex<Vec<LoopCheckpointKind>>>,
+        batch_invocations: Arc<Mutex<Vec<CapabilityBatchInvocation>>>,
+        single_invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+        staged_payloads: Arc<Mutex<Vec<StageCheckpointPayloadRequest>>>,
     }
 
     impl MockHost {
@@ -987,6 +1034,9 @@ mod tests {
                 batch_outcomes: Arc::new(Mutex::new(VecDeque::new())),
                 single_outcomes: Arc::new(Mutex::new(VecDeque::new())),
                 checkpoints: Arc::new(Mutex::new(Vec::new())),
+                batch_invocations: Arc::new(Mutex::new(Vec::new())),
+                single_invocations: Arc::new(Mutex::new(Vec::new())),
+                staged_payloads: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
@@ -1005,6 +1055,29 @@ mod tests {
 
         fn checkpoint_kinds(&self) -> Vec<LoopCheckpointKind> {
             self.checkpoints.lock().expect("lock").clone()
+        }
+
+        fn batch_invocations(&self) -> Vec<CapabilityBatchInvocation> {
+            self.batch_invocations.lock().expect("lock").clone()
+        }
+
+        fn single_invocations(&self) -> Vec<CapabilityInvocation> {
+            self.single_invocations.lock().expect("lock").clone()
+        }
+
+        fn staged_payloads(&self) -> Vec<StageCheckpointPayloadRequest> {
+            self.staged_payloads.lock().expect("lock").clone()
+        }
+    }
+
+    struct FixedCapabilityStrategy {
+        filter: CapabilityFilter,
+    }
+
+    #[async_trait]
+    impl CapabilityStrategy for FixedCapabilityStrategy {
+        async fn filter(&self, _state: &LoopExecutionState) -> CapabilityFilter {
+            self.filter.clone()
         }
     }
 
@@ -1105,8 +1178,9 @@ mod tests {
 
         async fn invoke_capability(
             &self,
-            _request: CapabilityInvocation,
+            request: CapabilityInvocation,
         ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            self.single_invocations.lock().expect("lock").push(request);
             self.single_outcomes
                 .lock()
                 .expect("lock")
@@ -1121,9 +1195,10 @@ mod tests {
 
         async fn invoke_capability_batch(
             &self,
-            _request: CapabilityBatchInvocation,
+            request: CapabilityBatchInvocation,
         ) -> Result<ironclaw_turns::run_profile::CapabilityBatchOutcome, AgentLoopHostError>
         {
+            self.batch_invocations.lock().expect("lock").push(request);
             self.batch_outcomes
                 .lock()
                 .expect("lock")
@@ -1159,8 +1234,9 @@ mod tests {
 
         async fn stage_checkpoint_payload(
             &self,
-            _request: StageCheckpointPayloadRequest,
+            request: StageCheckpointPayloadRequest,
         ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
+            self.staged_payloads.lock().expect("lock").push(request);
             LoopCheckpointStateRef::for_run(&self.context, "state")
                 .map_err(|error| AgentLoopHostError::new(AgentLoopHostErrorKind::Internal, error))
         }
@@ -1262,6 +1338,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn strategy_filtered_capability_denial_does_not_invoke_host_and_records_policy_denied() {
+        let family = family_with_capability_filter(CapabilityFilter::Deny(vec![capability_id()]));
+        let host = MockHost::new(vec![calls_response(), reply_response()]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&family, &host, state)
+            .await
+            .expect("execute");
+
+        assert!(matches!(exit, LoopExit::Completed(_)));
+        assert!(host.batch_invocations().is_empty());
+        assert!(host.single_invocations().is_empty());
+
+        let staged_states = host
+            .staged_payloads()
+            .into_iter()
+            .map(|request| {
+                LoopExecutionState::from_checkpoint_payload(
+                    &request.payload,
+                    checkpoint_kind_from_host(request.kind),
+                )
+                .expect("checkpoint payload")
+            })
+            .collect::<Vec<_>>();
+        assert!(staged_states.iter().any(|state| {
+            state
+                .recent_failure_kinds
+                .iter()
+                .any(|kind| *kind == LoopFailureKind::PolicyDenied)
+        }));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_payload_rehydrates_with_written_marker() {
+        let host = MockHost::new(vec![reply_response()]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        assert!(matches!(exit, LoopExit::Completed(_)));
+        let staged_payloads = host.staged_payloads();
+        let final_payload = staged_payloads
+            .iter()
+            .rev()
+            .find(|request| request.kind == LoopCheckpointKind::Final)
+            .expect("final checkpoint payload");
+        let rehydrated = LoopExecutionState::from_checkpoint_payload(
+            &final_payload.payload,
+            CheckpointKind::Final,
+        )
+        .expect("checkpoint payload");
+
+        assert_eq!(
+            rehydrated.last_checkpoint,
+            Some(crate::state::CheckpointMarker {
+                kind: CheckpointKind::Final,
+                iteration_at_checkpoint: rehydrated.iteration,
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn retry_uses_single_call_invocation() {
         let host = MockHost::new(vec![calls_response()])
             .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
@@ -1321,6 +1465,24 @@ mod tests {
 
     fn surface_version() -> CapabilitySurfaceVersion {
         CapabilitySurfaceVersion::new("surface:v1").expect("valid")
+    }
+
+    fn family_with_capability_filter(filter: CapabilityFilter) -> LoopFamily {
+        let planner = DefaultPlanner::compose_default()
+            .with_capability(Arc::new(FixedCapabilityStrategy { filter }));
+        let id = LoopFamilyId::new("executor-filter-test");
+        let version =
+            ComponentIdentity::from_static("executor-filter-test", ComponentDigest([1; 32]));
+        LoopFamily::new(id, version, Arc::new(planner))
+    }
+
+    fn checkpoint_kind_from_host(kind: LoopCheckpointKind) -> CheckpointKind {
+        match kind {
+            LoopCheckpointKind::BeforeModel => CheckpointKind::BeforeModel,
+            LoopCheckpointKind::BeforeSideEffect => CheckpointKind::BeforeSideEffect,
+            LoopCheckpointKind::BeforeBlock => CheckpointKind::BeforeBlock,
+            LoopCheckpointKind::Final => CheckpointKind::Final,
+        }
     }
 
     fn test_run_context() -> LoopRunContext {
