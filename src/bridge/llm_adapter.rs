@@ -73,6 +73,11 @@ pub struct LlmBridgeAdapter {
     provider: Arc<dyn LlmProvider>,
     /// Optional cheaper provider for sub-calls (depth > 0).
     cheap_provider: Option<Arc<dyn LlmProvider>>,
+    /// Optional CostGuard used to record each completion's spend so the
+    /// gateway's `/api/gateway/status` (daily_cost, model_usage) reflects
+    /// engine v2 activity. V1's dispatcher records here after every LLM
+    /// call; v2 must do the same or the dashboard reads 0.
+    cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
 }
 
 impl LlmBridgeAdapter {
@@ -83,7 +88,13 @@ impl LlmBridgeAdapter {
         Self {
             provider,
             cheap_provider,
+            cost_guard: None,
         }
+    }
+
+    pub fn with_cost_guard(mut self, cost_guard: Arc<crate::agent::cost_guard::CostGuard>) -> Self {
+        self.cost_guard = Some(cost_guard);
+        self
     }
 
     fn provider_for_depth(&self, depth: u32) -> &Arc<dyn LlmProvider> {
@@ -92,6 +103,37 @@ impl LlmBridgeAdapter {
         } else {
             &self.provider
         }
+    }
+
+    /// Forward this completion's token usage to the host's `CostGuard` so
+    /// `daily_spend()` / `model_usage()` stay current. Mirrors the v1
+    /// dispatcher's post-call recording in `src/agent/dispatcher.rs`. A
+    /// no-op when no `CostGuard` was wired in (tests, bare engine v2).
+    async fn record_cost(
+        &self,
+        provider: &Arc<dyn LlmProvider>,
+        config: &LlmCallConfig,
+        input_tokens: u32,
+        output_tokens: u32,
+        cache_read_input_tokens: u32,
+        cache_creation_input_tokens: u32,
+    ) {
+        let Some(cost_guard) = self.cost_guard.as_ref() else {
+            return;
+        };
+        let model_name = provider.effective_model_name(config.model.as_deref());
+        cost_guard
+            .record_llm_call(
+                &model_name,
+                input_tokens,
+                output_tokens,
+                cache_read_input_tokens,
+                cache_creation_input_tokens,
+                provider.cache_read_discount(),
+                provider.cache_write_multiplier(),
+                Some(provider.cost_per_token()),
+            )
+            .await;
     }
 }
 
@@ -146,6 +188,16 @@ impl LlmBackend for LlmBridgeAdapter {
             // Check for code blocks in the response (CodeAct/RLM pattern)
             // after stripping provider-flattened internal markers from visible text.
             let llm_response = text_response_from_cleaned_text(cleaned_text);
+
+            self.record_cost(
+                provider,
+                config,
+                response.input_tokens,
+                response.output_tokens,
+                response.cache_read_input_tokens,
+                response.cache_creation_input_tokens,
+            )
+            .await;
 
             return Ok(LlmOutput {
                 response: llm_response,
@@ -241,6 +293,16 @@ impl LlmBackend for LlmBridgeAdapter {
                 text_response_from_cleaned_text(cleaned_text)
             }
         };
+
+        self.record_cost(
+            provider,
+            config,
+            response.input_tokens,
+            response.output_tokens,
+            response.cache_read_input_tokens,
+            response.cache_creation_input_tokens,
+        )
+        .await;
 
         Ok(LlmOutput {
             response: llm_response,
@@ -1740,6 +1802,54 @@ And also check the token price:\n\
             "expected cost_usd ≈ {EXPECTED_COST_USD}, got {}",
             output.usage.cost_usd
         );
+    }
+
+    #[tokio::test]
+    async fn complete_records_to_cost_guard_when_wired() {
+        // Regression: engine v2 used to skip `CostGuard::record_llm_call`
+        // entirely. `/api/gateway/status` reads `daily_spend()` and
+        // `model_usage()` from the same guard, so the debug panel's
+        // "今日费用" and "各模型用量" cards stayed empty after every LLM
+        // call. The bridge adapter now forwards each completion's usage
+        // to the host's CostGuard via `.with_cost_guard(...)`.
+        use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+
+        let cost_guard = Arc::new(CostGuard::new(CostGuardConfig::default()));
+        let provider: Arc<dyn LlmProvider> = Arc::new(PricedProvider);
+        let adapter =
+            LlmBridgeAdapter::new(provider, None).with_cost_guard(Arc::clone(&cost_guard));
+
+        // Drive both code paths — with-tools and no-tools — through the
+        // adapter; both must record.
+        adapter
+            .complete(
+                &[ThreadMessage::user("hi")],
+                &[test_action("noop")],
+                &LlmCallConfig::default(),
+            )
+            .await
+            .unwrap();
+        adapter
+            .complete(&[ThreadMessage::user("hi")], &[], &LlmCallConfig::default())
+            .await
+            .unwrap();
+
+        let daily = cost_guard.daily_spend().await;
+        let expected = rust_decimal_macros::dec!(0.0105) * rust_decimal_macros::dec!(2);
+        assert_eq!(
+            daily, expected,
+            "CostGuard.daily_spend() must reflect both adapter completions; got {daily}"
+        );
+
+        let model_usage = cost_guard.model_usage().await;
+        let entry = model_usage.get("priced-mock").unwrap_or_else(|| {
+            panic!(
+                "CostGuard.model_usage() must contain the provider's model name; got keys {:?}",
+                model_usage.keys().collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(entry.input_tokens, 2000);
+        assert_eq!(entry.output_tokens, 1000);
     }
 
     #[tokio::test]

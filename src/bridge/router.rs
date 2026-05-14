@@ -1600,10 +1600,10 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
 
     debug!("engine v2: initializing engine state");
 
-    let llm_adapter = Arc::new(LlmBridgeAdapter::new(
-        agent.llm().clone(),
-        Some(agent.cheap_llm().clone()),
-    ));
+    let llm_adapter = Arc::new(
+        LlmBridgeAdapter::new(agent.llm().clone(), Some(agent.cheap_llm().clone()))
+            .with_cost_guard(Arc::clone(&agent.deps.cost_guard)),
+    );
 
     let effect_adapter = Arc::new(
         EffectBridgeAdapter::new(
@@ -6166,13 +6166,27 @@ fn thread_event_to_app_events(
                 },
             ]
         }
-        EventKind::StepCompleted { tokens, .. } => vec![AppEvent::Status {
-            message: format!(
-                "Step complete — {} in / {} out tokens",
-                tokens.input_tokens, tokens.output_tokens
-            ),
-            thread_id: Some(thread_id.into()),
-        }],
+        EventKind::StepCompleted { tokens, .. } => vec![
+            AppEvent::Status {
+                message: format!(
+                    "Step complete — {} in / {} out tokens",
+                    tokens.input_tokens, tokens.output_tokens
+                ),
+                thread_id: Some(thread_id.into()),
+            },
+            // Mirror v1's `StatusUpdate::TurnCost` so the debug panel's
+            // turn / token / session-cost cards populate. The frontend
+            // (`debug-panel.js` `on('turn_cost', ...)`) is the only
+            // listener that increments those counters; without this
+            // emission, engine v2 sessions show 0 across the board
+            // while still rendering tool counts.
+            AppEvent::TurnCost {
+                input_tokens: tokens.input_tokens,
+                output_tokens: tokens.output_tokens,
+                cost_usd: format!("${:.4}", tokens.cost_usd),
+                thread_id: Some(thread_id.into()),
+            },
+        ],
         EventKind::MessageAdded {
             role,
             content_preview,
@@ -8906,6 +8920,49 @@ mod tests {
                 && duration_ms == &Some(17)
                 && thread_id.as_deref() == Some("thread-123")
         ));
+    }
+
+    #[test]
+    fn thread_event_to_app_events_projects_turn_cost_from_step_completed() {
+        // Regression: engine v2 used to project `EventKind::StepCompleted`
+        // only to a free-form `AppEvent::Status` text line, dropping the
+        // structured token + cost data. The debug panel's turn /
+        // input-token / output-token / session-cost cards (driven by the
+        // frontend's `on('turn_cost', ...)` listener) stayed at 0 across
+        // an entire session even though `tokens` was populated on every
+        // step.
+        let event = ironclaw_engine::ThreadEvent::new(
+            ironclaw_engine::ThreadId::new(),
+            ironclaw_engine::EventKind::StepCompleted {
+                step_id: ironclaw_engine::StepId::new(),
+                tokens: ironclaw_engine::TokenUsage {
+                    input_tokens: 1234,
+                    output_tokens: 567,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                    cost_usd: 0.0105,
+                },
+            },
+        );
+
+        let app_events = thread_event_to_app_events(&event, "thread-step");
+
+        let has_turn_cost = app_events.iter().any(|e| {
+            matches!(
+                e,
+                AppEvent::TurnCost {
+                    input_tokens: 1234,
+                    output_tokens: 567,
+                    cost_usd,
+                    thread_id,
+                } if cost_usd == "$0.0105" && thread_id.as_deref() == Some("thread-step")
+            )
+        });
+        assert!(
+            has_turn_cost,
+            "StepCompleted must project an AppEvent::TurnCost with tokens + cost so the \
+             debug panel's stats cards populate; got {app_events:?}"
+        );
     }
 
     #[test]

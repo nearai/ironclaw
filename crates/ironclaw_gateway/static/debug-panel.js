@@ -354,7 +354,15 @@
       sessionStats.turns++;
       sessionStats.inputTokens += data.input_tokens || 0;
       sessionStats.outputTokens += data.output_tokens || 0;
-      var costVal = parseFloat(data.cost_usd);
+      // The backend ships `cost_usd` as a money-formatted string (e.g.
+      // "$0.0105"). The TUI consumer depends on the `$` prefix for its
+      // own rendering, so the wire format keeps it — strip the prefix
+      // here before `parseFloat`, otherwise the call returns NaN and the
+      // session-cost card never accumulates.
+      var rawCost = typeof data.cost_usd === 'string'
+        ? data.cost_usd.replace(/^\$/, '')
+        : data.cost_usd;
+      var costVal = parseFloat(rawCost);
       if (!isNaN(costVal)) sessionStats.cost += costVal;
 
       var costStr = (!isNaN(costVal) && costVal > 0) ? '$' + costVal.toFixed(4) : '';
