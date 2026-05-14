@@ -468,6 +468,7 @@ mod tests {
             phase: HookPhase::Policy,
             priority: HookPriority::DEFAULT,
             point: HookPointSpec::BeforePrompt,
+            event_kind_filter: None,
             owning_extension: None,
             scope: crate::registry::HookBindingScope::Global,
             poisoned: false,

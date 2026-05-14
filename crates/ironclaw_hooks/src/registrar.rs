@@ -370,6 +370,7 @@ fn manifest_kind_to_point(kind: HookManifestKind) -> HookPointSpec {
         HookManifestKind::AfterModel => HookPointSpec::AfterModel,
         HookManifestKind::AfterCapability => HookPointSpec::AfterCapability,
         HookManifestKind::AfterCheckpoint => HookPointSpec::AfterCheckpoint,
+        HookManifestKind::EventTriggered => HookPointSpec::EventTriggered,
     }
 }
 

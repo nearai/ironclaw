@@ -22,7 +22,10 @@ use crate::error::SanitizedReason;
 use crate::kinds::gate::{BeforeCapabilityHookDecision, GateDecisionInner};
 use crate::kinds::mutator::{HookPatch, PatchOrdinalHint};
 use crate::kinds::observer::{NoteCategory, ObserverFact};
-use crate::points::{BeforeCapabilityHookContext, BeforePromptHookContext, ObserverHookContext};
+use crate::points::{
+    BeforeCapabilityHookContext, BeforePromptHookContext, EventTriggeredHookContext,
+    ObserverHookContext,
+};
 use crate::trust::HookTrustClass;
 
 // ─── Gate sinks ─────────────────────────────────────────────────────────────
@@ -310,6 +313,31 @@ impl ObserverSink for RecordingObserverSink {
     }
 }
 
+/// Event-triggered observer sink — intentionally mirrors [`ObserverSink`]
+/// and intentionally does not expose gate or mutator methods.
+pub trait EventTriggeredObserverSink: Send {
+    fn note(&mut self, category: NoteCategory, summary: &'static str);
+}
+
+pub(crate) struct RecordingEventTriggeredObserverSink {
+    pub(crate) facts: Vec<ObserverFact>,
+}
+
+impl RecordingEventTriggeredObserverSink {
+    pub(crate) fn new() -> Self {
+        Self { facts: Vec::new() }
+    }
+}
+
+impl EventTriggeredObserverSink for RecordingEventTriggeredObserverSink {
+    fn note(&mut self, category: NoteCategory, summary: &'static str) {
+        self.facts.push(ObserverFact::note(
+            category,
+            SanitizedReason::from_static(summary),
+        ));
+    }
+}
+
 // ─── Hook author traits (per point × tier) ─────────────────────────────────
 
 /// A `before_capability` hook supplied by a Builtin or Trusted source.
@@ -362,6 +390,18 @@ pub trait RestrictedBeforePromptHook: Send + Sync {
 #[async_trait]
 pub trait ObserverHook: Send + Sync {
     async fn observe(&self, ctx: &ObserverHookContext, sink: &mut dyn ObserverSink);
+}
+
+/// An event-triggered observer hook. Same observer-only authority as
+/// [`ObserverHook`], but the context includes the durable runtime event and
+/// replay cursor that caused the hook to fire.
+#[async_trait]
+pub trait EventTriggeredHook: Send + Sync {
+    async fn observe(
+        &self,
+        ctx: &EventTriggeredHookContext<'_>,
+        sink: &mut dyn EventTriggeredObserverSink,
+    );
 }
 
 // ─── Dispatcher access to the internal decision ────────────────────────────
@@ -488,5 +528,47 @@ mod tests {
             .await;
         assert_eq!(recording.patches.len(), 1);
         assert_eq!(recording.patches[0].snippet_byte_count(), 26);
+    }
+
+    #[tokio::test]
+    async fn event_triggered_sink_is_observer_only_at_type_level() {
+        // Compile-time check: `EventTriggeredObserverSink` exposes only the
+        // observer note surface. A call like `sink.deny("nope")` would fail
+        // to compile here, which is the invariant this test documents.
+        struct EventOnly;
+        #[async_trait]
+        impl EventTriggeredHook for EventOnly {
+            async fn observe(
+                &self,
+                _ctx: &EventTriggeredHookContext<'_>,
+                sink: &mut dyn EventTriggeredObserverSink,
+            ) {
+                sink.note(crate::kinds::observer::NoteCategory::HookFired, "observed");
+            }
+        }
+
+        let tenant = ironclaw_host_api::TenantId::new("t".to_string()).expect("valid tenant");
+        let user = ironclaw_host_api::UserId::new("u".to_string()).expect("valid user");
+        let invocation_id = ironclaw_host_api::InvocationId::new();
+        let scope = ironclaw_host_api::ResourceScope::local_default(user, invocation_id)
+            .expect("valid scope");
+        let event = ironclaw_events::RuntimeEvent::hook_failed(
+            scope,
+            ironclaw_host_api::CapabilityId::new("hooks.failed").expect("valid capability"),
+            crate::identity::HookId::for_builtin("tests::event", crate::identity::HookVersion::ONE)
+                .to_hex(),
+            "panic",
+            "fail_isolated",
+        );
+        let ctx = EventTriggeredHookContext {
+            tenant_id: tenant,
+            event: &event,
+            event_cursor: ironclaw_events::EventCursor::new(1),
+        };
+        let mut recording = RecordingEventTriggeredObserverSink::new();
+        EventOnly
+            .observe(&ctx, &mut recording as &mut dyn EventTriggeredObserverSink)
+            .await;
+        assert_eq!(recording.facts.len(), 1);
     }
 }

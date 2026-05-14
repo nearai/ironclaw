@@ -19,6 +19,7 @@ async-trait = "0.1"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
 futures = "0.3"
+ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
 ironclaw_turns = { path = "../ironclaw_turns" }

@@ -4386,6 +4386,7 @@ dependencies = [
  "blake3",
  "chrono",
  "futures",
+ "ironclaw_events",
  "ironclaw_host_api",
  "ironclaw_prompt_envelope",
  "ironclaw_turns",

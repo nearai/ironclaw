@@ -95,6 +95,21 @@ emit_audit.summary = "polymarket hook failed"
   during downtime is acceptable for observer-only semantics;
   exact-once delivery is a future ratification slice.
 
+### Phase 5 implementation notes
+
+- The Reborn wiring uses a pull-driven durable-log consumer rather than
+  dispatching from the event emit path. The default poll interval is 50ms and
+  the default replay batch is 64 events; callers can tune both on
+  `EventTriggeredHookSubscription`.
+- Cursor persistence remains caller-owned for this slice: the subscription
+  starts from the supplied `EventCursor` and advances its in-memory cursor
+  while the host is alive. Restarting from the same cursor intentionally
+  gives at-least-once replay; exact-once acknowledgement is deferred.
+- Hook dispatch receives the durable `RuntimeEvent` directly. This uses only
+  the sealed event/cursor vocabulary from `ironclaw_events`; the hook crate
+  still does not depend on host runtime, dispatcher, secrets, network, WASM,
+  or Reborn internals.
+
 ## Cross-cutting constraints
 
 - **Cross-crate boundary**: `ironclaw_hooks` already forbids `events`

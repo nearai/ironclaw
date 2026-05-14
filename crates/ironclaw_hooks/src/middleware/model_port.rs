@@ -178,6 +178,7 @@ mod tests {
                 phase: HookPhase::Telemetry,
                 priority: HookPriority::DEFAULT,
                 point: HookPointSpec::AfterModel,
+                event_kind_filter: None,
                 owning_extension: None,
                 scope: crate::registry::HookBindingScope::Global,
                 poisoned: false,

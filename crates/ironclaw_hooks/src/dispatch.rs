@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::FutureExt;
+use ironclaw_events::{EventCursor, RuntimeEvent, RuntimeEventKind};
 use ironclaw_turns::run_profile::{HookDecisionSummary, HookMilestoneSink, LoopHostMilestoneKind};
 
 use crate::error::SanitizedReason;
@@ -22,12 +23,16 @@ use crate::kinds::gate::{BeforeCapabilityHookDecision, GateDecisionInner};
 use crate::kinds::mutator::HookPatch;
 use crate::kinds::observer::ObserverFact;
 use crate::ordering::{HookOrderKey, HookPhase, HookPriority};
-use crate::points::{BeforeCapabilityHookContext, BeforePromptHookContext, ObserverHookContext};
+use crate::points::{
+    BeforeCapabilityHookContext, BeforePromptHookContext, EventTriggeredHookContext,
+    ObserverHookContext,
+};
 use crate::registry::{HookBinding, HookBindingScope, HookPointSpec, HookRegistry};
+use crate::sink::EventTriggeredHook;
 use crate::sink::{
     GateSinkState, ObserverHook, PrivilegedBeforeCapabilityHook, PrivilegedBeforePromptHook,
-    RecordingGateSink, RecordingMutatorSink, RecordingObserverSink, RestrictedBeforeCapabilityHook,
-    RestrictedBeforePromptHook,
+    RecordingEventTriggeredObserverSink, RecordingGateSink, RecordingMutatorSink,
+    RecordingObserverSink, RestrictedBeforeCapabilityHook, RestrictedBeforePromptHook,
 };
 use crate::telemetry;
 use crate::trust::HookTrustClass;
@@ -89,6 +94,12 @@ pub(crate) enum BeforePromptHookImpl {
 pub(crate) enum ObserverHookImpl {
     Any(Box<dyn ObserverHook>),
     Wasm(WasmObserverHook),
+}
+
+/// Tier-tagged trait object for an event-triggered observer hook. Sealed to
+/// this crate for the same reason as [`ObserverHookImpl`].
+pub(crate) enum EventTriggeredHookImpl {
+    Any(Box<dyn EventTriggeredHook>),
 }
 
 /// The composed outcome of dispatching `before_capability` against all active
@@ -160,6 +171,7 @@ pub struct HookDispatcher {
     before_capability: HashMap<HookId, BeforeCapabilityHookImpl>,
     before_prompt: HashMap<HookId, BeforePromptHookImpl>,
     observers: HashMap<HookId, ObserverHookImpl>,
+    event_triggered: HashMap<HookId, EventTriggeredHookImpl>,
     timeout: Duration,
     milestone_sink: Option<Arc<dyn HookMilestoneSink>>,
 }
@@ -178,6 +190,7 @@ impl HookDispatcher {
             before_capability: HashMap::new(),
             before_prompt: HashMap::new(),
             observers: HashMap::new(),
+            event_triggered: HashMap::new(),
             timeout: DEFAULT_HOOK_TIMEOUT,
             milestone_sink: None,
         }
@@ -372,6 +385,14 @@ impl HookDispatcher {
         self.observers.insert(hook_id, hook);
     }
 
+    pub(crate) fn install_event_triggered_impl(
+        &mut self,
+        hook_id: HookId,
+        hook: EventTriggeredHookImpl,
+    ) {
+        self.event_triggered.insert(hook_id, hook);
+    }
+
     // ── Tier-specific public installers for before_capability ───────────────
     //
     // Each installer builds the `HookBinding` with the correct trust class and
@@ -395,6 +416,7 @@ impl HookDispatcher {
             phase,
             priority: HookPriority::DEFAULT,
             point: HookPointSpec::BeforeCapability,
+            event_kind_filter: None,
             owning_extension: None,
             scope: HookBindingScope::Global,
             poisoned: false,
@@ -419,6 +441,7 @@ impl HookDispatcher {
             phase,
             priority: HookPriority::DEFAULT,
             point: HookPointSpec::BeforeCapability,
+            event_kind_filter: None,
             owning_extension: None,
             scope: HookBindingScope::Global,
             poisoned: false,
@@ -452,6 +475,7 @@ impl HookDispatcher {
             phase,
             priority: HookPriority::DEFAULT,
             point: HookPointSpec::BeforeCapability,
+            event_kind_filter: None,
             owning_extension: Some(owning_extension),
             scope,
             poisoned: false,
@@ -502,6 +526,7 @@ impl HookDispatcher {
             phase,
             priority: HookPriority::DEFAULT,
             point: HookPointSpec::BeforePrompt,
+            event_kind_filter: None,
             owning_extension: None,
             scope: HookBindingScope::Global,
             poisoned: false,
@@ -524,6 +549,7 @@ impl HookDispatcher {
             phase,
             priority: HookPriority::DEFAULT,
             point: HookPointSpec::BeforePrompt,
+            event_kind_filter: None,
             owning_extension: None,
             scope: HookBindingScope::Global,
             poisoned: false,
@@ -548,6 +574,7 @@ impl HookDispatcher {
             phase,
             priority: HookPriority::DEFAULT,
             point: HookPointSpec::BeforePrompt,
+            event_kind_filter: None,
             owning_extension: Some(owning_extension),
             scope,
             poisoned: false,
@@ -627,6 +654,7 @@ impl HookDispatcher {
             phase,
             priority: HookPriority::DEFAULT,
             point,
+            event_kind_filter: None,
             owning_extension,
             scope,
             poisoned: false,
@@ -710,6 +738,7 @@ impl HookDispatcher {
             phase,
             priority: HookPriority::DEFAULT,
             point,
+            event_kind_filter: None,
             owning_extension: Some(owning_extension),
             scope,
             poisoned: false,
@@ -718,6 +747,91 @@ impl HookDispatcher {
         self.install_observer_impl(hook_id, ObserverHookImpl::Wasm(hook));
         Ok(())
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn install_event_triggered(
+        &mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        event_kind: RuntimeEventKind,
+        trust_class: HookTrustClass,
+        owning_extension: Option<ironclaw_host_api::ExtensionId>,
+        scope: HookBindingScope,
+        hook: Box<dyn EventTriggeredHook>,
+    ) -> Result<(), crate::error::HookError> {
+        let binding = HookBinding {
+            hook_id,
+            hook_version: HookVersion::ONE,
+            trust_class,
+            phase,
+            priority: HookPriority::DEFAULT,
+            point: HookPointSpec::EventTriggered,
+            event_kind_filter: Some(event_kind),
+            owning_extension,
+            scope,
+            poisoned: false,
+        };
+        self.insert_binding(binding)?;
+        self.install_event_triggered_impl(hook_id, EventTriggeredHookImpl::Any(hook));
+        Ok(())
+    }
+
+    pub(crate) fn install_builtin_event_triggered(
+        &mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        event_kind: RuntimeEventKind,
+        hook: Box<dyn EventTriggeredHook>,
+    ) -> Result<(), crate::error::HookError> {
+        self.install_event_triggered(
+            hook_id,
+            phase,
+            event_kind,
+            HookTrustClass::Builtin,
+            None,
+            HookBindingScope::Global,
+            hook,
+        )
+    }
+
+    pub(crate) fn install_trusted_event_triggered(
+        &mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        event_kind: RuntimeEventKind,
+        hook: Box<dyn EventTriggeredHook>,
+    ) -> Result<(), crate::error::HookError> {
+        self.install_event_triggered(
+            hook_id,
+            phase,
+            event_kind,
+            HookTrustClass::Trusted,
+            None,
+            HookBindingScope::Global,
+            hook,
+        )
+    }
+
+    pub(crate) fn install_installed_event_triggered(
+        &mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        event_kind: RuntimeEventKind,
+        owning_extension: ironclaw_host_api::ExtensionId,
+        scope: HookBindingScope,
+        hook: Box<dyn EventTriggeredHook>,
+    ) -> Result<(), crate::error::HookError> {
+        self.install_event_triggered(
+            hook_id,
+            phase,
+            event_kind,
+            HookTrustClass::Installed,
+            Some(owning_extension),
+            scope,
+            hook,
+        )
+    }
+
 
     /// Dispatch `before_capability`. Hooks run in `(phase, priority, hook_id)`
     /// order. The first `Deny` short-circuits the gate phases; `Telemetry`
@@ -1020,6 +1134,72 @@ impl HookDispatcher {
         (out, poisoned)
     }
 
+    /// Dispatch event-triggered observer hooks for a durable runtime event.
+    ///
+    /// This path is intentionally separate from `dispatch_observer_at`: event
+    /// hooks are fed by durable event-log replay in `ironclaw_reborn`, not by
+    /// the inline loop tick. The hook sink is observer-only, so a hook can
+    /// record audit facts but cannot gate or patch already-completed work.
+    pub async fn dispatch_event_triggered_at(
+        &self,
+        tenant: ironclaw_host_api::TenantId,
+        event_cursor: EventCursor,
+        event: &RuntimeEvent,
+    ) -> ObserverDispatchOutcome {
+        let (ordered, mut poisoned) =
+            self.ordered_bindings_with_poison_snapshot(HookPointSpec::EventTriggered);
+        let mut facts = Vec::new();
+        let mut failures = Vec::new();
+        let ctx = EventTriggeredHookContext {
+            tenant_id: tenant,
+            event,
+            event_cursor,
+        };
+
+        for (_key, binding) in ordered {
+            if poisoned.contains(&binding.hook_id) {
+                continue;
+            }
+            if binding.event_kind_filter != Some(event.kind) {
+                continue;
+            }
+            if !binding
+                .scope
+                .permits(binding.owning_extension.as_ref(), event.provider.as_ref())
+            {
+                continue;
+            }
+            let Some(hook) = self.event_triggered.get(&binding.hook_id) else {
+                self.poison_with_failure(
+                    binding.hook_id,
+                    FailureCategory::Malformed,
+                    binding.trust_class,
+                    &crate::trust::DecisionKind::Observer,
+                    "binding present without installed implementation",
+                    &mut failures,
+                )
+                .await;
+                poisoned.insert(binding.hook_id);
+                continue;
+            };
+            self.emit_dispatched(&binding).await;
+            match self.run_event_triggered_hook(hook, &binding, &ctx).await {
+                Ok(mut emitted) => {
+                    self.emit_decision(&binding, HookDecisionSummary::Pass)
+                        .await;
+                    facts.append(&mut emitted);
+                }
+                Err(failure) => {
+                    self.emit_failure(&failure).await;
+                    poisoned.insert(failure.hook_id);
+                    failures.push(failure);
+                }
+            }
+        }
+
+        ObserverDispatchOutcome { facts, failures }
+    }
+
     #[cfg(test)]
     fn ordered_bindings(&self, point: HookPointSpec) -> Vec<(HookOrderKey, HookBinding)> {
         let registry = self.registry.lock().expect("hooks registry mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
@@ -1303,6 +1483,41 @@ impl HookDispatcher {
         }
     }
 
+    async fn run_event_triggered_hook(
+        &self,
+        hook: &EventTriggeredHookImpl,
+        binding: &HookBinding,
+        ctx: &EventTriggeredHookContext<'_>,
+    ) -> Result<Vec<ObserverFact>, HookFailureRecord> {
+        let timeout = self.timeout;
+        let run = async {
+            match hook {
+                EventTriggeredHookImpl::Any(h) => {
+                    let mut sink = RecordingEventTriggeredObserverSink::new();
+                    AssertUnwindSafe(h.observe(ctx, &mut sink))
+                        .catch_unwind()
+                        .await
+                        .map_err(|_| ())
+                        .map(|()| sink.facts)
+                }
+            }
+        };
+
+        match tokio::time::timeout(timeout, run).await {
+            Ok(Ok(facts)) => Ok(facts),
+            Ok(Err(())) => Err(self.classify_failure(
+                binding,
+                FailureCategory::Panic,
+                "event-triggered hook panicked",
+            )),
+            Err(_elapsed) => Err(self.classify_failure(
+                binding,
+                FailureCategory::Timeout,
+                "event-triggered hook exceeded dispatch timeout",
+            )),
+        }
+    }
+
     fn classify_failure(
         &self,
         binding: &HookBinding,
@@ -1420,7 +1635,8 @@ fn decision_kind_for(point: HookPointSpec) -> crate::trust::DecisionKind {
         HookPointSpec::BeforePrompt => crate::trust::DecisionKind::Mutator,
         HookPointSpec::AfterModel
         | HookPointSpec::AfterCapability
-        | HookPointSpec::AfterCheckpoint => crate::trust::DecisionKind::Observer,
+        | HookPointSpec::AfterCheckpoint
+        | HookPointSpec::EventTriggered => crate::trust::DecisionKind::Observer,
     }
 }
 
@@ -1673,6 +1889,73 @@ impl HookDispatcherBuilder {
         Ok(self)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn install_event_triggered(
+        mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        event_kind: RuntimeEventKind,
+        trust_class: HookTrustClass,
+        owning_extension: Option<ironclaw_host_api::ExtensionId>,
+        scope: HookBindingScope,
+        hook: Box<dyn EventTriggeredHook>,
+    ) -> Result<Self, crate::error::HookError> {
+        self.dispatcher.install_event_triggered(
+            hook_id,
+            phase,
+            event_kind,
+            trust_class,
+            owning_extension,
+            scope,
+            hook,
+        )?;
+        Ok(self)
+    }
+
+    pub fn install_builtin_event_triggered(
+        mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        event_kind: RuntimeEventKind,
+        hook: Box<dyn EventTriggeredHook>,
+    ) -> Result<Self, crate::error::HookError> {
+        self.dispatcher
+            .install_builtin_event_triggered(hook_id, phase, event_kind, hook)?;
+        Ok(self)
+    }
+
+    pub fn install_trusted_event_triggered(
+        mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        event_kind: RuntimeEventKind,
+        hook: Box<dyn EventTriggeredHook>,
+    ) -> Result<Self, crate::error::HookError> {
+        self.dispatcher
+            .install_trusted_event_triggered(hook_id, phase, event_kind, hook)?;
+        Ok(self)
+    }
+
+    pub fn install_installed_event_triggered(
+        mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        event_kind: RuntimeEventKind,
+        owning_extension: ironclaw_host_api::ExtensionId,
+        scope: HookBindingScope,
+        hook: Box<dyn EventTriggeredHook>,
+    ) -> Result<Self, crate::error::HookError> {
+        self.dispatcher.install_installed_event_triggered(
+            hook_id,
+            phase,
+            event_kind,
+            owning_extension,
+            scope,
+            hook,
+        )?;
+        Ok(self)
+    }
+
     /// Get a mutable handle to the still-private dispatcher. Used by the
     /// [`crate::registrar::HookRegistrar`] to install manifest entries
     /// against an in-flight builder without exposing the underlying
@@ -1736,6 +2019,7 @@ mod tests {
             phase,
             priority,
             point,
+            event_kind_filter: None,
             owning_extension: None,
             scope: HookBindingScope::Global,
             poisoned: false,
@@ -1973,6 +2257,7 @@ mod tests {
             phase: HookPhase::Validation,
             priority: HookPriority::DEFAULT,
             point: HookPointSpec::BeforeCapability,
+            event_kind_filter: None,
             owning_extension: None,
             scope: HookBindingScope::Global,
             poisoned: false,
@@ -2085,6 +2370,7 @@ mod tests {
                 phase: HookPhase::Policy,
                 priority: HookPriority::DEFAULT,
                 point: HookPointSpec::BeforePrompt,
+                event_kind_filter: None,
                 owning_extension: None,
                 scope: HookBindingScope::Global,
                 poisoned: false,
@@ -2114,6 +2400,7 @@ mod tests {
                 phase: HookPhase::Telemetry,
                 priority: HookPriority::DEFAULT,
                 point: HookPointSpec::AfterModel,
+                event_kind_filter: None,
                 owning_extension: None,
                 scope: HookBindingScope::Global,
                 poisoned: false,
@@ -2577,6 +2864,7 @@ mod tests {
                 phase: HookPhase::Policy,
                 priority: HookPriority::DEFAULT,
                 point: HookPointSpec::BeforePrompt,
+                event_kind_filter: None,
                 owning_extension: None,
                 scope: HookBindingScope::Global,
                 poisoned: false,

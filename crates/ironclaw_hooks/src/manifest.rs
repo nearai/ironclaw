@@ -130,6 +130,7 @@ pub enum HookManifestKind {
     AfterModel,
     AfterCapability,
     AfterCheckpoint,
+    EventTriggered,
 }
 
 /// Hook scope. Determines whether the hook can observe / restrict only its
@@ -699,6 +700,31 @@ gas = 999
             },
         };
         let toml_text = toml::to_string(&entry).expect("ser");
+        let back: HookManifestEntry = toml::from_str(&toml_text).expect("de");
+        assert_eq!(entry, back);
+    }
+
+    #[test]
+    fn event_triggered_kind_round_trips_through_toml() {
+        let entry = HookManifestEntry {
+            id: HookLocalId("hook-failure-alert".to_string()),
+            kind: HookManifestKind::EventTriggered,
+            scope: HookManifestScope::OwnCapabilities,
+            phase: HookPhase::Telemetry,
+            priority: HookPriority::DEFAULT,
+            description: Some("Observe durable hook failures".to_string()),
+            requires_grant: None,
+            body: HookManifestBody::Wasm {
+                export: "observe_event".to_string(),
+                budget: WasmBudget::default(),
+            },
+        };
+        entry.validate().expect("event-triggered manifest is valid");
+        let toml_text = toml::to_string(&entry).expect("ser");
+        assert!(
+            toml_text.contains("event_triggered"),
+            "kind should use the manifest wire label"
+        );
         let back: HookManifestEntry = toml::from_str(&toml_text).expect("de");
         assert_eq!(entry, back);
     }

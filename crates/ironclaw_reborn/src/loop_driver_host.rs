@@ -3,9 +3,11 @@ use std::{
     error::Error,
     fmt,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use async_trait::async_trait;
+use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
 use ironclaw_hooks::dispatch::{HookDispatcher, HookDispatcherBuilder};
 use ironclaw_hooks::middleware::{
     CapabilityInputResolver as HookCapabilityInputResolver,
@@ -64,6 +66,7 @@ use ironclaw_turns::{
     },
     runner::ClaimedTurnRun,
 };
+use tokio::{sync::Notify, task::JoinHandle};
 
 #[async_trait]
 pub trait LoopCapabilityPortFactory: Send + Sync {
@@ -383,6 +386,131 @@ pub type HookDispatcherFactory = Arc<dyn Fn() -> Arc<HookDispatcher> + Send + Sy
 pub type HookDispatcherBuilderFactory =
     Arc<dyn Fn() -> HookDispatcherBuilder + Send + Sync + 'static>;
 
+/// Default number of durable runtime events read per subscription poll.
+pub const DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_BATCH_LIMIT: usize = 64;
+
+/// Default delay between empty/error subscription polls.
+pub const DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Pull-driven durable runtime-event subscription for event-triggered hooks.
+///
+/// The subscription reads from [`DurableEventLog`] on its own tokio task and
+/// dispatches matching hooks through the per-build [`HookDispatcher`]. Because
+/// events are pulled from the durable log after append, the runtime event
+/// producer does not wait for hook execution or hook backpressure.
+#[derive(Clone)]
+pub struct EventTriggeredHookSubscription {
+    log: Arc<dyn DurableEventLog>,
+    stream: EventStreamKey,
+    read_scope: ReadScope,
+    start_cursor: EventCursor,
+    batch_limit: usize,
+    poll_interval: Duration,
+}
+
+impl EventTriggeredHookSubscription {
+    pub fn new(
+        log: Arc<dyn DurableEventLog>,
+        stream: EventStreamKey,
+        read_scope: ReadScope,
+        start_cursor: EventCursor,
+    ) -> Self {
+        Self {
+            log,
+            stream,
+            read_scope,
+            start_cursor,
+            batch_limit: DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_BATCH_LIMIT,
+            poll_interval: DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_POLL_INTERVAL,
+        }
+    }
+
+    #[must_use]
+    pub fn with_batch_limit(mut self, batch_limit: usize) -> Self {
+        self.batch_limit = batch_limit.max(1);
+        self
+    }
+
+    #[must_use]
+    pub fn with_poll_interval(mut self, poll_interval: Duration) -> Self {
+        self.poll_interval = poll_interval.max(Duration::from_millis(1));
+        self
+    }
+
+    fn spawn(
+        self,
+        dispatcher: Arc<HookDispatcher>,
+        tenant_id: ironclaw_host_api::TenantId,
+    ) -> EventTriggeredHookSubscriptionHandle {
+        let task = tokio::spawn(async move {
+            self.run(dispatcher, tenant_id).await;
+        });
+        EventTriggeredHookSubscriptionHandle { task }
+    }
+
+    async fn run(self, dispatcher: Arc<HookDispatcher>, tenant_id: ironclaw_host_api::TenantId) {
+        let mut cursor = self.start_cursor;
+        loop {
+            match self
+                .log
+                .read_after_cursor(
+                    &self.stream,
+                    &self.read_scope,
+                    Some(cursor),
+                    self.batch_limit,
+                )
+                .await
+            {
+                Ok(replay) => {
+                    if replay.entries.is_empty() {
+                        cursor = replay.next_cursor;
+                        tokio::time::sleep(self.poll_interval).await;
+                        continue;
+                    }
+                    for entry in replay.entries {
+                        dispatcher
+                            .dispatch_event_triggered_at(
+                                tenant_id.clone(),
+                                entry.cursor,
+                                &entry.record,
+                            )
+                            .await;
+                    }
+                    cursor = replay.next_cursor;
+                }
+                Err(ironclaw_events::EventError::ReplayGap {
+                    requested,
+                    earliest,
+                }) => {
+                    tracing::warn!(
+                        ?requested,
+                        ?earliest,
+                        "event-triggered hook subscription stopped after replay gap"
+                    );
+                    break;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "event-triggered hook subscription poll failed; retrying"
+                    );
+                    tokio::time::sleep(self.poll_interval).await;
+                }
+            }
+        }
+    }
+}
+
+struct EventTriggeredHookSubscriptionHandle {
+    task: JoinHandle<()>,
+}
+
+impl Drop for EventTriggeredHookSubscriptionHandle {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 pub struct RebornLoopDriverHostFactory<S, G>
 where
     S: SessionThreadService + ?Sized,
@@ -431,6 +559,9 @@ where
     /// Per-build hook-gate-factory builder. See
     /// [`Self::with_hook_gate_ref_factory_builder`].
     hook_gate_ref_factory_builder: Option<HookGateRefFactoryBuilder>,
+    /// Optional durable runtime-event subscription for event-triggered hooks.
+    /// The subscription starts only when a hook dispatcher is also installed.
+    event_subscription: Option<EventTriggeredHookSubscription>,
     safety_context: Option<InstructionSafetyContext>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
@@ -489,6 +620,7 @@ where
             capability_input_resolver: None,
             hook_gate_ref_factory: None,
             hook_gate_ref_factory_builder: None,
+            event_subscription: None,
             safety_context: None,
             identity_context_source: None,
             input_queue: None,
@@ -625,6 +757,15 @@ where
             + 'static,
     {
         self.hook_gate_ref_factory_builder = Some(Arc::new(factory_builder));
+        self
+    }
+
+    /// Install a pull-driven durable event subscription for event-triggered
+    /// hooks. The event producer path is unchanged: this consumer polls the
+    /// durable log on a background task and dispatches observer-only hooks
+    /// outside the loop's inline tick.
+    pub fn with_event_subscription(mut self, subscription: EventTriggeredHookSubscription) -> Self {
+        self.event_subscription = Some(subscription);
         self
     }
 
@@ -811,6 +952,17 @@ where
             (None, Some(factory)) => Some(factory()),
             (None, None) => None,
         };
+        let event_subscription = match (
+            per_build_dispatcher.as_ref(),
+            self.event_subscription.as_ref(),
+        ) {
+            (Some(dispatcher), Some(subscription)) => Some(
+                subscription
+                    .clone()
+                    .spawn(Arc::clone(dispatcher), run_context.scope.tenant_id.clone()),
+            ),
+            _ => None,
+        };
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
             Arc::new(InMemoryInstructionMaterializationStore::default());
         let surface_state = Arc::new(CapabilitySurfaceState::default());
@@ -989,6 +1141,7 @@ where
             transcript,
             progress,
             cancellation,
+            _event_subscription: event_subscription,
         })
     }
 
@@ -1159,6 +1312,7 @@ pub struct RebornLoopDriverHost {
     transcript: Arc<dyn LoopTranscriptPort>,
     progress: Arc<dyn LoopProgressPort>,
     cancellation: Arc<dyn LoopCancellationPort>,
+    _event_subscription: Option<EventTriggeredHookSubscriptionHandle>,
 }
 
 impl fmt::Debug for RebornLoopDriverHost {

@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 
+use ironclaw_events::RuntimeEventKind;
 use ironclaw_host_api::ExtensionId;
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +36,12 @@ pub struct HookBinding {
     /// implementation (the trait object) is stored separately so this type
     /// remains serializable for checkpoint payloads.
     pub point: HookPointSpec,
+    /// Runtime-event kind filter for [`HookPointSpec::EventTriggered`]
+    /// bindings. `None` for inline hook points. Defaults to `None` so
+    /// checkpoint payloads serialized before event-triggered hooks remain
+    /// readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_kind_filter: Option<RuntimeEventKind>,
     /// Extension that authored this hook. `None` for `Builtin` and `Trusted`
     /// hooks (which observe globally). `Some` for `Installed` hooks; the
     /// dispatcher consults this in combination with [`Self::scope`] to decide
@@ -138,6 +145,7 @@ pub enum HookPointSpec {
     AfterModel,
     AfterCapability,
     AfterCheckpoint,
+    EventTriggered,
 }
 
 /// Bindings grouped by dispatcher point for cheap lookup during a tick.
@@ -357,6 +365,7 @@ mod tests {
             phase,
             priority: HookPriority::DEFAULT,
             point,
+            event_kind_filter: None,
             owning_extension: None,
             scope: HookBindingScope::Global,
             poisoned: false,
@@ -409,6 +418,7 @@ mod tests {
             phase: HookPhase::Policy,
             priority: HookPriority::DEFAULT,
             point: HookPointSpec::BeforeCapability,
+            event_kind_filter: None,
             owning_extension: None,
             scope: HookBindingScope::Global,
             poisoned: false,
@@ -435,6 +445,7 @@ mod tests {
             phase: HookPhase::Telemetry,
             priority: HookPriority::DEFAULT,
             point: HookPointSpec::AfterCapability,
+            event_kind_filter: None,
             owning_extension: None,
             scope: HookBindingScope::Global,
             poisoned: false,
