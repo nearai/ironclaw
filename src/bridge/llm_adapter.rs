@@ -515,6 +515,12 @@ fn extract_code_block(text: &str) -> Option<String> {
 }
 
 fn text_response_from_cleaned_text(cleaned_text: String) -> LlmResponse {
+    if ironclaw_engine::executor::prompt::codeact_disabled() {
+        if cleaned_text.trim().is_empty() {
+            return LlmResponse::Text(EMPTY_CLEANED_RESPONSE_FALLBACK.to_string());
+        }
+        return LlmResponse::Text(cleaned_text);
+    }
     match extract_code_block(&cleaned_text) {
         Some(code) => LlmResponse::Code {
             code,

@@ -32,6 +32,36 @@ const CODEACT_PREAMBLE: &str = include_str!("../../prompts/codeact_preamble.md")
 /// The strategy/closing block appended after the dynamic metadata sections.
 const CODEACT_POSTAMBLE: &str = include_str!("../../prompts/codeact_postamble.md");
 
+/// Structured-tools-only preamble used when `IRONCLAW_DISABLE_CODEACT` is set.
+const STRUCTURED_TOOL_PREAMBLE: &str = r#"You are IronClaw, a personal AI assistant.
+
+## Execution mode
+
+Use the provider's structured tool_calls interface for every action.
+Do not emit Python, repl, py, or other executable fenced code blocks.
+Do not call tools as Python functions.
+Do not write tool invocations in assistant text. Never output `[[call_tool ...]]`, `<tool_call>`, `<function_call>`, JSON tool-call blobs, or function-style calls such as `tool_name(...)`.
+Only the provider-level `tool_calls` field invokes tools. If you need a tool, return a structured tool call instead of describing or printing the call.
+When no action is needed, answer in plain text.
+"#;
+
+/// Structured-tools-only postamble used when `IRONCLAW_DISABLE_CODEACT` is set.
+const STRUCTURED_TOOL_POSTAMBLE: &str = r#"
+## Strategy
+
+Use structured tool calls when you need data, persistence, external effects, or system state.
+After tool results are available, continue with another structured tool call or return the final plain-text answer.
+Some integrations use literal UI blocks such as `[[choice_set]]...[[/choice_set]]` in final user-facing text. These are UI markup only; do not invent other bracketed control blocks, especially `[[call_tool ...]]`.
+"#;
+
+/// Whether CodeAct (Tier 1 Python execution) is disabled by env var.
+pub fn codeact_disabled() -> bool {
+    matches!(
+        std::env::var("IRONCLAW_DISABLE_CODEACT").as_deref(),
+        Ok("true" | "1")
+    )
+}
+
 /// Marker for the engine-owned CodeAct system prompt.
 const CODEACT_SYSTEM_PROMPT_MARKER: &str = "<!-- ironclaw:codeact-system-prompt -->\n";
 const CODEACT_LEGACY_OPENING: &str = "You are an AI assistant with a Python REPL environment.";
@@ -104,8 +134,19 @@ fn build_codeact_system_prompt_inner(
     overlay: Option<&str>,
     platform: Option<&PlatformInfo>,
 ) -> String {
+    let disable_codeact = codeact_disabled();
+    tracing::debug!(
+        codeact_disabled = disable_codeact,
+        "engine v2 prompt mode"
+    );
+    let (preamble, postamble) = if disable_codeact {
+        (STRUCTURED_TOOL_PREAMBLE, STRUCTURED_TOOL_POSTAMBLE)
+    } else {
+        (CODEACT_PREAMBLE, CODEACT_POSTAMBLE)
+    };
+
     let mut prompt = String::from(CODEACT_SYSTEM_PROMPT_MARKER);
-    prompt.push_str(CODEACT_PREAMBLE);
+    prompt.push_str(preamble);
 
     // Inject platform identity and runtime metadata
     if let Some(info) = platform {
@@ -163,7 +204,7 @@ fn build_codeact_system_prompt_inner(
         }
     }
 
-    prompt.push_str(CODEACT_POSTAMBLE);
+    prompt.push_str(postamble);
     prompt
 }
 
