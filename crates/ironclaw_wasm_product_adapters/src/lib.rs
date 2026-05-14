@@ -32,9 +32,9 @@
 #![forbid(unsafe_code)]
 #![warn(unreachable_pub)]
 
-pub mod auth_verifier;
-pub mod egress_policy;
-pub mod runner;
+mod auth_verifier;
+mod egress_policy;
+mod runner;
 
 pub use auth_verifier::{
     HmacWebhookAuth, SharedSecretHeaderAuth, VerificationOutcome, WebhookAuthVerifier,

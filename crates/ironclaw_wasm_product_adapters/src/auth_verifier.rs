@@ -28,7 +28,7 @@ use subtle::ConstantTimeEq;
 /// Default replay-attack window for HMAC verifiers (5 minutes). Matches
 /// Slack's documented recommendation. Configurable per-installation via
 /// [`HmacWebhookAuth::max_age`].
-pub const DEFAULT_HMAC_MAX_AGE_SECS: u64 = 300;
+pub(crate) const DEFAULT_HMAC_MAX_AGE_SECS: u64 = 300;
 
 /// Clock seam used by [`HmacWebhookAuth`]. Production hosts use
 /// [`SystemClock`]; tests inject a [`FixedClock`] to drive the timestamp
@@ -39,7 +39,7 @@ pub trait Clock: Send + Sync {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub struct SystemClock;
+pub(crate) struct SystemClock;
 
 impl Clock for SystemClock {
     fn now_unix_seconds(&self) -> u64 {
@@ -52,7 +52,7 @@ impl Clock for SystemClock {
 
 /// Test-only clock that returns a fixed timestamp.
 #[derive(Debug, Clone, Copy)]
-pub struct FixedClock(pub u64);
+pub(crate) struct FixedClock(pub u64);
 
 impl Clock for FixedClock {
     fn now_unix_seconds(&self) -> u64 {

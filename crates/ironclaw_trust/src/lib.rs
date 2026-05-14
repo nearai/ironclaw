@@ -30,12 +30,12 @@
 //! staging-track docs) for the broader Reborn vocabulary.
 #![warn(unreachable_pub)]
 
-pub mod clock;
-pub mod decision;
-pub mod error;
-pub mod invalidation;
-pub mod policy;
-pub mod sources;
+mod clock;
+mod decision;
+mod error;
+mod invalidation;
+mod policy;
+mod sources;
 
 #[cfg(test)]
 mod fixtures;

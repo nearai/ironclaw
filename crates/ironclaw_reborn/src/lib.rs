@@ -5,16 +5,16 @@
 //! free of Reborn loop-support wiring.
 
 pub mod driver_registry;
-pub mod loop_driver_host;
+mod loop_driver_host;
 pub mod loop_exit_applier;
-pub mod milestone_events;
-pub mod model_routes;
+mod milestone_events;
+mod model_routes;
 pub mod production_readiness;
-pub mod text_loop_driver;
+mod text_loop_driver;
 pub mod turn_runner;
 
 #[cfg(feature = "root-llm-provider")]
-pub mod model_gateway;
+mod model_gateway;
 #[cfg(feature = "libsql-secrets")]
 pub mod secrets;
 
