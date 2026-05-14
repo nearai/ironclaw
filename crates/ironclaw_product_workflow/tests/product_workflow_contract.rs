@@ -237,6 +237,28 @@ async fn before_inbound_policy_rewrite_reaches_inbound_turn_service() {
 }
 
 #[tokio::test]
+async fn before_inbound_policy_rewrite_revalidates_payload_before_turn_path() {
+    let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
+    policy.rewrite_user_message(UserMessagePayload {
+        text: "a".repeat(64 * 1024 + 1),
+        attachments: vec![],
+        trigger: ProductTriggerReason::DirectChat,
+    });
+    let envelope = sample_envelope("policy-rewrite-invalid");
+
+    let err = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect_err("invalid policy rewrite should fail before staging");
+
+    assert!(!err.is_retryable());
+    assert_eq!(policy.request_count(), 1);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+}
+
+#[tokio::test]
 async fn before_inbound_policy_rejection_skips_transcript_and_turn_path() {
     let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
     policy.reject(ProductRejection::permanent(

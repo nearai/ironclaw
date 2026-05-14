@@ -93,13 +93,17 @@ impl UserMessagePayload {
         attachments: Vec<ProductAttachmentDescriptor>,
         trigger: ProductTriggerReason,
     ) -> Result<Self, ProductAdapterError> {
-        let text = text.into();
-        validate_payload_string("user message text", &text, USER_MESSAGE_TEXT_MAX_BYTES)?;
-        Ok(Self {
-            text,
+        let payload = Self {
+            text: text.into(),
             attachments,
             trigger,
-        })
+        };
+        payload.validate()?;
+        Ok(payload)
+    }
+
+    pub fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_payload_string("user message text", &self.text, USER_MESSAGE_TEXT_MAX_BYTES)
     }
 }
 
@@ -487,8 +491,12 @@ impl ProductInboundEnvelope {
 
     /// Preserve host-stamped trusted context while replacing only the
     /// user-message payload after workflow-owned before-inbound policy rewrite.
-    pub fn with_rewritten_user_message(&self, payload: UserMessagePayload) -> Self {
-        Self {
+    pub fn with_rewritten_user_message(
+        &self,
+        payload: UserMessagePayload,
+    ) -> Result<Self, ProductAdapterError> {
+        payload.validate()?;
+        Ok(Self {
             adapter_id: self.adapter_id.clone(),
             installation_id: self.installation_id.clone(),
             external_event_id: self.external_event_id.clone(),
@@ -497,7 +505,7 @@ impl ProductInboundEnvelope {
             auth_claim: self.auth_claim.clone(),
             received_at: self.received_at,
             payload: ProductInboundPayload::UserMessage(payload),
-        }
+        })
     }
 
     pub fn source_binding_key(&self) -> String {

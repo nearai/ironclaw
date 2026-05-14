@@ -184,7 +184,12 @@ async fn dispatch_payload(
             let envelope_for_turn = match policy_outcome {
                 BeforeInboundPolicyOutcome::Allow => envelope,
                 BeforeInboundPolicyOutcome::RewriteUserMessage(payload) => {
-                    dispatch_envelope = envelope.with_rewritten_user_message(payload);
+                    dispatch_envelope =
+                        envelope.with_rewritten_user_message(payload).map_err(|_| {
+                            ProductWorkflowError::TurnSubmissionRejected {
+                                reason: "invalid policy-rewritten user message".into(),
+                            }
+                        })?;
                     &dispatch_envelope
                 }
                 BeforeInboundPolicyOutcome::Reject(rejection) => {
