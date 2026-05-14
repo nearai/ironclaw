@@ -37,7 +37,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "127.0.0.1:3300:3000"
+      - "127.0.0.1:3000:3000"
     # The t3claw process (uid 1000) needs read-write access to the Docker
     # socket.  The socket is owned by the group whose GID matches the host's
     # docker group.  We add that GID to the container's supplementary groups so
@@ -117,7 +117,6 @@ services:
       additional_contexts:
         trinity_mcp: ../trinity/client/mcp/t3n-mcp
         trinity_shared: ../trinity/client/shared
-        trinity_sdk: ../trinity/client/t3n-sdk
     restart: unless-stopped
     environment:
       # Defaults to Trinity staging; override in .env when you need a different
@@ -126,6 +125,11 @@ services:
       T3N_MCP_RPC_URL: ${T3N_MCP_RPC_URL:-}
       T3N_MCP_DASHBOARD_URL: ${T3N_MCP_DASHBOARD_URL:-}
       PRIVATE_KEY: ${T3N_MCP_PRIVATE_KEY:-}
+      # Agent signing key for runPayroll. The Trinity-side handler prefers
+      # T3N_MCP_AGENT_SECRET_HEX when set so callers can omit the secret
+      # field in tool arguments (see client/mcp/t3n-mcp/src/server/tools/
+      # payroll/runPayroll/schema.ts in the trinity repo). Empty default
+      # keeps existing setups unchanged.
       T3N_MCP_AGENT_SECRET_HEX: ${T3N_MCP_AGENT_SECRET_HEX:-}
       MCP_SOCKET_PATH: /var/run/t3n-mcp/t3n-mcp.sock
       # Source build from Trinity puts everything at /app (see Dockerfile).
