@@ -8,13 +8,14 @@ use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
-    NetworkObligationPolicyStore, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    RuntimeSecretInjectionStore,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+};
+use ironclaw_network::{
+    NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceGovernor};
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
-use secrecy::ExposeSecret;
 use serde_json::json;
 
 #[tokio::test]
@@ -40,6 +41,8 @@ async fn default_runtime_installs_configured_builtin_obligation_services() {
         max_egress_bytes: Some(2048),
     };
     let reservation_id = ResourceReservationId::new();
+    let network = RecordingNetwork::default();
+    let egress: Arc<dyn RuntimeHttpEgress> = Arc::new(services.host_http_egress(network.clone()));
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
         Arc::new(ObligatingAuthorizer {
             policy: expected_policy.clone(),
@@ -47,10 +50,8 @@ async fn default_runtime_installs_configured_builtin_obligation_services() {
             reservation_id,
         });
     let dispatcher = Arc::new(ObligationAwareDispatcher::new(
-        services.network_policy_store(),
-        services.secret_injection_store(),
+        egress,
         resource_governor.clone(),
-        expected_policy,
         secret_handle.clone(),
     ));
 
@@ -90,6 +91,19 @@ async fn default_runtime_installs_configured_builtin_obligation_services() {
         other => panic!("expected completed outcome, got {other:?}"),
     }
     assert!(dispatcher.dispatched_with_staged_handoffs());
+    let network_requests = network.requests();
+    assert_eq!(network_requests.len(), 1);
+    assert_eq!(network_requests[0].policy, expected_policy);
+    assert_eq!(
+        network_requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer runtime-secret".to_string(),
+        ))
+    );
     assert_eq!(audit_sink.records().len(), 1);
     assert_eq!(audit_sink.records()[0].stage, AuditStage::Before);
 }
@@ -127,28 +141,58 @@ impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
     }
 }
 
+#[derive(Clone, Default)]
+struct RecordingNetwork {
+    requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
+}
+
+impl RecordingNetwork {
+    fn requests(&self) -> Vec<NetworkHttpRequest> {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl NetworkHttpEgress for RecordingNetwork {
+    fn execute(
+        &self,
+        request: NetworkHttpRequest,
+    ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(request);
+        Ok(NetworkHttpResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: br#"{"ok":true}"#.to_vec(),
+            usage: NetworkUsage {
+                request_bytes: 5,
+                response_bytes: 11,
+                resolved_ip: None,
+            },
+        })
+    }
+}
+
 struct ObligationAwareDispatcher {
-    network_policies: Arc<NetworkObligationPolicyStore>,
-    secret_injections: Arc<RuntimeSecretInjectionStore>,
+    egress: Arc<dyn RuntimeHttpEgress>,
     resource_governor: Arc<InMemoryResourceGovernor>,
-    expected_policy: NetworkPolicy,
     secret_handle: SecretHandle,
     dispatched: Mutex<bool>,
 }
 
 impl ObligationAwareDispatcher {
     fn new(
-        network_policies: Arc<NetworkObligationPolicyStore>,
-        secret_injections: Arc<RuntimeSecretInjectionStore>,
+        egress: Arc<dyn RuntimeHttpEgress>,
         resource_governor: Arc<InMemoryResourceGovernor>,
-        expected_policy: NetworkPolicy,
         secret_handle: SecretHandle,
     ) -> Self {
         Self {
-            network_policies,
-            secret_injections,
+            egress,
             resource_governor,
-            expected_policy,
             secret_handle,
             dispatched: Mutex::new(false),
         }
@@ -168,18 +212,35 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
         &self,
         request: CapabilityDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
-        let policy = self
-            .network_policies
-            .take(&request.scope, &request.capability_id)
-            .expect("configured obligation store should stage network policy");
-        assert_eq!(policy, self.expected_policy);
-
-        let material = self
-            .secret_injections
-            .take(&request.scope, &request.capability_id, &self.secret_handle)
-            .unwrap()
-            .expect("configured obligation store should stage one-shot secret material");
-        assert_eq!(material.expose_secret(), "runtime-secret");
+        let egress_response = self
+            .egress
+            .execute(RuntimeHttpEgressRequest {
+                runtime: RuntimeKind::Wasm,
+                scope: request.scope.clone(),
+                capability_id: request.capability_id.clone(),
+                method: NetworkMethod::Post,
+                url: "https://api.example.com/v1/run".to_string(),
+                headers: Vec::new(),
+                body: b"hello".to_vec(),
+                network_policy: NetworkPolicy::default(),
+                credential_injections: vec![RuntimeCredentialInjection {
+                    handle: self.secret_handle.clone(),
+                    source: RuntimeCredentialSource::StagedObligation {
+                        capability_id: request.capability_id.clone(),
+                    },
+                    target: RuntimeCredentialTarget::Header {
+                        name: "authorization".to_string(),
+                        prefix: Some("Bearer ".to_string()),
+                    },
+                    required: true,
+                }],
+                response_body_limit: None,
+                timeout_ms: None,
+            })
+            .map_err(|_| DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::NetworkDenied,
+            })?;
+        assert_eq!(egress_response.status, 200);
 
         let reservation = request
             .resource_reservation

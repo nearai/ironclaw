@@ -38,6 +38,12 @@ pub trait OutboundStateStore: Send + Sync {
         record: ProjectionSubscriptionRecord,
     ) -> Result<(), OutboundError>;
 
+    /// Load a cursor only for the exact authorized actor/scope/thread tuple.
+    ///
+    /// Returns `Ok(None)` for missing rows and for rows with a mismatched
+    /// actor/scope/thread. The indistinguishable `None` preserves
+    /// anti-enumeration semantics: callers cannot learn whether a
+    /// subscription id exists outside their authorized tuple.
     async fn load_subscription_cursor(
         &self,
         request: LoadSubscriptionCursorRequest,
@@ -109,6 +115,9 @@ fn push_candidate(
         return;
     }
     candidates.push(OutboundPushCandidate {
+        tenant_id: request.scope.tenant_id.clone(),
+        agent_id: request.scope.agent_id.clone(),
+        project_id: request.scope.project_id.clone(),
         thread_id: request.scope.thread_id.clone(),
         turn_run_id: request.turn_run_id,
         target,

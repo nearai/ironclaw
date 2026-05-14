@@ -5,7 +5,8 @@ use ironclaw_host_api::VirtualPath;
 
 use crate::db::{
     child_path_like_pattern, direct_children, directory_append_error, directory_write_error,
-    is_not_found, libsql_db_error, not_found, valid_engine_path, virtual_path_prefixes,
+    is_not_found, libsql_db_error, not_found, system_time_from_unix_seconds, valid_engine_path,
+    virtual_path_prefixes,
 };
 use crate::{DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, RootFilesystem};
 
@@ -90,7 +91,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         if matches!(
             self.exact_entry(path).await?,
-            Some((_, FileType::Directory))
+            Some((_, FileType::Directory, _))
         ) || self.has_child_entry(path).await?
         {
             return Err(directory_write_error(path.clone()));
@@ -122,7 +123,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
     async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         if matches!(
             self.exact_entry(path).await?,
-            Some((_, FileType::Directory))
+            Some((_, FileType::Directory, _))
         ) || self.has_child_entry(path).await?
         {
             return Err(directory_append_error(path.clone()));
@@ -149,7 +150,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
         let exact_entry = self.exact_entry(path).await?;
-        if matches!(exact_entry, Some((_, FileType::File))) {
+        if matches!(exact_entry, Some((_, FileType::File, _))) {
             return Err(FilesystemError::Backend {
                 path: path.clone(),
                 operation: FilesystemOperation::ListDir,
@@ -160,18 +161,20 @@ impl RootFilesystem for LibSqlRootFilesystem {
             .child_entries(path, FilesystemOperation::ListDir)
             .await?;
         let children = direct_children(path, rows);
-        if matches!(exact_entry, Some((_, FileType::Directory))) && is_not_found(&children) {
+        if matches!(exact_entry, Some((_, FileType::Directory, _))) && is_not_found(&children) {
             return Ok(Vec::new());
         }
         children
     }
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
-        if let Some((len, file_type)) = self.exact_entry(path).await? {
+        if let Some((len, file_type, modified)) = self.exact_entry(path).await? {
             return Ok(FileStat {
                 path: path.clone(),
                 file_type,
                 len,
+                modified,
+                sensitive: false,
             });
         }
         if self.has_child_entry(path).await? {
@@ -179,6 +182,8 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 path: path.clone(),
                 file_type: FileType::Directory,
                 len: 0,
+                modified: None,
+                sensitive: false,
             });
         }
         Err(not_found(path.clone(), FilesystemOperation::Stat))
@@ -300,11 +305,11 @@ impl LibSqlRootFilesystem {
     async fn exact_entry(
         &self,
         path: &VirtualPath,
-    ) -> Result<Option<(u64, FileType)>, FilesystemError> {
+    ) -> Result<Option<(u64, FileType, Option<std::time::SystemTime>)>, FilesystemError> {
         let conn = self.connect().await?;
         let mut rows = conn
             .query(
-                "SELECT length(contents), is_dir FROM root_filesystem_entries WHERE path = ?1",
+                "SELECT length(contents), is_dir, CAST(strftime('%s', updated_at) AS INTEGER) AS updated_at_epoch FROM root_filesystem_entries WHERE path = ?1",
                 libsql::params![path.as_str()],
             )
             .await
@@ -320,6 +325,9 @@ impl LibSqlRootFilesystem {
         let is_dir_raw: i64 = row
             .get(1)
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Stat, error))?;
+        let updated_at_epoch: i64 = row
+            .get(2)
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Stat, error))?;
         let len = len_raw.max(0) as u64;
         let is_dir = is_dir_raw != 0;
         Ok(Some((
@@ -329,6 +337,7 @@ impl LibSqlRootFilesystem {
             } else {
                 FileType::File
             },
+            system_time_from_unix_seconds(updated_at_epoch),
         )))
     }
 

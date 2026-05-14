@@ -22,6 +22,8 @@ async fn libsql_root_filesystem_reads_writes_and_stats_files() {
     assert_eq!(stat.path, path);
     assert_eq!(stat.file_type, FileType::File);
     assert_eq!(stat.len, 11);
+    assert!(stat.modified.is_some());
+    assert!(!stat.sensitive);
 }
 
 #[cfg(feature = "libsql")]

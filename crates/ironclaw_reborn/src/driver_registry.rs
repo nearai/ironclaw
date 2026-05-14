@@ -5,7 +5,7 @@
 //! descriptor metadata at startup, and validates that configured and persisted
 //! run identities can be served before traffic is accepted.
 
-use std::{collections::HashMap, error::Error, fmt, sync::Arc};
+use std::{borrow::Borrow, collections::HashMap, error::Error, fmt, sync::Arc};
 
 use ironclaw_turns::{
     AgentLoopDriver, AgentLoopDriverDescriptor, RunProfileVersion, TurnStatus,
@@ -207,19 +207,41 @@ impl DriverRegistry {
         mode: DriverReadinessMode,
         inputs: DriverReadinessInputs,
     ) -> DriverReadinessReport {
+        self.validate_readiness_from_iter(
+            mode,
+            inputs.host_graph,
+            inputs.configured_profiles,
+            inputs.persisted_runs,
+        )
+    }
+
+    pub fn validate_readiness_from_iter<C, P>(
+        &self,
+        mode: DriverReadinessMode,
+        host_graph: HostGraphReadiness,
+        configured_profiles: C,
+        persisted_runs: P,
+    ) -> DriverReadinessReport
+    where
+        C: IntoIterator,
+        C::Item: Borrow<ConfiguredRunProfile>,
+        P: IntoIterator,
+        P::Item: Borrow<PersistedRunDriverIdentity>,
+    {
         let mut diagnostics = Vec::new();
         let mut has_reference_driver = false;
 
-        for profile in inputs
-            .configured_profiles
-            .iter()
-            .filter(|profile| profile.enabled)
-        {
+        for profile in configured_profiles {
+            let profile = profile.borrow();
+            if !profile.enabled {
+                continue;
+            }
+
             match self.get(&profile.driver_identity) {
                 Some(entry) => {
                     validate_entry_readiness(
                         mode,
-                        &inputs.host_graph,
+                        &host_graph,
                         &profile.name,
                         &profile.driver_identity,
                         entry,
@@ -228,7 +250,7 @@ impl DriverRegistry {
                     );
                 }
                 None => diagnostics.push(DriverReadinessDiagnostic::new(
-                    "missing_configured_driver",
+                    DriverReadinessDiagnosticCode::MissingConfiguredDriver,
                     profile.name.clone(),
                     Some(profile.driver_identity.clone()),
                     "enabled run profile references an unregistered loop driver identity",
@@ -236,16 +258,17 @@ impl DriverRegistry {
             }
         }
 
-        for persisted_run in inputs
-            .persisted_runs
-            .iter()
-            .filter(|run| !run.status.is_terminal())
-        {
+        for persisted_run in persisted_runs {
+            let persisted_run = persisted_run.borrow();
+            if persisted_run.status.is_terminal() {
+                continue;
+            }
+
             match self.get(&persisted_run.driver_identity) {
                 Some(entry) => {
                     validate_entry_readiness(
                         mode,
-                        &inputs.host_graph,
+                        &host_graph,
                         &persisted_run.run_id,
                         &persisted_run.driver_identity,
                         entry,
@@ -254,7 +277,7 @@ impl DriverRegistry {
                     );
                 }
                 None => diagnostics.push(DriverReadinessDiagnostic::new(
-                    "missing_non_terminal_run_driver",
+                    DriverReadinessDiagnosticCode::MissingNonTerminalRunDriver,
                     persisted_run.run_id.clone(),
                     Some(persisted_run.driver_identity.clone()),
                     "non-terminal persisted run requires an unregistered loop driver identity",
@@ -384,9 +407,18 @@ pub struct DriverReadinessReport {
     pub diagnostics: Vec<DriverReadinessDiagnostic>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriverReadinessDiagnosticCode {
+    MissingConfiguredDriver,
+    MissingNonTerminalRunDriver,
+    ReferenceDriverNotProductionReady,
+    ReferenceDriverAllowedForLocalDev,
+    MissingRequiredDriverRequirement,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DriverReadinessDiagnostic {
-    pub code: &'static str,
+    pub code: DriverReadinessDiagnosticCode,
     pub subject: String,
     pub driver_identity: Option<LoopDriverRegistryKey>,
     pub message: String,
@@ -395,7 +427,7 @@ pub struct DriverReadinessDiagnostic {
 
 impl DriverReadinessDiagnostic {
     fn new(
-        code: &'static str,
+        code: DriverReadinessDiagnosticCode,
         subject: String,
         driver_identity: Option<LoopDriverRegistryKey>,
         message: &'static str,
@@ -410,7 +442,7 @@ impl DriverReadinessDiagnostic {
     }
 
     fn non_blocking(
-        code: &'static str,
+        code: DriverReadinessDiagnosticCode,
         subject: String,
         driver_identity: Option<LoopDriverRegistryKey>,
         message: &'static str,
@@ -456,7 +488,7 @@ fn validate_entry_readiness(
     match (mode, entry.kind()) {
         (DriverReadinessMode::Production, DriverKind::Reference) => {
             diagnostics.push(DriverReadinessDiagnostic::new(
-                "reference_driver_not_production_ready",
+                DriverReadinessDiagnosticCode::ReferenceDriverNotProductionReady,
                 subject.to_string(),
                 Some(driver_identity.clone()),
                 "fake/reference loop driver cannot satisfy production readiness",
@@ -465,7 +497,7 @@ fn validate_entry_readiness(
         (DriverReadinessMode::LocalDevTest, DriverKind::Reference) => {
             *has_reference_driver = true;
             diagnostics.push(DriverReadinessDiagnostic::non_blocking(
-                "reference_driver_allowed_for_local_dev",
+                DriverReadinessDiagnosticCode::ReferenceDriverAllowedForLocalDev,
                 subject.to_string(),
                 Some(driver_identity.clone()),
                 "fake/reference loop driver allowed only for explicit local-dev/test readiness",
@@ -476,7 +508,7 @@ fn validate_entry_readiness(
 
     for requirement in missing_requirements(entry.requirements(), host_graph) {
         diagnostics.push(DriverReadinessDiagnostic::new(
-            "missing_required_driver_requirement",
+            DriverReadinessDiagnosticCode::MissingRequiredDriverRequirement,
             subject.to_string(),
             Some(driver_identity.clone()),
             requirement.message,

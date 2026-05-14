@@ -270,10 +270,12 @@ Run status projections are projection-local read models. Model/reply milestone e
 
 ### Outbound egress and subscription state
 
-`ironclaw_outbound` owns the metadata-only state needed around projection delivery:
+`ironclaw_outbound` owns the metadata-only state and policy seams needed around projection delivery:
 
 - per-thread notification policy for explicit external fanout and progress opt-in;
 - durable projection subscription cursor checkpoints scoped to actor, thread, and `ProjectionScope`;
+- a projection access-policy port that authorizes actor/thread visibility before subscription cursor state is created;
+- a reply-target validation port used before each external push candidate is turned into a delivery attempt;
 - outbound delivery attempt/status rows for support-visible retry/dead-letter workflows.
 
-This state is not canonical transcript or projection content. Rows store refs, cursors, status enums, timestamps, and sanitized failure kinds only. Product adapters still revalidate reply-target binding authorization before every external push, and delivery failure must not mutate canonical transcript/projection state or mark turns/runs failed.
+This state is not canonical transcript or projection content. Rows store refs, cursors, status enums, timestamps, and sanitized failure kinds only. Product adapters still revalidate reply-target binding authorization before every external push, and delivery failure must not mutate canonical transcript/projection state or mark turns/runs failed. If reply-target authorization is revoked at delivery time, the outbound policy service records a sanitized `authorization_revoked` delivery failure and does not return a sendable target.

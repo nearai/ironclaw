@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/memory/interaction-record.output.v1.json",
+  "title": "Memory Interaction Record Output v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["recorded"],
+  "properties": {
+    "recorded": { "type": "boolean" },
+    "record_ref": { "type": "string", "maxLength": 512 }
+  }
+}

@@ -17,12 +17,15 @@ use ironclaw_host_api::{
     ActionResultSummary, ActionSummary, AuditEnvelope, AuditEventId, AuditStage,
     CapabilityDispatchResult, CapabilityId, DecisionSummary, EffectKind, MountView, NetworkPolicy,
     Obligation, ProcessId, ResourceCeiling, ResourceEstimate, ResourceReservation, ResourceScope,
-    ResourceUsage, SandboxQuota, SecretHandle,
+    ResourceUsage, RuntimeHttpEgress, SandboxQuota, SecretHandle,
 };
+use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
 use ironclaw_resources::{ResourceError, ResourceGovernor};
 use ironclaw_safety::LeakDetector;
-use ironclaw_secrets::{SecretMaterial, SecretStore};
+use ironclaw_secrets::{
+    SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore, SecretStoreError,
+};
 
 /// Default maximum lifetime for one-shot runtime secret material staged in memory.
 pub const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from_secs(300);
@@ -34,7 +37,7 @@ pub const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from_secs(3
 /// Entries also expire after a short TTL so abandoned handoffs from setup
 /// failures, cancellation, or adapter bugs cannot remain usable indefinitely.
 #[derive(Clone)]
-pub struct RuntimeSecretInjectionStore {
+pub(crate) struct RuntimeSecretInjectionStore {
     state: Arc<RuntimeSecretInjectionState>,
 }
 
@@ -49,11 +52,11 @@ struct RuntimeSecretInjectionEntry {
 }
 
 impl RuntimeSecretInjectionStore {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn with_ttl(ttl: Duration) -> Self {
+    pub(crate) fn with_ttl(ttl: Duration) -> Self {
         Self {
             state: Arc::new(RuntimeSecretInjectionState {
                 secrets: Mutex::new(HashMap::new()),
@@ -62,11 +65,7 @@ impl RuntimeSecretInjectionStore {
         }
     }
 
-    pub fn ttl(&self) -> Duration {
-        self.state.ttl
-    }
-
-    pub fn insert(
+    pub(crate) fn insert(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -87,7 +86,7 @@ impl RuntimeSecretInjectionStore {
         Ok(())
     }
 
-    pub fn take(
+    pub(crate) fn take(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -105,16 +104,11 @@ impl RuntimeSecretInjectionStore {
             .map(|entry| entry.material))
     }
 
-    pub fn prune_expired(&self) -> Result<usize, RuntimeSecretInjectionStoreError> {
-        let mut secrets = self.lock()?;
-        Ok(prune_expired_entries(&mut secrets, Instant::now()))
-    }
-
     /// Discard all staged secrets for a scoped capability before process ownership exists.
     ///
     /// Background process lifecycle cleanup is guarded by a single-active-handoff
     /// invariant for the scoped capability; this method remains the abort/inline cleanup seam.
-    pub fn discard_for_capability(
+    pub(crate) fn discard_for_capability(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -135,6 +129,12 @@ impl RuntimeSecretInjectionStore {
         let mut secrets = self.lock()?;
         prune_expired_entries(&mut secrets, Instant::now());
         Ok(secrets.keys().any(|key| key.matches_scope(&scope_key)))
+    }
+
+    #[cfg(test)]
+    fn prune_expired(&self) -> Result<usize, RuntimeSecretInjectionStoreError> {
+        let mut secrets = self.lock()?;
+        Ok(prune_expired_entries(&mut secrets, Instant::now()))
     }
 
     fn lock(
@@ -176,7 +176,7 @@ fn prune_expired_entries(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeSecretInjectionStoreError {
+pub(crate) enum RuntimeSecretInjectionStoreError {
     Unavailable,
 }
 
@@ -264,16 +264,16 @@ impl RuntimeSecretInjectionScopeKey {
 /// every network operation in the invocation; obligation completion/abort or
 /// process lifecycle cleanup owns the final discard.
 #[derive(Debug, Clone, Default)]
-pub struct NetworkObligationPolicyStore {
+pub(crate) struct NetworkObligationPolicyStore {
     policies: Arc<Mutex<HashMap<NetworkPolicyKey, NetworkPolicy>>>,
 }
 
 impl NetworkObligationPolicyStore {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
-    pub fn insert(
+    pub(crate) fn insert(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -285,7 +285,7 @@ impl NetworkObligationPolicyStore {
             .insert(NetworkPolicyKey::new(scope, capability_id), policy);
     }
 
-    pub fn get(
+    pub(crate) fn get(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -297,7 +297,7 @@ impl NetworkObligationPolicyStore {
             .cloned()
     }
 
-    pub fn take(
+    pub(crate) fn take(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -312,7 +312,11 @@ impl NetworkObligationPolicyStore {
     ///
     /// Background process lifecycle cleanup is guarded by a single-active-handoff
     /// invariant for the scoped capability; this method remains the abort/inline cleanup seam.
-    pub fn discard_for_capability(&self, scope: &ResourceScope, capability_id: &CapabilityId) {
+    pub(crate) fn discard_for_capability(
+        &self,
+        scope: &ResourceScope,
+        capability_id: &CapabilityId,
+    ) {
         let _ = self.take(scope, capability_id);
     }
 
@@ -381,7 +385,7 @@ impl BuiltinObligationServices {
         )
     }
 
-    pub fn with_handoff_stores(
+    pub(crate) fn with_handoff_stores(
         audit_sink: Arc<dyn AuditSink>,
         network_policies: Arc<NetworkObligationPolicyStore>,
         secret_store: Arc<dyn SecretStore>,
@@ -401,20 +405,51 @@ impl BuiltinObligationServices {
         self.audit_sink.clone()
     }
 
-    pub fn network_policy_store(&self) -> Arc<NetworkObligationPolicyStore> {
-        self.network_policies.clone()
-    }
-
     pub fn secret_store(&self) -> Arc<dyn SecretStore> {
         self.secret_store.clone()
     }
 
-    pub fn secret_injection_store(&self) -> Arc<RuntimeSecretInjectionStore> {
-        self.secret_injections.clone()
-    }
-
     pub fn resource_governor(&self) -> Arc<dyn ResourceGovernor> {
         self.resource_governor.clone()
+    }
+
+    /// Builds host HTTP egress over this service graph's private handoff stores.
+    /// Callers can supply concrete network transport without receiving mutable
+    /// access to staged policy or secret material.
+    pub fn host_http_egress<N>(&self, network: N) -> impl RuntimeHttpEgress + use<N>
+    where
+        N: NetworkHttpEgress + 'static,
+    {
+        crate::HostHttpEgressService::new(network, SharedSecretStore(self.secret_store.clone()))
+            .with_network_policy_store(self.network_policies.clone())
+            .with_secret_injection_store(self.secret_injections.clone())
+    }
+
+    pub fn process_obligation_lifecycle_store<S>(
+        &self,
+        inner: Arc<S>,
+    ) -> ProcessObligationLifecycleStore
+    where
+        S: ProcessStore + 'static,
+    {
+        ProcessObligationLifecycleStore::new(
+            inner,
+            self.network_policies.clone(),
+            self.secret_injections.clone(),
+            self.resource_governor.clone(),
+        )
+    }
+
+    pub fn process_obligation_lifecycle_store_dyn(
+        &self,
+        inner: Arc<dyn ProcessStore>,
+    ) -> ProcessObligationLifecycleStore {
+        ProcessObligationLifecycleStore::from_dyn(
+            inner,
+            self.network_policies.clone(),
+            self.secret_injections.clone(),
+            self.resource_governor.clone(),
+        )
     }
 
     pub fn obligation_handler(&self) -> BuiltinObligationHandler {
@@ -440,6 +475,60 @@ impl fmt::Debug for BuiltinObligationServices {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct SharedSecretStore(pub(crate) Arc<dyn SecretStore>);
+
+#[async_trait]
+impl SecretStore for SharedSecretStore {
+    async fn put(
+        &self,
+        scope: ResourceScope,
+        handle: SecretHandle,
+        material: SecretMaterial,
+    ) -> Result<SecretMetadata, SecretStoreError> {
+        self.0.put(scope, handle, material).await
+    }
+
+    async fn metadata(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<Option<SecretMetadata>, SecretStoreError> {
+        self.0.metadata(scope, handle).await
+    }
+
+    async fn lease_once(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<SecretLease, SecretStoreError> {
+        self.0.lease_once(scope, handle).await
+    }
+
+    async fn consume(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretMaterial, SecretStoreError> {
+        self.0.consume(scope, lease_id).await
+    }
+
+    async fn revoke(
+        &self,
+        scope: &ResourceScope,
+        lease_id: SecretLeaseId,
+    ) -> Result<SecretLease, SecretStoreError> {
+        self.0.revoke(scope, lease_id).await
+    }
+
+    async fn leases_for_scope(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<Vec<SecretLease>, SecretStoreError> {
+        self.0.leases_for_scope(scope).await
+    }
+}
+
 /// Process-store wrapper that owns spawn-phase obligation handoffs after
 /// `ProcessStore::start` succeeds.
 ///
@@ -458,7 +547,7 @@ pub struct ProcessObligationLifecycleStore {
 }
 
 impl ProcessObligationLifecycleStore {
-    pub fn new<S>(
+    pub(crate) fn new<S>(
         inner: Arc<S>,
         network_policies: Arc<NetworkObligationPolicyStore>,
         secret_injections: Arc<RuntimeSecretInjectionStore>,
@@ -476,7 +565,7 @@ impl ProcessObligationLifecycleStore {
         )
     }
 
-    pub fn from_dyn(
+    pub(crate) fn from_dyn(
         inner: Arc<dyn ProcessStore>,
         network_policies: Arc<NetworkObligationPolicyStore>,
         secret_injections: Arc<RuntimeSecretInjectionStore>,
@@ -897,7 +986,10 @@ impl BuiltinObligationHandler {
         self
     }
 
-    pub fn with_network_policy_store(mut self, store: Arc<NetworkObligationPolicyStore>) -> Self {
+    pub(crate) fn with_network_policy_store(
+        mut self,
+        store: Arc<NetworkObligationPolicyStore>,
+    ) -> Self {
         self.network_policies = Some(store);
         self
     }
@@ -916,7 +1008,10 @@ impl BuiltinObligationHandler {
         self
     }
 
-    pub fn with_secret_injection_store(mut self, store: Arc<RuntimeSecretInjectionStore>) -> Self {
+    pub(crate) fn with_secret_injection_store(
+        mut self,
+        store: Arc<RuntimeSecretInjectionStore>,
+    ) -> Self {
         self.secret_injections = Some(store);
         self
     }
@@ -1745,5 +1840,223 @@ fn obligation_label(obligation: &Obligation) -> Option<&'static str> {
         Obligation::ReserveResources { .. } => Some("reserve_resources"),
         Obligation::UseScopedMounts { .. } => Some("use_scoped_mounts"),
         Obligation::EnforceResourceCeiling { .. } => Some("enforce_resource_ceiling"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use ironclaw_events::InMemoryAuditSink;
+    use ironclaw_host_api::{
+        AgentId, CapabilitySet, CorrelationId, ExecutionContext, ExtensionId, InvocationId,
+        NetworkScheme, NetworkTargetPattern, ProjectId, ResourceReservationId, RuntimeKind,
+        TenantId, TrustClass, UserId,
+    };
+    use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
+    use ironclaw_secrets::InMemorySecretStore;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn runtime_secret_injection_store_prunes_expired_handoffs() {
+        let store = RuntimeSecretInjectionStore::with_ttl(Duration::from_millis(5));
+        let scope = resource_scope_with_agent("agent-a");
+        let capability_id = capability_id();
+        let handle = SecretHandle::new("api_token").unwrap();
+
+        store
+            .insert(
+                &scope,
+                &capability_id,
+                &handle,
+                SecretMaterial::from("runtime-secret"),
+            )
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        assert_eq!(store.prune_expired().unwrap(), 1);
+        assert!(
+            store
+                .take(&scope, &capability_id, &handle)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn network_obligation_policy_store_isolates_agent_scope() {
+        let store = NetworkObligationPolicyStore::new();
+        let (agent_a, agent_b) = same_invocation_agent_scopes();
+        let capability_id = capability_id();
+
+        store.insert(&agent_a, &capability_id, allowed_network_policy());
+
+        assert!(store.take(&agent_b, &capability_id).is_none());
+        assert!(store.take(&agent_a, &capability_id).is_some());
+    }
+
+    #[test]
+    fn runtime_secret_injection_store_isolates_agent_scope() {
+        let store = RuntimeSecretInjectionStore::new();
+        let (agent_a, agent_b) = same_invocation_agent_scopes();
+        let capability_id = capability_id();
+        let handle = SecretHandle::new("api_token").unwrap();
+
+        store
+            .insert(
+                &agent_a,
+                &capability_id,
+                &handle,
+                SecretMaterial::from("runtime-secret"),
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .take(&agent_b, &capability_id, &handle)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .take(&agent_a, &capability_id, &handle)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn builtin_obligation_handler_satisfy_release_preserves_staged_handoffs() {
+        let network_policies = Arc::new(NetworkObligationPolicyStore::new());
+        let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
+        let secret_store = Arc::new(InMemorySecretStore::new());
+        let governor = Arc::new(InMemoryResourceGovernor::new());
+        let services = BuiltinObligationServices::with_handoff_stores(
+            Arc::new(InMemoryAuditSink::new()),
+            network_policies.clone(),
+            secret_store.clone(),
+            secret_injections.clone(),
+            governor.clone(),
+        );
+        let handler = services.obligation_handler();
+        let context = execution_context();
+        let account = ResourceAccount::tenant(context.resource_scope.tenant_id.clone());
+        let capability_id = capability_id();
+        let handle = SecretHandle::new("api_token").unwrap();
+        let estimate = ResourceEstimate {
+            concurrency_slots: Some(1),
+            ..ResourceEstimate::default()
+        };
+        secret_store
+            .put(
+                context.resource_scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("runtime-secret"),
+            )
+            .await
+            .unwrap();
+        let obligations = vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: allowed_network_policy(),
+            },
+            Obligation::InjectSecretOnce {
+                handle: handle.clone(),
+            },
+            Obligation::ReserveResources {
+                reservation_id: ResourceReservationId::new(),
+            },
+        ];
+
+        handler
+            .satisfy(CapabilityObligationRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id: &capability_id,
+                estimate: &estimate,
+                obligations: &obligations,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(governor.reserved_for(&account).concurrency_slots, 0);
+        assert!(
+            network_policies
+                .take(&context.resource_scope, &capability_id)
+                .is_some()
+        );
+        assert!(
+            secret_injections
+                .take(&context.resource_scope, &capability_id, &handle)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    fn same_invocation_agent_scopes() -> (ResourceScope, ResourceScope) {
+        let mut agent_a = resource_scope_with_agent("agent-a");
+        agent_a.invocation_id = InvocationId::new();
+        let mut agent_b = agent_a.clone();
+        agent_b.agent_id = Some(AgentId::new("agent-b").unwrap());
+        (agent_a, agent_b)
+    }
+
+    fn resource_scope_with_agent(agent_id: &str) -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("tenant1").unwrap(),
+            user_id: UserId::new("user1").unwrap(),
+            agent_id: Some(AgentId::new(agent_id).unwrap()),
+            project_id: Some(ProjectId::new("project1").unwrap()),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    fn execution_context() -> ExecutionContext {
+        let invocation_id = InvocationId::new();
+        let resource_scope = ResourceScope {
+            tenant_id: TenantId::new("tenant1").unwrap(),
+            user_id: UserId::new("user1").unwrap(),
+            agent_id: Some(AgentId::new("agent-a").unwrap()),
+            project_id: Some(ProjectId::new("project1").unwrap()),
+            mission_id: None,
+            thread_id: None,
+            invocation_id,
+        };
+        ExecutionContext {
+            invocation_id,
+            correlation_id: CorrelationId::new(),
+            process_id: None,
+            parent_process_id: None,
+            tenant_id: resource_scope.tenant_id.clone(),
+            user_id: resource_scope.user_id.clone(),
+            agent_id: resource_scope.agent_id.clone(),
+            project_id: resource_scope.project_id.clone(),
+            mission_id: resource_scope.mission_id.clone(),
+            thread_id: resource_scope.thread_id.clone(),
+            extension_id: ExtensionId::new("caller").unwrap(),
+            runtime: RuntimeKind::Wasm,
+            trust: TrustClass::Sandbox,
+            grants: CapabilitySet::default(),
+            mounts: MountView::default(),
+            resource_scope,
+        }
+    }
+
+    fn capability_id() -> CapabilityId {
+        CapabilityId::new("echo.say").unwrap()
+    }
+
+    fn allowed_network_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "api.example.test".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: Some(1024),
+        }
     }
 }

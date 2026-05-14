@@ -129,6 +129,7 @@ not bypass domain invariants by mutating primitive storage rows directly.
 | Virtual area | Source of truth | Access surface | Indexed? | Notes |
 | --- | --- | --- | --- | --- |
 | `/memory` | `ironclaw_memory` DB repositories over `memory_documents`, `memory_chunks`, `memory_document_versions` | file-shaped memory docs + memory service APIs | backend-defined full-text/vector | Memory-specific path grammar lives in `ironclaw_memory`, not filesystem. |
+| `/users` | typed user/profile repositories + optional user config projection | user/profile APIs + optional file projection | no, unless projection says otherwise | User-owned durable profile and configuration areas. |
 | `/projects` | local/object/project file backend | filesystem | optional project indexer | Project source files and user-authored project artifacts. |
 | `/system/settings` | typed settings repository | typed API + optional file projection | no, unless projection says otherwise | Settings source of truth is not memory. |
 | `/system/extensions` | extension package/registry repositories | extension API + filesystem package reads/projections | no semantic memory indexing | Installed packages, manifests, registry state. |

@@ -5,11 +5,12 @@
 //! through `CapabilityHost`, trust policy, grants, resource accounting, and
 //! runtime dispatch before any handler runs.
 
+mod coding;
 mod echo;
 mod json;
 mod time;
 
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use ironclaw_extensions::{ExtensionError, ExtensionManifest, ExtensionPackage, ExtensionRuntime};
@@ -24,6 +25,10 @@ use crate::{
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 
+pub use coding::{
+    APPLY_PATCH_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID,
+    READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
+};
 pub use echo::ECHO_CAPABILITY_ID;
 pub use json::JSON_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
@@ -31,6 +36,8 @@ pub use time::TIME_CAPABILITY_ID;
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
 
 const MAX_FIRST_PARTY_INPUT_BYTES: usize = 1_048_576;
+const MAX_WRITE_FILE_INPUT_BYTES: usize = 6 * 1024 * 1024;
+const MAX_APPLY_PATCH_INPUT_BYTES: usize = 21 * 1024 * 1024;
 const FIRST_PARTY_DEFAULT_OUTPUT_BYTES: u64 = 16 * 1024;
 const FIRST_PARTY_MAX_OUTPUT_BYTES: u64 = 1_048_576;
 const FIRST_PARTY_DEFAULT_WALL_CLOCK_MS: u64 = 100;
@@ -52,7 +59,12 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
             runtime: ExtensionRuntime::FirstParty {
                 service: "builtin".to_string(),
             },
-            capabilities: vec![echo::manifest()?, time::manifest()?, json::manifest()?],
+            capabilities: {
+                let mut capabilities =
+                    vec![echo::manifest()?, time::manifest()?, json::manifest()?];
+                capabilities.extend(coding::manifests()?);
+                capabilities
+            },
         },
         VirtualPath::new("/system/extensions/builtin")?,
     )
@@ -60,15 +72,27 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
 
 /// Create handlers for all built-in first-party capabilities.
 pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, HostApiError> {
-    let handler = std::sync::Arc::new(BuiltinFirstPartyTools);
+    let handler = Arc::new(BuiltinFirstPartyTools::default());
     Ok(FirstPartyCapabilityRegistry::new()
         .with_handler(CapabilityId::new(ECHO_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(TIME_CAPABILITY_ID)?, handler.clone())
-        .with_handler(CapabilityId::new(JSON_CAPABILITY_ID)?, handler))
+        .with_handler(CapabilityId::new(JSON_CAPABILITY_ID)?, handler.clone())
+        .with_handler(CapabilityId::new(READ_FILE_CAPABILITY_ID)?, handler.clone())
+        .with_handler(
+            CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
+            handler.clone(),
+        )
+        .with_handler(CapabilityId::new(LIST_DIR_CAPABILITY_ID)?, handler.clone())
+        .with_handler(CapabilityId::new(GLOB_CAPABILITY_ID)?, handler.clone())
+        .with_handler(CapabilityId::new(GREP_CAPABILITY_ID)?, handler.clone())
+        .with_handler(CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?, handler))
 }
 
 #[derive(Debug, Default)]
-pub struct BuiltinFirstPartyTools;
+pub struct BuiltinFirstPartyTools {
+    coding_read_state: coding::SharedCodingReadState,
+    coding_edit_locks: coding::SharedCodingEditLocks,
+}
 
 #[async_trait]
 impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
@@ -76,12 +100,20 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
         &self,
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
-        bounded_input_size(&request.input)?;
+        bounded_input_size(request.capability_id.as_str(), &request.input)?;
         let start = Instant::now();
         let output = match request.capability_id.as_str() {
             ECHO_CAPABILITY_ID => echo::dispatch(&request.input)?,
             TIME_CAPABILITY_ID => time::dispatch(&request.input)?,
             JSON_CAPABILITY_ID => json::dispatch(&request.input)?,
+            READ_FILE_CAPABILITY_ID
+            | WRITE_FILE_CAPABILITY_ID
+            | LIST_DIR_CAPABILITY_ID
+            | GLOB_CAPABILITY_ID
+            | GREP_CAPABILITY_ID
+            | APPLY_PATCH_CAPABILITY_ID => {
+                coding::dispatch(&request, &self.coding_read_state, &self.coding_edit_locks).await?
+            }
             _ => {
                 return Err(FirstPartyCapabilityError::new(
                     RuntimeDispatchErrorKind::UndeclaredCapability,
@@ -98,9 +130,17 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
     }
 }
 
-fn bounded_input_size(input: &serde_json::Value) -> Result<(), FirstPartyCapabilityError> {
+fn bounded_input_size(
+    capability_id: &str,
+    input: &serde_json::Value,
+) -> Result<(), FirstPartyCapabilityError> {
     let bytes = serde_json::to_vec(input).map_err(|_| input_error())?;
-    if bytes.len() > MAX_FIRST_PARTY_INPUT_BYTES {
+    let max_bytes = match capability_id {
+        WRITE_FILE_CAPABILITY_ID => MAX_WRITE_FILE_INPUT_BYTES,
+        APPLY_PATCH_CAPABILITY_ID => MAX_APPLY_PATCH_INPUT_BYTES,
+        _ => MAX_FIRST_PARTY_INPUT_BYTES,
+    };
+    if bytes.len() > max_bytes {
         return Err(FirstPartyCapabilityError::new(
             RuntimeDispatchErrorKind::Resource,
         ));

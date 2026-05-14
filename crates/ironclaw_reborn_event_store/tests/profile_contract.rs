@@ -109,6 +109,34 @@ async fn unavailable_postgres_backend_error_does_not_leak_secret_config() {
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
+async fn production_postgres_rejects_remote_sslmode_disable_before_connecting() {
+    let result = build_reborn_event_stores(
+        RebornProfile::Production,
+        RebornEventStoreConfig::Postgres {
+            url: SecretString::new(
+                "postgres://event_user:RAW_PASSWORD_SENTINEL_3162@db.example.com/events?sslmode=disable"
+                    .to_string()
+                    .into_boxed_str(),
+            ),
+        },
+    )
+    .await;
+
+    let error = result
+        .err()
+        .expect("remote postgres sslmode=disable must fail closed before connect");
+    assert!(matches!(
+        error,
+        RebornEventStoreError::RemotePostgresClearTextDisabled
+    ));
+    let displayed = error.to_string();
+    assert!(!displayed.contains("RAW_PASSWORD_SENTINEL_3162"));
+    assert!(!displayed.contains("db.example.com"));
+    assert!(!displayed.contains("postgres://"));
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
 async fn postgres_connection_failure_does_not_fall_back_or_leak_secret_config() {
     let result = build_reborn_event_stores(
         RebornProfile::Production,

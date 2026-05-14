@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/memory/document-write.input.v1.json",
+  "title": "Memory Document Write Input v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "content"],
+  "properties": {
+    "path": { "type": "string", "minLength": 1, "maxLength": 1024 },
+    "content": { "type": "string" },
+    "mode": { "type": "string", "enum": ["create", "replace", "append"] },
+    "metadata": { "type": "object", "additionalProperties": true }
+  }
+}

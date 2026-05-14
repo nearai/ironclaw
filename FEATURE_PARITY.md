@@ -306,7 +306,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Subagent forked context | ✅ | ❌ | Optional inherit-requester-transcript for native `sessions_spawn` |
 | `agents.defaults.contextInjection: "never"` | ✅ | ❌ | Disable workspace bootstrap injection per-agent |
 | `agents.defaults.experimental.localModelLean` | ✅ | ❌ | Drop heavyweight default tools for weaker local models |
-| `agents.files.get/set` workspace tools | ✅ | ❌ | Realpath-via-fd safety, symlink alias rejection |
+| `agents.files.get/set` workspace tools | ✅ | 🚧 | First-party scoped read/write/list/glob/grep/apply_patch capabilities exist through Reborn HostRuntime; OpenClaw-compatible `agents.files.*` aliases and realpath-via-fd hardening still pending |
 | Trajectory export | ✅ | ❌ | Default-on local trajectory capture; `/export-trajectory` bundles with redacted transcripts/events/artifacts |
 | Block-level streaming | ✅ | ❌ | |
 | Tool-level streaming | ✅ | ❌ | |

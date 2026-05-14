@@ -420,6 +420,7 @@ impl PostgresStore {
             .query(&query, &params)
             .await
             .map_err(|_| durable_error("postgres event store failed to read entries"))?;
+        let returned_rows = rows.len();
         let mut entries = Vec::new();
         let mut last_scanned: Option<EventCursor> = None;
         for row in rows {
@@ -443,8 +444,17 @@ impl PostgresStore {
         // sees rows that don't match. JSONL catches table corruption by
         // asserting each line's cursor equals the expected sequence; we have
         // to do the same out-of-band here, otherwise a missing entry row
-        // would silently turn into history loss.
-        if let Some(scanned) = last_scanned {
+        // would silently turn into history loss. When SQL returns a short
+        // page, the contiguity window must extend to the stream head so
+        // missing trailing rows filtered out by Rust-side decode/match cannot
+        // be skipped.
+        let reached_stream_head = returned_rows < limit;
+        let contiguity_upper = if reached_stream_head {
+            Some(EventCursor::new(next_cursor))
+        } else {
+            last_scanned
+        };
+        if let Some(scanned) = contiguity_upper {
             let scanned_i64 = i64::try_from(scanned.as_u64())
                 .map_err(|_| durable_error("postgres replay scanned cursor exceeds i64"))?;
             let count_row = client
@@ -486,7 +496,7 @@ impl PostgresStore {
         // trailing records were filtered out and never appeared in `last_scanned`.
         let last_matched = entries.last().map(|entry| entry.cursor);
         let stream_head_cursor = next_cursor;
-        let next_cursor = if entries.len() < limit {
+        let next_cursor = if reached_stream_head {
             EventCursor::new(stream_head_cursor)
         } else {
             match (last_matched, last_scanned) {

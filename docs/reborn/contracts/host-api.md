@@ -576,6 +576,22 @@ Rules:
 - a revoked grant is not represented in an active `CapabilitySet`
 - declaration does not equal grant
 
+### 10.5 Capability profiles and host ports
+
+`CapabilityProfileId` names a host-defined portability contract such as `memory.context_retrieval.v1`. It is distinct from `RuntimeProfile`, which is deployment/runtime policy vocabulary. `CapabilityProfileContract` lists the required operation contracts and schema refs that an extension must satisfy before claiming that profile.
+
+`HostPortId` names a mediated host API surface such as `host.storage.sql_transaction.first_party` or `host.events.audit`. `HostPortCatalog` is the host-defined catalog of known host-port contract names used by manifest and claim validators. `HostPortView` is the scoped set of host ports prepared for one invocation after authorization and obligation handling. Concrete host-port implementations belong in host/runtime service crates; `ironclaw_host_api` only owns the serializable vocabulary and validation.
+
+Rules:
+
+- profile IDs and profile operation IDs are lowercase, versioned dotted names ending in `vN`;
+- profile schema refs are relative repository paths, never absolute paths, URLs, or traversal paths;
+- profile schema-ref equality is identity/reference matching only; it does not prove JSON-schema conformance, which is deferred to manifest/claim validation slices;
+- host-port IDs are lowercase `host.*` dotted names;
+- host-port catalogs reject duplicate entries and are not runtime implementation registries;
+- host-port views reject duplicate grants and do not grant authority by themselves;
+- `HostPortGrant` remains a thin `HostPortId` grant token; future attenuation or parameter narrowing uses a separate wire type.
+
 ---
 
 ## 11. Resource contracts

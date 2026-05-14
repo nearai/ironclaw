@@ -1,3 +1,5 @@
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use ironclaw_host_api::{HostApiError, VirtualPath};
 
 use crate::{DirEntry, FileType, FilesystemError, FilesystemOperation};
@@ -121,6 +123,14 @@ pub(crate) fn libsql_db_error(
         operation,
         reason: error.to_string(),
     }
+}
+
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+pub(crate) fn system_time_from_unix_seconds(seconds: i64) -> Option<SystemTime> {
+    if seconds < 0 {
+        return None;
+    }
+    Some(UNIX_EPOCH + Duration::from_secs(seconds as u64))
 }
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]

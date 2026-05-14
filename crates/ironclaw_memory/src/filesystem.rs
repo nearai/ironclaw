@@ -406,6 +406,8 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
                     path: path.clone(),
                     file_type: FileType::File,
                     len,
+                    modified: None,
+                    sensitive: false,
                 });
             }
             let directory_prefix = format!("{relative_path}/");
@@ -417,6 +419,8 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
                     path: path.clone(),
                     file_type: FileType::Directory,
                     len: 0,
+                    modified: None,
+                    sensitive: false,
                 });
             }
             return Err(memory_not_found(path.clone(), FilesystemOperation::Stat));
@@ -429,6 +433,8 @@ impl RootFilesystem for MemoryBackendFilesystemAdapter {
             path: path.clone(),
             file_type: FileType::Directory,
             len: 0,
+            modified: None,
+            sensitive: false,
         })
     }
 }
@@ -804,6 +810,8 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                     path: path.clone(),
                     file_type: FileType::File,
                     len,
+                    modified: None,
+                    sensitive: false,
                 });
             }
             let directory_prefix = format!("{relative_path}/");
@@ -815,6 +823,8 @@ impl RootFilesystem for MemoryDocumentFilesystem {
                     path: path.clone(),
                     file_type: FileType::Directory,
                     len: 0,
+                    modified: None,
+                    sensitive: false,
                 });
             }
             return Err(memory_not_found(path.clone(), FilesystemOperation::Stat));
@@ -827,6 +837,8 @@ impl RootFilesystem for MemoryDocumentFilesystem {
             path: path.clone(),
             file_type: FileType::Directory,
             len: 0,
+            modified: None,
+            sensitive: false,
         })
     }
 }

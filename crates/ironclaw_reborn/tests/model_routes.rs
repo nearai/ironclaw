@@ -1,6 +1,6 @@
 use ironclaw_reborn::{
     ActiveModelRouteSettings, ModelRoute, ModelRoutePolicy, ModelRouteProviderKey,
-    ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
+    ModelRouteResolver, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
 };
 
 #[cfg(feature = "root-llm-provider")]
@@ -117,6 +117,42 @@ fn user_selectable_policy_allows_explicitly_approved_default_route() {
         snapshot.policy_mode(),
         ModelSelectionMode::UserSelectableAllowlist
     );
+}
+
+#[test]
+fn static_resolver_rejects_route_configured_for_different_slot_only() {
+    let default_route = ModelRoute::new("nearai", "qwen3-coder").unwrap();
+    let mission_route = ModelRoute::new("openrouter", "anthropic/claude-sonnet-4").unwrap();
+    let resolver = StaticModelRouteResolver::new(
+        ModelRoutePolicy::new(ModelSelectionMode::UserSelectableAllowlist)
+            .with_approved_route(default_route.clone())
+            .with_approved_route(mission_route.clone()),
+    )
+    .with_route(ModelSlot::Default, default_route)
+    .with_route(ModelSlot::Mission, mission_route.clone());
+
+    let error = resolver
+        .validate_model_route(ModelSlot::Default, &mission_route)
+        .unwrap_err();
+
+    assert_eq!(error.kind().as_str(), "route_not_approved");
+}
+
+#[test]
+fn static_resolver_allows_shared_route_configured_for_requested_slot() {
+    let shared_route = ModelRoute::new("nearai", "qwen3-coder").unwrap();
+    let resolver = StaticModelRouteResolver::new(
+        ModelRoutePolicy::new(ModelSelectionMode::UserSelectableAllowlist)
+            .with_approved_route(shared_route.clone()),
+    )
+    .with_route(ModelSlot::Default, shared_route.clone())
+    .with_route(ModelSlot::Mission, shared_route.clone());
+
+    let mode = resolver
+        .validate_model_route(ModelSlot::Default, &shared_route)
+        .unwrap();
+
+    assert_eq!(mode, ModelSelectionMode::UserSelectableAllowlist);
 }
 
 #[test]

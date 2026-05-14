@@ -1,6 +1,7 @@
 use ironclaw_capabilities::{
     CapabilityObligationHandler, CapabilityObligationPhase, CapabilityObligationRequest,
 };
+use ironclaw_events::InMemoryAuditSink;
 use ironclaw_host_api::{
     AgentId, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, InvocationId, MountView,
     NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, Obligation,
@@ -8,10 +9,7 @@ use ironclaw_host_api::{
     RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
     RuntimeKind, SecretHandle, TenantId, TrustClass, UserId,
 };
-use ironclaw_host_runtime::{
-    BuiltinObligationHandler, HostHttpEgressService, NetworkObligationPolicyStore,
-    RuntimeSecretInjectionStore,
-};
+use ironclaw_host_runtime::{BuiltinObligationServices, HostHttpEgressService};
 use ironclaw_mcp::{
     McpClient, McpClientRequest, McpHostHttpClient, McpHostHttpEgressPlan, McpHostHttpRequest,
     McpRuntimeHttpAdapter, StaticMcpHostHttpEgressPlanner,
@@ -19,6 +17,7 @@ use ironclaw_mcp::{
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
+use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_scripts::{ScriptHostHttpRequest, ScriptRuntimeHttpAdapter};
 use ironclaw_secrets::{
     InMemorySecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
@@ -47,20 +46,16 @@ fn host_http_egress_consumes_staged_obligation_secret_once() {
     let scope = sample_scope();
     let capability_id = sample_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
-    let staged = Arc::new(RuntimeSecretInjectionStore::new());
-    staged
-        .insert(
-            &scope,
-            &capability_id,
-            &handle,
-            SecretMaterial::from("sk-staged-secret"),
-        )
-        .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    )
-    .with_secret_injection_store(staged.clone());
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "sk-staged-secret",
+    );
+    let service = services.host_http_egress(network);
 
     let request = RuntimeHttpEgressRequest {
         runtime: RuntimeKind::Script,
@@ -103,13 +98,6 @@ fn host_http_egress_consumes_staged_obligation_secret_once() {
         ))
     );
     drop(requests);
-    assert!(
-        staged
-            .take(&scope, &capability_id, &handle)
-            .expect("store should remain available")
-            .is_none(),
-        "staged material must be removed after first injection"
-    );
 
     let error = service
         .execute(request)
@@ -135,15 +123,13 @@ async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler()
     });
     let network_recorder = network.requests.clone();
     let secret_store = Arc::new(InMemorySecretStore::new());
-    let staged = Arc::new(RuntimeSecretInjectionStore::new());
-    let handler = BuiltinObligationHandler::new()
-        .with_secret_store(secret_store.clone())
-        .with_secret_injection_store(staged.clone());
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    )
-    .with_secret_injection_store(staged);
+    let services = BuiltinObligationServices::new(
+        Arc::new(InMemoryAuditSink::new()),
+        secret_store.clone(),
+        Arc::new(InMemoryResourceGovernor::new()),
+    );
+    let handler = services.obligation_handler();
+    let service = services.host_http_egress(network);
     let context = execution_context();
     let capability_id = sample_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
@@ -155,9 +141,14 @@ async fn host_http_egress_consumes_secret_staged_by_builtin_obligation_handler()
         )
         .await
         .unwrap();
-    let obligations = vec![Obligation::InjectSecretOnce {
-        handle: handle.clone(),
-    }];
+    let obligations = vec![
+        Obligation::ApplyNetworkPolicy {
+            policy: sample_policy(),
+        },
+        Obligation::InjectSecretOnce {
+            handle: handle.clone(),
+        },
+    ];
 
     handler
         .satisfy(CapabilityObligationRequest {
@@ -226,20 +217,16 @@ fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_request() {
     let scope = sample_scope();
     let capability_id = sample_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
-    let staged = Arc::new(RuntimeSecretInjectionStore::new());
-    staged
-        .insert(
-            &scope,
-            &capability_id,
-            &handle,
-            SecretMaterial::from("sk-staged-secret"),
-        )
-        .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    )
-    .with_secret_injection_store(staged.clone());
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "sk-staged-secret",
+    );
+    let service = services.host_http_egress(network);
 
     service
         .execute(RuntimeHttpEgressRequest {
@@ -296,13 +283,6 @@ fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_request() {
         "https://api.example.test/v1/run?token=sk-staged-secret"
     );
     drop(requests);
-    assert!(
-        staged
-            .take(&scope, &capability_id, &handle)
-            .expect("store should remain available")
-            .is_none(),
-        "staged material must still be consumed only once across the whole request"
-    );
 }
 
 #[test]
@@ -318,17 +298,17 @@ fn host_http_egress_fails_closed_when_required_staged_secret_is_missing() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    )
-    .with_secret_injection_store(Arc::new(RuntimeSecretInjectionStore::new()));
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let service = services.host_http_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
-            scope: sample_scope(),
-            capability_id: sample_capability_id(),
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -337,7 +317,7 @@ fn host_http_egress_fails_closed_when_required_staged_secret_is_missing() {
             credential_injections: vec![RuntimeCredentialInjection {
                 handle: SecretHandle::new("api-token").unwrap(),
                 source: RuntimeCredentialSource::StagedObligation {
-                    capability_id: sample_capability_id(),
+                    capability_id: capability_id.clone(),
                 },
                 target: RuntimeCredentialTarget::Header {
                     name: "authorization".to_string(),
@@ -374,20 +354,16 @@ fn host_http_egress_does_not_take_staged_secret_from_other_capability() {
     let requested_capability = sample_capability_id();
     let other_capability = CapabilityId::new("other.capability").unwrap();
     let handle = SecretHandle::new("api-token").unwrap();
-    let staged = Arc::new(RuntimeSecretInjectionStore::new());
-    staged
-        .insert(
-            &scope,
-            &other_capability,
-            &handle,
-            SecretMaterial::from("sk-staged-secret"),
-        )
-        .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    )
-    .with_secret_injection_store(staged.clone());
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &requested_capability, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &other_capability,
+        &handle,
+        "sk-staged-secret",
+    );
+    let service = services.host_http_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -420,13 +396,6 @@ fn host_http_egress_does_not_take_staged_secret_from_other_capability() {
         ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
-    assert!(
-        staged
-            .take(&scope, &other_capability, &handle)
-            .expect("store should remain available")
-            .is_some(),
-        "material staged for a different capability must not be consumed"
-    );
 }
 
 #[test]
@@ -446,20 +415,16 @@ fn host_http_egress_does_not_take_staged_secret_for_other_handle() {
     let capability_id = sample_capability_id();
     let requested_handle = SecretHandle::new("api-token").unwrap();
     let other_handle = SecretHandle::new("other-token").unwrap();
-    let staged = Arc::new(RuntimeSecretInjectionStore::new());
-    staged
-        .insert(
-            &scope,
-            &capability_id,
-            &other_handle,
-            SecretMaterial::from("sk-staged-secret"),
-        )
-        .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    )
-    .with_secret_injection_store(staged.clone());
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &other_handle,
+        "sk-staged-secret",
+    );
+    let service = services.host_http_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -492,13 +457,6 @@ fn host_http_egress_does_not_take_staged_secret_for_other_handle() {
         ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
-    assert!(
-        staged
-            .take(&scope, &capability_id, &other_handle)
-            .expect("store should remain available")
-            .is_some(),
-        "material staged for a different handle must not be consumed"
-    );
 }
 
 #[test]
@@ -512,20 +470,16 @@ fn host_http_egress_removes_staged_secret_before_network_errors() {
     let scope = sample_scope();
     let capability_id = sample_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
-    let staged = Arc::new(RuntimeSecretInjectionStore::new());
-    staged
-        .insert(
-            &scope,
-            &capability_id,
-            &handle,
-            SecretMaterial::from("sk-staged-secret"),
-        )
-        .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    )
-    .with_secret_injection_store(staged.clone());
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &scope,
+        &capability_id,
+        &handle,
+        "sk-staged-secret",
+    );
+    let service = services.host_http_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -559,13 +513,6 @@ fn host_http_egress_removes_staged_secret_before_network_errors() {
     ));
     assert!(!error.to_string().contains("sk-staged-secret"));
     assert_eq!(network_recorder.lock().unwrap().len(), 1);
-    assert!(
-        staged
-            .take(&scope, &capability_id, &handle)
-            .expect("store should remain available")
-            .is_none(),
-        "network failures must not make staged material reusable"
-    );
 }
 
 #[test]
@@ -581,17 +528,17 @@ fn host_http_egress_skips_optional_missing_staged_secret() {
         },
     });
     let network_recorder = network.requests.clone();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    )
-    .with_secret_injection_store(Arc::new(RuntimeSecretInjectionStore::new()));
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let service = services.host_http_egress(network);
 
     let response = service
         .execute(RuntimeHttpEgressRequest {
             runtime: RuntimeKind::Script,
-            scope: sample_scope(),
-            capability_id: sample_capability_id(),
+            scope: scope.clone(),
+            capability_id: capability_id.clone(),
             method: NetworkMethod::Post,
             url: "https://api.example.test/v1/run".to_string(),
             headers: vec![],
@@ -600,7 +547,7 @@ fn host_http_egress_skips_optional_missing_staged_secret() {
             credential_injections: vec![RuntimeCredentialInjection {
                 handle: SecretHandle::new("api-token").unwrap(),
                 source: RuntimeCredentialSource::StagedObligation {
-                    capability_id: sample_capability_id(),
+                    capability_id: capability_id.clone(),
                 },
                 target: RuntimeCredentialTarget::Header {
                     name: "authorization".to_string(),
@@ -642,20 +589,16 @@ fn host_http_egress_does_not_take_staged_secret_from_other_scope() {
     let other_scope = sample_scope();
     let capability_id = sample_capability_id();
     let handle = SecretHandle::new("api-token").unwrap();
-    let staged = Arc::new(RuntimeSecretInjectionStore::new());
-    staged
-        .insert(
-            &other_scope,
-            &capability_id,
-            &handle,
-            SecretMaterial::from("sk-staged-secret"),
-        )
-        .unwrap();
-    let service = HostHttpEgressService::new_with_request_policy_for_tests(
-        network,
-        InMemorySecretStore::new(),
-    )
-    .with_secret_injection_store(staged.clone());
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &requested_scope, &capability_id, sample_policy());
+    stage_secret_sync(
+        &services,
+        &other_scope,
+        &capability_id,
+        &handle,
+        "sk-staged-secret",
+    );
+    let service = services.host_http_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -688,13 +631,6 @@ fn host_http_egress_does_not_take_staged_secret_from_other_scope() {
         ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
-    assert!(
-        staged
-            .take(&other_scope, &capability_id, &handle)
-            .expect("store should remain available")
-            .is_some(),
-        "material staged for a different scope must not be consumed"
-    );
 }
 
 #[test]
@@ -1049,13 +985,12 @@ fn host_http_egress_borrows_staged_network_policy_before_transport() {
         },
     });
     let network_recorder = network.requests.clone();
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let services = test_obligation_services();
     let scope = sample_scope();
     let capability_id = sample_capability_id();
     let staged_policy = sample_policy();
-    policy_store.insert(&scope, &capability_id, staged_policy.clone());
-    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
-        .with_network_policy_store(policy_store.clone());
+    stage_policy_sync(&services, &scope, &capability_id, staged_policy.clone());
+    let service = services.host_http_egress(network);
 
     service
         .execute(RuntimeHttpEgressRequest {
@@ -1077,10 +1012,6 @@ fn host_http_egress_borrows_staged_network_policy_before_transport() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].policy, staged_policy);
     drop(requests);
-    assert!(
-        policy_store.take(&scope, &capability_id).is_some(),
-        "runtime egress must leave staged policy for invocation/process lifecycle cleanup"
-    );
 }
 
 #[test]
@@ -1096,13 +1027,12 @@ fn wasm_http_adapter_borrows_real_host_staged_network_policy() {
         },
     });
     let network_recorder = network.requests.clone();
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let services = test_obligation_services();
     let scope = sample_scope();
     let capability_id = sample_capability_id();
     let staged_policy = sample_policy();
-    policy_store.insert(&scope, &capability_id, staged_policy.clone());
-    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
-        .with_network_policy_store(policy_store.clone());
+    stage_policy_sync(&services, &scope, &capability_id, staged_policy.clone());
+    let service = services.host_http_egress(network);
     let adapter = WasmRuntimeHttpAdapter::new(
         Arc::new(service),
         scope.clone(),
@@ -1128,7 +1058,6 @@ fn wasm_http_adapter_borrows_real_host_staged_network_policy() {
     assert_eq!(requests[0].url, "https://api.example.test/v1/run");
     assert_eq!(requests[0].body, b"hello".to_vec());
     drop(requests);
-    assert!(policy_store.take(&scope, &capability_id).is_some());
 }
 
 #[test]
@@ -1144,13 +1073,12 @@ fn script_http_adapter_borrows_real_host_staged_network_policy() {
         },
     });
     let network_recorder = network.requests.clone();
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let services = test_obligation_services();
     let scope = sample_scope();
     let capability_id = sample_capability_id();
     let staged_policy = sample_policy();
-    policy_store.insert(&scope, &capability_id, staged_policy.clone());
-    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
-        .with_network_policy_store(policy_store.clone());
+    stage_policy_sync(&services, &scope, &capability_id, staged_policy.clone());
+    let service = services.host_http_egress(network);
     let adapter = ScriptRuntimeHttpAdapter::new(Arc::new(service));
 
     let response = adapter
@@ -1176,7 +1104,6 @@ fn script_http_adapter_borrows_real_host_staged_network_policy() {
     assert_eq!(requests[0].url, "https://api.example.test/v1/run");
     assert_eq!(requests[0].body, b"hello".to_vec());
     drop(requests);
-    assert!(policy_store.take(&scope, &capability_id).is_some());
 }
 
 #[test]
@@ -1192,13 +1119,12 @@ fn mcp_http_adapter_borrows_real_host_staged_network_policy() {
         },
     });
     let network_recorder = network.requests.clone();
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let services = test_obligation_services();
     let scope = sample_scope();
     let capability_id = sample_capability_id();
     let staged_policy = sample_policy();
-    policy_store.insert(&scope, &capability_id, staged_policy.clone());
-    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
-        .with_network_policy_store(policy_store.clone());
+    stage_policy_sync(&services, &scope, &capability_id, staged_policy.clone());
+    let service = services.host_http_egress(network);
     let adapter = McpRuntimeHttpAdapter::new(Arc::new(service));
 
     let response = adapter
@@ -1224,20 +1150,18 @@ fn mcp_http_adapter_borrows_real_host_staged_network_policy() {
     assert_eq!(requests[0].url, "https://api.example.test/v1/run");
     assert_eq!(requests[0].body, b"hello".to_vec());
     drop(requests);
-    assert!(policy_store.take(&scope, &capability_id).is_some());
 }
 
 #[tokio::test]
 async fn mcp_http_client_reuses_real_host_staged_network_policy_for_json_rpc_session() {
     let network = JsonRpcMcpNetwork::new();
     let network_recorder = network.requests.clone();
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let services = test_obligation_services();
     let scope = sample_scope();
     let capability_id = CapabilityId::new("mcp.search").unwrap();
     let staged_policy = sample_policy();
-    policy_store.insert(&scope, &capability_id, staged_policy.clone());
-    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
-        .with_network_policy_store(policy_store.clone());
+    stage_policy(&services, &scope, &capability_id, staged_policy.clone()).await;
+    let service = services.host_http_egress(network);
     let client = McpHostHttpClient::new(
         McpRuntimeHttpAdapter::new(Arc::new(service)),
         StaticMcpHostHttpEgressPlanner::new(McpHostHttpEgressPlan {
@@ -1279,10 +1203,6 @@ async fn mcp_http_client_reuses_real_host_staged_network_policy_for_json_rpc_ses
             .all(|request| request.policy == staged_policy)
     );
     drop(requests);
-    assert!(
-        policy_store.take(&scope, &capability_id).is_some(),
-        "host egress should leave staged policies for invocation/process lifecycle cleanup"
-    );
 }
 
 #[test]
@@ -1298,9 +1218,8 @@ fn host_http_egress_fails_closed_without_staged_network_policy() {
         },
     });
     let network_recorder = network.requests.clone();
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
-    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
-        .with_network_policy_store(policy_store);
+    let services = test_obligation_services();
+    let service = services.host_http_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -1342,16 +1261,15 @@ fn host_http_egress_does_not_use_cross_scope_or_cross_capability_policy() {
         },
     });
     let network_recorder = network.requests.clone();
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let services = test_obligation_services();
     let scope = sample_scope();
     let capability_id = sample_capability_id();
     let mut other_scope = scope.clone();
     other_scope.agent_id = Some(AgentId::new("other-agent").unwrap());
     let other_capability_id = CapabilityId::new("other.http").unwrap();
-    policy_store.insert(&other_scope, &capability_id, sample_policy());
-    policy_store.insert(&scope, &other_capability_id, sample_policy());
-    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
-        .with_network_policy_store(policy_store.clone());
+    stage_policy_sync(&services, &other_scope, &capability_id, sample_policy());
+    stage_policy_sync(&services, &scope, &other_capability_id, sample_policy());
+    let service = services.host_http_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -1378,8 +1296,6 @@ fn host_http_egress_does_not_use_cross_scope_or_cross_capability_policy() {
         } if reason == "network_policy_missing"
     ));
     assert!(network_recorder.lock().unwrap().is_empty());
-    assert!(policy_store.take(&other_scope, &capability_id).is_some());
-    assert!(policy_store.take(&scope, &other_capability_id).is_some());
 }
 
 #[test]
@@ -1395,12 +1311,11 @@ fn host_http_egress_consumes_staged_policy_when_dispatch_fails_before_transport(
         },
     });
     let network_recorder = network.requests.clone();
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let services = test_obligation_services();
     let scope = sample_scope();
     let capability_id = sample_capability_id();
-    policy_store.insert(&scope, &capability_id, sample_policy());
-    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
-        .with_network_policy_store(policy_store.clone());
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let service = services.host_http_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -1428,7 +1343,6 @@ fn host_http_egress_consumes_staged_policy_when_dispatch_fails_before_transport(
 
     assert!(matches!(error, RuntimeHttpEgressError::Credential { .. }));
     assert!(network_recorder.lock().unwrap().is_empty());
-    assert!(policy_store.take(&scope, &capability_id).is_none());
 }
 
 #[test]
@@ -1444,12 +1358,11 @@ fn host_http_egress_consumes_staged_policy_when_request_validation_fails() {
         },
     });
     let network_recorder = network.requests.clone();
-    let policy_store = Arc::new(NetworkObligationPolicyStore::new());
+    let services = test_obligation_services();
     let scope = sample_scope();
     let capability_id = sample_capability_id();
-    policy_store.insert(&scope, &capability_id, sample_policy());
-    let service = HostHttpEgressService::new(network, InMemorySecretStore::new())
-        .with_network_policy_store(policy_store.clone());
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let service = services.host_http_egress(network);
 
     let error = service
         .execute(RuntimeHttpEgressRequest {
@@ -1472,7 +1385,6 @@ fn host_http_egress_consumes_staged_policy_when_request_validation_fails() {
 
     assert!(matches!(error, RuntimeHttpEgressError::Request { .. }));
     assert!(network_recorder.lock().unwrap().is_empty());
-    assert!(policy_store.take(&scope, &capability_id).is_none());
 }
 
 #[test]
@@ -2220,6 +2132,79 @@ fn block_on_test<T>(future: impl std::future::Future<Output = T>) -> T {
         .build()
         .unwrap()
         .block_on(future)
+}
+
+fn test_obligation_services() -> BuiltinObligationServices {
+    BuiltinObligationServices::new(
+        Arc::new(InMemoryAuditSink::new()),
+        Arc::new(InMemorySecretStore::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+    )
+}
+
+fn context_for_scope(scope: ResourceScope) -> ExecutionContext {
+    let mut context = execution_context();
+    context.resource_scope = scope;
+    context
+}
+
+fn stage_policy_sync(
+    services: &BuiltinObligationServices,
+    scope: &ResourceScope,
+    capability_id: &CapabilityId,
+    policy: NetworkPolicy,
+) {
+    block_on_test(stage_policy(services, scope, capability_id, policy));
+}
+
+async fn stage_policy(
+    services: &BuiltinObligationServices,
+    scope: &ResourceScope,
+    capability_id: &CapabilityId,
+    policy: NetworkPolicy,
+) {
+    let context = context_for_scope(scope.clone());
+    services
+        .obligation_handler()
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id,
+            estimate: &ResourceEstimate::default(),
+            obligations: &[Obligation::ApplyNetworkPolicy { policy }],
+        })
+        .await
+        .unwrap();
+}
+
+fn stage_secret_sync(
+    services: &BuiltinObligationServices,
+    scope: &ResourceScope,
+    capability_id: &CapabilityId,
+    handle: &SecretHandle,
+    material: &str,
+) {
+    block_on_test(services.secret_store().put(
+        scope.clone(),
+        handle.clone(),
+        SecretMaterial::from(material),
+    ))
+    .unwrap();
+    let context = context_for_scope(scope.clone());
+    block_on_test(
+        services
+            .obligation_handler()
+            .satisfy(CapabilityObligationRequest {
+                phase: CapabilityObligationPhase::Invoke,
+                context: &context,
+                capability_id,
+                estimate: &ResourceEstimate::default(),
+                obligations: &[Obligation::InjectSecretOnce {
+                    handle: handle.clone(),
+                }],
+            }),
+    )
+    .unwrap();
 }
 
 fn sample_scope() -> ResourceScope {

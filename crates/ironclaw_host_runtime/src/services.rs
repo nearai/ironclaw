@@ -85,11 +85,14 @@ use ironclaw_wasm::{
 
 use thiserror::Error;
 
+use crate::obligations::{
+    NetworkObligationPolicyStore, RuntimeSecretInjectionStore, SharedSecretStore,
+};
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
-    NetworkObligationPolicyStore, ProcessObligationLifecycleStore, RuntimeBackendHealth,
-    RuntimeSecretInjectionStore, TurnRunExecutor, TurnRunScheduler, TurnRunSchedulerConfig,
+    ProcessObligationLifecycleStore, RuntimeBackendHealth, TurnRunExecutor, TurnRunScheduler,
+    TurnRunSchedulerConfig,
 };
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
@@ -1007,12 +1010,27 @@ where
         self
     }
 
-    pub fn secret_injection_store(&self) -> Arc<RuntimeSecretInjectionStore> {
-        Arc::clone(&self.secret_injection_store)
-    }
-
-    pub fn network_policy_store(&self) -> Arc<NetworkObligationPolicyStore> {
-        Arc::clone(&self.network_policy_store)
+    /// Builds and attaches production-shaped host HTTP egress using this
+    /// service graph's private network-policy, secret-injection, and secret-store
+    /// handles. Callers provide concrete network transport, but never receive the
+    /// mutable handoff stores or choose a separate secret backend.
+    pub fn try_with_host_http_egress<N>(self, network: N) -> Result<Self, ProductionWiringReport>
+    where
+        N: NetworkHttpEgress + 'static,
+    {
+        let Some(secret_store) = self.secret_store.clone() else {
+            return Err(production_wiring_report(
+                ProductionWiringComponent::SecretStore,
+                ProductionWiringIssueKind::Missing,
+                None,
+            ));
+        };
+        let runtime_http_egress = Arc::new(
+            crate::HostHttpEgressService::new(network, SharedSecretStore(secret_store))
+                .with_network_policy_store(Arc::clone(&self.network_policy_store))
+                .with_secret_injection_store(Arc::clone(&self.secret_injection_store)),
+        );
+        Ok(self.with_host_http_egress_service(runtime_http_egress))
     }
 
     pub fn with_script_runtime<T>(mut self, runtime: Arc<T>) -> Self
@@ -1523,7 +1541,10 @@ where
         if let Some(runtime) = &self.first_party_runtime {
             dispatcher = dispatcher.with_runtime_adapter_arc(
                 RuntimeKind::FirstParty,
-                Arc::new(FirstPartyRuntimeAdapter::from_registry(Arc::clone(runtime))),
+                Arc::new(FirstPartyRuntimeAdapter::from_registry(
+                    Arc::clone(runtime),
+                    Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
+                )),
             );
         }
         if let Some(runtime) = &self.wasm_runtime {
@@ -1857,11 +1878,18 @@ where
 #[derive(Clone)]
 struct FirstPartyRuntimeAdapter {
     registry: Arc<FirstPartyCapabilityRegistry>,
+    filesystem: Arc<dyn RootFilesystem>,
 }
 
 impl FirstPartyRuntimeAdapter {
-    pub fn from_registry(registry: Arc<FirstPartyCapabilityRegistry>) -> Self {
-        Self { registry }
+    pub fn from_registry(
+        registry: Arc<FirstPartyCapabilityRegistry>,
+        filesystem: Arc<dyn RootFilesystem>,
+    ) -> Self {
+        Self {
+            registry,
+            filesystem,
+        }
     }
 }
 
@@ -1905,6 +1933,7 @@ where
             scope: request.scope.clone(),
             estimate: request.estimate,
             mounts: request.mounts,
+            filesystem: Arc::clone(&self.filesystem),
             input: request.input,
         }))
         .catch_unwind()
@@ -2401,5 +2430,257 @@ fn runtime_sort_key(kind: RuntimeKind) -> u8 {
         RuntimeKind::Script => 2,
         RuntimeKind::FirstParty => 3,
         RuntimeKind::System => 4,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use ironclaw_authorization::GrantAuthorizer;
+    use ironclaw_extensions::ExtensionRegistry;
+    use ironclaw_filesystem::LocalFilesystem;
+    use ironclaw_host_api::{
+        CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme,
+        NetworkTargetPattern, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
+        RuntimeCredentialTarget, RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId,
+        UserId,
+    };
+    use ironclaw_network::{
+        NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
+    };
+    use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
+    use ironclaw_resources::InMemoryResourceGovernor;
+    use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+
+    use super::*;
+
+    #[test]
+    fn host_http_egress_borrows_staged_policy_for_repeated_invocation_requests() {
+        let network = RecordingNetwork::ok();
+        let recorded_requests = Arc::clone(&network.requests);
+        let services = test_services()
+            .with_secret_store(Arc::new(InMemorySecretStore::new()))
+            .try_with_host_http_egress(network)
+            .expect("host HTTP egress should wire with graph secret store");
+        let scope = sample_scope();
+        let capability_id = sample_capability_id();
+        let staged_policy = staged_policy();
+        services
+            .network_policy_store
+            .insert(&scope, &capability_id, staged_policy.clone());
+        let egress = configured_egress(&services);
+
+        egress
+            .execute(request_without_credentials(
+                scope.clone(),
+                capability_id.clone(),
+            ))
+            .expect("first request should observe staged policy");
+        egress
+            .execute(request_without_credentials(scope, capability_id))
+            .expect("second request in same invocation should observe borrowed staged policy");
+
+        let requests = recorded_requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].policy, staged_policy);
+        assert_eq!(requests[1].policy, staged_policy);
+    }
+
+    #[test]
+    fn host_http_egress_helper_leases_secret_store_credentials_from_graph_store() {
+        let graph_secret_store = Arc::new(InMemorySecretStore::new());
+        let scope = sample_scope();
+        let capability_id = sample_capability_id();
+        let handle = SecretHandle::new("api-token").unwrap();
+        block_on_secret_store(graph_secret_store.put(
+            scope.clone(),
+            handle.clone(),
+            SecretMaterial::from("graph-secret"),
+        ))
+        .expect("graph secret should be seeded");
+
+        let network = RecordingNetwork::ok();
+        let recorded_requests = Arc::clone(&network.requests);
+        let services = test_services()
+            .with_secret_store(Arc::clone(&graph_secret_store))
+            .try_with_host_http_egress(network)
+            .expect("host HTTP egress should wire with graph secret store");
+        services
+            .network_policy_store
+            .insert(&scope, &capability_id, staged_policy());
+        let egress = configured_egress(&services);
+
+        egress
+            .execute(request_with_secret_store_lease(
+                scope,
+                capability_id,
+                handle,
+            ))
+            .expect("SecretStoreLease should lease from graph-owned secret store");
+
+        let requests = recorded_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .headers
+                .iter()
+                .find(|(name, _)| name == "authorization"),
+            Some(&(
+                "authorization".to_string(),
+                "Bearer graph-secret".to_string()
+            ))
+        );
+    }
+
+    fn test_services() -> HostRuntimeServices<
+        LocalFilesystem,
+        InMemoryResourceGovernor,
+        InMemoryProcessStore,
+        InMemoryProcessResultStore,
+    > {
+        HostRuntimeServices::new(
+            Arc::new(ExtensionRegistry::new()),
+            Arc::new(LocalFilesystem::new()),
+            Arc::new(InMemoryResourceGovernor::new()),
+            Arc::new(GrantAuthorizer::new()),
+            ProcessServices::in_memory(),
+            CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        )
+    }
+
+    fn configured_egress<
+        F: RootFilesystem + 'static,
+        G: ResourceGovernor + 'static,
+        S: ProcessStore + 'static,
+        R: ProcessResultStore + 'static,
+    >(
+        services: &HostRuntimeServices<F, G, S, R>,
+    ) -> Arc<dyn RuntimeHttpEgress> {
+        services
+            .runtime_http_egress
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("runtime HTTP egress should be configured")
+            .clone()
+    }
+
+    fn request_without_credentials(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+    ) -> RuntimeHttpEgressRequest {
+        RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            capability_id,
+            method: NetworkMethod::Get,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: Vec::new(),
+            network_policy: caller_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        }
+    }
+
+    fn request_with_secret_store_lease(
+        scope: ResourceScope,
+        capability_id: CapabilityId,
+        handle: SecretHandle,
+    ) -> RuntimeHttpEgressRequest {
+        RuntimeHttpEgressRequest {
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            ..request_without_credentials(scope, capability_id)
+        }
+    }
+
+    fn sample_scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("tenant1").unwrap(),
+            user_id: UserId::new("user1").unwrap(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    fn sample_capability_id() -> CapabilityId {
+        CapabilityId::new("runtime.http").unwrap()
+    }
+
+    fn staged_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "api.example.test".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: true,
+            max_egress_bytes: Some(4096),
+        }
+    }
+
+    fn caller_policy() -> NetworkPolicy {
+        NetworkPolicy {
+            allowed_targets: vec![NetworkTargetPattern {
+                scheme: Some(NetworkScheme::Https),
+                host_pattern: "caller.example.test".to_string(),
+                port: None,
+            }],
+            deny_private_ip_ranges: false,
+            max_egress_bytes: Some(1),
+        }
+    }
+
+    fn block_on_secret_store<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    #[derive(Clone)]
+    struct RecordingNetwork {
+        requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
+    }
+
+    impl RecordingNetwork {
+        fn ok() -> Self {
+            Self {
+                requests: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl NetworkHttpEgress for RecordingNetwork {
+        fn execute(
+            &self,
+            request: NetworkHttpRequest,
+        ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+            self.requests.lock().unwrap().push(request);
+            Ok(NetworkHttpResponse {
+                status: 200,
+                headers: vec![],
+                body: br#"{"ok":true}"#.to_vec(),
+                usage: NetworkUsage {
+                    request_bytes: 0,
+                    response_bytes: 11,
+                    resolved_ip: None,
+                },
+            })
+        }
     }
 }

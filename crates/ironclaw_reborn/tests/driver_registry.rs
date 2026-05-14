@@ -2,9 +2,10 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_reborn::driver_registry::{
-    ConfiguredRunProfile, DriverKind, DriverReadinessInputs, DriverReadinessMode,
-    DriverReadinessStatus, DriverRegistry, DriverRegistryError, DriverRequirements,
-    HostGraphReadiness, LoopDriverRegistryKey, PersistedRunDriverIdentity, RequirementLevel,
+    ConfiguredRunProfile, DriverKind, DriverReadinessDiagnosticCode, DriverReadinessInputs,
+    DriverReadinessMode, DriverReadinessStatus, DriverRegistry, DriverRegistryError,
+    DriverRequirements, HostGraphReadiness, LoopDriverRegistryKey, PersistedRunDriverIdentity,
+    RequirementLevel,
 };
 use ironclaw_turns::{
     AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverResumeRequest,
@@ -102,12 +103,9 @@ fn production_readiness_rejects_missing_configured_driver() {
     );
 
     assert_eq!(report.status, DriverReadinessStatus::NotReady);
-    assert!(
-        report
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "missing_configured_driver")
-    );
+    assert!(report.diagnostics.iter().any(
+        |diagnostic| diagnostic.code == DriverReadinessDiagnosticCode::MissingConfiguredDriver
+    ));
 }
 
 #[test]
@@ -136,12 +134,8 @@ fn production_readiness_rejects_fake_driver() {
     );
 
     assert_eq!(report.status, DriverReadinessStatus::NotReady);
-    assert!(
-        report
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "reference_driver_not_production_ready")
-    );
+    assert!(report.diagnostics.iter().any(|diagnostic| diagnostic.code
+        == DriverReadinessDiagnosticCode::ReferenceDriverNotProductionReady));
 }
 
 #[test]
@@ -173,12 +167,8 @@ fn local_dev_readiness_allows_fake_driver_with_degraded_status() {
         report.status,
         DriverReadinessStatus::LocalDevDegradedReference
     );
-    assert!(
-        report
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "reference_driver_allowed_for_local_dev")
-    );
+    assert!(report.diagnostics.iter().any(|diagnostic| diagnostic.code
+        == DriverReadinessDiagnosticCode::ReferenceDriverAllowedForLocalDev));
 }
 
 #[test]
@@ -201,10 +191,8 @@ fn readiness_requires_driver_for_non_terminal_run_identity() {
 
     assert_eq!(report.status, DriverReadinessStatus::NotReady);
     assert!(
-        report
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "missing_non_terminal_run_driver")
+        report.diagnostics.iter().any(|diagnostic| diagnostic.code
+            == DriverReadinessDiagnosticCode::MissingNonTerminalRunDriver)
     );
 }
 
@@ -298,12 +286,8 @@ fn production_readiness_rejects_missing_required_host_component() {
     );
 
     assert_eq!(report.status, DriverReadinessStatus::NotReady);
-    assert!(
-        report
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "missing_required_driver_requirement")
-    );
+    assert!(report.diagnostics.iter().any(|diagnostic| diagnostic.code
+        == DriverReadinessDiagnosticCode::MissingRequiredDriverRequirement));
 }
 
 #[test]
@@ -344,7 +328,7 @@ fn production_readiness_enforces_required_prompt_port_availability() {
 
     assert_eq!(report.status, DriverReadinessStatus::NotReady);
     assert!(report.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "missing_required_driver_requirement"
+        diagnostic.code == DriverReadinessDiagnosticCode::MissingRequiredDriverRequirement
             && diagnostic.message.contains("prompt bundle")
     }));
 

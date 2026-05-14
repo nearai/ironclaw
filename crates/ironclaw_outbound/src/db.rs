@@ -303,6 +303,7 @@ pub(crate) fn validate_delivery_row(
 pub(crate) fn failure_kind_key(kind: DeliveryFailureKind) -> &'static str {
     match kind {
         DeliveryFailureKind::AuthorizationRevoked => "authorization_revoked",
+        DeliveryFailureKind::TransientValidatorError => "transient_validator_error",
         DeliveryFailureKind::TransportUnavailable => "transport_unavailable",
         DeliveryFailureKind::RateLimited => "rate_limited",
         DeliveryFailureKind::Rejected => "rejected",

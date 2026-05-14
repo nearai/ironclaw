@@ -85,37 +85,46 @@ Use for:
 
 ## 4. Namespace roots
 
-V1 canonical virtual roots:
+Frozen V1 canonical virtual roots (aligned with `storage-placement.md`):
 
 ```text
 /engine
+/system/settings
 /system/extensions
+/system/skills
 /users
 /projects
 /memory
+/artifacts
+/tmp
+/secrets
+/events
 ```
 
 Recommended meaning:
 
 | Root | Purpose |
 |---|---|
-| `/engine` | host-owned engine config, schemas, migrations, and service metadata |
+| `/engine` | host-owned runtime state, schemas, migrations, and service metadata |
+| `/system/settings` | typed settings repository and optional settings projections |
 | `/system/extensions` | installed extension packages and extension-local config/state/cache roots |
+| `/system/skills` | skill manifests, registries, and installed skill state |
 | `/users` | user-owned durable profile/config areas |
-| `/projects` | project workspaces, missions, thread state, artifacts, and project-local config |
+| `/projects` | project workspaces, missions, thread state, and project-local config |
 | `/memory` | durable memory namespace, initially file-like even if backed by another store |
+| `/artifacts` | artifact/object storage for process output refs and durable generated files |
+| `/tmp` | process/invocation-local temporary data |
+| `/secrets` | encrypted secret records and redacted secret projections only |
+| `/events` | durable event/audit append log and projections |
 
-Extension-visible aliases should be scoped aliases such as:
+Extension-visible workspace-style names should be scoped aliases such as:
 
 ```text
 /workspace
 /project
-/memory
 /extension/config
 /extension/state
 /extension/cache
-/tmp
-/artifacts
 ```
 
 Aliases are resolved by `MountView`; they are not global virtual roots by themselves.

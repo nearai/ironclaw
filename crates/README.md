@@ -50,6 +50,8 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_scripts` | `ironclaw_scripts` | Script/CLI capability runner contracts. Executes declared commands through a host-selected backend. |
 | `ironclaw_mcp` | `ironclaw_mcp` | Adapts manifest-declared MCP tools into IronClaw capabilities without granting ambient filesystem, secret, or network authority. |
 | `ironclaw_wasm` | `ironclaw_wasm` | Reborn WASM component runtime lane. Owns component-model/WIT runtime surface and sandboxed WASM execution details. |
+| `ironclaw_wasm_product_adapters` | `ironclaw_wasm_product_adapters` | WASM-side adapters that bridge guest components into product-facing shapes. Keeps host-only authority out of the guest. |
+| `ironclaw_extensions` | `ironclaw_extensions` | Extension manifest, lifecycle, and registration contracts. Owns install/activate/remove semantics; runtime crates consume validated descriptors from here. |
 | `ironclaw_host_runtime` | `ironclaw_host_runtime` | Narrow facade upper Reborn services depend on. Provides `HostRuntime` plus production composition around capability hosting. |
 
 ### Durable state, eventing, and read models
@@ -64,12 +66,17 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_conversations` | `ironclaw_conversations` | Conversation binding and session-thread contracts that connect product conversation concepts to Reborn threads. |
 | `ironclaw_memory` | `ironclaw_memory` | Memory document service adapters. This is for workspace/memory document semantics, not arbitrary transcript deletion. |
 | `ironclaw_outbound` | `ironclaw_outbound` | Metadata-only outbound state: notification policy, projection subscription cursors, and delivery status. It does not own transport delivery or payload content. |
+| `ironclaw_storage` | `ironclaw_storage` | Shared storage primitives used by event/state backends (pool wiring, migrations helpers). Keeps low-level storage glue out of vocabulary crates. |
 
 ### Product, agent loop, and user surfaces
 
 | Crate directory | Package | Human context |
 | --- | --- | --- |
 | `ironclaw_reborn` | `llm_gateway` | Standalone Reborn composition and adapters. Despite the package name, this is the high-level Reborn composition crate. |
+| `ironclaw_reborn_composition` | `ironclaw_reborn_composition` | Wiring layer that assembles Reborn services into the host runtime. Composition-only; no policy or persistence logic of its own. |
+| `ironclaw_reborn_config` | `ironclaw_reborn_config` | Reborn boot-config boundary: typed configuration, profiles, and validation consumed before services start. |
+| `ironclaw_reborn_cli` | `ironclaw_reborn_cli` | Reborn-first CLI surface (command modules, completion, shell entry points). Calls into composition; does not own host policy. |
+| `ironclaw_llm` | `ironclaw_llm` | LLM provider routing and abstraction used by Reborn product surfaces and the agent loop. |
 | `ironclaw_loop_support` | `ironclaw_loop_support` | Adapts durable Reborn support boundaries into the narrow agent-loop host port. It should not own provider clients or runtime dispatchers. |
 | `ironclaw_turns` | `ironclaw_turns` | Host-layer turn coordination contracts. Use it for turn lifecycle boundaries between loop/product code and host services. |
 | `ironclaw_product_adapters` | `ironclaw_product_adapters` | Product-adapter contracts for mapping Reborn state and events into product-facing shapes. |
@@ -78,6 +85,8 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 | `ironclaw_skills` | `ironclaw_skills` | Skill selection, scoring, and management. |
 | `ironclaw_gateway` | `ironclaw_gateway` | Browser gateway frontend assets, layout configuration, and widget extension system. |
 | `ironclaw_tui` | `ironclaw_tui` | Modular Ratatui-based terminal UI. |
+| `ironclaw_telegram_v2_adapter` | `ironclaw_telegram_v2_adapter` | Telegram v2 channel adapter for the Reborn product surface. Maps Telegram traffic into Reborn capability and turn contracts. |
+| `ironclaw_silk_decoder` | `ironclaw_silk_decoder` | Standalone WeChat `audio/silk` decoder helper. Excluded from the default workspace build; needs `libclang` and a C toolchain. |
 
 ## Where to make common changes
 
@@ -86,6 +95,10 @@ A good rule of thumb: if a change adds new authority or persistence, put it in t
 - **Secret storage or leasing**: use `ironclaw_secrets`; do not put SQL or crypto details in engine, gateway, or runtime lanes.
 - **Network or filesystem access**: use `ironclaw_network` or `ironclaw_filesystem`; runtimes should ask host services instead of bypassing them.
 - **WASM, MCP, or script execution**: use the corresponding runtime-lane crate plus `ironclaw_capabilities`/`ironclaw_dispatcher` for coordination.
+- **Extension lifecycle (install/activate/remove)**: use `ironclaw_extensions`; do not parse manifests or reimplement registration in runtime or UI crates.
+- **Reborn composition or boot config**: use `ironclaw_reborn_composition` and `ironclaw_reborn_config`; keep `main.rs`/CLI entry points thin.
+- **LLM provider routing**: use `ironclaw_llm`; do not wire provider clients directly into engine or gateway crates.
+- **Channel adapters (e.g., Telegram)**: use the channel adapter crate (`ironclaw_telegram_v2_adapter`); keep authority in lower host crates.
 - **Durable event history**: use `ironclaw_events` for contracts and `ironclaw_reborn_event_store` for backend adapters.
 - **Current invocation state**: use `ironclaw_run_state`, not event logs.
 - **User-visible read models**: prefer `ironclaw_event_projections` or `ironclaw_product_adapters` over parsing storage rows in UI code.

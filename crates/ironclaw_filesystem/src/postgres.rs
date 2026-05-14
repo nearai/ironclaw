@@ -3,7 +3,8 @@ use ironclaw_host_api::VirtualPath;
 
 use crate::db::{
     child_path_like_pattern, db_error, direct_children, directory_append_error,
-    directory_write_error, is_not_found, not_found, valid_engine_path, virtual_path_prefixes,
+    directory_write_error, is_not_found, not_found, system_time_from_unix_seconds,
+    valid_engine_path, virtual_path_prefixes,
 };
 use crate::{DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, RootFilesystem};
 
@@ -75,7 +76,7 @@ impl RootFilesystem for PostgresRootFilesystem {
         let client = self.client().await?;
         if matches!(
             self.exact_entry_with_client(&client, path).await?,
-            Some((_, FileType::Directory))
+            Some((_, FileType::Directory, _))
         ) || self.has_child_entry_with_client(&client, path).await?
         {
             return Err(directory_write_error(path.clone()));
@@ -105,7 +106,7 @@ impl RootFilesystem for PostgresRootFilesystem {
         let client = self.client().await?;
         if matches!(
             self.exact_entry_with_client(&client, path).await?,
-            Some((_, FileType::Directory))
+            Some((_, FileType::Directory, _))
         ) || self.has_child_entry_with_client(&client, path).await?
         {
             return Err(directory_append_error(path.clone()));
@@ -133,7 +134,7 @@ impl RootFilesystem for PostgresRootFilesystem {
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
         let client = self.client().await?;
         let exact_entry = self.exact_entry_with_client(&client, path).await?;
-        if matches!(exact_entry, Some((_, FileType::File))) {
+        if matches!(exact_entry, Some((_, FileType::File, _))) {
             return Err(FilesystemError::Backend {
                 path: path.clone(),
                 operation: FilesystemOperation::ListDir,
@@ -144,7 +145,7 @@ impl RootFilesystem for PostgresRootFilesystem {
             .child_entries_with_client(&client, path, FilesystemOperation::ListDir)
             .await?;
         let children = direct_children(path, rows);
-        if matches!(exact_entry, Some((_, FileType::Directory))) && is_not_found(&children) {
+        if matches!(exact_entry, Some((_, FileType::Directory, _))) && is_not_found(&children) {
             return Ok(Vec::new());
         }
         children
@@ -152,11 +153,15 @@ impl RootFilesystem for PostgresRootFilesystem {
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         let client = self.client().await?;
-        if let Some((len, file_type)) = self.exact_entry_with_client(&client, path).await? {
+        if let Some((len, file_type, modified)) =
+            self.exact_entry_with_client(&client, path).await?
+        {
             return Ok(FileStat {
                 path: path.clone(),
                 file_type,
                 len,
+                modified,
+                sensitive: false,
             });
         }
         if self.has_child_entry_with_client(&client, path).await? {
@@ -164,6 +169,8 @@ impl RootFilesystem for PostgresRootFilesystem {
                 path: path.clone(),
                 file_type: FileType::Directory,
                 len: 0,
+                modified: None,
+                sensitive: false,
             });
         }
         Err(not_found(path.clone(), FilesystemOperation::Stat))
@@ -236,10 +243,10 @@ impl PostgresRootFilesystem {
         &self,
         client: &tokio_postgres::Client,
         path: &VirtualPath,
-    ) -> Result<Option<(u64, FileType)>, FilesystemError> {
+    ) -> Result<Option<(u64, FileType, Option<std::time::SystemTime>)>, FilesystemError> {
         let row = client
             .query_opt(
-                "SELECT OCTET_LENGTH(contents)::bigint AS len, is_dir FROM root_filesystem_entries WHERE path = $1",
+                "SELECT OCTET_LENGTH(contents)::bigint AS len, is_dir, EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at_epoch FROM root_filesystem_entries WHERE path = $1",
                 &[&path.as_str()],
             )
             .await
@@ -247,6 +254,7 @@ impl PostgresRootFilesystem {
         Ok(row.map(|row| {
             let len: i64 = row.get("len");
             let is_dir: bool = row.get("is_dir");
+            let updated_at_epoch: i64 = row.get("updated_at_epoch");
             (
                 if is_dir { 0 } else { len.max(0) as u64 },
                 if is_dir {
@@ -254,6 +262,7 @@ impl PostgresRootFilesystem {
                 } else {
                     FileType::File
                 },
+                system_time_from_unix_seconds(updated_at_epoch),
             )
         }))
     }

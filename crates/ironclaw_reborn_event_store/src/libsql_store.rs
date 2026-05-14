@@ -499,11 +499,13 @@ impl LibSqlStore {
             .map_err(|_| durable_error("libsql event store failed to read entries"))?;
         let mut entries = Vec::new();
         let mut last_scanned: Option<EventCursor> = None;
+        let mut returned_rows = 0usize;
         while let Some(row) = rows
             .next()
             .await
             .map_err(|_| durable_error("libsql event store failed to read entries"))?
         {
+            returned_rows = returned_rows.saturating_add(1);
             let cursor = u64::try_from(
                 row.get::<i64>(0)
                     .map_err(|_| durable_error("libsql entry cursor has invalid type"))?,
@@ -538,11 +540,19 @@ impl LibSqlStore {
         // sequence; SQL must do the same out-of-band, otherwise a missing
         // entry row would silently turn into history loss.
         //
-        // Expected count in the unfiltered window `(after, last_scanned]` is
-        // exactly `last_scanned - after`, because cursors are dense within a
-        // stream by construction. A smaller actual count means at least one
-        // row in that range is missing.
-        if let Some(scanned) = last_scanned {
+        // Expected count in the unfiltered window `(after, upper]` is exactly
+        // `upper - after`, because cursors are dense within a stream by
+        // construction. When SQL returns a short page, it has reached the
+        // stream head even if Rust-side decode/match rejects some returned
+        // rows, so the contiguity window must extend to the stream head rather
+        // than the last matching row.
+        let reached_stream_head = returned_rows < limit;
+        let contiguity_upper = if reached_stream_head {
+            Some(EventCursor::new(next_cursor))
+        } else {
+            last_scanned
+        };
+        if let Some(scanned) = contiguity_upper {
             let scanned_i64 = i64::try_from(scanned.as_u64())
                 .map_err(|_| durable_error("libsql replay scanned cursor exceeds i64"))?;
             let mut count_rows = conn
@@ -592,7 +602,7 @@ impl LibSqlStore {
         // trailing records were filtered out and never appeared in `last_scanned`.
         let last_matched = entries.last().map(|entry| entry.cursor);
         let stream_head_cursor = next_cursor;
-        let next_cursor = if entries.len() < limit {
+        let next_cursor = if reached_stream_head {
             EventCursor::new(stream_head_cursor)
         } else {
             match (last_matched, last_scanned) {

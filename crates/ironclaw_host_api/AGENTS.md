@@ -27,6 +27,7 @@
 
 ## Agent Notes
 
+- `HostPortGrant` is intentionally a thin scoped-view grant token over `HostPortId`. Do not add attenuation/scope/expiry fields to that wire shape; introduce a distinct scoped/attenuated grant type if that behavior lands later.
 - Keep edits inside this crate unless a contract explicitly requires a neighboring crate change.
 - Prefer caller-level tests when a helper gates dispatch, persistence, network, secrets, approvals, resources, events, or process side effects.
 - If the contract and code disagree, stop and treat the task as a contract-change request instead of silently changing ownership.

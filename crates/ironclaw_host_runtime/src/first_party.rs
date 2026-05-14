@@ -6,9 +6,10 @@
 //! usage. Authority decisions remain in `CapabilityHost`/authorization and the
 //! runtime-policy/planning layers.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
+use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityId, MountView, ResourceEstimate, ResourceScope, ResourceUsage,
     RuntimeDispatchErrorKind,
@@ -16,14 +17,39 @@ use ironclaw_host_api::{
 use serde_json::Value;
 
 /// Already-authorized first-party capability dispatch input.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct FirstPartyCapabilityRequest {
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
+    pub filesystem: Arc<dyn RootFilesystem>,
     pub input: Value,
+}
+
+impl fmt::Debug for FirstPartyCapabilityRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FirstPartyCapabilityRequest")
+            .field("capability_id", &self.capability_id)
+            .field("scope", &self.scope)
+            .field("estimate", &self.estimate)
+            .field("mounts", &self.mounts)
+            .field("filesystem", &"<root filesystem>")
+            .field("input", &self.input)
+            .finish()
+    }
+}
+
+impl PartialEq for FirstPartyCapabilityRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.capability_id == other.capability_id
+            && self.scope == other.scope
+            && self.estimate == other.estimate
+            && self.mounts == other.mounts
+            && self.input == other.input
+    }
 }
 
 /// Normalized first-party capability output before resource reconciliation.

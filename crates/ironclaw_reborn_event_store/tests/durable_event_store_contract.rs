@@ -482,6 +482,94 @@ async fn postgres_replay_advances_next_cursor_past_trailing_filtered_records() {
 
 #[cfg(feature = "postgres")]
 #[tokio::test]
+async fn postgres_filtered_replay_detects_missing_trailing_filtered_row_as_replay_gap() {
+    let Ok(url) = std::env::var("IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL") else {
+        eprintln!(
+            "skipping postgres filtered replay gap contract: IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL not set"
+        );
+        return;
+    };
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time")
+        .as_nanos();
+    let user = format!("postgres-filtered-gap-alice-{suffix}");
+    let scope_a = scope_for(&user, "project-a");
+    let scope_b = scope_for(&user, "project-b");
+    let stream = EventStreamKey::from_scope(&scope_a);
+
+    let stores = build_reborn_event_stores(
+        RebornProfile::Production,
+        RebornEventStoreConfig::Postgres {
+            url: SecretString::new(url.clone().into_boxed_str()),
+        },
+    )
+    .await
+    .expect("postgres stores");
+    stores
+        .events
+        .append(RuntimeEvent::dispatch_requested(
+            scope_a.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("append project a");
+    for _ in 0..2 {
+        stores
+            .events
+            .append(RuntimeEvent::dispatch_requested(
+                scope_b.clone(),
+                capability_id(),
+            ))
+            .await
+            .expect("append project b");
+    }
+    drop(stores);
+
+    // Test-only corruption fixture: intended for local Postgres URLs. Production
+    // store construction above rejects remote sslmode=disable before connecting.
+    let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+        .await
+        .expect("connect postgres for corruption fixture");
+    let connection_task = tokio::spawn(connection);
+    client
+        .execute(
+            "DELETE FROM reborn_event_entries WHERE user_id = $1 AND cursor = 3",
+            &[&user],
+        )
+        .await
+        .expect("delete trailing filtered cursor");
+    drop(client);
+    connection_task
+        .await
+        .expect("postgres connection task should join")
+        .expect("postgres connection should close cleanly");
+
+    let stores = build_reborn_event_stores(
+        RebornProfile::Production,
+        RebornEventStoreConfig::Postgres {
+            url: SecretString::new(url.into_boxed_str()),
+        },
+    )
+    .await
+    .expect("postgres stores after corruption");
+    let project_a = ReadScope {
+        project_id: scope_a.project_id.clone(),
+        ..ReadScope::default()
+    };
+    let result = stores
+        .events
+        .read_after_cursor(&stream, &project_a, None, 10)
+        .await;
+
+    assert!(
+        matches!(result, Err(EventError::ReplayGap { .. })),
+        "missing trailing row filtered out by ReadScope must surface as ReplayGap, got {result:?}"
+    );
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
 async fn postgres_runtime_and_audit_logs_survive_rebuild_with_filtered_cursor_semantics() {
     let Ok(url) = std::env::var("IRONCLAW_REBORN_EVENT_STORE_POSTGRES_URL") else {
         eprintln!(
@@ -869,6 +957,82 @@ async fn jsonl_bounded_replay_does_not_parse_the_whole_file() {
         .expect("bounded replay must not parse trailing garbage");
     assert_eq!(bounded.entries.len(), 1);
     assert_eq!(bounded.entries[0].cursor, EventCursor::new(1));
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_filtered_replay_detects_missing_trailing_filtered_row_as_replay_gap() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db_path = temp.path().join("event-store.db");
+    let scope_a = scope_for("filtered-gap-alice", "project-a");
+    let scope_b = scope_for("filtered-gap-alice", "project-b");
+    let stream = EventStreamKey::from_scope(&scope_a);
+
+    let stores = build_reborn_event_stores(
+        RebornProfile::Production,
+        RebornEventStoreConfig::Libsql {
+            path_or_url: db_path.display().to_string(),
+            auth_token: None,
+        },
+    )
+    .await
+    .expect("libsql stores");
+    stores
+        .events
+        .append(RuntimeEvent::dispatch_requested(
+            scope_a.clone(),
+            capability_id(),
+        ))
+        .await
+        .expect("append project a");
+    for _ in 0..2 {
+        stores
+            .events
+            .append(RuntimeEvent::dispatch_requested(
+                scope_b.clone(),
+                capability_id(),
+            ))
+            .await
+            .expect("append project b");
+    }
+    drop(stores);
+
+    let db = libsql::Builder::new_local(db_path.display().to_string())
+        .build()
+        .await
+        .expect("open libsql");
+    let conn = db.connect().expect("connect");
+    conn.execute(
+        "DELETE FROM reborn_event_entries WHERE cursor = 3",
+        libsql::params![],
+    )
+    .await
+    .expect("delete trailing filtered cursor");
+    drop(conn);
+    drop(db);
+
+    let stores = build_reborn_event_stores(
+        RebornProfile::Production,
+        RebornEventStoreConfig::Libsql {
+            path_or_url: db_path.display().to_string(),
+            auth_token: None,
+        },
+    )
+    .await
+    .expect("libsql stores after corruption");
+    let project_a = ReadScope {
+        project_id: scope_a.project_id.clone(),
+        ..ReadScope::default()
+    };
+    let result = stores
+        .events
+        .read_after_cursor(&stream, &project_a, None, 10)
+        .await;
+
+    assert!(
+        matches!(result, Err(EventError::ReplayGap { .. })),
+        "missing trailing row filtered out by ReadScope must surface as ReplayGap, got {result:?}"
+    );
 }
 
 #[cfg(feature = "libsql")]

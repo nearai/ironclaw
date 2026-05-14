@@ -353,6 +353,22 @@ impl ModelRouteResolver for StaticModelRouteResolver {
         if !self.policy.permits(route) {
             return Err(ModelRouteError::new(ModelRouteErrorKind::RouteNotApproved));
         }
+        // Persisted snapshots may outlive current settings, but a route that
+        // is currently configured exclusively for a different slot must not be
+        // replayed as this slot's route.
+        let current_slot_uses_route = self
+            .routes
+            .get(&slot)
+            .is_some_and(|configured_route| configured_route.route() == route);
+        let other_slot_uses_route =
+            self.routes
+                .iter()
+                .any(|(configured_slot, configured_route)| {
+                    *configured_slot != slot && configured_route.route() == route
+                });
+        if other_slot_uses_route && !current_slot_uses_route {
+            return Err(ModelRouteError::new(ModelRouteErrorKind::RouteNotApproved));
+        }
         Ok(self.policy.mode())
     }
 }

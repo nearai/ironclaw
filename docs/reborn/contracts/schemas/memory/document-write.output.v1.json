@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/memory/document-write.output.v1.json",
+  "title": "Memory Document Write Output v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["written"],
+  "properties": {
+    "written": { "type": "boolean" },
+    "version": { "type": "string", "maxLength": 128 },
+    "document_ref": { "type": "string", "maxLength": 512 }
+  }
+}

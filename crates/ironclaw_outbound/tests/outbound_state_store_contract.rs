@@ -340,6 +340,9 @@ async fn subscription_cursor_rejects_mismatched_scope(store: &impl OutboundState
             thread_id: thread_id(),
         })
         .await;
+    // Anti-enumeration: wrong actor/scope reads look identical to missing
+    // subscription ids, so callers cannot distinguish an existing foreign row
+    // from absence.
     assert!(matches!(result, Ok(None)));
 
     let mut wrong_scope = projection_scope();
@@ -439,6 +442,8 @@ async fn subscription_ids_are_scoped_not_global(store: &impl OutboundStateStore)
             thread_id: thread_id(),
         })
         .await;
+    // Anti-enumeration: even when the id exists for sibling tuples, an
+    // unrelated tuple receives the same `None` result as a missing id.
     assert!(matches!(unrelated_lookup, Ok(None)));
 }
 
@@ -510,6 +515,9 @@ async fn delivery_status_rejects_inconsistent_failure_kind(store: &impl Outbound
         delivery_id,
         scope: scope.clone(),
         candidate: OutboundPushCandidate {
+            tenant_id: scope.tenant_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
             thread_id: scope.thread_id.clone(),
             turn_run_id: Some(TurnRunId::new()),
             target: reply_ref("reply-status-validation"),

@@ -14,7 +14,10 @@ use ironclaw_authorization::{
     CapabilityLeaseStatus, CapabilityLeaseStore, GrantAuthorizer, InMemoryCapabilityLeaseStore,
     TrustAwareCapabilityDispatchAuthorizer,
 };
-use ironclaw_capabilities::{CapabilityHost, CapabilitySpawnRequest};
+use ironclaw_capabilities::{
+    CapabilityHost, CapabilityObligationHandler, CapabilityObligationPhase,
+    CapabilityObligationRequest, CapabilitySpawnRequest,
+};
 use ironclaw_event_projections::{
     AuditProjectionError, AuditProjectionRequest, AuditProjectionService, AuditProjectionStage,
     EventProjectionService, ProjectionCursor, ProjectionError, ProjectionRequest, ProjectionScope,
@@ -32,12 +35,12 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
-    BuiltinObligationHandler, CancelReason, CancelRuntimeWorkRequest, CapabilitySurfaceVersion,
-    DefaultHostRuntime, HostHttpEgressService, HostRuntime, HostRuntimeServices,
-    NetworkObligationPolicyStore, ProcessObligationLifecycleStore, ProductionWiringComponent,
+    BuiltinObligationHandler, BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest,
+    CapabilitySurfaceVersion, DefaultHostRuntime, HostHttpEgressService, HostRuntime,
+    HostRuntimeServices, ProcessObligationLifecycleStore, ProductionWiringComponent,
     ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
-    RuntimeSecretInjectionStore, RuntimeStatusRequest, RuntimeWorkId,
+    RuntimeStatusRequest, RuntimeWorkId,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use ironclaw_network::{
@@ -83,7 +86,8 @@ use ironclaw_turns::{
 use ironclaw_turns::{NoopTurnRunWakeNotifier, TurnRunWake, TurnRunWakeNotifier};
 use ironclaw_wasm::{
     RecordingWasmHostHttp, WasmHostError, WasmHostHttp, WasmHttpRequest, WasmHttpResponse,
-    WasmStagedRuntimeCredential, WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
+    WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest, WasmStagedRuntimeCredential,
+    WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig,
 };
 use serde_json::json;
 use wit_component::{ComponentEncoder, StringEncoding, embed_component_metadata};
@@ -1071,16 +1075,11 @@ fn production_wiring_validation_accepts_verified_host_http_egress_shape() {
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    );
-    let runtime_http = Arc::new(
-        HostHttpEgressService::new(
-            RecordingNetworkHttpEgress::new(),
-            InMemorySecretStore::new(),
-        )
-        .with_secret_injection_store(services.secret_injection_store())
-        .with_network_policy_store(services.network_policy_store()),
-    );
-    let services = services.with_host_http_egress_service(runtime_http);
+    )
+    .with_secret_store(Arc::new(InMemorySecretStore::new()));
+    let services = services
+        .try_with_host_http_egress(RecordingNetworkHttpEgress::new())
+        .unwrap();
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]).require_runtime_http_egress());
@@ -1095,7 +1094,7 @@ fn production_wiring_validation_accepts_verified_host_http_egress_shape() {
 }
 
 #[test]
-fn production_wiring_validation_rejects_host_http_egress_with_unrelated_handoff_store() {
+fn host_http_egress_helper_requires_graph_secret_store() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
         Arc::new(LocalFilesystem::new()),
@@ -1104,27 +1103,16 @@ fn production_wiring_validation_rejects_host_http_egress_with_unrelated_handoff_
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     );
-    let runtime_http = Arc::new(
-        HostHttpEgressService::new(
-            RecordingNetworkHttpEgress::new(),
-            InMemorySecretStore::new(),
-        )
-        .with_secret_injection_store(services.secret_injection_store())
-        .with_network_policy_store(Arc::new(NetworkObligationPolicyStore::new())),
-    );
-    let services = services.with_host_http_egress_service(runtime_http);
 
-    let report = services
-        .validate_production_wiring(&ProductionWiringConfig::new([]).require_runtime_http_egress())
-        .expect_err("runtime HTTP egress must share the graph-owned network policy handoff store");
+    let report = match services.try_with_host_http_egress(RecordingNetworkHttpEgress::new()) {
+        Ok(_) => panic!("host HTTP egress helper must use configured graph secret store"),
+        Err(report) => report,
+    };
 
-    assert!(
-        report.contains(
-            ProductionWiringComponent::RuntimeHttpEgress,
-            ProductionWiringIssueKind::UnverifiedProductionImplementation
-        ),
-        "runtime HTTP egress with unrelated handoff stores should be unverified: {report:?}"
-    );
+    assert!(report.contains(
+        ProductionWiringComponent::SecretStore,
+        ProductionWiringIssueKind::Missing
+    ));
 }
 
 #[test]
@@ -2195,12 +2183,13 @@ async fn host_runtime_services_jsonl_approval_audit_projection_rejects_foreign_c
 async fn process_lifecycle_projects_through_durable_replay_without_output_leaks() {
     let event_log = Arc::new(InMemoryDurableEventLog::new());
     let inner_process_store = Arc::new(InMemoryProcessStore::new());
-    let process_store = Arc::new(ProcessObligationLifecycleStore::new(
-        inner_process_store,
-        Arc::new(NetworkObligationPolicyStore::new()),
-        Arc::new(RuntimeSecretInjectionStore::new()),
+    let obligation_services = BuiltinObligationServices::new(
+        Arc::new(InMemoryAuditSink::new()),
+        Arc::new(InMemorySecretStore::new()),
         Arc::new(InMemoryResourceGovernor::new()),
-    ));
+    );
+    let process_store =
+        Arc::new(obligation_services.process_obligation_lifecycle_store(inner_process_store));
     let durable_event_log: Arc<dyn DurableEventLog> = event_log.clone();
     process_store.set_event_sink(Arc::new(DurableEventSink::new(durable_event_log)));
     let result_store = Arc::new(InMemoryProcessResultStore::new());
@@ -3603,13 +3592,9 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
             "https://example.test/api".to_string(),
         ),
     ])));
-    let runtime_http = Arc::new(
-        HostHttpEgressService::new(network.clone(), InMemorySecretStore::new())
-            .with_network_policy_store(services.network_policy_store())
-            .with_secret_injection_store(services.secret_injection_store()),
-    );
     let services = services
-        .with_runtime_http_egress(runtime_http)
+        .try_with_host_http_egress(network.clone())
+        .unwrap()
         .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
         .unwrap();
     let capability_id = CapabilityId::new("wasm-http.success").unwrap();
@@ -3648,20 +3633,84 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
             "Bearer sk-vertical-secret".to_string(),
         ))
     );
-    assert!(
-        services
-            .network_policy_store()
-            .take(&scope, &capability_id)
-            .is_none(),
-        "completed invoke must discard staged network policy after shared egress uses it"
+    // The consumed-staged-secret one-shot invariant is covered by
+    // `reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once`.
+}
+
+#[tokio::test]
+async fn host_runtime_services_wasm_http_secret_store_lease_uses_graph_secret_store() {
+    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let component = tool_component(HTTP_TOOL_WAT);
+    let filesystem = Arc::new(
+        filesystem_with_wasm_component(
+            parsed_manifest.id.as_str(),
+            "wasm/http-success.wasm",
+            &component,
+        )
+        .await,
     );
-    assert!(
-        services
-            .secret_injection_store()
-            .take(&scope, &capability_id, &secret_handle)
-            .unwrap()
-            .is_none(),
-        "completed invoke must consume staged secret material once"
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let secret_handle = SecretHandle::new("api-token").unwrap();
+    let policy = wasm_http_policy();
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            },
+        ]));
+    let network = RecordingNetworkHttpEgress::new();
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(WASM_HTTP_SUCCESS_MANIFEST)),
+        filesystem,
+        governor,
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_wasm_runtime_credential_provider(Arc::new(SecretStoreLeaseCredentials {
+        handle: secret_handle.clone(),
+    }));
+    let services = services
+        .try_with_host_http_egress(network.clone())
+        .unwrap()
+        .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
+        .unwrap();
+    let capability_id = CapabilityId::new("wasm-http.success").unwrap();
+    let scope = sample_scope(InvocationId::new());
+    secret_store
+        .put(
+            scope.clone(),
+            secret_handle,
+            SecretMaterial::from("sk-graph-store-secret"),
+        )
+        .await
+        .unwrap();
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope,
+            json!({"call": "http-success-with-secret-store-lease"}),
+        ))
+        .await
+        .unwrap();
+
+    assert_completed_outcome(outcome, &capability_id);
+    let requests = network.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].policy, policy);
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer sk-graph-store-secret".to_string(),
+        ))
     );
 }
 
@@ -3693,6 +3742,7 @@ async fn host_runtime_services_wasm_http_missing_staged_secret_stays_before_tran
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
+    .with_secret_store(Arc::new(InMemorySecretStore::new()))
     .with_wasm_runtime_credential_provider(Arc::new(WasmStagedRuntimeCredentials::new(vec![
         WasmStagedRuntimeCredential::for_exact_url(
             secret_handle,
@@ -3704,15 +3754,9 @@ async fn host_runtime_services_wasm_http_missing_staged_secret_stays_before_tran
             "https://example.test/api".to_string(),
         ),
     ])));
-    let runtime_http = Arc::new(
-        HostHttpEgressService::new_with_request_policy_for_tests(
-            network.clone(),
-            InMemorySecretStore::new(),
-        )
-        .with_secret_injection_store(services.secret_injection_store()),
-    );
     let services = services
-        .with_runtime_http_egress(runtime_http)
+        .try_with_host_http_egress(network.clone())
+        .unwrap()
         .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
         .unwrap();
     let capability_id = CapabilityId::new("wasm-http.success").unwrap();
@@ -4002,19 +4046,6 @@ async fn spawned_obligation_lifecycle_reconciles_resources_and_discards_handoffs
             ..
         }
     ));
-    assert!(
-        fixture
-            .network_policies
-            .take(&fixture.scope, &script_capability_id())
-            .is_none()
-    );
-    assert!(
-        fixture
-            .secret_injections
-            .take(&fixture.scope, &script_capability_id(), &secret_handle)
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[tokio::test]
@@ -4045,19 +4076,6 @@ async fn spawned_obligation_lifecycle_releases_resources_and_discards_handoffs_o
             ..
         }
     ));
-    assert!(
-        fixture
-            .network_policies
-            .take(&fixture.scope, &script_capability_id())
-            .is_none()
-    );
-    assert!(
-        fixture
-            .secret_injections
-            .take(&fixture.scope, &script_capability_id(), &secret_handle)
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[tokio::test]
@@ -4082,19 +4100,6 @@ async fn spawned_obligation_lifecycle_releases_resources_and_discards_handoffs_o
             ..
         }
     ));
-    assert!(
-        fixture
-            .network_policies
-            .take(&fixture.scope, &script_capability_id())
-            .is_none()
-    );
-    assert!(
-        fixture
-            .secret_injections
-            .take(&fixture.scope, &script_capability_id(), &secret_handle)
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[tokio::test]
@@ -4102,9 +4107,12 @@ async fn process_obligation_lifecycle_cleans_record_started_before_wrapper_exist
     let reservation_id = ResourceReservationId::new();
     let secret_handle = SecretHandle::new("api_token").unwrap();
     let inner_store = Arc::new(InMemoryProcessStore::new());
-    let network_policies = Arc::new(NetworkObligationPolicyStore::new());
-    let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
+    let obligation_services = BuiltinObligationServices::new(
+        Arc::new(InMemoryAuditSink::new()),
+        Arc::new(InMemorySecretStore::new()),
+        governor.clone(),
+    );
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id);
     let estimate = ResourceEstimate {
@@ -4115,27 +4123,22 @@ async fn process_obligation_lifecycle_cleans_record_started_before_wrapper_exist
     governor
         .reserve_with_id(scope.clone(), estimate.clone(), reservation_id)
         .unwrap();
-    network_policies.insert(&scope, &script_capability_id(), wasm_http_policy());
-    secret_injections
-        .insert(
-            &scope,
-            &script_capability_id(),
-            &secret_handle,
-            SecretMaterial::from("runtime-secret"),
-        )
-        .unwrap();
+    stage_process_handoffs(
+        &obligation_services,
+        &scope,
+        &script_capability_id(),
+        &secret_handle,
+        wasm_http_policy(),
+        "runtime-secret",
+    )
+    .await;
     let process_id = ProcessId::new();
     let mut start = process_start(process_id, invocation_id, scope.clone());
     start.estimated_resources = estimate;
     start.resource_reservation_id = Some(reservation_id);
     inner_store.start(start).await.unwrap();
 
-    let lifecycle_store = ProcessObligationLifecycleStore::new(
-        inner_store,
-        Arc::clone(&network_policies),
-        Arc::clone(&secret_injections),
-        governor.clone(),
-    );
+    let lifecycle_store = obligation_services.process_obligation_lifecycle_store(inner_store);
     lifecycle_store.kill(&scope, process_id).await.unwrap();
 
     assert!(matches!(
@@ -4145,82 +4148,62 @@ async fn process_obligation_lifecycle_cleans_record_started_before_wrapper_exist
             ..
         }
     ));
-    assert!(
-        network_policies
-            .take(&scope, &script_capability_id())
-            .is_none()
-    );
-    assert!(
-        secret_injections
-            .take(&scope, &script_capability_id(), &secret_handle)
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[tokio::test]
 async fn process_obligation_lifecycle_cleans_legacy_handoffs_without_resource_reservation() {
     let secret_handle = SecretHandle::new("api_token").unwrap();
     let inner_store = Arc::new(InMemoryProcessStore::new());
-    let network_policies = Arc::new(NetworkObligationPolicyStore::new());
-    let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
-    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let obligation_services = BuiltinObligationServices::new(
+        Arc::new(InMemoryAuditSink::new()),
+        Arc::new(InMemorySecretStore::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+    );
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id);
-    network_policies.insert(&scope, &script_capability_id(), wasm_http_policy());
-    secret_injections
-        .insert(
-            &scope,
-            &script_capability_id(),
-            &secret_handle,
-            SecretMaterial::from("runtime-secret"),
-        )
-        .unwrap();
+    stage_process_handoffs(
+        &obligation_services,
+        &scope,
+        &script_capability_id(),
+        &secret_handle,
+        wasm_http_policy(),
+        "runtime-secret",
+    )
+    .await;
     let process_id = ProcessId::new();
     inner_store
         .start(process_start(process_id, invocation_id, scope.clone()))
         .await
         .unwrap();
 
-    let lifecycle_store = ProcessObligationLifecycleStore::new(
-        inner_store,
-        Arc::clone(&network_policies),
-        Arc::clone(&secret_injections),
-        governor,
-    );
+    let lifecycle_store = obligation_services.process_obligation_lifecycle_store(inner_store);
     lifecycle_store.kill(&scope, process_id).await.unwrap();
-
-    assert!(
-        network_policies
-            .take(&scope, &script_capability_id())
-            .is_none()
-    );
-    assert!(
-        secret_injections
-            .take(&scope, &script_capability_id(), &secret_handle)
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[tokio::test]
 async fn process_obligation_lifecycle_rejects_second_active_handoff_for_same_scope_capability() {
     let inner_store = Arc::new(InMemoryProcessStore::new());
-    let network_policies = Arc::new(NetworkObligationPolicyStore::new());
-    let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
-    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let obligation_services = BuiltinObligationServices::new(
+        Arc::new(InMemoryAuditSink::new()),
+        Arc::new(InMemorySecretStore::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+    );
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id);
     let first_process_id = ProcessId::new();
     let second_process_id = ProcessId::new();
-    let lifecycle_store = ProcessObligationLifecycleStore::new(
-        inner_store,
-        Arc::clone(&network_policies),
-        secret_injections,
-        governor,
-    );
+    let lifecycle_store = obligation_services.process_obligation_lifecycle_store(inner_store);
+    let secret_handle = SecretHandle::new("api_token").unwrap();
 
-    network_policies.insert(&scope, &script_capability_id(), wasm_http_policy());
+    stage_process_handoffs(
+        &obligation_services,
+        &scope,
+        &script_capability_id(),
+        &secret_handle,
+        wasm_http_policy(),
+        "runtime-secret",
+    )
+    .await;
     lifecycle_store
         .start(process_start(
             first_process_id,
@@ -4230,7 +4213,15 @@ async fn process_obligation_lifecycle_rejects_second_active_handoff_for_same_sco
         .await
         .unwrap();
 
-    network_policies.insert(&scope, &script_capability_id(), wasm_http_policy());
+    stage_process_handoffs(
+        &obligation_services,
+        &scope,
+        &script_capability_id(),
+        &secret_handle,
+        wasm_http_policy(),
+        "runtime-secret",
+    )
+    .await;
     let error = lifecycle_store
         .start(process_start(
             second_process_id,
@@ -4254,7 +4245,15 @@ async fn process_obligation_lifecycle_rejects_second_active_handoff_for_same_sco
         .complete(&scope, first_process_id)
         .await
         .unwrap();
-    network_policies.insert(&scope, &script_capability_id(), wasm_http_policy());
+    stage_process_handoffs(
+        &obligation_services,
+        &scope,
+        &script_capability_id(),
+        &secret_handle,
+        wasm_http_policy(),
+        "runtime-secret",
+    )
+    .await;
     lifecycle_store
         .start(process_start(
             second_process_id,
@@ -4270,9 +4269,12 @@ async fn process_obligation_lifecycle_does_not_clean_handoffs_twice_after_backgr
     let reservation_id = ResourceReservationId::new();
     let secret_handle = SecretHandle::new("api_token").unwrap();
     let inner_store = Arc::new(InMemoryProcessStore::new());
-    let network_policies = Arc::new(NetworkObligationPolicyStore::new());
-    let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
+    let obligation_services = BuiltinObligationServices::new(
+        Arc::new(InMemoryAuditSink::new()),
+        Arc::new(InMemorySecretStore::new()),
+        governor.clone(),
+    );
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id);
     let process_id = ProcessId::new();
@@ -4284,21 +4286,16 @@ async fn process_obligation_lifecycle_does_not_clean_handoffs_twice_after_backgr
     governor
         .reserve_with_id(scope.clone(), estimate.clone(), reservation_id)
         .unwrap();
-    network_policies.insert(&scope, &script_capability_id(), wasm_http_policy());
-    secret_injections
-        .insert(
-            &scope,
-            &script_capability_id(),
-            &secret_handle,
-            SecretMaterial::from("first-runtime-secret"),
-        )
-        .unwrap();
-    let lifecycle_store = ProcessObligationLifecycleStore::new(
-        inner_store,
-        Arc::clone(&network_policies),
-        Arc::clone(&secret_injections),
-        governor.clone(),
-    );
+    stage_process_handoffs(
+        &obligation_services,
+        &scope,
+        &script_capability_id(),
+        &secret_handle,
+        wasm_http_policy(),
+        "first-runtime-secret",
+    )
+    .await;
+    let lifecycle_store = obligation_services.process_obligation_lifecycle_store(inner_store);
     let mut start = process_start(process_id, invocation_id, scope.clone());
     start.estimated_resources = estimate;
     start.resource_reservation_id = Some(reservation_id);
@@ -4308,51 +4305,35 @@ async fn process_obligation_lifecycle_does_not_clean_handoffs_twice_after_backgr
         .cleanup_process_obligations(&scope, process_id, false)
         .await
         .unwrap();
-    network_policies.insert(&scope, &script_capability_id(), wasm_http_policy());
-    secret_injections
-        .insert(
-            &scope,
-            &script_capability_id(),
-            &secret_handle,
-            SecretMaterial::from("second-runtime-secret"),
-        )
-        .unwrap();
+    stage_process_handoffs(
+        &obligation_services,
+        &scope,
+        &script_capability_id(),
+        &secret_handle,
+        wasm_http_policy(),
+        "second-runtime-secret",
+    )
+    .await;
 
     lifecycle_store.kill(&scope, process_id).await.unwrap();
-
-    assert!(
-        network_policies
-            .take(&scope, &script_capability_id())
-            .is_some(),
-        "a later terminal transition for an already-cleaned process must not discard a newer staged policy"
-    );
-    assert!(
-        secret_injections
-            .take(&scope, &script_capability_id(), &secret_handle)
-            .unwrap()
-            .is_some(),
-        "a later terminal transition for an already-cleaned process must not discard newer staged secret material"
-    );
 }
 
 #[tokio::test]
 async fn process_obligation_lifecycle_surfaces_resource_cleanup_errors_after_terminal_transition() {
     let reservation_id = ResourceReservationId::new();
     let inner_store = Arc::new(InMemoryProcessStore::new());
-    let network_policies = Arc::new(NetworkObligationPolicyStore::new());
-    let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
     let governor = Arc::new(FailingCleanupResourceGovernor);
+    let obligation_services = BuiltinObligationServices::new(
+        Arc::new(InMemoryAuditSink::new()),
+        Arc::new(InMemorySecretStore::new()),
+        governor.clone(),
+    );
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id);
     let process_id = ProcessId::new();
     let mut start = process_start(process_id, invocation_id, scope.clone());
     start.resource_reservation_id = Some(reservation_id);
-    let lifecycle_store = ProcessObligationLifecycleStore::new(
-        inner_store,
-        network_policies,
-        secret_injections,
-        governor,
-    );
+    let lifecycle_store = obligation_services.process_obligation_lifecycle_store(inner_store);
     lifecycle_store.start(start).await.unwrap();
 
     let error = lifecycle_store
@@ -4403,19 +4384,6 @@ async fn spawned_obligation_lifecycle_cleans_handoffs_when_result_store_complete
             ..
         }
     ));
-    assert!(
-        fixture
-            .network_policies
-            .take(&fixture.scope, &script_capability_id())
-            .is_none()
-    );
-    assert!(
-        fixture
-            .secret_injections
-            .take(&fixture.scope, &script_capability_id(), &secret_handle)
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[tokio::test]
@@ -4449,19 +4417,6 @@ async fn spawned_obligation_lifecycle_cleans_handoffs_when_result_store_fail_fai
             ..
         }
     ));
-    assert!(
-        fixture
-            .network_policies
-            .take(&fixture.scope, &script_capability_id())
-            .is_none()
-    );
-    assert!(
-        fixture
-            .secret_injections
-            .take(&fixture.scope, &script_capability_id(), &secret_handle)
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[tokio::test]
@@ -4496,19 +4451,6 @@ async fn spawned_obligation_lifecycle_reconciles_when_store_complete_fails_after
             ..
         }
     ));
-    assert!(
-        fixture
-            .network_policies
-            .take(&fixture.scope, &script_capability_id())
-            .is_none()
-    );
-    assert!(
-        fixture
-            .secret_injections
-            .take(&fixture.scope, &script_capability_id(), &secret_handle)
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[tokio::test]
@@ -4543,19 +4485,6 @@ async fn spawned_obligation_lifecycle_releases_when_store_fail_fails_after_resul
             ..
         }
     ));
-    assert!(
-        fixture
-            .network_policies
-            .take(&fixture.scope, &script_capability_id())
-            .is_none()
-    );
-    assert!(
-        fixture
-            .secret_injections
-            .take(&fixture.scope, &script_capability_id(), &secret_handle)
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[tokio::test]
@@ -4599,19 +4528,6 @@ async fn spawned_obligation_lifecycle_abort_cleans_up_when_process_start_fails()
             ..
         }
     ));
-    assert!(
-        fixture
-            .network_policies
-            .take(&fixture.scope, &script_capability_id())
-            .is_none()
-    );
-    assert!(
-        fixture
-            .secret_injections
-            .take(&fixture.scope, &script_capability_id(), &secret_handle)
-            .unwrap()
-            .is_none()
-    );
 }
 
 #[tokio::test]
@@ -5240,6 +5156,28 @@ impl NetworkHttpEgress for RecordingNetworkHttpEgress {
     }
 }
 
+#[derive(Debug)]
+struct SecretStoreLeaseCredentials {
+    handle: SecretHandle,
+}
+
+impl WasmRuntimeCredentialProvider for SecretStoreLeaseCredentials {
+    fn credential_injections(
+        &self,
+        _request: &WasmRuntimeCredentialRequest,
+    ) -> Result<Vec<RuntimeCredentialInjection>, WasmHostError> {
+        Ok(vec![RuntimeCredentialInjection {
+            handle: self.handle.clone(),
+            source: RuntimeCredentialSource::SecretStoreLease,
+            target: RuntimeCredentialTarget::Header {
+                name: "authorization".to_string(),
+                prefix: Some("Bearer ".to_string()),
+            },
+            required: true,
+        }])
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct RecordingRuntimeHttpEgress {
     requests: Arc<std::sync::Mutex<Vec<RuntimeHttpEgressRequest>>>,
@@ -5268,6 +5206,43 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
     }
 }
 
+async fn stage_process_handoffs(
+    services: &BuiltinObligationServices,
+    scope: &ResourceScope,
+    capability_id: &CapabilityId,
+    secret_handle: &SecretHandle,
+    policy: NetworkPolicy,
+    material: &str,
+) {
+    services
+        .secret_store()
+        .put(
+            scope.clone(),
+            secret_handle.clone(),
+            SecretMaterial::from(material),
+        )
+        .await
+        .unwrap();
+    let context =
+        execution_context_with_dispatch_grant_for_scope(capability_id.clone(), scope.clone());
+    services
+        .obligation_handler()
+        .satisfy(CapabilityObligationRequest {
+            phase: CapabilityObligationPhase::Invoke,
+            context: &context,
+            capability_id,
+            estimate: &ResourceEstimate::default(),
+            obligations: &[
+                Obligation::ApplyNetworkPolicy { policy },
+                Obligation::InjectSecretOnce {
+                    handle: secret_handle.clone(),
+                },
+            ],
+        })
+        .await
+        .unwrap();
+}
+
 struct SpawnObligationFixture {
     registry: Arc<ExtensionRegistry>,
     dispatcher: Arc<NoopDispatcher>,
@@ -5275,8 +5250,6 @@ struct SpawnObligationFixture {
     handler: Arc<BuiltinObligationHandler>,
     process_manager: Arc<BackgroundProcessManager>,
     process_store: Arc<ProcessObligationLifecycleStore>,
-    network_policies: Arc<NetworkObligationPolicyStore>,
-    secret_injections: Arc<RuntimeSecretInjectionStore>,
     governor: Arc<InMemoryResourceGovernor>,
     context: ExecutionContext,
     scope: ResourceScope,
@@ -5352,10 +5325,13 @@ where
 {
     let registry = Arc::new(registry_with_manifest(SCRIPT_MANIFEST));
     let dispatcher = Arc::new(NoopDispatcher);
-    let network_policies = Arc::new(NetworkObligationPolicyStore::new());
-    let secret_injections = Arc::new(RuntimeSecretInjectionStore::new());
     let governor = Arc::new(InMemoryResourceGovernor::new());
     let secret_store = Arc::new(InMemorySecretStore::new());
+    let obligation_services = BuiltinObligationServices::new(
+        Arc::new(InMemoryAuditSink::new()),
+        secret_store.clone(),
+        governor.clone(),
+    );
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id);
     let context =
@@ -5373,13 +5349,7 @@ where
         )
         .await
         .unwrap();
-    let handler = Arc::new(
-        BuiltinObligationHandler::new()
-            .with_network_policy_store(Arc::clone(&network_policies))
-            .with_secret_store(secret_store)
-            .with_secret_injection_store(Arc::clone(&secret_injections))
-            .with_resource_governor(Arc::clone(&governor)),
-    );
+    let handler = Arc::new(obligation_services.obligation_handler());
     let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
         Arc::new(ObligatingAuthorizer::new(vec![
             Obligation::ReserveResources { reservation_id },
@@ -5390,12 +5360,8 @@ where
                 handle: secret_handle,
             },
         ]));
-    let process_store = Arc::new(ProcessObligationLifecycleStore::new(
-        inner_process_store,
-        Arc::clone(&network_policies),
-        Arc::clone(&secret_injections),
-        governor.clone(),
-    ));
+    let process_store =
+        Arc::new(obligation_services.process_obligation_lifecycle_store(inner_process_store));
     let cleanup_process_store = Arc::clone(&process_store);
     let process_manager = Arc::new(
         BackgroundProcessManager::new(Arc::clone(&process_store), Arc::new(executor))
@@ -5424,8 +5390,6 @@ where
         handler,
         process_manager,
         process_store,
-        network_policies,
-        secret_injections,
         governor,
         context,
         scope,

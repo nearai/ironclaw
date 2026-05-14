@@ -59,7 +59,7 @@ jobs:
             echo "has_boundary_check=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_reborn_cli/|crates/ironclaw_reborn_config/|crates/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/code_style\.yml$)'; then
+          if printf '%s\n' "$CHANGED_FILES" | grep -Eq '^(crates/ironclaw_reborn/|crates/ironclaw_reborn_cli/|crates/ironclaw_reborn_config/|crates/ironclaw_architecture/tests/reborn_dependency_boundaries\.rs$|Cargo\.toml$|Cargo\.lock$|\.github/workflows/code_style\.yml$)'; then
             echo "has_reborn_cli=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_reborn_cli=false" >> "$GITHUB_OUTPUT"
@@ -203,6 +203,13 @@ jobs:
         run: cargo test -p ironclaw_reborn_config
       - name: Test Reborn CLI binary crate
         run: cargo test -p ironclaw_reborn_cli
+      - name: Test Reborn libSQL restart integration
+        run: |
+          cargo test -p ironclaw_reborn \
+            --features libsql-restart-tests \
+            --test loop_driver_host \
+            turn_runner_worker_completes_after_libsql_turn_and_thread_services_reopen \
+            -- --nocapture
       - name: Test Reborn architecture boundaries
         run: cargo test -p ironclaw_architecture reborn
 

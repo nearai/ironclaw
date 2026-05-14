@@ -244,6 +244,13 @@ impl CredentialSessionId {
     pub fn parse(value: &str) -> Result<Self, uuid::Error> {
         Uuid::parse_str(value).map(Self)
     }
+
+    // Keep this helper feature-agnostic so private DTO conversion code does not
+    // depend on backend feature gates. It may be unused in featureless builds.
+    #[allow(dead_code)]
+    pub(crate) fn to_private_storage_string(self) -> String {
+        self.0.to_string()
+    }
 }
 
 impl Default for CredentialSessionId {
@@ -260,7 +267,7 @@ impl fmt::Debug for CredentialSessionId {
 
 impl fmt::Display for CredentialSessionId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
+        formatter.write_str("[REDACTED]")
     }
 }
 
@@ -1377,7 +1384,7 @@ mod tests {
 
     use crate::{
         CREDENTIAL_ID_MAX_LEN, CredentialAccount, CredentialAccountId, CredentialAccountStatus,
-        CredentialBrokerError, CredentialPathPolicy, CredentialSessionRequest,
+        CredentialBrokerError, CredentialPathPolicy, CredentialSessionId, CredentialSessionRequest,
         CredentialTargetPolicy, InMemoryCredentialBroker, InMemorySecretStore,
         InMemorySecretsStore, RedactedJson, ScopedSecretsStoreAdapter, SecretLeaseKey,
         SecretMaterial, SecretStore, SecretStoreError, SecretsCrypto, SecretsStore,
@@ -1487,6 +1494,43 @@ mod tests {
     }
 
     #[test]
+    fn credential_session_id_display_redacts_bearer_like_value() {
+        let raw_session_id = "3f2f4a08-f8ef-4d83-a8f6-624d77cf9181";
+        let session_id = CredentialSessionId::parse(raw_session_id).unwrap();
+        let display = session_id.to_string();
+
+        assert!(!display.contains(raw_session_id));
+        assert!(display.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn credential_broker_session_error_displays_redact_session_id() {
+        let raw_session_id = "3f2f4a08-f8ef-4d83-a8f6-624d77cf9181";
+        let session_id = CredentialSessionId::parse(raw_session_id).unwrap();
+
+        for (error, stable_reason) in [
+            (
+                CredentialBrokerError::UnknownSession { session_id },
+                "MissingCredential",
+            ),
+            (
+                CredentialBrokerError::SessionExpired { session_id },
+                "CredentialExpired",
+            ),
+            (
+                CredentialBrokerError::SessionUseLimitExceeded { session_id },
+                "CredentialExpired",
+            ),
+        ] {
+            let display = error.to_string();
+
+            assert!(!display.contains(raw_session_id), "{display}");
+            assert!(display.contains("[REDACTED]"), "{display}");
+            assert_eq!(error.stable_reason(), stable_reason);
+        }
+    }
+
+    #[test]
     fn stable_reason_tokens_are_locked() {
         let account_id = CredentialAccountId::new("openai_prod").unwrap();
         assert_eq!(
@@ -1546,7 +1590,7 @@ mod tests {
         let debug = format!("{session:?}");
         assert!(!debug.contains("sk-live-sentinel"));
         assert!(!debug.contains("token"));
-        assert!(!debug.contains(&session.correlation_id().to_string()));
+        assert!(debug.contains("CredentialSessionId([REDACTED])"));
     }
 
     #[test]

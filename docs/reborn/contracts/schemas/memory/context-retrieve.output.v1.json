@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "schemas/memory/context-retrieve.output.v1.json",
+  "title": "Memory Context Retrieve Output v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["snippets"],
+  "properties": {
+    "snippets": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["text"],
+        "properties": {
+          "text": { "type": "string", "maxLength": 4096 },
+          "ref": { "type": "string", "maxLength": 512 },
+          "score": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    }
+  }
+}

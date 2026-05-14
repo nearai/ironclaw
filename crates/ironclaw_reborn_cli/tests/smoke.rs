@@ -1,5 +1,7 @@
 use std::process::Command;
 
+const INVALID_PROFILE_MESSAGE: &str = "IRONCLAW_REBORN_PROFILE must be one of";
+
 fn reborn_bin() -> &'static str {
     env!("CARGO_BIN_EXE_ironclaw-reborn")
 }
@@ -461,6 +463,26 @@ fn completion_generates_zsh_script_without_reborn_home() {
 }
 
 #[test]
+fn completion_generates_bash_script_without_reborn_home() {
+    let output = Command::new(reborn_bin())
+        .arg("completion")
+        .arg("--shell")
+        .arg("bash")
+        .env_clear()
+        .output()
+        .expect("ironclaw-reborn completion should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("_ironclaw-reborn()"), "stdout: {stdout}");
+    assert!(stdout.contains("COMPREPLY"), "stdout: {stdout}");
+}
+
+#[test]
 fn run_initializes_minimal_runtime_shell_without_touching_v1_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
@@ -493,6 +515,10 @@ fn run_initializes_minimal_runtime_shell_without_touching_v1_state() {
     );
     assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
     assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("driver_registry: initialized"),
+        "stdout: {stdout}"
+    );
     assert!(
         stdout.contains("runtime_shell: initialized"),
         "stdout: {stdout}"
@@ -539,6 +565,10 @@ fn doctor_uses_reborn_home_override_without_touching_v1_state() {
     );
     assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
     assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("driver_registry: initialized"),
+        "stdout: {stdout}"
+    );
     assert!(
         !reborn_home.exists(),
         "doctor should not create state directories"
@@ -595,6 +625,110 @@ fn doctor_reports_explicit_profile() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("profile: production"), "stdout: {stdout}");
+}
+
+#[test]
+fn run_reports_explicit_profile() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let output = Command::new(reborn_bin())
+        .arg("run")
+        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .env("IRONCLAW_REBORN_PROFILE", "migration-dry-run")
+        .output()
+        .expect("ironclaw-reborn run should run");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("profile: migration-dry-run"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("driver_registry: initialized"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn doctor_rejects_invalid_profile() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let output = Command::new(reborn_bin())
+        .arg("doctor")
+        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .env("IRONCLAW_REBORN_PROFILE", "prod")
+        .output()
+        .expect("ironclaw-reborn doctor should run");
+
+    assert!(
+        !output.status.success(),
+        "doctor should reject invalid profile"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(INVALID_PROFILE_MESSAGE), "stderr: {stderr}");
+}
+
+#[test]
+fn doctor_rejects_empty_profile_override() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let output = Command::new(reborn_bin())
+        .arg("doctor")
+        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .env("IRONCLAW_REBORN_PROFILE", "")
+        .output()
+        .expect("ironclaw-reborn doctor should run");
+
+    assert!(
+        !output.status.success(),
+        "doctor should reject empty profile"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(INVALID_PROFILE_MESSAGE), "stderr: {stderr}");
+}
+
+#[test]
+fn run_rejects_invalid_profile() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let output = Command::new(reborn_bin())
+        .arg("run")
+        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .env("IRONCLAW_REBORN_PROFILE", "prod")
+        .output()
+        .expect("ironclaw-reborn run should run");
+
+    assert!(
+        !output.status.success(),
+        "run should reject invalid profile"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(INVALID_PROFILE_MESSAGE), "stderr: {stderr}");
+}
+
+#[test]
+fn run_rejects_reborn_home_equal_to_explicit_v1_base_dir() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let v1_root = temp.path().join("v1-state");
+
+    let output = Command::new(reborn_bin())
+        .arg("run")
+        .env("IRONCLAW_REBORN_HOME", &v1_root)
+        .env("IRONCLAW_BASE_DIR", &v1_root)
+        .output()
+        .expect("ironclaw-reborn run should run");
+
+    assert!(!output.status.success(), "run should reject v1 root");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("IRONCLAW_REBORN_HOME must not point at the v1 IronClaw state root"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]

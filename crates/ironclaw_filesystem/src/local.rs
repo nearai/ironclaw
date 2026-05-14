@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{HostPath, VirtualPath};
+use ironclaw_safety::sensitive_paths::is_sensitive_path;
 use tokio::io::AsyncWriteExt;
 
 use crate::{
@@ -242,13 +243,15 @@ impl RootFilesystem for LocalFilesystem {
         let resolved = self
             .resolve_existing(path, FilesystemOperation::Stat)
             .await?;
-        let metadata = tokio::fs::metadata(resolved)
+        let metadata = tokio::fs::metadata(&resolved)
             .await
             .map_err(|error| io_error(path.clone(), FilesystemOperation::Stat, error))?;
         Ok(FileStat {
             path: path.clone(),
             file_type: file_type_from_metadata(&metadata),
             len: metadata.len(),
+            modified: metadata.modified().ok(),
+            sensitive: is_sensitive_path(&resolved),
         })
     }
 

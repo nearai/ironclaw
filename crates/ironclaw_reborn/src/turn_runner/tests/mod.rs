@@ -337,6 +337,8 @@ struct MockDriver {
     descriptor: AgentLoopDriverDescriptor,
     run_result: Mutex<Result<LoopExit, AgentLoopDriverError>>,
     run_delay: Duration,
+    run_requests: Mutex<Vec<AgentLoopDriverRunRequest>>,
+    resume_requests: Mutex<Vec<AgentLoopDriverResumeRequest>>,
 }
 
 impl MockDriver {
@@ -345,6 +347,8 @@ impl MockDriver {
             descriptor,
             run_result: Mutex::new(Ok(test_completed_exit())),
             run_delay: Duration::ZERO,
+            run_requests: Mutex::new(Vec::new()),
+            resume_requests: Mutex::new(Vec::new()),
         }
     }
 
@@ -353,12 +357,22 @@ impl MockDriver {
             descriptor,
             run_result: Mutex::new(Err(error)),
             run_delay: Duration::ZERO,
+            run_requests: Mutex::new(Vec::new()),
+            resume_requests: Mutex::new(Vec::new()),
         }
     }
 
     fn with_delay(mut self, delay: Duration) -> Self {
         self.run_delay = delay;
         self
+    }
+
+    fn run_requests(&self) -> Vec<AgentLoopDriverRunRequest> {
+        self.run_requests.lock().expect("lock").clone()
+    }
+
+    fn resume_requests(&self) -> Vec<AgentLoopDriverResumeRequest> {
+        self.resume_requests.lock().expect("lock").clone()
     }
 }
 
@@ -370,9 +384,10 @@ impl AgentLoopDriver for MockDriver {
 
     async fn run(
         &self,
-        _request: AgentLoopDriverRunRequest,
+        request: AgentLoopDriverRunRequest,
         _host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
+        self.run_requests.lock().expect("lock").push(request);
         if !self.run_delay.is_zero() {
             tokio::time::sleep(self.run_delay).await;
         }
@@ -381,9 +396,10 @@ impl AgentLoopDriver for MockDriver {
 
     async fn resume(
         &self,
-        _request: AgentLoopDriverResumeRequest,
+        request: AgentLoopDriverResumeRequest,
         _host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
+        self.resume_requests.lock().expect("lock").push(request);
         if !self.run_delay.is_zero() {
             tokio::time::sleep(self.run_delay).await;
         }
@@ -764,6 +780,51 @@ async fn worker_reuses_claim_runner_and_lease_for_heartbeat_and_exit() {
             && request.lease_token == first_claim.lease_token),
         "exit application must use the same runner and lease token as the claim"
     );
+}
+
+#[tokio::test]
+async fn worker_resumes_claimed_run_with_checkpoint() {
+    let desc = test_descriptor();
+    let driver = Arc::new(MockDriver::completing(desc.clone()));
+    let registry = Arc::new(setup_registry(driver.clone()));
+    let checkpoint_id = TurnCheckpointId::new();
+    let mut claimed = make_claimed_run(&desc, test_scope(), TurnStatus::RecoveryRequired);
+    claimed.state.checkpoint_id = Some(checkpoint_id);
+    let turn_id = claimed.state.turn_id;
+    let run_id = claimed.state.run_id;
+    let profile = claimed.resolved_run_profile.clone();
+    let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
+    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let worker = TurnRunnerWorker::new(
+        TurnRunnerWorkerConfig {
+            heartbeat_interval: Duration::from_secs(60),
+            poll_interval: Duration::from_secs(60),
+            scope_filter: None,
+        },
+        port.clone(),
+        make_applier(port),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+    );
+
+    assert!(
+        worker
+            .try_claim_and_run(&CancellationToken::new())
+            .await
+            .unwrap()
+    );
+
+    assert!(
+        driver.run_requests().is_empty(),
+        "checkpointed recovery run must not start from scratch"
+    );
+    let resume_requests = driver.resume_requests();
+    assert_eq!(resume_requests.len(), 1);
+    assert_eq!(resume_requests[0].turn_id, turn_id);
+    assert_eq!(resume_requests[0].run_id, run_id);
+    assert_eq!(resume_requests[0].checkpoint_id, checkpoint_id);
+    assert_eq!(resume_requests[0].resolved_run_profile, profile);
 }
 
 #[tokio::test]

@@ -1,3 +1,5 @@
+use std::time::SystemTime;
+
 use ironclaw_host_api::{HostApiError, ScopedPath, VirtualPath};
 use thiserror::Error;
 
@@ -87,6 +89,8 @@ pub struct FileStat {
     pub path: VirtualPath,
     pub file_type: FileType,
     pub len: u64,
+    pub modified: Option<SystemTime>,
+    pub sensitive: bool,
 }
 
 /// Stable identifier for a mounted filesystem backend.
