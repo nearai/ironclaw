@@ -36,6 +36,25 @@ pub(crate) trait RecoveryStrategy: Send + Sync {
     ) -> RecoveryOutcome;
 }
 
+/// Compile-time object-safety check.
+#[allow(dead_code)]
+fn _recovery_strategy_object_safe(_: &dyn RecoveryStrategy) {}
+
+/// Sanitized, strategy-visible error summary text.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub(crate) struct SanitizedStrategySummary(String);
+
+impl SanitizedStrategySummary {
+    pub(crate) fn from_trusted_static(summary: &'static str) -> Self {
+        Self(summary.to_string())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Sanitized capability error — class + safe summary string + opaque
 /// diagnostic ref. Strategies never see raw provider errors, host paths,
 /// or secrets (sanitization happens at the host port boundary, per master
@@ -43,20 +62,27 @@ pub(crate) trait RecoveryStrategy: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CapabilityErrorSummary {
     pub(crate) class: CapabilityErrorClass,
-    pub(crate) safe_summary: String,
+    pub(crate) safe_summary: SanitizedStrategySummary,
     pub(crate) diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
 /// Wire-stable capability error classification. Snake_case names appear in
 /// checkpoints and observability events.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum CapabilityErrorClass {
+    /// Retryable capability-side failure such as timeout or temporary outage.
     Transient,
+    /// Non-retryable capability-side failure.
     Permanent,
+    /// Host rejected malformed capability input.
     InputInvalid,
+    /// Host policy denied the capability call.
     PolicyDenied,
+    /// Capability provider or backing service is unavailable.
     Unavailable,
+    /// Capability host failed internally without safe caller detail.
     Internal,
 }
 
@@ -64,18 +90,24 @@ pub(crate) enum CapabilityErrorClass {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ModelErrorSummary {
     pub(crate) class: ModelErrorClass,
-    pub(crate) safe_summary: String,
+    pub(crate) safe_summary: SanitizedStrategySummary,
     pub(crate) diagnostic_ref: Option<LoopDiagnosticRef>,
 }
 
 /// Wire-stable model error classification.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ModelErrorClass {
+    /// Retryable model/provider failure such as timeout or temporary outage.
     Transient,
+    /// Prompt/context exceeded the selected model's limits.
     ContextOverflow,
+    /// Provider rejected or filtered the content.
     ContentFiltered,
+    /// Model route, credentials, or provider is unavailable.
     Unavailable,
+    /// Model gateway failed internally without safe caller detail.
     Internal,
 }
 
@@ -86,6 +118,7 @@ pub(crate) enum ModelErrorClass {
 ///   iteration-level retry; `alter` carries the strategy's hint).
 /// - `SkipResult` — drop this result and continue the batch.
 /// - `Abort` — return `LoopExit::Failed { reason_kind: failure_kind }`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "outcome")]
 pub(crate) enum RecoveryOutcome {
@@ -105,13 +138,14 @@ pub(crate) enum RecoveryOutcome {
 /// Strategy hint about WHAT to alter on retry. Skeleton supports prompt-shape
 /// alterations only; model-route swap is reserved for the deferred
 /// `ModelRouteChain` follow-up (master doc §9).
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "alteration")]
 pub(crate) enum RetryAlteration {
     /// Shrink context for the next attempt (e.g. on context-overflow).
     ShrinkContext { drop_messages: u32 },
     /// Backoff before retry (executor honors as a sleep).
-    Backoff { delay: std::time::Duration },
+    Backoff { delay_ms: u64 },
     /// Reserved for future `ModelRouteChain` landing. Skeleton executor MUST
     /// reject this alteration with `LoopFailureKind::DriverBug` until the
     /// chain mechanism lands.
@@ -120,16 +154,20 @@ pub(crate) enum RetryAlteration {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
-
-    /// Compile-time object-safety check.
-    #[allow(dead_code)]
-    fn _check(_: &dyn RecoveryStrategy) {}
 
     fn sample_recovery() -> RecoveryStrategyState {
         RecoveryStrategyState { attempts: 2 }
+    }
+
+    #[test]
+    fn sanitized_strategy_summary_serializes_as_string() {
+        let summary = SanitizedStrategySummary::from_trusted_static("provider unavailable");
+        let value = serde_json::to_value(&summary).expect("serialize");
+        assert_eq!(value, serde_json::json!("provider unavailable"));
+        let restored: SanitizedStrategySummary =
+            serde_json::from_value(value).expect("deserialize");
+        assert_eq!(restored.as_str(), "provider unavailable");
     }
 
     #[test]
@@ -170,24 +208,34 @@ mod tests {
     fn capability_error_summary_round_trips() {
         let summary = CapabilityErrorSummary {
             class: CapabilityErrorClass::Transient,
-            safe_summary: "upstream timed out".to_string(),
+            safe_summary: SanitizedStrategySummary::from_trusted_static("upstream timed out"),
             diagnostic_ref: Some(LoopDiagnosticRef::new("diag:cap-1").expect("valid")),
         };
         let value = serde_json::to_value(&summary).expect("serialize");
+        assert_eq!(
+            value["safe_summary"],
+            serde_json::json!("upstream timed out")
+        );
         let restored: CapabilityErrorSummary = serde_json::from_value(value).expect("deserialize");
         assert_eq!(restored, summary);
+        assert_eq!(restored.safe_summary.as_str(), "upstream timed out");
     }
 
     #[test]
     fn model_error_summary_round_trips() {
         let summary = ModelErrorSummary {
             class: ModelErrorClass::ContextOverflow,
-            safe_summary: "context window exceeded".to_string(),
+            safe_summary: SanitizedStrategySummary::from_trusted_static("context window exceeded"),
             diagnostic_ref: None,
         };
         let value = serde_json::to_value(&summary).expect("serialize");
+        assert_eq!(
+            value["safe_summary"],
+            serde_json::json!("context window exceeded")
+        );
         let restored: ModelErrorSummary = serde_json::from_value(value).expect("deserialize");
         assert_eq!(restored, summary);
+        assert_eq!(restored.safe_summary.as_str(), "context window exceeded");
     }
 
     #[test]
@@ -206,15 +254,14 @@ mod tests {
 
     #[test]
     fn retry_alteration_backoff_round_trips() {
-        let alteration = RetryAlteration::Backoff {
-            delay: Duration::from_millis(250),
-        };
+        let alteration = RetryAlteration::Backoff { delay_ms: 250 };
         let value = serde_json::to_value(&alteration).expect("serialize");
+        assert_eq!(value["delay_ms"], serde_json::json!(250));
         let restored: RetryAlteration = serde_json::from_value(value).expect("deserialize");
         assert_eq!(restored, alteration);
         match restored {
-            RetryAlteration::Backoff { delay } => {
-                assert_eq!(delay, Duration::from_millis(250))
+            RetryAlteration::Backoff { delay_ms } => {
+                assert_eq!(delay_ms, 250)
             }
             other => panic!("unexpected variant: {other:?}"),
         }

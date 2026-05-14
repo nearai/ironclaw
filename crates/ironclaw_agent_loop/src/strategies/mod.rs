@@ -8,6 +8,15 @@
 //! WS-2 lands the trait stubs and outcome enums for the batch / gate /
 //! recovery axis. `Default*` impls land in WS-5; the executor body that
 //! consumes these outcomes lands in WS-6.
+//!
+//! Checkpoint/observability wire enums are `#[non_exhaustive]`; later
+//! workstreams should extend them without forcing consumers to assume the
+//! current variants are closed.
+//!
+//! Pure policy traits with no host or future host consult may stay sync.
+//! Gate and recovery traits are async because they can consult host/runtime
+//! state such as grant history, auth flow status, route health, or
+//! circuit-breaker counters.
 
 // WS-1/2 land crate-internal contracts before WS-4/5/6 compose and execute
 // them. Keep the unused lint local to these forward-declared contracts.
@@ -28,5 +37,5 @@ pub(crate) use ironclaw_turns::run_profile::ConcurrencyHint;
 pub(crate) use model::{ModelPreference, ModelStrategy};
 pub(crate) use recovery::{
     CapabilityErrorClass, CapabilityErrorSummary, ModelErrorClass, ModelErrorSummary,
-    RecoveryOutcome, RecoveryStrategy, RetryAlteration,
+    RecoveryOutcome, RecoveryStrategy, RetryAlteration, SanitizedStrategySummary,
 };

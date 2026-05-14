@@ -26,6 +26,10 @@ pub(crate) trait GateHandlingStrategy: Send + Sync {
     async fn handle(&self, state: &LoopExecutionState, gate: &GateSummary) -> GateOutcome;
 }
 
+/// Compile-time object-safety check.
+#[allow(dead_code)]
+fn _gate_handling_strategy_object_safe(_: &dyn GateHandlingStrategy) {}
+
 /// Loop-side projection of a host capability gate — kind + opaque ref only.
 /// The strategy never sees raw input, secrets, or auth state (per
 /// `contracts/turns-agent-loop.md` §6 + `contracts/lightweight-agent-loop.md`
@@ -38,6 +42,7 @@ pub(crate) struct GateSummary {
 
 /// Wire-stable gate classification. Snake_case names are part of the public
 /// contract — they appear in checkpoints and observability events.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum GateKind {
@@ -55,6 +60,7 @@ pub(crate) enum GateKind {
 ///   the rest of the batch. Use sparingly; intended for fire-and-forget
 ///   tools where a missing approval is non-fatal.
 /// - `Abort` — return `LoopExit::Failed { reason_kind: failure_kind }`.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "outcome")]
 pub(crate) enum GateOutcome {
@@ -70,13 +76,22 @@ pub(crate) enum GateOutcome {
     },
 }
 
+impl GateOutcome {
+    /// Validate the outcome against the originating gate kind before an
+    /// executor honors it. WS-6 executor code must call this first.
+    pub(crate) fn validate_for_gate_kind(&self, kind: GateKind) -> Result<(), LoopFailureKind> {
+        match (kind, self) {
+            (GateKind::Approval, GateOutcome::SkipAndContinue { .. }) => {
+                Err(LoopFailureKind::DriverBug)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Compile-time object-safety check.
-    #[allow(dead_code)]
-    fn _check(_: &dyn GateHandlingStrategy) {}
 
     fn sample_gate() -> GateStrategyState {
         GateStrategyState::default()
@@ -155,5 +170,25 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn approval_gate_rejects_skip_and_continue_outcome() {
+        let outcome = GateOutcome::SkipAndContinue {
+            gate: sample_gate(),
+        };
+        assert_eq!(
+            outcome.validate_for_gate_kind(GateKind::Approval),
+            Err(LoopFailureKind::DriverBug)
+        );
+    }
+
+    #[test]
+    fn auth_and_resource_gates_allow_skip_and_continue_outcome() {
+        let outcome = GateOutcome::SkipAndContinue {
+            gate: sample_gate(),
+        };
+        assert_eq!(outcome.validate_for_gate_kind(GateKind::Auth), Ok(()));
+        assert_eq!(outcome.validate_for_gate_kind(GateKind::Resource), Ok(()));
     }
 }

@@ -24,9 +24,16 @@ pub(crate) trait BatchPolicyStrategy: Send + Sync {
     fn policy(&self, state: &LoopExecutionState, calls: &[CapabilityCallSummary]) -> BatchPolicy;
 }
 
+/// Compile-time object-safety check. `BatchPolicyStrategy` is pure-sync
+/// policy, but we still want it usable behind a trait object so the
+/// executor can hold a heterogeneous strategy stack.
+#[allow(dead_code)]
+fn _batch_policy_strategy_object_safe(_: &dyn BatchPolicyStrategy) {}
+
 /// Batch-level execution mode. Wire-stable: serialized into checkpoints and
 /// emitted on observability events, so the snake_case names are part of the
 /// public contract.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum BatchPolicy {
@@ -49,12 +56,6 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-
-    /// Compile-time object-safety check. `BatchPolicyStrategy` is pure-sync
-    /// policy, but we still want it usable behind a trait object so the
-    /// executor can hold a heterogeneous strategy stack.
-    #[allow(dead_code)]
-    fn _check(_: &dyn BatchPolicyStrategy) {}
 
     #[test]
     fn batch_policy_round_trips_snake_case() {
