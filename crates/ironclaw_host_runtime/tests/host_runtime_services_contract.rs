@@ -3575,6 +3575,8 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
             "Bearer sk-vertical-secret".to_string(),
         ))
     );
+    // The consumed-staged-secret one-shot invariant is covered by
+    // `reborn_e2e_gate_host_http_consumes_staged_policy_and_secret_once`.
 }
 
 #[tokio::test]
