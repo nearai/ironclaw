@@ -70,6 +70,7 @@ serde = "1"
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+wat = "1.245.1"
 
 [[test]]
 name = "llm_gateway"

@@ -307,6 +307,17 @@ impl HookRegistry {
             })
     }
 
+    /// Returns true when a binding for `hook_id` exists, poisoned or not.
+    /// Replay validation uses this against checkpoint-pinned hook ids before
+    /// dispatching so version or module-byte drift cannot silently skip a
+    /// previously-observed hook slot.
+    pub fn contains_hook(&self, hook_id: HookId) -> bool {
+        self.by_point
+            .values()
+            .flat_map(|bindings| bindings.iter())
+            .any(|b| b.hook_id == hook_id)
+    }
+
     /// Total number of bindings, poisoned or not.
     pub fn len(&self) -> usize {
         self.by_point.values().map(Vec::len).sum()

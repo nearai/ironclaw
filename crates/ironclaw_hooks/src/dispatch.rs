@@ -31,6 +31,9 @@ use crate::sink::{
 };
 use crate::telemetry;
 use crate::trust::HookTrustClass;
+use crate::wasm::{
+    WasmBeforeCapabilityHook, WasmBeforePromptHook, WasmHookFailure, WasmObserverHook,
+};
 
 /// Default per-hook wall-clock budget. Tunable per dispatcher.
 pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_millis(50);
@@ -51,6 +54,7 @@ pub const DEFAULT_HOOK_TIMEOUT: Duration = Duration::from_millis(50);
 pub(crate) enum BeforeCapabilityHookImpl {
     Privileged(Box<dyn PrivilegedBeforeCapabilityHook>),
     Restricted(Box<dyn RestrictedBeforeCapabilityHook>),
+    RestrictedWasm(WasmBeforeCapabilityHook),
 }
 
 impl BeforeCapabilityHookImpl {
@@ -61,6 +65,12 @@ impl BeforeCapabilityHookImpl {
         match self {
             BeforeCapabilityHookImpl::Privileged(h) => h.needs_input(),
             BeforeCapabilityHookImpl::Restricted(h) => h.needs_input(),
+            // WASM hooks: conservatively assume they read arguments. The
+            // manifest does not currently expose a `needs_input` capability
+            // bit, so eager input resolution is required for correctness.
+            // Once a manifest-declared input descriptor lands, this can be
+            // refined.
+            BeforeCapabilityHookImpl::RestrictedWasm(_) => true,
         }
     }
 }
@@ -70,6 +80,7 @@ impl BeforeCapabilityHookImpl {
 pub(crate) enum BeforePromptHookImpl {
     Privileged(Box<dyn PrivilegedBeforePromptHook>),
     Restricted(Box<dyn RestrictedBeforePromptHook>),
+    RestrictedWasm(WasmBeforePromptHook),
 }
 
 /// Tier-tagged trait object for an observer hook. Sealed to this crate for
@@ -77,6 +88,7 @@ pub(crate) enum BeforePromptHookImpl {
 /// registry still tracks trust_class for audit attribution.
 pub(crate) enum ObserverHookImpl {
     Any(Box<dyn ObserverHook>),
+    Wasm(WasmObserverHook),
 }
 
 /// The composed outcome of dispatching `before_capability` against all active
@@ -269,6 +281,27 @@ impl HookDispatcher {
         registry.active_at(point).cloned().collect()
     }
 
+    /// Validate that every hook id pinned by a checkpoint still resolves in
+    /// the active registry before replay proceeds. This catches extension
+    /// version drift and WASM module substitution as an explicit
+    /// `UnknownHook` instead of silently dropping a previously-audited hook.
+    pub fn validate_checkpoint_hook_ids_for_replay(
+        &self,
+        hook_ids: &[HookId],
+    ) -> Result<(), crate::error::HookError> {
+        let registry = self.registry.lock().map_err(|_| {
+            crate::error::HookError::RegistryConstruction(
+                "hook registry mutex poisoned".to_string(),
+            )
+        })?;
+        for hook_id in hook_ids {
+            if !registry.contains_hook(*hook_id) {
+                return Err(crate::error::HookError::UnknownHook(*hook_id));
+            }
+        }
+        Ok(())
+    }
+
     /// Insert a new binding into the dispatcher's registry. Used by the
     /// [`crate::registrar::HookRegistrar`] to wire manifest entries into a
     /// live dispatcher. Returns the same errors as
@@ -428,6 +461,32 @@ impl HookDispatcher {
         Ok(())
     }
 
+    /// Install an Installed-tier WASM `before_capability` hook through the
+    /// restricted sink surface. WASM can deny or pause, but cannot mint Allow.
+    pub(crate) fn install_installed_wasm_before_capability(
+        &mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        owning_extension: ironclaw_host_api::ExtensionId,
+        scope: HookBindingScope,
+        hook: WasmBeforeCapabilityHook,
+    ) -> Result<(), crate::error::HookError> {
+        let binding = HookBinding {
+            hook_id,
+            hook_version: HookVersion::ONE,
+            trust_class: HookTrustClass::Installed,
+            phase,
+            priority: HookPriority::DEFAULT,
+            point: HookPointSpec::BeforeCapability,
+            owning_extension: Some(owning_extension),
+            scope,
+            poisoned: false,
+        };
+        self.insert_binding(binding)?;
+        self.install_before_capability(hook_id, BeforeCapabilityHookImpl::RestrictedWasm(hook));
+        Ok(())
+    }
+
     // ── Tier-specific public installers for before_prompt ───────────────────
 
     pub(crate) fn install_builtin_before_prompt(
@@ -495,6 +554,32 @@ impl HookDispatcher {
         };
         self.insert_binding(binding)?;
         self.install_before_prompt(hook_id, BeforePromptHookImpl::Restricted(hook));
+        Ok(())
+    }
+
+    /// Install an Installed-tier WASM `before_prompt` hook through the
+    /// restricted mutator surface.
+    pub(crate) fn install_installed_wasm_before_prompt(
+        &mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        owning_extension: ironclaw_host_api::ExtensionId,
+        scope: HookBindingScope,
+        hook: WasmBeforePromptHook,
+    ) -> Result<(), crate::error::HookError> {
+        let binding = HookBinding {
+            hook_id,
+            hook_version: HookVersion::ONE,
+            trust_class: HookTrustClass::Installed,
+            phase,
+            priority: HookPriority::DEFAULT,
+            point: HookPointSpec::BeforePrompt,
+            owning_extension: Some(owning_extension),
+            scope,
+            poisoned: false,
+        };
+        self.insert_binding(binding)?;
+        self.install_before_prompt(hook_id, BeforePromptHookImpl::RestrictedWasm(hook));
         Ok(())
     }
 
@@ -605,6 +690,33 @@ impl HookDispatcher {
             scope,
             hook,
         )
+    }
+
+    /// Install an Installed-tier WASM observer hook. Observer failures are
+    /// isolated by the failure-policy matrix.
+    pub(crate) fn install_installed_wasm_observer(
+        &mut self,
+        hook_id: HookId,
+        phase: HookPhase,
+        point: HookPointSpec,
+        owning_extension: ironclaw_host_api::ExtensionId,
+        scope: HookBindingScope,
+        hook: WasmObserverHook,
+    ) -> Result<(), crate::error::HookError> {
+        let binding = HookBinding {
+            hook_id,
+            hook_version: HookVersion::ONE,
+            trust_class: HookTrustClass::Installed,
+            phase,
+            priority: HookPriority::DEFAULT,
+            point,
+            owning_extension: Some(owning_extension),
+            scope,
+            poisoned: false,
+        };
+        self.insert_binding(binding)?;
+        self.install_observer_impl(hook_id, ObserverHookImpl::Wasm(hook));
+        Ok(())
     }
 
     /// Dispatch `before_capability`. Hooks run in `(phase, priority, hook_id)`
@@ -930,6 +1042,22 @@ impl HookDispatcher {
         ctx: &BeforeCapabilityHookContext,
     ) -> Result<GateHookOutcome, HookFailureRecord> {
         let timeout = self.timeout;
+        if let BeforeCapabilityHookImpl::RestrictedWasm(h) = hook {
+            let run = AssertUnwindSafe(async { h.evaluate(ctx) }).catch_unwind();
+            return match tokio::time::timeout(timeout, run).await {
+                Ok(Ok(Ok(outcome))) => Ok(outcome),
+                Ok(Ok(Err(failure))) => Err(self.classify_wasm_failure(binding, failure)),
+                Ok(Err(_panic)) => {
+                    Err(self.classify_failure(binding, FailureCategory::Panic, "hook panicked"))
+                }
+                Err(_elapsed) => Err(self.classify_failure(
+                    binding,
+                    FailureCategory::Timeout,
+                    "hook exceeded dispatch timeout",
+                )),
+            };
+        }
+
         let run = async {
             match hook {
                 BeforeCapabilityHookImpl::Privileged(h) => {
@@ -947,6 +1075,17 @@ impl HookDispatcher {
                         .await
                         .map_err(|_| ())
                         .map(|()| (sink.state, sink.audit_reason))
+                }
+                BeforeCapabilityHookImpl::RestrictedWasm(_) => {
+                    // Unreachable: the `RestrictedWasm` variant short-circuits
+                    // earlier in this function via a dedicated path that
+                    // handles wall-clock timeout + panic isolation around the
+                    // WASM invocation. This arm exists only because Rust
+                    // exhaustiveness requires it.
+                    unreachable!(
+                        "RestrictedWasm is dispatched on its own path above; \
+                         this branch is unreachable"
+                    )
                 }
             }
         };
@@ -990,6 +1129,22 @@ impl HookDispatcher {
         ctx: &BeforePromptHookContext,
     ) -> Result<Vec<HookPatch>, HookFailureRecord> {
         let timeout = self.timeout;
+        if let BeforePromptHookImpl::RestrictedWasm(h) = hook {
+            let run = AssertUnwindSafe(async { h.evaluate(ctx) }).catch_unwind();
+            return match tokio::time::timeout(timeout, run).await {
+                Ok(Ok(Ok(patches))) => Ok(patches),
+                Ok(Ok(Err(failure))) => Err(self.classify_wasm_failure(binding, failure)),
+                Ok(Err(_panic)) => {
+                    Err(self.classify_failure(binding, FailureCategory::Panic, "hook panicked"))
+                }
+                Err(_elapsed) => Err(self.classify_failure(
+                    binding,
+                    FailureCategory::Timeout,
+                    "hook exceeded dispatch timeout",
+                )),
+            };
+        }
+
         let run = async {
             match hook {
                 BeforePromptHookImpl::Privileged(h) => {
@@ -1008,6 +1163,7 @@ impl HookDispatcher {
                         .map_err(|_| ())
                         .map(|()| sink.patches)
                 }
+                BeforePromptHookImpl::RestrictedWasm(h) => h.evaluate(ctx).map_err(|_| ()),
             }
         };
 
@@ -1031,6 +1187,24 @@ impl HookDispatcher {
         ctx: &ObserverHookContext,
     ) -> Result<Vec<ObserverFact>, HookFailureRecord> {
         let timeout = self.timeout;
+        if let ObserverHookImpl::Wasm(h) = hook {
+            let run = AssertUnwindSafe(async { h.observe(ctx) }).catch_unwind();
+            return match tokio::time::timeout(timeout, run).await {
+                Ok(Ok(Ok(facts))) => Ok(facts),
+                Ok(Ok(Err(failure))) => Err(self.classify_wasm_failure(binding, failure)),
+                Ok(Err(_panic)) => Err(self.classify_failure(
+                    binding,
+                    FailureCategory::Panic,
+                    "observer hook panicked",
+                )),
+                Err(_elapsed) => Err(self.classify_failure(
+                    binding,
+                    FailureCategory::Timeout,
+                    "observer hook exceeded dispatch timeout",
+                )),
+            };
+        }
+
         let run = async {
             match hook {
                 ObserverHookImpl::Any(h) => {
@@ -1041,6 +1215,7 @@ impl HookDispatcher {
                         .map_err(|_| ())
                         .map(|()| sink.facts)
                 }
+                ObserverHookImpl::Wasm(h) => h.observe(ctx).map_err(|_| ()),
             }
         };
 
@@ -1084,6 +1259,14 @@ impl HookDispatcher {
             disposition,
             reason: SanitizedReason::from_static(reason),
         }
+    }
+
+    fn classify_wasm_failure(
+        &self,
+        binding: &HookBinding,
+        failure: WasmHookFailure,
+    ) -> HookFailureRecord {
+        self.classify_failure(binding, failure.category, failure.reason)
     }
 
     async fn poison_with_failure(

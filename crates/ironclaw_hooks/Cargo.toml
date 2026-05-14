@@ -29,6 +29,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["time", "rt", "sync"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
+wasmtime = "44.0.2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

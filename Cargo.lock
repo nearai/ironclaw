@@ -4396,6 +4396,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "uuid",
+ "wasmtime",
 ]
 
 [[package]]
@@ -4746,6 +4747,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "wat",
 ]
 
 [[package]]

@@ -160,7 +160,10 @@ Ranked by severity:
 ## What this threat model does NOT cover
 
 - The **extension installation pipeline** — where do extension bundles come from, who signs them, how is `trust_class` derived. This is #3492.
-- The **WASM execution sandbox** — when Installed-WASM ships, it needs its own threat model covering the wasmtime surface, host-function attenuation, and the linear-memory boundary.
+- The **WASM execution sandbox** — covered separately in
+  [`threat-model-wasm.md`](./threat-model-wasm.md), including the
+  wasmtime boundary, host-function attenuation, and the linear-memory
+  boundary.
 - The **approval gateway** — gate-ref lifecycle, TTL, user-facing approval UX. Owned by the channel layer (#3564).
 - **Side channels at the model layer** — what if the LLM itself is the attack vector (jailbreak, prompt injection from user input). The prompt-envelope mitigates the *hook-injected* prompt-injection vector but doesn't address user-driven prompt injection.
 - **Supply chain on `blake3`, `tokio`, `serde_json`, `wasmtime`** — out of scope here.

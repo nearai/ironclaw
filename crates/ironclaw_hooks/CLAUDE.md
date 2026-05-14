@@ -8,8 +8,9 @@ hooks across the Reborn loop. It does not own:
   those stay in `ironclaw_loop_support` and `ironclaw_reborn`.
 - The Reborn-side middleware composition that wraps host ports — that lives in
   `ironclaw_reborn::loop_driver_host` and consumes types from this crate.
-- WASM hook execution. Programmatic hooks will run inside `wasmtime` via a sink
-  exposed by the dispatcher; the actual wasm runtime integration is a follow-up.
+- Extension bundle loading and installation. Installed-tier WASM hooks execute
+  here once their module bytes are resolved, but the extension installer remains
+  the authority for sourcing those bytes.
 
 ## Dependency direction
 
