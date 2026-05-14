@@ -18,9 +18,10 @@ durable backend is the source of truth.
    tenant share counter state. Run-1 increments → run-2 sees the
    updated count.
 2. **Restart survival**: counter state survives process restart.
-3. **Replay refusal**: re-emitting a recorded invocation timestamp
-   must NOT double-count. The backend stores `(timestamp, run_id,
-   event_id)` so duplicate-event detection works at replay time.
+3. **Replay refusal**: re-emitting a recorded invocation must NOT
+   double-count. The backend dedupes on `event_id` (a sanitized
+   `RuntimeEventId` hex) so duplicate detection works across restart
+   / replay.
 4. **Backend-agnostic**: the predicate evaluator depends on the trait,
    not a specific store.
 
@@ -29,36 +30,51 @@ durable backend is the source of truth.
 ```rust
 #[async_trait]
 pub trait PredicateStateBackend: Send + Sync {
+    /// Atomic record-and-read: the implementation MUST perform the
+    /// insert AND the in-window count read under a single
+    /// lock/transaction. Splitting them is a race that lets the cap
+    /// drift past `max` (codex Critical from #3635).
     async fn record_invocation(
         &self,
         key: &InvocationKey,           // (tenant, hook_id, capability)
-        timestamp: SystemTime,
-        event_id: RuntimeEventId,
-    ) -> Result<(), PredicateBackendError>;
-
-    async fn count_in_window(
-        &self,
-        key: &InvocationKey,
+        timestamp: DateTime<Utc>,      // project-wide convention; see src/db/mod.rs
+        event_id: &PredicateEventId,   // opaque hex; durable backends UNIQUE-constraint on it
         window: Duration,
     ) -> Result<u32, PredicateBackendError>;
 
     async fn record_value(
         &self,
         key: &ValueKey,                // (tenant, hook_id, capability, field)
-        timestamp: SystemTime,
+        timestamp: DateTime<Utc>,
+        event_id: &PredicateEventId,
         value: Decimal,
-        event_id: RuntimeEventId,
-    ) -> Result<(), PredicateBackendError>;
-
-    async fn sum_in_window(
-        &self,
-        key: &ValueKey,
         window: Duration,
     ) -> Result<Decimal, PredicateBackendError>;
 
-    async fn evict_older_than(&self, cutoff: SystemTime) -> Result<u64, PredicateBackendError>;
+    /// Garbage-collect rows older than `cutoff`. Operator runs this as
+    /// a reaper task, typically at the slowest configured window.
+    async fn evict_older_than(
+        &self,
+        cutoff: DateTime<Utc>,
+    ) -> Result<u64, PredicateBackendError>;
 }
 ```
+
+**Clock note (responding to gemini's review on the prior draft):** the
+in-memory backend that already shipped in PR #3635 uses `Instant`
+because it's process-local and monotonic. Durable backends serialize
+across processes, so they must use `chrono::DateTime<Utc>` to match
+the rest of the project (`src/db/mod.rs`, `ironclaw_events`). The
+trait will accept `DateTime<Utc>` and the existing in-memory backend
+will gain a thin shim mapping `Instant`-driven callers to a fixed
+reference point.
+
+**Run scope:** the trait does NOT carry `run_id` directly. The
+sliding-window state is per-tenant + per-hook-id; replay refusal is
+driven by `event_id` (which is `RuntimeEventId` from `ironclaw_events`,
+itself already keyed to the current run's emission). An earlier draft
+mentioned storing `run_id` alongside; that's redundant given the event
+id's uniqueness contract and was removed in this revision.
 
 ## Backends
 
@@ -90,7 +106,14 @@ pub trait PredicateStateBackend: Send + Sync {
       (tenant_id, hook_id, capability, field, occurred_at DESC);
   ```
 - **`LibSqlPredicateStateBackend`**: parity with the rest of the
-  dual-backend story (per `src/db/CLAUDE.md`).
+  dual-backend story (per `src/db/CLAUDE.md`). Same shape as the
+  Postgres impl, with two material differences mandated by
+  `src/db/CLAUDE.md`:
+  - `value` column is `TEXT NOT NULL` (not numeric), because libSQL's
+    integer/real types can't preserve `rust_decimal` precision; the
+    backend serializes via `Decimal::to_string()` / `from_str()` at
+    the row boundary.
+  - `occurred_at` is stored as ISO-8601 `TEXT` (libSQL convention).
 
 ## Migration / coexistence
 
@@ -116,8 +139,16 @@ pub trait PredicateStateBackend: Send + Sync {
 - Touches `src/db/` migrations machinery. See `.claude/rules/database.md`
   for the dual-backend conventions.
 - Performance: every predicate evaluation becomes a DB round-trip.
-  Plan: batched writes via the dispatcher's tick boundary, with
-  reads cached for the current dispatch.
+  An earlier draft suggested batching writes at the dispatcher's tick
+  boundary. **That conflicts with requirement #1 (cross-process
+  consistency)**: a deferred write from host A wouldn't be visible to
+  host B's read until the next tick, so two concurrent hosts could
+  each see "under cap" simultaneously and both proceed past `max`
+  (gemini's review on the prior draft). Resolution: the v1 production
+  backend keeps writes synchronous (read-your-own-writes within the
+  call); the in-process cache stays per-dispatch-only. A future
+  optimization could batch *reads* — collapse N predicate evaluations
+  in one dispatch into a single batch SELECT — but never writes.
 
 ## Effort
 
