@@ -30,11 +30,6 @@ where
         Self { store }
     }
 
-    /// Returns the backing registry store reference.
-    pub fn store(&self) -> &S {
-        &self.store
-    }
-
     /// Lists runtime-visible ProductAdapter entries.
     ///
     /// Only explicitly enabled installations are returned. For each enabled
