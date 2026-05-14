@@ -57,7 +57,8 @@ mod turn_scheduler;
 
 pub use credential_resolver::{
     CredentialAccountResolution, CredentialAccountResolver, CredentialAccountResolverError,
-    CredentialAccountResolverRequest, HostApiCredentialRequirement,
+    CredentialAccountResolverRequest, CredentialAccountSecretRequirement,
+    HostApiCredentialRequirement,
 };
 pub use first_party::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,

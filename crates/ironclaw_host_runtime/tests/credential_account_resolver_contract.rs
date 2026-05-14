@@ -8,7 +8,7 @@ use ironclaw_host_api::{
 };
 use ironclaw_host_runtime::{
     CredentialAccountResolver, CredentialAccountResolverError, CredentialAccountResolverRequest,
-    HostApiCredentialRequirement,
+    CredentialAccountSecretRequirement, HostApiCredentialRequirement,
 };
 use ironclaw_secrets::{
     CredentialAccount, CredentialAccountId, CredentialAccountStatus, CredentialBrokerError,
@@ -36,7 +36,13 @@ async fn resolves_projected_host_api_requirement_into_exact_url_wasm_credentials
     );
     let resolved = resolver.resolve_for_wasm(&request).await.unwrap();
 
-    assert_eq!(resolved.required_secret_handles, vec![handle.clone()]);
+    assert_eq!(
+        resolved.secret_requirements,
+        vec![CredentialAccountSecretRequirement {
+            handle: handle.clone(),
+            required: true,
+        }]
+    );
     assert_eq!(resolved.wasm_credentials.len(), 1);
 
     let provider = WasmStagedRuntimeCredentials::new(resolved.wasm_credentials);
@@ -45,6 +51,17 @@ async fn resolves_projected_host_api_requirement_into_exact_url_wasm_credentials
         "https://api.telegram.org/bot123/sendMessage",
     ));
     assert_eq!(injections.unwrap().len(), 1);
+    let injection = provider
+        .credential_injections(&wasm_request_with_method(
+            &request,
+            NetworkMethod::Get,
+            "https://api.telegram.org/bot123/sendMessage",
+        ))
+        .unwrap();
+    assert!(
+        injection.is_empty(),
+        "resolved credential must be exact-method scoped"
+    );
     let injection = provider
         .credential_injections(&wasm_request(
             &request,
@@ -76,7 +93,13 @@ async fn resolves_account_from_same_account_scope_under_different_invocation() {
     );
     let resolved = resolver.resolve_for_wasm(&request).await.unwrap();
 
-    assert_eq!(resolved.required_secret_handles, vec![handle]);
+    assert_eq!(
+        resolved.secret_requirements,
+        vec![CredentialAccountSecretRequirement {
+            handle,
+            required: true,
+        }]
+    );
     assert_eq!(resolved.wasm_credentials.len(), 1);
 }
 
@@ -122,8 +145,77 @@ async fn optional_missing_account_is_skipped() {
         .await
         .unwrap();
 
-    assert!(resolved.required_secret_handles.is_empty());
+    assert!(resolved.secret_requirements.is_empty());
     assert!(resolved.wasm_credentials.is_empty());
+}
+
+#[tokio::test]
+async fn optional_existing_account_preserves_optional_secret_requirement() {
+    let scope = sample_scope();
+    let account_id = CredentialAccountId::new("telegram_bot").unwrap();
+    let handle = SecretHandle::new("telegram_bot_token").unwrap();
+    let store = Arc::new(InMemoryCredentialBroker::new());
+    store
+        .put_account(sample_account(&scope, &account_id, &handle))
+        .unwrap();
+    let resolver = CredentialAccountResolver::new(
+        Arc::clone(&store),
+        [requirement(&account_id, &handle, None, false)],
+    );
+
+    let resolved = resolver
+        .resolve_for_wasm(&resolver_request(
+            &scope,
+            "https://api.telegram.org/bot123/sendMessage",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resolved.secret_requirements,
+        vec![CredentialAccountSecretRequirement {
+            handle,
+            required: false,
+        }]
+    );
+    assert_eq!(resolved.wasm_credentials.len(), 1);
+    assert!(!resolved.wasm_credentials[0].required);
+}
+
+#[tokio::test]
+async fn duplicate_secret_requirement_keeps_required_semantics() {
+    let scope = sample_scope();
+    let account_id = CredentialAccountId::new("telegram_bot").unwrap();
+    let handle = SecretHandle::new("telegram_bot_token").unwrap();
+    let store = Arc::new(InMemoryCredentialBroker::new());
+    store
+        .put_account(sample_account(&scope, &account_id, &handle))
+        .unwrap();
+    let resolver = CredentialAccountResolver::new(
+        Arc::clone(&store),
+        [
+            requirement(&account_id, &handle, None, false),
+            requirement(&account_id, &handle, None, true),
+        ],
+    );
+
+    let resolved = resolver
+        .resolve_for_wasm(&resolver_request(
+            &scope,
+            "https://api.telegram.org/bot123/sendMessage",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resolved.secret_requirements,
+        vec![CredentialAccountSecretRequirement {
+            handle,
+            required: true,
+        }]
+    );
+    assert_eq!(resolved.wasm_credentials.len(), 1);
+    assert!(resolved.wasm_credentials[0].required);
 }
 
 #[tokio::test]
@@ -253,10 +345,18 @@ fn wasm_request(
     request: &CredentialAccountResolverRequest,
     url: &str,
 ) -> WasmRuntimeCredentialRequest {
+    wasm_request_with_method(request, request.method, url)
+}
+
+fn wasm_request_with_method(
+    request: &CredentialAccountResolverRequest,
+    method: NetworkMethod,
+    url: &str,
+) -> WasmRuntimeCredentialRequest {
     WasmRuntimeCredentialRequest {
         scope: request.scope.clone(),
         capability_id: request.capability_id.clone(),
-        method: request.method,
+        method,
         url: url.to_string(),
         headers: Vec::new(),
     }

@@ -55,13 +55,19 @@ pub struct CredentialAccountResolverRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialAccountResolution {
-    /// Secret handles that must be satisfied through `InjectSecretOnce` before
+    /// Secret handles that should be staged through `InjectSecretOnce` before
     /// the returned WASM staged credential rules can be used.
-    pub required_secret_handles: Vec<SecretHandle>,
-    /// Request-scoped WASM credential rules. Each rule is exact-URL scoped to
-    /// the resolver request so resolved credentials cannot silently bleed into
-    /// another host-mediated HTTP request in the same invocation.
+    pub secret_requirements: Vec<CredentialAccountSecretRequirement>,
+    /// Request-scoped WASM credential rules. Each rule is exact-method-and-URL
+    /// scoped to the resolver request so resolved credentials cannot silently
+    /// bleed into another host-mediated HTTP request in the same invocation.
     pub wasm_credentials: Vec<WasmStagedRuntimeCredential>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialAccountSecretRequirement {
+    pub handle: SecretHandle,
+    pub required: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -89,8 +95,8 @@ impl CredentialAccountResolverError {
 /// The resolver does not read raw secret material and does not grant authority
 /// by itself. It proves that a projected host API credential requirement matches
 /// an active scoped credential account and destination policy, then returns the
-/// secret handles and exact-URL staged credential rules that later obligation
-/// handling/runtime composition can consume.
+/// secret handles and exact-method-and-URL staged credential rules that later
+/// obligation handling/runtime composition can consume.
 pub struct CredentialAccountResolver<S>
 where
     S: CredentialAccountStore + ?Sized,
@@ -121,7 +127,7 @@ where
         &self,
         request: &CredentialAccountResolverRequest,
     ) -> Result<CredentialAccountResolution, CredentialAccountResolverError> {
-        let mut required_secret_handles = Vec::new();
+        let mut secret_requirements = Vec::new();
         let mut wasm_credentials = Vec::new();
 
         for requirement in self
@@ -185,17 +191,25 @@ where
                 });
             }
 
-            push_unique_handle(&mut required_secret_handles, requirement.handle.clone());
-            wasm_credentials.push(WasmStagedRuntimeCredential::for_exact_url(
+            push_secret_requirement(
+                &mut secret_requirements,
                 requirement.handle.clone(),
-                requirement.target.clone(),
                 requirement.required,
-                request.url.clone(),
-            ));
+            );
+            push_wasm_credential(
+                &mut wasm_credentials,
+                WasmStagedRuntimeCredential::for_exact_request(
+                    requirement.handle.clone(),
+                    requirement.target.clone(),
+                    requirement.required,
+                    request.method,
+                    request.url.clone(),
+                ),
+            );
         }
 
         Ok(CredentialAccountResolution {
-            required_secret_handles,
+            secret_requirements,
             wasm_credentials,
         })
     }
@@ -212,8 +226,41 @@ fn account_matches_request(
         && account.provider_or_extension_id == request.extension_id
 }
 
-fn push_unique_handle(handles: &mut Vec<SecretHandle>, handle: SecretHandle) {
-    if !handles.iter().any(|existing| existing == &handle) {
-        handles.push(handle);
+fn push_secret_requirement(
+    requirements: &mut Vec<CredentialAccountSecretRequirement>,
+    handle: SecretHandle,
+    required: bool,
+) {
+    if let Some(existing) = requirements
+        .iter_mut()
+        .find(|existing| existing.handle == handle)
+    {
+        existing.required |= required;
+    } else {
+        requirements.push(CredentialAccountSecretRequirement { handle, required });
     }
+}
+
+fn push_wasm_credential(
+    credentials: &mut Vec<WasmStagedRuntimeCredential>,
+    credential: WasmStagedRuntimeCredential,
+) {
+    if let Some(existing) = credentials
+        .iter_mut()
+        .find(|existing| same_wasm_credential_scope(existing, &credential))
+    {
+        existing.required |= credential.required;
+    } else {
+        credentials.push(credential);
+    }
+}
+
+fn same_wasm_credential_scope(
+    left: &WasmStagedRuntimeCredential,
+    right: &WasmStagedRuntimeCredential,
+) -> bool {
+    left.handle == right.handle
+        && left.target == right.target
+        && left.exact_method() == right.exact_method()
+        && left.exact_url() == right.exact_url()
 }

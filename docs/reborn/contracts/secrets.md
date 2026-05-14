@@ -130,15 +130,17 @@ material once and reuses it only within that request. Runtime callers must not
 supply their own `Authorization`, cookie, or API-key-style headers; those values
 must come from the host-approved injection plan. WASM host-mediated HTTP
 composition can construct staged plans with `WasmStagedRuntimeCredentials` after
-attaching the invoking capability id to the adapter; exact-url rules should be
-preferred when a credential is only valid for specific destinations.
+attaching the invoking capability id to the adapter; exact-request rules should
+be preferred when a credential is only valid for specific destinations.
 
 Credential-account resolution is owned above this crate. Host API contract
 handlers project credential requirements from explicit manifest sections, and
 host-runtime composition resolves those requirements against scoped
 `CredentialAccountStore` records before constructing `InjectSecretOnce` staging
-and exact-URL WASM credential rules. The secrets crate remains responsible only
-for account/session storage contracts and secret lease/consume mechanics.
+and exact-method-and-URL WASM credential rules. The resolver preserves each
+credential's required/optional semantics for the eventual obligation planner.
+The secrets crate remains responsible only for account/session storage contracts
+and secret lease/consume mechanics.
 
 ---
 

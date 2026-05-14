@@ -159,6 +159,7 @@ pub struct WasmStagedRuntimeCredential {
     pub handle: SecretHandle,
     pub target: RuntimeCredentialTarget,
     pub required: bool,
+    exact_method: Option<NetworkMethod>,
     exact_url: Option<String>,
 }
 
@@ -172,6 +173,7 @@ impl WasmStagedRuntimeCredential {
             handle,
             target,
             required,
+            exact_method: None,
             exact_url: None,
         }
     }
@@ -186,11 +188,42 @@ impl WasmStagedRuntimeCredential {
             handle,
             target,
             required,
+            exact_method: None,
             exact_url: Some(exact_url),
         }
     }
 
+    pub fn for_exact_request(
+        handle: SecretHandle,
+        target: RuntimeCredentialTarget,
+        required: bool,
+        exact_method: NetworkMethod,
+        exact_url: String,
+    ) -> Self {
+        Self {
+            handle,
+            target,
+            required,
+            exact_method: Some(exact_method),
+            exact_url: Some(exact_url),
+        }
+    }
+
+    pub fn exact_method(&self) -> Option<NetworkMethod> {
+        self.exact_method
+    }
+
+    pub fn exact_url(&self) -> Option<&str> {
+        self.exact_url.as_deref()
+    }
+
     fn matches_request(&self, request: &WasmRuntimeCredentialRequest) -> bool {
+        if self
+            .exact_method
+            .is_some_and(|exact_method| exact_method != request.method)
+        {
+            return false;
+        }
         match &self.exact_url {
             Some(exact_url) => exact_url == &request.url,
             None => true,
