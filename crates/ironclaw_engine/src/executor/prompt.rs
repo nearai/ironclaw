@@ -135,10 +135,7 @@ fn build_codeact_system_prompt_inner(
     platform: Option<&PlatformInfo>,
 ) -> String {
     let disable_codeact = codeact_disabled();
-    tracing::debug!(
-        codeact_disabled = disable_codeact,
-        "engine v2 prompt mode"
-    );
+    tracing::debug!(codeact_disabled = disable_codeact, "engine v2 prompt mode");
     let (preamble, postamble) = if disable_codeact {
         (STRUCTURED_TOOL_PREAMBLE, STRUCTURED_TOOL_POSTAMBLE)
     } else {
