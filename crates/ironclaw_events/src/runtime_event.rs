@@ -518,12 +518,13 @@ impl RuntimeEvent {
         hook_id: impl Into<String>,
         point: impl Into<String>,
         trust_class: impl Into<String>,
+        owning_extension: Option<ExtensionId>,
     ) -> Self {
         Self::new(RuntimeEventPayload {
             kind: RuntimeEventKind::HookDispatched,
             scope,
             capability_id,
-            provider: None,
+            provider: owning_extension,
             runtime: None,
             process_id: None,
             output_bytes: None,
@@ -547,12 +548,13 @@ impl RuntimeEvent {
         capability_id: CapabilityId,
         hook_id: impl Into<String>,
         decision: impl Into<String>,
+        owning_extension: Option<ExtensionId>,
     ) -> Self {
         Self::new(RuntimeEventPayload {
             kind: RuntimeEventKind::HookDecisionEmitted,
             scope,
             capability_id,
-            provider: None,
+            provider: owning_extension,
             runtime: None,
             process_id: None,
             output_bytes: None,
@@ -573,12 +575,13 @@ impl RuntimeEvent {
         hook_id: impl Into<String>,
         category: impl Into<String>,
         disposition: impl Into<String>,
+        owning_extension: Option<ExtensionId>,
     ) -> Self {
         Self::new(RuntimeEventPayload {
             kind: RuntimeEventKind::HookFailed,
             scope,
             capability_id,
-            provider: None,
+            provider: owning_extension,
             runtime: None,
             process_id: None,
             output_bytes: None,
@@ -765,6 +768,7 @@ mod tests {
             hook_id_hex(),
             "before_capability",
             "builtin",
+            None,
         );
         let wire = serde_json::to_string(&event).expect("serialize hook dispatched");
         let decoded: RuntimeEvent =
@@ -786,6 +790,7 @@ mod tests {
             capability(),
             hook_id_hex(),
             "pause_approval",
+            None,
         );
         let wire = serde_json::to_string(&event).expect("serialize hook decision");
         let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize hook decision");
@@ -803,6 +808,7 @@ mod tests {
             hook_id_hex(),
             "timeout",
             "fail_closed",
+            None,
         );
         let wire = serde_json::to_string(&event).expect("serialize hook failed");
         let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize hook failed");
@@ -825,6 +831,7 @@ mod tests {
             // not lower_snake_case
             "Before Capability",
             "trusted",
+            None,
         );
         let wire = serde_json::to_string(&event).expect("serialize");
         let decoded: RuntimeEvent = serde_json::from_str(&wire).expect("deserialize");

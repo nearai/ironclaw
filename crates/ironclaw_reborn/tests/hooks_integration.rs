@@ -1096,6 +1096,7 @@ async fn event_triggered_hook_matches_runtime_event_kind_subscription() {
         runtime_capability("hooks.test"),
         hook_id.to_hex(),
         "pass",
+        None,
     ))
     .await
     .expect("append non-matching hook event");
@@ -1105,6 +1106,7 @@ async fn event_triggered_hook_matches_runtime_event_kind_subscription() {
         hook_id.to_hex(),
         "panic",
         "fail_isolated",
+        None,
     ))
     .await
     .expect("append matching hook event");
@@ -1144,6 +1146,7 @@ async fn event_triggered_subscription_replays_from_resume_cursor() {
             runtime_capability("hooks.resume"),
             hook_id.to_hex(),
             "pass",
+            None,
         ))
         .await
         .expect("append prefix event");
@@ -1154,6 +1157,7 @@ async fn event_triggered_subscription_replays_from_resume_cursor() {
             hook_id.to_hex(),
             "timeout",
             "fail_isolated",
+            None,
         ))
         .await
         .expect("append replayed event");
@@ -1297,6 +1301,7 @@ async fn event_triggered_own_capabilities_scope_resolves_hook_failed_owner_from_
         ext_a_source_hook_hex.clone(),
         "panic",
         "fail_isolated",
+        None,
     ))
     .await
     .expect("append ext-A hook failure event");
@@ -1306,6 +1311,7 @@ async fn event_triggered_own_capabilities_scope_resolves_hook_failed_owner_from_
         ext_b_source_hook_hex.clone(),
         "panic",
         "fail_isolated",
+        None,
     ))
     .await
     .expect("append ext-B hook failure event");
@@ -1315,6 +1321,7 @@ async fn event_triggered_own_capabilities_scope_resolves_hook_failed_owner_from_
         ext_a_source_hook_hex.clone(),
         "panic",
         "fail_isolated",
+        None,
     ))
     .await
     .expect("append second ext-A hook failure event");
@@ -1398,6 +1405,73 @@ async fn event_triggered_own_capabilities_scope_resolves_hook_failed_owner_from_
     );
 }
 
+/// henrypark133 HIGH regression: hook milestone events now carry the
+/// originating hook's owning extension directly in `provider`. An
+/// `OwnCapabilities`-scoped event-triggered subscription must match those
+/// events through the primary `event.provider` path — no fallback hook_id
+/// lookup needed. This is the load-bearing default case for Phase 5
+/// (hook-failure / decision-emitted alerting).
+#[tokio::test]
+async fn event_triggered_own_capabilities_matches_hook_failed_with_carried_provider() {
+    let fixture = Fixture::new().await;
+    let scope = runtime_scope(&fixture);
+    let stream = EventStreamKey::from_scope(&scope);
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let ext_a = ironclaw_host_api::ExtensionId::new("ext-a").expect("valid ext");
+    let ext_b = ironclaw_host_api::ExtensionId::new("ext-b").expect("valid ext");
+    let foreign_hook_hex = HookId::for_builtin("tests::foreign_failed", HookVersion::ONE).to_hex();
+    let own_hook_hex = HookId::for_builtin("tests::own_failed", HookVersion::ONE).to_hex();
+
+    // Two HookFailed events with provider explicitly carried (the new path).
+    // Foreign-provider event must be filtered out; own-provider event must
+    // fire the subscription.
+    log.append(RuntimeEvent::hook_failed(
+        scope.clone(),
+        runtime_capability("hooks.ext_b.failed"),
+        foreign_hook_hex,
+        "panic",
+        "fail_isolated",
+        Some(ext_b),
+    ))
+    .await
+    .expect("append foreign-provider hook failure event");
+    log.append(RuntimeEvent::hook_failed(
+        scope,
+        runtime_capability("hooks.ext_a.failed"),
+        own_hook_hex,
+        "panic",
+        "fail_isolated",
+        Some(ext_a.clone()),
+    ))
+    .await
+    .expect("append own-provider hook failure event");
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let _host = fixture
+        .factory()
+        .with_hook_dispatcher(event_triggered_dispatcher_with_scope(
+            RuntimeEventKind::HookFailed,
+            Arc::clone(&seen),
+            HookBindingScope::OwnCapabilities,
+            ext_a.as_str(),
+            None,
+        ))
+        .with_event_subscription(event_log_subscription(
+            Arc::clone(&log),
+            stream,
+            RuntimeEventCursor::origin(),
+        ))
+        .build_text_only_host_with_capabilities(fixture.request(), inner)
+        .await
+        .expect("host builds with HookFailed OwnCapabilities subscription");
+
+    let events = wait_for_seen_events(&seen, 1).await;
+    assert_eq!(events.len(), 1, "exactly one own-provider event must fire");
+    assert_eq!(events[0].kind, RuntimeEventKind::HookFailed);
+    assert_eq!(events[0].provider.as_ref(), Some(&ext_a));
+}
+
 #[tokio::test]
 async fn event_triggered_sink_is_observer_only_at_caller_boundary() {
     let fixture = Fixture::new().await;
@@ -1412,6 +1486,7 @@ async fn event_triggered_sink_is_observer_only_at_caller_boundary() {
         hook_id.to_hex(),
         "panic",
         "fail_isolated",
+        None,
     );
     let seen = Arc::new(Mutex::new(Vec::new()));
     let dispatcher = event_triggered_dispatcher(RuntimeEventKind::HookFailed, Arc::clone(&seen));
@@ -1468,6 +1543,7 @@ async fn event_triggered_slow_hook_does_not_block_event_emit_caller() {
             hook_id.to_hex(),
             "timeout",
             "fail_isolated",
+            None,
         ))
         .await
         .expect("emit event");

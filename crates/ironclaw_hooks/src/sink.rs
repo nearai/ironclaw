@@ -559,6 +559,7 @@ mod tests {
                 .to_hex(),
             "panic",
             "fail_isolated",
+            None,
         );
         let ctx = EventTriggeredHookContext {
             tenant_id: tenant,

@@ -226,16 +226,19 @@ impl DurableLoopHostMilestoneSink {
                 hook_id,
                 point,
                 trust_class,
+                owning_extension,
             } => RuntimeEvent::hook_dispatched(
                 scope,
                 capability_id(HOOK_CAPABILITY_ID)?,
                 hook_id.clone(),
                 point.clone(),
                 trust_class.clone(),
+                owning_extension.clone(),
             ),
             LoopHostMilestoneKind::HookDecisionEmitted {
                 hook_id,
                 decision,
+                owning_extension,
                 // `audit_reason` is intentionally NOT projected into the
                 // durable event log: durable events are model-visible audit
                 // surface; the free-form manifest reason is operator-visible
@@ -247,17 +250,20 @@ impl DurableLoopHostMilestoneSink {
                 capability_id(HOOK_CAPABILITY_ID)?,
                 hook_id.clone(),
                 hook_decision_label(decision),
+                owning_extension.clone(),
             ),
             LoopHostMilestoneKind::HookFailed {
                 hook_id,
                 category,
                 disposition,
+                owning_extension,
             } => RuntimeEvent::hook_failed(
                 scope,
                 capability_id(HOOK_CAPABILITY_ID)?,
                 hook_id.clone(),
                 category.clone(),
                 disposition.clone(),
+                owning_extension.clone(),
             ),
             // PromptBundleBuilt and CheckpointCreated are suppressed here intentionally.
             // Checkpoint durability is owned by LoopCheckpointPort::write_checkpoint; the
@@ -365,6 +371,7 @@ mod tests {
                 hook_id: HOOK_HEX_ID.to_string(),
                 point: "before_capability".to_string(),
                 trust_class: "builtin".to_string(),
+                owning_extension: None,
             });
 
         let sink = projector_for(thread_id, run_id);
@@ -396,6 +403,7 @@ mod tests {
                     reason: "policy-denied raw text".to_string(),
                 },
                 audit_reason: None,
+                owning_extension: None,
             });
 
         let sink = projector_for(thread_id, run_id);
@@ -420,6 +428,7 @@ mod tests {
             hook_id: HOOK_HEX_ID.to_string(),
             category: "timeout".to_string(),
             disposition: "fail_closed".to_string(),
+            owning_extension: None,
         });
 
         let sink = projector_for(thread_id, run_id);

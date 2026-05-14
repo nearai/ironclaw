@@ -1027,6 +1027,7 @@ async fn publish_loop_milestone_projects_hook_decision_with_closed_vocabulary_on
                 reason: RAW_DECISION_REASON.to_string(),
             },
             audit_reason: None,
+            owning_extension: None,
         },
     ))
     .await

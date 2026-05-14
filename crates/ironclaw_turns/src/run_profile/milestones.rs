@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::CapabilityId;
+use ironclaw_host_api::{CapabilityId, ExtensionId};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -130,6 +130,14 @@ pub enum LoopHostMilestoneKind {
         hook_id: String,
         point: String,
         trust_class: String,
+        /// The extension that authored this hook, when applicable.
+        /// Populated for `Installed` hooks; `None` for `Builtin`, `Trusted`,
+        /// and `SelfAuthored` hooks (which have no owning extension).
+        /// Carried into [`ironclaw_events::RuntimeEvent::provider`] so
+        /// event-triggered subscriptions scoped to `OwnCapabilities` can
+        /// match hook milestone events from the same extension.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owning_extension: Option<ExtensionId>,
     },
     /// A hook produced a decision (or explicitly passed) for a dispatch.
     HookDecisionEmitted {
@@ -144,6 +152,8 @@ pub enum LoopHostMilestoneKind {
         /// any `Pass` outcome).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         audit_reason: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owning_extension: Option<ExtensionId>,
     },
     /// A hook misbehaved during dispatch. Captures the failure category and
     /// the dispatcher's disposition (fail-closed vs fail-isolated).
@@ -151,6 +161,8 @@ pub enum LoopHostMilestoneKind {
         hook_id: String,
         category: String,
         disposition: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owning_extension: Option<ExtensionId>,
     },
 }
 
@@ -512,11 +524,13 @@ where
         hook_id: String,
         point: String,
         trust_class: String,
+        owning_extension: Option<ExtensionId>,
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::HookDispatched {
             hook_id,
             point,
             trust_class,
+            owning_extension,
         })
         .await
     }
@@ -526,11 +540,13 @@ where
         hook_id: String,
         decision: HookDecisionSummary,
         audit_reason: Option<String>,
+        owning_extension: Option<ExtensionId>,
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::HookDecisionEmitted {
             hook_id,
             decision,
             audit_reason,
+            owning_extension,
         })
         .await
     }
@@ -540,11 +556,13 @@ where
         hook_id: String,
         category: String,
         disposition: String,
+        owning_extension: Option<ExtensionId>,
     ) -> Result<(), AgentLoopHostError> {
         self.publish(LoopHostMilestoneKind::HookFailed {
             hook_id,
             category,
             disposition,
+            owning_extension,
         })
         .await
     }
@@ -586,6 +604,7 @@ mod hook_milestone_schema_snapshots {
             hook_id: "abcdef0123456789".to_string(),
             point: "before_capability".to_string(),
             trust_class: "installed".to_string(),
+            owning_extension: None,
         };
         const EXPECTED: &str = r#"{
   "hook_dispatched": {
@@ -603,6 +622,7 @@ mod hook_milestone_schema_snapshots {
             hook_id: "abcdef0123456789".to_string(),
             decision: HookDecisionSummary::Allow,
             audit_reason: None,
+            owning_extension: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {
@@ -621,6 +641,7 @@ mod hook_milestone_schema_snapshots {
                 reason: "blocked by policy".to_string(),
             },
             audit_reason: None,
+            owning_extension: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {
@@ -643,6 +664,7 @@ mod hook_milestone_schema_snapshots {
                 reason: "user approval required".to_string(),
             },
             audit_reason: None,
+            owning_extension: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {
@@ -665,6 +687,7 @@ mod hook_milestone_schema_snapshots {
                 reason: "re-authentication required".to_string(),
             },
             audit_reason: None,
+            owning_extension: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {
@@ -685,6 +708,7 @@ mod hook_milestone_schema_snapshots {
             hook_id: "abcdef0123456789".to_string(),
             decision: HookDecisionSummary::Pass,
             audit_reason: None,
+            owning_extension: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {
@@ -701,6 +725,7 @@ mod hook_milestone_schema_snapshots {
             hook_id: "abcdef0123456789".to_string(),
             decision: HookDecisionSummary::Patch,
             audit_reason: None,
+            owning_extension: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {
@@ -717,6 +742,7 @@ mod hook_milestone_schema_snapshots {
             hook_id: "abcdef0123456789".to_string(),
             category: "timeout".to_string(),
             disposition: "fail_closed".to_string(),
+            owning_extension: None,
         };
         const EXPECTED: &str = r#"{
   "hook_failed": {
@@ -734,6 +760,7 @@ mod hook_milestone_schema_snapshots {
             hook_id: "abcdef0123456789".to_string(),
             category: "panic".to_string(),
             disposition: "fail_closed".to_string(),
+            owning_extension: None,
         };
         const EXPECTED: &str = r#"{
   "hook_failed": {
@@ -751,6 +778,7 @@ mod hook_milestone_schema_snapshots {
             hook_id: "abcdef0123456789".to_string(),
             category: "malformed".to_string(),
             disposition: "fail_closed".to_string(),
+            owning_extension: None,
         };
         const EXPECTED: &str = r#"{
   "hook_failed": {
@@ -768,6 +796,7 @@ mod hook_milestone_schema_snapshots {
             hook_id: "abcdef0123456789".to_string(),
             category: "attenuation_violation".to_string(),
             disposition: "fail_isolated".to_string(),
+            owning_extension: None,
         };
         const EXPECTED: &str = r#"{
   "hook_failed": {

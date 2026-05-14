@@ -1620,6 +1620,7 @@ impl HookDispatcher {
             hook_id: telemetry::hook_id_string(binding.hook_id),
             point: telemetry::point_label(binding.point).to_string(),
             trust_class: telemetry::trust_class_label(binding.trust_class).to_string(),
+            owning_extension: binding.owning_extension.clone(),
         })
         .await;
     }
@@ -1641,6 +1642,7 @@ impl HookDispatcher {
             hook_id: telemetry::hook_id_string(binding.hook_id),
             decision,
             audit_reason: telemetry::sanitize_audit_reason(audit_reason),
+            owning_extension: binding.owning_extension.clone(),
         })
         .await;
     }
@@ -1649,12 +1651,31 @@ impl HookDispatcher {
         if self.milestone_sink.is_none() {
             return;
         }
+        // Resolve the owning extension through the registry's hex index so the
+        // milestone (and the downstream RuntimeEvent::HookFailed) carries the
+        // same provider that an `OwnCapabilities`-scoped event-triggered hook
+        // expects to match against. The failure path doesn't carry the
+        // `HookBinding` directly, so we look up by sanitized hex.
+        let hook_id_hex = telemetry::hook_id_string(record.hook_id);
+        let owning_extension = self.lookup_owning_extension(&hook_id_hex);
         self.emit_milestone(LoopHostMilestoneKind::HookFailed {
-            hook_id: telemetry::hook_id_string(record.hook_id),
+            hook_id: hook_id_hex,
             category: telemetry::failure_category_label(record.category).to_string(),
             disposition: telemetry::failure_disposition_label(record.disposition).to_string(),
+            owning_extension,
         })
         .await;
+    }
+
+    /// Look up the owning extension for a hook id via the registry index.
+    /// Returns `None` if the registry mutex is poisoned, the hook id isn't
+    /// found, or the binding has no owning extension (Builtin / Trusted /
+    /// SelfAuthored hooks).
+    fn lookup_owning_extension(&self, hook_id_hex: &str) -> Option<ironclaw_host_api::ExtensionId> {
+        match self.registry.lock() {
+            Ok(registry) => registry.owning_extension_for_hook_hex(hook_id_hex).cloned(),
+            Err(_) => None,
+        }
     }
 }
 
