@@ -172,14 +172,15 @@ where
     .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
     .await?;
 
-    // Safety: `with_secret_store` is called unconditionally above on the same
-    // builder chain, so `try_with_host_http_egress` cannot return a
-    // `Missing(SecretStore)` wiring report here.
+    // safety: `with_secret_store` is called unconditionally above on the same
+    // builder chain, so `try_with_host_http_egress` can only return a
+    // `Missing(SecretStore)` wiring report if the host-runtime builder API
+    // regresses; treat that as infallible here.
     let services = services
         .try_with_host_http_egress(PolicyNetworkHttpEgress::new(
             ReqwestNetworkTransport::default(),
         ))
-        .expect("secret_store wired above guarantees host HTTP egress is buildable");
+        .expect("secret_store wired above guarantees host HTTP egress is buildable"); // safety: see comment above
 
     Ok(services)
 }
@@ -234,14 +235,15 @@ where
     .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
     .await?;
 
-    // Safety: `with_secret_store` is called unconditionally above on the same
-    // builder chain, so `try_with_host_http_egress` cannot return a
-    // `Missing(SecretStore)` wiring report here.
+    // safety: `with_secret_store` is called unconditionally above on the same
+    // builder chain, so `try_with_host_http_egress` can only return a
+    // `Missing(SecretStore)` wiring report if the host-runtime builder API
+    // regresses; treat that as infallible here.
     let services = services
         .try_with_host_http_egress(PolicyNetworkHttpEgress::new(
             ReqwestNetworkTransport::default(),
         ))
-        .expect("secret_store wired above guarantees host HTTP egress is buildable");
+        .expect("secret_store wired above guarantees host HTTP egress is buildable"); // safety: see comment above
 
     Ok(services)
 }
