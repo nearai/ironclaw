@@ -67,10 +67,31 @@ impl LoopCancellationPort for AlwaysAliveLoopCancellationPort {
 /// Produces one cancellation handle per claimed run.
 #[async_trait]
 pub trait RunCancellationFactory: Send + Sync {
+    /// Describes whether handles from this factory can observe real host
+    /// cancellation requests.
+    fn observation_kind(&self) -> RunCancellationObservationKind {
+        RunCancellationObservationKind::LiveCapable
+    }
+
     async fn handle_for_run(
         &self,
         run_id: TurnRunId,
     ) -> Result<RunCancellationHandle, AgentLoopHostError>;
+}
+
+/// Runtime liveness contract for run cancellation observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunCancellationObservationKind {
+    /// Handles can be flipped by live host/runtime cancellation requests.
+    LiveCapable,
+    /// Handles are inert fallbacks for non-live or test-only runtimes.
+    InertFallback,
+}
+
+impl RunCancellationObservationKind {
+    pub fn is_live_capable(self) -> bool {
+        matches!(self, Self::LiveCapable)
+    }
 }
 
 /// Default factory used until the host runtime wires real cancel observation.
@@ -78,6 +99,10 @@ pub struct AlwaysAliveRunCancellationFactory;
 
 #[async_trait]
 impl RunCancellationFactory for AlwaysAliveRunCancellationFactory {
+    fn observation_kind(&self) -> RunCancellationObservationKind {
+        RunCancellationObservationKind::InertFallback
+    }
+
     async fn handle_for_run(
         &self,
         _run_id: TurnRunId,
@@ -91,12 +116,27 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use async_trait::async_trait;
     use chrono::Utc;
     use ironclaw_turns::run_profile::{LoopCancelReasonKind, LoopCancellationPort};
+    use ironclaw_turns::{TurnRunId, run_profile::AgentLoopHostError};
 
     use super::{
-        AlwaysAliveLoopCancellationPort, RunCancellationHandle, RunStateLoopCancellationPort,
+        AlwaysAliveLoopCancellationPort, AlwaysAliveRunCancellationFactory, RunCancellationFactory,
+        RunCancellationHandle, RunCancellationObservationKind, RunStateLoopCancellationPort,
     };
+
+    struct TestLiveCancellationFactory;
+
+    #[async_trait]
+    impl RunCancellationFactory for TestLiveCancellationFactory {
+        async fn handle_for_run(
+            &self,
+            _run_id: TurnRunId,
+        ) -> Result<RunCancellationHandle, AgentLoopHostError> {
+            Ok(RunCancellationHandle::default())
+        }
+    }
 
     #[test]
     fn observe_returns_none_when_not_requested() {
@@ -170,5 +210,30 @@ mod tests {
         let port = AlwaysAliveLoopCancellationPort;
 
         assert_eq!(port.observe_cancellation(), None);
+    }
+
+    #[tokio::test]
+    async fn always_alive_factory_is_identified_as_inert_fallback() {
+        let factory = AlwaysAliveRunCancellationFactory;
+
+        assert_eq!(
+            factory.observation_kind(),
+            RunCancellationObservationKind::InertFallback
+        );
+        assert!(!factory.observation_kind().is_live_capable());
+
+        let handle = factory.handle_for_run(TurnRunId::new()).await.unwrap();
+        assert!(!handle.is_requested());
+    }
+
+    #[test]
+    fn custom_run_cancellation_factory_defaults_to_live_capable() {
+        let factory = TestLiveCancellationFactory;
+
+        assert_eq!(
+            factory.observation_kind(),
+            RunCancellationObservationKind::LiveCapable
+        );
+        assert!(factory.observation_kind().is_live_capable());
     }
 }

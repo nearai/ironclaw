@@ -9,7 +9,8 @@ use ironclaw_loop_support::{
     AlwaysAliveRunCancellationFactory, CapabilitySurfaceProfileFilter,
     CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort,
     HostIdentityContextSource, HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort,
-    HostSkillContextSource, RunCancellationFactory, RunStateLoopCancellationPort,
+    HostSkillContextSource, RunCancellationFactory, RunCancellationObservationKind,
+    RunStateLoopCancellationPort,
     ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
@@ -214,6 +215,10 @@ where
         let factory: Arc<dyn RunCancellationFactory> = factory;
         self.cancellation_factory = factory;
         self
+    }
+
+    pub fn cancellation_observation_kind(&self) -> RunCancellationObservationKind {
+        self.cancellation_factory.observation_kind()
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {

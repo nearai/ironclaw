@@ -21,7 +21,7 @@ mod skill_context;
 
 pub use cancellation_port::{
     AlwaysAliveLoopCancellationPort, AlwaysAliveRunCancellationFactory, RunCancellationFactory,
-    RunCancellationHandle, RunStateLoopCancellationPort,
+    RunCancellationHandle, RunCancellationObservationKind, RunStateLoopCancellationPort,
 };
 pub use capability_allow_set::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,

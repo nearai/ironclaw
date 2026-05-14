@@ -16,7 +16,6 @@ use ironclaw_turns::{
     RunProfileId, RunProfileVersion, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply, CancellationPolicy,
-        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityCallCandidate,
         CapabilityDescriptorView, CapabilityFailure, CapabilityFailureKind, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
         CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
@@ -54,6 +53,7 @@ pub struct MockAgentLoopDriverHost {
     fail_prompt_with: Mutex<Option<AgentLoopHostErrorKind>>,
     fail_model_with: Mutex<Option<AgentLoopHostErrorKind>>,
     acked_tokens: Mutex<Vec<LoopInputAckToken>>,
+    cancellation: Mutex<Option<LoopCancellationSignal>>,
 }
 
 impl MockAgentLoopDriverHost {
@@ -92,6 +92,7 @@ pub struct MockAgentLoopDriverHostBuilder {
     visible_capabilities: Vec<CapabilityDescriptorView>,
     fail_prompt_with: Option<AgentLoopHostErrorKind>,
     fail_model_with: Option<AgentLoopHostErrorKind>,
+    cancellation: Option<LoopCancellationSignal>,
 }
 
 impl MockAgentLoopDriverHostBuilder {
@@ -106,6 +107,7 @@ impl MockAgentLoopDriverHostBuilder {
             )],
             fail_prompt_with: None,
             fail_model_with: None,
+            cancellation: None,
         }
     }
 
@@ -139,6 +141,12 @@ impl MockAgentLoopDriverHostBuilder {
         self
     }
 
+    /// Sets the cancellation signal returned by the host accessor.
+    pub fn cancellation_signal(mut self, signal: LoopCancellationSignal) -> Self {
+        self.cancellation = Some(signal);
+        self
+    }
+
     /// Builds the host and its shared checkpoint recorder.
     pub fn build(self) -> (MockAgentLoopDriverHost, Arc<CheckpointRecorder>) {
         let checkpoints = Arc::new(CheckpointRecorder::default());
@@ -153,6 +161,7 @@ impl MockAgentLoopDriverHostBuilder {
                 fail_prompt_with: Mutex::new(self.fail_prompt_with),
                 fail_model_with: Mutex::new(self.fail_model_with),
                 acked_tokens: Mutex::new(Vec::new()),
+                cancellation: Mutex::new(self.cancellation),
             },
             checkpoints,
         )
@@ -721,7 +730,7 @@ impl ironclaw_turns::run_profile::LoopProgressPort for MockAgentLoopDriverHost {
 
 impl LoopCancellationPort for MockAgentLoopDriverHost {
     fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
-        None
+        lock_or_panic(&self.cancellation).clone()
     }
 }
 
