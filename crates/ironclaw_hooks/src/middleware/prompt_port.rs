@@ -178,8 +178,36 @@ fn safe_content_for_patch(patch: &HookPatch) -> Option<String> {
     }
 }
 
-/// Convert hook patches into envelope-wrapped `system`-role model messages,
-/// enforcing the aggregate snippet byte budget across all patches.
+/// Map a hook's trust class to the model-message role it's allowed to
+/// produce. **Load-bearing security boundary**: Installed-tier hooks
+/// (third-party extensions) must NOT inject `system`-role content,
+/// because that's the channel the model treats as authoritative
+/// instructions. Envelope-wrapping the body with `"Untrusted hook
+/// content: ..."` is a text-level label, not an authority attenuation —
+/// the model still receives a `system` message and may follow its
+/// content as if it were a real system instruction.
+///
+/// Builtin / Trusted / SelfAuthored hooks remain `system`-role because
+/// they're trusted-by-construction at the type level (sink seals
+/// guarantee no Installed code reaches those paths). Installed hooks
+/// drop to `user`-role: the content still reaches the model but with
+/// user-channel authority, which is the appropriate ceiling for
+/// third-party-extension-supplied context.
+///
+/// serrrfirat review finding #1 (PR #3573).
+fn role_for_trust_class(trust_class: crate::trust::HookTrustClass) -> &'static str {
+    match trust_class {
+        crate::trust::HookTrustClass::Builtin
+        | crate::trust::HookTrustClass::Trusted
+        | crate::trust::HookTrustClass::SelfAuthored => "system",
+        crate::trust::HookTrustClass::Installed => "user",
+    }
+}
+
+/// Convert hook patches into envelope-wrapped model messages, enforcing
+/// the aggregate snippet byte budget across all patches. Each message's
+/// role is determined by the source patch's `trust_class` via
+/// [`role_for_trust_class`].
 fn wrap_patches_to_messages(
     patches: &[HookPatch],
     budget: u32,
@@ -190,13 +218,15 @@ fn wrap_patches_to_messages(
     let mut ordinal: usize = 0;
 
     for patch in patches {
-        let wrapped_string = match patch.view() {
+        let (wrapped_string, trust_class) = match patch.view() {
             HookPatchView::AddSnippet {
                 body: SnippetBodyView::Enveloped { wrapped },
+                trust_class,
                 ..
-            } => wrapped.to_string(),
+            } => (wrapped.to_string(), trust_class),
             HookPatchView::AddSnippet {
                 body: SnippetBodyView::Trusted { text },
+                trust_class,
                 ..
             } => {
                 // Trusted-tier hook content still flows through the envelope
@@ -214,7 +244,7 @@ fn wrap_patches_to_messages(
                         "trusted hook snippet rejected by prompt envelope",
                     )
                 })?;
-                envelope.into_string()
+                (envelope.into_string(), trust_class)
             }
             HookPatchView::AddMilestoneMetadata { .. } => continue,
         };
@@ -234,7 +264,7 @@ fn wrap_patches_to_messages(
         let content_ref = synthesize_hook_message_ref(ordinal, &wrapped_string)?;
         ordinal = ordinal.saturating_add(1);
         messages.push(LoopModelMessage {
-            role: "system".to_string(),
+            role: role_for_trust_class(trust_class).to_string(),
             content_ref,
         });
     }
@@ -432,8 +462,14 @@ mod tests {
         );
     }
 
+    /// Installed hooks must NOT escalate to `system`-role authority
+    /// (serrrfirat review finding #1, PR #3573). The textual envelope
+    /// label "Untrusted hook content:" doesn't strip system-role
+    /// authority — the model treats `system` messages as authoritative
+    /// instructions regardless of their text content. Installed-tier
+    /// hook output drops to `user` role.
     #[tokio::test]
-    async fn hook_patch_appended_as_envelope_wrapped_message() {
+    async fn installed_hook_patch_drops_to_user_role() {
         let inner = Arc::new(StubPromptPort::new());
         let dispatcher = make_dispatcher(
             HookTrustClass::Installed,
@@ -447,7 +483,11 @@ mod tests {
             .await
             .expect("ok");
         assert_eq!(bundle.messages.len(), 1, "envelope patch must be appended");
-        assert_eq!(bundle.messages[0].role, "system");
+        assert_eq!(
+            bundle.messages[0].role, "user",
+            "Installed-tier hook content must NOT reach the model as system-role; \
+             that's a prompt-authority escalation. Use user-role (or lower)."
+        );
         assert!(
             bundle.messages[0]
                 .content_ref
@@ -455,6 +495,33 @@ mod tests {
                 .starts_with("msg:hook."),
             "hook snippet ref must use the hook namespace, got `{}`",
             bundle.messages[0].content_ref.as_str()
+        );
+    }
+
+    /// Builtin / Trusted / SelfAuthored hooks are trusted at the type
+    /// level (sealed sinks ensure no Installed code reaches the
+    /// Privileged path), so they keep `system`-role authority. Pins the
+    /// trust-class → role mapping so a future refactor that accidentally
+    /// flips Installed to system or downgrades Trusted to user is loud.
+    #[tokio::test]
+    async fn trusted_tier_hook_patch_keeps_system_role() {
+        let inner = Arc::new(StubPromptPort::new());
+        let dispatcher = make_dispatcher(
+            HookTrustClass::Trusted,
+            BeforePromptHookImpl::Privileged(Box::new(TrustedHook)),
+        );
+        let wrapped = HookedLoopPromptPort::new(inner, Arc::new(dispatcher), tenant())
+            .with_materialization_sink(Arc::new(RecordingMaterializationSink::default()));
+
+        let bundle = wrapped
+            .build_prompt_bundle(default_request())
+            .await
+            .expect("ok");
+        assert_eq!(bundle.messages.len(), 1);
+        assert_eq!(
+            bundle.messages[0].role, "system",
+            "Trusted-tier hook content stays system-role (Builtin/Trusted/SelfAuthored \
+             are trusted by construction at the type level)"
         );
     }
 
