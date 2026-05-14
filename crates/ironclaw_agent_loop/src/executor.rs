@@ -162,7 +162,6 @@ impl CanonicalAgentLoopExecutor {
                         messages: prompt_bundle.messages,
                         surface_version: Some(surface.version.clone()),
                         model_preference,
-                        context_summaries: prompt_bundle.context_summaries,
                     },
                 )
                 .await?
@@ -327,7 +326,18 @@ impl CanonicalAgentLoopExecutor {
         state.stop_state.last_batch_total = 0;
         state.stop_state.terminate_hints_in_last_batch = 0;
 
-        let summaries = calls
+        let mut visible_calls = Vec::new();
+        let mut denied_calls = Vec::new();
+        for call in calls {
+            if capability_is_visible(surface, &call) {
+                visible_calls.push(call);
+                continue;
+            }
+
+            denied_calls.push(call);
+        }
+
+        let summaries = visible_calls
             .iter()
             .map(|call| capability_summary(surface, call))
             .collect::<Vec<_>>();
@@ -340,13 +350,7 @@ impl CanonicalAgentLoopExecutor {
             .state;
 
         let mut signatures = HashSet::new();
-        let mut visible_calls = Vec::new();
-        for call in calls {
-            if capability_is_visible(surface, &call) {
-                visible_calls.push(call);
-                continue;
-            }
-
+        for call in denied_calls {
             push_call_signature_once(&mut state, &mut signatures, &call)?;
             state
                 .recent_failure_kinds
@@ -849,6 +853,7 @@ fn model_error_class(error: &AgentLoopHostError) -> Option<ModelErrorClass> {
         AgentLoopHostErrorKind::Internal => Some(ModelErrorClass::Internal),
         AgentLoopHostErrorKind::BudgetExceeded => Some(ModelErrorClass::ContextOverflow),
         AgentLoopHostErrorKind::Cancelled => Some(ModelErrorClass::Transient),
+        AgentLoopHostErrorKind::CredentialUnavailable => None,
         AgentLoopHostErrorKind::Unauthorized
         | AgentLoopHostErrorKind::ScopeMismatch
         | AgentLoopHostErrorKind::StaleSurface
@@ -997,7 +1002,7 @@ mod tests {
             CapabilityDescriptorView, CapabilityInputRef, CapabilitySurfaceProfileId,
             CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId, ConcurrencyClass,
             ContextProfileId, LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle,
-            LoopContextRequest, LoopContextSummary, LoopDriverId, LoopInputBatch, LoopInputCursor,
+            LoopContextRequest, LoopDriverId, LoopInputBatch, LoopInputCursor,
             LoopModelMessage, LoopModelResponse, LoopPromptBundle, LoopPromptBundleRef,
             LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort, ModelProfileId,
             ModelStreamChunk, RedactedRunProfileProvenance, ResolvedRunProfile,
@@ -1135,7 +1140,6 @@ mod tests {
                     content_ref: LoopMessageRef::new("msg:user").expect("valid"),
                 }],
                 surface_version: self.prompt_surface_version.clone(),
-                context_summaries: std::collections::HashMap::<String, LoopContextSummary>::new(),
             })
         }
     }
@@ -1476,6 +1480,7 @@ mod tests {
         let batch_invocations = host.batch_invocations();
         assert_eq!(batch_invocations.len(), 1);
         assert_eq!(batch_invocations[0].invocations.len(), 1);
+        assert!(!batch_invocations[0].stop_on_first_suspension);
         assert_eq!(
             batch_invocations[0].invocations[0].surface_version,
             surface_version()
