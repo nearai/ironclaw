@@ -75,6 +75,22 @@ impl HookGateActorBinding {
     }
 }
 
+/// Run and actor identity resolved when minting a hook gate reservation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookGateReservationContext {
+    pub run_context: LoopRunContext,
+    pub actor: HookGateActorBinding,
+}
+
+impl HookGateReservationContext {
+    pub fn new(run_context: LoopRunContext, actor: HookGateActorBinding) -> Self {
+        Self { run_context, actor }
+    }
+}
+
+type HookGateReservationContextSource =
+    Arc<dyn Fn() -> HookGateReservationContext + Send + Sync + 'static>;
+
 /// Per-invocation metadata captured outside `ironclaw_hooks` and consumed by
 /// [`RouterBackedHookGateRefFactory`] when the hook middleware asks for a ref.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,8 +235,7 @@ pub trait HookGateRouter: Send + Sync {
 /// Production `HookGateRefFactory` adapter backed by a host approval/auth
 /// router.
 pub struct RouterBackedHookGateRefFactory {
-    run_context: LoopRunContext,
-    actor: HookGateActorBinding,
+    context_source: HookGateReservationContextSource,
     router: Arc<dyn HookGateRouter>,
     reservation_ttl: Duration,
 }
@@ -229,26 +244,25 @@ impl fmt::Debug for RouterBackedHookGateRefFactory {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("RouterBackedHookGateRefFactory")
-            .field("run_context", &self.run_context)
-            .field("actor", &self.actor)
             .field("reservation_ttl", &self.reservation_ttl)
             .finish_non_exhaustive()
     }
 }
 
 impl RouterBackedHookGateRefFactory {
-    pub fn try_new(
-        run_context: LoopRunContext,
-        actor: HookGateActorBinding,
+    pub fn try_new<F>(
         router: Arc<dyn HookGateRouter>,
         reservation_ttl: Duration,
-    ) -> Result<Self, HookGateError> {
+        context_source: F,
+    ) -> Result<Self, HookGateError>
+    where
+        F: Fn() -> HookGateReservationContext + Send + Sync + 'static,
+    {
         if reservation_ttl <= Duration::zero() {
             return Err(HookGateError::InvalidTtl);
         }
         Ok(Self {
-            run_context,
-            actor,
+            context_source: Arc::new(context_source),
             router,
             reservation_ttl,
         })
@@ -265,10 +279,11 @@ impl RouterBackedHookGateRefFactory {
         let expires_at = now
             .checked_add_signed(self.reservation_ttl)
             .ok_or(HookGateError::InvalidTtl)?;
+        let context = (self.context_source)();
         let request = HookGateReservationRequest {
             kind,
-            run_context: self.run_context.clone(),
-            actor: self.actor.clone(),
+            run_context: context.run_context,
+            actor: context.actor,
             capability_id: metadata.capability_id,
             arguments_digest: metadata.arguments_digest,
             reason: reason.to_string(),
@@ -432,6 +447,7 @@ impl HookGateRouter for InMemoryHookGateRouter {
         &self,
         request: HookGateResolutionRequest,
     ) -> Result<HookGateResolution, HookGateError> {
+        let resolved_at = Utc::now();
         let mut reservations = self.reservations_guard()?;
         let state = reservations
             .get_mut(request.gate_ref.as_str())
@@ -444,7 +460,7 @@ impl HookGateRouter for InMemoryHookGateRouter {
                 consumed_at,
             });
         }
-        if request.resolved_at >= state.reservation.expires_at {
+        if resolved_at >= state.reservation.expires_at {
             return Err(HookGateError::Expired {
                 gate_ref: state.reservation.gate_ref.clone(),
                 expires_at: state.reservation.expires_at,
@@ -481,7 +497,7 @@ impl HookGateRouter for InMemoryHookGateRouter {
                 gate_ref: state.reservation.gate_ref.clone(),
             });
         }
-        state.consumed_at = Some(request.resolved_at);
+        state.consumed_at = Some(resolved_at);
         Ok(HookGateResolution {
             gate_ref: state.reservation.gate_ref.clone(),
             kind: state.reservation.kind,
@@ -489,7 +505,7 @@ impl HookGateRouter for InMemoryHookGateRouter {
             actor: state.reservation.actor.clone(),
             capability_id: state.reservation.capability_id.clone(),
             arguments_digest: state.reservation.arguments_digest.clone(),
-            resolved_at: request.resolved_at,
+            resolved_at,
         })
     }
 }

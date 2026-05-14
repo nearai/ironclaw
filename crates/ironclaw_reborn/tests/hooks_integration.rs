@@ -55,8 +55,8 @@ use ironclaw_loop_support::{
     HostManagedModelResponse, LoopCapabilityInputResolver,
 };
 use ironclaw_reborn::hook_gate_refs::{
-    HookGateActorBinding, HookGateResolutionRequest, HookGateRouter, InMemoryHookGateRouter,
-    RouterBackedHookGateRefFactory, hook_gate_arguments_digest,
+    HookGateActorBinding, HookGateReservationContext, HookGateResolutionRequest, HookGateRouter,
+    InMemoryHookGateRouter, RouterBackedHookGateRefFactory, hook_gate_arguments_digest,
 };
 use ironclaw_reborn::loop_driver_host::{
     RebornLoopDriverHostFactory, RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
@@ -595,12 +595,12 @@ fn router_backed_factory(
     fixture: &Fixture,
     router: Arc<InMemoryHookGateRouter>,
 ) -> RouterBackedHookGateRefFactory {
-    RouterBackedHookGateRefFactory::try_new(
-        fixture.context.clone(),
-        HookGateActorBinding::new(fixture.actor_id.clone()),
-        router,
-        chrono::Duration::seconds(30),
-    )
+    let run_context = fixture.context.clone();
+    let actor = HookGateActorBinding::new(fixture.actor_id.clone());
+    let router: Arc<dyn HookGateRouter> = router;
+    RouterBackedHookGateRefFactory::try_new(router, chrono::Duration::seconds(30), move || {
+        HookGateReservationContext::new(run_context.clone(), actor.clone())
+    })
     .expect("router-backed hook gate-ref factory accepts positive ttl")
 }
 
@@ -1093,17 +1093,145 @@ async fn router_backed_pause_approval_gate_ref_rejects_cross_actor_resolution() 
 }
 
 #[tokio::test]
+async fn router_backed_gate_ref_factory_sources_context_per_mint_when_reused() {
+    let fixture = Fixture::new().await;
+    let router = Arc::new(InMemoryHookGateRouter::new());
+    let surface_version = fixture.surface_version.clone();
+
+    let actor_a = HookGateActorBinding::new(
+        UserId::new("ext-a-hooks-user").expect("actor A id literal is valid"),
+    );
+    let actor_b = HookGateActorBinding::new(
+        UserId::new("ext-b-hooks-user").expect("actor B id literal is valid"),
+    );
+    let live_context = Arc::new(Mutex::new(HookGateReservationContext::new(
+        fixture.context.clone(),
+        actor_a.clone(),
+    )));
+    let context_source = Arc::clone(&live_context);
+    let router_for_factory: Arc<dyn HookGateRouter> = router.clone();
+    let gate_ref_factory = RouterBackedHookGateRefFactory::try_new(
+        router_for_factory,
+        chrono::Duration::seconds(30),
+        move || {
+            context_source
+                .lock()
+                .expect("live hook gate context mutex not poisoned")
+                .clone()
+        },
+    )
+    .expect("router-backed hook gate-ref factory accepts positive ttl");
+    let host_factory = fixture
+        .factory()
+        .with_hook_dispatcher(pause_approval_dispatcher())
+        .with_hook_gate_ref_factory(Arc::new(gate_ref_factory));
+
+    let inner_a = Arc::new(RecordingCapabilityPort::new());
+    let request_a = fixture.request();
+    let context_a = request_a.loop_run_context.clone();
+    let host_a = host_factory
+        .build_text_only_host_with_capabilities(request_a, inner_a.clone())
+        .await
+        .expect("first host builds");
+    let invocation_a = invocation(&surface_version, "cap.blocked");
+    let outcome_a = host_a
+        .invoke_capability(invocation_a.clone())
+        .await
+        .expect("first invoke returns outcome");
+    let CapabilityOutcome::ApprovalRequired {
+        gate_ref: gate_ref_a,
+        ..
+    } = outcome_a
+    else {
+        panic!("expected first build ApprovalRequired, got {outcome_a:?}");
+    };
+    router
+        .resolve(
+            HookGateResolutionRequest::for_invocation(
+                gate_ref_a,
+                actor_a.clone(),
+                context_a.clone(),
+                &invocation_a,
+            )
+            .expect("first resolution request can be derived from invocation"),
+        )
+        .await
+        .expect("first build gate resolves with actor A/context A");
+
+    let mut request_b = fixture.request();
+    let turn_id_b = ironclaw_turns::TurnId::new();
+    let run_id_b = TurnRunId::new();
+    request_b.loop_run_context = LoopRunContext::new(
+        request_b.loop_run_context.scope.clone(),
+        turn_id_b,
+        run_id_b,
+        request_b.loop_run_context.resolved_run_profile.clone(),
+    );
+    request_b.claimed_run.state.turn_id = turn_id_b;
+    request_b.claimed_run.state.run_id = run_id_b;
+    let context_b = request_b.loop_run_context.clone();
+    *live_context
+        .lock()
+        .expect("live hook gate context mutex not poisoned") =
+        HookGateReservationContext::new(context_b.clone(), actor_b.clone());
+
+    let inner_b = Arc::new(RecordingCapabilityPort::new());
+    let host_b = host_factory
+        .build_text_only_host_with_capabilities(request_b, inner_b.clone())
+        .await
+        .expect("second host builds");
+    let invocation_b = invocation(&surface_version, "cap.blocked");
+    let outcome_b = host_b
+        .invoke_capability(invocation_b.clone())
+        .await
+        .expect("second invoke returns outcome");
+    let CapabilityOutcome::ApprovalRequired {
+        gate_ref: gate_ref_b,
+        ..
+    } = outcome_b
+    else {
+        panic!("expected second build ApprovalRequired, got {outcome_b:?}");
+    };
+
+    router
+        .resolve(
+            HookGateResolutionRequest::for_invocation(
+                gate_ref_b.clone(),
+                actor_a,
+                context_a,
+                &invocation_b,
+            )
+            .expect("stale resolution request can be derived from invocation"),
+        )
+        .await
+        .expect_err("second build gate must not resolve with actor/context from build A");
+    router
+        .resolve(
+            HookGateResolutionRequest::for_invocation(
+                gate_ref_b,
+                actor_b,
+                context_b,
+                &invocation_b,
+            )
+            .expect("second resolution request can be derived from invocation"),
+        )
+        .await
+        .expect("second build gate resolves with actor B/context B");
+}
+
+#[tokio::test]
 async fn router_backed_pause_approval_gate_ref_expires_after_ttl() {
     let fixture = Fixture::new().await;
     let inner = Arc::new(RecordingCapabilityPort::new());
     let surface_version = fixture.surface_version.clone();
     let router = Arc::new(InMemoryHookGateRouter::new());
     let router_for_factory: Arc<dyn HookGateRouter> = router.clone();
+    let run_context = fixture.context.clone();
+    let actor = HookGateActorBinding::new(fixture.actor_id.clone());
     let factory = RouterBackedHookGateRefFactory::try_new(
-        fixture.context.clone(),
-        HookGateActorBinding::new(fixture.actor_id.clone()),
         router_for_factory,
         chrono::Duration::milliseconds(1),
+        move || HookGateReservationContext::new(run_context.clone(), actor.clone()),
     )
     .expect("positive ttl is accepted");
     let request = invocation(&surface_version, "cap.blocked");
@@ -1140,6 +1268,61 @@ async fn router_backed_pause_approval_gate_ref_expires_after_ttl() {
         }
         other => panic!("expected ApprovalRequired, got {other:?}"),
     }
+    assert!(
+        inner.invocations().is_empty(),
+        "inner port must NOT be invoked when a hook pauses; got {:?}",
+        inner.invocations()
+    );
+}
+
+#[tokio::test]
+async fn router_backed_pause_approval_gate_ref_rejects_backdated_resolution_after_ttl() {
+    let fixture = Fixture::new().await;
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let surface_version = fixture.surface_version.clone();
+    let router = Arc::new(InMemoryHookGateRouter::new());
+    let router_for_factory: Arc<dyn HookGateRouter> = router.clone();
+    let run_context = fixture.context.clone();
+    let actor = HookGateActorBinding::new(fixture.actor_id.clone());
+    let factory = RouterBackedHookGateRefFactory::try_new(
+        router_for_factory,
+        chrono::Duration::milliseconds(1),
+        move || HookGateReservationContext::new(run_context.clone(), actor.clone()),
+    )
+    .expect("positive ttl is accepted");
+    let request = invocation(&surface_version, "cap.blocked");
+
+    let host = fixture
+        .factory()
+        .with_hook_dispatcher(pause_approval_dispatcher())
+        .with_hook_gate_ref_factory(Arc::new(factory))
+        .build_text_only_host_with_capabilities(fixture.request(), inner.clone())
+        .await
+        .expect("host builds with hook dispatcher installed");
+
+    let outcome = host
+        .invoke_capability(request.clone())
+        .await
+        .expect("invoke_capability returns a (suspended) outcome, not an error");
+
+    let CapabilityOutcome::ApprovalRequired { gate_ref, .. } = outcome else {
+        panic!("expected ApprovalRequired, got {outcome:?}");
+    };
+    tokio::time::sleep(StdDuration::from_millis(5)).await;
+    let mut resolution_request = HookGateResolutionRequest::for_invocation(
+        gate_ref,
+        HookGateActorBinding::new(fixture.actor_id.clone()),
+        fixture.context.clone(),
+        &request,
+    )
+    .expect("resolution request can be derived from invocation");
+    resolution_request.resolved_at = Utc::now() - chrono::Duration::seconds(30);
+
+    let err = router
+        .resolve(resolution_request)
+        .await
+        .expect_err("backdating resolved_at must not bypass router TTL enforcement");
+    assert!(err.is_expired(), "expected expired error, got {err:?}");
     assert!(
         inner.invocations().is_empty(),
         "inner port must NOT be invoked when a hook pauses; got {:?}",
