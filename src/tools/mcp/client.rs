@@ -751,6 +751,34 @@ impl McpClient {
             })?
             .to_string();
 
+        // Decode the inner credential JCS to extract org_did, which is injected
+        // server-side so the LLM never needs to supply it (and can't substitute
+        // the wrong value from session context).
+        let cred_bytes = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(credential_jcs.trim_end_matches('='))
+                .map_err(|e| {
+                    ToolError::ExternalService(format!(
+                        "t3n-mcp: stored credential_jcs is not valid base64url: {e}"
+                    ))
+                })?
+        };
+        let cred_json: serde_json::Value = serde_json::from_slice(&cred_bytes).map_err(|e| {
+            ToolError::ExternalService(format!(
+                "t3n-mcp: stored credential_jcs does not decode to JSON: {e}"
+            ))
+        })?;
+        let credential_org_did = cred_json
+            .get("org_did")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                ToolError::ExternalService(
+                    "t3n-mcp: stored credential is missing 'org_did'".to_string(),
+                )
+            })?
+            .to_string();
+
         let mut merged = match arguments {
             serde_json::Value::Object(map) => map,
             other => {
@@ -761,6 +789,22 @@ impl McpClient {
                 m
             }
         };
+
+        // Cross-check if the LLM supplied org_did; the credential's value is authoritative.
+        if let Some(caller_org_did) = merged.get("org_did").and_then(|v| v.as_str()) {
+            if caller_org_did != credential_org_did {
+                return Err(ToolError::ExternalService(format!(
+                    "t3n-mcp: org_did mismatch — caller supplied '{caller_org_did}', \
+                     stored credential is for '{credential_org_did}'. \
+                     The credential's org_did is authoritative."
+                )));
+            }
+        }
+        merged.insert(
+            "org_did".to_string(),
+            serde_json::Value::String(credential_org_did),
+        );
+
         merged.insert(
             "credential_jcs_b64u".to_string(),
             serde_json::Value::String(credential_jcs),
@@ -2252,9 +2296,9 @@ mod tests {
 
     // ── t3n-mcp delegation credential injection ─────────────────────────────
     //
-    // The next three unit tests exercise `inject_t3n_delegation_credential`
-    // directly, covering the three sentinel cases (present, absent, malformed).
-    // The caller-level integration test below then drives `call_tool` itself
+    // Tests for `inject_t3n_delegation_credential` covering present/absent/
+    // malformed sentinel cases plus the org_did cross-check behaviour.
+    // The caller-level integration test below drives `call_tool` itself
     // (the "Test Through the Caller, Not Just the Helper" rule from
     // `.claude/rules/testing.md`).
 
@@ -2279,17 +2323,37 @@ mod tests {
         )
     }
 
+    /// Build a base64url-encoded credential JCS JSON string for use in tests.
+    fn make_credential_jcs_b64u(org_did: &str) -> String {
+        use base64::Engine as _;
+        let inner = serde_json::json!({
+            "vc_id": "test-vc-id",
+            "user_did": "did:t3n:aaaa000000000000000000000000000000000000",
+            "org_did": org_did,
+            "not_before_secs": 1700000000u64,
+            "not_after_secs": 1800000000u64,
+        });
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(inner.to_string().as_bytes())
+    }
+
+    /// Build a minimal delegation token JSON string with a valid credential_jcs.
+    fn make_token_json(org_did: &str) -> String {
+        serde_json::json!({
+            "credential_jcs": make_credential_jcs_b64u(org_did),
+            "user_sig": "usig-value",
+            "agent_pubkey": "pubkey-value",
+        })
+        .to_string()
+    }
+
+    const TEST_ORG_DID: &str = "did:t3n:a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+
     #[tokio::test]
     async fn inject_t3n_delegation_credential_merges_fields_when_secret_present() {
         use crate::secrets::CreateSecretParams;
 
         let store = make_test_secrets_store();
-        let token_json = serde_json::json!({
-            "credential_jcs": "cjcs-value",
-            "user_sig": "usig-value",
-            "agent_pubkey": "pubkey-value"
-        })
-        .to_string();
+        let token_json = make_token_json(TEST_ORG_DID);
         store
             .create(
                 "test-user",
@@ -2309,9 +2373,110 @@ mod tests {
             .await
             .expect("inject should succeed when secret is present");
 
-        assert_eq!(merged["credential_jcs_b64u"], "cjcs-value");
+        assert_eq!(
+            merged["credential_jcs_b64u"],
+            make_credential_jcs_b64u(TEST_ORG_DID)
+        );
         assert_eq!(merged["user_sig_b64u"], "usig-value");
+        assert_eq!(merged["org_did"], TEST_ORG_DID);
         assert_eq!(merged["cycle_id"], "2025-01");
+    }
+
+    #[tokio::test]
+    async fn inject_injects_org_did_when_caller_omits_it() {
+        use crate::secrets::CreateSecretParams;
+
+        let store = make_test_secrets_store();
+        store
+            .create(
+                "test-user",
+                CreateSecretParams::new(
+                    crate::tools::mcp::config::T3N_DELEGATION_TOKEN_SECRET,
+                    &make_token_json(TEST_ORG_DID),
+                ),
+            )
+            .await
+            .expect("store delegation token");
+
+        let client = t3n_mcp_client_with_secrets(store);
+        let args = serde_json::json!({"cycle_id": "2025-06"});
+
+        let merged = client
+            .inject_t3n_delegation_credential(args)
+            .await
+            .expect("inject should succeed");
+
+        assert_eq!(
+            merged["org_did"], TEST_ORG_DID,
+            "org_did from the stored credential must be injected when caller omits it"
+        );
+    }
+
+    #[tokio::test]
+    async fn inject_accepts_matching_caller_org_did() {
+        use crate::secrets::CreateSecretParams;
+
+        let store = make_test_secrets_store();
+        store
+            .create(
+                "test-user",
+                CreateSecretParams::new(
+                    crate::tools::mcp::config::T3N_DELEGATION_TOKEN_SECRET,
+                    &make_token_json(TEST_ORG_DID),
+                ),
+            )
+            .await
+            .expect("store delegation token");
+
+        let client = t3n_mcp_client_with_secrets(store);
+        let args = serde_json::json!({"org_did": TEST_ORG_DID, "cycle_id": "2025-06"});
+
+        let merged = client
+            .inject_t3n_delegation_credential(args)
+            .await
+            .expect("matching org_did must be accepted");
+
+        assert_eq!(merged["org_did"], TEST_ORG_DID);
+    }
+
+    #[tokio::test]
+    async fn inject_rejects_mismatching_caller_org_did() {
+        use crate::secrets::CreateSecretParams;
+
+        let store = make_test_secrets_store();
+        store
+            .create(
+                "test-user",
+                CreateSecretParams::new(
+                    crate::tools::mcp::config::T3N_DELEGATION_TOKEN_SECRET,
+                    &make_token_json(TEST_ORG_DID),
+                ),
+            )
+            .await
+            .expect("store delegation token");
+
+        let client = t3n_mcp_client_with_secrets(store);
+        let wrong_did = "did:t3n:0000000000000000000000000000000000000000";
+        let args = serde_json::json!({"org_did": wrong_did});
+
+        let err = client
+            .inject_t3n_delegation_credential(args)
+            .await
+            .expect_err("mismatching org_did must be rejected");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("org_did mismatch"),
+            "error must name the mismatch: {msg}"
+        );
+        assert!(
+            msg.contains(wrong_did),
+            "error must include caller's value: {msg}"
+        );
+        assert!(
+            msg.contains(TEST_ORG_DID),
+            "error must include credential's value: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -2427,18 +2592,12 @@ mod tests {
 
         // ── Seed the delegation token in an in-memory store ───────────
         let store = make_test_secrets_store();
-        let token_json = serde_json::json!({
-            "credential_jcs": "cjcs-test",
-            "user_sig": "usig-test",
-            "agent_pubkey": "pubkey-test"
-        })
-        .to_string();
         store
             .create(
                 "test-user",
                 CreateSecretParams::new(
                     crate::tools::mcp::config::T3N_DELEGATION_TOKEN_SECRET,
-                    &token_json,
+                    &make_token_json(TEST_ORG_DID),
                 ),
             )
             .await
@@ -2478,12 +2637,17 @@ mod tests {
         let args = &params["arguments"];
 
         assert_eq!(
-            args["credential_jcs_b64u"], "cjcs-test",
+            args["credential_jcs_b64u"],
+            make_credential_jcs_b64u(TEST_ORG_DID),
             "credential_jcs_b64u must be injected into the forwarded arguments"
         );
         assert_eq!(
-            args["user_sig_b64u"], "usig-test",
+            args["user_sig_b64u"], "usig-value",
             "user_sig_b64u must be injected into the forwarded arguments"
+        );
+        assert_eq!(
+            args["org_did"], TEST_ORG_DID,
+            "org_did must be injected from the stored credential"
         );
         assert_eq!(
             args["cycle_id"], "2025-01",
