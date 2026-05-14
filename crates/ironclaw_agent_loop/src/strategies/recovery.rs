@@ -102,6 +102,141 @@ pub(crate) enum RecoveryOutcome {
     },
 }
 
+/// Reference baseline `RecoveryStrategy`: bounded retry per error class with
+/// exponential backoff.
+///
+/// Per master spec §10 ("Production-safe escape" — per-error retry budget),
+/// this strategy:
+/// - Skips `PolicyDenied` so the model can try another authorized tool.
+/// - Aborts immediately on `Permanent`, `InputInvalid`, `ContextOverflow`,
+///   and `ContentFiltered` (no retry will help).
+/// - Retries `Transient`, `Unavailable`, and `Internal` up to
+///   [`Self::max_attempts_per_class`] times with `Backoff` alteration, then
+///   aborts with the originating error class.
+///
+/// See `docs/reborn/agent-loop-skeleton.md` §6 ("The nine strategies" →
+/// `RecoveryStrategy`) and §10 ("Production-safe escape").
+#[derive(Debug, Clone, Copy)]
+pub struct DefaultRecoveryStrategy {
+    /// Max retries per error class before giving up. Default `2`.
+    pub max_attempts_per_class: u32,
+}
+
+impl Default for DefaultRecoveryStrategy {
+    fn default() -> Self {
+        Self {
+            max_attempts_per_class: 2,
+        }
+    }
+}
+
+#[async_trait]
+impl RecoveryStrategy for DefaultRecoveryStrategy {
+    async fn on_capability_error(
+        &self,
+        state: &LoopExecutionState,
+        err: &CapabilityErrorSummary,
+    ) -> RecoveryOutcome {
+        let next = state.recovery_state.with_incremented_attempts();
+        let kind = capability_error_to_failure_kind(err.class);
+        match err.class {
+            CapabilityErrorClass::PolicyDenied => RecoveryOutcome::SkipResult { recovery: next },
+            CapabilityErrorClass::Permanent | CapabilityErrorClass::InputInvalid => {
+                RecoveryOutcome::Abort {
+                    recovery: next,
+                    failure_kind: kind,
+                }
+            }
+            CapabilityErrorClass::Transient
+            | CapabilityErrorClass::Unavailable
+            | CapabilityErrorClass::Internal => {
+                if state.recovery_state.attempts >= self.max_attempts_per_class {
+                    RecoveryOutcome::Abort {
+                        recovery: next,
+                        failure_kind: kind,
+                    }
+                } else {
+                    RecoveryOutcome::Retry {
+                        recovery: next,
+                        alter: Some(RetryAlteration::Backoff {
+                            delay: backoff_for(state.recovery_state.attempts),
+                        }),
+                    }
+                }
+            }
+        }
+    }
+
+    async fn on_model_error(
+        &self,
+        state: &LoopExecutionState,
+        err: &ModelErrorSummary,
+    ) -> RecoveryOutcome {
+        let next = state.recovery_state.with_incremented_attempts();
+        let kind = model_error_to_failure_kind(err.class);
+        match err.class {
+            // No retry will help — abort with the originating class.
+            ModelErrorClass::ContextOverflow | ModelErrorClass::ContentFiltered => {
+                RecoveryOutcome::Abort {
+                    recovery: next,
+                    failure_kind: kind,
+                }
+            }
+            ModelErrorClass::Transient
+            | ModelErrorClass::Unavailable
+            | ModelErrorClass::Internal => {
+                if state.recovery_state.attempts >= self.max_attempts_per_class {
+                    RecoveryOutcome::Abort {
+                        recovery: next,
+                        failure_kind: kind,
+                    }
+                } else {
+                    RecoveryOutcome::Retry {
+                        recovery: next,
+                        alter: Some(RetryAlteration::Backoff {
+                            delay: backoff_for(state.recovery_state.attempts),
+                        }),
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Maps a sanitized capability error class to the loop-level failure kind that
+/// the executor surfaces in `LoopExit::Failed { reason_kind }`.
+fn capability_error_to_failure_kind(class: CapabilityErrorClass) -> LoopFailureKind {
+    match class {
+        CapabilityErrorClass::PolicyDenied => LoopFailureKind::PolicyDenied,
+        CapabilityErrorClass::Transient
+        | CapabilityErrorClass::Permanent
+        | CapabilityErrorClass::InputInvalid
+        | CapabilityErrorClass::Unavailable
+        | CapabilityErrorClass::Internal => LoopFailureKind::CapabilityProtocolError,
+    }
+}
+
+/// Maps a sanitized model error class to the loop-level failure kind.
+fn model_error_to_failure_kind(class: ModelErrorClass) -> LoopFailureKind {
+    match class {
+        ModelErrorClass::Transient
+        | ModelErrorClass::ContextOverflow
+        | ModelErrorClass::ContentFiltered
+        | ModelErrorClass::Unavailable
+        | ModelErrorClass::Internal => LoopFailureKind::ModelError,
+    }
+}
+
+/// Exponential backoff for retry attempts: `250ms × 2^attempt`, capped at 5s.
+///
+/// Strictly monotonic in `attempt` until the 5s cap kicks in. The executor
+/// honors this as a sleep before re-issuing the call.
+fn backoff_for(attempt: u32) -> std::time::Duration {
+    let shift = attempt.min(5);
+    let ms = 250u64.saturating_mul(1u64 << shift);
+    std::time::Duration::from_millis(ms.min(5_000))
+}
+
 /// Strategy hint about WHAT to alter on retry. Skeleton supports prompt-shape
 /// alterations only; model-route swap is reserved for the deferred
 /// `ModelRouteChain` follow-up (master doc §9).
@@ -116,33 +251,6 @@ pub(crate) enum RetryAlteration {
     /// reject this alteration with `LoopFailureKind::DriverBug` until the
     /// chain mechanism lands.
     AdvanceFallback,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct DefaultRecoveryStrategy;
-
-#[async_trait]
-impl RecoveryStrategy for DefaultRecoveryStrategy {
-    async fn on_capability_error(
-        &self,
-        state: &LoopExecutionState,
-        _err: &CapabilityErrorSummary,
-    ) -> RecoveryOutcome {
-        RecoveryOutcome::SkipResult {
-            recovery: state.recovery_state.clone(),
-        }
-    }
-
-    async fn on_model_error(
-        &self,
-        state: &LoopExecutionState,
-        _err: &ModelErrorSummary,
-    ) -> RecoveryOutcome {
-        RecoveryOutcome::Abort {
-            recovery: state.recovery_state.clone(),
-            failure_kind: LoopFailureKind::ModelError,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -310,6 +418,266 @@ mod tests {
                 assert_eq!(failure_kind, LoopFailureKind::NoProgressDetected);
             }
             other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    mod default_recovery_strategy {
+        use ironclaw_host_api::{TenantId, ThreadId};
+        use ironclaw_turns::{
+            AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId,
+            TurnScope,
+            run_profile::{
+                CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy,
+                CheckpointSchemaId, ConcurrencyClass, ContextProfileId, LoopDriverId,
+                LoopRunContext, ModelProfileId, RedactedRunProfileProvenance, ResolvedRunProfile,
+                ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+                RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
+            },
+        };
+
+        use super::super::{
+            CapabilityErrorClass, CapabilityErrorSummary, DefaultRecoveryStrategy, ModelErrorClass,
+            ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryAlteration, backoff_for,
+        };
+        use crate::state::{LoopExecutionState, RecoveryStrategyState};
+        use ironclaw_turns::LoopFailureKind;
+
+        fn test_run_context() -> LoopRunContext {
+            let scope = TurnScope::new(
+                TenantId::new("tenant-default-recovery").expect("valid"),
+                None,
+                None,
+                ThreadId::new("thread-default-recovery").expect("valid"),
+            );
+            let descriptor = AgentLoopDriverDescriptor {
+                id: LoopDriverId::new("default_recovery_test_driver").expect("valid"),
+                version: RunProfileVersion::new(1),
+                checkpoint_schema_id: Some(
+                    CheckpointSchemaId::new("default_recovery_test_checkpoint").expect("valid"),
+                ),
+                checkpoint_schema_version: Some(RunProfileVersion::new(1)),
+            };
+            let resolved_run_profile = ResolvedRunProfile {
+                run_class_id: RunClassId::new("default_recovery_test_class").expect("valid"),
+                profile_id: RunProfileId::default_profile(),
+                profile_version: RunProfileVersion::new(1),
+                loop_driver: descriptor.clone(),
+                checkpoint_schema_id: descriptor
+                    .checkpoint_schema_id
+                    .clone()
+                    .expect("descriptor checkpoint id"),
+                checkpoint_schema_version: descriptor
+                    .checkpoint_schema_version
+                    .expect("descriptor checkpoint version"),
+                model_profile_id: ModelProfileId::new("default_recovery_test_model")
+                    .expect("valid"),
+                capability_surface_profile_id: CapabilitySurfaceProfileId::new(
+                    "default_recovery_test_capabilities",
+                )
+                .expect("valid"),
+                context_profile_id: ContextProfileId::new("default_recovery_test_context")
+                    .expect("valid"),
+                steering_policy: SteeringPolicy {
+                    allow_steering: false,
+                    allow_interrupt: true,
+                    allow_driver_specific_nudges: false,
+                },
+                cancellation_policy: CancellationPolicy {
+                    allow_cancel: true,
+                    require_checkpoint_before_cancel: false,
+                },
+                checkpoint_policy: CheckpointPolicy {
+                    require_before_model: false,
+                    require_before_side_effect: false,
+                    require_before_block: true,
+                    max_checkpoint_bytes: 64 * 1024,
+                    require_final_checkpoint: false,
+                    allow_no_reply_completion: false,
+                },
+                resource_budget_policy: ResourceBudgetPolicy {
+                    tier: ResourceBudgetTier::new("default_recovery_test_tier").expect("valid"),
+                    max_model_calls: 32,
+                    max_capability_invocations: 64,
+                },
+                runtime_constraints: RuntimeProfileConstraints {
+                    allow_raw_runtime_backend_selection: false,
+                    allow_broad_capability_surface: false,
+                },
+                runner_pool_id: None,
+                scheduling_class: SchedulingClass::new("interactive").expect("valid"),
+                concurrency_class: ConcurrencyClass::new("thread_serial").expect("valid"),
+                resolution_fingerprint: RunProfileFingerprint::new(
+                    "default-recovery-test-fingerprint",
+                )
+                .expect("valid"),
+                provenance: RedactedRunProfileProvenance {
+                    sources: vec![],
+                    effective_privileges: vec![],
+                },
+            };
+            LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved_run_profile)
+        }
+
+        fn state_with_attempts(attempts: u32) -> LoopExecutionState {
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            state.recovery_state = RecoveryStrategyState { attempts };
+            state
+        }
+
+        fn cap_err(class: CapabilityErrorClass) -> CapabilityErrorSummary {
+            CapabilityErrorSummary {
+                class,
+                safe_summary: "test".to_string(),
+                diagnostic_ref: None,
+            }
+        }
+
+        fn model_err(class: ModelErrorClass) -> ModelErrorSummary {
+            ModelErrorSummary {
+                class,
+                safe_summary: "test".to_string(),
+                diagnostic_ref: None,
+            }
+        }
+
+        #[test]
+        fn default_max_attempts_is_two() {
+            assert_eq!(DefaultRecoveryStrategy::default().max_attempts_per_class, 2);
+        }
+
+        #[tokio::test]
+        async fn capability_permanent_aborts_immediately() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let state = state_with_attempts(0);
+
+            let outcome = strategy
+                .on_capability_error(&state, &cap_err(CapabilityErrorClass::Permanent))
+                .await;
+
+            assert!(matches!(
+                outcome,
+                RecoveryOutcome::Abort {
+                    failure_kind: LoopFailureKind::CapabilityProtocolError,
+                    ..
+                }
+            ));
+        }
+
+        #[tokio::test]
+        async fn capability_input_invalid_aborts_immediately() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let state = state_with_attempts(0);
+
+            let outcome = strategy
+                .on_capability_error(&state, &cap_err(CapabilityErrorClass::InputInvalid))
+                .await;
+
+            assert!(matches!(outcome, RecoveryOutcome::Abort { .. }));
+        }
+
+        #[tokio::test]
+        async fn capability_policy_denied_skips_result() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let state = state_with_attempts(0);
+
+            let outcome = strategy
+                .on_capability_error(&state, &cap_err(CapabilityErrorClass::PolicyDenied))
+                .await;
+
+            match outcome {
+                RecoveryOutcome::SkipResult { recovery } => {
+                    assert_eq!(recovery.attempts, 1);
+                }
+                other => panic!("expected SkipResult, got {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn capability_transient_retries_then_aborts_at_budget() {
+            let strategy = DefaultRecoveryStrategy::default();
+
+            for attempts in 0..2 {
+                let state = state_with_attempts(attempts);
+                let outcome = strategy
+                    .on_capability_error(&state, &cap_err(CapabilityErrorClass::Transient))
+                    .await;
+                assert!(
+                    matches!(
+                        outcome,
+                        RecoveryOutcome::Retry {
+                            alter: Some(RetryAlteration::Backoff { .. }),
+                            ..
+                        }
+                    ),
+                    "expected retry at attempts={attempts}, got {outcome:?}"
+                );
+            }
+
+            let state = state_with_attempts(2);
+            let outcome = strategy
+                .on_capability_error(&state, &cap_err(CapabilityErrorClass::Transient))
+                .await;
+            assert!(matches!(
+                outcome,
+                RecoveryOutcome::Abort {
+                    failure_kind: LoopFailureKind::CapabilityProtocolError,
+                    ..
+                }
+            ));
+        }
+
+        #[tokio::test]
+        async fn model_context_overflow_aborts_immediately() {
+            let strategy = DefaultRecoveryStrategy::default();
+            let state = state_with_attempts(0);
+
+            let outcome = strategy
+                .on_model_error(&state, &model_err(ModelErrorClass::ContextOverflow))
+                .await;
+
+            assert!(matches!(
+                outcome,
+                RecoveryOutcome::Abort {
+                    failure_kind: LoopFailureKind::ModelError,
+                    ..
+                }
+            ));
+        }
+
+        #[tokio::test]
+        async fn model_transient_retries_then_aborts_at_budget() {
+            let strategy = DefaultRecoveryStrategy::default();
+
+            let state = state_with_attempts(0);
+            let outcome = strategy
+                .on_model_error(&state, &model_err(ModelErrorClass::Transient))
+                .await;
+            assert!(matches!(
+                outcome,
+                RecoveryOutcome::Retry {
+                    alter: Some(RetryAlteration::Backoff { .. }),
+                    ..
+                }
+            ));
+
+            let state = state_with_attempts(2);
+            let outcome = strategy
+                .on_model_error(&state, &model_err(ModelErrorClass::Transient))
+                .await;
+            assert!(matches!(outcome, RecoveryOutcome::Abort { .. }));
+        }
+
+        #[test]
+        fn backoff_increases_with_attempt_until_cap() {
+            let zero = backoff_for(0);
+            let one = backoff_for(1);
+            let two = backoff_for(2);
+            assert!(one > zero, "expected backoff(1) > backoff(0)");
+            assert!(two > one, "expected backoff(2) > backoff(1)");
+
+            let cap = std::time::Duration::from_millis(5_000);
+            assert!(backoff_for(10) <= cap);
+            assert!(backoff_for(99) <= cap);
         }
     }
 }

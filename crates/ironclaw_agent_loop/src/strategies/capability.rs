@@ -18,6 +18,24 @@ pub(crate) trait CapabilityStrategy: Send + Sync {
     async fn filter(&self, state: &LoopExecutionState) -> CapabilityFilter;
 }
 
+/// Reference baseline `CapabilityStrategy`: never narrow the host surface.
+///
+/// The host applies its own scope/grant/auth filters on top — this default
+/// strategy declines to filter further, leaving capability visibility entirely
+/// to the host's authoritative policy.
+///
+/// See `docs/reborn/agent-loop-skeleton.md` §6 ("The nine strategies" →
+/// `CapabilityStrategy`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultCapabilityStrategy;
+
+#[async_trait]
+impl CapabilityStrategy for DefaultCapabilityStrategy {
+    async fn filter(&self, _state: &LoopExecutionState) -> CapabilityFilter {
+        CapabilityFilter::All
+    }
+}
+
 /// Strategy-side narrowing of the visible capability surface.
 ///
 /// Variants are mutually exclusive. The host always applies its own
@@ -34,24 +52,105 @@ pub(crate) enum CapabilityFilter {
     Deny(Vec<CapabilityId>),
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct DefaultCapabilityStrategy;
-
-#[async_trait]
-impl CapabilityStrategy for DefaultCapabilityStrategy {
-    async fn filter(&self, _state: &LoopExecutionState) -> CapabilityFilter {
-        CapabilityFilter::All
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use ironclaw_host_api::CapabilityId;
+    use ironclaw_host_api::{CapabilityId, TenantId, ThreadId};
+    use ironclaw_turns::{
+        AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+        run_profile::{
+            CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
+            ConcurrencyClass, ContextProfileId, LoopDriverId, LoopRunContext, ModelProfileId,
+            RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
+            ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
+            SchedulingClass, SteeringPolicy,
+        },
+    };
 
-    use super::{CapabilityFilter, CapabilityStrategy};
+    use super::{CapabilityFilter, CapabilityStrategy, DefaultCapabilityStrategy};
+    use crate::state::LoopExecutionState;
 
     #[allow(dead_code)]
     fn _check(_: &dyn CapabilityStrategy) {}
+
+    fn test_run_context() -> LoopRunContext {
+        let scope = TurnScope::new(
+            TenantId::new("tenant-default-cap").expect("valid"),
+            None,
+            None,
+            ThreadId::new("thread-default-cap").expect("valid"),
+        );
+        let descriptor = AgentLoopDriverDescriptor {
+            id: LoopDriverId::new("default_cap_test_driver").expect("valid"),
+            version: RunProfileVersion::new(1),
+            checkpoint_schema_id: Some(
+                CheckpointSchemaId::new("default_cap_test_checkpoint").expect("valid"),
+            ),
+            checkpoint_schema_version: Some(RunProfileVersion::new(1)),
+        };
+        let resolved_run_profile = ResolvedRunProfile {
+            run_class_id: RunClassId::new("default_cap_test_class").expect("valid"),
+            profile_id: RunProfileId::default_profile(),
+            profile_version: RunProfileVersion::new(1),
+            loop_driver: descriptor.clone(),
+            checkpoint_schema_id: descriptor
+                .checkpoint_schema_id
+                .clone()
+                .expect("descriptor checkpoint id"),
+            checkpoint_schema_version: descriptor
+                .checkpoint_schema_version
+                .expect("descriptor checkpoint version"),
+            model_profile_id: ModelProfileId::new("default_cap_test_model").expect("valid"),
+            capability_surface_profile_id: CapabilitySurfaceProfileId::new(
+                "default_cap_test_capabilities",
+            )
+            .expect("valid"),
+            context_profile_id: ContextProfileId::new("default_cap_test_context").expect("valid"),
+            steering_policy: SteeringPolicy {
+                allow_steering: false,
+                allow_interrupt: true,
+                allow_driver_specific_nudges: false,
+            },
+            cancellation_policy: CancellationPolicy {
+                allow_cancel: true,
+                require_checkpoint_before_cancel: false,
+            },
+            checkpoint_policy: CheckpointPolicy {
+                require_before_model: false,
+                require_before_side_effect: false,
+                require_before_block: true,
+                max_checkpoint_bytes: 64 * 1024,
+                require_final_checkpoint: false,
+                allow_no_reply_completion: false,
+            },
+            resource_budget_policy: ResourceBudgetPolicy {
+                tier: ResourceBudgetTier::new("default_cap_test_tier").expect("valid"),
+                max_model_calls: 32,
+                max_capability_invocations: 64,
+            },
+            runtime_constraints: RuntimeProfileConstraints {
+                allow_raw_runtime_backend_selection: false,
+                allow_broad_capability_surface: false,
+            },
+            runner_pool_id: None,
+            scheduling_class: SchedulingClass::new("interactive").expect("valid"),
+            concurrency_class: ConcurrencyClass::new("thread_serial").expect("valid"),
+            resolution_fingerprint: RunProfileFingerprint::new("default-cap-test-fingerprint")
+                .expect("valid"),
+            provenance: RedactedRunProfileProvenance {
+                sources: vec![],
+                effective_privileges: vec![],
+            },
+        };
+        LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved_run_profile)
+    }
+
+    #[tokio::test]
+    async fn default_capability_strategy_returns_all() {
+        let strategy = DefaultCapabilityStrategy;
+        let state = LoopExecutionState::initial_for_run(&test_run_context());
+
+        assert_eq!(strategy.filter(&state).await, CapabilityFilter::All);
+    }
 
     #[test]
     fn default_filter_allows_all() {

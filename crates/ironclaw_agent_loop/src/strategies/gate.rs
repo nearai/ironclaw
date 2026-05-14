@@ -26,6 +26,26 @@ pub(crate) trait GateHandlingStrategy: Send + Sync {
     async fn handle(&self, state: &LoopExecutionState, gate: &GateSummary) -> GateOutcome;
 }
 
+/// Reference baseline `GateHandlingStrategy`: always `Block`.
+///
+/// The executor checkpoints (`BeforeBlock`) and returns
+/// `LoopExit::Blocked`. Loop families that want skip-and-continue or abort
+/// semantics swap this strategy.
+///
+/// See `docs/reborn/agent-loop-skeleton.md` §6 ("The nine strategies" →
+/// `GateHandlingStrategy`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DefaultGateHandlingStrategy;
+
+#[async_trait]
+impl GateHandlingStrategy for DefaultGateHandlingStrategy {
+    async fn handle(&self, state: &LoopExecutionState, _gate: &GateSummary) -> GateOutcome {
+        GateOutcome::Block {
+            gate: state.gate_state.clone(),
+        }
+    }
+}
+
 /// Loop-side projection of a host capability gate — kind + opaque ref only.
 /// The strategy never sees raw input, secrets, or auth state (per
 /// `contracts/turns-agent-loop.md` §6 + `contracts/lightweight-agent-loop.md`
@@ -70,21 +90,22 @@ pub(crate) enum GateOutcome {
     },
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct DefaultGateHandlingStrategy;
-
-#[async_trait]
-impl GateHandlingStrategy for DefaultGateHandlingStrategy {
-    async fn handle(&self, state: &LoopExecutionState, _gate: &GateSummary) -> GateOutcome {
-        GateOutcome::Block {
-            gate: state.gate_state.clone(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use ironclaw_host_api::{TenantId, ThreadId};
+    use ironclaw_turns::{
+        AgentLoopDriverDescriptor, RunProfileId, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+        run_profile::{
+            CancellationPolicy, CapabilitySurfaceProfileId, CheckpointPolicy, CheckpointSchemaId,
+            ConcurrencyClass, ContextProfileId, LoopDriverId, LoopRunContext, ModelProfileId,
+            RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
+            ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
+            SchedulingClass, SteeringPolicy,
+        },
+    };
+
     use super::*;
+    use crate::state::LoopExecutionState;
 
     /// Compile-time object-safety check.
     #[allow(dead_code)]
@@ -92,6 +113,78 @@ mod tests {
 
     fn sample_gate() -> GateStrategyState {
         GateStrategyState::default()
+    }
+
+    fn test_run_context() -> LoopRunContext {
+        let scope = TurnScope::new(
+            TenantId::new("tenant-default-gate").expect("valid"),
+            None,
+            None,
+            ThreadId::new("thread-default-gate").expect("valid"),
+        );
+        let descriptor = AgentLoopDriverDescriptor {
+            id: LoopDriverId::new("default_gate_test_driver").expect("valid"),
+            version: RunProfileVersion::new(1),
+            checkpoint_schema_id: Some(
+                CheckpointSchemaId::new("default_gate_test_checkpoint").expect("valid"),
+            ),
+            checkpoint_schema_version: Some(RunProfileVersion::new(1)),
+        };
+        let resolved_run_profile = ResolvedRunProfile {
+            run_class_id: RunClassId::new("default_gate_test_class").expect("valid"),
+            profile_id: RunProfileId::default_profile(),
+            profile_version: RunProfileVersion::new(1),
+            loop_driver: descriptor.clone(),
+            checkpoint_schema_id: descriptor
+                .checkpoint_schema_id
+                .clone()
+                .expect("descriptor checkpoint id"),
+            checkpoint_schema_version: descriptor
+                .checkpoint_schema_version
+                .expect("descriptor checkpoint version"),
+            model_profile_id: ModelProfileId::new("default_gate_test_model").expect("valid"),
+            capability_surface_profile_id: CapabilitySurfaceProfileId::new(
+                "default_gate_test_capabilities",
+            )
+            .expect("valid"),
+            context_profile_id: ContextProfileId::new("default_gate_test_context").expect("valid"),
+            steering_policy: SteeringPolicy {
+                allow_steering: false,
+                allow_interrupt: true,
+                allow_driver_specific_nudges: false,
+            },
+            cancellation_policy: CancellationPolicy {
+                allow_cancel: true,
+                require_checkpoint_before_cancel: false,
+            },
+            checkpoint_policy: CheckpointPolicy {
+                require_before_model: false,
+                require_before_side_effect: false,
+                require_before_block: true,
+                max_checkpoint_bytes: 64 * 1024,
+                require_final_checkpoint: false,
+                allow_no_reply_completion: false,
+            },
+            resource_budget_policy: ResourceBudgetPolicy {
+                tier: ResourceBudgetTier::new("default_gate_test_tier").expect("valid"),
+                max_model_calls: 32,
+                max_capability_invocations: 64,
+            },
+            runtime_constraints: RuntimeProfileConstraints {
+                allow_raw_runtime_backend_selection: false,
+                allow_broad_capability_surface: false,
+            },
+            runner_pool_id: None,
+            scheduling_class: SchedulingClass::new("interactive").expect("valid"),
+            concurrency_class: ConcurrencyClass::new("thread_serial").expect("valid"),
+            resolution_fingerprint: RunProfileFingerprint::new("default-gate-test-fingerprint")
+                .expect("valid"),
+            provenance: RedactedRunProfileProvenance {
+                sources: vec![],
+                effective_privileges: vec![],
+            },
+        };
+        LoopRunContext::new(scope, TurnId::new(), TurnRunId::new(), resolved_run_profile)
     }
 
     #[test]
@@ -166,6 +259,24 @@ mod tests {
                 assert_eq!(failure_kind, LoopFailureKind::PolicyDenied);
             }
             other => panic!("unexpected variant: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn default_gate_handling_strategy_blocks_for_every_kind() {
+        let strategy = DefaultGateHandlingStrategy;
+        let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+        state.gate_state = sample_gate();
+
+        for kind in [GateKind::Approval, GateKind::Auth, GateKind::Resource] {
+            let summary = GateSummary {
+                kind,
+                gate_ref: LoopGateRef::new("gate:default-test").expect("valid"),
+            };
+            match strategy.handle(&state, &summary).await {
+                GateOutcome::Block { gate } => assert_eq!(gate, sample_gate()),
+                other => panic!("expected Block for {kind:?}, got {other:?}"),
+            }
         }
     }
 }

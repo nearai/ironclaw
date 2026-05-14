@@ -191,15 +191,15 @@ pub(crate) struct DefaultStrategySlots {
 impl Default for DefaultStrategySlots {
     fn default() -> Self {
         Self {
-            context: Arc::new(DefaultContextStrategy),
-            capability: Arc::new(DefaultCapabilityStrategy),
-            model: Arc::new(DefaultModelStrategy),
-            batch: Arc::new(DefaultBatchPolicyStrategy),
-            gate: Arc::new(DefaultGateHandlingStrategy),
-            recovery: Arc::new(DefaultRecoveryStrategy),
-            stop: Arc::new(DefaultStopConditionStrategy),
+            context: Arc::new(DefaultContextStrategy::default()),
+            capability: Arc::new(DefaultCapabilityStrategy::default()),
+            model: Arc::new(DefaultModelStrategy::default()),
+            batch: Arc::new(DefaultBatchPolicyStrategy::default()),
+            gate: Arc::new(DefaultGateHandlingStrategy::default()),
+            recovery: Arc::new(DefaultRecoveryStrategy::default()),
+            stop: Arc::new(DefaultStopConditionStrategy::default()),
             drain: Arc::new(DefaultInputDrainStrategy),
-            budget: Arc::new(DefaultBudgetStrategy),
+            budget: Arc::new(DefaultBudgetStrategy::default()),
         }
     }
 }
