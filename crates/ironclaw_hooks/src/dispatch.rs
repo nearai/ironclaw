@@ -1155,6 +1155,7 @@ impl HookDispatcher {
             event,
             event_cursor,
         };
+        let event_scope_provider = self.scope_provider_for_runtime_event(event);
 
         for (_key, binding) in ordered {
             if poisoned.contains(&binding.hook_id) {
@@ -1163,10 +1164,10 @@ impl HookDispatcher {
             if binding.event_kind_filter != Some(event.kind) {
                 continue;
             }
-            if !binding
-                .scope
-                .permits(binding.owning_extension.as_ref(), event.provider.as_ref())
-            {
+            if !binding.scope.permits(
+                binding.owning_extension.as_ref(),
+                event_scope_provider.as_ref(),
+            ) {
                 continue;
             }
             let Some(hook) = self.event_triggered.get(&binding.hook_id) else {
@@ -1198,6 +1199,34 @@ impl HookDispatcher {
         }
 
         ObserverDispatchOutcome { facts, failures }
+    }
+
+    fn scope_provider_for_runtime_event(
+        &self,
+        event: &RuntimeEvent,
+    ) -> Option<ironclaw_host_api::ExtensionId> {
+        if let Some(provider) = event.provider.clone() {
+            return Some(provider);
+        }
+        if !matches!(
+            event.kind,
+            RuntimeEventKind::HookDispatched
+                | RuntimeEventKind::HookDecisionEmitted
+                | RuntimeEventKind::HookFailed
+        ) {
+            return None;
+        }
+        let hook_id = event.hook_id.as_deref()?;
+        match self.registry.lock() {
+            Ok(registry) => registry.owning_extension_for_hook_hex(hook_id).cloned(),
+            Err(poisoned) => {
+                // Keep the same fail-closed posture as other registry reads:
+                // if the registry cannot be trusted, providerless OwnCapabilities
+                // hooks remain inert.
+                let _ = poisoned;
+                None
+            }
+        }
     }
 
     #[cfg(test)]

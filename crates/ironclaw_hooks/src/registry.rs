@@ -336,6 +336,35 @@ impl HookRegistry {
         self.hook_index.contains_key(&hook_id)
     }
 
+    /// Owning extension for the binding registered under a serialized hook id.
+    ///
+    /// Hook telemetry events carry the stable [`HookId::to_hex`] wire string,
+    /// so event-triggered scope filtering uses this index to recover the
+    /// provider for `Hook*` runtime events whose `provider` field is empty.
+    pub fn owning_extension_for_hook_hex(&self, hook_id: &str) -> Option<&ExtensionId> {
+        let (point, slot) = self
+            .by_point
+            .iter()
+            .flat_map(|(point, bindings)| {
+                bindings
+                    .iter()
+                    .enumerate()
+                    .map(move |(idx, binding)| (*point, idx, binding))
+            })
+            .find_map(|(point, idx, binding)| {
+                if binding.hook_id.to_hex() == hook_id {
+                    Some((point, idx))
+                } else {
+                    None
+                }
+            })?;
+        self.by_point
+            .get(&point)?
+            .get(slot)?
+            .owning_extension
+            .as_ref()
+    }
+
     /// Total number of bindings, poisoned or not.
     pub fn len(&self) -> usize {
         self.by_point.values().map(Vec::len).sum()

@@ -410,6 +410,7 @@ struct SeenRuntimeEvent {
     cursor: RuntimeEventCursor,
     kind: RuntimeEventKind,
     provider: Option<ironclaw_host_api::ExtensionId>,
+    hook_id: Option<String>,
 }
 
 struct RecordingEventTriggeredHook {
@@ -434,6 +435,7 @@ impl EventTriggeredHook for RecordingEventTriggeredHook {
                 cursor: ctx.event_cursor,
                 kind: ctx.event.kind,
                 provider: ctx.event.provider.clone(),
+                hook_id: ctx.event.hook_id.clone(),
             });
         sink.note(NoteCategory::HookFired, "event hook fired");
     }
@@ -1264,6 +1266,136 @@ async fn event_triggered_hook_respects_own_capabilities_scope_filter() {
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].kind, RuntimeEventKind::DispatchSucceeded);
     assert_eq!(events[0].provider.as_ref(), Some(&ext_a));
+}
+
+#[tokio::test]
+async fn event_triggered_own_capabilities_scope_resolves_hook_failed_owner_from_hook_id() {
+    let fixture = Fixture::new().await;
+    let scope = runtime_scope(&fixture);
+    let stream = EventStreamKey::from_scope(&scope);
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let ext_a = ironclaw_host_api::ExtensionId::new("ext-a").expect("valid ext");
+    let ext_b = ironclaw_host_api::ExtensionId::new("ext-b").expect("valid ext");
+    let ext_a_source_hook_id = HookId::derive(
+        &ExtensionId(ext_a.as_str().to_string()),
+        "0.0.1",
+        &HookLocalId("hook-failed-source-a".to_string()),
+        HookVersion::ONE,
+    );
+    let ext_b_source_hook_id = HookId::derive(
+        &ExtensionId(ext_b.as_str().to_string()),
+        "0.0.1",
+        &HookLocalId("hook-failed-source-b".to_string()),
+        HookVersion::ONE,
+    );
+    let ext_a_source_hook_hex = ext_a_source_hook_id.to_hex();
+    let ext_b_source_hook_hex = ext_b_source_hook_id.to_hex();
+
+    log.append(RuntimeEvent::hook_failed(
+        scope.clone(),
+        runtime_capability("hooks.ext_a.first"),
+        ext_a_source_hook_hex.clone(),
+        "panic",
+        "fail_isolated",
+    ))
+    .await
+    .expect("append ext-A hook failure event");
+    log.append(RuntimeEvent::hook_failed(
+        scope.clone(),
+        runtime_capability("hooks.ext_b"),
+        ext_b_source_hook_hex.clone(),
+        "panic",
+        "fail_isolated",
+    ))
+    .await
+    .expect("append ext-B hook failure event");
+    log.append(RuntimeEvent::hook_failed(
+        scope,
+        runtime_capability("hooks.ext_a.second"),
+        ext_a_source_hook_hex.clone(),
+        "panic",
+        "fail_isolated",
+    ))
+    .await
+    .expect("append second ext-A hook failure event");
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let inert_seen = Arc::new(Mutex::new(Vec::new()));
+    let subscription_hook_id = HookId::derive(
+        &ExtensionId(ext_a.as_str().to_string()),
+        "0.0.1",
+        &HookLocalId("hook-failed-own-capabilities-subscription".to_string()),
+        HookVersion::ONE,
+    );
+    let dispatcher = HookDispatcherBuilder::new(HookRegistry::new())
+        .with_timeout(Duration::from_millis(500))
+        .install_installed_event_triggered(
+            subscription_hook_id,
+            HookPhase::Telemetry,
+            RuntimeEventKind::HookFailed,
+            ext_a.clone(),
+            HookBindingScope::OwnCapabilities,
+            Box::new(RecordingEventTriggeredHook {
+                seen: Arc::clone(&seen),
+                delay: None,
+            }),
+        )
+        .expect("install ext-A HookFailed subscription")
+        .install_installed_event_triggered(
+            ext_a_source_hook_id,
+            HookPhase::Telemetry,
+            RuntimeEventKind::DispatchSucceeded,
+            ext_a,
+            HookBindingScope::Global,
+            Box::new(RecordingEventTriggeredHook {
+                seen: Arc::clone(&inert_seen),
+                delay: None,
+            }),
+        )
+        .expect("install ext-A source hook binding")
+        .install_installed_event_triggered(
+            ext_b_source_hook_id,
+            HookPhase::Telemetry,
+            RuntimeEventKind::DispatchSucceeded,
+            ext_b,
+            HookBindingScope::Global,
+            Box::new(RecordingEventTriggeredHook {
+                seen: Arc::clone(&inert_seen),
+                delay: None,
+            }),
+        )
+        .expect("install ext-B source hook binding")
+        .build_arc();
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let _host = fixture
+        .factory()
+        .with_hook_dispatcher(dispatcher)
+        .with_event_subscription(event_log_subscription(
+            Arc::clone(&log),
+            stream,
+            RuntimeEventCursor::origin(),
+        ))
+        .build_text_only_host_with_capabilities(fixture.request(), inner)
+        .await
+        .expect("host builds with scoped hook-failure event subscription");
+
+    let events = wait_for_seen_events(&seen, 2).await;
+    assert_eq!(events.len(), 2);
+    assert!(
+        events.iter().all(|event| event.provider.is_none()),
+        "HookFailed constructors leave provider unset; test must exercise hook_id owner lookup"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| event.hook_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![
+            Some(ext_a_source_hook_hex.as_str()),
+            Some(ext_a_source_hook_hex.as_str())
+        ],
+        "ext-A OwnCapabilities subscription must fire only for ext-A hook failures"
+    );
 }
 
 #[tokio::test]
