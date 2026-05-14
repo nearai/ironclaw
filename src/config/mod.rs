@@ -55,7 +55,7 @@ pub use self::agent::AgentConfig;
 pub use self::builder::BuilderModeConfig;
 pub use self::channels::{
     ChannelsConfig, CliConfig, DEFAULT_GATEWAY_PORT, GatewayConfig, GatewayOidcConfig, HttpConfig,
-    SignalConfig, TuiChannelConfig, validate_telegram_v1_v2_exclusivity,
+    SignalConfig, TuiChannelConfig,
 };
 pub use self::database::{DatabaseBackend, DatabaseConfig, SslMode, default_libsql_path};
 pub use self::embeddings::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig};
@@ -210,7 +210,6 @@ impl Config {
                 wasm_channels_enabled: false,
                 configured_wasm_channels: Vec::new(),
                 wasm_channel_owner_ids: HashMap::new(),
-                reborn_telegram_v2_enabled: false,
             },
             agent: AgentConfig::for_testing(),
             safety: SafetyConfig {

@@ -14,6 +14,7 @@ use ironclaw_product_workflow::{
 use uuid::Uuid;
 
 use crate::error::{pool_error, postgres_error, transient};
+use crate::phase::{parse_phase, phase_to_str};
 
 #[derive(Clone)]
 pub struct PostgresProductIdempotencyLedger {
@@ -23,28 +24,6 @@ pub struct PostgresProductIdempotencyLedger {
 impl PostgresProductIdempotencyLedger {
     pub fn new(pool: Pool) -> Self {
         Self { pool }
-    }
-}
-
-/// Convert the stored `phase` column value back to an `ActionPhase`.
-/// Exhaustive on the persisted wire spelling — keep in lock-step with
-/// [`phase_to_str`] below.
-fn parse_phase(value: &str) -> Result<ActionPhase, ProductWorkflowError> {
-    match value {
-        "received" => Ok(ActionPhase::Received),
-        "dispatched" => Ok(ActionPhase::Dispatched),
-        "settled" => Ok(ActionPhase::Settled),
-        "deduplicated_replay" => Ok(ActionPhase::DeduplicatedReplay),
-        other => Err(transient(format!("invalid phase '{other}'"))),
-    }
-}
-
-fn phase_to_str(phase: ActionPhase) -> &'static str {
-    match phase {
-        ActionPhase::Received => "received",
-        ActionPhase::Dispatched => "dispatched",
-        ActionPhase::Settled => "settled",
-        ActionPhase::DeduplicatedReplay => "deduplicated_replay",
     }
 }
 
@@ -96,9 +75,44 @@ impl IdempotencyLedger for PostgresProductIdempotencyLedger {
         fingerprint: ActionFingerprintKey,
         received_at: DateTime<Utc>,
     ) -> Result<IdempotencyDecision, ProductWorkflowError> {
+        // Single-roundtrip INSERT-or-replay using `ON CONFLICT DO NOTHING
+        // RETURNING action_id`. Closes the SELECT-then-INSERT TOCTOU window
+        // from the prior implementation (zmanian's review on PR #3590,
+        // item #1). If no row is returned, a concurrent caller — or an
+        // honest retry — beat us; a second SELECT fetches the canonical row
+        // and decides Replay vs Transient based on its phase.
         let client = self.pool.get().await.map_err(pool_error)?;
+        let action = ProductInboundAction::begin(fingerprint.clone(), received_at);
+        let action_id_uuid = action.action_id.as_uuid();
 
-        let existing = client
+        let inserted = client
+            .query_opt(
+                "INSERT INTO product_inbound_actions \
+                 (action_id, adapter_id, installation_id, source_binding_key, external_event_id, \
+                  phase, dispatch_kind_json, outcome_json, received_at, settled_at) \
+                 VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, $7, NULL) \
+                 ON CONFLICT (adapter_id, installation_id, source_binding_key, external_event_id) \
+                 DO NOTHING \
+                 RETURNING action_id",
+                &[
+                    &action_id_uuid,
+                    &action.fingerprint.adapter_id.as_str(),
+                    &action.fingerprint.installation_id.as_str(),
+                    &action.fingerprint.source_binding_key.as_str(),
+                    &action.fingerprint.external_event_id.as_str(),
+                    &phase_to_str(action.phase),
+                    &action.received_at,
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+
+        if inserted.is_some() {
+            return Ok(IdempotencyDecision::New(action));
+        }
+
+        // Conflict path: another caller owns the row. Read it and decide.
+        let row = client
             .query_opt(
                 "SELECT action_id, phase, dispatch_kind_json, outcome_json, received_at, settled_at \
                  FROM product_inbound_actions \
@@ -114,44 +128,24 @@ impl IdempotencyLedger for PostgresProductIdempotencyLedger {
                 ],
             )
             .await
-            .map_err(postgres_error)?;
+            .map_err(postgres_error)?
+            .ok_or_else(|| {
+                transient(
+                    "ledger ON CONFLICT fired but row not visible on follow-up SELECT",
+                )
+            })?;
 
-        if let Some(row) = existing {
-            let phase_str: String = row.get("phase");
-            let phase = parse_phase(&phase_str)?;
-            let action = row_into_action(&row, fingerprint.clone())?;
-            return match phase {
-                ActionPhase::Settled | ActionPhase::DeduplicatedReplay => {
-                    Ok(IdempotencyDecision::Replay(action))
-                }
-                ActionPhase::Received | ActionPhase::Dispatched => Err(transient(
-                    "idempotency fingerprint already in flight; retry after recovery lease",
-                )),
-            };
+        let phase_str: String = row.get("phase");
+        let phase = parse_phase(&phase_str)?;
+        let action = row_into_action(&row, fingerprint)?;
+        match phase {
+            ActionPhase::Settled | ActionPhase::DeduplicatedReplay => {
+                Ok(IdempotencyDecision::Replay(action))
+            }
+            ActionPhase::Received | ActionPhase::Dispatched => Err(transient(
+                "idempotency fingerprint already in flight; retry after recovery lease",
+            )),
         }
-
-        let action = ProductInboundAction::begin(fingerprint, received_at);
-        let action_id_uuid = action.action_id.as_uuid();
-        client
-            .execute(
-                "INSERT INTO product_inbound_actions \
-                 (action_id, adapter_id, installation_id, source_binding_key, external_event_id, \
-                  phase, dispatch_kind_json, outcome_json, received_at, settled_at) \
-                 VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, $7, NULL)",
-                &[
-                    &action_id_uuid,
-                    &action.fingerprint.adapter_id.as_str(),
-                    &action.fingerprint.installation_id.as_str(),
-                    &action.fingerprint.source_binding_key.as_str(),
-                    &action.fingerprint.external_event_id.as_str(),
-                    &phase_to_str(action.phase),
-                    &action.received_at,
-                ],
-            )
-            .await
-            .map_err(postgres_error)?;
-
-        Ok(IdempotencyDecision::New(action))
     }
 
     async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {

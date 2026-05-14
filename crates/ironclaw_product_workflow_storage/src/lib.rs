@@ -15,6 +15,8 @@
 
 mod error;
 mod identifiers;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod phase;
 
 #[cfg(feature = "libsql")]
 mod binding_libsql;

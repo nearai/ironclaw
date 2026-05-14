@@ -715,20 +715,6 @@ async fn async_main() -> anyhow::Result<()> {
             startup_active_channels.iter().cloned().collect()
         };
 
-        // Runtime-tier Telegram v1/v2 exclusivity check. The config-resolve
-        // call earlier (in `ChannelsConfig::resolve`) only sees the env-var
-        // view of v1. Persisted `activated_channels` rows can carry
-        // `telegram` independently of `WASM_CHANNELS`, and
-        // `setup_wasm_channels` auto-loads them — so an env-only guard
-        // would let v1 stand up alongside v2 for the same webhook
-        // installation. Re-running the validator here with the persisted
-        // set closes that gap (issue #3285, follow-up to PR #3356 review
-        // by @henrypark133).
-        ironclaw::config::validate_telegram_v1_v2_exclusivity(
-            &config.channels,
-            Some(&startup_active_wasm_channels),
-        )?;
-
         let wasm_result = ironclaw::channels::wasm::setup_wasm_channels(
             &config,
             &components.secrets_store,
@@ -756,24 +742,6 @@ async fn async_main() -> anyhow::Result<()> {
             }
         }
     }
-
-    // Reborn channel wiring — gated by REBORN_TELEGRAM_V2_ENABLED. All
-    // Reborn-related crate usage is contained in this single call into
-    // `ironclaw::channels::reborn`; the v1 agent binary doesn't otherwise
-    // mingle with Reborn crates (per @serrrfirat's review on PR #3590).
-    ironclaw::channels::reborn::register_reborn_channels(
-        ironclaw::channels::reborn::RebornChannelWiringInputs {
-            enable_non_cli,
-            reborn_telegram_v2_enabled: config.channels.reborn_telegram_v2_enabled,
-            owner_id: &config.owner_id,
-            database_handles: components.database_handles.as_ref(),
-            secrets_store: components.secrets_store.as_ref(),
-        },
-        &channels,
-        &mut webhook_routes,
-        &mut channel_names,
-    )
-    .await;
 
     // Add Signal channel if configured and not CLI-only mode.
     if enable_non_cli && let Some(ref signal_config) = config.channels.signal {

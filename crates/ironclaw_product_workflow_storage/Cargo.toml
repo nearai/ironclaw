@@ -11,6 +11,12 @@ publish = false
 default = []
 libsql = ["dep:libsql"]
 postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
+# Exposes test-only helpers (`TelegramHttpEgress::with_base_url_for_test`)
+# to downstream test crates. Off by default so production builds cannot
+# accidentally redirect egress to a non-Telegram host. Internal `#[cfg(test)]`
+# code uses the helper unconditionally; this feature is for external test
+# crates (`tests/`, sibling integration suites) that want the same helper.
+test-support = []
 
 [dependencies]
 async-trait = "0.1"

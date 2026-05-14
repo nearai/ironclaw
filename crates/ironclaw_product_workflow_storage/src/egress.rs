@@ -65,7 +65,12 @@ impl TelegramHttpEgress {
     /// Test-only: redirect the URL prefix to a local mock server. The
     /// declared-host allowlist still gates the request (so tests must still
     /// declare the host they put in the `EgressRequest`).
-    #[doc(hidden)]
+    ///
+    /// `#[doc(hidden)]` alone wasn't a compile-time barrier (zmanian's
+    /// review on PR #3590, item #11); the helper is now gated so it
+    /// physically does not exist in release builds without the
+    /// `test-support` feature.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_base_url_for_test(mut self, base_url: impl Into<String>) -> Self {
         self.base_url_for_test = Some(base_url.into());
         self

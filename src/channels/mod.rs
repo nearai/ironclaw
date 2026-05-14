@@ -31,7 +31,6 @@ mod attachments;
 mod channel;
 mod http;
 mod manager;
-pub mod reborn;
 pub mod relay;
 mod repl;
 mod signal;

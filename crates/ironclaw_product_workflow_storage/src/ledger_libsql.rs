@@ -15,6 +15,7 @@ use ironclaw_product_workflow::{
 use uuid::Uuid;
 
 use crate::error::{libsql_error, transient};
+use crate::phase::{parse_phase, phase_to_str};
 
 /// libSQL-backed durable idempotency ledger.
 ///
@@ -46,30 +47,6 @@ struct LedgerRow {
     outcome_json: Option<String>,
     received_at: String,
     settled_at: Option<String>,
-}
-
-/// Convert the stored `phase` column value back to an `ActionPhase`.
-/// Exhaustive on the persisted wire spelling — any new variant added to
-/// `ActionPhase` must be added here too, or this stops compiling.
-fn parse_phase(value: &str) -> Result<ActionPhase, ProductWorkflowError> {
-    match value {
-        "received" => Ok(ActionPhase::Received),
-        "dispatched" => Ok(ActionPhase::Dispatched),
-        "settled" => Ok(ActionPhase::Settled),
-        "deduplicated_replay" => Ok(ActionPhase::DeduplicatedReplay),
-        other => Err(transient(format!("invalid phase '{other}'"))),
-    }
-}
-
-fn phase_to_str(phase: ActionPhase) -> &'static str {
-    // Keep in lock-step with `parse_phase` above. Both must enumerate every
-    // `ActionPhase` variant or one of them will be silently lossy.
-    match phase {
-        ActionPhase::Received => "received",
-        ActionPhase::Dispatched => "dispatched",
-        ActionPhase::Settled => "settled",
-        ActionPhase::DeduplicatedReplay => "deduplicated_replay",
-    }
 }
 
 fn parse_timestamp(value: &str) -> Result<DateTime<Utc>, ProductWorkflowError> {
@@ -169,43 +146,62 @@ impl IdempotencyLedger for LibSqlProductIdempotencyLedger {
         fingerprint: ActionFingerprintKey,
         received_at: DateTime<Utc>,
     ) -> Result<IdempotencyDecision, ProductWorkflowError> {
+        // INSERT-first to close the SELECT-then-INSERT TOCTOU window
+        // (zmanian's review on PR #3590, item #1). Two concurrent callers
+        // with the same fingerprint used to both miss a prior SELECT and
+        // race the UNIQUE constraint at INSERT; the loser surfaced a raw DB
+        // error instead of the expected `Transient` reply. Mirrors the
+        // pattern already used by `binding_libsql.rs`.
         let conn = self.connect().await?;
-
-        if let Some(row) = fetch_row(&conn, &fingerprint).await? {
-            let phase = parse_phase(&row.phase)?;
-            let action = row_into_action(row, fingerprint.clone())?;
-            return match phase {
-                ActionPhase::Settled | ActionPhase::DeduplicatedReplay => {
-                    Ok(IdempotencyDecision::Replay(action))
-                }
-                ActionPhase::Received | ActionPhase::Dispatched => Err(transient(
-                    "idempotency fingerprint already in flight; retry after recovery lease",
-                )),
-            };
-        }
-
-        let action = ProductInboundAction::begin(fingerprint, received_at);
+        let action = ProductInboundAction::begin(fingerprint.clone(), received_at);
         let action_id_str = action.action_id.as_uuid().to_string();
         let received_at_str = format_timestamp(action.received_at);
-        conn.execute(
-            "INSERT INTO product_inbound_actions \
-             (action_id, adapter_id, installation_id, source_binding_key, external_event_id, \
-              phase, dispatch_kind_json, outcome_json, received_at, settled_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, ?7, NULL)",
-            ::libsql::params![
-                action_id_str,
-                action.fingerprint.adapter_id.as_str(),
-                action.fingerprint.installation_id.as_str(),
-                action.fingerprint.source_binding_key.as_str(),
-                action.fingerprint.external_event_id.as_str(),
-                phase_to_str(action.phase),
-                received_at_str,
-            ],
-        )
-        .await
-        .map_err(libsql_error)?;
 
-        Ok(IdempotencyDecision::New(action))
+        match conn
+            .execute(
+                "INSERT INTO product_inbound_actions \
+                 (action_id, adapter_id, installation_id, source_binding_key, external_event_id, \
+                  phase, dispatch_kind_json, outcome_json, received_at, settled_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, ?7, NULL)",
+                ::libsql::params![
+                    action_id_str,
+                    action.fingerprint.adapter_id.as_str(),
+                    action.fingerprint.installation_id.as_str(),
+                    action.fingerprint.source_binding_key.as_str(),
+                    action.fingerprint.external_event_id.as_str(),
+                    phase_to_str(action.phase),
+                    received_at_str,
+                ],
+            )
+            .await
+        {
+            Ok(_) => Ok(IdempotencyDecision::New(action)),
+            // UNIQUE constraint (extended SQLite code 2067 =
+            // SQLITE_CONSTRAINT_UNIQUE) means a concurrent caller — or an
+            // honest retry — got there first. Fetch the winning row and
+            // decide Replay vs Transient based on its phase. libsql 0.6
+            // surfaces the extended code, not the primary code 19; matching
+            // on 19 alone silently misses this case (verified empirically
+            // by an inline probe — UNIQUE = 2067 on this libsql version).
+            Err(::libsql::Error::SqliteFailure(2067, _)) => {
+                let row = fetch_row(&conn, &fingerprint).await?.ok_or_else(|| {
+                    transient(
+                        "ledger UNIQUE constraint fired but row not visible on follow-up SELECT",
+                    )
+                })?;
+                let phase = parse_phase(&row.phase)?;
+                let action = row_into_action(row, fingerprint)?;
+                match phase {
+                    ActionPhase::Settled | ActionPhase::DeduplicatedReplay => {
+                        Ok(IdempotencyDecision::Replay(action))
+                    }
+                    ActionPhase::Received | ActionPhase::Dispatched => Err(transient(
+                        "idempotency fingerprint already in flight; retry after recovery lease",
+                    )),
+                }
+            }
+            Err(other) => Err(libsql_error(other)),
+        }
     }
 
     async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
@@ -414,6 +410,45 @@ CREATE TABLE IF NOT EXISTS product_inbound_actions (
             .await
             .expect("second begin");
         assert!(matches!(second, IdempotencyDecision::New(_)));
+    }
+
+    /// Regression for zmanian's PR #3590 review item #1 — concurrent
+    /// `begin_or_replay` calls with the same fingerprint must never surface
+    /// a raw DB UNIQUE-constraint error. Exactly one task sees `New`; the
+    /// rest see `Transient` (an honest "in-flight" reply, retryable later)
+    /// or `Replay` (if one of them settled first). No `Err` other than
+    /// `Transient` is allowed.
+    #[tokio::test]
+    async fn concurrent_begin_funnels_through_unique_constraint() {
+        let (ledger, _dir) = ledger().await;
+        let fp = fingerprint("evt_concurrent");
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let l = ledger.clone();
+            let f = fp.clone();
+            handles.push(tokio::spawn(async move {
+                l.begin_or_replay(f, Utc::now()).await
+            }));
+        }
+
+        let mut new_count = 0;
+        let mut transient_count = 0;
+        for h in handles {
+            match h.await.expect("join") {
+                Ok(IdempotencyDecision::New(_)) => new_count += 1,
+                Ok(IdempotencyDecision::Replay(_)) => {
+                    // Possible if the winner settles in time, though not
+                    // expected in this test because nobody calls settle.
+                }
+                Err(ProductWorkflowError::Transient { .. }) => transient_count += 1,
+                Err(other) => {
+                    panic!("concurrent begin must surface Transient on conflict, not {other:?}")
+                }
+            }
+        }
+        assert_eq!(new_count, 1, "exactly one task should win the insert");
+        assert!(transient_count >= 1, "losers must surface as Transient");
     }
 
     #[tokio::test]

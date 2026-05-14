@@ -1,13 +1,8 @@
-//! Axum webhook route for the Reborn Telegram v2 channel.
+//! Axum webhook route for the standalone Reborn Telegram v2 host.
 //!
 //! Pattern: `POST /webhook/telegram-v2/{installation_id}` — delegates the
 //! whole webhook lifecycle to [`NativeProductAdapterRunner::process_webhook`]
-//! which handles auth verification, parsing, workflow dispatch, and ack
-//! mapping internally.
-//!
-//! Multi-install is out of scope for the tracer — boot wiring constructs one
-//! runner per configured installation; this router demultiplexes by the
-//! `{installation_id}` path segment.
+//! which handles auth, parsing, workflow dispatch, and ack mapping.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,8 +17,6 @@ use ironclaw_wasm_product_adapters::{
     NativeProductAdapterRunner, RunnerError, WebhookProcessOutcome,
 };
 
-/// Shared state: a map of `installation_id` to its configured
-/// [`NativeProductAdapterRunner`]. Constructed at app boot.
 #[derive(Clone)]
 pub struct TelegramV2RouterState {
     pub runners: Arc<HashMap<String, Arc<NativeProductAdapterRunner>>>,
@@ -75,7 +68,6 @@ async fn handle(
                 error = %err,
                 "telegram v2 webhook processing failed"
             );
-            // For retryable errors return 503 so Telegram retries; otherwise 500.
             if err.is_retryable() {
                 StatusCode::SERVICE_UNAVAILABLE.into_response()
             } else {

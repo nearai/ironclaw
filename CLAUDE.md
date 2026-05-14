@@ -266,16 +266,19 @@ See `.env.example` for all environment variables. LLM backends (`nearai`, `opena
 3. Add config in `src/config/channels.rs`
 4. Wire up in `src/app.rs` channel setup section
 
-## Reborn Channels (Telegram v2 tracer)
+## Reborn lives in a separate binary
 
-A second Telegram channel path lives in `src/channels/reborn/` and is
-default-off behind `REBORN_TELEGRAM_V2_ENABLED`. It wires the Reborn
-`ProductAdapter` / `ProductWorkflow` stack into the running binary
-with a v1 `Channel` bridge for outbound delivery. The v1/v2 exclusivity
-guard at `src/config/channels.rs:517` prevents both paths from being
-active for the same install. See `src/channels/reborn/CLAUDE.md` for
-file map, call paths, bridge seams, operator setup, and the migration
-path once PR #3583 (WASM ProductAdapter component runtime) lands.
+Reborn product-layer channels (Telegram v2, future Slack/Discord/WeChat
+ports) do not run inside this agent binary. They live in the
+`ironclaw_reborn_telegram_v2_host` workspace crate and ship as a
+standalone `ironclaw-reborn-telegram-host` binary. The v1 agent has zero
+awareness: no Reborn crate dependencies, no wiring code, no shared
+in-process state.
+
+See `crates/ironclaw_reborn_telegram_v2_host/` for the standalone host.
+Build with `cargo build --bin ironclaw-reborn-telegram-host`. (A separate
+`ironclaw-reborn` binary, from `crates/ironclaw_reborn_cli/`, is the
+operator/inspection surface for the broader Reborn runtime.)
 
 ## Everything Goes Through Tools
 

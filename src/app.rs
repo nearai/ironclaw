@@ -1006,11 +1006,6 @@ impl AppBuilder {
                 ));
                 em = em.with_pairing_store(ps);
             }
-            // Wire the Reborn Telegram v2 feature flag so the manager
-            // can reject hot-activation of the legacy `telegram` WASM
-            // channel when v2 owns the webhook installation (Henry's
-            // review on PR #3356 — startup guard alone is not enough).
-            em.set_reborn_telegram_v2_enabled(self.config.channels.reborn_telegram_v2_enabled);
             let manager = Arc::new(em);
             tools.register_extension_tools(Arc::clone(&manager));
 

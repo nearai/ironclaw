@@ -170,7 +170,10 @@ impl ConversationBindingService for LibSqlConversationBindingService {
             // UNIQUE violation means another concurrent inbound created the
             // binding between our SELECT and INSERT. Retry the lookup so we
             // return the canonical row instead of two threads for one chat.
-            ::libsql::Error::SqliteFailure(19, _) => {
+            // libsql 0.6 surfaces the extended SQLite code 2067
+            // (SQLITE_CONSTRAINT_UNIQUE), not the primary code 19; matching
+            // on 19 alone silently fails to catch the concurrent case.
+            ::libsql::Error::SqliteFailure(2067, _) => {
                 transient("concurrent binding insert detected; retry")
             }
             other => libsql_error(other),
