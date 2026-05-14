@@ -473,6 +473,17 @@ async fn handle_event(
                         ActiveTab::Logs => ActiveTab::Conversation,
                     };
                 }
+                InputAction::DownloadLogs => {
+                    let (message, kind) = match download_logs(state) {
+                        Ok(path) => (format!("Logs saved to {path}"), ToastKind::Success),
+                        Err(err) => (format!("Save logs failed: {err}"), ToastKind::Error),
+                    };
+                    state.toasts.push(Toast {
+                        message,
+                        kind,
+                        created_at: chrono::Utc::now(),
+                    });
+                }
                 InputAction::ScrollUp => match state.active_tab {
                     ActiveTab::Conversation => {
                         let page = state.conversation_height.max(2).saturating_sub(2) as i16;
@@ -2379,23 +2390,14 @@ fn render_toasts(
 
     let theme = layout.resolve_theme();
     let max_toasts = 3usize;
-    let toast_width = 40u16.min(size.width.saturating_sub(2));
+    let icon_pad = 4u16; // " ICON "
+    let border_pad = 2u16; // left + right border
 
     // Stack toasts from bottom up, above status bar
-    let start_y = size.height.saturating_sub(3); // above status bar + input
-    let visible_toasts = state.toasts.iter().rev().take(max_toasts);
+    let mut next_bottom = size.height.saturating_sub(3);
+    let visible_toasts: Vec<_> = state.toasts.iter().rev().take(max_toasts).collect();
 
-    for (i, toast) in visible_toasts.enumerate() {
-        let y = start_y.saturating_sub((i as u16) * 3);
-        let x = size.width.saturating_sub(toast_width + 1);
-        let area = Rect::new(x, y, toast_width, 3);
-
-        if area.y == 0 {
-            continue;
-        }
-
-        Clear.render(area, frame.buffer_mut());
-
+    for toast in visible_toasts {
         let (icon, border_style) = match toast.kind {
             ToastKind::Info => ("\u{2139}", theme.accent_style()),
             ToastKind::Success => ("\u{2713}", theme.success_style()),
@@ -2403,21 +2405,36 @@ fn render_toasts(
             ToastKind::Error => ("\u{2717}", theme.error_style()),
         };
 
+        // Width fits the message in full (e.g. saved-log file paths), capped
+        // at the terminal width. If even the cap isn't enough, the paragraph
+        // wraps onto extra lines and the toast grows in height.
+        let max_outer_width = size.width.saturating_sub(1);
+        let message_chars = u16::try_from(toast.message.chars().count()).unwrap_or(u16::MAX);
+        let toast_width = message_chars
+            .saturating_add(icon_pad + border_pad)
+            .min(max_outer_width)
+            .max(20);
+
+        let inner_msg_width = toast_width
+            .saturating_sub(border_pad + icon_pad)
+            .max(1) as usize;
+        let wrap_lines = toast.message.chars().count().div_ceil(inner_msg_width).max(1);
+        let toast_height = (wrap_lines as u16 + border_pad).min(size.height.saturating_sub(1));
+
+        if next_bottom < toast_height {
+            break;
+        }
+        let y = next_bottom.saturating_sub(toast_height);
+        let x = size.width.saturating_sub(toast_width + 1);
+        let area = Rect::new(x, y, toast_width, toast_height);
+
+        Clear.render(area, frame.buffer_mut());
+
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(border_style);
         let inner = block.inner(area);
         block.render(area, frame.buffer_mut());
-
-        let msg_width = inner.width as usize;
-        let display_msg = if toast.message.len() > msg_width.saturating_sub(3) {
-            format!(
-                "{}...",
-                &toast.message[..msg_width.saturating_sub(6).min(toast.message.len())]
-            )
-        } else {
-            toast.message.clone()
-        };
 
         let line = Line::from(vec![
             Span::styled(
@@ -2425,12 +2442,14 @@ fn render_toasts(
                 border_style.add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                display_msg,
+                toast.message.clone(),
                 ratatui::style::Style::default().fg(theme.fg.to_color()),
             ),
         ]);
-        let paragraph = Paragraph::new(line);
+        let paragraph = Paragraph::new(line).wrap(ratatui::widgets::Wrap { trim: false });
         paragraph.render(inner, frame.buffer_mut());
+
+        next_bottom = y;
     }
 }
 
@@ -2497,6 +2516,41 @@ fn try_paste_clipboard_image(state: &AppState) -> Option<TuiAttachment> {
 #[cfg(not(feature = "clipboard"))]
 fn try_paste_clipboard_image(_state: &AppState) -> Option<TuiAttachment> {
     None
+}
+
+/// Write the current log ring buffer to a timestamped file under `~/.ironclaw/logs/`
+/// (falls back to `$IRONCLAW_HOME/logs/` or the current directory). Returns the
+/// human-readable target path on success.
+fn download_logs(state: &AppState) -> Result<String, String> {
+    use std::io::Write;
+
+    let dir = log_output_dir().ok_or_else(|| "could not resolve log directory".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let path = dir.join(format!("tui-logs-{stamp}.log"));
+
+    let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
+    for entry in state.log_entries.iter() {
+        writeln!(
+            file,
+            "{} {:<5} {} {}",
+            entry.timestamp, entry.level, entry.target, entry.message
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    Ok(path.display().to_string())
+}
+
+fn log_output_dir() -> Option<std::path::PathBuf> {
+    if let Ok(custom) = std::env::var("IRONCLAW_HOME") {
+        return Some(std::path::PathBuf::from(custom).join("logs"));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return Some(std::path::PathBuf::from(home).join(".ironclaw").join("logs"));
+    }
+    std::env::current_dir().ok().map(|d| d.join("logs"))
 }
 
 /// Encode raw RGBA pixel data to PNG. Returns `None` on invalid dimensions or

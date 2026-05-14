@@ -17,6 +17,8 @@ pub enum InputAction {
     ToggleSidebar,
     /// Toggle between Conversation and Logs tabs.
     ToggleLogs,
+    /// Write the current log buffer to a file on disk (Ctrl-S in Logs tab).
+    DownloadLogs,
     /// Scroll conversation up.
     ScrollUp,
     /// Scroll conversation down.
@@ -122,6 +124,14 @@ pub fn map_key(
     // Log level filter keys only in logs tab
     if logs_active && let Some(action) = map_log_filter_key(key) {
         return action;
+    }
+
+    // Save logs only when the Logs tab is the focused view.
+    if logs_active
+        && key.code == KeyCode::Char('s')
+        && key.modifiers == KeyModifiers::CONTROL
+    {
+        return InputAction::DownloadLogs;
     }
 
     match (key.code, key.modifiers) {
