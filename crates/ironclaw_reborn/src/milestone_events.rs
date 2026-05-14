@@ -18,6 +18,9 @@ use ironclaw_turns::{
 const MODEL_CAPABILITY_ID: &str = "loop.model";
 const ASSISTANT_REPLY_CAPABILITY_ID: &str = "loop.assistant_reply";
 const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";
+const CAPABILITY_BATCH_CAPABILITY_ID: &str = "loop.capability_batch";
+const GATE_CAPABILITY_ID: &str = "loop.gate";
+const CHECKPOINT_CAPABILITY_ID: &str = "loop.checkpoint";
 
 /// Scope authority bound into the sink at construction time.
 ///
@@ -195,9 +198,22 @@ impl DurableLoopHostMilestoneSink {
                 capability_id(LOOP_RUN_CAPABILITY_ID)?,
                 loop_failure_kind(reason_kind),
             ),
-            LoopHostMilestoneKind::PromptBundleBuilt { .. }
+            LoopHostMilestoneKind::CapabilityBatchCompleted { .. } => {
+                RuntimeEvent::capability_batch_completed(
+                    scope,
+                    capability_id(CAPABILITY_BATCH_CAPABILITY_ID)?,
+                )
+            }
+            LoopHostMilestoneKind::GateBlocked { .. } => {
+                RuntimeEvent::gate_blocked(scope, capability_id(GATE_CAPABILITY_ID)?)
+            }
+            LoopHostMilestoneKind::CheckpointCreated { .. } => {
+                RuntimeEvent::checkpoint_created(scope, capability_id(CHECKPOINT_CAPABILITY_ID)?)
+            }
+            LoopHostMilestoneKind::IterationStarted { .. }
+            | LoopHostMilestoneKind::PromptBundleBuilt { .. }
             | LoopHostMilestoneKind::CapabilityInvoked { .. }
-            | LoopHostMilestoneKind::CheckpointCreated { .. }
+            | LoopHostMilestoneKind::CapabilityBatchStarted { .. }
             | LoopHostMilestoneKind::Blocked { .. }
             | LoopHostMilestoneKind::DriverNote { .. } => return Ok(None),
         };

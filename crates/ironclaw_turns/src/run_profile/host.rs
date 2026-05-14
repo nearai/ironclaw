@@ -838,6 +838,10 @@ pub struct LoopPromptBundle {
     pub surface_version: Option<CapabilitySurfaceVersion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
+    #[serde(default)]
+    pub identity_message_count: u32,
+    #[serde(default)]
+    pub instruction_snippet_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1385,6 +1389,38 @@ pub enum LoopProgressEvent {
         kind: LoopDriverNoteKind,
         safe_summary: LoopSafeSummary,
     },
+    IterationStarted {
+        iteration: u32,
+    },
+    PromptBundleBuilt {
+        iteration: u32,
+        bundle_ref: LoopPromptBundleRef,
+        mode: PromptMode,
+        surface_version: Option<CapabilitySurfaceVersion>,
+        message_count: u32,
+        identity_message_count: u32,
+        instruction_snippet_count: u32,
+    },
+    CapabilityBatchStarted {
+        iteration: u32,
+        call_count: u32,
+        policy: BatchPolicyKind,
+    },
+    CapabilityBatchCompleted {
+        iteration: u32,
+        result_count: u32,
+        denied_count: u32,
+        gated_count: u32,
+        failed_count: u32,
+    },
+    GateBlocked {
+        iteration: u32,
+        gate_kind: LoopGateKind,
+    },
+    CheckpointWritten {
+        iteration: u32,
+        kind: LoopCheckpointKind,
+    },
 }
 
 impl LoopProgressEvent {
@@ -1401,8 +1437,29 @@ impl LoopProgressEvent {
     pub fn kind_name(&self) -> &'static str {
         match self {
             Self::DriverNote { .. } => "driver_note",
+            Self::IterationStarted { .. } => "iteration_started",
+            Self::PromptBundleBuilt { .. } => "prompt_bundle_built",
+            Self::CapabilityBatchStarted { .. } => "capability_batch_started",
+            Self::CapabilityBatchCompleted { .. } => "capability_batch_completed",
+            Self::GateBlocked { .. } => "gate_blocked",
+            Self::CheckpointWritten { .. } => "checkpoint_written",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchPolicyKind {
+    Sequential,
+    Parallel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopGateKind {
+    Approval,
+    Auth,
+    ResourceWait,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

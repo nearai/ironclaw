@@ -193,6 +193,9 @@ pub enum TimelineEntryKind {
     AssistantReplyFinalized,
     LoopCompleted,
     LoopFailed,
+    CapabilityBatchCompleted,
+    GateBlocked,
+    CheckpointCreated,
     ProcessStarted,
     ProcessCompleted,
     ProcessFailed,
@@ -212,6 +215,9 @@ impl From<RuntimeEventKind> for TimelineEntryKind {
             RuntimeEventKind::AssistantReplyFinalized => Self::AssistantReplyFinalized,
             RuntimeEventKind::LoopCompleted => Self::LoopCompleted,
             RuntimeEventKind::LoopFailed => Self::LoopFailed,
+            RuntimeEventKind::CapabilityBatchCompleted => Self::CapabilityBatchCompleted,
+            RuntimeEventKind::GateBlocked => Self::GateBlocked,
+            RuntimeEventKind::CheckpointCreated => Self::CheckpointCreated,
             RuntimeEventKind::ProcessStarted => Self::ProcessStarted,
             RuntimeEventKind::ProcessCompleted => Self::ProcessCompleted,
             RuntimeEventKind::ProcessFailed => Self::ProcessFailed,
@@ -1593,6 +1599,9 @@ fn apply_run_event(
         RuntimeEventKind::AssistantReplyFinalized
             | RuntimeEventKind::LoopCompleted
             | RuntimeEventKind::LoopFailed
+            | RuntimeEventKind::CapabilityBatchCompleted
+            | RuntimeEventKind::GateBlocked
+            | RuntimeEventKind::CheckpointCreated
     ) {
         run.capability_id = event.capability_id.clone();
     }
@@ -1629,6 +1638,9 @@ fn run_status_for_event(
         | RuntimeEventKind::ModelStarted
         | RuntimeEventKind::ModelCompleted
         | RuntimeEventKind::ModelFailed
+        | RuntimeEventKind::CapabilityBatchCompleted
+        | RuntimeEventKind::GateBlocked
+        | RuntimeEventKind::CheckpointCreated
         | RuntimeEventKind::ProcessStarted => RunProjectionStatus::Running,
         RuntimeEventKind::DispatchSucceeded
             if has_active_process && current_status == Some(RunProjectionStatus::Running) =>

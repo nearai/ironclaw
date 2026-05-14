@@ -16,7 +16,7 @@ use ironclaw_turns::{
     events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
+        BatchPolicyKind, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion, ConcurrencyHint,
         FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
@@ -25,14 +25,15 @@ use ironclaw_turns::{
         InstructionSafetyContext, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage,
         LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata,
-        LoopDriverId, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneEmitter,
-        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor,
-        LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
-        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
-        LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, ModelCallOutcome, ParentLoopOutput,
-        PromptMode, PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
+        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputBatch,
+        LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
+        LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage,
+        LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleRef,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
+        LoopTranscriptPort, ModelCallOutcome, ParentLoopOutput, PromptMode,
+        PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -619,6 +620,8 @@ async fn loop_prompt_port_builds_text_only_bundle_from_context_refs() {
 
     assert!(bundle.bundle_ref.is_for_run(&host.context));
     assert_eq!(bundle.surface_version, Some(surface_version));
+    assert_eq!(bundle.identity_message_count, 0);
+    assert_eq!(bundle.instruction_snippet_count, 0);
     assert_eq!(
         bundle.messages,
         vec![LoopModelMessage {
@@ -685,6 +688,54 @@ async fn loop_prompt_port_uses_current_surface_version_lookup_each_build() {
 }
 
 #[tokio::test]
+async fn loop_milestone_emitter_publishes_loop_progress_kinds() {
+    let host = RecordingAgentLoopHost::new(claimed_run_context().await);
+    let emitter = host.milestone_emitter();
+
+    emitter.iteration_started(3).await.unwrap();
+    emitter
+        .capability_batch_started(3, 2, BatchPolicyKind::Parallel)
+        .await
+        .unwrap();
+    emitter
+        .capability_batch_completed(3, 1, 0, 1, 0)
+        .await
+        .unwrap();
+    emitter.gate_blocked(3, LoopGateKind::Auth).await.unwrap();
+
+    let milestones = host.milestones();
+    assert!(matches!(
+        milestones[0].kind,
+        LoopHostMilestoneKind::IterationStarted { iteration: 3 }
+    ));
+    assert!(matches!(
+        milestones[1].kind,
+        LoopHostMilestoneKind::CapabilityBatchStarted {
+            iteration: 3,
+            call_count: 2,
+            policy: BatchPolicyKind::Parallel,
+        }
+    ));
+    assert!(matches!(
+        milestones[2].kind,
+        LoopHostMilestoneKind::CapabilityBatchCompleted {
+            iteration: 3,
+            result_count: 1,
+            denied_count: 0,
+            gated_count: 1,
+            failed_count: 0,
+        }
+    ));
+    assert!(matches!(
+        milestones[3].kind,
+        LoopHostMilestoneKind::GateBlocked {
+            iteration: 3,
+            gate_kind: LoopGateKind::Auth,
+        }
+    ));
+}
+
+#[tokio::test]
 async fn loop_prompt_port_materializes_instruction_snippets_as_system_refs() {
     let host = Arc::new(
         RecordingAgentLoopHost::new(claimed_run_context().await)
@@ -709,6 +760,8 @@ async fn loop_prompt_port_materializes_instruction_snippets_as_system_refs() {
         .unwrap();
 
     assert_eq!(bundle.messages.len(), 2);
+    assert_eq!(bundle.identity_message_count, 0);
+    assert_eq!(bundle.instruction_snippet_count, 1);
     assert_eq!(bundle.messages[0].role, "system");
     assert_eq!(
         bundle.messages[0].content_ref,
@@ -1952,6 +2005,8 @@ impl LoopPromptPort for RecordingAgentLoopHost {
                 .collect(),
             surface_version: request.surface_version,
             instruction_fingerprint: None,
+            identity_message_count: 0,
+            instruction_snippet_count: 0,
         };
         self.milestone_emitter()
             .prompt_bundle_built(
