@@ -24,6 +24,7 @@ pub mod middleware;
 pub mod ordering;
 pub mod points;
 pub mod predicate;
+pub mod predicate_state;
 pub mod registrar;
 pub mod registry;
 pub mod self_authored;
