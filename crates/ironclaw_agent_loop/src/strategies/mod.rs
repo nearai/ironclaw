@@ -36,6 +36,7 @@ pub(crate) use gate::{GateHandlingStrategy, GateKind, GateOutcome, GateSummary};
 pub(crate) use ironclaw_turns::run_profile::ConcurrencyHint;
 pub(crate) use model::{ModelPreference, ModelStrategy};
 pub(crate) use recovery::{
-    CapabilityErrorClass, CapabilityErrorSummary, ModelErrorClass, ModelErrorSummary,
-    RecoveryOutcome, RecoveryStrategy, RetryAlteration, SanitizedStrategySummary,
+    BackoffDelayMs, CapabilityErrorClass, CapabilityErrorSummary, ModelErrorClass,
+    ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryAlteration, RetryScope,
+    SanitizedStrategySummary,
 };

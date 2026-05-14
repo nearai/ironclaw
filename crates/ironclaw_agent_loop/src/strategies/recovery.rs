@@ -115,7 +115,8 @@ pub(crate) enum ModelErrorClass {
 ///
 /// Variants:
 /// - `Retry` — re-issue (the executor decides whether call-level or
-///   iteration-level retry; `alter` carries the strategy's hint).
+///   iteration-level retry from `scope`; `alter` carries the strategy's
+///   prompt/model hint).
 /// - `SkipResult` — drop this result and continue the batch.
 /// - `Abort` — return `LoopExit::Failed { reason_kind: failure_kind }`.
 #[non_exhaustive]
@@ -124,6 +125,7 @@ pub(crate) enum ModelErrorClass {
 pub(crate) enum RecoveryOutcome {
     Retry {
         recovery: RecoveryStrategyState,
+        scope: RetryScope,
         alter: Option<RetryAlteration>,
     },
     SkipResult {
@@ -133,6 +135,17 @@ pub(crate) enum RecoveryOutcome {
         recovery: RecoveryStrategyState,
         failure_kind: LoopFailureKind,
     },
+}
+
+/// Where the executor should apply a retry outcome.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RetryScope {
+    /// Retry only the capability call or model call that produced the error.
+    Call,
+    /// Re-run the current loop iteration after rebuilding iteration context.
+    Iteration,
 }
 
 /// Strategy hint about WHAT to alter on retry. Skeleton supports prompt-shape
@@ -145,11 +158,53 @@ pub(crate) enum RetryAlteration {
     /// Shrink context for the next attempt (e.g. on context-overflow).
     ShrinkContext { drop_messages: u32 },
     /// Backoff before retry (executor honors as a sleep).
-    Backoff { delay_ms: u64 },
+    Backoff { delay_ms: BackoffDelayMs },
     /// Reserved for future `ModelRouteChain` landing. Skeleton executor MUST
     /// reject this alteration with `LoopFailureKind::DriverBug` until the
     /// chain mechanism lands.
     AdvanceFallback,
+}
+
+/// Bounded retry backoff delay in milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BackoffDelayMs(u64);
+
+impl BackoffDelayMs {
+    pub(crate) const MAX_DELAY_MS: u64 = 60_000;
+
+    pub(crate) fn new(delay_ms: u64) -> Result<Self, String> {
+        if delay_ms <= Self::MAX_DELAY_MS {
+            Ok(Self(delay_ms))
+        } else {
+            Err(format!(
+                "backoff delay {delay_ms}ms exceeds max {}ms",
+                Self::MAX_DELAY_MS
+            ))
+        }
+    }
+
+    pub(crate) fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
+impl serde::Serialize for BackoffDelayMs {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u64(self.0)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for BackoffDelayMs {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let delay_ms = <u64 as serde::Deserialize>::deserialize(deserializer)?;
+        Self::new(delay_ms).map_err(serde::de::Error::custom)
+    }
 }
 
 #[cfg(test)]
@@ -239,6 +294,37 @@ mod tests {
     }
 
     #[test]
+    fn retry_scope_round_trips_snake_case() {
+        for (variant, wire) in [
+            (RetryScope::Call, "call"),
+            (RetryScope::Iteration, "iteration"),
+        ] {
+            let value = serde_json::to_value(variant).expect("serialize");
+            assert_eq!(value, serde_json::json!(wire));
+            let restored: RetryScope = serde_json::from_value(value).expect("deserialize");
+            assert_eq!(restored, variant);
+        }
+    }
+
+    #[test]
+    fn backoff_delay_ms_accepts_bounded_values_and_serializes_as_number() {
+        let delay = BackoffDelayMs::new(250).expect("valid");
+        assert_eq!(delay.as_u64(), 250);
+        let value = serde_json::to_value(delay).expect("serialize");
+        assert_eq!(value, serde_json::json!(250));
+        let restored: BackoffDelayMs = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(restored, delay);
+    }
+
+    #[test]
+    fn backoff_delay_ms_rejects_values_above_max() {
+        let too_large = BackoffDelayMs::MAX_DELAY_MS + 1;
+        assert!(BackoffDelayMs::new(too_large).is_err());
+        let result = serde_json::from_value::<BackoffDelayMs>(serde_json::json!(too_large));
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn retry_alteration_shrink_context_round_trips() {
         let alteration = RetryAlteration::ShrinkContext { drop_messages: 4 };
         let value = serde_json::to_value(&alteration).expect("serialize");
@@ -254,14 +340,16 @@ mod tests {
 
     #[test]
     fn retry_alteration_backoff_round_trips() {
-        let alteration = RetryAlteration::Backoff { delay_ms: 250 };
+        let alteration = RetryAlteration::Backoff {
+            delay_ms: BackoffDelayMs::new(250).expect("valid"),
+        };
         let value = serde_json::to_value(&alteration).expect("serialize");
         assert_eq!(value["delay_ms"], serde_json::json!(250));
         let restored: RetryAlteration = serde_json::from_value(value).expect("deserialize");
         assert_eq!(restored, alteration);
         match restored {
             RetryAlteration::Backoff { delay_ms } => {
-                assert_eq!(delay_ms, 250)
+                assert_eq!(delay_ms.as_u64(), 250)
             }
             other => panic!("unexpected variant: {other:?}"),
         }
@@ -279,14 +367,20 @@ mod tests {
     fn recovery_outcome_retry_carries_recovery_slot_and_optional_alteration() {
         let outcome = RecoveryOutcome::Retry {
             recovery: sample_recovery(),
+            scope: RetryScope::Call,
             alter: Some(RetryAlteration::ShrinkContext { drop_messages: 2 }),
         };
         let value = serde_json::to_value(&outcome).expect("serialize");
         let restored: RecoveryOutcome = serde_json::from_value(value).expect("deserialize");
         assert_eq!(restored, outcome);
         match restored {
-            RecoveryOutcome::Retry { recovery, alter } => {
+            RecoveryOutcome::Retry {
+                recovery,
+                scope,
+                alter,
+            } => {
                 assert_eq!(recovery, sample_recovery());
+                assert_eq!(scope, RetryScope::Call);
                 assert_eq!(
                     alter,
                     Some(RetryAlteration::ShrinkContext { drop_messages: 2 })
