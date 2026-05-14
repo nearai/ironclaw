@@ -153,7 +153,7 @@ impl PredicateEvaluator {
                             tenant_id: ctx.tenant_id.clone(),
                             capability: ctx.capability_name.clone(),
                         };
-                        let event_id = synth_event_id(hook_id, ctx);
+                        let event_id = resolve_event_id(hook_id, ctx);
                         let count = match self
                             .backend
                             .record_invocation(&key, &event_id, now, window_dur)
@@ -216,7 +216,7 @@ impl PredicateEvaluator {
                             capability: ctx.capability_name.clone(),
                             field: field.clone(),
                         };
-                        let event_id = synth_event_id(hook_id, ctx);
+                        let event_id = resolve_event_id(hook_id, ctx);
                         let sum = match self
                             .backend
                             .record_value(&key, &event_id, now, value, window_dur)
@@ -242,12 +242,32 @@ impl PredicateEvaluator {
     }
 }
 
-/// Synthesize a per-call-unique event id. Production callers that want
-/// replay dedup (durable backends) should plumb the runtime's
-/// `RuntimeEventId` through a future `evaluate_with_event_id` API; the
-/// synth path used here generates a globally unique id per call so the
-/// in-memory backend's dedup correctness property still holds without
-/// changing the evaluator's public surface.
+/// Resolve the event id used for backend replay/idempotency dedup.
+///
+/// Prefer the caller-supplied [`BeforeCapabilityHookContext::caller_event_id`]
+/// when present — that is the load-bearing path for durable backends, where
+/// the same logical invocation re-evaluated on retry/replay must produce the
+/// same id so the backend's UNIQUE constraint short-circuits the second
+/// counter write.
+///
+/// When no caller id is wired through, fall back to a per-call-unique synth.
+/// This preserves the in-memory backend's correctness ("each evaluation
+/// counts once") while making the synth path explicit and easy to spot in
+/// review: any production durable caller that lands without supplying
+/// `caller_event_id` will visibly fall through to this synth path. The
+/// fallback is the legacy behavior; the documented contract for durable use
+/// is "caller MUST supply `caller_event_id`."
+fn resolve_event_id(hook_id: HookId, ctx: &BeforeCapabilityHookContext) -> PredicateEventId {
+    if let Some(caller_id) = ctx.caller_event_id.as_ref() {
+        return caller_id.clone();
+    }
+    synth_event_id(hook_id, ctx)
+}
+
+/// Synthesize a per-call-unique event id. Used by [`resolve_event_id`] only
+/// when the caller has not supplied a stable id via
+/// [`BeforeCapabilityHookContext::caller_event_id`]; see that function's
+/// documentation for the load-bearing semantics.
 ///
 /// The id is the hex digest of `(hook_id, capability_name, arguments_digest,
 /// process-local counter)`. The counter guarantees uniqueness across calls
@@ -469,6 +489,79 @@ mod tests {
             evaluator.evaluate(hook_id(), &spec, &ctx("memory.read")),
             EvaluatorDecision::Allow
         );
+    }
+
+    /// henrypark133 HIGH regression on PR #3635: replay dedup must engage
+    /// when the caller threads a stable `caller_event_id` through the hook
+    /// context. Two evaluations with the same id must count as one
+    /// invocation, even if all other context (capability, args, hook,
+    /// timestamp) is bit-identical — because that's the very case durable
+    /// backends face on retry/replay.
+    #[test]
+    fn duplicate_caller_event_id_is_deduped_in_invocation_count() {
+        let evaluator = PredicateEvaluator::new();
+        let spec = HookPredicateSpec::RateOrValueCap {
+            when: CapabilityPredicate::NameEquals {
+                name: "cap.x".to_string(),
+            },
+            bound: ValueOrRateBound::InvocationCount {
+                max: 2,
+                window: "1h".to_string(),
+            },
+            on_exceeded: OnExceededAction::Deny {
+                reason: "rate cap".to_string(),
+            },
+        };
+        let stable_id = crate::predicate_state::PredicateEventId(
+            "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234".to_string(),
+        );
+        let ctx_with_id = ctx("cap.x").with_caller_event_id(stable_id);
+        let now = Instant::now();
+
+        // First evaluation with the stable id — counted.
+        assert_eq!(
+            evaluator.evaluate_at(hook_id(), &spec, &ctx_with_id, now),
+            EvaluatorDecision::Allow
+        );
+        // Replay with the same caller_event_id — backend dedupes, count
+        // remains 1, still under the cap of 2.
+        assert_eq!(
+            evaluator.evaluate_at(hook_id(), &spec, &ctx_with_id, now),
+            EvaluatorDecision::Allow
+        );
+        // A second logical invocation gets a different stable id and counts
+        // — bringing total to 2, still under the cap.
+        let second_id = crate::predicate_state::PredicateEventId(
+            "ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555".to_string(),
+        );
+        let ctx_second = ctx("cap.x").with_caller_event_id(second_id);
+        assert_eq!(
+            evaluator.evaluate_at(hook_id(), &spec, &ctx_second, now),
+            EvaluatorDecision::Allow
+        );
+        // A third logical invocation crosses the cap.
+        let third_id = crate::predicate_state::PredicateEventId(
+            "11112222111122221111222211112222111122221111222211112222111122".to_string(),
+        );
+        let ctx_third = ctx("cap.x").with_caller_event_id(third_id);
+        assert!(matches!(
+            evaluator.evaluate_at(hook_id(), &spec, &ctx_third, now),
+            EvaluatorDecision::Deny { .. }
+        ));
+
+        // Sanity: without `caller_event_id`, the synth path counts each call.
+        // Four evaluations against a different evaluator hit the cap normally.
+        let plain = PredicateEvaluator::new();
+        for _ in 0..2 {
+            assert_eq!(
+                plain.evaluate_at(hook_id(), &spec, &ctx("cap.x"), now),
+                EvaluatorDecision::Allow
+            );
+        }
+        assert!(matches!(
+            plain.evaluate_at(hook_id(), &spec, &ctx("cap.x"), now),
+            EvaluatorDecision::Deny { .. }
+        ));
     }
 
     #[test]
