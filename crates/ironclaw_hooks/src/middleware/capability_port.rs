@@ -551,6 +551,31 @@ fn serialized_len(value: &serde_json::Value) -> Result<u64, serde_json::Error> {
 /// hashes the input-ref's underlying value so two invocations with identical
 /// arguments produce the same digest, enabling repetition / rate-cap logic
 /// without exposing raw arguments to hook code.
+///
+/// # Stability contract
+///
+/// This digest is part of the **public hook contract**. Repetition-detection
+/// hooks key on `BeforeCapabilityHookContext.arguments_digest` across
+/// invocations; a shifted digest silently breaks them. Changing the hashing
+/// structure (length-prefix ordering, hasher choice, which fields contribute)
+/// requires:
+///
+/// 1. Updating the fixture in
+///    `tests::invocation_arguments_digest_is_stable_for_known_inputs` with
+///    the new captured hex.
+/// 2. Surfacing the change in the cross-crate wire-format contract section
+///    of `crate::identity` (the same section that pins `HookId::to_hex()`).
+/// 3. Bumping the hook framework's contract version if downstream
+///    consumers exist.
+///
+/// What this digest is NOT:
+///
+/// - **Not** a content digest of the resolved capability arguments. Hooks
+///   that want to key on resolved content should use
+///   `CapabilityInputResolver` + `SanitizedArguments`, not this digest.
+/// - **Not** suitable as a primary key for cross-process deduplication —
+///   two distinct invocations with the same `input_ref` (rare but legal)
+///   produce the same digest.
 fn invocation_arguments_digest(invocation: &CapabilityInvocation) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     let cap = invocation.capability_id.to_string();
@@ -760,6 +785,58 @@ mod tests {
                 "no router",
             ))
         }
+    }
+
+    /// Snapshot regression: pins `invocation_arguments_digest` for a known
+    /// `(capability_id, input_ref)` pair. If this assertion fails, the
+    /// digest's hashing structure changed — see the stability contract on
+    /// `invocation_arguments_digest`. **Do not update the expected hex
+    /// without auditing every caller that keys on `arguments_digest`.**
+    #[test]
+    fn invocation_arguments_digest_is_stable_for_known_inputs() {
+        let invocation = CapabilityInvocation {
+            surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(
+                "snapshot:v1",
+            )
+            .expect("surface version literal is valid"),
+            capability_id: CapabilityId::new("cap.snapshot.fixture")
+                .expect("capability id literal is valid"),
+            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
+                "input:cap.snapshot.fixture",
+            )
+            .expect("input ref literal is valid"),
+        };
+        let digest = invocation_arguments_digest(&invocation);
+        let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "4d0ab78e009b32615c2766bd1c26921bd59ef81b5741a75387707f82f0344315",
+            "invocation_arguments_digest shifted for a fixed input — \
+             this is a wire-contract break. See the stability-contract \
+             rustdoc on `invocation_arguments_digest`."
+        );
+    }
+
+    /// Distinct inputs must produce distinct digests (sanity check; the
+    /// snapshot test pins one specific point in input space, this widens
+    /// coverage to the structural property).
+    #[test]
+    fn invocation_arguments_digest_differs_for_different_input_refs() {
+        let cap_id = CapabilityId::new("cap.x").expect("ok");
+        let surface = ironclaw_turns::run_profile::CapabilitySurfaceVersion::new("v").expect("ok");
+        let a = CapabilityInvocation {
+            surface_version: surface.clone(),
+            capability_id: cap_id.clone(),
+            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:a").expect("ok"),
+        };
+        let b = CapabilityInvocation {
+            surface_version: surface,
+            capability_id: cap_id,
+            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new("input:b").expect("ok"),
+        };
+        assert_ne!(
+            invocation_arguments_digest(&a),
+            invocation_arguments_digest(&b)
+        );
     }
 
     fn invocation(capability: &str) -> CapabilityInvocation {
