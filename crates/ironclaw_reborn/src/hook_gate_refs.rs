@@ -152,6 +152,16 @@ pub struct HookGateReservation {
 }
 
 /// Request to consume a previously issued hook gate ref.
+///
+/// **No timestamp field.** Resolution time and consumption time are
+/// authoritatively owned by the router via its own clock — see
+/// [`HookGateResolution::resolved_at`] for the router-supplied value
+/// returned on successful consumption. An earlier revision of this struct
+/// exposed a caller-supplied `resolved_at`; that was a trust-boundary bug
+/// (serrrfirat HIGH on PR #3633) because any adapter or buggy caller could
+/// backdate it and bypass TTL enforcement. The field is gone; expiry and
+/// `consumed_at` are now computed inside `resolve_gate` from the router's
+/// own wall clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookGateResolutionRequest {
     pub gate_ref: LoopGateRef,
@@ -160,7 +170,6 @@ pub struct HookGateResolutionRequest {
     pub run_context: LoopRunContext,
     pub capability_id: CapabilityId,
     pub arguments_digest: String,
-    pub resolved_at: DateTime<Utc>,
 }
 
 impl HookGateResolutionRequest {
@@ -194,7 +203,6 @@ impl HookGateResolutionRequest {
             run_context,
             capability_id: metadata.capability_id,
             arguments_digest: metadata.arguments_digest,
-            resolved_at: Utc::now(),
         })
     }
 }

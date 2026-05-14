@@ -1308,20 +1308,25 @@ async fn router_backed_pause_approval_gate_ref_rejects_backdated_resolution_afte
     let CapabilityOutcome::ApprovalRequired { gate_ref, .. } = outcome else {
         panic!("expected ApprovalRequired, got {outcome:?}");
     };
+    // serrrfirat HIGH regression: `HookGateResolutionRequest` no longer
+    // exposes a caller-controllable `resolved_at`. Time authority lives on
+    // the router's own wall clock — see `InMemoryHookGateRouter::resolve_gate`
+    // where `Utc::now()` is read directly. The TTL was 1ms above and we
+    // slept 5ms past reservation, so the router will compute "now is past
+    // expires_at" using its own clock; no caller value can override it.
     tokio::time::sleep(StdDuration::from_millis(5)).await;
-    let mut resolution_request = HookGateResolutionRequest::for_invocation(
+    let resolution_request = HookGateResolutionRequest::for_invocation(
         gate_ref,
         HookGateActorBinding::new(fixture.actor_id.clone()),
         fixture.context.clone(),
         &request,
     )
     .expect("resolution request can be derived from invocation");
-    resolution_request.resolved_at = Utc::now() - chrono::Duration::seconds(30);
 
     let err = router
         .resolve(resolution_request)
         .await
-        .expect_err("backdating resolved_at must not bypass router TTL enforcement");
+        .expect_err("router-owned clock must enforce TTL regardless of caller intent");
     assert!(err.is_expired(), "expected expired error, got {err:?}");
     assert!(
         inner.invocations().is_empty(),
