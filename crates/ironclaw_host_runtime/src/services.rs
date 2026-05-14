@@ -24,7 +24,7 @@ use ironclaw_dispatcher::{
 };
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
-    InMemoryAuditSink, InMemoryEventSink,
+    InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
 };
 use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime};
 #[cfg(feature = "libsql")]
@@ -324,7 +324,9 @@ fn classify_component_type<T: 'static>() -> ProductionImplementationReadiness {
             || type_id == TypeId::of::<InMemoryApprovalRequestStore>()
             || type_id == TypeId::of::<InMemoryCapabilityLeaseStore>()
             || type_id == TypeId::of::<InMemoryEventSink>()
+            || type_id == TypeId::of::<InMemoryDurableEventLog>()
             || type_id == TypeId::of::<InMemoryAuditSink>()
+            || type_id == TypeId::of::<InMemoryDurableAuditLog>()
             || type_id == TypeId::of::<InMemorySecretStore>()
             || type_id == TypeId::of::<EmptyWasmRuntimeCredentials>()
             || type_id == TypeId::of::<InMemoryTurnStateStore>()
