@@ -335,3 +335,130 @@ class TestV2EngineToolIntentNudge:
             f"Expected response to contain 'found' after nudge recovery, got: "
             f"{all_responses[:500]}"
         )
+
+# NOTE: The #2544 regression ("agent plans but never executes") is
+# covered as a *behavior* test, not a mechanism test. The orchestrator's
+# tool-intent nudge above is one possible defence, but the actual fix
+# might live in the system prompt, the model selection, or somewhere
+# else entirely. We don't want a regression test that locks in the
+# nudge as the answer.
+#
+# The behaviour-level coverage lives in
+# ``test_assistant_executes_not_plans_2544.py`` and runs against the
+# live-LLM record/replay harness, so a system-prompt change can be
+# verified to still produce actual work end-to-end.
+
+
+class TestV2EngineCodeActSyntaxErrorRecovery:
+    """Verify the engine recovers from a Python parse failure inside a
+    CodeAct snippet even when a previous CodeAct turn raised an
+    Authentication gate (e.g. github_token preflight).
+
+    The user reproducer: a CodeAct skill issued an http call to GitHub
+    that required ``github_token``; the engine's auth preflight raised
+    an Authentication gate. The LLM's *next* CodeAct turn carried a
+    Python syntax error (unclosed string literal) so the snippet
+    failed parsing before any code could run. The engine stalled
+    awaiting ``github_token`` indefinitely instead of surfacing the
+    parse error and allowing the conversation to recover.
+
+    What this test pins (the contract, not the mechanism):
+
+      * A thread driven through the mock-LLM
+        ``trigger codeact syntax error after github auth`` flow
+        must reach a terminal state (Failed, Completed, or a fresh
+        pending gate the user can cancel) within ~60 seconds.
+      * Iff the thread surfaces a pending gate at the end, its
+        resume_kind must NOT be a stale ``Authentication`` for
+        ``github_token`` carried over from the first turn — the
+        parse failure has to release that hold, even if it raises a
+        fresh one later. We do *not* hard-pin the resolution path
+        (recover-and-continue vs fail-with-error vs new-gate); any
+        of those is acceptable as long as the engine does not hang
+        forever on the stale auth gate.
+
+    The mock LLM patterns this test depends on live in
+    ``mock_llm.py``: ``CODEACT_SYNTAX_ERROR_TRIGGER`` plus the two
+    response branches (valid github-calling CodeAct first, then the
+    unclosed-string CodeAct).
+    """
+
+    async def test_codeact_syntax_error_does_not_stall_engine(
+        self, v2_error_server,
+    ):
+        thread_r = await api_post(
+            v2_error_server, "/api/chat/thread/new", timeout=15,
+        )
+        assert thread_r.status_code == 200
+        thread_id = thread_r.json()["id"]
+
+        send_r = await api_post(
+            v2_error_server,
+            "/api/chat/send",
+            json={
+                "content": "trigger codeact syntax error after github auth",
+                "thread_id": thread_id,
+            },
+            timeout=30,
+        )
+        assert send_r.status_code in (200, 202)
+
+        # Poll until the thread reaches a terminal-ish state:
+        # - a response landed (Failed gracefully, Completed, or surfaced
+        #   the parse error to the user), OR
+        # - a fresh pending_gate is visible (and the user can then
+        #   resolve/cancel it).
+        # The bug being pinned is "neither happens" — the thread sits
+        # silent with an unresolvable github_token gate from the first
+        # turn even after the broken CodeAct should have unwound it.
+        deadline = asyncio.get_event_loop().time() + 60
+        terminal_history: dict | None = None
+        while asyncio.get_event_loop().time() < deadline:
+            r = await api_get(
+                v2_error_server,
+                f"/api/chat/history?thread_id={thread_id}",
+                timeout=15,
+            )
+            r.raise_for_status()
+            history = r.json()
+            turns = history.get("turns") or []
+            latest_response = (
+                turns[-1].get("response") if turns else None
+            )
+            pending = history.get("pending_gate")
+            if latest_response or pending:
+                terminal_history = history
+                break
+            await asyncio.sleep(0.5)
+
+        assert terminal_history is not None, (
+            f"thread {thread_id} sat with no response and no pending "
+            f"gate for 60s — the engine stalled. This is the bug "
+            f"shape: a CodeAct parse failure failed to release the "
+            f"first-turn github_token Authentication gate."
+        )
+
+        pending = terminal_history.get("pending_gate")
+        if pending is not None:
+            # A pending gate is acceptable at the end IFF it is not
+            # the stale Authentication gate for github_token left
+            # over from the first turn. The "stale" shape: the
+            # engine has emitted no terminal turn response, the
+            # parse failure isn't recorded in any turn, AND the
+            # gate's credential is github_token.
+            resume_kind = pending.get("resume_kind") or {}
+            credential_name = None
+            if isinstance(resume_kind, dict):
+                auth_payload = resume_kind.get("Authentication") or {}
+                if isinstance(auth_payload, dict):
+                    credential_name = auth_payload.get("credential_name")
+            turns = terminal_history.get("turns") or []
+            has_response = any(t.get("response") for t in turns)
+            if credential_name == "github_token" and not has_response:
+                raise AssertionError(
+                    "engine surfaced a github_token Authentication "
+                    "gate at thread end with no terminal response — "
+                    "this matches the bug fingerprint where a CodeAct "
+                    "parse failure failed to release the prior "
+                    "auth gate. pending_gate=" + repr(pending)
+                )

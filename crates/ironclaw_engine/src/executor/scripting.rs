@@ -1587,7 +1587,10 @@ async fn preflight_action(
                 .find(|action| action.matches_name(action_name))
         });
     if context.available_actions_snapshot.is_some() && action_def.is_none() {
-        let error = format!("action '{action_name}' is not callable in this execution context");
+        // Shared message builder lives in `structured.rs`; reuse it so
+        // the CodeAct (Tier 1) path produces the same user-facing
+        // wording as the Tier 0 path for tool_install / tool_auth.
+        let error = crate::executor::structured::uncallable_action_error(action_name);
         events.push(EventKind::ActionFailed {
             step_id: context.step_id,
             action_name: action_name.into(),

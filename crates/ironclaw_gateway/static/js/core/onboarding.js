@@ -56,6 +56,20 @@ function showApproval(data) {
   header.textContent = I18n.t('approval.title');
   card.appendChild(header);
 
+  // Render the i18n approval.description as a card subtitle below the
+  // title. PR #3364 updated this string in every locale ("The agent
+  // wants to run this tool…" / "에이전트가 이 도구를…" / "智能体想要…")
+  // but the original change never wired it into the DOM, leaving the
+  // key as dead code. A test recording (test_recent_workflow_regressions
+  // → ceo onboarding workflow) caught the orphan and this hooks it up
+  // as originally intended. Kept separate from `.approval-description`
+  // (which carries the tool's own description from the SSE event) so
+  // both pieces of context render.
+  const subtitle = document.createElement('div');
+  subtitle.className = 'approval-subtitle';
+  subtitle.textContent = I18n.t('approval.description');
+  card.appendChild(subtitle);
+
   const toolName = document.createElement('div');
   toolName.className = 'approval-tool-name';
   toolName.textContent = humanizeToolName(data.tool_name);

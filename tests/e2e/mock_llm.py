@@ -89,6 +89,15 @@ TRUNCATED_TOOL_CALL_TRIGGER = re.compile(
 EMPTY_REPLY_TRIGGER = re.compile(r"issue 1780 empty reply", re.IGNORECASE)
 LOOP_FOREVER_TRIGGER = re.compile(r"issue 1780 loop forever", re.IGNORECASE)
 MULTI_STEP_TRIGGER = re.compile(r"multi step echo then time", re.IGNORECASE)
+# Regression trigger: LLM emits CodeAct with an unclosed string literal so
+# Python parsing fails before execution. Pairs with the github auth path —
+# the first turn's CodeAct issues an http call that raises a github_token
+# Authentication gate; the second turn's CodeAct is the unparseable one.
+# Pinned by test_codeact_syntax_error_does_not_stall_engine.
+CODEACT_SYNTAX_ERROR_TRIGGER = re.compile(
+    r"trigger codeact syntax error after github auth",
+    re.IGNORECASE,
+)
 
 # Lifecycle canary triggers for write+cleanup flows against real provider APIs.
 GITHUB_ISSUE_LIFECYCLE_TRIGGER = re.compile(
@@ -1555,6 +1564,52 @@ def match_special_response(messages: list[dict], has_tools: bool) -> dict | None
     if EMPTY_REPLY_TRIGGER.search(last_user):
         return {"type": "empty_text"}
 
+    # ── Regression: CodeAct syntax error pairs with github auth gate ─────
+    #
+    # Turn 0: emit a CodeAct snippet that calls the github tool. Without a
+    # github_token configured, the http preflight raises an Authentication
+    # gate. Turn 1 (after the gate fires or the engine re-enters the loop):
+    # emit CodeAct with an unclosed string literal so Python parsing fails
+    # before execution.
+    #
+    # The contract the test pins: regardless of how the engine resolves the
+    # parse failure, it must NOT remain stalled awaiting `github_token`
+    # auth indefinitely. Either the parse failure surfaces an error to the
+    # user, OR the engine completes/fails the thread within a reasonable
+    # bound. The user reproducer that motivated this was an engine that
+    # held the github_token gate indefinitely after a parse failure on the
+    # next CodeAct turn.
+    if _conversation_has_user_trigger(messages, CODEACT_SYNTAX_ERROR_TRIGGER):
+        # Detect whether the assistant has already emitted the first
+        # github-calling CodeAct in this conversation. If so, switch to
+        # the broken-CodeAct response.
+        prior_assistant_repl = any(
+            msg.get("role") == "assistant"
+            and "```repl" in _message_text(msg)
+            for msg in messages
+        )
+        if not prior_assistant_repl:
+            # First turn: valid CodeAct that issues a github http call.
+            # The github tool's auth preflight raises a gate before the
+            # call executes.
+            text = (
+                "```repl\n"
+                "result = await http(method=\"GET\", "
+                "url=\"https://api.github.com/repos/nearai/ironclaw/issues\")\n"
+                "FINAL(str(result))\n"
+                "```"
+            )
+            return {"type": "text", "text": text}
+        # Subsequent turn: CodeAct with an unclosed string literal. Python
+        # parsing fails before any execution can pick up the gate state.
+        text = (
+            "```repl\n"
+            "result = \"this string is intentionally unclosed\n"
+            "FINAL(str(result))\n"
+            "```"
+        )
+        return {"type": "text", "text": text}
+
     # Multi-step tool chain: echo first, then time, then text completion.
     # Uses result count (not names) because v2 engine tool results don't
     # always include the tool name in a parseable format.
@@ -1828,6 +1883,12 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
         return await _dispatch_special_response(request, cid, stream, special)
     # Multi-step chain: must bypass tool-result-summary to issue second tool call
     if special and _conversation_has_user_trigger(messages, MULTI_STEP_TRIGGER):
+        return await _dispatch_special_response(request, cid, stream, special)
+    # CodeAct syntax-error regression: each turn emits a code block; the
+    # second turn's parse failure is the load-bearing trigger. Must
+    # bypass the tool-result-summary path so the broken code reaches the
+    # engine on every retry.
+    if special and _conversation_has_user_trigger(messages, CODEACT_SYNTAX_ERROR_TRIGGER):
         return await _dispatch_special_response(request, cid, stream, special)
     # Lifecycle canary multi-step chains: create → verify → cleanup → summarize
     for lifecycle_trigger in (

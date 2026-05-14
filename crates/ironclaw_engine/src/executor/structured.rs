@@ -19,6 +19,34 @@ use crate::types::event::EventKind;
 use crate::types::step::{ActionCall, ActionResult};
 use crate::types::thread::Thread;
 
+/// Build a user-friendlier error string when the LLM emits an action
+/// call that isn't in the model's callable surface.
+///
+/// The default ("action 'X' is not callable in this execution context")
+/// is technically accurate but the LLM relays it verbatim to the user,
+/// which is confusing — especially for two specific names the LLM
+/// likes to hallucinate when the user asks for an install or auth
+/// from chat: ``tool_install`` and ``tool_auth``. Those tools really
+/// exist; they are intentionally hidden from the agent surface (see
+/// `bridge/CLAUDE.md` → "Engine-v2 enablement contract") so users
+/// install integrations through the IronClaw UI, not via the agent.
+///
+/// The clearer message gives the LLM enough context to relay
+/// something actionable back to the user ("install via Settings →
+/// Extensions") instead of a raw engine string.
+pub(crate) fn uncallable_action_error(action_name: &str) -> String {
+    let normalized = action_name.trim().replace('-', "_");
+    if normalized == "tool_install" || normalized == "tool_auth" {
+        return format!(
+            "action '{action_name}' is not callable from chat. Tell the \
+             user to install or authenticate the integration through \
+             Settings → Extensions in the IronClaw UI; the agent cannot \
+             install extensions itself."
+        );
+    }
+    format!("action '{action_name}' is not callable in this execution context")
+}
+
 /// Result of executing a batch of action calls.
 pub struct ActionBatchResult {
     /// Results for each action call (in order).
@@ -83,10 +111,7 @@ pub async fn execute_action_calls(
             .find(|action| action.matches_name(&call.action_name));
 
         let Some(action_def) = action_def else {
-            let error = format!(
-                "action '{}' is not callable in this execution context",
-                call.action_name
-            );
+            let error = uncallable_action_error(&call.action_name);
             let error_result = ActionResult {
                 call_id: call.id.clone(),
                 action_name: call.action_name.clone(),

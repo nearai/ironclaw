@@ -362,14 +362,48 @@ async def _replay(
     cursor = state["cursors"].setdefault(request_hash, 0)
     if cursor >= len(matching):
         state["miss_count"] += 1
-        # On miss, dump the canonical blob to a debug file so the
-        # test author can diff it against fixture entries to find
-        # what's different between record and replay.
+        # On miss, dump the canonical blob to a debug file alongside
+        # the closest-matching recorded canonical (same tail length
+        # is the best cheap heuristic for "this is the entry that
+        # would have matched if the conversation hadn't drifted").
+        # The test author can diff the two files directly to find
+        # what's different between record and replay — no separate
+        # tooling needed, no separate diff scripts to write.
         canon = _canonicalize_request(body)
+        miss_tail_len = len(canon.get("tail") or [])
+        nearest = None
+        for e in entries:
+            rec_tail = e.get("request_canonical", {}).get("tail") or []
+            if len(rec_tail) == miss_tail_len:
+                nearest = e
+                break
         debug_dir = state["fixture_path"].parent
         debug_path = debug_dir / f"{state['fixture_path'].stem}.miss_{state['miss_count']:03d}.json"
         debug_path.write_text(
-            json.dumps({"request_hash": request_hash, "canonical": canon}, indent=2)
+            json.dumps(
+                {
+                    "request_hash": request_hash,
+                    "miss_canonical": canon,
+                    "nearest_recorded": (
+                        {
+                            "request_hash": nearest["request_hash"],
+                            "canonical": nearest.get("request_canonical"),
+                        }
+                        if nearest
+                        else None
+                    ),
+                    "diagnostic_tip": (
+                        "Diff miss_canonical against nearest_recorded.canonical "
+                        "to find what drifted. If the difference is inside a "
+                        "tool result (`role: tool`), the underlying tool is "
+                        "emitting non-deterministic output (timestamps, "
+                        "generated ids, ordering); extend _strip_dynamic in "
+                        "live_llm_proxy.py to normalize that field, or fix "
+                        "the source to emit a stable representation."
+                    ),
+                },
+                indent=2,
+            )
         )
         # Build a diagnostic so the test sees exactly which prompt
         # missed when it inevitably fails to drive the next step.

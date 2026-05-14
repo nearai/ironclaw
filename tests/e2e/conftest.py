@@ -1718,3 +1718,327 @@ async def mission_gmail_live_page(mission_gmail_live_server, browser):
     await _open_authed_gateway_page(pg, mission_gmail_live_server["base_url"])
     yield pg
     await context.close()
+
+
+# ── CEO onboarding live workflow fixture ─────────────────────────────────
+
+
+@pytest.fixture
+async def ceo_workflow_live_server(
+    ironclaw_binary,
+    mock_llm_server,
+    request,
+):
+    """Isolated ironclaw instance for the executive-onboarding live workflow
+    (``test_ceo_onboarding_workflow.py``).
+
+    Wires:
+
+    1. ``live_llm_proxy.py`` record/replay proxy as the LLM backend. The
+       proxy reads/writes ``tests/e2e/fixtures/live/<test_name>.json``.
+    2. ``mock_llm.py`` reused as the mock Google API host (the existing
+       `/drive/v3/files`, `/oauth/exchange`, `/oauth/refresh`,
+       `/__mock/oauth/*` routes are already there) AND as the mock
+       Notion MCP host (the existing ``/mcp`` + DCR + token routes).
+       Both are routed through `IRONCLAW_TEST_HTTP_REWRITE_MAP`.
+    3. An ironclaw process with:
+       - ``ENGINE_V2=true`` so mission/skill paths run on the new engine
+       - ``AGENT_AUTO_APPROVE_TOOLS=true`` so the chat-driven
+         install/scan/memory-write flow does not pause for human approval
+       - ``SKILLS_DIR`` pointing at the repo's ``skills/`` directory so
+         the ``ceo-setup`` skill (the one that creates the commitments
+         project) is discoverable by the activation pipeline
+       - ``ONBOARD_COMPLETED`` deliberately UNSET so first-run bootstrap
+         (BOOTSTRAP.md ritual) actually fires
+       - Hosted Google OAuth client id set so the google_drive setup
+         flow exercises the hosted-proxy path
+       - Pre-built google-drive WASM tool dropped into the WASM tools
+         directory so a chat-driven ``tool_install("google_drive")``
+         + setup + OAuth callback resolves all the way through
+
+    Yields a dict with ``base_url``, ``mock_llm_url``, ``live_proxy_url``,
+    ``fixture``, ``mode``, plus ``home_dir`` (so the test can sqlite-poke
+    secrets or workspace files if it wants).
+    """
+    import shutil
+    from live_harness import start_live_proxy
+
+    proxy_iter = start_live_proxy(request.node.name)
+    proxy = await proxy_iter.__anext__()
+
+    reserved = _reserve_loopback_sockets(2)
+    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-ceo-db-")
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-ceo-home-")
+    channels_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-ceo-channels-")
+    tools_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-ceo-tools-")
+    proc = None
+    startup_kill_attempted = False
+
+    try:
+        gateway_port = reserved[0].getsockname()[1]
+        http_port = reserved[1].getsockname()[1]
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+
+        # Drop the pre-built google-drive WASM into the test's tools dir,
+        # mirroring the `_install_google_drive_wasm` helper used by the
+        # v2 OAuth test. The full-workflow test fails fast (pytest.skip)
+        # if the binary is absent rather than running with a broken
+        # tool_install path.
+        wasm_dir = tools_tmpdir.name
+        wasm_src: Path | None = None
+        for candidate in (
+            ROOT / ".cargo" / "shared-target" / "wasm32-wasip2" / "release" / "google_drive_tool.wasm",
+            Path.home() / ".cargo" / "shared-target" / "wasm32-wasip2" / "release" / "google_drive_tool.wasm",
+            ROOT / "tools-src" / "google-drive" / "target" / "wasm32-wasip2" / "release" / "google_drive_tool.wasm",
+        ):
+            if candidate.exists():
+                wasm_src = candidate
+                break
+
+        wasm_ready = False
+        if wasm_src is not None:
+            cap_src = ROOT / "tools-src" / "google-drive" / "google-drive-tool.capabilities.json"
+            if cap_src.exists():
+                shutil.copy2(str(wasm_src), os.path.join(wasm_dir, "google_drive.wasm"))
+                shutil.copy2(str(cap_src), os.path.join(wasm_dir, "google_drive.capabilities.json"))
+                wasm_ready = True
+
+        env = _build_gateway_env(
+            mock_llm_server=mock_llm_server,
+            wasm_tools_dir=wasm_dir,
+            home_dir=home_tmpdir.name,
+            gateway_port=gateway_port,
+            http_port=http_port,
+            db_path=os.path.join(db_tmpdir.name, "ceo-workflow-live.db"),
+            extra_env={
+                "SECRETS_MASTER_KEY": (
+                    "0123456789abcdef0123456789abcdef"
+                    "0123456789abcdef0123456789abcdef"
+                ),
+                "WASM_CHANNELS_DIR": channels_tmpdir.name,
+                # Route LLM at the live proxy.
+                "LLM_BASE_URL": proxy["url"],
+                # Route gdrive + notion external endpoints to mock_llm,
+                # which already serves both surfaces.
+                "IRONCLAW_TEST_HTTP_REWRITE_MAP": json.dumps({
+                    "www.googleapis.com": mock_llm_server,
+                    "oauth2.googleapis.com": mock_llm_server,
+                    "mcp.notion.com": mock_llm_server,
+                }),
+                "IRONCLAW_OAUTH_PROXY_ALLOW_LOOPBACK": "1",
+                "GOOGLE_OAUTH_CLIENT_ID": "hosted-google-client-id",
+                "AGENT_AUTO_APPROVE_TOOLS": "true",
+                "ENGINE_V2": "true",
+                # The bootstrap ritual is the load-bearing thing this
+                # test verifies. Override _build_gateway_env's
+                # ONBOARD_COMPLETED=true with a deletion marker so the
+                # First-Run Bootstrap block actually injects into the
+                # system prompt.
+                "ONBOARD_COMPLETED": "",
+                # Make ceo-setup / commitment-setup skills discoverable
+                # without copying them per-test.
+                "SKILLS_DIR": str(ROOT / "skills"),
+            },
+        )
+        # Remove the empty ONBOARD_COMPLETED so dotenv treats it as unset
+        # (some Rust env parsers treat "" as "present and empty").
+        env = {k: v for k, v in env.items() if k != "ONBOARD_COMPLETED" or v}
+
+        stderr_log_path = os.environ.get("IRONCLAW_E2E_STDERR_LOG")
+        stderr_dest: Any = asyncio.subprocess.PIPE
+        if stderr_log_path:
+            stderr_dest = open(stderr_log_path, "w")  # noqa: SIM115
+        proc = await asyncio.create_subprocess_exec(
+            ironclaw_binary, "--no-onboard",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=stderr_dest,
+            env=env,
+        )
+        base_url = f"http://127.0.0.1:{gateway_port}"
+        try:
+            await wait_for_ready(f"{base_url}/api/health", timeout=60)
+            yield {
+                "base_url": base_url,
+                "mock_llm_url": mock_llm_server,
+                "live_proxy_url": proxy["url"],
+                "fixture": str(proxy["fixture"]),
+                "mode": proxy["mode"],
+                "home_dir": home_tmpdir.name,
+                "db_path": os.path.join(db_tmpdir.name, "ceo-workflow-live.db"),
+                "google_drive_wasm_ready": wasm_ready,
+            }
+        except TimeoutError:
+            if proc.returncode is None:
+                startup_kill_attempted = True
+                await _stop_process(proc, timeout=2)
+            returncode = proc.returncode
+            stderr_bytes = b""
+            if proc.stderr:
+                try:
+                    stderr_bytes = await asyncio.wait_for(
+                        proc.stderr.read(8192), timeout=2
+                    )
+                except asyncio.TimeoutError:
+                    pass
+            stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+            pytest.fail(
+                f"ceo_workflow_live_server failed to start on port "
+                f"{gateway_port} (returncode={returncode}).\n"
+                f"stderr:\n{stderr_text}"
+            )
+        finally:
+            if proc is not None and proc.returncode is None:
+                if startup_kill_attempted:
+                    await _stop_process(proc, timeout=2)
+                else:
+                    await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+                    if proc.returncode is None:
+                        await _stop_process(proc, timeout=2)
+    finally:
+        try:
+            await proxy_iter.__anext__()
+        except StopAsyncIteration:
+            pass
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+        db_tmpdir.cleanup()
+        home_tmpdir.cleanup()
+        channels_tmpdir.cleanup()
+        tools_tmpdir.cleanup()
+
+
+@pytest.fixture
+async def ceo_workflow_live_page(ceo_workflow_live_server, browser):
+    """Browser page bound to the ceo_workflow_live_server fixture."""
+    context = await browser.new_context(viewport={"width": 1280, "height": 720})
+    pg = await context.new_page()
+    await _open_authed_gateway_page(pg, ceo_workflow_live_server["base_url"])
+    yield pg
+    await context.close()
+
+
+# ── #2544 behavior fixture (live LLM, minimal setup) ────────────────────
+
+
+@pytest.fixture
+async def intent_live_server(
+    ironclaw_binary,
+    mock_llm_server,
+    wasm_tools_dir,
+    request,
+):
+    """Minimal live-LLM record/replay server for behaviour tests where
+    the *system prompt* is the load-bearing thing being verified.
+
+    Used by ``test_assistant_executes_not_plans_2544.py``. The fixture
+    is deliberately bare: engine v2, auto-approve, no extensions
+    pre-installed, no mocked external APIs. The live LLM is the only
+    intelligence in the loop, and the test asserts that — given a
+    realistic user prompt — it produces actual tool calls + concrete
+    output, not a plan of work.
+
+    Re-record the fixture trace after any system-prompt change to
+    verify the new prompt still drives execution:
+
+        IRONCLAW_LIVE_TEST=1 IRONCLAW_LIVE_LLM_BASE_URL=... ... \\
+            pytest tests/e2e/scenarios/test_assistant_executes_not_plans_2544.py
+    """
+    from live_harness import start_live_proxy
+
+    proxy_iter = start_live_proxy(request.node.name)
+    proxy = await proxy_iter.__anext__()
+
+    reserved = _reserve_loopback_sockets(2)
+    db_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-intent-db-")
+    home_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-intent-home-")
+    channels_tmpdir = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-intent-channels-")
+    proc = None
+    startup_kill_attempted = False
+
+    try:
+        gateway_port = reserved[0].getsockname()[1]
+        http_port = reserved[1].getsockname()[1]
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+
+        env = _build_gateway_env(
+            mock_llm_server=mock_llm_server,
+            wasm_tools_dir=wasm_tools_dir,
+            home_dir=home_tmpdir.name,
+            gateway_port=gateway_port,
+            http_port=http_port,
+            db_path=os.path.join(db_tmpdir.name, "intent-live.db"),
+            extra_env={
+                "SECRETS_MASTER_KEY": (
+                    "0123456789abcdef0123456789abcdef"
+                    "0123456789abcdef0123456789abcdef"
+                ),
+                "WASM_CHANNELS_DIR": channels_tmpdir.name,
+                "LLM_BASE_URL": proxy["url"],
+                "AGENT_AUTO_APPROVE_TOOLS": "true",
+                "ENGINE_V2": "true",
+            },
+        )
+
+        stderr_log_path = os.environ.get("IRONCLAW_E2E_STDERR_LOG")
+        stderr_dest: Any = asyncio.subprocess.PIPE
+        if stderr_log_path:
+            stderr_dest = open(stderr_log_path, "w")  # noqa: SIM115
+        proc = await asyncio.create_subprocess_exec(
+            ironclaw_binary, "--no-onboard",
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=stderr_dest,
+            env=env,
+        )
+        base_url = f"http://127.0.0.1:{gateway_port}"
+        try:
+            await wait_for_ready(f"{base_url}/api/health", timeout=60)
+            yield {
+                "base_url": base_url,
+                "live_proxy_url": proxy["url"],
+                "fixture": str(proxy["fixture"]),
+                "mode": proxy["mode"],
+            }
+        except TimeoutError:
+            if proc.returncode is None:
+                startup_kill_attempted = True
+                await _stop_process(proc, timeout=2)
+            returncode = proc.returncode
+            stderr_bytes = b""
+            if proc.stderr:
+                try:
+                    stderr_bytes = await asyncio.wait_for(
+                        proc.stderr.read(8192), timeout=2
+                    )
+                except asyncio.TimeoutError:
+                    pass
+            pytest.fail(
+                f"intent_live_server failed to start on port "
+                f"{gateway_port} (returncode={returncode}).\n"
+                f"stderr:\n{stderr_bytes.decode('utf-8', errors='replace')}"
+            )
+        finally:
+            if proc is not None and proc.returncode is None:
+                if startup_kill_attempted:
+                    await _stop_process(proc, timeout=2)
+                else:
+                    await _stop_process(proc, sig=signal.SIGINT, timeout=10)
+                    if proc.returncode is None:
+                        await _stop_process(proc, timeout=2)
+    finally:
+        try:
+            await proxy_iter.__anext__()
+        except StopAsyncIteration:
+            pass
+        for sock in reserved:
+            if sock.fileno() != -1:
+                sock.close()
+        db_tmpdir.cleanup()
+        home_tmpdir.cleanup()
+        channels_tmpdir.cleanup()

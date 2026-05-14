@@ -602,6 +602,12 @@
   letter-spacing: 0.5px;
 }
 
+.approval-subtitle {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
 .approval-tool-name {
   font-size: var(--text-base);
   font-weight: 600;
