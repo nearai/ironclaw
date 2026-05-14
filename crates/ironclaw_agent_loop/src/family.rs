@@ -6,15 +6,20 @@ use serde::{Deserialize, Serialize};
 ///
 /// Profile JSON serializes as a flat string. The registry is the authority on
 /// whether a deserialized id is actually bound.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct LoopFamilyId(pub Cow<'static, str>);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LoopFamilyId(Cow<'static, str>);
 
 impl LoopFamilyId {
     pub const DEFAULT: Self = Self(Cow::Borrowed("default"));
 
-    pub fn new(id: impl Into<Cow<'static, str>>) -> Self {
-        Self(id.into())
+    pub fn new(id: impl Into<Cow<'static, str>>) -> Result<Self, String> {
+        let id = id.into();
+        validate_loop_family_id(id.as_ref())?;
+        Ok(Self(id))
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_ref()
     }
 }
 
@@ -22,6 +27,44 @@ impl fmt::Display for LoopFamilyId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.0.as_ref())
     }
+}
+
+impl Serialize for LoopFamilyId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for LoopFamilyId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+fn validate_loop_family_id(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("loop_family_id must not be empty".to_string());
+    }
+    if value.len() > 128 {
+        return Err("loop_family_id must be at most 128 bytes".to_string());
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' || c == ':')
+    {
+        return Err(
+            "loop_family_id must contain only lowercase ASCII letters, digits, _, -, or :"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Content digest for a component whose implementation affects replay safety.
@@ -104,7 +147,9 @@ impl LoopFamilyRegistry {
     pub fn with_families(families: Vec<Arc<LoopFamily>>) -> Arc<Self> {
         let mut map = HashMap::with_capacity(families.len());
         for family in families {
-            map.insert(family.id().clone(), family);
+            let id = family.id().clone();
+            assert!(!map.contains_key(&id), "duplicate loop family id: {id}");
+            map.insert(id, family);
         }
         Arc::new(Self { families: map })
     }
@@ -122,11 +167,40 @@ mod tests {
 
     #[test]
     fn loop_family_id_default_is_flat_string() {
-        assert_eq!(LoopFamilyId::DEFAULT.0, "default");
+        assert_eq!(LoopFamilyId::DEFAULT.as_str(), "default");
         let json = serde_json::to_string(&LoopFamilyId::DEFAULT).expect("serialize id");
         assert_eq!(json, "\"default\"");
         let decoded: LoopFamilyId = serde_json::from_str(&json).expect("deserialize id");
         assert_eq!(decoded, LoopFamilyId::DEFAULT);
+    }
+
+    #[test]
+    fn loop_family_id_validates_construction_and_deserialization() {
+        let valid = LoopFamilyId::new("default_family-1:stable").expect("valid id");
+        assert_eq!(valid.as_str(), "default_family-1:stable");
+
+        let too_long = "a".repeat(129);
+        let invalid_values = [
+            "",
+            "Default",
+            "with space",
+            "bad\ncontrol",
+            "path/ish",
+            "path\\ish",
+            too_long.as_str(),
+        ];
+        for value in invalid_values {
+            assert!(
+                LoopFamilyId::new(value.to_string()).is_err(),
+                "expected invalid construction for {value:?}"
+            );
+
+            let json = serde_json::to_string(value).expect("serialize invalid id");
+            assert!(
+                serde_json::from_str::<LoopFamilyId>(&json).is_err(),
+                "expected invalid deserialization for {value:?}"
+            );
+        }
     }
 
     #[test]
@@ -147,7 +221,28 @@ mod tests {
         let registry = LoopFamilyRegistry::with_families(vec![family]);
 
         assert!(registry.get(&LoopFamilyId::DEFAULT).is_some());
-        assert!(registry.get(&LoopFamilyId::new("unknown")).is_none());
+        assert!(
+            registry
+                .get(&LoopFamilyId::new("unknown").expect("valid test id"))
+                .is_none()
+        );
         assert_eq!(registry.ids().count(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate loop family id: default")]
+    fn registry_rejects_duplicate_family_ids() {
+        let family_a = Arc::new(LoopFamily::new(
+            LoopFamilyId::DEFAULT,
+            ComponentIdentity::from_static("default", ComponentDigest([1; 32])),
+            Arc::new(TestPlanner),
+        ));
+        let family_b = Arc::new(LoopFamily::new(
+            LoopFamilyId::DEFAULT,
+            ComponentIdentity::from_static("default", ComponentDigest([2; 32])),
+            Arc::new(TestPlanner),
+        ));
+
+        let _registry = LoopFamilyRegistry::with_families(vec![family_a, family_b]);
     }
 }

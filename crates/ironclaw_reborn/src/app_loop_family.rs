@@ -22,7 +22,11 @@ mod tests {
         let registry = build_loop_family_registry();
 
         assert!(registry.get(&LoopFamilyId::DEFAULT).is_some());
-        assert!(registry.get(&LoopFamilyId::new("unknown")).is_none());
+        assert!(
+            registry
+                .get(&LoopFamilyId::new("unknown").expect("valid test id"))
+                .is_none()
+        );
         assert_eq!(registry.ids().count(), 1);
     }
 }
