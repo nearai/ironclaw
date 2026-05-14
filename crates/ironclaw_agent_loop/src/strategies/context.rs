@@ -19,10 +19,5 @@ pub(crate) trait ContextStrategy: Send + Sync {
     async fn plan_context_request(&self, state: &LoopExecutionState) -> LoopPromptBundleRequest;
 }
 
-#[cfg(test)]
-mod tests {
-    use super::ContextStrategy;
-
-    #[allow(dead_code)]
-    fn _check(_: &dyn ContextStrategy) {}
-}
+#[allow(dead_code)]
+fn _assert_object_safe(_: &dyn ContextStrategy) {}

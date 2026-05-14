@@ -18,26 +18,30 @@ pub(crate) trait ModelStrategy: Send + Sync {
     async fn preference(&self, state: &LoopExecutionState) -> ModelPreference;
 }
 
+#[allow(dead_code)]
+fn _assert_object_safe(_: &dyn ModelStrategy) {}
+
 /// Strategy hint to the host about which already-resolved route to use.
 ///
-/// In the skeleton, `Primary` is the only meaningful value. `Fallback` is wired
-/// through for the future `ModelRouteChain` follow-up.
+/// In the skeleton, `Primary` is the only value strategies produce. `Fallback`
+/// is reserved for the deferred `ModelRouteChain` follow-up.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ModelPreference {
+    /// Route-chain index 0: the primary route.
     #[default]
     Primary,
     Fallback {
+        /// Deferred route-chain index from `ModelStrategyState::fallback_index`.
+        /// Valid fallback indexes are nonzero; `1` is the first fallback after
+        /// `Primary`.
         index: u32,
     },
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ModelPreference, ModelStrategy};
-
-    #[allow(dead_code)]
-    fn _check(_: &dyn ModelStrategy) {}
+    use super::ModelPreference;
 
     #[test]
     fn default_preference_is_primary() {

@@ -18,6 +18,9 @@ pub(crate) trait CapabilityStrategy: Send + Sync {
     async fn filter(&self, state: &LoopExecutionState) -> CapabilityFilter;
 }
 
+#[allow(dead_code)]
+fn _assert_object_safe(_: &dyn CapabilityStrategy) {}
+
 /// Strategy-side narrowing of the visible capability surface.
 ///
 /// Variants are mutually exclusive. The host always applies its own
@@ -38,10 +41,7 @@ pub(crate) enum CapabilityFilter {
 mod tests {
     use ironclaw_host_api::CapabilityId;
 
-    use super::{CapabilityFilter, CapabilityStrategy};
-
-    #[allow(dead_code)]
-    fn _check(_: &dyn CapabilityStrategy) {}
+    use super::CapabilityFilter;
 
     #[test]
     fn default_filter_allows_all() {
