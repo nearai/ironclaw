@@ -45,6 +45,67 @@ pub trait LoopCapabilityResultWriter: Send + Sync {
 }
 
 #[derive(Clone)]
+pub struct HostRuntimeLoopCapabilityPortFactory {
+    runtime: Arc<dyn HostRuntime>,
+    visible_request: ironclaw_host_runtime::VisibleCapabilityRequest,
+    input_resolver: Arc<dyn LoopCapabilityInputResolver>,
+    result_writer: Arc<dyn LoopCapabilityResultWriter>,
+    milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+}
+
+impl HostRuntimeLoopCapabilityPortFactory {
+    pub fn new(
+        runtime: Arc<dyn HostRuntime>,
+        visible_request: ironclaw_host_runtime::VisibleCapabilityRequest,
+        input_resolver: Arc<dyn LoopCapabilityInputResolver>,
+        result_writer: Arc<dyn LoopCapabilityResultWriter>,
+        milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+    ) -> Self {
+        Self {
+            runtime,
+            visible_request,
+            input_resolver,
+            result_writer,
+            milestone_sink,
+        }
+    }
+
+    pub fn without_milestone_sink(
+        runtime: Arc<dyn HostRuntime>,
+        visible_request: ironclaw_host_runtime::VisibleCapabilityRequest,
+        input_resolver: Arc<dyn LoopCapabilityInputResolver>,
+        result_writer: Arc<dyn LoopCapabilityResultWriter>,
+    ) -> Self {
+        Self::new(
+            runtime,
+            visible_request,
+            input_resolver,
+            result_writer,
+            None,
+        )
+    }
+
+    pub fn with_milestone_sink(mut self, sink: Arc<dyn LoopHostMilestoneSink>) -> Self {
+        self.milestone_sink = Some(sink);
+        self
+    }
+
+    pub fn for_run_context(&self, run_context: LoopRunContext) -> Arc<dyn LoopCapabilityPort> {
+        let mut port = HostRuntimeLoopCapabilityPort::new(
+            Arc::clone(&self.runtime),
+            run_context,
+            self.visible_request.clone(),
+            Arc::clone(&self.input_resolver),
+            Arc::clone(&self.result_writer),
+        );
+        if let Some(sink) = &self.milestone_sink {
+            port = port.with_milestone_sink(Arc::clone(sink));
+        }
+        Arc::new(port)
+    }
+}
+
+#[derive(Clone)]
 struct SurfaceCapabilitySnapshot {
     provider: ExtensionId,
     estimate: ResourceEstimate,
