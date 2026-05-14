@@ -64,4 +64,18 @@ Credential injection plans identify their material source. `RuntimeCredentialSou
 
 For WASM host-mediated HTTP imports, `WasmRuntimeHttpAdapter` carries the invoking capability id into `WasmRuntimeCredentialProvider`. Host composition can use `WasmStagedRuntimeCredentials` rules to emit exact-url or request-wide `StagedObligation` injection plans; the WASM guest still supplies only method/url/headers/body and never chooses credential handles or targets.
 
+## Credential account resolution
+
+Host API manifest contracts can project credential requirements into `HostApiCredentialRequirement` records keyed by extension id, host API id, manifest section path, capability id, credential account id, and secret handle. `CredentialAccountResolver` consumes those projected records plus a scoped `CredentialAccountStore` and request method/URL, then proves:
+
+- the projected requirement belongs to the invoking extension, host API section, and capability
+- the scoped credential account exists when required
+- the account is active and owned by the same extension
+- the account destination policy matches the request method/URL
+- the projected secret handle is actually bound to that credential account
+
+Successful resolution returns the `SecretHandle`s that must be satisfied through `InjectSecretOnce` plus exact-URL `WasmStagedRuntimeCredential` rules. The exact-URL narrowing is deliberate: even if a projected requirement is broader, the resolved runtime credential rule must not silently apply to a different WASM HTTP request in the same invocation.
+
+This resolver is a planning/projection boundary only. It does not read raw secret material, issue OAuth repairs, mutate credential-account state, or grant authority without the upstream capability/obligation workflow. Final `InjectCredentialOnce` obligation wiring remains the product path that should connect credential account resolution, secret staging, blocked-auth repair, and runtime adapter construction.
+
 Script execution keeps Docker containers ambient-network-disabled by default (`docker run --network none`). If scripts later gain a brokered HTTP SDK, sidecar, helper process, or host API, every request must flow through `ironclaw_scripts::ScriptRuntimeHttpAdapter<RuntimeHttpEgress>`. The host supplies the `ResourceScope`, `CapabilityId`, `NetworkPolicy`, credential injection plan, response body limit, and timeout; script/runtime input must not invent secret handles, raw credential headers/query parameters, DNS checks, private-IP checks, or direct HTTP clients inside `ironclaw_scripts`.

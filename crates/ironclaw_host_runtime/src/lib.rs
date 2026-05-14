@@ -44,6 +44,7 @@ use serde_json::Value;
 use std::{collections::BTreeMap, fmt, sync::Arc};
 use thiserror::Error;
 
+mod credential_resolver;
 mod first_party;
 mod first_party_tools;
 pub mod memory_context;
@@ -54,6 +55,10 @@ mod services;
 mod surface;
 mod turn_scheduler;
 
+pub use credential_resolver::{
+    CredentialAccountResolution, CredentialAccountResolver, CredentialAccountResolverError,
+    CredentialAccountResolverRequest, HostApiCredentialRequirement,
+};
 pub use first_party::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,

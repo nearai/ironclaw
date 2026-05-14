@@ -133,6 +133,13 @@ composition can construct staged plans with `WasmStagedRuntimeCredentials` after
 attaching the invoking capability id to the adapter; exact-url rules should be
 preferred when a credential is only valid for specific destinations.
 
+Credential-account resolution is owned above this crate. Host API contract
+handlers project credential requirements from explicit manifest sections, and
+host-runtime composition resolves those requirements against scoped
+`CredentialAccountStore` records before constructing `InjectSecretOnce` staging
+and exact-URL WASM credential rules. The secrets crate remains responsible only
+for account/session storage contracts and secret lease/consume mechanics.
+
 ---
 
 ## 5. Non-goals
