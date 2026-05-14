@@ -1,3 +1,8 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock},
+};
+
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind, ThreadId};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -833,6 +838,97 @@ pub struct LoopPromptBundle {
     pub surface_version: Option<CapabilitySurfaceVersion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopPromptBundleGrant {
+    pub bundle_ref: LoopPromptBundleRef,
+    pub messages: Vec<LoopModelMessage>,
+    pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
+}
+
+#[derive(Clone, Default)]
+pub struct LoopPromptBundleAuthority {
+    inner: Arc<Mutex<LoopPromptBundleAuthorityState>>,
+}
+
+#[derive(Default)]
+struct LoopPromptBundleAuthorityState {
+    latest_by_run: HashMap<String, LoopPromptBundleGrant>,
+}
+
+impl LoopPromptBundleAuthority {
+    pub fn shared() -> Self {
+        static AUTHORITY: OnceLock<LoopPromptBundleAuthority> = OnceLock::new();
+        AUTHORITY.get_or_init(Self::default).clone()
+    }
+
+    pub fn issue_bundle(
+        &self,
+        context: &LoopRunContext,
+        bundle: &LoopPromptBundle,
+    ) -> Result<(), AgentLoopHostError> {
+        if !bundle.bundle_ref.is_for_run(context) {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::ScopeMismatch,
+                "prompt bundle ref is not scoped to this loop run",
+            ));
+        }
+
+        self.lock_state()?.latest_by_run.insert(
+            context.run_id.to_string(),
+            LoopPromptBundleGrant {
+                bundle_ref: bundle.bundle_ref.clone(),
+                messages: bundle.messages.clone(),
+                instruction_fingerprint: bundle.instruction_fingerprint.clone(),
+            },
+        );
+        Ok(())
+    }
+
+    pub fn authorize_latest_model_request(
+        &self,
+        context: &LoopRunContext,
+        messages: &[LoopModelMessage],
+    ) -> Result<LoopPromptBundleGrant, AgentLoopHostError> {
+        let grant = self
+            .lock_state()?
+            .latest_by_run
+            .get(&context.run_id.to_string())
+            .cloned()
+            .ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "model request has no host-built prompt bundle",
+                )
+            })?;
+
+        if !grant.bundle_ref.is_for_run(context) {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::ScopeMismatch,
+                "prompt bundle ref is not scoped to this loop run",
+            ));
+        }
+        if grant.messages != messages {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "model request messages do not match the host-built prompt bundle",
+            ));
+        }
+
+        Ok(grant)
+    }
+
+    fn lock_state(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, LoopPromptBundleAuthorityState>, AgentLoopHostError> {
+        self.inner.lock().map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                "prompt bundle authority is unavailable",
+            )
+        })
+    }
 }
 
 /// Host boundary for building prompt bundles before model invocation.

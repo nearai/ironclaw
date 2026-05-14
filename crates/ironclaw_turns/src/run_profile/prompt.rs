@@ -4,8 +4,8 @@ use async_trait::async_trait;
 
 use super::host::{
     AgentLoopHostError, AgentLoopHostErrorKind, CapabilitySurfaceVersion, LoopContextPort,
-    LoopContextRequest, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-    LoopPromptPort, LoopRunContext, PromptMode, VisibleCapabilitySurface,
+    LoopContextRequest, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef,
+    LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, PromptMode, VisibleCapabilitySurface,
 };
 use super::instruction_bundle::{
     InstructionBundleBuilder, InstructionBundleRequest, InstructionMaterializationStore,
@@ -40,6 +40,7 @@ where
     context: LoopRunContext,
     context_port: Arc<C>,
     milestones: LoopHostMilestoneEmitter<S>,
+    prompt_authority: LoopPromptBundleAuthority,
     default_message_limit: usize,
     current_surface_version: Option<Arc<CurrentSurfaceVersionLookup>>,
     current_surface: Option<Arc<CurrentSurfaceLookup>>,
@@ -57,6 +58,7 @@ where
             context: context.clone(),
             context_port,
             milestones: LoopHostMilestoneEmitter::new(context, milestone_sink),
+            prompt_authority: LoopPromptBundleAuthority::shared(),
             default_message_limit: DEFAULT_TEXT_ONLY_MESSAGE_LIMIT,
             current_surface_version: None,
             current_surface: None,
@@ -67,6 +69,14 @@ where
 
     pub fn with_default_message_limit(mut self, default_message_limit: usize) -> Self {
         self.default_message_limit = default_message_limit.clamp(1, MAX_TEXT_ONLY_MESSAGE_LIMIT);
+        self
+    }
+
+    pub fn with_prompt_bundle_authority(
+        mut self,
+        prompt_authority: LoopPromptBundleAuthority,
+    ) -> Self {
+        self.prompt_authority = prompt_authority;
         self
     }
 
@@ -267,6 +277,7 @@ where
             surface_version: request.surface_version.clone(),
             instruction_fingerprint: Some(instruction_bundle.fingerprint),
         };
+        self.prompt_authority.issue_bundle(&self.context, &bundle)?;
         self.milestones
             .prompt_bundle_built(
                 bundle.bundle_ref.clone(),

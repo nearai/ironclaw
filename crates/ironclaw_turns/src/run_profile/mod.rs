@@ -39,11 +39,12 @@ pub use host::{
     LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputBatch, LoopInputCursor,
     LoopInputCursorToken, LoopInputPort, LoopInterruptKind, LoopModelMessage, LoopModelPort,
     LoopModelRequest, LoopModelResponse, LoopModelRouteSnapshot, LoopProcessRef, LoopProgressEvent,
-    LoopProgressPort, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-    LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-    ModelStreamChunk, ParentLoopOutput, ProcessHandleSummary, PromptMode,
-    StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
-    VisibleCapabilitySurface, sanitize_model_visible_text, validate_model_route_component_value,
+    LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleGrant,
+    LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+    LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
+    ProcessHandleSummary, PromptMode, StageCheckpointPayloadRequest, UpdateAssistantDraft,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
+    validate_model_route_component_value,
 };
 pub use instruction_bundle::{
     InMemoryInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,
