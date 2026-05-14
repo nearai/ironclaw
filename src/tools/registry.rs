@@ -138,6 +138,9 @@ pub struct ToolRegistry {
     rate_limiter: RateLimiter,
     /// Optional HTTP interceptor propagated into registered WASM wrappers.
     http_interceptor: Option<Arc<dyn HttpInterceptor>>,
+    /// Optional approval gate for high-classification signers, propagated
+    /// into registered WASM wrappers so every signature path is gated.
+    signer_gate: Option<Arc<dyn crate::secrets::SignerApprovalGate>>,
     /// Reference to the message tool for setting context per-turn.
     message_tool: RwLock<Option<Arc<crate::tools::builtin::MessageTool>>>,
     /// Active engine version. Controls which tools are visible via
@@ -170,6 +173,7 @@ impl ToolRegistry {
             db: None,
             rate_limiter: RateLimiter::new(),
             http_interceptor: None,
+            signer_gate: None,
             message_tool: RwLock::new(None),
             engine_version: EngineVersion::V1,
         }
@@ -201,6 +205,11 @@ impl ToolRegistry {
 
     pub fn with_http_interceptor(mut self, interceptor: Arc<dyn HttpInterceptor>) -> Self {
         self.http_interceptor = Some(interceptor);
+        self
+    }
+
+    pub fn with_signer_gate(mut self, gate: Arc<dyn crate::secrets::SignerApprovalGate>) -> Self {
+        self.signer_gate = Some(gate);
         self
     }
 
@@ -986,6 +995,9 @@ impl ToolRegistry {
         }
         if let Some(interceptor) = &self.http_interceptor {
             wrapper = wrapper.with_http_interceptor(Arc::clone(interceptor));
+        }
+        if let Some(gate) = &self.signer_gate {
+            wrapper = wrapper.with_signer_gate(Arc::clone(gate));
         }
 
         // Register the tool

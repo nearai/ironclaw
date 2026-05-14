@@ -84,7 +84,7 @@ pub const WIT_CHANNEL_VERSION: &str = "0.3.0";
 
 mod allowlist;
 mod capabilities;
-mod capabilities_schema;
+pub(crate) mod capabilities_schema;
 pub(crate) mod credential_injector;
 mod error;
 mod host;
@@ -93,6 +93,7 @@ mod limits;
 pub(crate) mod loader;
 mod rate_limiter;
 mod runtime;
+pub mod signer_gate;
 pub(crate) mod storage;
 mod wrapper;
 

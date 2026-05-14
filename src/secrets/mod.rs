@@ -70,9 +70,11 @@ pub use store::LibSqlSecretsStore;
 pub use store::PostgresSecretsStore;
 pub use store::{SecretConsumeResult, SecretsStore};
 pub use types::{
-    BodyJsonOutput, BodyValue, BytesPart, CreateSecretParams, CredentialLocation,
-    CredentialMapping, DecryptedSecret, Eip712Domain, Eip712StructDef, Eip712TypedField,
-    FieldSource, HeaderOutput, OutputSource, Secret, SecretError, SecretRef,
+    AllowAllSignerGate, Approval, ApprovalRequest, BodyJsonOutput, BodyValue, BytesPart,
+    CreateSecretParams, CredentialKind, CredentialLocation, CredentialMapping, DecryptedSecret,
+    Eip712Domain, Eip712StructDef, Eip712TypedField, FieldSource, HeaderOutput, OutputSource,
+    RejectAllSignerGate, Secret, SecretError, SecretRef, SignerApprovalGate, SignerClassification,
+    classify_signing_location,
 };
 pub(crate) use types::{
     extract_url_path_for_matching, host_matches_pattern, match_specificity, path_matches_prefix,

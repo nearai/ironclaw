@@ -33,6 +33,7 @@ mod profile;
 mod registry;
 mod routines;
 mod service;
+mod signer_render;
 mod skills;
 pub mod status;
 mod tool;
