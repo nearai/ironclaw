@@ -1126,34 +1126,94 @@ fn wasm_module_substitution_is_rejected_by_checkpoint_replay_guard() {
 }
 
 #[tokio::test]
-async fn wasm_unsupported_host_import_fails_closed() {
-    let fixture = Fixture::new().await;
-    let inner = Arc::new(RecordingCapabilityPort::new());
-    let surface_version = fixture.surface_version.clone();
-    let (dispatcher, _hook_id) = wasm_dispatcher_from_wat(
+async fn wasm_unsupported_host_import_is_rejected_at_install_time() {
+    // serrrfirat finding #3: bad-import modules must be rejected at
+    // registration so they never reach live dispatch. Prior behavior
+    // accepted the install and only failed at first invocation.
+    let resolver = Arc::new(InMemoryWasmHookModules::with_wat(
         "wasm-bad-import",
-        HookManifestKind::BeforeCapability,
         WASM_UNSUPPORTED_IMPORT,
-        WasmBudget::default(),
+    ));
+    let runtime = Arc::new(WasmHookRuntime::new(resolver).expect("wasm runtime"));
+    let registrar =
+        HookRegistrar::new(Arc::new(PredicateEvaluator::new())).with_wasm_runtime(runtime);
+    let entry = HookManifestEntry::new(
+        HookLocalId("wasm-bad-import".to_string()),
+        HookManifestKind::BeforeCapability,
+        HookManifestBody::Wasm {
+            export: "evaluate".to_string(),
+            budget: WasmBudget::default(),
+        },
+    )
+    .with_scope(HookManifestScope::SameTenant)
+    .with_requires_grant("integration-test-wasm-hooks");
+    let builder = HookDispatcherBuilder::new(HookRegistry::new());
+    let result = registrar.install(
+        ironclaw_host_api::ExtensionId::new("integration-tests").expect("valid ext id"),
+        "0.0.1".to_string(),
+        vec![entry],
+        builder,
     );
+    match result {
+        Err(HookError::RegistryConstruction(msg)) => {
+            assert!(
+                msg.contains("not_allowed") || msg.contains("imports"),
+                "expected install-time rejection citing the unsupported import; got: {msg}"
+            );
+        }
+        Err(other) => panic!("expected RegistryConstruction error, got {other:?}"),
+        Ok(_) => panic!("install must reject bad-import wasm hook before live dispatch"),
+    }
+}
 
-    let host = fixture
-        .factory()
-        .with_hook_dispatcher(dispatcher)
-        .build_text_only_host_with_capabilities(fixture.request(), inner.clone())
-        .await
-        .expect("host builds with bad-import wasm hook installed");
-
-    let outcome = host
-        .invoke_capability(invocation(&surface_version, "cap.blocked"))
-        .await
-        .expect("invoke_capability returns denied outcome");
-
-    expect_denied_with(outcome, "hook_denied");
-    assert!(
-        inner.invocations().is_empty(),
-        "link-error gate hook must fail closed before inner port"
+#[tokio::test]
+async fn wasm_missing_export_is_rejected_at_install_time() {
+    // Same surface as the bad-import test: a module that compiles cleanly
+    // but lacks the manifest-declared export must fail at install rather
+    // than survive to first dispatch.
+    const WASM_MISSING_EXPORT: &str = r#"
+(module
+  (import "ic:hooks/before-capability@1" "deny" (func $deny (param i32) (result i32)))
+  (func (export "other_name")
+    i32.const 1
+    call $deny
+    drop)
+)
+"#;
+    let resolver = Arc::new(InMemoryWasmHookModules::with_wat(
+        "wasm-missing-export",
+        WASM_MISSING_EXPORT,
+    ));
+    let runtime = Arc::new(WasmHookRuntime::new(resolver).expect("wasm runtime"));
+    let registrar =
+        HookRegistrar::new(Arc::new(PredicateEvaluator::new())).with_wasm_runtime(runtime);
+    let entry = HookManifestEntry::new(
+        HookLocalId("wasm-missing-export".to_string()),
+        HookManifestKind::BeforeCapability,
+        HookManifestBody::Wasm {
+            export: "evaluate".to_string(),
+            budget: WasmBudget::default(),
+        },
+    )
+    .with_scope(HookManifestScope::SameTenant)
+    .with_requires_grant("integration-test-wasm-hooks");
+    let builder = HookDispatcherBuilder::new(HookRegistry::new());
+    let result = registrar.install(
+        ironclaw_host_api::ExtensionId::new("integration-tests").expect("valid ext id"),
+        "0.0.1".to_string(),
+        vec![entry],
+        builder,
     );
+    match result {
+        Err(HookError::RegistryConstruction(msg)) => {
+            assert!(
+                msg.contains("evaluate") || msg.contains("export"),
+                "expected install-time rejection citing the missing export; got: {msg}"
+            );
+        }
+        Err(other) => panic!("expected RegistryConstruction error, got {other:?}"),
+        Ok(_) => panic!("install must reject missing-export wasm hook before live dispatch"),
+    }
 }
 
 #[tokio::test]

@@ -99,6 +99,11 @@ pub enum WasmHookRuntimeError {
     Budget(String),
     #[error("wasm hook export `{export}` is invalid: {reason}")]
     InvalidExport { export: String, reason: String },
+    /// Module's imports don't match the host surface for the target hook
+    /// point. Surfaced at install time (`prepare()`) by a scratch
+    /// instantiation so bad modules never reach live dispatch.
+    #[error("wasm hook imports do not match host surface for {point}: {reason}")]
+    InvalidImports { point: &'static str, reason: String },
     #[error("wasm hook execution failed: {0}")]
     Execution(String),
     #[error("wasm hook runtime cache lock poisoned")]
@@ -223,11 +228,20 @@ impl WasmHookRuntime {
                     .clone()
             }
         };
+        let limits: WasmHookLimits = budget.try_into()?;
+        // Install-time ABI validation. Scratch-instantiate the module against
+        // the linker for this hook point so any unsupported import, missing
+        // export, or wrong export signature surfaces here — at registration —
+        // rather than deferring to first live dispatch. Per-prepare cost is
+        // small (one extra `Linker::instantiate`); module-compile output is
+        // already cached above.
+        let point = wasm_point_for_kind(request.kind);
+        validate_module_abi(&self.engine, &module, &limits, point, request.export)?;
         Ok(PreparedWasmHook {
             module,
             module_digest: digest,
             export: request.export.to_string(),
-            limits: budget.try_into()?,
+            limits,
         })
     }
 
@@ -501,6 +515,56 @@ fn create_linker(
         WasmHookPoint::Observer(_) => add_observer_imports(&mut linker)?,
     }
     Ok(linker)
+}
+
+fn wasm_point_for_kind(kind: HookManifestKind) -> WasmHookPoint {
+    match kind {
+        HookManifestKind::BeforeCapability => WasmHookPoint::BeforeCapability,
+        HookManifestKind::BeforePrompt => WasmHookPoint::BeforePrompt,
+        HookManifestKind::AfterModel => WasmHookPoint::Observer(HookPointSpec::AfterModel),
+        HookManifestKind::AfterCapability => {
+            WasmHookPoint::Observer(HookPointSpec::AfterCapability)
+        }
+        HookManifestKind::AfterCheckpoint => {
+            WasmHookPoint::Observer(HookPointSpec::AfterCheckpoint)
+        }
+    }
+}
+
+/// Scratch-instantiate `module` against the linker for `point` and resolve
+/// the named export. Surfaces ABI mismatches at `prepare()` time rather than
+/// deferring to first live dispatch. Returns `Ok(())` if the module satisfies
+/// the host surface contract; otherwise [`WasmHookRuntimeError::InvalidImports`]
+/// or [`WasmHookRuntimeError::InvalidExport`].
+fn validate_module_abi(
+    engine: &Engine,
+    module: &Module,
+    limits: &WasmHookLimits,
+    point: WasmHookPoint,
+    export: &str,
+) -> Result<(), WasmHookRuntimeError> {
+    let mut store = Store::new(
+        engine,
+        HookStoreData::new(limits.memory_bytes, limits.wall, point),
+    );
+    // Configure fuel/epoch the same way `execute()` does. Instantiation does
+    // not consume fuel, but the limiter API rejects stores without resource
+    // bounds installed.
+    configure_store(&mut store, limits)?;
+    let linker = create_linker(engine, point)?;
+    let instance = linker.instantiate(&mut store, module).map_err(|error| {
+        WasmHookRuntimeError::InvalidImports {
+            point: point.label(),
+            reason: error.to_string(),
+        }
+    })?;
+    instance
+        .get_typed_func::<(), ()>(&mut store, export)
+        .map_err(|error| WasmHookRuntimeError::InvalidExport {
+            export: export.to_string(),
+            reason: error.to_string(),
+        })?;
+    Ok(())
 }
 
 fn get_export(
