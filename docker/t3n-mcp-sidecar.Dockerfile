@@ -19,6 +19,19 @@ RUN apk add --no-cache dumb-init \
 #   /app/shared/bin/   <- client/shared/bin
 #   /shared -> /app/shared  (symlink so ../../shared from /app resolves)
 
+# Trinity t3n-sdk is referenced from t3n-mcp's package.json as
+# "link:../../t3n-sdk". Because t3n-mcp lives at /app, the pnpm link protocol
+# resolves to /app/../../t3n-sdk == /t3n-sdk. Stage the linked package there
+# (with its own installed deps) before t3n-mcp's install, otherwise pnpm
+# creates a dangling symlink and the runtime hits ERR_MODULE_NOT_FOUND.
+WORKDIR /t3n-sdk
+COPY --from=trinity_t3n_sdk package.json ./package.json
+COPY --from=trinity_t3n_sdk pnpm-lock.yaml ./pnpm-lock.yaml
+RUN pnpm install --frozen-lockfile
+COPY --from=trinity_t3n_sdk dist ./dist
+COPY --from=trinity_t3n_sdk src ./src
+
+WORKDIR /app
 COPY --from=trinity_mcp package.json ./package.json
 COPY --from=trinity_mcp pnpm-lock.yaml ./pnpm-lock.yaml
 

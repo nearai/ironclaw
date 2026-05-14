@@ -117,6 +117,7 @@ services:
       additional_contexts:
         trinity_mcp: ../trinity/client/mcp/t3n-mcp
         trinity_shared: ../trinity/client/shared
+        trinity_t3n_sdk: ../trinity/client/t3n-sdk
     restart: unless-stopped
     environment:
       # Defaults to Trinity staging; override in .env when you need a different

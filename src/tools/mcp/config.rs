@@ -496,6 +496,67 @@ pub(crate) fn nearai_mcp_server_from_env() -> Result<Option<McpServerConfig>, Co
     Ok(Some(server))
 }
 
+/// Register a built-in MCP server entry on first boot.
+///
+/// Shared implementation for [`bootstrap_nearai_mcp_server`] and
+/// [`bootstrap_t3n_mcp_server`]. Returns `Ok(true)` when a new entry was
+/// written, `Ok(false)` when the server is already registered in the
+/// authoritative store.
+///
+/// # DB vs disk semantics
+///
+/// When `db` is `Some`, the DB row at `settings.mcp_servers` is the
+/// authoritative source of truth. We deliberately do **not** call
+/// `load_mcp_servers_from_db` here: its disk fallback would conflate
+/// "DB has no row but disk has the server" with "DB row already contains
+/// the server" and skip the DB write, leaving gateway clients (which read
+/// the DB only) unable to see the server.
+///
+/// When the DB row is absent we seed it from the on-disk
+/// `mcp-servers.json` so any user-configured servers in the legacy file
+/// survive the migration, then add the bootstrap entry on top.
+async fn bootstrap_mcp_server(
+    db: Option<&dyn crate::db::Database>,
+    user_id: &str,
+    server: McpServerConfig,
+) -> Result<bool, ConfigError> {
+    match db {
+        Some(store) => {
+            let existing =
+                store
+                    .get_setting(user_id, "mcp_servers")
+                    .await
+                    .map_err(|e| ConfigError::InvalidConfig {
+                        reason: format!("Failed to read mcp_servers from DB: {}", e),
+                    })?;
+
+            let mut servers = match existing {
+                Some(value) => {
+                    let cfg: McpServersFile = serde_json::from_value(value)?;
+                    if cfg.get(&server.name).is_some() {
+                        return Ok(false);
+                    }
+                    cfg
+                }
+                None => load_mcp_servers().await?,
+            };
+
+            servers.upsert(server);
+            save_mcp_servers_to_db(store, user_id, &servers).await?;
+            Ok(true)
+        }
+        None => {
+            let mut servers = load_mcp_servers().await?;
+            if servers.get(&server.name).is_some() {
+                return Ok(false);
+            }
+            servers.upsert(server);
+            save_mcp_servers(&servers).await?;
+            Ok(true)
+        }
+    }
+}
+
 pub async fn bootstrap_nearai_mcp_server(
     db: Option<&dyn crate::db::Database>,
     user_id: &str,
@@ -503,22 +564,7 @@ pub async fn bootstrap_nearai_mcp_server(
     let Some(server) = nearai_mcp_server_from_env()? else {
         return Ok(false);
     };
-
-    let mut servers = match db {
-        Some(store) => load_mcp_servers_from_db(store, user_id).await?,
-        None => load_mcp_servers().await?,
-    };
-
-    if servers.get(&server.name).is_some() {
-        return Ok(false);
-    }
-    servers.upsert(server);
-
-    match db {
-        Some(store) => save_mcp_servers_to_db(store, user_id, &servers).await?,
-        None => save_mcp_servers(&servers).await?,
-    }
-    Ok(true)
+    bootstrap_mcp_server(db, user_id, server).await
 }
 
 /// MCP server id for the t3n (Trinity) sidecar auto-bootstrap.
@@ -584,22 +630,7 @@ pub async fn bootstrap_t3n_mcp_server(
     let Some(server) = t3n_mcp_server_from_env() else {
         return Ok(false);
     };
-
-    let mut servers = match db {
-        Some(store) => load_mcp_servers_from_db(store, user_id).await?,
-        None => load_mcp_servers().await?,
-    };
-
-    if servers.get(&server.name).is_some() {
-        return Ok(false);
-    }
-    servers.upsert(server);
-
-    match db {
-        Some(store) => save_mcp_servers_to_db(store, user_id, &servers).await?,
-        None => save_mcp_servers(&servers).await?,
-    }
-    Ok(true)
+    bootstrap_mcp_server(db, user_id, server).await
 }
 
 /// Load MCP servers after bootstrapping the built-in MCP servers (NEAR AI and

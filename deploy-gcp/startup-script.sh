@@ -76,6 +76,12 @@ services:
       ONBOARD_COMPLETED: "true"
       T3CLAW_IN_DOCKER: "true"
       SANDBOX_ENABLED: "false"
+      # Triggers bootstrap_t3n_mcp_server() at agent startup so the t3n-mcp
+      # server is auto-registered in the DB under owner_id. Without this the
+      # CLI still works (it falls back to the seeded mcp-servers.json on
+      # disk) but the gateway settings API returns 404 and the web UI shows
+      # nothing under MCP servers.
+      T3N_MCP_SOCKET_PATH: /var/run/t3n-mcp/t3n-mcp.sock
     volumes:
       - t3claw_data:/home/t3claw/.t3claw
       - t3n_mcp_socket:/var/run/t3n-mcp
@@ -90,8 +96,9 @@ services:
       T3N_MCP_RPC_URL: ${T3N_MCP_RPC_URL:-}
       T3N_MCP_DASHBOARD_URL: ${T3N_MCP_DASHBOARD_URL:-}
       PRIVATE_KEY: ${T3N_MCP_PRIVATE_KEY:-}
+      T3N_MCP_AGENT_SECRET_HEX: ${T3N_MCP_AGENT_SECRET_HEX:-}
       MCP_SOCKET_PATH: /var/run/t3n-mcp/t3n-mcp.sock
-      T3N_PROJECT_DIR: /app/node_modules/@terminal-3/t3n-mcp
+      T3N_PROJECT_DIR: /app
     volumes:
       - t3n_mcp_socket:/var/run/t3n-mcp
 
