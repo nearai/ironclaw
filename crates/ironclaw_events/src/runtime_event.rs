@@ -44,6 +44,9 @@ pub enum RuntimeEventKind {
     AssistantReplyFinalized,
     LoopCompleted,
     LoopFailed,
+    CapabilityBatchCompleted,
+    GateBlocked,
+    CheckpointCreated,
     ProcessStarted,
     ProcessCompleted,
     ProcessFailed,
@@ -270,6 +273,22 @@ impl RuntimeEvent {
             output_bytes: None,
             error_kind: Some(sanitize_error_kind(error_kind)),
         })
+    }
+
+    pub fn capability_batch_completed(scope: ResourceScope, capability_id: CapabilityId) -> Self {
+        Self::new_metadata_only(
+            RuntimeEventKind::CapabilityBatchCompleted,
+            scope,
+            capability_id,
+        )
+    }
+
+    pub fn gate_blocked(scope: ResourceScope, capability_id: CapabilityId) -> Self {
+        Self::new_metadata_only(RuntimeEventKind::GateBlocked, scope, capability_id)
+    }
+
+    pub fn checkpoint_created(scope: ResourceScope, capability_id: CapabilityId) -> Self {
+        Self::new_metadata_only(RuntimeEventKind::CheckpointCreated, scope, capability_id)
     }
 
     fn new_metadata_only(

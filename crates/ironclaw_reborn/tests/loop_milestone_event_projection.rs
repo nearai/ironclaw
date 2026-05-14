@@ -34,13 +34,14 @@ use ironclaw_turns::{
     AcceptedMessageRef, EventCursor, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
     InMemoryRunProfileResolver, LoopCompletionKind, LoopExitId, LoopFailureKind,
     ReplyTargetBindingRef, RunProfileId, RunProfileResolutionRequest, RunProfileResolver,
-    RunProfileVersion, SourceBindingRef, TurnId, TurnLeaseToken, TurnRunId, TurnRunState,
-    TurnRunnerId, TurnScope, TurnStatus,
+    RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId,
+    TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
     run_profile::{
-        AgentLoopHostErrorKind, BatchPolicyKind, FinalizeAssistantMessage, LoopDriverId,
-        LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind,
-        LoopHostMilestoneSink, LoopModelPort, LoopModelRequest, LoopRunContext, LoopTranscriptPort,
-        ParentLoopOutput,
+        AgentLoopHostErrorKind, BatchPolicyKind, FinalizeAssistantMessage, LoopCheckpointKind,
+        LoopDriverId, LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter,
+        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopModelPort, LoopModelRequest,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopTranscriptPort,
+        ParentLoopOutput, PromptMode,
     },
     runner::ClaimedTurnRun,
 };
@@ -207,7 +208,7 @@ async fn durable_milestone_sink_rejects_mismatched_thread_or_run_binding() {
 }
 
 #[tokio::test]
-async fn durable_milestone_sink_drops_metadata_only_loop_progress_milestones() {
+async fn durable_milestone_sink_replays_metadata_only_loop_progress_milestones() {
     let events: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let thread_scope = ThreadScope {
         tenant_id: tenant_id(),
@@ -252,6 +253,10 @@ async fn durable_milestone_sink_drops_metadata_only_loop_progress_milestones() {
             iteration: 1,
             gate_kind: LoopGateKind::Approval,
         },
+        LoopHostMilestoneKind::CheckpointCreated {
+            checkpoint_id: TurnCheckpointId::new(),
+            checkpoint_kind: LoopCheckpointKind::BeforeBlock,
+        },
     ] {
         sink.publish_loop_milestone(LoopHostMilestone {
             scope: scope.clone(),
@@ -273,8 +278,48 @@ async fn durable_milestone_sink_drops_metadata_only_loop_progress_milestones() {
         })
         .await
         .unwrap();
-    assert!(snapshot.timeline.entries.is_empty());
-    assert!(snapshot.runs.is_empty());
+    assert_eq!(
+        snapshot
+            .timeline
+            .entries
+            .iter()
+            .map(|entry| entry.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            TimelineEntryKind::CapabilityBatchCompleted,
+            TimelineEntryKind::GateBlocked,
+            TimelineEntryKind::CheckpointCreated,
+        ]
+    );
+    assert_eq!(snapshot.runs.len(), 1);
+    assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Running);
+    assert_eq!(
+        snapshot.runs[0].capability_id,
+        CapabilityId::new("loop.capability_batch").unwrap(),
+        "progress-only milestone projection should preserve the first durable progress capability"
+    );
+
+    let replay_scope = projection_scope_for_thread(scope.thread_id.clone());
+    let replay = manager
+        .runtime_updates(ProjectionRequest {
+            scope: replay_scope.clone(),
+            after: Some(ProjectionCursor::origin_for_scope(replay_scope)),
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        replay
+            .updates
+            .iter()
+            .map(|entry| entry.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            TimelineEntryKind::CapabilityBatchCompleted,
+            TimelineEntryKind::GateBlocked,
+            TimelineEntryKind::CheckpointCreated,
+        ]
+    );
 }
 
 async fn drive_model_reply_milestones_and_assert_projection(
@@ -291,9 +336,20 @@ async fn drive_model_reply_milestones_and_assert_projection(
     )
     .await;
     let success_host = success.build_host().await;
+    let success_prompt = success_host
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+        })
+        .await
+        .unwrap();
     let model_response = success_host
         .stream_model(LoopModelRequest {
-            messages: Vec::new(),
+            messages: success_prompt.messages,
             surface_version: None,
             model_preference: None,
         })
@@ -353,9 +409,20 @@ async fn drive_model_reply_milestones_and_assert_projection(
     )
     .await;
     let failure_host = failure.build_host().await;
+    let failure_prompt = failure_host
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+        })
+        .await
+        .unwrap();
     let error = failure_host
         .stream_model(LoopModelRequest {
-            messages: Vec::new(),
+            messages: failure_prompt.messages,
             surface_version: None,
             model_preference: None,
         })

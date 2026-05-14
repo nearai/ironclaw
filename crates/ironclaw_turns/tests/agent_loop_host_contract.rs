@@ -30,8 +30,8 @@ use ironclaw_turns::{
         LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
         LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage,
         LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
-        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleRef,
-        LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
         LoopRunInfoPort, LoopTranscriptPort, ModelCallOutcome, ParentLoopOutput, PromptMode,
         PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
@@ -646,6 +646,8 @@ async fn prompt_bundle_authority_consumes_grant_after_successful_model_authoriza
         messages: messages.clone(),
         surface_version: None,
         instruction_fingerprint: None,
+        identity_message_count: 0,
+        instruction_snippet_count: 0,
     };
     authority.issue_bundle(&context, &bundle).unwrap();
 
