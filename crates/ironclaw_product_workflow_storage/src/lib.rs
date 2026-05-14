@@ -17,6 +17,11 @@ mod error;
 mod identifiers;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod phase;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod recovery;
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub use recovery::DEFAULT_RECOVERY_LEASE;
 
 #[cfg(feature = "libsql")]
 mod binding_libsql;

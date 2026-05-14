@@ -167,6 +167,68 @@ async fn postgres_ledger_round_trips_begin_settle_replay() {
     }
 }
 
+/// Regression for Henry's PR #3590 review item #1 — stale in-flight rows
+/// must be reclaimed by `begin_or_replay`, not block retries forever.
+/// Mirrors `stale_inflight_row_is_reclaimed_on_next_begin` from the libSQL
+/// unit-tests but drives the Postgres implementation through its public API.
+#[tokio::test]
+async fn postgres_ledger_reclaims_stale_inflight_row() {
+    let Some(pool) = postgres_pool().await else {
+        eprintln!("skipping postgres test: set IRONCLAW_PRODUCT_STORAGE_POSTGRES_URL");
+        return;
+    };
+    reset_schema(&pool).await;
+
+    let ledger = PostgresProductIdempotencyLedger::with_recovery_lease(
+        pool.clone(),
+        std::time::Duration::from_millis(1),
+    );
+    let fp = fingerprint("pg_stale_reclaim");
+
+    let first = ledger
+        .begin_or_replay(fp.clone(), Utc::now())
+        .await
+        .expect("first begin");
+    let first_action_id = match first {
+        IdempotencyDecision::New(a) => a.action_id,
+        other => panic!("expected New, got {other:?}"),
+    };
+
+    // Hand-age the row past the 1ms lease.
+    let aged = Utc::now() - chrono::Duration::seconds(10);
+    let client = pool.get().await.expect("client");
+    let affected = client
+        .execute(
+            "UPDATE product_inbound_actions SET received_at = $1 \
+             WHERE adapter_id = $2 AND installation_id = $3 \
+               AND source_binding_key = $4 AND external_event_id = $5",
+            &[
+                &aged,
+                &fp.adapter_id.as_str(),
+                &fp.installation_id.as_str(),
+                &fp.source_binding_key.as_str(),
+                &fp.external_event_id.as_str(),
+            ],
+        )
+        .await
+        .expect("age the row");
+    assert_eq!(affected, 1);
+
+    let second = ledger
+        .begin_or_replay(fp, Utc::now())
+        .await
+        .expect("second begin");
+    match second {
+        IdempotencyDecision::New(reclaimed) => {
+            assert_ne!(
+                reclaimed.action_id, first_action_id,
+                "reclaim must mint a fresh action_id"
+            );
+        }
+        other => panic!("stale row must be reclaimed and surface as New, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn postgres_ledger_release_removes_only_inflight() {
     let Some(pool) = postgres_pool().await else {

@@ -4,6 +4,7 @@
 //! This file only deals with row layout and state transitions.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -16,26 +17,134 @@ use uuid::Uuid;
 
 use crate::error::{libsql_error, transient};
 use crate::phase::{parse_phase, phase_to_str};
+use crate::recovery::DEFAULT_RECOVERY_LEASE;
 
 /// libSQL-backed durable idempotency ledger.
 ///
 /// Webhook retries for the same external event return a `Replay` of the prior
 /// outcome instead of double-dispatching downstream. Required-but-in-flight
 /// duplicates surface as transient errors so the protocol layer can retry
-/// after the in-flight action settles (or after recovery lease TTL elapses,
-/// which is a separate sweep concern).
+/// after the in-flight action settles, **or** after the recovery lease TTL
+/// elapses and `begin_or_replay` reclaims the stale reservation.
 #[derive(Clone)]
 pub struct LibSqlProductIdempotencyLedger {
     db: Arc<::libsql::Database>,
+    recovery_lease: Duration,
 }
 
 impl LibSqlProductIdempotencyLedger {
+    /// Construct with the [`DEFAULT_RECOVERY_LEASE`].
     pub fn new(db: Arc<::libsql::Database>) -> Self {
-        Self { db }
+        Self::with_recovery_lease(db, DEFAULT_RECOVERY_LEASE)
+    }
+
+    /// Construct with an explicit recovery-lease TTL. A non-terminal row
+    /// older than this is eligible for reclaim on the next
+    /// `begin_or_replay` call for the same fingerprint.
+    pub fn with_recovery_lease(db: Arc<::libsql::Database>, recovery_lease: Duration) -> Self {
+        Self { db, recovery_lease }
     }
 
     async fn connect(&self) -> Result<::libsql::Connection, ProductWorkflowError> {
         self.db.connect().map_err(libsql_error)
+    }
+
+    /// Conflict-path handler for `begin_or_replay`. The INSERT lost the
+    /// UNIQUE race; a row already exists for this fingerprint. The three
+    /// branches:
+    ///
+    /// * `Settled` / `DeduplicatedReplay` — return `Replay(row)`. Caller
+    ///   replays the prior outcome.
+    /// * `Received` / `Dispatched` with `received_at` < `now -
+    ///   recovery_lease` — the prior reservation is abandoned (timeout,
+    ///   crash, cancelled spawn). Atomically claim it: UPDATE in place
+    ///   with a fresh `action_id` and `received_at`, keep `phase = Received`.
+    ///   Return `New(reclaimed_action)`.
+    /// * `Received` / `Dispatched` within lease — return `Transient`. Caller
+    ///   should retry later.
+    ///
+    /// The reclaim UPDATE is gated on the same phase-and-age predicate so
+    /// two concurrent callers that both observe a stale row only let one
+    /// of them claim it; the other sees `rows_affected = 0` and re-reads
+    /// the now-fresh row (and returns Transient because the new claim is
+    /// in-flight).
+    async fn handle_conflict(
+        &self,
+        conn: &::libsql::Connection,
+        fingerprint: ActionFingerprintKey,
+        received_at: DateTime<Utc>,
+    ) -> Result<IdempotencyDecision, ProductWorkflowError> {
+        let row = fetch_row(conn, &fingerprint).await?.ok_or_else(|| {
+            transient("ledger UNIQUE constraint fired but row not visible on follow-up SELECT")
+        })?;
+        let phase = parse_phase(&row.phase)?;
+        match phase {
+            ActionPhase::Settled | ActionPhase::DeduplicatedReplay => {
+                let action = row_into_action(row, fingerprint)?;
+                Ok(IdempotencyDecision::Replay(action))
+            }
+            ActionPhase::Received | ActionPhase::Dispatched => {
+                let row_received_at = parse_timestamp(&row.received_at)?;
+                let lease_chrono = chrono::Duration::from_std(self.recovery_lease)
+                    .map_err(|e| transient(format!("recovery lease out of range: {e}")))?;
+                let stale_threshold = received_at - lease_chrono;
+                if row_received_at >= stale_threshold {
+                    // Still in flight within the lease window.
+                    return Err(transient(
+                        "idempotency fingerprint already in flight; retry after recovery lease",
+                    ));
+                }
+                // Stale. Atomically claim by UPDATE-with-WHERE. The WHERE
+                // includes the phase-and-age predicate so a concurrent
+                // caller that also saw the stale row only lets one of us
+                // win; the loser observes rows_affected = 0 and re-reads
+                // (the row now carries the winner's fresh received_at, so
+                // the follow-through hits the Transient branch).
+                let claimed = ProductInboundAction::begin(fingerprint.clone(), received_at);
+                let claimed_action_id_str = claimed.action_id.as_uuid().to_string();
+                let claimed_received_at_str = format_timestamp(claimed.received_at);
+                let row_received_at_str = row.received_at.clone();
+                let affected = conn
+                    .execute(
+                        "UPDATE product_inbound_actions \
+                         SET action_id = ?1, received_at = ?2, phase = 'received', \
+                             dispatch_kind_json = NULL, outcome_json = NULL, settled_at = NULL \
+                         WHERE adapter_id = ?3 \
+                           AND installation_id = ?4 \
+                           AND source_binding_key = ?5 \
+                           AND external_event_id = ?6 \
+                           AND phase IN ('received', 'dispatched') \
+                           AND received_at = ?7",
+                        ::libsql::params![
+                            claimed_action_id_str,
+                            claimed_received_at_str,
+                            claimed.fingerprint.adapter_id.as_str(),
+                            claimed.fingerprint.installation_id.as_str(),
+                            claimed.fingerprint.source_binding_key.as_str(),
+                            claimed.fingerprint.external_event_id.as_str(),
+                            row_received_at_str,
+                        ],
+                    )
+                    .await
+                    .map_err(libsql_error)?;
+                if affected == 1 {
+                    tracing::warn!(
+                        fingerprint = ?claimed.fingerprint,
+                        prior_received_at = %row_received_at,
+                        lease_secs = self.recovery_lease.as_secs(),
+                        "reclaimed stale non-terminal ledger row after recovery lease elapsed"
+                    );
+                    Ok(IdempotencyDecision::New(claimed))
+                } else {
+                    // Another caller claimed it between our SELECT and
+                    // UPDATE. Their claim is in-flight; we surface
+                    // Transient so the protocol layer retries.
+                    Err(transient(
+                        "idempotency fingerprint reclaimed by concurrent caller; retry",
+                    ))
+                }
+            }
+        }
     }
 }
 
@@ -150,8 +259,7 @@ impl IdempotencyLedger for LibSqlProductIdempotencyLedger {
         // (zmanian's review on PR #3590, item #1). Two concurrent callers
         // with the same fingerprint used to both miss a prior SELECT and
         // race the UNIQUE constraint at INSERT; the loser surfaced a raw DB
-        // error instead of the expected `Transient` reply. Mirrors the
-        // pattern already used by `binding_libsql.rs`.
+        // error instead of the expected `Transient` reply.
         let conn = self.connect().await?;
         let action = ProductInboundAction::begin(fingerprint.clone(), received_at);
         let action_id_str = action.action_id.as_uuid().to_string();
@@ -177,28 +285,14 @@ impl IdempotencyLedger for LibSqlProductIdempotencyLedger {
         {
             Ok(_) => Ok(IdempotencyDecision::New(action)),
             // UNIQUE constraint (extended SQLite code 2067 =
-            // SQLITE_CONSTRAINT_UNIQUE) means a concurrent caller — or an
-            // honest retry — got there first. Fetch the winning row and
-            // decide Replay vs Transient based on its phase. libsql 0.6
-            // surfaces the extended code, not the primary code 19; matching
-            // on 19 alone silently misses this case (verified empirically
-            // by an inline probe — UNIQUE = 2067 on this libsql version).
+            // SQLITE_CONSTRAINT_UNIQUE). libsql 0.6 surfaces the extended
+            // code, not the primary code 19; matching on 19 alone
+            // silently misses this case. We then take the conflict path,
+            // which may either reclaim a stale non-terminal row (recovery
+            // lease) or return Replay/Transient based on the winner's
+            // phase.
             Err(::libsql::Error::SqliteFailure(2067, _)) => {
-                let row = fetch_row(&conn, &fingerprint).await?.ok_or_else(|| {
-                    transient(
-                        "ledger UNIQUE constraint fired but row not visible on follow-up SELECT",
-                    )
-                })?;
-                let phase = parse_phase(&row.phase)?;
-                let action = row_into_action(row, fingerprint)?;
-                match phase {
-                    ActionPhase::Settled | ActionPhase::DeduplicatedReplay => {
-                        Ok(IdempotencyDecision::Replay(action))
-                    }
-                    ActionPhase::Received | ActionPhase::Dispatched => Err(transient(
-                        "idempotency fingerprint already in flight; retry after recovery lease",
-                    )),
-                }
+                self.handle_conflict(&conn, fingerprint, received_at).await
             }
             Err(other) => Err(libsql_error(other)),
         }
@@ -449,6 +543,110 @@ CREATE TABLE IF NOT EXISTS product_inbound_actions (
         }
         assert_eq!(new_count, 1, "exactly one task should win the insert");
         assert!(transient_count >= 1, "losers must surface as Transient");
+    }
+
+    /// Regression for Henry's PR #3590 review item #1 — the recovery-lease
+    /// contract. A non-terminal row whose `received_at` is older than the
+    /// configured lease must be atomically reclaimed by the next caller's
+    /// `begin_or_replay`, returning `New`. Drives the actual public API
+    /// (not just helper internals), per the "Test Through the Caller" rule.
+    #[tokio::test]
+    async fn stale_inflight_row_is_reclaimed_on_next_begin() {
+        let (db, _dir) = build_test_db().await;
+        // Short lease so the test doesn't have to wait. 1ms means any row
+        // we hand-age by even 10ms is well past the threshold.
+        let ledger = LibSqlProductIdempotencyLedger::with_recovery_lease(
+            Arc::clone(&db),
+            Duration::from_millis(1),
+        );
+        let fp = fingerprint("evt_stale_reclaim");
+
+        // First begin: ordinary New + in-flight reservation.
+        let first = ledger
+            .begin_or_replay(fp.clone(), Utc::now())
+            .await
+            .expect("first begin");
+        let first_action = match first {
+            IdempotencyDecision::New(a) => a,
+            other => panic!("expected New, got {other:?}"),
+        };
+        // Simulate "process crashed before settle/release": hand-age the
+        // row's received_at to a value well past the 1ms lease window.
+        let conn = db.connect().expect("connect");
+        let aged = Utc::now() - chrono::Duration::seconds(10);
+        let aged_str = format_timestamp(aged);
+        let affected = conn
+            .execute(
+                "UPDATE product_inbound_actions SET received_at = ?1 \
+                 WHERE adapter_id = ?2 AND installation_id = ?3 \
+                   AND source_binding_key = ?4 AND external_event_id = ?5",
+                ::libsql::params![
+                    aged_str,
+                    fp.adapter_id.as_str(),
+                    fp.installation_id.as_str(),
+                    fp.source_binding_key.as_str(),
+                    fp.external_event_id.as_str(),
+                ],
+            )
+            .await
+            .expect("age the row");
+        assert_eq!(affected, 1, "must hand-age exactly one row");
+
+        // Second begin: stale row should be reclaimed atomically.
+        let second = ledger
+            .begin_or_replay(fp, Utc::now())
+            .await
+            .expect("second begin");
+        match second {
+            IdempotencyDecision::New(reclaimed) => {
+                assert_ne!(
+                    reclaimed.action_id, first_action.action_id,
+                    "reclaim must mint a fresh action_id"
+                );
+            }
+            other => panic!("stale row must be reclaimed and surface as New, got {other:?}"),
+        }
+    }
+
+    /// Counter-test: a *fresh* non-terminal row within the lease window
+    /// must continue to surface as Transient. Prevents the reclaim path
+    /// from over-firing and clobbering honest slow dispatches.
+    #[tokio::test]
+    async fn fresh_inflight_row_stays_transient_within_lease() {
+        let (db, _dir) = build_test_db().await;
+        // Generous lease so the second begin happens well inside it.
+        let ledger = LibSqlProductIdempotencyLedger::with_recovery_lease(
+            Arc::clone(&db),
+            Duration::from_secs(3600),
+        );
+        let fp = fingerprint("evt_fresh_inflight");
+        let _first = ledger
+            .begin_or_replay(fp.clone(), Utc::now())
+            .await
+            .expect("first begin");
+        let err = ledger
+            .begin_or_replay(fp, Utc::now())
+            .await
+            .expect_err("fresh in-flight must be Transient");
+        assert!(
+            matches!(err, ProductWorkflowError::Transient { .. }),
+            "fresh in-flight must be Transient, got {err:?}"
+        );
+    }
+
+    /// Helper: build a fresh in-memory libSQL DB with the V26 schema.
+    /// Extracted from `ledger()` so tests that need a custom-lease ledger
+    /// can keep the same DB lifecycle.
+    async fn build_test_db() -> (Arc<::libsql::Database>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ledger.db");
+        let db = ::libsql::Builder::new_local(path)
+            .build()
+            .await
+            .expect("build db");
+        let conn = db.connect().expect("connect");
+        conn.execute_batch(TEST_SCHEMA).await.expect("schema");
+        (Arc::new(db), dir)
     }
 
     #[tokio::test]

@@ -3,6 +3,8 @@
 //! Schema lives in `migrations/V28__product_inbound_actions_and_bindings.sql`.
 //! This file only deals with row layout and state transitions.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use deadpool_postgres::Pool;
@@ -15,15 +17,28 @@ use uuid::Uuid;
 
 use crate::error::{pool_error, postgres_error, transient};
 use crate::phase::{parse_phase, phase_to_str};
+use crate::recovery::DEFAULT_RECOVERY_LEASE;
 
 #[derive(Clone)]
 pub struct PostgresProductIdempotencyLedger {
     pool: Pool,
+    recovery_lease: Duration,
 }
 
 impl PostgresProductIdempotencyLedger {
+    /// Construct with the [`DEFAULT_RECOVERY_LEASE`].
     pub fn new(pool: Pool) -> Self {
-        Self { pool }
+        Self::with_recovery_lease(pool, DEFAULT_RECOVERY_LEASE)
+    }
+
+    /// Construct with an explicit recovery-lease TTL. See
+    /// `LibSqlProductIdempotencyLedger::with_recovery_lease` for the
+    /// semantics — both backends share the contract.
+    pub fn with_recovery_lease(pool: Pool, recovery_lease: Duration) -> Self {
+        Self {
+            pool,
+            recovery_lease,
+        }
     }
 }
 
@@ -111,7 +126,10 @@ impl IdempotencyLedger for PostgresProductIdempotencyLedger {
             return Ok(IdempotencyDecision::New(action));
         }
 
-        // Conflict path: another caller owns the row. Read it and decide.
+        // Conflict path: another caller owns the row. Read it and decide
+        // — Settled/DeduplicatedReplay replays, fresh Received/Dispatched
+        // is Transient, stale Received/Dispatched is reclaimed in place
+        // and returns New.
         let row = client
             .query_opt(
                 "SELECT action_id, phase, dispatch_kind_json, outcome_json, received_at, settled_at \
@@ -137,14 +155,66 @@ impl IdempotencyLedger for PostgresProductIdempotencyLedger {
 
         let phase_str: String = row.get("phase");
         let phase = parse_phase(&phase_str)?;
-        let action = row_into_action(&row, fingerprint)?;
+        let prior_received_at: DateTime<Utc> = row.get("received_at");
+
         match phase {
             ActionPhase::Settled | ActionPhase::DeduplicatedReplay => {
+                let action = row_into_action(&row, fingerprint)?;
                 Ok(IdempotencyDecision::Replay(action))
             }
-            ActionPhase::Received | ActionPhase::Dispatched => Err(transient(
-                "idempotency fingerprint already in flight; retry after recovery lease",
-            )),
+            ActionPhase::Received | ActionPhase::Dispatched => {
+                let lease_chrono = chrono::Duration::from_std(self.recovery_lease)
+                    .map_err(|e| transient(format!("recovery lease out of range: {e}")))?;
+                let stale_threshold = received_at - lease_chrono;
+                if prior_received_at >= stale_threshold {
+                    return Err(transient(
+                        "idempotency fingerprint already in flight; retry after recovery lease",
+                    ));
+                }
+                // Stale. Atomic reclaim by UPDATE-with-WHERE; the
+                // received_at predicate makes the race between two
+                // concurrent reclaim attempts deterministic — only one
+                // UPDATE sees the prior timestamp and wins.
+                let claimed = ProductInboundAction::begin(fingerprint.clone(), received_at);
+                let claimed_action_id_uuid = claimed.action_id.as_uuid();
+                let updated = client
+                    .query_opt(
+                        "UPDATE product_inbound_actions \
+                         SET action_id = $1, received_at = $2, phase = 'received', \
+                             dispatch_kind_json = NULL, outcome_json = NULL, settled_at = NULL \
+                         WHERE adapter_id = $3 \
+                           AND installation_id = $4 \
+                           AND source_binding_key = $5 \
+                           AND external_event_id = $6 \
+                           AND phase IN ('received', 'dispatched') \
+                           AND received_at = $7 \
+                         RETURNING action_id",
+                        &[
+                            &claimed_action_id_uuid,
+                            &claimed.received_at,
+                            &claimed.fingerprint.adapter_id.as_str(),
+                            &claimed.fingerprint.installation_id.as_str(),
+                            &claimed.fingerprint.source_binding_key.as_str(),
+                            &claimed.fingerprint.external_event_id.as_str(),
+                            &prior_received_at,
+                        ],
+                    )
+                    .await
+                    .map_err(postgres_error)?;
+                if updated.is_some() {
+                    tracing::warn!(
+                        fingerprint = ?claimed.fingerprint,
+                        prior_received_at = %prior_received_at,
+                        lease_secs = self.recovery_lease.as_secs(),
+                        "reclaimed stale non-terminal ledger row after recovery lease elapsed"
+                    );
+                    Ok(IdempotencyDecision::New(claimed))
+                } else {
+                    Err(transient(
+                        "idempotency fingerprint reclaimed by concurrent caller; retry",
+                    ))
+                }
+            }
         }
     }
 

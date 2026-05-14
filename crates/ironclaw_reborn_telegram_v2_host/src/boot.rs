@@ -164,20 +164,27 @@ async fn fetch_bot_identity(bot_token: &str) -> Result<BotIdentity, String> {
         .user_agent("ironclaw-reborn-telegram-v2/0")
         .timeout(std::time::Duration::from_secs(10))
         .build()
-        .map_err(|e| format!("build reqwest client: {e}"))?;
+        .map_err(|e| format!("build reqwest client: {}", scrub(e)))?;
+    // Telegram's only auth method is path-embedded bot tokens. reqwest's
+    // `Error::Display` includes the request URL by default, so a DNS/TLS/
+    // connect failure formatted with `{e}` writes the bot token into logs.
+    // `.without_url()` strips the URL from every error returned downstream
+    // (zmanian / Henry's review on PR #3590, "Concerning" #2 — token leak
+    // through error-stringification). Body-related errors don't carry a
+    // URL, but we use the same scrubber uniformly to avoid drift.
     let url = format!("https://api.telegram.org/bot{bot_token}/getMe");
     let response = client
         .get(&url)
         .send()
         .await
-        .map_err(|e| format!("getMe request failed: {e}"))?;
+        .map_err(|e| format!("getMe request failed: {}", scrub(e)))?;
     if !response.status().is_success() {
         return Err(format!("getMe returned HTTP {}", response.status()));
     }
     let body: serde_json::Value = response
         .json()
         .await
-        .map_err(|e| format!("parse getMe response: {e}"))?;
+        .map_err(|e| format!("parse getMe response: {}", scrub(e)))?;
     if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         return Err(format!("getMe response not ok: {body}"));
     }
@@ -194,4 +201,11 @@ async fn fetch_bot_identity(bot_token: &str) -> Result<BotIdentity, String> {
         .ok_or_else(|| "getMe 'result.username' missing or not a string".to_string())?
         .to_string();
     Ok(BotIdentity { id, username })
+}
+
+/// Format a `reqwest::Error` with its URL stripped — `.without_url()` mutates
+/// the error to drop the `url` field that `Display` would otherwise include,
+/// which for Telegram's bot API leaks the token path segment.
+fn scrub(err: reqwest::Error) -> String {
+    err.without_url().to_string()
 }

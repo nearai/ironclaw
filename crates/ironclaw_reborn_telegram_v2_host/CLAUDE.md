@@ -64,7 +64,7 @@ Telegram webhook
 ```bash
 export TELEGRAM_BOT_TOKEN=...
 export TELEGRAM_WEBHOOK_SECRET=...
-export LIBSQL_PATH=~/.ironclaw-reborn.db
+export LIBSQL_PATH=~/.ironclaw-reborn.db          # required (or DATABASE_URL for Postgres)
 # Optional:
 # export REBORN_TELEGRAM_V2_INSTALLATION_ID=default
 # export IRONCLAW_REBORN_LISTEN_ADDR=127.0.0.1:8090
@@ -72,6 +72,12 @@ export LIBSQL_PATH=~/.ironclaw-reborn.db
 cargo build --bin ironclaw-reborn-telegram-host
 ./target/debug/ironclaw-reborn-telegram-host
 ```
+
+The host fails closed at startup if neither `DATABASE_URL` (Postgres) nor
+`LIBSQL_PATH` (libSQL) is set. Ephemeral in-memory storage is available
+for tests/dev via the explicit opt-in `IRONCLAW_REBORN_ALLOW_EPHEMERAL=1`;
+do not use it in production — the ledger and bindings will not survive
+a restart.
 
 Then expose `127.0.0.1:8090` via cloudflared/ngrok and register the webhook
 with Telegram:

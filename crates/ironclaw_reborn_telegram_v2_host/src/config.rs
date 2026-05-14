@@ -80,6 +80,14 @@ impl HostConfig {
     }
 }
 
+/// Env-var name an operator can set to *explicitly* opt into ephemeral
+/// in-memory storage. Required for tests and dev loops; absent in any
+/// production deployment that should survive a restart. Renamed from the
+/// previous silent `:memory:` fallback because that fallback made it
+/// impossible to tell a misconfigured production process apart from an
+/// intentional dev session (Henry's PR #3590 review item #3).
+const ALLOW_EPHEMERAL_ENV: &str = "IRONCLAW_REBORN_ALLOW_EPHEMERAL";
+
 #[allow(unreachable_code)]
 fn resolve_storage() -> Result<StorageBackend, HostError> {
     #[cfg(feature = "postgres")]
@@ -87,13 +95,28 @@ fn resolve_storage() -> Result<StorageBackend, HostError> {
         return Ok(StorageBackend::Postgres { url });
     }
     #[cfg(feature = "libsql")]
-    {
-        let path = env::var("LIBSQL_PATH").unwrap_or_else(|_| ":memory:".to_string());
+    if let Ok(path) = env::var("LIBSQL_PATH") {
         return Ok(StorageBackend::LibSql { path });
     }
-    #[allow(unreachable_code)]
-    Err(HostError::Config(
-        "no storage backend configured — set DATABASE_URL (postgres) or LIBSQL_PATH (libsql)"
-            .into(),
-    ))
+    // Fail-closed default. The Reborn host's entire purpose is durable
+    // idempotency + binding storage; a silent `:memory:` fallback would
+    // break the idempotency contract on every restart without anyone
+    // noticing. Operators who want ephemeral storage on purpose (tests,
+    // dev loops) opt in explicitly via `IRONCLAW_REBORN_ALLOW_EPHEMERAL=1`.
+    #[cfg(feature = "libsql")]
+    if env::var(ALLOW_EPHEMERAL_ENV).is_ok_and(|v| !v.is_empty() && v != "0") {
+        tracing::warn!(
+            "Reborn host: using ephemeral in-memory libSQL storage because \
+             {ALLOW_EPHEMERAL_ENV} is set. Ledger and bindings will be lost \
+             on restart; not safe for production."
+        );
+        return Ok(StorageBackend::LibSql {
+            path: ":memory:".to_string(),
+        });
+    }
+    Err(HostError::Config(format!(
+        "no durable storage configured — set DATABASE_URL (postgres) or \
+         LIBSQL_PATH (libsql). For tests/dev, set {ALLOW_EPHEMERAL_ENV}=1 to \
+         opt into in-memory storage."
+    )))
 }
