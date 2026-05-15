@@ -31,6 +31,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::sync::Notify;
+
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_events::{
@@ -413,8 +415,48 @@ struct SeenRuntimeEvent {
     hook_id: Option<String>,
 }
 
+/// Recorder used by event-triggered hook integration tests. Pairs the
+/// observed-events vec with a `Notify` so `wait_for_seen_events` can
+/// suspend until the next event arrives instead of polling on a 10 ms
+/// timer — see henrypark133 nit #8 on PR #3640.
+#[derive(Default)]
+struct SeenLog {
+    events: Mutex<Vec<SeenRuntimeEvent>>,
+    notify: Notify,
+}
+
+impl SeenLog {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    fn push(&self, event: SeenRuntimeEvent) {
+        self.events
+            .lock()
+            .expect("seen-event mutex not poisoned")
+            .push(event);
+        // `notify_one` is a permit-store; an arriving event before the
+        // waiter parks still wakes the waiter on its next `notified()`.
+        self.notify.notify_one();
+    }
+
+    fn snapshot(&self) -> Vec<SeenRuntimeEvent> {
+        self.events
+            .lock()
+            .expect("seen-event mutex not poisoned")
+            .clone()
+    }
+
+    fn len(&self) -> usize {
+        self.events
+            .lock()
+            .expect("seen-event mutex not poisoned")
+            .len()
+    }
+}
+
 struct RecordingEventTriggeredHook {
-    seen: Arc<Mutex<Vec<SeenRuntimeEvent>>>,
+    seen: Arc<SeenLog>,
     delay: Option<Duration>,
 }
 
@@ -428,22 +470,19 @@ impl EventTriggeredHook for RecordingEventTriggeredHook {
         if let Some(delay) = self.delay {
             tokio::time::sleep(delay).await;
         }
-        self.seen
-            .lock()
-            .expect("seen-event mutex not poisoned")
-            .push(SeenRuntimeEvent {
-                cursor: ctx.event_cursor,
-                kind: ctx.event.kind,
-                provider: ctx.event.provider.clone(),
-                hook_id: ctx.event.hook_id.clone(),
-            });
+        self.seen.push(SeenRuntimeEvent {
+            cursor: ctx.event_cursor,
+            kind: ctx.event.kind,
+            provider: ctx.event.provider.clone(),
+            hook_id: ctx.event.hook_id.clone(),
+        });
         sink.note(NoteCategory::HookFired, "event hook fired");
     }
 }
 
 fn event_triggered_dispatcher(
     event_kind: RuntimeEventKind,
-    seen: Arc<Mutex<Vec<SeenRuntimeEvent>>>,
+    seen: Arc<SeenLog>,
 ) -> Arc<HookDispatcher> {
     event_triggered_dispatcher_with_scope(
         event_kind,
@@ -456,7 +495,7 @@ fn event_triggered_dispatcher(
 
 fn event_triggered_dispatcher_with_scope(
     event_kind: RuntimeEventKind,
-    seen: Arc<Mutex<Vec<SeenRuntimeEvent>>>,
+    seen: Arc<SeenLog>,
     scope: HookBindingScope,
     owning_extension: &str,
     delay: Option<Duration>,
@@ -1062,22 +1101,28 @@ fn expect_denied_with_summary(
     }
 }
 
-async fn wait_for_seen_events(
-    seen: &Arc<Mutex<Vec<SeenRuntimeEvent>>>,
-    expected: usize,
-) -> Vec<SeenRuntimeEvent> {
+async fn wait_for_seen_events(seen: &Arc<SeenLog>, expected: usize) -> Vec<SeenRuntimeEvent> {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        let snapshot = seen.lock().expect("seen-event mutex not poisoned").clone();
+        let snapshot = seen.snapshot();
         if snapshot.len() >= expected {
             return snapshot;
         }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for {expected} event-triggered hook calls, saw {}",
-            snapshot.len()
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        let remaining = match deadline.checked_duration_since(Instant::now()) {
+            Some(remaining) => remaining,
+            None => {
+                panic!(
+                    "timed out waiting for {expected} event-triggered hook calls, saw {}",
+                    snapshot.len()
+                );
+            }
+        };
+        // Notify-driven wakeup; tokio::time::timeout caps the wait so the
+        // test still fails loud if the hook never fires. `notify_one`
+        // stores a permit when racing the waiter's parking, so an event
+        // arriving between `snapshot()` and `notified().await` still
+        // wakes us immediately.
+        let _ = tokio::time::timeout(remaining, seen.notify.notified()).await;
     }
 }
 
@@ -1111,7 +1156,7 @@ async fn event_triggered_hook_matches_runtime_event_kind_subscription() {
     .await
     .expect("append matching hook event");
 
-    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen = SeenLog::new();
     let inner = Arc::new(RecordingCapabilityPort::new());
     let _host = fixture
         .factory()
@@ -1163,7 +1208,7 @@ async fn event_triggered_subscription_replays_from_resume_cursor() {
         .expect("append replayed event");
     }
 
-    let first_seen = Arc::new(Mutex::new(Vec::new()));
+    let first_seen = SeenLog::new();
     {
         let inner = Arc::new(RecordingCapabilityPort::new());
         let _host = fixture
@@ -1191,7 +1236,7 @@ async fn event_triggered_subscription_replays_from_resume_cursor() {
         );
     }
 
-    let second_seen = Arc::new(Mutex::new(Vec::new()));
+    let second_seen = SeenLog::new();
     let inner = Arc::new(RecordingCapabilityPort::new());
     let _host = fixture
         .factory()
@@ -1246,7 +1291,7 @@ async fn event_triggered_hook_respects_own_capabilities_scope_filter() {
     .await
     .expect("append foreign-provider event");
 
-    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen = SeenLog::new();
     let inner = Arc::new(RecordingCapabilityPort::new());
     let _host = fixture
         .factory()
@@ -1326,8 +1371,8 @@ async fn event_triggered_own_capabilities_scope_resolves_hook_failed_owner_from_
     .await
     .expect("append second ext-A hook failure event");
 
-    let seen = Arc::new(Mutex::new(Vec::new()));
-    let inert_seen = Arc::new(Mutex::new(Vec::new()));
+    let seen = SeenLog::new();
+    let inert_seen = SeenLog::new();
     let subscription_hook_id = HookId::derive(
         &ExtensionId(ext_a.as_str().to_string()),
         "0.0.1",
@@ -1446,7 +1491,7 @@ async fn event_triggered_own_capabilities_matches_hook_failed_with_carried_provi
     .await
     .expect("append own-provider hook failure event");
 
-    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen = SeenLog::new();
     let inner = Arc::new(RecordingCapabilityPort::new());
     let _host = fixture
         .factory()
@@ -1472,7 +1517,7 @@ async fn event_triggered_own_capabilities_matches_hook_failed_with_carried_provi
     assert_eq!(events[0].provider.as_ref(), Some(&ext_a));
 }
 
-/// serrrfirat HIGH #1 on PR #3640: subscription stream/read-scope must be
+/// NOTE(#3640): subscription stream/read-scope must be
 /// bound to the host's run scope. A subscription pointing at a foreign
 /// tenant's stream must fail the host build instead of silently dispatching
 /// foreign events through this host's dispatcher.
@@ -1491,10 +1536,7 @@ async fn event_triggered_subscription_with_foreign_tenant_stream_fails_host_buil
     // Stream keyed to a different tenant — must be rejected.
     let foreign_stream = EventStreamKey::new(foreign_tenant, our_user, Some(our_agent));
 
-    let dispatcher = event_triggered_dispatcher(
-        RuntimeEventKind::HookFailed,
-        Arc::new(Mutex::new(Vec::new())),
-    );
+    let dispatcher = event_triggered_dispatcher(RuntimeEventKind::HookFailed, SeenLog::new());
     let inner = Arc::new(RecordingCapabilityPort::new());
     let err = fixture
         .factory()
@@ -1530,10 +1572,7 @@ async fn event_triggered_subscription_with_foreign_user_stream_fails_host_build(
         .expect("fixture sets an agent");
     let foreign_stream = EventStreamKey::new(our_tenant, foreign_user, Some(our_agent));
 
-    let dispatcher = event_triggered_dispatcher(
-        RuntimeEventKind::HookFailed,
-        Arc::new(Mutex::new(Vec::new())),
-    );
+    let dispatcher = event_triggered_dispatcher(RuntimeEventKind::HookFailed, SeenLog::new());
     let inner = Arc::new(RecordingCapabilityPort::new());
     let err = fixture
         .factory()
@@ -1553,7 +1592,7 @@ async fn event_triggered_subscription_with_foreign_user_stream_fails_host_build(
     );
 }
 
-/// serrrfirat MED on PR #3640: a hook subscribing to its own lifecycle
+/// NOTE(#3640): a hook subscribing to its own lifecycle
 /// events (HookFailed/HookDispatched/HookDecisionEmitted) with a scope
 /// that matches its own provider would otherwise be dispatched for events
 /// describing its OWN executions — the dispatch loop's emit_failure /
@@ -1610,7 +1649,7 @@ async fn event_triggered_self_lifecycle_event_does_not_redispatch() {
     .await
     .expect("append foreign-hook failure event");
 
-    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen = SeenLog::new();
     let inner = Arc::new(RecordingCapabilityPort::new());
     let _host = fixture
         .factory()
@@ -1644,7 +1683,7 @@ async fn event_triggered_self_lifecycle_event_does_not_redispatch() {
     );
 }
 
-/// serrrfirat MED on PR #3640: a `ReplayGap` from the durable log used to
+/// NOTE(#3640): a `ReplayGap` from the durable log used to
 /// log a warn and silently break the subscription loop. Now it surfaces an
 /// `EventSubscriptionTerminated` `DriverNote` milestone so SSE/audit
 /// consumers can see that the subscription died and why.
@@ -1670,10 +1709,8 @@ async fn event_triggered_replay_gap_emits_subscription_terminated_milestone() {
     log.truncate_before_or_at(&stream, RuntimeEventCursor::new(2))
         .expect("truncate");
 
-    let dispatcher = event_triggered_dispatcher(
-        RuntimeEventKind::HookDecisionEmitted,
-        Arc::new(Mutex::new(Vec::new())),
-    );
+    let dispatcher =
+        event_triggered_dispatcher(RuntimeEventKind::HookDecisionEmitted, SeenLog::new());
     let inner = Arc::new(RecordingCapabilityPort::new());
     let milestone_sink = fixture.milestone_sink.clone();
     let _host = fixture
@@ -1729,7 +1766,7 @@ async fn event_triggered_sink_is_observer_only_at_caller_boundary() {
         "fail_isolated",
         None,
     );
-    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen = SeenLog::new();
     let dispatcher = event_triggered_dispatcher(RuntimeEventKind::HookFailed, Arc::clone(&seen));
 
     let outcome = dispatcher
@@ -1742,7 +1779,7 @@ async fn event_triggered_sink_is_observer_only_at_caller_boundary() {
 
     assert!(outcome.failures.is_empty());
     assert_eq!(outcome.facts.len(), 1);
-    assert_eq!(seen.lock().expect("seen-event mutex not poisoned").len(), 1);
+    assert_eq!(seen.len(), 1);
 }
 
 #[tokio::test]
@@ -1756,7 +1793,7 @@ async fn event_triggered_slow_hook_does_not_block_event_emit_caller() {
         "tests::hooks_integration::slow_event_hook",
         HookVersion::ONE,
     );
-    let seen = Arc::new(Mutex::new(Vec::new()));
+    let seen = SeenLog::new();
     let inner = Arc::new(RecordingCapabilityPort::new());
     let _host = fixture
         .factory()

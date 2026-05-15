@@ -9,7 +9,7 @@ use ironclaw_events::{EventCursor, RuntimeEvent};
 use ironclaw_host_api::TenantId;
 
 /// Read-only context handed to an event-triggered hook.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[non_exhaustive]
 pub struct EventTriggeredHookContext<'a> {
     pub tenant_id: TenantId,

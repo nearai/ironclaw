@@ -1762,7 +1762,7 @@ pub enum LoopDriverNoteKind {
     /// typically because the durable event log reported a replay gap that
     /// the subscription cannot bridge without losing events. Surfaced as
     /// an operator-visible note so the missing telemetry isn't silently
-    /// invisible (serrrfirat MED on PR #3640).
+    /// invisible (NOTE(#3640)).
     EventSubscriptionTerminated,
 }
 

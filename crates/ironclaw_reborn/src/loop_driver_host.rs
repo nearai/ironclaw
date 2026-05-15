@@ -492,8 +492,8 @@ impl EventTriggeredHookSubscription {
     /// tenant A but supplies a subscription pointing at tenant B's stream
     /// (or to a stream-key that names a foreign user), the host would
     /// dispatch B's hook events into A's dispatcher with A's context tenant
-    /// — a cross-tenant trust-boundary break (serrrfirat HIGH #1 on PR
-    /// #3640). Same for `ReadScope` filter dimensions: any `Some(want)` in
+    /// — a cross-tenant trust-boundary break (NOTE(#3640)). Same for
+    /// `ReadScope` filter dimensions: any `Some(want)` in
     /// the filter must match the corresponding value in the run scope, so
     /// the subscription never observes events outside the host's authority.
     fn validate_against_run_scope(
@@ -648,7 +648,7 @@ impl EventTriggeredHookSubscription {
                         ?earliest,
                         "event-triggered hook subscription stopped after replay gap"
                     );
-                    // serrrfirat #3640 MED: replay gaps used to be a silent
+                    // NOTE(#3640): replay gaps used to be a silent
                     // warn+break. Surface as an operator-visible milestone
                     // so missing hook deliveries are auditable. Fail-closed:
                     // we break out of the loop after emitting because the
@@ -1168,8 +1168,8 @@ where
             self.event_subscription.as_ref(),
         ) {
             (Some(dispatcher), Some(subscription)) => {
-                // serrrfirat HIGH #1 on PR #3640: bind subscription
-                // stream/read-scope to this host's run scope. Otherwise a
+                // NOTE(#3640): bind subscription stream/read-scope to
+                // this host's run scope. Otherwise a
                 // caller wiring tenant A's host with tenant B's stream
                 // would silently dispatch B's hook events into A's
                 // dispatcher with A's context tenant.

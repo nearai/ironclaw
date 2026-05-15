@@ -1170,7 +1170,7 @@ impl HookDispatcher {
             ) {
                 continue;
             }
-            // serrrfirat MED #3 on PR #3640: skip self-observation. A hook
+            // NOTE(#3640): skip self-observation. A hook
             // that subscribes to a hook-lifecycle event kind
             // (HookDispatched/HookDecisionEmitted/HookFailed) and whose
             // owning_extension scope happens to match its own provider would
