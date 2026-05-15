@@ -9,7 +9,10 @@ use async_trait::async_trait;
 use ironclaw_threads::{
     MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
-use ironclaw_turns::{LoopCheckpointKind, LoopMessageRef, TurnError, TurnId, TurnRunId, TurnScope};
+use ironclaw_turns::{
+    GetRunStateRequest, LoopCheckpointKind, LoopMessageRef, TurnError, TurnId, TurnRunId,
+    TurnScope, TurnStateStore, TurnStatus,
+};
 
 pub use ironclaw_turns::loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
@@ -153,6 +156,7 @@ where
     S: SessionThreadService + ?Sized,
 {
     thread_service: Arc<S>,
+    turn_state_store: Arc<dyn TurnStateStore>,
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
 }
 
@@ -162,10 +166,12 @@ where
 {
     pub fn new(
         thread_service: Arc<S>,
+        turn_state_store: Arc<dyn TurnStateStore>,
         loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
     ) -> Self {
         Self {
             thread_service,
+            turn_state_store,
             loop_checkpoint_store,
         }
     }
@@ -251,11 +257,21 @@ where
 
     async fn is_cancellation_observed(
         &self,
-        _scope: &TurnScope,
+        scope: &TurnScope,
         _turn_id: TurnId,
-        _run_id: TurnRunId,
+        run_id: TurnRunId,
     ) -> Result<bool, TurnError> {
-        Ok(false)
+        let state = self
+            .turn_state_store
+            .get_run_state(GetRunStateRequest {
+                scope: scope.clone(),
+                run_id,
+            })
+            .await?;
+        Ok(matches!(
+            state.status,
+            TurnStatus::CancelRequested | TurnStatus::Cancelled
+        ))
     }
 
     async fn latest_checkpoint_kind(

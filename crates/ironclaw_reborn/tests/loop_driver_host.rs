@@ -941,6 +941,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
     let evidence: Arc<dyn LoopExitEvidencePort> =
         Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
             thread_service.clone(),
+            turn_store.clone(),
             loop_checkpoint_store.clone(),
         ));
     let applier = Arc::new(LoopExitApplier::new(transition_port, evidence));
@@ -5256,6 +5257,7 @@ fn loop_exit_applier_for_fixture(
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         Arc::clone(&fixture.thread_service),
+        turn_store.clone(),
         loop_checkpoint_store,
     ));
     Arc::new(LoopExitApplier::new(turn_store, evidence))
