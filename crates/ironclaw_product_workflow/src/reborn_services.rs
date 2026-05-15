@@ -13,9 +13,9 @@ use ironclaw_product_adapters::{
     ProductAdapterError, ProjectionStream, ProjectionSubscriptionRequest,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest,
-    MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
+    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService,
+    ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
@@ -424,15 +424,19 @@ async fn mark_message_submitted_or_replay(
         .await
     {
         Ok(_) => Ok(()),
-        Err(error) => reconcile_terminal_duplicate(
-            thread_service,
-            handoff,
-            source_binding_id,
-            client_action_id,
-            |replay| replay.status == MessageStatus::Submitted && replay.turn_run_id == Some(run_id),
-            error,
-        )
-        .await,
+        Err(error) => {
+            reconcile_terminal_duplicate(
+                thread_service,
+                handoff,
+                source_binding_id,
+                client_action_id,
+                |replay| {
+                    replay.status == MessageStatus::Submitted && replay.turn_run_id == Some(run_id)
+                },
+                error,
+            )
+            .await
+        }
     }
 }
 
@@ -448,15 +452,17 @@ async fn mark_message_deferred_busy_or_replay(
         .await
     {
         Ok(_) => Ok(()),
-        Err(error) => reconcile_terminal_duplicate(
-            thread_service,
-            handoff,
-            source_binding_id,
-            client_action_id,
-            |replay| replay.status == MessageStatus::DeferredBusy,
-            error,
-        )
-        .await,
+        Err(error) => {
+            reconcile_terminal_duplicate(
+                thread_service,
+                handoff,
+                source_binding_id,
+                client_action_id,
+                |replay| replay.status == MessageStatus::DeferredBusy,
+                error,
+            )
+            .await
+        }
     }
 }
 
@@ -620,7 +626,11 @@ fn webui_source_binding_id(scope: &TurnScope, actor: &TurnActor) -> String {
         ),
         segment(
             "project",
-            scope.project_id.as_ref().map(ironclaw_host_api::ProjectId::as_str).unwrap_or("")
+            scope
+                .project_id
+                .as_ref()
+                .map(ironclaw_host_api::ProjectId::as_str)
+                .unwrap_or("")
         ),
         segment("actor", actor.user_id.as_str())
     )
