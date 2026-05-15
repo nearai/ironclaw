@@ -213,14 +213,21 @@ impl DurableLoopHostMilestoneSink {
                 point.clone(),
                 trust_class.clone(),
             ),
-            LoopHostMilestoneKind::HookDecisionEmitted { hook_id, decision } => {
-                RuntimeEvent::hook_decision_emitted(
-                    scope,
-                    capability_id(HOOK_CAPABILITY_ID)?,
-                    hook_id.clone(),
-                    hook_decision_label(decision),
-                )
-            }
+            LoopHostMilestoneKind::HookDecisionEmitted {
+                hook_id,
+                decision,
+                // `audit_reason` is intentionally NOT projected into the
+                // durable event log: durable events are model-visible audit
+                // surface; the free-form manifest reason is operator-visible
+                // SSE/audit content delivered via the in-memory milestone
+                // sink, not the cross-process event channel.
+                audit_reason: _,
+            } => RuntimeEvent::hook_decision_emitted(
+                scope,
+                capability_id(HOOK_CAPABILITY_ID)?,
+                hook_id.clone(),
+                hook_decision_label(decision),
+            ),
             LoopHostMilestoneKind::HookFailed {
                 hook_id,
                 category,
@@ -371,6 +378,7 @@ mod tests {
                 decision: HookDecisionSummary::Deny {
                     reason: "policy-denied raw text".to_string(),
                 },
+                audit_reason: None,
             });
 
         let sink = projector_for(thread_id, run_id);

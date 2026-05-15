@@ -46,6 +46,14 @@ pub trait PrivilegedGateSink: Send {
     /// any sink method," which is treated as a protocol violation and
     /// fails closed.
     fn pass(&mut self);
+    /// Record a free-form audit-only reason that accompanies the model-
+    /// visible decision. The model never sees this text — it flows into the
+    /// hook decision milestone for SSE/audit consumers so operators can see
+    /// the manifest-supplied context behind a closed-vocab label like
+    /// `hook_rate_limit`. Implementations should overwrite any prior value;
+    /// if the hook calls this and then never mints a decision, the audit
+    /// reason is discarded along with the malformed-protocol failure.
+    fn record_audit_reason(&mut self, reason: String);
 }
 
 /// Gate sink surface for Installed hooks. Deliberately omits `allow`; an
@@ -57,6 +65,8 @@ pub trait RestrictedGateSink: Send {
     /// Record that the hook evaluated the context and has no opinion. See
     /// [`PrivilegedGateSink::pass`] for the full semantics.
     fn pass(&mut self);
+    /// See [`PrivilegedGateSink::record_audit_reason`].
+    fn record_audit_reason(&mut self, reason: String);
 }
 
 /// State recorded by [`RecordingGateSink`] as the hook calls sink methods.
@@ -77,12 +87,20 @@ pub(crate) enum GateSinkState {
 /// the hook.
 pub(crate) struct RecordingGateSink {
     pub(crate) state: GateSinkState,
+    /// Audit-only free-form reason set by [`PrivilegedGateSink::record_audit_reason`]
+    /// or [`RestrictedGateSink::record_audit_reason`]. The model-facing
+    /// decision in `state` carries the closed-vocab label; this field carries
+    /// the manifest-supplied context for audit/SSE consumers. `None` if the
+    /// hook never called `record_audit_reason` or did so before
+    /// `pass()`/Unset path.
+    pub(crate) audit_reason: Option<String>,
 }
 
 impl RecordingGateSink {
     pub(crate) fn new() -> Self {
         Self {
             state: GateSinkState::Unset,
+            audit_reason: None,
         }
     }
 
@@ -124,6 +142,10 @@ impl PrivilegedGateSink for RecordingGateSink {
     fn pass(&mut self) {
         self.state = GateSinkState::Passed;
     }
+
+    fn record_audit_reason(&mut self, reason: String) {
+        self.audit_reason = Some(reason);
+    }
 }
 
 impl RestrictedGateSink for RecordingGateSink {
@@ -147,6 +169,10 @@ impl RestrictedGateSink for RecordingGateSink {
 
     fn pass(&mut self) {
         self.state = GateSinkState::Passed;
+    }
+
+    fn record_audit_reason(&mut self, reason: String) {
+        self.audit_reason = Some(reason);
     }
 }
 

@@ -60,10 +60,17 @@ impl RestrictedBeforeCapabilityHook for PredicateBackedBeforeCapabilityHook {
                 // and continues composing without short-circuiting.
                 sink.pass();
             }
-            EvaluatorDecision::Deny { code, .. } => {
+            EvaluatorDecision::Deny { code, reason } => {
+                // serrrfirat #3636: model sees the closed-vocab label; audit/SSE
+                // gets the manifest's free-form reason via a separate channel.
+                // The two are intentionally split so a predicate author can name
+                // *why* (rich, operator-facing) without minting a model-visible
+                // label that could itself be a steering surface.
+                sink.record_audit_reason(reason);
                 sink.deny(code.as_label());
             }
-            EvaluatorDecision::PauseApproval { code, .. } => {
+            EvaluatorDecision::PauseApproval { code, reason } => {
+                sink.record_audit_reason(reason);
                 sink.pause_approval(code.as_label());
             }
         }
@@ -201,6 +208,58 @@ mod tests {
             }
             other => panic!("expected PauseApproval, got {other:?}"),
         }
+    }
+
+    /// serrrfirat #3636 regression: the manifest's free-form reason text
+    /// must reach the audit channel (the recording sink's `audit_reason`)
+    /// while the sink's decision reason stays on the closed-vocab label.
+    /// Model sees `hook_rate_limit`; audit sees the manifest text.
+    #[tokio::test]
+    async fn deny_with_code_records_audit_reason_separately_from_model_label() {
+        use crate::predicate::{DenyReasonCode, OnExceededAction, ValueOrRateBound};
+
+        let evaluator = Arc::new(PredicateEvaluator::new());
+        let spec = HookPredicateSpec::RateOrValueCap {
+            when: CapabilityPredicate::NameEquals {
+                name: "polymarket.place_order".to_string(),
+            },
+            bound: ValueOrRateBound::InvocationCount {
+                max: 0,
+                window: "1h".to_string(),
+            },
+            on_exceeded: OnExceededAction::DenyWithCode {
+                code: DenyReasonCode::RateLimit,
+                reason: "daily cap of $1000 exceeded at 14:32 UTC".to_string(),
+            },
+        };
+        let hook = PredicateBackedBeforeCapabilityHook::new(hook_id(), spec, evaluator);
+        let mut sink = RecordingGateSink::new();
+        let ctx = BeforeCapabilityHookContext::new_unresolved(
+            TenantId::new("alpha").expect("ok"),
+            "polymarket.place_order".to_string(),
+            [0u8; 32],
+        );
+
+        hook.evaluate(&ctx, &mut sink as &mut dyn RestrictedGateSink)
+            .await;
+        let decision = sink.decision().expect("hook emitted a decision");
+        match decision.view() {
+            crate::kinds::gate::GateDecisionView::Deny { reason } => {
+                assert_eq!(
+                    reason.as_str(),
+                    "hook_rate_limit",
+                    "model-visible reason must be the closed-vocab label, \
+                     never the manifest free-form text"
+                );
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+        assert_eq!(
+            sink.audit_reason.as_deref(),
+            Some("daily cap of $1000 exceeded at 14:32 UTC"),
+            "audit channel must receive the manifest's free-form reason \
+             intact for operator-facing SSE/audit consumers"
+        );
     }
 
     #[tokio::test]

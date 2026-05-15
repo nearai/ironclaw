@@ -115,6 +115,15 @@ pub enum LoopHostMilestoneKind {
     HookDecisionEmitted {
         hook_id: String,
         decision: HookDecisionSummary,
+        /// Audit-only free-form reason. Distinct from any reason embedded in
+        /// `decision` (which is the closed-vocab, model-visible label). This
+        /// field carries the manifest-supplied operator context behind a
+        /// closed-vocab label like `hook_rate_limit` and flows only to
+        /// audit/SSE consumers — never to the model. `None` for hooks that
+        /// did not record an audit reason (Builtin/Trusted gate hooks, or
+        /// any `Pass` outcome).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        audit_reason: Option<String>,
     },
     /// A hook misbehaved during dispatch. Captures the failure category and
     /// the dispatcher's disposition (fail-closed vs fail-isolated).
@@ -443,9 +452,14 @@ where
         &self,
         hook_id: String,
         decision: HookDecisionSummary,
+        audit_reason: Option<String>,
     ) -> Result<(), AgentLoopHostError> {
-        self.publish(LoopHostMilestoneKind::HookDecisionEmitted { hook_id, decision })
-            .await
+        self.publish(LoopHostMilestoneKind::HookDecisionEmitted {
+            hook_id,
+            decision,
+            audit_reason,
+        })
+        .await
     }
 
     pub async fn hook_failed(
@@ -515,6 +529,7 @@ mod hook_milestone_schema_snapshots {
         let value = LoopHostMilestoneKind::HookDecisionEmitted {
             hook_id: "abcdef0123456789".to_string(),
             decision: HookDecisionSummary::Allow,
+            audit_reason: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {
@@ -532,6 +547,7 @@ mod hook_milestone_schema_snapshots {
             decision: HookDecisionSummary::Deny {
                 reason: "blocked by policy".to_string(),
             },
+            audit_reason: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {
@@ -553,6 +569,7 @@ mod hook_milestone_schema_snapshots {
             decision: HookDecisionSummary::PauseApproval {
                 reason: "user approval required".to_string(),
             },
+            audit_reason: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {
@@ -574,6 +591,7 @@ mod hook_milestone_schema_snapshots {
             decision: HookDecisionSummary::PauseAuth {
                 reason: "re-authentication required".to_string(),
             },
+            audit_reason: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {
@@ -593,6 +611,7 @@ mod hook_milestone_schema_snapshots {
         let value = LoopHostMilestoneKind::HookDecisionEmitted {
             hook_id: "abcdef0123456789".to_string(),
             decision: HookDecisionSummary::Pass,
+            audit_reason: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {
@@ -608,6 +627,7 @@ mod hook_milestone_schema_snapshots {
         let value = LoopHostMilestoneKind::HookDecisionEmitted {
             hook_id: "abcdef0123456789".to_string(),
             decision: HookDecisionSummary::Patch,
+            audit_reason: None,
         };
         const EXPECTED: &str = r#"{
   "hook_decision_emitted": {

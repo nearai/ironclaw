@@ -90,7 +90,15 @@ pub struct BeforeCapabilityDispatchOutcome {
 #[derive(Debug)]
 pub(crate) enum GateHookOutcome {
     Pass,
-    Decision(BeforeCapabilityHookDecision),
+    Decision {
+        decision: BeforeCapabilityHookDecision,
+        /// Free-form audit-only reason set by the hook via
+        /// [`crate::sink::PrivilegedGateSink::record_audit_reason`] /
+        /// [`crate::sink::RestrictedGateSink::record_audit_reason`]. The
+        /// model-visible reason inside `decision` is the closed-vocab
+        /// label; this carries the manifest-supplied context for audit/SSE.
+        audit_reason: Option<String>,
+    },
 }
 
 /// Per-hook record of misbehavior surfaced during a dispatch.
@@ -579,9 +587,13 @@ impl HookDispatcher {
                     self.emit_decision(&binding, HookDecisionSummary::Pass)
                         .await;
                 }
-                Ok(GateHookOutcome::Decision(decision)) => {
+                Ok(GateHookOutcome::Decision {
+                    decision,
+                    audit_reason,
+                }) => {
                     let summary = telemetry::gate_decision_summary(&decision);
-                    self.emit_decision(&binding, summary).await;
+                    self.emit_decision_with_audit(&binding, summary, audit_reason)
+                        .await;
                     composed = compose_gate_decision(composed, decision);
                     if !matches!(composed.inner(), GateDecisionInner::Allow) {
                         short_circuited = true;
@@ -791,7 +803,7 @@ impl HookDispatcher {
                         .catch_unwind()
                         .await
                         .map_err(|_| ())
-                        .map(|()| sink.state)
+                        .map(|()| (sink.state, sink.audit_reason))
                 }
                 BeforeCapabilityHookImpl::Restricted(h) => {
                     let mut sink = RecordingGateSink::new();
@@ -799,15 +811,20 @@ impl HookDispatcher {
                         .catch_unwind()
                         .await
                         .map_err(|_| ())
-                        .map(|()| sink.state)
+                        .map(|()| (sink.state, sink.audit_reason))
                 }
             }
         };
 
         match tokio::time::timeout(timeout, run).await {
-            Ok(Ok(GateSinkState::Decided(decision))) => Ok(GateHookOutcome::Decision(decision)),
-            Ok(Ok(GateSinkState::Passed)) => Ok(GateHookOutcome::Pass),
-            Ok(Ok(GateSinkState::Unset)) => {
+            Ok(Ok((GateSinkState::Decided(decision), audit_reason))) => {
+                Ok(GateHookOutcome::Decision {
+                    decision,
+                    audit_reason,
+                })
+            }
+            Ok(Ok((GateSinkState::Passed, _))) => Ok(GateHookOutcome::Pass),
+            Ok(Ok((GateSinkState::Unset, _))) => {
                 let failure = self.classify_failure(
                     binding,
                     FailureCategory::Malformed,
@@ -977,12 +994,22 @@ impl HookDispatcher {
     }
 
     async fn emit_decision(&self, binding: &HookBinding, decision: HookDecisionSummary) {
+        self.emit_decision_with_audit(binding, decision, None).await;
+    }
+
+    async fn emit_decision_with_audit(
+        &self,
+        binding: &HookBinding,
+        decision: HookDecisionSummary,
+        audit_reason: Option<String>,
+    ) {
         if self.milestone_sink.is_none() {
             return;
         }
         self.emit_milestone(LoopHostMilestoneKind::HookDecisionEmitted {
             hook_id: telemetry::hook_id_string(binding.hook_id),
             decision,
+            audit_reason,
         })
         .await;
     }
