@@ -18,6 +18,24 @@ async fn in_memory_defaults_policy_progress_opt_in_and_subscription_scope() {
     notification_policy_rejects_excessive_targets(&store).await;
 }
 
+#[tokio::test]
+async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
+    // The new FilesystemOutboundStateStore runs the same contract suite as
+    // the in-memory and SQL backends, demonstrating that it satisfies the
+    // OutboundStateStore trait identically. The InMemoryBackend from
+    // ironclaw_filesystem stands in as the underlying mount; in production
+    // this would be a libSQL- or Postgres-backed RootFilesystem, or an
+    // HSM-decorated mount, with no consumer-side code change.
+    let backend = std::sync::Arc::new(ironclaw_filesystem::InMemoryBackend::new());
+    let store = FilesystemOutboundStateStore::new(backend);
+    durable_policy_subscription_delivery_flow(&store).await;
+    subscription_cursor_rejects_mismatched_scope(&store).await;
+    subscription_ids_are_scoped_not_global(&store).await;
+    subscription_cursor_rejects_backward_advancement(&store).await;
+    delivery_status_rejects_inconsistent_failure_kind(&store).await;
+    notification_policy_rejects_excessive_targets(&store).await;
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_persists_outbound_state_across_reopen() {
