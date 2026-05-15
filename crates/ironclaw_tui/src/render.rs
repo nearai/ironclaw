@@ -8,7 +8,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::theme::Theme;
 
 /// Convert a plain text string into wrapped `Line`s that fit within `max_width`.
-pub fn wrap_text(text: &str, max_width: usize, style: Style) -> Vec<Line<'static>> {
+pub(crate) fn wrap_text(text: &str, max_width: usize, style: Style) -> Vec<Line<'static>> {
     if max_width == 0 {
         return vec![];
     }
@@ -135,7 +135,7 @@ enum ListKind {
 /// Headings, bold, italic, inline code, fenced code blocks, lists,
 /// blockquotes, horizontal rules, and links are all rendered with
 /// appropriate terminal styles via `theme`.
-pub fn render_markdown(text: &str, max_width: usize, theme: &Theme) -> Vec<Line<'static>> {
+pub(crate) fn render_markdown(text: &str, max_width: usize, theme: &Theme) -> Vec<Line<'static>> {
     if max_width == 0 {
         return vec![];
     }
@@ -616,7 +616,7 @@ fn wrap_styled_segments(
 }
 
 /// Truncate a string to a maximum character count, appending "..." if truncated.
-pub fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     let char_count = s.chars().count();
     if char_count <= max {
         s.to_string()
@@ -630,13 +630,13 @@ pub fn truncate(s: &str, max: usize) -> String {
 ///
 /// Replaces newlines with spaces and collapses consecutive whitespace,
 /// then truncates to `max` characters.
-pub fn collapse_preview(s: &str, max: usize) -> String {
+pub(crate) fn collapse_preview(s: &str, max: usize) -> String {
     let collapsed: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
     truncate(&collapsed, max)
 }
 
 /// Format a duration in seconds to a human-readable string (e.g., "2m", "1h 5m").
-pub fn format_duration(secs: u64) -> String {
+pub(crate) fn format_duration(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")
     } else if secs < 3600 {
@@ -653,7 +653,7 @@ pub fn format_duration(secs: u64) -> String {
 }
 
 /// Format a tool duration in milliseconds (e.g., "37ms", "1.3s", "2m 5s").
-pub fn format_tool_duration(ms: u64) -> String {
+pub(crate) fn format_tool_duration(ms: u64) -> String {
     if ms < 1_000 {
         format!("{ms}ms")
     } else if ms < 60_000 {
@@ -671,7 +671,7 @@ pub fn format_tool_duration(ms: u64) -> String {
 }
 
 /// Format a token count with K/M suffix.
-pub fn format_tokens(tokens: u64) -> String {
+pub(crate) fn format_tokens(tokens: u64) -> String {
     if tokens < 1_000 {
         tokens.to_string()
     } else if tokens < 1_000_000 {

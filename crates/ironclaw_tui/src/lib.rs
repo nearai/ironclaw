@@ -32,14 +32,14 @@
 //! main crate directly.
 #![warn(unreachable_pub)]
 
-pub mod app;
-pub mod event;
-pub mod input;
-pub mod layout;
-pub mod render;
-pub mod spinner;
-pub mod theme;
-pub mod widgets;
+mod app;
+mod event;
+mod input;
+mod layout;
+mod render;
+mod spinner;
+mod theme;
+mod widgets;
 
 pub use app::{TuiAppConfig, TuiAppHandle, start_tui};
 pub use event::{

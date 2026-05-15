@@ -856,15 +856,58 @@ impl LoopRunInfoPort for HostManagedLoopProgressPort {
 #[async_trait]
 impl LoopProgressPort for HostManagedLoopProgressPort {
     async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError> {
+        let emitter = LoopHostMilestoneEmitter::new(
+            self.run_context.clone(),
+            Arc::clone(&self.milestone_sink),
+        );
         match event {
             LoopProgressEvent::DriverNote { kind, safe_summary } => {
-                LoopHostMilestoneEmitter::new(
-                    self.run_context.clone(),
-                    Arc::clone(&self.milestone_sink),
-                )
-                .driver_note(kind, safe_summary)
-                .await
+                emitter.driver_note(kind, safe_summary).await
             }
+            LoopProgressEvent::IterationStarted { iteration } => {
+                emitter.iteration_started(iteration).await
+            }
+            // Prompt construction already emits the canonical
+            // `PromptBundleBuilt` milestone from `HostManagedLoopPromptPort`,
+            // including the bundle ref and redacted skill-context metadata.
+            // Treat the executor progress echo as advisory to avoid duplicate
+            // prompt milestones for the same bundle.
+            LoopProgressEvent::PromptBundleBuilt { .. } => Ok(()),
+            LoopProgressEvent::CapabilityBatchStarted {
+                iteration,
+                call_count,
+                policy,
+            } => {
+                emitter
+                    .capability_batch_started(iteration, call_count, policy)
+                    .await
+            }
+            LoopProgressEvent::CapabilityBatchCompleted {
+                iteration,
+                result_count,
+                denied_count,
+                gated_count,
+                failed_count,
+            } => {
+                emitter
+                    .capability_batch_completed(
+                        iteration,
+                        result_count,
+                        denied_count,
+                        gated_count,
+                        failed_count,
+                    )
+                    .await
+            }
+            LoopProgressEvent::GateBlocked {
+                iteration,
+                gate_kind,
+            } => emitter.gate_blocked(iteration, gate_kind).await,
+            // `HostManagedLoopCheckpointPort::checkpoint` publishes the
+            // canonical checkpoint milestone with the durable checkpoint id.
+            // `CheckpointWritten` carries only the checkpoint kind/iteration,
+            // so emitting it here would either duplicate or weaken that record.
+            LoopProgressEvent::CheckpointWritten { .. } => Ok(()),
         }
     }
 }

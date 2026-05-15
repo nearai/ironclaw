@@ -1,14 +1,15 @@
 //! Shared types and utilities used across the IronClaw workspace.
 #![warn(unreachable_pub)]
 
-pub mod attachment;
+mod attachment;
 pub mod env_helpers;
 mod event;
 mod identity;
 pub mod paths;
-pub mod platform;
+mod platform;
 mod timezone;
-pub mod trust_boundary;
+#[allow(dead_code)] // Trust-boundary scaffolding for the Reborn architecture; not yet consumed.
+mod trust_boundary;
 mod util;
 
 pub use attachment::{AttachmentKind, IncomingAttachment};

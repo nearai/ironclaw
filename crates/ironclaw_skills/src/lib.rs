@@ -37,8 +37,8 @@
 //! controls tool access via capability leases.
 
 pub mod gating;
-pub mod parser;
-pub mod selector;
+mod parser;
+mod selector;
 pub mod types;
 pub mod v2;
 pub mod validation;

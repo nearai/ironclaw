@@ -10,10 +10,11 @@ use ironclaw_turns::{
     LoopBlocked, LoopBlockedKind, LoopCancelled, LoopCancelledReasonKind, LoopCompleted,
     LoopCompletionKind, LoopExit, LoopExitId, LoopFailed, LoopFailureKind,
     run_profile::{
-        AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityCallCandidate, CapabilityFailureKind, CapabilityInvocation, CapabilityOutcome,
-        CapabilityResultMessage, FinalizeAssistantMessage, LoopCheckpointKind,
-        LoopCheckpointRequest, LoopInput, LoopInputCursor, LoopModelRequest, ParentLoopOutput,
+        AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind,
+        CapabilityBatchInvocation, CapabilityCallCandidate, CapabilityFailureKind,
+        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, FinalizeAssistantMessage,
+        LoopCheckpointKind, LoopCheckpointRequest, LoopDriverNoteKind, LoopGateKind, LoopInput,
+        LoopInputCursor, LoopModelRequest, LoopProgressEvent, ParentLoopOutput,
         StageCheckpointPayloadRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
@@ -71,7 +72,6 @@ pub enum HostStage {
     Capability,
     Transcript,
     Checkpoint,
-    Progress,
     Input,
 }
 
@@ -168,6 +168,14 @@ impl CanonicalAgentLoopExecutor {
                 );
             }
 
+            self.emit_progress(
+                host,
+                LoopProgressEvent::IterationStarted {
+                    iteration: state.iteration,
+                },
+            )
+            .await;
+
             if pending_input_ack.is_empty() && planner.drain().drain_steering(&state).await {
                 let drained = self.drain_user_inputs(host, state).await?;
                 state = drained.state;
@@ -175,12 +183,26 @@ impl CanonicalAgentLoopExecutor {
             }
 
             let context_request = planner.context().plan_context_request(&state).await;
+            let prompt_mode = context_request.mode;
             let prompt_bundle = host
                 .build_prompt_bundle(context_request)
                 .await
                 .map_err(|_| AgentLoopExecutorError::HostUnavailable {
                     stage: HostStage::Prompt,
                 })?;
+            self.emit_progress(
+                host,
+                LoopProgressEvent::PromptBundleBuilt {
+                    iteration: state.iteration,
+                    bundle_ref: prompt_bundle.bundle_ref.clone(),
+                    mode: prompt_mode,
+                    surface_version: prompt_bundle.surface_version.clone(),
+                    message_count: prompt_bundle.messages.len() as u32,
+                    identity_message_count: prompt_bundle.identity_message_count,
+                    instruction_snippet_count: prompt_bundle.instruction_snippet_count,
+                },
+            )
+            .await;
 
             let surface_filter = planner.capability().filter(&state).await;
             let mut surface = host
@@ -342,6 +364,19 @@ impl CanonicalAgentLoopExecutor {
                         } => {
                             state.recovery_state = recovery;
                             honor_retry_alteration(alter.as_ref())?;
+                            self.emit_progress(
+                                host,
+                                LoopProgressEvent::driver_note(
+                                    LoopDriverNoteKind::Retrying,
+                                    "retrying model request",
+                                )
+                                .map_err(|_| {
+                                    AgentLoopExecutorError::PlannerContract {
+                                        detail: "retry progress summary was invalid",
+                                    }
+                                })?,
+                            )
+                            .await;
                         }
                         RecoveryOutcome::SkipResult { .. } => {
                             return Err(AgentLoopExecutorError::PlannerContract {
@@ -437,6 +472,16 @@ impl CanonicalAgentLoopExecutor {
             return Ok(BatchStep::Continue(Box::new(state)));
         }
 
+        self.emit_progress(
+            host,
+            LoopProgressEvent::CapabilityBatchStarted {
+                iteration: state.iteration,
+                call_count: visible_calls.len() as u32,
+                policy: batch_policy_kind(policy),
+            },
+        )
+        .await;
+
         let batch = host
             .invoke_capability_batch(CapabilityBatchInvocation {
                 invocations: visible_calls
@@ -456,6 +501,20 @@ impl CanonicalAgentLoopExecutor {
                 detail: "capability batch outcome count does not match invocations",
             });
         }
+
+        let (result_count, denied_count, gated_count, failed_count) =
+            capability_batch_counts(&batch.outcomes);
+        self.emit_progress(
+            host,
+            LoopProgressEvent::CapabilityBatchCompleted {
+                iteration: state.iteration,
+                result_count,
+                denied_count,
+                gated_count,
+                failed_count,
+            },
+        )
+        .await;
 
         for (call, outcome) in visible_calls.into_iter().zip(batch.outcomes) {
             push_call_signature_once(&mut state, &mut signatures, &call)?;
@@ -570,6 +629,19 @@ impl CanonicalAgentLoopExecutor {
                     }
                     state.recovery_state = recovery;
                     honor_retry_alteration(alter.as_ref())?;
+                    self.emit_progress(
+                        host,
+                        LoopProgressEvent::driver_note(
+                            LoopDriverNoteKind::Retrying,
+                            "retrying capability invocation",
+                        )
+                        .map_err(|_| {
+                            AgentLoopExecutorError::PlannerContract {
+                                detail: "retry progress summary was invalid",
+                            }
+                        })?,
+                    )
+                    .await;
                     let retry = host
                         .invoke_capability(capability_invocation_from_candidate(call.clone()))
                         .await
@@ -658,6 +730,14 @@ impl CanonicalAgentLoopExecutor {
             GateOutcome::Block { gate } => {
                 state.gate_state = gate;
                 state.last_gate = Some(gate_ref.clone());
+                self.emit_progress(
+                    host,
+                    LoopProgressEvent::GateBlocked {
+                        iteration: state.iteration,
+                        gate_kind: loop_gate_kind(kind),
+                    },
+                )
+                .await;
                 let checked = self
                     .checkpoint(host, state, CheckpointKind::BeforeBlock)
                     .await?;
@@ -774,11 +854,27 @@ impl CanonicalAgentLoopExecutor {
             })
             .await
             .map_err(|_| AgentLoopExecutorError::CheckpointFailed { stage: kind })?;
+        self.emit_progress(
+            host,
+            LoopProgressEvent::CheckpointWritten {
+                iteration: state.iteration,
+                kind: host_kind,
+            },
+        )
+        .await;
         Ok(CheckpointWrite {
             state,
             checkpoint_id,
             state_ref,
         })
+    }
+
+    async fn emit_progress(
+        &self,
+        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        event: LoopProgressEvent,
+    ) {
+        let _ = host.emit_loop_progress(event).await;
     }
 
     async fn drain_user_inputs(
@@ -955,6 +1051,43 @@ fn blocked_kind(kind: GateKind) -> LoopBlockedKind {
         GateKind::Auth => LoopBlockedKind::Auth,
         GateKind::Resource => LoopBlockedKind::Resource,
     }
+}
+
+fn loop_gate_kind(kind: GateKind) -> LoopGateKind {
+    match kind {
+        GateKind::Approval => LoopGateKind::Approval,
+        GateKind::Auth => LoopGateKind::Auth,
+        GateKind::Resource => LoopGateKind::ResourceWait,
+    }
+}
+
+fn batch_policy_kind(policy: BatchPolicy) -> BatchPolicyKind {
+    match policy {
+        BatchPolicy::Sequential => BatchPolicyKind::Sequential,
+        BatchPolicy::Parallel => BatchPolicyKind::Parallel,
+    }
+}
+
+fn capability_batch_counts(outcomes: &[CapabilityOutcome]) -> (u32, u32, u32, u32) {
+    let mut result_count = 0;
+    let mut denied_count = 0;
+    let mut gated_count = 0;
+    let mut failed_count = 0;
+    for outcome in outcomes {
+        match outcome {
+            CapabilityOutcome::Completed(_) => result_count += 1,
+            CapabilityOutcome::Denied(_) => denied_count += 1,
+            CapabilityOutcome::ApprovalRequired { .. }
+            | CapabilityOutcome::AuthRequired { .. }
+            | CapabilityOutcome::ResourceBlocked { .. }
+            // SpawnedProcess: treated as gated — it is a non-completing, non-failing, non-denied
+            // outcome that defers completion to a background process. Grouped with gated to avoid
+            // treating it as completed or failed in batch accounting.
+            | CapabilityOutcome::SpawnedProcess(_) => gated_count += 1,
+            CapabilityOutcome::Failed(_) => failed_count += 1,
+        }
+    }
+    (result_count, denied_count, gated_count, failed_count)
 }
 
 fn model_preference_to_host(
@@ -1183,6 +1316,8 @@ mod tests {
         events: Arc<Mutex<Vec<String>>>,
         prompt_surface_version: Option<CapabilitySurfaceVersion>,
         visible_surface_version: CapabilitySurfaceVersion,
+        progress_events: Arc<Mutex<Vec<ironclaw_turns::run_profile::LoopProgressEvent>>>,
+        fail_progress_port: bool,
     }
 
     impl MockHost {
@@ -1203,6 +1338,8 @@ mod tests {
                 events: Arc::new(Mutex::new(Vec::new())),
                 prompt_surface_version: Some(surface_version()),
                 visible_surface_version: surface_version(),
+                progress_events: Arc::new(Mutex::new(Vec::new())),
+                fail_progress_port: false,
             }
         }
 
@@ -1229,6 +1366,11 @@ mod tests {
 
         fn with_model_errors(self, errors: Vec<AgentLoopHostError>) -> Self {
             *self.model_errors.lock().expect("lock") = errors.into();
+            self
+        }
+
+        fn with_failing_progress_port(mut self) -> Self {
+            self.fail_progress_port = true;
             self
         }
 
@@ -1263,6 +1405,17 @@ mod tests {
 
         fn events(&self) -> Vec<String> {
             self.events.lock().expect("lock").clone()
+        }
+
+        fn progress_events(&self) -> Vec<ironclaw_turns::run_profile::LoopProgressEvent> {
+            self.progress_events.lock().expect("lock").clone()
+        }
+
+        fn progress_event_names(&self) -> Vec<&'static str> {
+            self.progress_events()
+                .iter()
+                .map(|event| event.kind_name())
+                .collect()
         }
     }
 
@@ -1312,6 +1465,8 @@ mod tests {
                 }],
                 surface_version: self.prompt_surface_version.clone(),
                 instruction_fingerprint: None,
+                identity_message_count: 0,
+                instruction_snippet_count: 0,
             })
         }
     }
@@ -1458,8 +1613,15 @@ mod tests {
     impl ironclaw_turns::run_profile::LoopProgressPort for MockHost {
         async fn emit_loop_progress(
             &self,
-            _event: ironclaw_turns::run_profile::LoopProgressEvent,
+            event: ironclaw_turns::run_profile::LoopProgressEvent,
         ) -> Result<(), AgentLoopHostError> {
+            if self.fail_progress_port {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "progress sink unavailable",
+                ));
+            }
+            self.progress_events.lock().expect("lock").push(event);
             Ok(())
         }
     }
@@ -1485,6 +1647,56 @@ mod tests {
         assert_eq!(
             host.checkpoint_kinds(),
             vec![LoopCheckpointKind::BeforeModel, LoopCheckpointKind::Final]
+        );
+        assert_eq!(
+            host.progress_event_names(),
+            vec![
+                "iteration_started",
+                "prompt_bundle_built",
+                "checkpoint_written",
+                "checkpoint_written",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn progress_port_failure_does_not_abort_reply_only_run() {
+        let host = MockHost::new(vec![reply_response()]).with_failing_progress_port();
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        match exit {
+            LoopExit::Completed(completed) => {
+                assert_eq!(
+                    completed.reply_message_refs,
+                    vec![message_ref("msg:assistant")]
+                );
+                assert!(completed.final_checkpoint_id.is_some());
+            }
+            other => panic!("expected completed, got {other:?}"),
+        }
+        assert_eq!(
+            host.checkpoint_kinds(),
+            vec![LoopCheckpointKind::BeforeModel, LoopCheckpointKind::Final]
+        );
+        assert!(host.progress_events().is_empty());
+
+        let final_state = final_staged_state(&host);
+        assert_eq!(
+            final_state.assistant_refs,
+            vec![message_ref("msg:assistant")]
+        );
+        assert_eq!(
+            final_state.last_checkpoint,
+            Some(crate::state::CheckpointMarker {
+                kind: CheckpointKind::Final,
+                iteration_at_checkpoint: final_state.iteration,
+            })
         );
     }
 
@@ -1517,6 +1729,33 @@ mod tests {
                 LoopCheckpointKind::Final,
             ]
         );
+        assert_eq!(
+            host.progress_event_names(),
+            vec![
+                "iteration_started",
+                "prompt_bundle_built",
+                "checkpoint_written",
+                "checkpoint_written",
+                "capability_batch_started",
+                "capability_batch_completed",
+                "checkpoint_written",
+            ]
+        );
+        let completed = host
+            .progress_events()
+            .into_iter()
+            .find_map(|event| match event {
+                ironclaw_turns::run_profile::LoopProgressEvent::CapabilityBatchCompleted {
+                    result_count,
+                    denied_count,
+                    gated_count,
+                    failed_count,
+                    ..
+                } => Some((result_count, denied_count, gated_count, failed_count)),
+                _ => None,
+            })
+            .expect("batch completed progress event");
+        assert_eq!(completed, (1, 0, 0, 0));
     }
 
     #[tokio::test]
@@ -1547,6 +1786,34 @@ mod tests {
                 LoopCheckpointKind::BeforeBlock,
             ]
         );
+        assert_eq!(
+            host.progress_event_names(),
+            vec![
+                "iteration_started",
+                "prompt_bundle_built",
+                "checkpoint_written",
+                "checkpoint_written",
+                "capability_batch_started",
+                "capability_batch_completed",
+                "gate_blocked",
+                "checkpoint_written",
+            ]
+        );
+        let completed = host
+            .progress_events()
+            .into_iter()
+            .find_map(|event| match event {
+                ironclaw_turns::run_profile::LoopProgressEvent::CapabilityBatchCompleted {
+                    result_count,
+                    denied_count,
+                    gated_count,
+                    failed_count,
+                    ..
+                } => Some((result_count, denied_count, gated_count, failed_count)),
+                _ => None,
+            })
+            .expect("batch completed progress event");
+        assert_eq!(completed, (0, 0, 1, 0));
     }
 
     #[tokio::test]

@@ -1443,11 +1443,9 @@ fn t14i_trust_change_listener_can_reenter_evaluate_without_deadlock() {
 
 #[test]
 fn t15_default_decision_is_sandbox_for_every_unmatched_package_source() {
-    // Empty policy chain — every input falls through to `default_decision`.
-    let policy = policy(vec![
-        Box::new(BundledRegistry::new()),
-        Box::new(AdminConfig::new()),
-    ]);
+    // Explicit fail-closed policy — every input falls through to
+    // `default_decision` without consulting any host-controlled source.
+    let policy = HostTrustPolicy::fail_closed();
 
     let unmatched_origins = [
         // Already correct pre-fix; included so the test asserts the full
@@ -1485,6 +1483,10 @@ fn t15_default_decision_is_sandbox_for_every_unmatched_package_source() {
         assert!(
             decision.authority_ceiling.allowed_effects.is_empty(),
             "default decision must carry an empty authority ceiling"
+        );
+        assert!(
+            decision.authority_ceiling.max_resource_ceiling.is_none(),
+            "default decision must not carry a resource ceiling"
         );
     }
 }

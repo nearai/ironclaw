@@ -1,0 +1,12 @@
+[package]
+name = "ironclaw_wasm_sandbox_core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+publish = false
+
+[dependencies]
+thiserror = "2"
+tracing = "0.1"
+wasmtime = { version = "43.0.2", features = ["component-model"] }
+wasmtime-wasi = "43.0.2"
