@@ -4,13 +4,13 @@ use std::time::{Duration, Instant};
 
 use wasmtime::{Caller, Config, Engine, Instance, Linker, Module, Store};
 
-// Reuse the tool-WASM resource limiter without introducing a normal
-// `ironclaw_hooks -> ironclaw_wasm` Cargo edge; architecture tests forbid
-// that lower-substrate dependency from the hook contract crate.
-#[path = "../../../ironclaw_wasm/src/limiter.rs"]
-mod tool_wasm_limiter;
-
-use tool_wasm_limiter::WasmResourceLimiter;
+// Shared resource limiter extracted into `ironclaw_wasm_limiter` so both
+// `ironclaw_hooks` and `ironclaw_wasm` depend on it through Cargo rather
+// than a `#[path = ...]` file import (henrypark133 must-fix #1 on PR
+// #3634). The micro-crate sits below both consumers and doesn't pull in
+// the rest of the tool-WASM surface, so the architecture rule against
+// `ironclaw_hooks -> ironclaw_wasm` is preserved.
+use ironclaw_wasm_limiter::WasmResourceLimiter;
 
 use crate::failure_policy::FailureCategory;
 use crate::identity::HookLocalId;

@@ -1,7 +1,17 @@
+//! Shared `wasmtime::ResourceLimiter` used by both the tool-WASM runtime
+//! (`ironclaw_wasm`) and the hook-WASM runtime (`ironclaw_hooks`).
+//!
+//! Extracted from `ironclaw_wasm`'s private `limiter.rs` so the hook crate
+//! can depend on it through Cargo rather than a `#[path = ...]` file
+//! import (henrypark133 must-fix #1 on PR #3634). The two consumers
+//! enforce identical limits; centralizing the impl prevents drift and
+//! makes the dependency edge visible to `cargo check`, `cargo doc`, and
+//! architecture-linting tests.
+
 use wasmtime::ResourceLimiter;
 
 #[derive(Debug)]
-pub(crate) struct WasmResourceLimiter {
+pub struct WasmResourceLimiter {
     memory_limit: u64,
     memory_used: u64,
     pending_memory_growth: u64,
@@ -11,7 +21,7 @@ pub(crate) struct WasmResourceLimiter {
 }
 
 impl WasmResourceLimiter {
-    pub(crate) fn new(memory_limit: u64) -> Self {
+    pub fn new(memory_limit: u64) -> Self {
         Self {
             memory_limit,
             memory_used: 0,
