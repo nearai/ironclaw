@@ -25,8 +25,8 @@ use crate::{
     strategies::{
         BatchPolicy, CapabilityCallSummary, CapabilityErrorClass, CapabilityErrorSummary,
         CapabilityFilter, GateKind, GateOutcome, ModelErrorClass, ModelErrorSummary,
-        ModelPreference, RecoveryOutcome, RetryAlteration, StopKind, StopOutcome, TurnEndKind,
-        TurnSummary,
+        ModelPreference, RecoveryOutcome, RetryAlteration, SanitizedStrategySummary, StopKind,
+        StopOutcome, TurnEndKind, TurnSummary,
     },
 };
 
@@ -277,11 +277,13 @@ impl CanonicalAgentLoopExecutor {
                     }
                     let summary = ModelErrorSummary {
                         class,
-                        safe_summary: error.safe_summary,
+                        safe_summary: sanitized_strategy_summary(error.safe_summary)?,
                         diagnostic_ref: error.diagnostic_ref,
                     };
                     match planner.recovery().on_model_error(&state, &summary).await {
-                        RecoveryOutcome::Retry { recovery, alter } => {
+                        RecoveryOutcome::Retry {
+                            recovery, alter, ..
+                        } => {
                             state.recovery_state = recovery;
                             honor_retry_alteration(alter.as_ref())?;
                         }
@@ -360,7 +362,9 @@ impl CanonicalAgentLoopExecutor {
                 .push(LoopFailureKind::PolicyDenied);
             let summary = CapabilityErrorSummary {
                 class: CapabilityErrorClass::PolicyDenied,
-                safe_summary: "capability is not visible in the filtered surface".to_string(),
+                safe_summary: SanitizedStrategySummary::from_trusted_static(
+                    "capability is not visible in the filtered surface",
+                ),
                 diagnostic_ref: None,
             };
             match self
@@ -455,7 +459,7 @@ impl CanonicalAgentLoopExecutor {
                     .push(LoopFailureKind::PolicyDenied);
                 let summary = CapabilityErrorSummary {
                     class: CapabilityErrorClass::PolicyDenied,
-                    safe_summary: denied.safe_summary,
+                    safe_summary: sanitized_strategy_summary(denied.safe_summary)?,
                     diagnostic_ref: None,
                 };
                 self.handle_capability_error(planner, host, state, call, summary)
@@ -467,7 +471,7 @@ impl CanonicalAgentLoopExecutor {
                     .push(capability_failure_kind(&failure.error_kind));
                 let summary = CapabilityErrorSummary {
                     class: capability_error_class(&failure.error_kind),
-                    safe_summary: failure.safe_summary,
+                    safe_summary: sanitized_strategy_summary(failure.safe_summary)?,
                     diagnostic_ref: None,
                 };
                 self.handle_capability_error(planner, host, state, call, summary)
@@ -507,7 +511,9 @@ impl CanonicalAgentLoopExecutor {
                         Some(checked.checkpoint_id),
                     )));
                 }
-                RecoveryOutcome::Retry { recovery, alter } => {
+                RecoveryOutcome::Retry {
+                    recovery, alter, ..
+                } => {
                     if matches!(summary.class, CapabilityErrorClass::PolicyDenied) {
                         state.recovery_state = recovery;
                         return Ok(BatchStep::Continue(state));
@@ -524,7 +530,7 @@ impl CanonicalAgentLoopExecutor {
                         CapabilityOutcome::Failed(failure) => {
                             summary = CapabilityErrorSummary {
                                 class: capability_error_class(&failure.error_kind),
-                                safe_summary: failure.safe_summary,
+                                safe_summary: sanitized_strategy_summary(failure.safe_summary)?,
                                 diagnostic_ref: None,
                             };
                         }
@@ -568,14 +574,14 @@ impl CanonicalAgentLoopExecutor {
                                     .push(LoopFailureKind::PolicyDenied);
                                 summary = CapabilityErrorSummary {
                                     class: CapabilityErrorClass::PolicyDenied,
-                                    safe_summary: denied.safe_summary,
+                                    safe_summary: sanitized_strategy_summary(denied.safe_summary)?,
                                     diagnostic_ref: None,
                                 };
                             }
                             CapabilityOutcome::Failed(failure) => {
                                 summary = CapabilityErrorSummary {
                                     class: capability_error_class(&failure.error_kind),
-                                    safe_summary: failure.safe_summary,
+                                    safe_summary: sanitized_strategy_summary(failure.safe_summary)?,
                                     diagnostic_ref: None,
                                 };
                             }
@@ -917,6 +923,14 @@ fn capability_failure_kind(kind: &str) -> LoopFailureKind {
     } else {
         LoopFailureKind::CapabilityProtocolError
     }
+}
+
+fn sanitized_strategy_summary(
+    summary: String,
+) -> Result<SanitizedStrategySummary, AgentLoopExecutorError> {
+    SanitizedStrategySummary::new(summary).map_err(|_| AgentLoopExecutorError::PlannerContract {
+        detail: "host returned unsafe strategy summary",
+    })
 }
 
 fn honor_retry_alteration(
@@ -1767,7 +1781,7 @@ mod tests {
     fn family_with_capability_filter(filter: CapabilityFilter) -> LoopFamily {
         let planner = DefaultPlanner::compose_default()
             .with_capability(Arc::new(FixedCapabilityStrategy { filter }));
-        let id = LoopFamilyId::new("executor-filter-test");
+        let id = LoopFamilyId::new("executor-filter-test").expect("valid test family id");
         let version =
             ComponentIdentity::from_static("executor-filter-test", ComponentDigest([1; 32]));
         LoopFamily::new(id, version, Arc::new(planner))
