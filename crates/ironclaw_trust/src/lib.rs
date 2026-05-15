@@ -30,23 +30,24 @@
 //! staging-track docs) for the broader Reborn vocabulary.
 #![warn(unreachable_pub)]
 
-pub mod clock;
-pub mod decision;
-pub mod error;
-pub mod invalidation;
-pub mod policy;
-pub mod sources;
+mod clock;
+mod decision;
+mod error;
+mod invalidation;
+mod policy;
+mod sources;
 
 #[cfg(test)]
 mod fixtures;
 
+pub use clock::Clock;
 pub use decision::{
     AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment, TrustDecision, TrustProvenance,
 };
 pub use error::TrustError;
-pub use invalidation::InvalidationBus;
+pub use invalidation::{InvalidationBus, TrustChange, TrustChangeListener};
 pub use policy::{HostTrustPolicy, TrustPolicy, TrustPolicyInput};
-pub use sources::{AdminConfig, AdminEntry, BundledEntry, BundledRegistry};
+pub use sources::{AdminConfig, AdminEntry, BundledEntry, BundledRegistry, PolicySource};
 
 #[cfg(test)]
 mod tests {

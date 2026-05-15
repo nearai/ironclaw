@@ -31,6 +31,7 @@
 //! constructors below) remains `pub` because no policy state exists for an
 //! invalidation to be meaningful against — those constructors are for
 //! seeding the chain *before* it is wired up to a bus.
+#![allow(dead_code)] // Scaffolding; some items kept for future use.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -494,18 +495,18 @@ pub struct SignerEntry {
 /// 3. Reuse the `AdminEntry::for_*` constructor pattern: separate
 ///    constructors per `PackageSource` so the call sites that elevate
 ///    user-writable origins are greppable.
-pub struct SignedRegistry {
+pub(crate) struct SignedRegistry {
     trusted_signers: RwLock<HashMap<String, SignerEntry>>,
 }
 
 impl SignedRegistry {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             trusted_signers: RwLock::new(HashMap::new()),
         }
     }
 
-    pub fn with_signers<I: IntoIterator<Item = SignerEntry>>(signers: I) -> Self {
+    pub(crate) fn with_signers<I: IntoIterator<Item = SignerEntry>>(signers: I) -> Self {
         let map = signers
             .into_iter()
             .map(|entry| (entry.signer.clone(), entry))
@@ -577,7 +578,7 @@ impl PolicySource for SignedRegistry {
 /// explicit configuration (e.g., a CLI flag or a config file outside any
 /// user-writable location) and audit logging on every match. Without that
 /// configuration the source is inert.
-pub struct LocalDevOverride {
+pub(crate) struct LocalDevOverride {
     /// Packages the operator has explicitly opted in for elevated trust in
     /// development. Empty means the source has nothing to evaluate even
     /// once the implementation lands.
@@ -593,7 +594,7 @@ impl LocalDevOverride {
     /// Construct an inert `LocalDevOverride`. PR1b has no production opt-in
     /// path — the source is documented as future-compatible and never
     /// matches.
-    pub fn inert() -> Self {
+    pub(crate) fn inert() -> Self {
         Self {
             overrides: RwLock::new(HashMap::new()),
             enabled: false,
@@ -604,12 +605,12 @@ impl LocalDevOverride {
     /// because no production opt-in path exists yet — the accessor is
     /// here so tests can pin the inert contract and so future
     /// implementations have a stable read surface.
-    pub fn is_enabled(&self) -> bool {
+    pub(crate) fn is_enabled(&self) -> bool {
         self.enabled
     }
 
     /// Number of staged override entries.
-    pub fn override_count(&self) -> usize {
+    pub(crate) fn override_count(&self) -> usize {
         self.overrides
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -627,7 +628,7 @@ impl LocalDevOverride {
     /// crate's `#[cfg(test)]` targets and is not exposed by any Cargo
     /// feature.
     #[cfg(test)]
-    pub fn enabled_for_test(entries: Vec<(PackageId, AdminEntry)>) -> Self {
+    pub(crate) fn enabled_for_test(entries: Vec<(PackageId, AdminEntry)>) -> Self {
         let map: HashMap<_, _> = entries.into_iter().collect();
         Self {
             overrides: RwLock::new(map),

@@ -19,15 +19,15 @@
 
 #![forbid(unsafe_code)]
 
-pub mod action;
-pub mod binding;
-pub mod error;
+mod action;
+mod binding;
+mod error;
 #[cfg(any(test, feature = "test-support"))]
-pub mod fakes;
-pub mod inbound_turn;
-pub mod ledger;
-pub mod webui_inbound;
-pub mod workflow;
+mod fakes;
+mod inbound_turn;
+mod ledger;
+mod webui_inbound;
+mod workflow;
 
 pub use action::{
     ActionDispatchKind, ActionFingerprintKey, ActionPhase, AuthRequestRef, LinkedThreadActionId,

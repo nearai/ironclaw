@@ -207,7 +207,6 @@ fn host_stage_name(stage: HostStage) -> &'static str {
         HostStage::Capability => "Capability",
         HostStage::Transcript => "Transcript",
         HostStage::Checkpoint => "Checkpoint",
-        HostStage::Progress => "Progress",
         HostStage::Input => "Input",
     }
 }

@@ -1795,6 +1795,8 @@ fn issue_prompt_grant(context: &LoopRunContext, messages: &[LoopModelMessage]) {
         messages: messages.to_vec(),
         surface_version: None,
         instruction_fingerprint: None,
+        identity_message_count: 0,
+        instruction_snippet_count: 0,
     };
     LoopPromptBundleAuthority::shared()
         .issue_bundle(context, &bundle)

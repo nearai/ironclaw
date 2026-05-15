@@ -5,10 +5,10 @@
 //! `ironclaw-reborn` binary and later Reborn runtime composition without pulling
 //! in the v1 root application.
 
-pub mod boot;
-pub mod doctor;
-pub mod home;
-pub mod profile;
+mod boot;
+mod doctor;
+mod home;
+mod profile;
 
 pub use boot::RebornBootConfig;
 pub use doctor::RebornDoctorReport;

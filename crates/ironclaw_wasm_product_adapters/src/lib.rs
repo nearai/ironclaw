@@ -32,12 +32,12 @@
 #![forbid(unsafe_code)]
 #![warn(unreachable_pub)]
 
-pub mod auth_verifier;
-pub mod egress_policy;
-pub mod runner;
+mod auth_verifier;
+mod egress_policy;
+mod runner;
 
 pub use auth_verifier::{
-    HmacWebhookAuth, SharedSecretHeaderAuth, VerificationOutcome, WebhookAuthVerifier,
+    Clock, HmacWebhookAuth, SharedSecretHeaderAuth, VerificationOutcome, WebhookAuthVerifier,
 };
 pub use egress_policy::{EgressPolicy, EgressPolicyError, EgressPolicyTarget};
 pub use runner::{
