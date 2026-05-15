@@ -239,19 +239,19 @@ pub struct LoopExecutionState {
 - `most_common_count_in(window: usize) -> usize`
 - `same_run_length() -> usize`
 
-`CapabilityCallSignature` is `(CapabilityName, ArgsHash)` — a stable hash over the capability name plus canonicalized JSON args. Lets the executor cheaply detect "same call repeated" without retaining the args themselves (no raw tool input in state, per [`turns-agent-loop.md`](contracts/turns-agent-loop.md) §6).
+`CapabilityCallSignature` is `(CapabilityId, ArgsHash)` — a stable hash over the capability id plus canonicalized JSON args. Lets the executor cheaply detect "same call repeated" without retaining the args themselves (no raw tool input in state, per [`turns-agent-loop.md`](contracts/turns-agent-loop.md) §6).
 
 Strategy outcome shape (example for `RecoveryStrategy`):
 
 ```rust
 pub enum RecoveryOutcome {
-    Retry      { recovery: RecoveryStrategyState, alter: Option<RetryAlteration> },
+    Retry      { recovery: RecoveryStrategyState, scope: RetryScope, alter: Option<RetryAlteration> },
     SkipResult { recovery: RecoveryStrategyState },
     Abort      { recovery: RecoveryStrategyState, failure_kind: LoopFailureKind },
 }
 ```
 
-The strategy returns the new value of *its own slot only*. The executor builds the next whole state by swapping that slot. The compiler enforces that `RecoveryStrategy` cannot rewrite `BudgetStrategyState`.
+`RetryScope` is `Call` or `Iteration`, so the executor does not infer retry breadth from the alteration. Backoff alterations carry a bounded `BackoffDelayMs`, and recovery summaries use `SanitizedStrategySummary` rather than a raw `String`. The strategy returns the new value of *its own slot only*. The executor builds the next whole state by swapping that slot. The compiler enforces that `RecoveryStrategy` cannot rewrite `BudgetStrategyState`.
 
 ## 8. The canonical executor tick
 
@@ -309,7 +309,7 @@ loop:
       Err(err):
         recovery = planner.recovery().on_model_error(&state, &sanitize_model_error(&err))
         match recovery:
-          Retry { recovery, alter }: state.recovery_state = recovery; honor_alteration(alter); continue
+          Retry { recovery, scope, alter }: state.recovery_state = recovery; honor_retry(scope, alter); continue
           SkipResult { .. }: return PlannerContract { "SkipResult on model error" }
           Abort { recovery, fk }: state.recovery_state = recovery
                                    return LoopExit::Failed { reason_kind: fk, ... }
@@ -364,6 +364,8 @@ loop:
             state.append_result(result)
           ApprovalRequired(g) | AuthRequired(g) | ResourceBlocked(g):
             // Gate handling — Block/SkipAndContinue/Abort per planner.gate().
+            // validate_for_gate_kind() rejects approval SkipAndContinue before
+            // the executor honors the strategy outcome.
             // (See WS-6 §3.3 for full match.)
           Denied(reason):
             // EmptyLoopCapabilityPort returns Denied; capability policy can
