@@ -600,11 +600,16 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             .into());
         }
 
-        // Apply per-user overrides from settings (first iteration only
-        // to avoid repeated DB lookups within the same agentic loop).
+        // Apply per-user overrides from settings on the first iteration
+        // only, to avoid repeated DB lookups within the same agentic loop.
         // Uses admin-fallback so admin-set defaults propagate to members
         // who haven't overridden the value themselves.
-        if iteration == 0 {
+        //
+        // The loop in `run_agentic_loop` starts iterations at 1 (see
+        // `agentic_loop.rs`), so this gate must match that first value.
+        // Off-by-one here silently disables per-request temperature, the
+        // `temperature` setting, and the `selected_model` override.
+        if iteration == 1 {
             // Per-request temperature from the inbound message metadata
             // (e.g. Responses API `temperature` field). Wins over both the
             // settings-level default and the hardcoded reasoning default.
