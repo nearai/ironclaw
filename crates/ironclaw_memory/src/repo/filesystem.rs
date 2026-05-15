@@ -95,7 +95,7 @@ where
         // unreachable construction failure as a backend error rather than
         // panic to keep the repo's behavior fail-closed.
         RecordKind::new("memory_document")
-            .expect("`memory_document` is a valid record-kind identifier")
+            .unwrap_or_else(|_| unreachable!("`memory_document` is a valid record-kind identifier"))
     }
 
     fn document_virtual_path(
@@ -123,26 +123,31 @@ where
         let user = scope.user_id().to_string();
         entry = entry
             .with_indexed(
-                IndexKey::new(fs_keys::TENANT).expect("tenant_id is a valid index key"),
+                IndexKey::new(fs_keys::TENANT)
+                    .unwrap_or_else(|_| unreachable!("tenant_id is a valid index key")),
                 IndexValue::Text(tenant),
             )
             .with_indexed(
-                IndexKey::new(fs_keys::USER).expect("user_id is a valid index key"),
+                IndexKey::new(fs_keys::USER)
+                    .unwrap_or_else(|_| unreachable!("user_id is a valid index key")),
                 IndexValue::Text(user),
             )
             .with_indexed(
-                IndexKey::new(fs_keys::CONTENT).expect("content is a valid index key"),
+                IndexKey::new(fs_keys::CONTENT)
+                    .unwrap_or_else(|_| unreachable!("content is a valid index key")),
                 IndexValue::Text(String::from_utf8_lossy(bytes).into_owned()),
             );
         if let Some(agent_id) = scope.agent_id() {
             entry = entry.with_indexed(
-                IndexKey::new(fs_keys::AGENT).expect("agent_id is a valid index key"),
+                IndexKey::new(fs_keys::AGENT)
+                    .unwrap_or_else(|_| unreachable!("agent_id is a valid index key")),
                 IndexValue::Text(agent_id.to_string()),
             );
         }
         if let Some(project_id) = scope.project_id() {
             entry = entry.with_indexed(
-                IndexKey::new(fs_keys::PROJECT).expect("project_id is a valid index key"),
+                IndexKey::new(fs_keys::PROJECT)
+                    .unwrap_or_else(|_| unreachable!("project_id is a valid index key")),
                 IndexValue::Text(project_id.to_string()),
             );
         }
@@ -361,7 +366,7 @@ mod tests {
 
     fn doc(relative: &str) -> MemoryDocumentPath {
         MemoryDocumentPath::new("tenant-a", "alice", Some("proj-1"), relative)
-            .expect("valid memory document path")
+            .unwrap_or_else(|_| unreachable!("valid memory document path"))
     }
 
     #[tokio::test]

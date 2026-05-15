@@ -149,7 +149,8 @@ where
     }
 
     fn job_kind() -> RecordKind {
-        RecordKind::new(KIND_JOB).expect("agent_job is a valid record-kind literal")
+        RecordKind::new(KIND_JOB)
+            .unwrap_or_else(|_| unreachable!("agent_job is a valid record-kind literal"))
     }
 
     async fn read_job(
@@ -376,7 +377,8 @@ where
         let body =
             serde_json::to_vec(&stored).map_err(|e| DatabaseError::Serialization(e.to_string()))?;
         let entry = Entry::record(
-            RecordKind::new(KIND_ACTION).expect("job_action is a valid record-kind literal"),
+            RecordKind::new(KIND_ACTION)
+                .unwrap_or_else(|_| unreachable!("job_action is a valid record-kind literal")),
             &serde_json::Value::Null,
         )
         .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
@@ -448,7 +450,8 @@ where
         let body =
             serde_json::to_vec(&stored).map_err(|e| DatabaseError::Serialization(e.to_string()))?;
         let entry = Entry::record(
-            RecordKind::new(KIND_LLM_CALL).expect("llm_call is a valid record-kind literal"),
+            RecordKind::new(KIND_LLM_CALL)
+                .unwrap_or_else(|_| unreachable!("llm_call is a valid record-kind literal")),
             &serde_json::Value::Null,
         )
         .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
@@ -499,8 +502,9 @@ where
         let body =
             serde_json::to_vec(&stored).map_err(|e| DatabaseError::Serialization(e.to_string()))?;
         let entry = Entry::record(
-            RecordKind::new(KIND_ESTIMATION)
-                .expect("estimation_snapshot is a valid record-kind literal"),
+            RecordKind::new(KIND_ESTIMATION).unwrap_or_else(|_| {
+                unreachable!("estimation_snapshot is a valid record-kind literal")
+            }),
             &serde_json::Value::Null,
         )
         .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
@@ -550,8 +554,9 @@ where
             let body = serde_json::to_vec(&stored)
                 .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
             let entry = Entry::record(
-                RecordKind::new(KIND_ESTIMATION)
-                    .expect("estimation_snapshot is a valid record-kind literal"),
+                RecordKind::new(KIND_ESTIMATION).unwrap_or_else(|_| {
+                    unreachable!("estimation_snapshot is a valid record-kind literal")
+                }),
                 &serde_json::Value::Null,
             )
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
@@ -842,7 +847,7 @@ pub(crate) const IDX_PROVIDER: &str = "provider";
 pub(crate) const IDX_MODEL: &str = "model";
 
 pub(crate) fn index_key(name: &'static str) -> IndexKey {
-    IndexKey::new(name).expect("index key literal is valid")
+    IndexKey::new(name).unwrap_or_else(|_| unreachable!("index key literal is valid"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1049,7 +1054,7 @@ mod tests {
             .iter()
             .filter(|v| v.entry.kind.as_ref().map(|k| k.as_str()) == Some(KIND_ESTIMATION))
             .find_map(|v| serde_json::from_slice::<StoredEstimation>(&v.entry.body).ok())
-            .expect("estimation persisted");
+            .unwrap_or_else(|_| unreachable!("estimation persisted"));
         assert_eq!(stored.actual_cost.as_deref(), Some("0.04"));
         assert_eq!(stored.actual_time_secs, Some(25));
     }

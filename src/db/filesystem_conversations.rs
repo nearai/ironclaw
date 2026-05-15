@@ -101,7 +101,8 @@ where
     }
 
     fn message_kind() -> RecordKind {
-        RecordKind::new(KIND_MESSAGE).expect("conversation_message is a valid record-kind literal")
+        RecordKind::new(KIND_MESSAGE)
+            .unwrap_or_else(|_| unreachable!("conversation_message is a valid record-kind literal"))
     }
 
     async fn read_conversation(
@@ -139,8 +140,8 @@ where
         conversation_id: Uuid,
     ) -> Result<Vec<StoredMessage>, DatabaseError> {
         let prefix = messages_root(conversation_id)?;
-        let key_conv =
-            IndexKey::new(IDX_CONVERSATION_ID).expect("conversation_id is a valid index key");
+        let key_conv = IndexKey::new(IDX_CONVERSATION_ID)
+            .unwrap_or_else(|_| unreachable!("conversation_id is a valid index key"));
         let filter = Filter::Eq {
             key: key_conv,
             value: IndexValue::Text(conversation_id.to_string()),
@@ -759,7 +760,8 @@ fn build_conversation_entry(
     body: Vec<u8>,
 ) -> Result<Entry, DatabaseError> {
     let entry = Entry::record(
-        RecordKind::new(KIND_CONVERSATION).expect("conversation is a valid record-kind literal"),
+        RecordKind::new(KIND_CONVERSATION)
+            .unwrap_or_else(|_| unreachable!("conversation is a valid record-kind literal")),
         &serde_json::Value::Null,
     )
     .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
@@ -842,7 +844,7 @@ pub(crate) const IDX_CREATED_AT_TS: &str = "created_at_ts";
 pub(crate) const IDX_CREATED_AT: &str = "created_at";
 
 pub(crate) fn index_key(name: &'static str) -> IndexKey {
-    IndexKey::new(name).expect("index key literal is valid")
+    IndexKey::new(name).unwrap_or_else(|_| unreachable!("index key literal is valid"))
 }
 
 // ---------------------------------------------------------------------------
