@@ -77,10 +77,13 @@ impl PredicateEvaluator {
         }
     }
 
-    /// Construct an evaluator with an explicit backend. Production
-    /// callers swap in a durable backend here; tests use the in-memory
-    /// default via [`Self::new`].
-    pub fn with_backend(backend: Arc<dyn PredicateStateBackend>) -> Self {
+    /// Construct an evaluator with an explicit backend. Tests in this
+    /// crate use this to inject deterministic backends; external callers
+    /// should use [`Self::new`] until the durable backend trait is
+    /// finalized (serrrfirat MED on PR #3635 — the trait still takes
+    /// `Instant` which can't serialize across processes).
+    #[allow(dead_code)] // reserved for future durable-backend test injection
+    pub(crate) fn with_backend(backend: Arc<dyn PredicateStateBackend>) -> Self {
         Self { backend }
     }
 

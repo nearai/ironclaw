@@ -7,6 +7,21 @@
 //! (Postgres-backed, libSQL-backed) implement the same trait so the
 //! evaluator's predicate logic stays backend-agnostic.
 //!
+//! # Visibility
+//!
+//! The backend trait and the in-memory impl are intentionally
+//! `pub(crate)` until the durable contract is stable. The trait's `now:
+//! Instant` is correct for the in-memory backend but not serializable
+//! across processes, so a future durable trait will accept
+//! `chrono::DateTime<Utc>` (see successor doc 03-persistent-counter.md).
+//! Holding the public surface back until then avoids shipping a public
+//! API we know we'll break (serrrfirat MED on PR #3635).
+//!
+//! [`PredicateEventId`] stays `pub` because it flows through
+//! [`BeforeCapabilityHookContext::caller_event_id`] on the public hook
+//! surface; only the backend trait and its keys/error type are crate-
+//! internal until the durable contract is ready.
+//!
 //! # Why a trait
 //!
 //! - **Cross-process consistency**: Hook 1 increments → Hook 2 (different
@@ -50,7 +65,7 @@ use crate::identity::HookId;
 /// Identity of an invocation-history bucket. The `tenant_id` field is
 /// the trust boundary — one tenant's counter must never affect another's.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct InvocationKey {
+pub(crate) struct InvocationKey {
     pub hook_id: HookId,
     pub tenant_id: TenantId,
     pub capability: String,
@@ -59,7 +74,7 @@ pub struct InvocationKey {
 /// Identity of a value-sum-history bucket. Extends [`InvocationKey`]
 /// with the numeric field path the predicate is summing over.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ValueKey {
+pub(crate) struct ValueKey {
     pub hook_id: HookId,
     pub tenant_id: TenantId,
     pub capability: String,
@@ -79,8 +94,9 @@ pub struct PredicateEventId(pub String);
 /// transient failures (connection lost, DB unavailable); the in-memory
 /// backend never returns errors.
 #[derive(Debug, thiserror::Error)]
-pub enum PredicateBackendError {
+pub(crate) enum PredicateBackendError {
     #[error("predicate state backend is unavailable: {0}")]
+    #[allow(dead_code)] // populated by future durable backends; in-memory is infallible
     Unavailable(String),
 }
 
@@ -106,7 +122,7 @@ pub enum PredicateBackendError {
 /// backend implements this via a small per-key seen-id set; durable
 /// backends should use `INSERT … ON CONFLICT (event_id) DO NOTHING`
 /// or equivalent.
-pub trait PredicateStateBackend: Send + Sync {
+pub(crate) trait PredicateStateBackend: Send + Sync {
     /// Record an invocation at `now` against `key` (idempotent against
     /// `event_id`) and return the resulting in-window count after
     /// trimming entries older than `window`. Atomic against concurrent
@@ -165,7 +181,7 @@ struct ValueBucket {
     entries: VecDeque<(Instant, Decimal, PredicateEventId)>,
 }
 
-pub struct InMemoryPredicateStateBackend {
+pub(crate) struct InMemoryPredicateStateBackend {
     invocation_history: Mutex<HashMap<InvocationKey, InvocationBucket>>,
     value_history: Mutex<HashMap<ValueKey, ValueBucket>>,
     evictions: AtomicU64,
