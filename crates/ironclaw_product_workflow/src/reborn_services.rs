@@ -616,8 +616,11 @@ fn bounded_ref<T: RefFactory>(prefix: &str, raw: &str) -> Result<T, RebornServic
 }
 
 fn webui_source_binding_id(scope: &TurnScope, actor: &TurnActor) -> String {
+    // WebUI retries are scoped to the authenticated caller context, not the
+    // thread id. When the caller is not project-bound, we encode that
+    // explicitly rather than collapsing onto an empty string.
     format!(
-        "{}{}{}{}{}",
+        "{}{}{}{}{}{}",
         segment("surface", "webui"),
         segment("tenant", scope.tenant_id.as_str()),
         segment(
@@ -625,13 +628,18 @@ fn webui_source_binding_id(scope: &TurnScope, actor: &TurnActor) -> String {
             scope.agent_id.as_ref().map(AgentId::as_str).unwrap_or("")
         ),
         segment(
-            "project",
-            scope
-                .project_id
-                .as_ref()
-                .map(ironclaw_host_api::ProjectId::as_str)
-                .unwrap_or("")
+            "project_scope",
+            if scope.project_id.is_some() {
+                "bound"
+            } else {
+                "none"
+            }
         ),
+        scope
+            .project_id
+            .as_ref()
+            .map(|project_id| segment("project", project_id.as_str()))
+            .unwrap_or_default(),
         segment("actor", actor.user_id.as_str())
     )
 }

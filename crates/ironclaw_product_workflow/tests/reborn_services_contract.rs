@@ -25,11 +25,15 @@ use ironclaw_turns::{
 use serde_json::json;
 
 fn caller() -> WebUiAuthenticatedCaller {
+    caller_with_project(Some("project-alpha"))
+}
+
+fn caller_with_project(project_id: Option<&str>) -> WebUiAuthenticatedCaller {
     WebUiAuthenticatedCaller::new(
         TenantId::new("tenant-alpha").expect("valid tenant"),
         UserId::new("user-alpha").expect("valid user"),
         Some(AgentId::new("agent-alpha").expect("valid agent")),
-        Some(ProjectId::new("project-alpha").expect("valid project")),
+        project_id.map(|project_id| ProjectId::new(project_id).expect("valid project")),
     )
 }
 
@@ -408,6 +412,80 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     assert_eq!(timeline.messages.len(), 1);
     assert_eq!(timeline.messages[0].status, MessageStatus::Submitted);
     assert_eq!(timeline.messages[0].content.as_deref(), Some("hello once"));
+}
+
+#[tokio::test]
+async fn duplicate_submit_without_project_id_still_rejects_cross_thread_reuse() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator.clone());
+    let caller = caller_with_project(None);
+
+    services
+        .submit_turn(
+            caller.clone(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-no-project",
+                "thread_id": "thread-alpha",
+                "content": "hello once"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("first submit succeeds");
+
+    let err = services
+        .submit_turn(
+            caller,
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-no-project",
+                "thread_id": "thread-beta",
+                "content": "hello twice"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("cross-thread duplicate is rejected without a project binding");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.status_code, 409);
+    assert_eq!(coordinator.submission_count(), 1);
+}
+
+#[tokio::test]
+async fn duplicate_submit_is_isolated_by_project_scope() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator.clone());
+
+    let first = services
+        .submit_turn(
+            caller_with_project(Some("project-alpha")),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-project-scoped",
+                "thread_id": "thread-alpha",
+                "content": "hello alpha"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("project alpha submit");
+    let second = services
+        .submit_turn(
+            caller_with_project(Some("project-beta")),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-project-scoped",
+                "thread_id": "thread-beta",
+                "content": "hello beta"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("project beta submit");
+
+    assert!(matches!(first, RebornSubmitTurnResponse::Submitted { .. }));
+    assert!(matches!(second, RebornSubmitTurnResponse::Submitted { .. }));
+    assert_eq!(coordinator.submission_count(), 2);
 }
 
 #[tokio::test]
