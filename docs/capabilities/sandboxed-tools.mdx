@@ -211,7 +211,7 @@ Review `capabilities.json` before installing any WASM tool from an untrusted sou
     WASM modules cannot spawn child processes, execute shell commands, or load dynamic libraries. The WASI interface exposed to modules is minimal.
   </Accordion>
 
-  <Accordion title="Fuel prevents denial-of-service" icon="zap">
-    A buggy or malicious WASM tool that enters an infinite loop will be terminated when it exhausts its fuel allocation. This prevents a single tool from blocking the agent indefinitely.
+  <Accordion title="Fuel bounds runaway computation" icon="zap">
+    A buggy or malicious WASM tool that enters an infinite loop will be terminated when it exhausts its fuel allocation. This bounds the cost of a single invocation; it does not limit how many separate invocations a tool can make or how slow each one is.
   </Accordion>
 </AccordionGroup>

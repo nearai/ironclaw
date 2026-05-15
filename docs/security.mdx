@@ -9,9 +9,9 @@ But all of these capabilities are only possible by accessing your credentials.
 
 Your API keys, OAuth tokens, database passwords, and SSH access all sit between two untrusted layers: a model that treats its context as instructions, and tools that are arbitrary code. If either the model or a tool can read a credential, that credential is one clever prompt-injected email or one bad dependency away from being turned against you.
 
-IronClaw is built around this problem. Credential handling isn't a feature bolted on; it's the shape of the system. The single rule the architecture enforces: **models and tools never see your credentials.**
+IronClaw is built around this problem. Credential handling isn't a feature bolted on; it's the shape of the system. The principle is simple: **the model never sees your raw credentials, and neither should your tools.**
 
-Everything below exists to make that rule hold up in practice.
+Everything below exists to make that hold up in practice.
 
 <CardGroup cols={1}>
   <Card title="Encrypted at rest" icon="lock">
@@ -19,7 +19,7 @@ Everything below exists to make that rule hold up in practice.
   </Card>
 
   <Card title="Sandboxed execution" icon="cubes">
-    Tools run inside a WebAssembly sandbox, are resource limited, and can only contact allowlisted endpoints.
+    WASM tools run sandboxed by wasmtime, are resource limited, and can only contact allowlisted endpoints.
   </Card>
 
   <Card title="Leak Detection" icon="shield">
@@ -27,7 +27,7 @@ Everything below exists to make that rule hold up in practice.
   </Card>
 
   <Card title="Network Allowlisting" icon="server">
-    Tools can reach only pre-approved endpoints. No silent phone-home to unknown hosts.
+    WASM tools can reach only pre-approved endpoints. No silent phone-home to unknown hosts.
   </Card>
 </CardGroup>
 
