@@ -7,10 +7,9 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_loop_support::{
     AlwaysAliveRunCancellationFactory, CapabilitySurfaceProfileFilter,
-    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort,
-    HostIdentityContextSource, HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort,
-    HostSkillContextSource, RunCancellationFactory, RunCancellationObservationKind,
-    RunStateLoopCancellationPort,
+    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, HostIdentityContextSource,
+    HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource,
+    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
     ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
