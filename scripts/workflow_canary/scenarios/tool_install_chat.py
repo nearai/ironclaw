@@ -86,53 +86,43 @@ FORBIDDEN_FRAGMENTS = [
 ]
 
 
-async def _open_thread(base_url: str, token: str) -> str:
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.post(
-            f"{base_url}/api/chat/thread/new",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        response.raise_for_status()
-        return response.json()["id"]
+async def _open_thread(client: httpx.AsyncClient, base_url: str) -> str:
+    response = await client.post(f"{base_url}/api/chat/thread/new", timeout=15.0)
+    response.raise_for_status()
+    return response.json()["id"]
 
 
 async def _send_chat(
-    base_url: str, token: str, thread_id: str, content: str
+    client: httpx.AsyncClient, base_url: str, thread_id: str, content: str
 ) -> int:
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            f"{base_url}/api/chat/send",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"content": content, "thread_id": thread_id},
-        )
-        return response.status_code
+    response = await client.post(
+        f"{base_url}/api/chat/send",
+        json={"content": content, "thread_id": thread_id},
+        timeout=30.0,
+    )
+    return response.status_code
 
 
 async def _read_history(
-    base_url: str, token: str, thread_id: str
+    client: httpx.AsyncClient, base_url: str, thread_id: str
 ) -> dict[str, Any]:
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.get(
-            f"{base_url}/api/chat/history",
-            headers={"Authorization": f"Bearer {token}"},
-            params={"thread_id": thread_id},
-        )
-        response.raise_for_status()
-        return response.json()
+    response = await client.get(
+        f"{base_url}/api/chat/history",
+        params={"thread_id": thread_id},
+        timeout=15.0,
+    )
+    response.raise_for_status()
+    return response.json()
 
 
 async def _get_extension(
-    base_url: str, token: str, name: str
+    client: httpx.AsyncClient, base_url: str, name: str
 ) -> dict[str, Any] | None:
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        response = await client.get(
-            f"{base_url}/api/extensions",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        response.raise_for_status()
-        for ext in response.json().get("extensions", []):
-            if ext.get("name") == name:
-                return ext
+    response = await client.get(f"{base_url}/api/extensions", timeout=15.0)
+    response.raise_for_status()
+    for ext in response.json().get("extensions", []):
+        if ext.get("name") == name:
+            return ext
     return None
 
 
@@ -186,7 +176,7 @@ def _history_text(history: dict[str, Any]) -> str:
 
 
 async def _wait_for_install(
-    base_url: str, token: str, name: str, deadline: float
+    client: httpx.AsyncClient, base_url: str, name: str, deadline: float
 ) -> tuple[bool, dict[str, Any] | None]:
     """Poll until the extension is `installed=true` or deadline expires.
 
@@ -194,7 +184,7 @@ async def _wait_for_install(
     """
     last: dict[str, Any] | None = None
     while time.perf_counter() < deadline:
-        ext = await _get_extension(base_url, token, name)
+        ext = await _get_extension(client, base_url, name)
         if ext is not None:
             last = ext
             if ext.get("installed") is True:
@@ -220,30 +210,38 @@ async def run(
     base_url = stack.base_url
     token = stack.gateway_token
 
+    # Single client for the whole probe — the install-poll loop calls
+    # /api/extensions ~120 times across TIMEOUT_S at POLL_INTERVAL_S
+    # cadence. Reusing the client keeps HTTP keepalives warm and avoids
+    # the per-call TCP/TLS dance.
+    auth_headers = {"Authorization": f"Bearer {token}"}
     try:
-        thread_id = await _open_thread(base_url, token)
-        send_status = await _send_chat(base_url, token, thread_id, TRIGGER_PROMPT)
-        if send_status != 202:
-            return [
-                ProbeResult(
-                    provider="extensions",
-                    mode=mode,
-                    success=False,
-                    latency_ms=int((time.perf_counter() - started) * 1000),
-                    details={
-                        "error": f"chat send returned {send_status}, expected 202",
-                        "thread_id": thread_id,
-                        "trigger_prompt": TRIGGER_PROMPT,
-                    },
-                )
-            ]
+        async with httpx.AsyncClient(headers=auth_headers) as client:
+            thread_id = await _open_thread(client, base_url)
+            send_status = await _send_chat(
+                client, base_url, thread_id, TRIGGER_PROMPT
+            )
+            if send_status != 202:
+                return [
+                    ProbeResult(
+                        provider="extensions",
+                        mode=mode,
+                        success=False,
+                        latency_ms=int((time.perf_counter() - started) * 1000),
+                        details={
+                            "error": f"chat send returned {send_status}, expected 202",
+                            "thread_id": thread_id,
+                            "trigger_prompt": TRIGGER_PROMPT,
+                        },
+                    )
+                ]
 
-        deadline = time.perf_counter() + TIMEOUT_S
-        installed, ext = await _wait_for_install(
-            base_url, token, TARGET_EXTENSION, deadline
-        )
+            deadline = time.perf_counter() + TIMEOUT_S
+            installed, ext = await _wait_for_install(
+                client, base_url, TARGET_EXTENSION, deadline
+            )
 
-        history = await _read_history(base_url, token, thread_id)
+            history = await _read_history(client, base_url, thread_id)
         text = _history_text(history)
         tool_install_seen = _history_has_tool_install(history, TARGET_EXTENSION)
         forbidden_hits = [frag for frag in FORBIDDEN_FRAGMENTS if frag in text]

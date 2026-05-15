@@ -66,13 +66,20 @@ TEST_START_RE = re.compile(r"^test (?P<name>[\w:]+) \.\.\. ?(?P<trailer>.*)$")
 # standalone outcome.
 OUTCOME_RE = re.compile(r"^(?P<outcome>ok|FAILED|ignored)\s*$")
 
-# Panic header — the message we want is the first non-empty line that
-# follows. Cargo nocapture interleaves stdout, so we only grab a single
-# line and truncate.
+# Panic header. Two shapes in the wild:
 #
-#   thread 'live_tests::zizmor_scan' (27813) panicked at tests/e2e_live.rs:85:9:
-#   Expected shell tool to be used for running zizmor, got: []
-PANIC_RE = re.compile(r"^thread '(?P<name>[\w:]+)' .* panicked at ")
+#   Rust >= 1.73 (current — message on next line):
+#     thread 'live_tests::zizmor_scan' (27813) panicked at tests/e2e_live.rs:85:9:
+#     Expected shell tool to be used for running zizmor, got: []
+#
+#   Rust < 1.73 (legacy — message inline on the header):
+#     thread 'foo' panicked at 'expected X, got Y', src/lib.rs:1:1
+#
+# `.*?` (lazy) is critical: it lets the regex match the legacy form
+# where there's nothing between the closing quote and ` panicked at `.
+# Greedy `.*` here would have required at least one character of
+# between-text (a worker-id like `(27813)`) and missed the legacy form.
+PANIC_RE = re.compile(r"^thread '(?P<name>[\w:]+)'.*? panicked at ")
 
 MAX_ERROR_LEN = 240
 
@@ -119,6 +126,24 @@ def parse_log(log_text: str) -> list[dict]:
         m = PANIC_RE.match(line)
         if not m:
             continue
+
+        # Rust < 1.73 emits the panic message inline on the header:
+        #
+        #   thread 'foo' panicked at 'expected X, got Y', src/lib.rs:1:1
+        #
+        # Rust >= 1.73 puts only the location on the header and the
+        # message on the following line:
+        #
+        #   thread 'foo' panicked at src/lib.rs:1:1:
+        #   expected X, got Y
+        #
+        # A trailing `:` on the suffix is the location-only signal; if
+        # the suffix carries anything else, that *is* the message.
+        suffix = line[m.end() :].strip()
+        if suffix and not suffix.endswith(":") and not suffix.startswith("note:"):
+            panic_messages[m.group("name")] = redact(suffix)[:MAX_ERROR_LEN]
+            continue
+
         for follow in lines[i + 1 : i + 6]:
             stripped = follow.strip()
             if not stripped:
