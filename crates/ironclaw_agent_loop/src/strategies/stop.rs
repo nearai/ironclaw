@@ -159,11 +159,16 @@ mod tests {
     }
 
     #[test]
-    fn aborted_stop_kind_preserves_policy_denied_variant_tag() {
-        let kind = StopKind::Aborted(LoopFailureKind::PolicyDenied);
-        let value = serde_json::to_value(kind).unwrap();
+    fn aborted_stop_kind_preserves_failure_variant_tags() {
+        for (failure_kind, wire_tag) in [
+            (LoopFailureKind::PolicyDenied, "policy_denied"),
+            (LoopFailureKind::ModelError, "model_error"),
+        ] {
+            let kind = StopKind::Aborted(failure_kind);
+            let value = serde_json::to_value(kind).unwrap();
 
-        assert_eq!(value, json!({ "aborted": "policy_denied" }));
-        assert_eq!(serde_json::from_value::<StopKind>(value).unwrap(), kind);
+            assert_eq!(value, json!({ "aborted": wire_tag }));
+            assert_eq!(serde_json::from_value::<StopKind>(value).unwrap(), kind);
+        }
     }
 }
