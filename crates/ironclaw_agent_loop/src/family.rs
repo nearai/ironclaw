@@ -72,6 +72,12 @@ fn validate_loop_family_id(value: &str) -> Result<(), String> {
 #[serde(transparent)]
 pub struct ComponentDigest(pub [u8; 32]);
 
+impl ComponentDigest {
+    pub fn from_blake3(bytes: impl AsRef<[u8]>) -> Self {
+        Self(*blake3::hash(bytes.as_ref()).as_bytes())
+    }
+}
+
 /// Content-addressed identity for a loop family, hook, skill snapshot, model
 /// route, or other replay-relevant component.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
