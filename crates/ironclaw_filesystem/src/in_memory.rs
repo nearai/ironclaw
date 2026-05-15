@@ -131,14 +131,30 @@ impl RootFilesystem for InMemoryBackend {
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let mut state = self.state.lock().await;
+        // PR #3659 reviewer fix: delete now matches the SQL backends'
+        // subtree semantics. If an exact entry exists, remove it.
+        // Otherwise, if the path has children (i.e. `stat` would call
+        // this a directory), remove every entry under it. Returns
+        // NotFound only when neither an exact entry nor any descendants
+        // exist.
         if state.entries.remove(path.as_str()).is_some() {
-            Ok(())
-        } else {
-            Err(FilesystemError::NotFound {
+            // Also sweep any descendants under the deleted path — a
+            // record-shaped entry at /a/b plus byte entries at /a/b/c
+            // should both be cleared on `delete("/a/b")`.
+            let prefix = with_trailing_slash(path.as_str());
+            state.entries.retain(|key, _| !key.starts_with(&prefix));
+            return Ok(());
+        }
+        let prefix = with_trailing_slash(path.as_str());
+        let before = state.entries.len();
+        state.entries.retain(|key, _| !key.starts_with(&prefix));
+        if state.entries.len() == before {
+            return Err(FilesystemError::NotFound {
                 path: path.clone(),
                 operation: FilesystemOperation::Delete,
-            })
+            });
         }
+        Ok(())
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
@@ -156,7 +172,20 @@ impl RootFilesystem for InMemoryBackend {
                 } else {
                     FileType::File
                 };
-                seen.entry(head.to_string()).or_insert(file_type);
+                // PR #3659 reviewer fix: with `or_insert`, the first
+                // discovery wins. If `/a/b` (file) is processed before
+                // `/a/b/c` (under-`b` file), `b` would be listed as a
+                // File even though it has children. Any path that
+                // serves as a prefix for other entries is a Directory
+                // in this listing — use `and_modify` to upgrade on a
+                // later `has_more` discovery.
+                seen.entry(head.to_string())
+                    .and_modify(|existing| {
+                        if has_more {
+                            *existing = FileType::Directory;
+                        }
+                    })
+                    .or_insert(file_type);
             }
         }
         let mut out = Vec::with_capacity(seen.len());
@@ -370,11 +399,34 @@ fn filter_matches(
             _ => false,
         },
         Filter::Range { key, lo, hi } => match indexed.get(key) {
-            Some(v) => v >= lo && v <= hi,
+            Some(v) => {
+                // PR #3659 reviewer fix: Filter::Range previously used
+                // the derived IndexValue Ord, which orders across
+                // variants by their declared position. That meant a
+                // numeric `lo` and a Bytes `hi` could match Bool/Text
+                // values purely on enum-variant ordering rather than
+                // domain ordering. Require all three sides to share a
+                // variant; mismatched bound/value variants don't match.
+                index_value_variant(lo) == index_value_variant(hi)
+                    && index_value_variant(v) == index_value_variant(lo)
+                    && v >= lo
+                    && v <= hi
+            }
             None => false,
         },
         Filter::And(children) => children.iter().all(|f| filter_matches(f, indexed)),
         Filter::Or(children) => children.iter().any(|f| filter_matches(f, indexed)),
+    }
+}
+
+/// Identify the [`IndexValue`] variant for cross-variant Range matching
+/// (see PR #3659 reviewer note in `filter_matches`).
+fn index_value_variant(value: &IndexValue) -> u8 {
+    match value {
+        IndexValue::Bool(_) => 0,
+        IndexValue::I64(_) => 1,
+        IndexValue::Text(_) => 2,
+        IndexValue::Bytes(_) => 3,
     }
 }
 
@@ -560,6 +612,95 @@ mod tests {
         assert!(fs.get(&path).await.unwrap().is_none());
         let err = fs.delete(&path).await.unwrap_err();
         assert!(matches!(err, FilesystemError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_directory_removes_subtree() {
+        // PR #3659 reviewer fix: deleting a directory path (no exact
+        // entry, but children exist) used to return NotFound and leave
+        // the subtree behind, diverging from the SQL backends'
+        // subtree-delete semantics.
+        let fs = InMemoryBackend::new();
+        for p in ["/projects/dir/a", "/projects/dir/b", "/projects/dir/sub/c"] {
+            fs.put(&vpath(p), Entry::bytes(vec![1]), CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+        let dir = vpath("/projects/dir");
+        // No exact entry at /projects/dir, but children exist → treat
+        // as a directory and remove the subtree.
+        fs.delete(&dir).await.unwrap();
+        for p in ["/projects/dir/a", "/projects/dir/b", "/projects/dir/sub/c"] {
+            assert!(fs.get(&vpath(p)).await.unwrap().is_none());
+        }
+        // Now NotFound — the subtree is gone.
+        let err = fs.delete(&dir).await.unwrap_err();
+        assert!(matches!(err, FilesystemError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn list_dir_upgrades_to_directory_on_later_child_discovery() {
+        // PR #3659 reviewer fix: with `or_insert`, the first discovery
+        // of a name decided its FileType. Path /a/b inserted first as
+        // a File could shadow /a/b/c arriving later, leaving `b`
+        // listed as a File even though it has children.
+        let fs = InMemoryBackend::new();
+        // Insert /projects/x as a leaf file, then /projects/x/y as a
+        // file under x — `x` should now list as Directory because it
+        // has children, regardless of insertion order.
+        fs.put(
+            &vpath("/projects/x"),
+            Entry::bytes(vec![1]),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+        fs.put(
+            &vpath("/projects/x/y"),
+            Entry::bytes(vec![2]),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+        let entries = fs.list_dir(&vpath("/projects")).await.unwrap();
+        let x = entries
+            .iter()
+            .find(|e| e.name == "x")
+            .expect("/projects/x should be listed");
+        assert_eq!(x.file_type, FileType::Directory);
+    }
+
+    #[tokio::test]
+    async fn filter_range_rejects_cross_variant_bounds() {
+        // PR #3659 reviewer fix: Filter::Range used to rely on derived
+        // IndexValue Ord, which orders across variants by their
+        // declared position. That meant numeric lo + Bytes hi could
+        // include Bool/Text values purely on enum ordering. We now
+        // require all three sides (lo, hi, stored) to share a variant.
+        let fs = InMemoryBackend::new();
+        let kind = RecordKind::new("widget").unwrap();
+        let key = IndexKey::new("size").unwrap();
+        let entry = Entry::record(kind, &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(key.clone(), IndexValue::Text("medium".into()));
+        fs.put(&vpath("/projects/W1"), entry, CasExpectation::Absent)
+            .await
+            .unwrap();
+        // Numeric lo + Bytes hi over a Text-valued indexed field must
+        // not match.
+        let results = fs
+            .query(
+                &vpath("/projects"),
+                &Filter::Range {
+                    key,
+                    lo: IndexValue::I64(0),
+                    hi: IndexValue::Bytes(vec![0xff]),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert!(results.is_empty());
     }
 
     #[tokio::test]

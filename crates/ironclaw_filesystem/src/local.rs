@@ -6,8 +6,8 @@ use ironclaw_safety::sensitive_paths::is_sensitive_path;
 use tokio::io::AsyncWriteExt;
 
 use crate::{
-    DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, RootFilesystem,
-    path_prefix_matches,
+    CasExpectation, DirEntry, Entry, FileStat, FileType, FilesystemError, FilesystemOperation,
+    RecordVersion, RootFilesystem, VersionedEntry, path_prefix_matches,
 };
 
 /// Local filesystem backend mounted into the virtual namespace.
@@ -172,6 +172,52 @@ impl LocalFilesystem {
 
 #[async_trait]
 impl RootFilesystem for LocalFilesystem {
+    /// Native `put` for the byte-only local filesystem. Opaque-file entries
+    /// (`kind = None`, empty `indexed`) with `CasExpectation::Any` delegate
+    /// to `write_file`. Record-shaped entries, populated indexed
+    /// projections, and `CasExpectation::Absent` / `Version(_)` are
+    /// `Unsupported` because the local filesystem has no native metadata or
+    /// version tracking (sidecar metadata is a future addition; see the
+    /// reborn storage rework plan). We implement `put` here rather than
+    /// relying on a trait default so that the put/write_file pair is
+    /// non-recursive even when downstream consumers route through `put`.
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if entry.kind.is_some() || !entry.indexed.is_empty() {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+            });
+        }
+        if !matches!(cas, CasExpectation::Any) {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+            });
+        }
+        self.write_file(path, &entry.body).await?;
+        Ok(RecordVersion::from_backend(0))
+    }
+
+    /// Native `get` mirroring `put`: read the bytes and wrap as an opaque
+    /// `Entry`. Version is always `0` because the local filesystem doesn't
+    /// track per-path versions. Non-existent paths return `Ok(None)`;
+    /// directories or symlinks return their respective `read_file` errors.
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        match self.read_file(path).await {
+            Ok(body) => Ok(Some(VersionedEntry {
+                entry: Entry::bytes(body),
+                version: RecordVersion::from_backend(0),
+            })),
+            Err(FilesystemError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
         let resolved = self
             .resolve_existing(path, FilesystemOperation::ReadFile)

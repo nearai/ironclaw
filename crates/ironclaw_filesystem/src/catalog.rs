@@ -6,8 +6,8 @@ use ironclaw_host_api::VirtualPath;
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
     BackendCapabilities, BackendId, BackendKind, CasExpectation, ContentKind, DirEntry, Entry,
-    FileStat, FilesystemError, Filter, IndexPolicy, IndexSpec, Page, RecordVersion, RootFilesystem,
-    SeqNo, StorageClass, VersionedEntry, path_prefix_matches,
+    FileStat, FilesystemError, FilesystemOperation, Filter, IndexPolicy, IndexSpec, Page,
+    RecordVersion, RootFilesystem, SeqNo, StorageClass, VersionedEntry, path_prefix_matches,
 };
 
 /// Trusted catalog record for one virtual filesystem mount.
@@ -103,6 +103,12 @@ impl CompositeRootFilesystem {
                 path: descriptor.virtual_root,
             });
         }
+        // PR #3659 reviewer fix: validate the descriptor's advertised
+        // capabilities against the backend's actual capabilities at
+        // mount time. Catalog metadata that claims query/index/event
+        // support over a backend that doesn't provide it would defeat
+        // the PR's mount-time validation guarantee — fail closed instead.
+        validate_mount_capabilities(&descriptor, backend.capabilities())?;
         self.mounts.push(CompositeMount {
             descriptor,
             backend,
@@ -124,6 +130,74 @@ impl CompositeRootFilesystem {
 impl Default for CompositeRootFilesystem {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// PR #3659 reviewer fix: reject a [`MountDescriptor`] whose advertised
+/// capabilities claim more than the backend actually delivers on the
+/// **new** capability axes (records, query, index, events, txn).
+///
+/// Scope deliberately limited to the new axes: the legacy bytes-plane
+/// flags (`read`/`write`/`list`/`stat`/`delete`/`append`) have always
+/// been descriptor-driven metadata, and many existing backends still
+/// return `BackendCapabilities::default()` (all-false) from their
+/// `capabilities()` accessor even though they implement
+/// `read_file`/`write_file` natively. The mount-time validation
+/// guarantee the reviewer asked for applies to the new capability
+/// surface that this PR introduces; downstream catalog clients are the
+/// authority for the legacy plane until each backend opts in to a more
+/// accurate `capabilities()` override.
+fn validate_mount_capabilities(
+    descriptor: &MountDescriptor,
+    backend: BackendCapabilities,
+) -> Result<(), FilesystemError> {
+    let declared = descriptor.capabilities;
+    let mut shortfalls: Vec<&'static str> = Vec::new();
+    if declared.records && !backend.records {
+        shortfalls.push("records");
+    }
+    if declared.query && !backend.query {
+        shortfalls.push("query");
+    }
+    if declared.index.exact && !backend.index.exact {
+        shortfalls.push("index.exact");
+    }
+    if declared.index.prefix && !backend.index.prefix {
+        shortfalls.push("index.prefix");
+    }
+    if declared.index.fts && !backend.index.fts {
+        shortfalls.push("index.fts");
+    }
+    if declared.index.vector && !backend.index.vector {
+        shortfalls.push("index.vector");
+    }
+    if declared.events && !backend.events {
+        shortfalls.push("events");
+    }
+    let backend_txn = txn_capability_rank(backend.txn);
+    let declared_txn = txn_capability_rank(declared.txn);
+    if declared_txn > backend_txn {
+        shortfalls.push("txn");
+    }
+    if shortfalls.is_empty() {
+        Ok(())
+    } else {
+        Err(FilesystemError::Backend {
+            path: descriptor.virtual_root.clone(),
+            operation: FilesystemOperation::MountLocal,
+            reason: format!(
+                "mount descriptor claims capabilities the backend does not provide: {}",
+                shortfalls.join(", ")
+            ),
+        })
+    }
+}
+
+fn txn_capability_rank(value: crate::TxnCapability) -> u8 {
+    match value {
+        crate::TxnCapability::None => 0,
+        crate::TxnCapability::Cas => 1,
+        crate::TxnCapability::MultiKey => 2,
     }
 }
 

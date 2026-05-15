@@ -48,6 +48,15 @@ pub trait RootFilesystem: Send + Sync {
 
     /// Write an [`Entry`] at `path` with a compare-and-swap precondition.
     /// Returns the new [`RecordVersion`].
+    ///
+    /// Default impl is `Unsupported` — backends that want to participate in
+    /// the unified surface must implement `put` natively. Byte-only backends
+    /// can do this with a thin delegation to their own native `write_file`,
+    /// gated on `kind = None`, empty `indexed`, and `CasExpectation::Any`;
+    /// see `LocalFilesystem::put` for the canonical pattern. We deliberately
+    /// do **not** route the default `put` through `self.write_file`, because
+    /// the default `write_file` routes through `self.put` — a backend that
+    /// overrode neither would recurse to a stack overflow.
     async fn put(
         &self,
         path: &VirtualPath,
@@ -58,19 +67,15 @@ pub trait RootFilesystem: Send + Sync {
     }
 
     /// Read the entry at `path`, returning `None` if no entry is present.
+    ///
+    /// Default impl is `Unsupported`. Same recursion concern as `put`:
+    /// `read_file`'s default delegates here, so we must not delegate the
+    /// other direction in the trait default. Byte-only backends implement
+    /// `get` by wrapping their native `read_file` result in
+    /// `Some(VersionedEntry { entry: Entry::bytes(body), version: 0 })`
+    /// directly. See `LocalFilesystem::get` for the canonical pattern.
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
-        // Default: assume bytes-only legacy backend. Fetch via `read_file`,
-        // wrap in an opaque-file Entry, version 0 (legacy backends do not
-        // track versions). This default is removed when the backend gains a
-        // native `put`/`get` implementation (see task 5).
-        match self.read_file(path).await {
-            Ok(body) => Ok(Some(VersionedEntry {
-                entry: Entry::bytes(body),
-                version: RecordVersion::from_backend(0),
-            })),
-            Err(FilesystemError::NotFound { .. }) => Ok(None),
-            Err(e) => Err(e),
-        }
+        unsupported(path, FilesystemOperation::ReadFile)
     }
 
     /// Lists direct children of a canonical virtual directory.
