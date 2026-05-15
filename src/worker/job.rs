@@ -115,7 +115,7 @@ impl Worker {
         self.deps.use_planning
     }
 
-    async fn tool_definitions_for_current_context(&self) -> Vec<crate::llm::ToolDefinition> {
+    async fn tool_definitions_for_current_context(&self) -> Vec<ironclaw_llm::ToolDefinition> {
         let tool_defs = self.tools().tool_definitions().await;
 
         let Ok(job_ctx) = self.context_manager().get_context(self.job_id).await else {

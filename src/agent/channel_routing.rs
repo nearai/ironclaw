@@ -13,7 +13,7 @@ use std::path::Path;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::db::SettingsStore;
-use crate::llm::ToolDefinition;
+use ironclaw_llm::ToolDefinition;
 
 /// Channel-to-tool-group routing configuration.
 ///

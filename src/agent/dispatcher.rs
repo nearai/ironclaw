@@ -114,8 +114,8 @@ impl Agent {
         &self,
         channel: &str,
         metadata: &serde_json::Value,
-        tools: Vec<crate::llm::ToolDefinition>,
-    ) -> Vec<crate::llm::ToolDefinition> {
+        tools: Vec<ironclaw_llm::ToolDefinition>,
+    ) -> Vec<ironclaw_llm::ToolDefinition> {
         let routing = { self.deps.channel_routing.read().await.clone() };
         if let Some(routing) = routing {
             let builtin_names = self.deps.tools.builtin_tool_names().await;
