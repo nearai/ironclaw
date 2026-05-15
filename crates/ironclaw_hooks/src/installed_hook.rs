@@ -89,8 +89,11 @@ impl RestrictedBeforeCapabilityHook for PredicateBackedBeforeCapabilityHook {
 mod tests {
     use super::*;
     use crate::identity::{ExtensionId, HookLocalId, HookVersion};
-    use crate::predicate::{CapabilityPredicate, HookPredicateSpec};
-    use crate::sink::RecordingGateSink;
+    use crate::predicate::{
+        CapabilityPredicate, HookPredicateSpec, OnExceededAction, ValueOrRateBound,
+    };
+    use crate::predicate_state::PredicateEventId;
+    use crate::sink::{GateSinkState, RecordingGateSink};
     use ironclaw_host_api::TenantId;
 
     fn hook_id() -> HookId {
@@ -272,8 +275,6 @@ mod tests {
 
     #[tokio::test]
     async fn allow_predicate_routes_to_sink_pass() {
-        use crate::sink::GateSinkState;
-
         let evaluator = Arc::new(PredicateEvaluator::new());
         // Spec only fires on `shell.exec`; context invokes a different
         // capability so the evaluator returns Allow.
@@ -298,5 +299,95 @@ mod tests {
             "no-opinion path must not record a decision"
         );
         assert_eq!(sink.state, GateSinkState::Passed);
+    }
+
+    /// henrypark133 HIGH on PR #3635: replay dedup must engage at the
+    /// **caller boundary** — `PredicateBackedBeforeCapabilityHook::evaluate`
+    /// is the production path the dispatcher invokes. A unit test on the
+    /// evaluator alone is insufficient (per repo CLAUDE.md "Test through
+    /// the caller, not just the helper"): the wrapper hook reads
+    /// `BeforeCapabilityHookContext::caller_event_id` and threads it to
+    /// the backend, so the regression test must drive the wrapper.
+    ///
+    /// Two evaluations sharing the same stable `caller_event_id` against
+    /// the same `(hook_id, tenant, capability)` key must count as ONE
+    /// invocation. We pick a `RateOrValueCap` with `max=1` and assert the
+    /// second replay still passes (count stays at 1, under cap). A third
+    /// evaluation with a *distinct* id then crosses the cap, proving the
+    /// dedup is replay-scoped (same id → no-op) rather than blanket-
+    /// suppress (any id → no-op).
+    #[tokio::test]
+    async fn caller_event_id_replay_is_deduped_through_wrapper_hook() {
+        let evaluator = Arc::new(PredicateEvaluator::new());
+        let spec = HookPredicateSpec::RateOrValueCap {
+            when: CapabilityPredicate::NameEquals {
+                name: "cap.x".to_string(),
+            },
+            bound: ValueOrRateBound::InvocationCount {
+                max: 1,
+                window: "1h".to_string(),
+            },
+            on_exceeded: OnExceededAction::Deny {
+                reason: "rate cap".to_string(),
+            },
+        };
+        let hook =
+            PredicateBackedBeforeCapabilityHook::new(hook_id(), spec, Arc::clone(&evaluator));
+
+        let stable_id = PredicateEventId::new(
+            "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
+        )
+        .expect("fixture id passes format validation");
+        let ctx = BeforeCapabilityHookContext::new_unresolved(
+            TenantId::new("alpha").expect("ok"),
+            "cap.x".to_string(),
+            [0u8; 32],
+        )
+        .with_caller_event_id(stable_id);
+
+        // First evaluation — counted, under cap of 1.
+        let mut sink_1 = RecordingGateSink::new();
+        hook.evaluate(&ctx, &mut sink_1 as &mut dyn RestrictedGateSink)
+            .await;
+        assert!(
+            sink_1.decision().is_none(),
+            "first evaluation under cap must not deny"
+        );
+        assert_eq!(sink_1.state, GateSinkState::Passed);
+
+        // Replay with the SAME caller_event_id — backend dedupes, count
+        // stays at 1, still under cap. If the wrapper were synthesizing a
+        // fresh id (the bug Henry flagged), this would tip count=2 and
+        // deny.
+        let mut sink_2 = RecordingGateSink::new();
+        hook.evaluate(&ctx, &mut sink_2 as &mut dyn RestrictedGateSink)
+            .await;
+        assert!(
+            sink_2.decision().is_none(),
+            "replay with same caller_event_id must dedupe at the wrapper boundary, \
+             not be re-counted into a deny"
+        );
+        assert_eq!(sink_2.state, GateSinkState::Passed);
+
+        // A DIFFERENT caller_event_id is a logically new invocation —
+        // this one crosses the cap. Proves dedup is replay-scoped, not
+        // blanket-suppress.
+        let distinct_id = PredicateEventId::new(
+            "ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555",
+        )
+        .expect("fixture id passes format validation");
+        let ctx_distinct = BeforeCapabilityHookContext::new_unresolved(
+            TenantId::new("alpha").expect("ok"),
+            "cap.x".to_string(),
+            [0u8; 32],
+        )
+        .with_caller_event_id(distinct_id);
+        let mut sink_3 = RecordingGateSink::new();
+        hook.evaluate(&ctx_distinct, &mut sink_3 as &mut dyn RestrictedGateSink)
+            .await;
+        let decision = sink_3
+            .decision()
+            .expect("distinct caller_event_id is a new invocation; cap=1 must deny");
+        assert!(!decision.permits());
     }
 }
