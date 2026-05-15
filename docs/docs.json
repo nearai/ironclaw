@@ -94,6 +94,7 @@
                       "channels/local",
                       "channels/discord",
                       "channels/telegram",
+                      "channels/wechat",
                       "channels/webhook",
                       "channels/signal"
                     ]
