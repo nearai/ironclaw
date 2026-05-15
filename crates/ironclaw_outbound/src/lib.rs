@@ -6,6 +6,7 @@
 //! payloads, prompts, tool I/O, secrets, host paths, or backend detail strings.
 
 mod error;
+mod filesystem_store;
 mod ids;
 mod memory;
 mod service;
@@ -21,6 +22,7 @@ mod libsql_store;
 mod postgres_store;
 
 pub use error::OutboundError;
+pub use filesystem_store::FilesystemOutboundStateStore;
 pub use ids::{OutboundDeliveryId, ProjectionSubscriptionId, ProjectionUpdateRef};
 pub use memory::InMemoryOutboundStateStore;
 pub use service::{
