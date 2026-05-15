@@ -1643,6 +1643,11 @@ impl LoopProgressPort for HostManagedLoopProgressPort {
             LoopProgressEvent::IterationStarted { iteration } => {
                 emitter.iteration_started(iteration).await
             }
+            // Prompt construction already emits the canonical
+            // `PromptBundleBuilt` milestone from `HostManagedLoopPromptPort`,
+            // including the bundle ref and redacted skill-context metadata.
+            // Treat the executor progress echo as advisory to avoid duplicate
+            // prompt milestones for the same bundle.
             LoopProgressEvent::PromptBundleBuilt { .. } => Ok(()),
             LoopProgressEvent::CapabilityBatchStarted {
                 iteration,
@@ -1674,6 +1679,10 @@ impl LoopProgressPort for HostManagedLoopProgressPort {
                 iteration,
                 gate_kind,
             } => emitter.gate_blocked(iteration, gate_kind).await,
+            // `HostManagedLoopCheckpointPort::checkpoint` publishes the
+            // canonical checkpoint milestone with the durable checkpoint id.
+            // `CheckpointWritten` carries only the checkpoint kind/iteration,
+            // so emitting it here would either duplicate or weaken that record.
             LoopProgressEvent::CheckpointWritten { .. } => Ok(()),
         }
     }

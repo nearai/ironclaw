@@ -175,7 +175,7 @@ impl CanonicalAgentLoopExecutor {
                     iteration: state.iteration,
                 },
             )
-            .await?;
+            .await;
 
             if pending_input_ack.is_empty() && planner.drain().drain_steering(&state).await {
                 let drained = self.drain_user_inputs(host, state).await?;
@@ -203,7 +203,7 @@ impl CanonicalAgentLoopExecutor {
                     instruction_snippet_count: prompt_bundle.instruction_snippet_count,
                 },
             )
-            .await?;
+            .await;
 
             let surface_filter = planner.capability().filter(&state).await;
             let mut surface = host
@@ -377,7 +377,7 @@ impl CanonicalAgentLoopExecutor {
                                     }
                                 })?,
                             )
-                            .await?;
+                            .await;
                         }
                         RecoveryOutcome::SkipResult { .. } => {
                             return Err(AgentLoopExecutorError::PlannerContract {
@@ -481,7 +481,7 @@ impl CanonicalAgentLoopExecutor {
                 policy: batch_policy_kind(policy),
             },
         )
-        .await?;
+        .await;
 
         let batch = host
             .invoke_capability_batch(CapabilityBatchInvocation {
@@ -515,7 +515,7 @@ impl CanonicalAgentLoopExecutor {
                 failed_count,
             },
         )
-        .await?;
+        .await;
 
         for (call, outcome) in visible_calls.into_iter().zip(batch.outcomes) {
             push_call_signature_once(&mut state, &mut signatures, &call)?;
@@ -642,7 +642,7 @@ impl CanonicalAgentLoopExecutor {
                             }
                         })?,
                     )
-                    .await?;
+                    .await;
                     let retry = host
                         .invoke_capability(capability_invocation_from_candidate(call.clone()))
                         .await
@@ -738,7 +738,7 @@ impl CanonicalAgentLoopExecutor {
                         gate_kind: loop_gate_kind(kind),
                     },
                 )
-                .await?;
+                .await;
                 let checked = self
                     .checkpoint(host, state, CheckpointKind::BeforeBlock)
                     .await?;
@@ -862,7 +862,7 @@ impl CanonicalAgentLoopExecutor {
                 kind: host_kind,
             },
         )
-        .await?;
+        .await;
         Ok(CheckpointWrite {
             state,
             checkpoint_id,
@@ -874,12 +874,8 @@ impl CanonicalAgentLoopExecutor {
         &self,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
         event: LoopProgressEvent,
-    ) -> Result<(), AgentLoopExecutorError> {
-        host.emit_loop_progress(event)
-            .await
-            .map_err(|_| AgentLoopExecutorError::HostUnavailable {
-                stage: HostStage::Progress,
-            })
+    ) {
+        let _ = host.emit_loop_progress(event).await;
     }
 
     async fn drain_user_inputs(
@@ -1316,6 +1312,7 @@ mod tests {
         prompt_surface_version: Option<CapabilitySurfaceVersion>,
         visible_surface_version: CapabilitySurfaceVersion,
         progress_events: Arc<Mutex<Vec<ironclaw_turns::run_profile::LoopProgressEvent>>>,
+        fail_progress_port: bool,
     }
 
     impl MockHost {
@@ -1337,6 +1334,7 @@ mod tests {
                 prompt_surface_version: Some(surface_version()),
                 visible_surface_version: surface_version(),
                 progress_events: Arc::new(Mutex::new(Vec::new())),
+                fail_progress_port: false,
             }
         }
 
@@ -1363,6 +1361,11 @@ mod tests {
 
         fn with_model_errors(self, errors: Vec<AgentLoopHostError>) -> Self {
             *self.model_errors.lock().expect("lock") = errors.into();
+            self
+        }
+
+        fn with_failing_progress_port(mut self) -> Self {
+            self.fail_progress_port = true;
             self
         }
 
@@ -1607,6 +1610,12 @@ mod tests {
             &self,
             event: ironclaw_turns::run_profile::LoopProgressEvent,
         ) -> Result<(), AgentLoopHostError> {
+            if self.fail_progress_port {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "progress sink unavailable",
+                ));
+            }
             self.progress_events.lock().expect("lock").push(event);
             Ok(())
         }
@@ -1642,6 +1651,47 @@ mod tests {
                 "checkpoint_written",
                 "checkpoint_written",
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn progress_port_failure_does_not_abort_reply_only_run() {
+        let host = MockHost::new(vec![reply_response()]).with_failing_progress_port();
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        match exit {
+            LoopExit::Completed(completed) => {
+                assert_eq!(
+                    completed.reply_message_refs,
+                    vec![message_ref("msg:assistant")]
+                );
+                assert!(completed.final_checkpoint_id.is_some());
+            }
+            other => panic!("expected completed, got {other:?}"),
+        }
+        assert_eq!(
+            host.checkpoint_kinds(),
+            vec![LoopCheckpointKind::BeforeModel, LoopCheckpointKind::Final]
+        );
+        assert!(host.progress_events().is_empty());
+
+        let final_state = final_staged_state(&host);
+        assert_eq!(
+            final_state.assistant_refs,
+            vec![message_ref("msg:assistant")]
+        );
+        assert_eq!(
+            final_state.last_checkpoint,
+            Some(crate::state::CheckpointMarker {
+                kind: CheckpointKind::Final,
+                iteration_at_checkpoint: final_state.iteration,
+            })
         );
     }
 

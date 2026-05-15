@@ -208,7 +208,7 @@ async fn durable_milestone_sink_rejects_mismatched_thread_or_run_binding() {
 }
 
 #[tokio::test]
-async fn durable_milestone_sink_replays_metadata_only_loop_progress_milestones() {
+async fn durable_milestone_sink_does_not_project_lossy_loop_progress_milestones() {
     let events: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let thread_scope = ThreadScope {
         tenant_id: tenant_id(),
@@ -278,25 +278,13 @@ async fn durable_milestone_sink_replays_metadata_only_loop_progress_milestones()
         })
         .await
         .unwrap();
-    assert_eq!(
-        snapshot
-            .timeline
-            .entries
-            .iter()
-            .map(|entry| entry.kind)
-            .collect::<Vec<_>>(),
-        vec![
-            TimelineEntryKind::CapabilityBatchCompleted,
-            TimelineEntryKind::GateBlocked,
-            TimelineEntryKind::CheckpointCreated,
-        ]
+    assert!(
+        snapshot.timeline.entries.is_empty(),
+        "progress milestones carry counters/checkpoint kinds that would be lost in RuntimeEvent"
     );
-    assert_eq!(snapshot.runs.len(), 1);
-    assert_eq!(snapshot.runs[0].status, RunProjectionStatus::Running);
-    assert_eq!(
-        snapshot.runs[0].capability_id,
-        CapabilityId::new("loop.capability_batch").unwrap(),
-        "progress-only milestone projection should preserve the first durable progress capability"
+    assert!(
+        snapshot.runs.is_empty(),
+        "progress milestones should not synthesize partial run records"
     );
 
     let replay_scope = projection_scope_for_thread(scope.thread_id.clone());
@@ -308,18 +296,8 @@ async fn durable_milestone_sink_replays_metadata_only_loop_progress_milestones()
         })
         .await
         .unwrap();
-    assert_eq!(
-        replay
-            .updates
-            .iter()
-            .map(|entry| entry.kind)
-            .collect::<Vec<_>>(),
-        vec![
-            TimelineEntryKind::CapabilityBatchCompleted,
-            TimelineEntryKind::GateBlocked,
-            TimelineEntryKind::CheckpointCreated,
-        ]
-    );
+    assert!(replay.updates.is_empty());
+    assert!(replay.runs.is_empty());
 }
 
 async fn drive_model_reply_milestones_and_assert_projection(

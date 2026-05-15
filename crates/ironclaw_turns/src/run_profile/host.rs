@@ -1561,6 +1561,13 @@ pub enum LoopDriverNoteKind {
 
 #[async_trait]
 pub trait LoopProgressPort: Send + Sync {
+    /// Emit observational progress for UI/status consumers.
+    ///
+    /// Progress events are best-effort and must not be used as
+    /// recoverability-critical durability markers. A failed progress emission
+    /// must not invalidate already-completed durable work; callers should treat
+    /// this like host model milestone projection, where sink failures are
+    /// logged/observed without changing the provider or checkpoint outcome.
     async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError>;
 }
 

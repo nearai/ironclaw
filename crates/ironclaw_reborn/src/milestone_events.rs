@@ -18,9 +18,6 @@ use ironclaw_turns::{
 const MODEL_CAPABILITY_ID: &str = "loop.model";
 const ASSISTANT_REPLY_CAPABILITY_ID: &str = "loop.assistant_reply";
 const LOOP_RUN_CAPABILITY_ID: &str = "loop.run";
-const CAPABILITY_BATCH_CAPABILITY_ID: &str = "loop.capability_batch";
-const GATE_CAPABILITY_ID: &str = "loop.gate";
-const CHECKPOINT_CAPABILITY_ID: &str = "loop.checkpoint";
 
 /// Scope authority bound into the sink at construction time.
 ///
@@ -112,10 +109,12 @@ impl DurableLoopHostMilestoneScope {
 
 /// Durable projection adapter for public AgentLoopHost milestones.
 ///
-/// The adapter writes only metadata-only model/reply milestones into the
-/// runtime event log. Raw prompts, assistant content, provider errors, message
-/// refs, host paths, and secrets stay in their owning stores and never enter
-/// runtime events.
+/// The adapter writes only metadata-only loop lifecycle milestones into the
+/// runtime event log. Progress milestones that carry useful counters or typed
+/// checkpoint/prompt metadata stay in the milestone-sink substrate rather than
+/// being collapsed into lossy `RuntimeEvent` rows. Raw prompts, assistant
+/// content, provider errors, message refs, host paths, and secrets stay in
+/// their owning stores and never enter runtime events.
 #[derive(Clone)]
 pub struct DurableLoopHostMilestoneSink {
     event_log: Arc<dyn DurableEventLog>,
@@ -198,22 +197,13 @@ impl DurableLoopHostMilestoneSink {
                 capability_id(LOOP_RUN_CAPABILITY_ID)?,
                 loop_failure_kind(reason_kind),
             ),
-            LoopHostMilestoneKind::CapabilityBatchCompleted { .. } => {
-                RuntimeEvent::capability_batch_completed(
-                    scope,
-                    capability_id(CAPABILITY_BATCH_CAPABILITY_ID)?,
-                )
-            }
-            LoopHostMilestoneKind::GateBlocked { .. } => {
-                RuntimeEvent::gate_blocked(scope, capability_id(GATE_CAPABILITY_ID)?)
-            }
-            LoopHostMilestoneKind::CheckpointCreated { .. } => {
-                RuntimeEvent::checkpoint_created(scope, capability_id(CHECKPOINT_CAPABILITY_ID)?)
-            }
             LoopHostMilestoneKind::IterationStarted { .. }
             | LoopHostMilestoneKind::PromptBundleBuilt { .. }
             | LoopHostMilestoneKind::CapabilityInvoked { .. }
             | LoopHostMilestoneKind::CapabilityBatchStarted { .. }
+            | LoopHostMilestoneKind::CapabilityBatchCompleted { .. }
+            | LoopHostMilestoneKind::GateBlocked { .. }
+            | LoopHostMilestoneKind::CheckpointCreated { .. }
             | LoopHostMilestoneKind::Blocked { .. }
             | LoopHostMilestoneKind::DriverNote { .. } => return Ok(None),
         };
