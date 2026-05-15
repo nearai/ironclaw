@@ -127,10 +127,7 @@ pub fn map_key(
     }
 
     // Save logs only when the Logs tab is the focused view.
-    if logs_active
-        && key.code == KeyCode::Char('s')
-        && key.modifiers == KeyModifiers::CONTROL
-    {
+    if logs_active && key.code == KeyCode::Char('s') && key.modifiers == KeyModifiers::CONTROL {
         return InputAction::DownloadLogs;
     }
 

@@ -2415,10 +2415,13 @@ fn render_toasts(
             .min(max_outer_width)
             .max(20);
 
-        let inner_msg_width = toast_width
-            .saturating_sub(border_pad + icon_pad)
-            .max(1) as usize;
-        let wrap_lines = toast.message.chars().count().div_ceil(inner_msg_width).max(1);
+        let inner_msg_width = toast_width.saturating_sub(border_pad + icon_pad).max(1) as usize;
+        let wrap_lines = toast
+            .message
+            .chars()
+            .count()
+            .div_ceil(inner_msg_width)
+            .max(1);
         let toast_height = (wrap_lines as u16 + border_pad).min(size.height.saturating_sub(1));
 
         if next_bottom < toast_height {
@@ -2548,7 +2551,11 @@ fn log_output_dir() -> Option<std::path::PathBuf> {
         return Some(std::path::PathBuf::from(custom).join("logs"));
     }
     if let Ok(home) = std::env::var("HOME") {
-        return Some(std::path::PathBuf::from(home).join(".ironclaw").join("logs"));
+        return Some(
+            std::path::PathBuf::from(home)
+                .join(".ironclaw")
+                .join("logs"),
+        );
     }
     std::env::current_dir().ok().map(|d| d.join("logs"))
 }
