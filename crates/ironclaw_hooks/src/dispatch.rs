@@ -923,13 +923,21 @@ impl HookDispatcher {
                         .map_err(|_| ())
                         .map(|()| sink.state)
                 }
-                BeforeCapabilityHookImpl::RestrictedWasm(h) => h
-                    .evaluate(ctx)
-                    .map(|outcome| match outcome {
-                        GateHookOutcome::Pass => GateSinkState::Passed,
-                        GateHookOutcome::Decision(decision) => GateSinkState::Decided(decision),
-                    })
-                    .map_err(|_| ()),
+                BeforeCapabilityHookImpl::RestrictedWasm(_) => {
+                    // henrypark133 must-fix #2 on PR #3634: WASM gate
+                    // hooks are dispatched through the early-return guard
+                    // above (line ~892), which wraps the synchronous
+                    // `h.evaluate` in `catch_unwind` + `tokio::timeout`.
+                    // This arm is unreachable; left in the match only so
+                    // the enum coverage check stays strict. If a future
+                    // refactor removes the early-return, this `unreachable`
+                    // will trip immediately rather than silently dropping
+                    // panic isolation + timeout enforcement.
+                    unreachable!(
+                        "wasm gate hooks dispatched via early-return guard; \
+                         this arm is unreachable"
+                    )
+                }
             }
         };
 
@@ -1001,7 +1009,19 @@ impl HookDispatcher {
                         .map_err(|_| ())
                         .map(|()| sink.patches)
                 }
-                BeforePromptHookImpl::RestrictedWasm(h) => h.evaluate(ctx).map_err(|_| ()),
+                BeforePromptHookImpl::RestrictedWasm(_) => {
+                    // henrypark133 must-fix #2 + #3 on PR #3634: same as
+                    // the gate dispatch above — WASM prompt hooks are
+                    // dispatched via the early-return guard. The previous
+                    // dead arm here also silently discarded the
+                    // `WasmHookFailure` category via `|_| ()`, which made
+                    // the must-fix #2 silent-failure problem worse on the
+                    // prompt path specifically.
+                    unreachable!(
+                        "wasm prompt hooks dispatched via early-return guard; \
+                         this arm is unreachable"
+                    )
+                }
             }
         };
 
@@ -1053,7 +1073,17 @@ impl HookDispatcher {
                         .map_err(|_| ())
                         .map(|()| sink.facts)
                 }
-                ObserverHookImpl::Wasm(h) => h.observe(ctx).map_err(|_| ()),
+                ObserverHookImpl::Wasm(_) => {
+                    // henrypark133 must-fix #2 on PR #3634: WASM observer
+                    // hooks are dispatched via the early-return guard
+                    // above. This arm is unreachable; previously it ran
+                    // without `catch_unwind` or timeout and silently
+                    // dropped `WasmHookFailure` via `|_| ()`.
+                    unreachable!(
+                        "wasm observer hooks dispatched via early-return guard; \
+                         this arm is unreachable"
+                    )
+                }
             }
         };
 

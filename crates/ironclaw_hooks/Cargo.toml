@@ -22,6 +22,7 @@ futures = "0.3"
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_prompt_envelope = { path = "../ironclaw_prompt_envelope" }
 ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_wasm_limiter = { path = "../ironclaw_wasm_limiter" }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

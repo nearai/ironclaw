@@ -4297,6 +4297,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_prompt_envelope",
  "ironclaw_turns",
+ "ironclaw_wasm_limiter",
  "rust_decimal",
  "serde",
  "serde_json",
@@ -4920,6 +4921,7 @@ dependencies = [
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_resources",
+ "ironclaw_wasm_limiter",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
@@ -4930,6 +4932,14 @@ dependencies = [
  "wat",
  "wit-component 0.245.1",
  "wit-parser 0.245.1",
+]
+
+[[package]]
+name = "ironclaw_wasm_limiter"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "wasmtime",
 ]
 
 [[package]]

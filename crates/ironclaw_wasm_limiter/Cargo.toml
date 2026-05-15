@@ -1,0 +1,17 @@
+[package]
+name = "ironclaw_wasm_limiter"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Shared `wasmtime::ResourceLimiter` impl used by both `ironclaw_wasm`
+# (tool-WASM) and `ironclaw_hooks` (hook-WASM). Extracted from a
+# `#[path = "../../../ironclaw_wasm/src/limiter.rs"]` cross-crate file
+# import (henrypark133 must-fix #1 on PR #3634) so Cargo tooling, doc
+# generation, and architecture linting see the dependency edge
+# explicitly, and so the file can't be moved out from under one of the
+# two consumers without a visible build break.
+
+[dependencies]
+tracing = "0.1"
+wasmtime = { version = "43.0.2", features = ["component-model"] }
