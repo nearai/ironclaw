@@ -2525,15 +2525,20 @@ fn try_paste_clipboard_image(_state: &AppState) -> Option<TuiAttachment> {
 /// (falls back to `$IRONCLAW_HOME/logs/` or the current directory). Returns the
 /// human-readable target path on success.
 fn download_logs(state: &AppState) -> Result<String, String> {
+    let dir = log_output_dir().ok_or_else(|| "could not resolve log directory".to_string())?;
+    download_logs_to_dir(state, &dir)
+}
+
+/// Inner write step, parameterized on output dir so tests can use a tempdir
+/// without racing `IRONCLAW_HOME` env mutation across threads.
+fn download_logs_to_dir(state: &AppState, dir: &std::path::Path) -> Result<String, String> {
     use std::io::Write;
 
-    let dir = log_output_dir().ok_or_else(|| "could not resolve log directory".to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
 
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
-    let path = dir.join(format!("tui-logs-{stamp}.log"));
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let (mut file, path) = open_unique_log_file(dir, &stamp)?;
 
-    let mut file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
     for entry in state.log_entries.iter() {
         writeln!(
             file,
@@ -2544,6 +2549,47 @@ fn download_logs(state: &AppState) -> Result<String, String> {
     }
 
     Ok(path.display().to_string())
+}
+
+/// Open a new log file under `dir` with owner-only permissions on Unix and a
+/// collision-free name. Tries `tui-logs-<stamp>.log` first, then appends a
+/// numeric suffix on collision. Surfaces "already exists" as a hard error
+/// once the candidate budget is exhausted, instead of silently truncating —
+/// the timestamp has second precision, so two presses inside the same UTC
+/// second would otherwise destroy the earlier export.
+fn open_unique_log_file(
+    dir: &std::path::Path,
+    stamp: &str,
+) -> Result<(std::fs::File, std::path::PathBuf), String> {
+    /// Bound on the in-second retry budget. Realistically a user is not
+    /// pressing Ctrl-S a thousand times per second; this caps the loop.
+    const MAX_RETRIES: u32 = 1000;
+
+    for n in 0..MAX_RETRIES {
+        let path = if n == 0 {
+            dir.join(format!("tui-logs-{stamp}.log"))
+        } else {
+            dir.join(format!("tui-logs-{stamp}-{n}.log"))
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Owner-only perms from creation, so a permissive umask on a
+        // shared host never produces group/world-readable log dumps.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(file) => return Ok((file, path)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        }
+    }
+    Err(format!(
+        "exhausted {MAX_RETRIES} candidate filenames in {} for stamp {stamp}",
+        dir.display()
+    ))
 }
 
 fn log_output_dir() -> Option<std::path::PathBuf> {
@@ -2625,6 +2671,83 @@ mod tests {
         for (offset, ch) in text.chars().enumerate() {
             snapshot.buffer[(column + offset as u16, row)].set_symbol(&ch.to_string());
         }
+    }
+
+    fn push_log_entry(state: &mut AppState, message: &str) {
+        state.log_entries.push(crate::event::TuiLogEntry {
+            level: "INFO".to_string(),
+            target: "test".to_string(),
+            message: message.to_string(),
+            timestamp: "2026-05-15T00:00:00Z".to_string(),
+        });
+    }
+
+    /// Regression for serrrfirat's Medium #1 (PR #3658): exported log files
+    /// must not inherit umask. Two presses of Ctrl-S on a permissive host
+    /// previously produced 0664/0666 files containing every tracing line —
+    /// readable by anyone in the user's primary group.
+    #[cfg(unix)]
+    #[test]
+    fn download_logs_writes_owner_only_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state = AppState::default();
+        push_log_entry(&mut state, "hello");
+
+        let path = download_logs_to_dir(&state, dir.path()).expect("download");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "expected 0600, got {:o} for {path}",
+            mode & 0o777
+        );
+    }
+
+    /// Regression for serrrfirat's Medium #2 (PR #3658): the filename
+    /// timestamp has second precision and the writer used to call
+    /// `File::create`, which truncates. Two Ctrl-S presses in the same UTC
+    /// second silently overwrote the first export.
+    #[test]
+    fn download_logs_does_not_overwrite_on_same_second_collision() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut state_a = AppState::default();
+        push_log_entry(&mut state_a, "first");
+        let mut state_b = AppState::default();
+        push_log_entry(&mut state_b, "second");
+
+        let path_a = download_logs_to_dir(&state_a, dir.path()).expect("first write");
+        let path_b = download_logs_to_dir(&state_b, dir.path()).expect("second write");
+
+        assert_ne!(
+            path_a, path_b,
+            "second write must not collide with the first"
+        );
+        let body_a = std::fs::read_to_string(&path_a).expect("read a");
+        let body_b = std::fs::read_to_string(&path_b).expect("read b");
+        assert!(body_a.contains("first"), "first export was overwritten");
+        assert!(body_b.contains("second"));
+        assert!(
+            !body_a.contains("second"),
+            "first export must be untouched by the second call"
+        );
+    }
+
+    /// Direct check on the collision-resolution helper: feeding it the same
+    /// stamp repeatedly must keep yielding fresh paths until the budget runs
+    /// out, never reopening an existing file.
+    #[test]
+    fn open_unique_log_file_appends_suffix_on_collision() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stamp = "20260515T000000Z";
+
+        let (_f1, p1) = open_unique_log_file(dir.path(), stamp).expect("first");
+        let (_f2, p2) = open_unique_log_file(dir.path(), stamp).expect("second");
+        let (_f3, p3) = open_unique_log_file(dir.path(), stamp).expect("third");
+
+        assert_eq!(p1, dir.path().join("tui-logs-20260515T000000Z.log"));
+        assert_eq!(p2, dir.path().join("tui-logs-20260515T000000Z-1.log"));
+        assert_eq!(p3, dir.path().join("tui-logs-20260515T000000Z-2.log"));
     }
 
     #[cfg(feature = "clipboard")]

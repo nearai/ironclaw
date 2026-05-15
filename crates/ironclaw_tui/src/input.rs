@@ -524,4 +524,13 @@ mod tests {
         assert_eq!(parse_slash_command("  /quit  "), Some("/quit"));
         assert_eq!(parse_slash_command("hello"), None);
     }
+
+    #[test]
+    fn ctrl_s_triggers_download_only_in_logs_tab() {
+        let key = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(map_logs(key), InputAction::DownloadLogs);
+        // Outside the Logs tab Ctrl-S must fall through to default text input,
+        // not silently dump the ring buffer from arbitrary contexts.
+        assert_eq!(map_default(key), InputAction::Forward);
+    }
 }
