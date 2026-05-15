@@ -366,6 +366,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forged_future_cursor_is_rejected_by_host_queue() {
+        let run_context = test_run_context("run-future-poll").await;
+        let queue = Arc::new(FakeInputQueue::new(vec![LoopInput::UserMessage {
+            message_ref: message_ref("msg:user"),
+        }]));
+        let port = HostQueueLoopInputPort::new(queue.clone(), run_context.clone());
+        let future = LoopInputCursor::from_host_token(&run_context, cursor_token(99));
+
+        let error = port
+            .poll_inputs(future, 8)
+            .await
+            .expect_err("future cursor should be rejected by queue");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+        assert_eq!(queue.call_count(), 1);
+    }
+
+    #[tokio::test]
     async fn forged_future_ack_token_is_rejected_for_ack_inputs() {
         let run_context = test_run_context("run-forged-ack").await;
         let queue = Arc::new(FakeInputQueue::new(vec![LoopInput::UserMessage {
@@ -548,6 +566,17 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             *self.last_limit.lock().expect("last limit") = Some(limit);
             let after_sequence = cursor_sequence(&after)?;
+            let max_sequence = self
+                .entries
+                .iter()
+                .map(|(sequence, _)| *sequence)
+                .max()
+                .unwrap_or(0);
+            if after_sequence > max_sequence {
+                return Err(HostInputQueueError::InvalidCursor {
+                    reason: "cursor token was not issued by this input queue".to_string(),
+                });
+            }
             let acked = self
                 .acked
                 .lock()

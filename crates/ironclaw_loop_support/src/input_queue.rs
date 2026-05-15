@@ -18,7 +18,9 @@ use thiserror::Error;
 /// - Tokens are opaque to the loop. Implementations may use a monotonic
 ///   sequence, generation token, or compound key. `next_after` must return the
 ///   first input strictly after `after`, or an equivalent origin point for a
-///   run-start cursor.
+///   run-start cursor. Implementations must reject malformed, foreign, or
+///   unissued future cursor tokens for the bound run instead of treating them
+///   as empty positions.
 /// - Cursors are read positions, not ack identities. Acking is by exact
 ///   per-input token so control inputs cannot be skipped by cursor-through ack.
 /// - `ack_consumed` is at-most-once. Acking the same token twice is a no-op.
