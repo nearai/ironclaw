@@ -828,6 +828,51 @@ async fn worker_resumes_claimed_run_with_checkpoint() {
 }
 
 #[tokio::test]
+async fn worker_resumes_requeued_claimed_run_with_checkpoint() {
+    let desc = test_descriptor();
+    let driver = Arc::new(MockDriver::completing(desc.clone()));
+    let registry = Arc::new(setup_registry(driver.clone()));
+    let checkpoint_id = TurnCheckpointId::new();
+    let mut claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
+    claimed.state.checkpoint_id = Some(checkpoint_id);
+    let turn_id = claimed.state.turn_id;
+    let run_id = claimed.state.run_id;
+    let profile = claimed.resolved_run_profile.clone();
+    let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
+    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let worker = TurnRunnerWorker::new(
+        TurnRunnerWorkerConfig {
+            heartbeat_interval: Duration::from_secs(60),
+            poll_interval: Duration::from_secs(60),
+            scope_filter: None,
+        },
+        port.clone(),
+        make_applier(port),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+    );
+
+    assert!(
+        worker
+            .try_claim_and_run(&CancellationToken::new())
+            .await
+            .unwrap()
+    );
+
+    assert!(
+        driver.run_requests().is_empty(),
+        "requeued checkpointed run must not start from scratch"
+    );
+    let resume_requests = driver.resume_requests();
+    assert_eq!(resume_requests.len(), 1);
+    assert_eq!(resume_requests[0].turn_id, turn_id);
+    assert_eq!(resume_requests[0].run_id, run_id);
+    assert_eq!(resume_requests[0].checkpoint_id, checkpoint_id);
+    assert_eq!(resume_requests[0].resolved_run_profile, profile);
+}
+
+#[tokio::test]
 async fn worker_persists_host_model_route_snapshot_before_driver_exit() {
     let desc = test_descriptor();
     let driver = Arc::new(MockDriver::completing(desc.clone()));

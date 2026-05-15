@@ -1,7 +1,21 @@
+#![forbid(unsafe_code)]
+
 //! Minimal Reborn production composition root.
 //!
 //! This crate intentionally wires substrate services only. Product/AppBuilder
 //! integration belongs in later slices.
+
+mod error;
+mod factory;
+mod input;
+mod profile;
+mod readiness;
+
+pub use error::RebornBuildError;
+pub use factory::{RebornServices, build_reborn_services};
+pub use input::RebornBuildInput;
+pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
+pub use readiness::{RebornFacadeReadiness, RebornReadiness, RebornReadinessState};
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::sync::Arc;

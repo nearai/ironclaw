@@ -34,23 +34,29 @@ fn valid_wasm_manifest_parses_and_extracts_capability_descriptor() {
 
 #[test]
 fn manifest_privileged_trust_request_is_metadata_and_descriptor_stays_sandboxed() {
-    let manifest = ExtensionManifest::parse(
-        &WASM_MANIFEST.replace("trust = \"untrusted\"", "trust = \"first_party_requested\""),
-    )
-    .unwrap();
+    for (manifest_value, requested_trust) in [
+        (
+            "first_party_requested",
+            RequestedTrustClass::FirstPartyRequested,
+        ),
+        ("system_requested", RequestedTrustClass::SystemRequested),
+    ] {
+        let manifest = ExtensionManifest::parse(&WASM_MANIFEST.replace(
+            "trust = \"untrusted\"",
+            &format!("trust = \"{manifest_value}\""),
+        ))
+        .unwrap();
 
-    assert_eq!(
-        manifest.requested_trust,
-        RequestedTrustClass::FirstPartyRequested
-    );
-    assert_eq!(manifest.trust, TrustClass::Sandbox);
+        assert_eq!(manifest.requested_trust, requested_trust);
+        assert_eq!(manifest.trust, TrustClass::Sandbox);
 
-    let package = ExtensionPackage::from_manifest(
-        manifest,
-        VirtualPath::new("/system/extensions/echo").unwrap(),
-    )
-    .unwrap();
-    assert_eq!(package.capabilities[0].trust_ceiling, TrustClass::Sandbox);
+        let package = ExtensionPackage::from_manifest(
+            manifest,
+            VirtualPath::new("/system/extensions/echo").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(package.capabilities[0].trust_ceiling, TrustClass::Sandbox);
+    }
 }
 
 #[test]

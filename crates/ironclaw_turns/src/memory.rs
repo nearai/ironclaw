@@ -1221,6 +1221,9 @@ impl Inner {
                     to: TurnStatus::Queued,
                 });
             }
+            if record.actor != request.actor {
+                return Err(TurnError::Unauthorized);
+            }
             if record.gate_ref.as_ref() != Some(&request.gate_resolution_ref) {
                 return Err(TurnError::InvalidRequest {
                     reason: "gate resolution reference mismatch".to_string(),

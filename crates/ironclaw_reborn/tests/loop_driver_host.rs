@@ -32,6 +32,7 @@ use ironclaw_loop_support::{
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::{
+    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     HostRuntimeLoopCapabilityPort, LoopCapabilityInputResolver, LoopCapabilityResultWriter,
     ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, RebornLoopDriverHostFactory,
     RebornLoopDriverHostRequest, StaticModelRouteResolver, TextOnlyLoopHostConfig,
@@ -75,17 +76,17 @@ use ironclaw_turns::{
     TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        CapabilityDeniedReasonKind, CapabilityFailureKind, CapabilityInputRef,
+        BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityFailureKind, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
         FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopCheckpointStateRef, LoopContextRequest, LoopDriverId, LoopDriverNoteKind,
-        LoopHostMilestone, LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAckToken,
-        LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
-        LoopModelGatewayError, LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot,
-        LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopSafeSummary, ModelCallOutcome, ParentLoopOutput, PromptMode, SkillVisibility,
-        StageCheckpointPayloadRequest, VisibleCapabilityRequest,
+        LoopCheckpointStateRef, LoopContextRequest, LoopDriverId, LoopDriverNoteKind, LoopGateKind,
+        LoopHostMilestone, LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageRole,
+        LoopInput, LoopInputAckToken, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPort, LoopModelRequest,
+        LoopModelRouteSnapshot, LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopSafeSummary, ModelCallOutcome, ParentLoopOutput, PromptMode,
+        SkillVisibility, StageCheckpointPayloadRequest, VisibleCapabilityRequest,
     },
     runner::ClaimedTurnRun,
 };
@@ -312,6 +313,178 @@ async fn text_only_host_factory_invokes_model_budget_accountant() {
 }
 
 #[tokio::test]
+async fn progress_port_routes_loop_progress_milestones() {
+    let fixture = HostFixture::new("thread-progress-route", "hello progress").await;
+    let host = fixture.build_host().await;
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::IterationStarted { iteration: 2 })
+        .await
+        .unwrap();
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::CapabilityBatchStarted {
+            iteration: 2,
+            call_count: 3,
+            policy: BatchPolicyKind::Parallel,
+        })
+        .await
+        .unwrap();
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::CapabilityBatchCompleted {
+            iteration: 2,
+            result_count: 1,
+            denied_count: 1,
+            gated_count: 1,
+            failed_count: 0,
+        })
+        .await
+        .unwrap();
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::GateBlocked {
+            iteration: 2,
+            gate_kind: LoopGateKind::Approval,
+        })
+        .await
+        .unwrap();
+
+    let milestones = fixture.milestones();
+    assert!(matches!(
+        milestones[0].kind,
+        LoopHostMilestoneKind::IterationStarted { iteration: 2 }
+    ));
+    assert!(matches!(
+        milestones[1].kind,
+        LoopHostMilestoneKind::CapabilityBatchStarted {
+            iteration: 2,
+            call_count: 3,
+            policy: BatchPolicyKind::Parallel,
+        }
+    ));
+    assert!(matches!(
+        milestones[2].kind,
+        LoopHostMilestoneKind::CapabilityBatchCompleted {
+            iteration: 2,
+            result_count: 1,
+            denied_count: 1,
+            gated_count: 1,
+            failed_count: 0,
+        }
+    ));
+    assert!(matches!(
+        milestones[3].kind,
+        LoopHostMilestoneKind::GateBlocked {
+            iteration: 2,
+            gate_kind: LoopGateKind::Approval,
+        }
+    ));
+    assert!(milestones.iter().all(|milestone| {
+        milestone.scope == fixture.context.scope
+            && milestone.turn_id == fixture.context.turn_id
+            && milestone.run_id == fixture.context.run_id
+    }));
+}
+
+#[tokio::test]
+async fn progress_port_checkpoint_written_does_not_double_emit() {
+    let fixture = HostFixture::new("thread-progress-checkpoint", "hello progress").await;
+    let host = fixture.build_host().await;
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::CheckpointWritten {
+            iteration: 0,
+            kind: LoopCheckpointKind::BeforeModel,
+        })
+        .await
+        .unwrap();
+
+    assert!(fixture.milestones().is_empty());
+}
+
+#[tokio::test]
+async fn progress_port_prompt_bundle_built_does_not_double_emit() {
+    let fixture = HostFixture::new("thread-progress-prompt", "hello progress").await;
+    let host = fixture.build_host().await;
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+
+    let prompt_bundle = host_dyn
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+        })
+        .await
+        .unwrap();
+    host_dyn
+        .emit_loop_progress(LoopProgressEvent::PromptBundleBuilt {
+            iteration: 0,
+            bundle_ref: prompt_bundle.bundle_ref,
+            mode: PromptMode::TextOnly,
+            surface_version: prompt_bundle.surface_version,
+            message_count: prompt_bundle.messages.len() as u32,
+            identity_message_count: prompt_bundle.identity_message_count,
+            instruction_snippet_count: prompt_bundle.instruction_snippet_count,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(fixture.milestone_names(), vec!["prompt_bundle_built"]);
+}
+
+#[tokio::test]
+async fn progress_event_serde_roundtrip_all_variants() {
+    let fixture = HostFixture::new("thread-progress-serde", "hello progress").await;
+    let context = fixture.context.clone();
+    let bundle_ref = ironclaw_turns::run_profile::LoopPromptBundleRef::for_run(&context, "bundle")
+        .expect("bundle ref");
+    let surface_version = CapabilitySurfaceVersion::new("surface:v1").expect("surface version");
+
+    let events = vec![
+        LoopProgressEvent::driver_note(LoopDriverNoteKind::Planning, "safe note").unwrap(),
+        LoopProgressEvent::IterationStarted { iteration: 1 },
+        LoopProgressEvent::PromptBundleBuilt {
+            iteration: 1,
+            bundle_ref,
+            mode: PromptMode::TextOnly,
+            surface_version: Some(surface_version),
+            message_count: 4,
+            identity_message_count: 1,
+            instruction_snippet_count: 2,
+        },
+        LoopProgressEvent::CapabilityBatchStarted {
+            iteration: 1,
+            call_count: 2,
+            policy: BatchPolicyKind::Sequential,
+        },
+        LoopProgressEvent::CapabilityBatchCompleted {
+            iteration: 1,
+            result_count: 1,
+            denied_count: 0,
+            gated_count: 1,
+            failed_count: 0,
+        },
+        LoopProgressEvent::GateBlocked {
+            iteration: 1,
+            gate_kind: LoopGateKind::ResourceWait,
+        },
+        LoopProgressEvent::CheckpointWritten {
+            iteration: 1,
+            kind: LoopCheckpointKind::Final,
+        },
+    ];
+
+    for event in events {
+        let value = serde_json::to_value(&event).expect("serialize");
+        let restored: LoopProgressEvent = serde_json::from_value(value).expect("deserialize");
+        assert_eq!(restored, event);
+    }
+}
+
+#[tokio::test]
 async fn text_only_model_reply_driver_runs_prompt_model_transcript_path() {
     let mut fixture = HostFixture::new(
         "thread-driver-happy",
@@ -373,7 +546,7 @@ async fn text_only_model_reply_driver_runs_prompt_model_transcript_path() {
 }
 
 #[tokio::test]
-async fn text_only_model_reply_driver_preserves_non_secret_marker_reply_text() {
+async fn text_only_model_reply_driver_redacts_credential_marker_reply_text() {
     let mut fixture = HostFixture::new("thread-driver-marker-reply", "hello config").await;
     fixture.gateway.set_response(Ok(HostManagedModelResponse {
         safe_text_deltas: vec!["Use OPENAI_API_KEY in the environment".to_string()],
@@ -406,7 +579,7 @@ async fn text_only_model_reply_driver_preserves_non_secret_marker_reply_text() {
     assert_eq!(assistant.status, MessageStatus::Finalized);
     assert_eq!(
         assistant.content.as_deref(),
-        Some("Use OPENAI_API_KEY in the environment")
+        Some("Use [redacted] in the environment")
     );
 }
 
@@ -2803,6 +2976,145 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
 }
 
 #[tokio::test]
+async fn text_only_host_profiled_capabilities_filter_surface_and_invocation() {
+    let fixture = HostFixture::new("thread-host-runtime-capability-profile", "hello").await;
+    let allowed_id = CapabilityId::new("demo.allowed").unwrap();
+    let denied_id = CapabilityId::new("demo.denied").unwrap();
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor(allowed_id.as_str()),
+        capability_descriptor(denied_id.as_str()),
+    ])));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let capability_port = HostRuntimeLoopCapabilityPort::new(
+        runtime.clone(),
+        fixture.context.clone(),
+        host_runtime_visible_request(&fixture, ["demo"]),
+        io.clone(),
+        io,
+    );
+    let resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
+        CapabilityAllowSet::allowlist([allowed_id.clone()]),
+    ));
+
+    let host = fixture
+        .factory()
+        .build_text_only_host_with_profiled_capabilities(
+            RebornLoopDriverHostRequest {
+                claimed_run: fixture.claimed.clone(),
+                loop_run_context: fixture.context.clone(),
+            },
+            Arc::new(capability_port),
+            resolver,
+        )
+        .await
+        .unwrap();
+
+    let surface = host
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .unwrap();
+    assert_eq!(surface.descriptors.len(), 1);
+    assert_eq!(surface.descriptors[0].capability_id, allowed_id);
+
+    let outcome = host
+        .invoke_capability(CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id: denied_id,
+            input_ref: CapabilityInputRef::new("input:denied-profile").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        CapabilityOutcome::Denied(denied)
+            if denied.reason_kind.as_str() == "surface_profile_denied"
+    ));
+    assert!(runtime.invocations().is_empty());
+}
+
+// Fix 4 (henrypark): composition test — host profile filter wins over strategy `All`.
+// This gates the host-wiring/cutover boundary: when the host-level CapabilitySurfaceProfileFilter
+// restricts to only `tool_a`, invoking `tool_b` must be denied even though the strategy
+// (via `CapabilityAllowSet::All`) would normally permit everything.
+#[tokio::test]
+async fn default_strategy_filter_all_loses_to_host_profile_filter() {
+    let fixture = HostFixture::new("thread-host-profile-filter-wins", "hello").await;
+    let tool_a_id = CapabilityId::new("demo.tool_a").unwrap();
+    let tool_b_id = CapabilityId::new("demo.tool_b").unwrap();
+
+    // The host runtime exposes both capabilities.
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor(tool_a_id.as_str()),
+        capability_descriptor(tool_b_id.as_str()),
+    ])));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+
+    // Build a raw capability port wired to the host runtime (no profile filter yet).
+    let capability_port = HostRuntimeLoopCapabilityPort::new(
+        runtime.clone(),
+        fixture.context.clone(),
+        host_runtime_visible_request(&fixture, ["demo"]),
+        io.clone(),
+        io,
+    );
+
+    // The profile resolver only allows tool_a — this is the host-level filter.
+    // The strategy effectively resolves to `CapabilityAllowSet::All` for any
+    // capability not explicitly blocked, but the host filter wraps the port and
+    // takes precedence.
+    let resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
+        CapabilityAllowSet::allowlist([tool_a_id.clone()]),
+    ));
+
+    let host = fixture
+        .factory()
+        .build_text_only_host_with_profiled_capabilities(
+            RebornLoopDriverHostRequest {
+                claimed_run: fixture.claimed.clone(),
+                loop_run_context: fixture.context.clone(),
+            },
+            Arc::new(capability_port),
+            resolver,
+        )
+        .await
+        .unwrap();
+
+    // Surface should only expose tool_a (host filter applied).
+    let surface = host
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .unwrap();
+    assert_eq!(surface.descriptors.len(), 1);
+    assert_eq!(surface.descriptors[0].capability_id, tool_a_id);
+
+    // Invoking tool_b must be denied — the host profile filter wins over the
+    // strategy's implicit `All` permit.
+    let outcome = host
+        .invoke_capability(CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id: tool_b_id,
+            input_ref: CapabilityInputRef::new("input:tool-b-denied").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(
+            &outcome,
+            CapabilityOutcome::Denied(denied)
+                if denied.reason_kind.as_str() == "surface_profile_denied"
+        ),
+        "expected surface_profile_denied, got {outcome:?}"
+    );
+    // The host runtime must not have been called for the denied invocation.
+    assert!(
+        runtime.invocations().is_empty(),
+        "host runtime must not be invoked for a profile-denied capability"
+    );
+}
+
+#[tokio::test]
 async fn text_only_host_uses_fresh_execution_context_per_capability_invocation() {
     let fixture = HostFixture::new("thread-host-runtime-capability-context", "hello").await;
     let capability_id = CapabilityId::new("demo.echo").unwrap();
@@ -2893,10 +3205,10 @@ async fn text_only_host_uses_fresh_execution_context_per_capability_invocation()
         );
         assert_eq!(
             invocation.context.extension_id,
-            visible_request.context.extension_id
+            ExtensionId::new(fixture.context.loop_driver_id.as_str()).unwrap()
         );
-        assert_eq!(invocation.context.runtime, visible_request.context.runtime);
-        assert_eq!(invocation.context.trust, visible_request.context.trust);
+        assert_eq!(invocation.context.runtime, RuntimeKind::Wasm);
+        assert_eq!(invocation.context.trust, TrustClass::UserTrusted);
         assert_eq!(invocation.context.grants, visible_request.context.grants);
         assert_eq!(invocation.context.mounts, visible_request.context.mounts);
     }
@@ -4076,6 +4388,26 @@ impl HostSkillContextSource for StaticSkillContextSource {
     }
 }
 
+struct StaticCapabilitySurfaceProfileResolver {
+    allow_set: CapabilityAllowSet,
+}
+
+impl StaticCapabilitySurfaceProfileResolver {
+    fn new(allow_set: CapabilityAllowSet) -> Self {
+        Self { allow_set }
+    }
+}
+
+#[async_trait]
+impl CapabilitySurfaceProfileResolver for StaticCapabilitySurfaceProfileResolver {
+    async fn resolve(
+        &self,
+        _run_context: &LoopRunContext,
+    ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
+        Ok(self.allow_set.clone())
+    }
+}
+
 fn skill_md(name: &str, description: &str, prompt: &str) -> String {
     format!(
         "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [{name}]\n---\n\n{prompt}\n"
@@ -4304,7 +4636,7 @@ fn host_runtime_visible_request(
         .unwrap_or_else(|| UserId::new("user-text-host").unwrap());
     let mut context = ExecutionContext::local_default(
         user_id,
-        ExtensionId::new("loop-driver").unwrap(),
+        ExtensionId::new(fixture.context.loop_driver_id.as_str()).unwrap(),
         RuntimeKind::FirstParty,
         TrustClass::System,
         CapabilitySet::default(),

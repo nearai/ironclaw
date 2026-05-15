@@ -3382,6 +3382,77 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
 }
 
 #[tokio::test]
+async fn resume_turn_from_foreign_actor_is_denied_without_requeueing_run() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("approval-gate").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let err = coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-a"),
+            actor: TurnActor::new(UserId::new("user2").unwrap()),
+            run_id,
+            gate_resolution_ref: gate_ref.clone(),
+            source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-resume-foreign-actor").unwrap(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(err, TurnError::Unauthorized);
+    assert_eq!(err.adapter_status_code(), 403);
+    let snapshot = store.persistence_snapshot();
+    let run = snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap();
+    assert_eq!(run.status, TurnStatus::BlockedApproval);
+    assert_eq!(run.gate_ref, Some(gate_ref));
+    assert!(
+        store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: Some(scope("thread-a")),
+            })
+            .await
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn resume_turn_with_wrong_gate_resolution_ref_is_invalid_request() {
     let (coordinator, store) = coordinator();
     let run_id = accepted_run_id(

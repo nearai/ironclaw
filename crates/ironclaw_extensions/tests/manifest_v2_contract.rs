@@ -1,8 +1,11 @@
 //! Extension Manifest v2 contract tests.
 
+use std::sync::Arc;
+
 use ironclaw_extensions::{
-    CapabilityVisibility, ExtensionManifestV2, ExtensionRuntimeV2, MANIFEST_SCHEMA_VERSION,
-    ManifestSource, ManifestV2Error,
+    CapabilityVisibility, ExtensionManifestV2, ExtensionRuntimeV2, HostApiContractRegistry,
+    HostApiId, HostApiManifestContract, HostApiMultiplicity, HostApiRefV2, MANIFEST_SCHEMA_VERSION,
+    ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{
     CapabilityProfileId, ExtensionId, HostPortCatalog, HostPortCatalogEntry, HostPortId,
@@ -95,6 +98,19 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
 "#;
     let err =
         ExtensionManifestV2::parse(toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
+    assert!(matches!(err, ManifestV2Error::Parse { .. }), "{err:?}");
+}
+
+#[test]
+fn rejects_unknown_top_level_tables_in_legacy_capability_manifests() {
+    let toml = third_party_wasm_manifest("acme-tools", "acme-tools.echo")
+        + r#"
+
+[surprise]
+enabled = true
+"#;
+    let err =
+        ExtensionManifestV2::parse(&toml, ManifestSource::InstalledLocal, &catalog()).unwrap_err();
     assert!(matches!(err, ManifestV2Error::Parse { .. }), "{err:?}");
 }
 
@@ -862,4 +878,389 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
         }
         other => panic!("expected InvalidSchemaRef, got {other:?}"),
     }
+}
+
+struct FakeHostApiContract {
+    id: HostApiId,
+    prefix: &'static str,
+    multiplicity: HostApiMultiplicity,
+    required_key: &'static str,
+}
+
+impl FakeHostApiContract {
+    fn new(
+        id: &'static str,
+        prefix: &'static str,
+        multiplicity: HostApiMultiplicity,
+        required_key: &'static str,
+    ) -> Self {
+        Self {
+            id: HostApiId::new(id).unwrap(),
+            prefix,
+            multiplicity,
+            required_key,
+        }
+    }
+}
+
+impl HostApiManifestContract for FakeHostApiContract {
+    fn id(&self) -> &HostApiId {
+        &self.id
+    }
+
+    fn multiplicity(&self) -> HostApiMultiplicity {
+        self.multiplicity
+    }
+
+    fn accepts_section_path(&self, section: &ManifestSectionPath) -> bool {
+        section
+            .as_str()
+            .strip_prefix(self.prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    }
+
+    fn validate_section(
+        &self,
+        _host_api: &HostApiRefV2,
+        section: &toml::Value,
+    ) -> Result<(), String> {
+        let table = section
+            .as_table()
+            .ok_or_else(|| "section must be a table".to_string())?;
+        if table.contains_key(self.required_key) {
+            Ok(())
+        } else {
+            Err(format!("missing required key {}", self.required_key))
+        }
+    }
+}
+
+fn host_api_registry() -> HostApiContractRegistry {
+    let product = Arc::new(FakeHostApiContract::new(
+        "ironclaw.product_adapter/v1",
+        "product_adapter",
+        HostApiMultiplicity::Multiple,
+        "surface_kind",
+    ));
+    let capabilities = Arc::new(FakeHostApiContract::new(
+        "ironclaw.capability_provider/v1",
+        "capability_provider",
+        HostApiMultiplicity::Single,
+        "capabilities",
+    ));
+    let mut registry = HostApiContractRegistry::new();
+    registry.register(product).unwrap();
+    registry.register(capabilities).unwrap();
+    registry
+}
+
+fn telegram_multi_host_api_manifest() -> String {
+    format!(
+        r#"
+schema_version = "{schema}"
+id = "telegram"
+name = "Telegram"
+version = "0.1.0"
+description = "Telegram product adapter and tools"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/telegram.wasm"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.inbound"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[product_adapter.inbound]
+surface_kind = "telegram"
+auth = {{ kind = "request_signature", header_name = "x-telegram-signature" }}
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "telegram.send_message"
+description = "Send a Telegram message to a chat."
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/telegram/send_message.input.v1.json"
+output_schema_ref = "schemas/telegram/send_message.output.v1.json"
+prompt_doc_ref = "prompts/telegram/send_message.md"
+"#,
+        schema = MANIFEST_SCHEMA_VERSION,
+    )
+}
+
+#[test]
+fn parses_multi_host_api_extension_contracts_with_explicit_sections() {
+    let registry = host_api_registry();
+    let manifest = ExtensionManifestV2::parse_with_host_api_contracts(
+        &telegram_multi_host_api_manifest(),
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &registry,
+    )
+    .unwrap();
+
+    assert_eq!(manifest.id, ExtensionId::new("telegram").unwrap());
+    assert_eq!(manifest.capabilities.len(), 0);
+    assert_eq!(manifest.host_apis.len(), 2);
+    assert_eq!(
+        manifest.host_apis[0].id.as_str(),
+        "ironclaw.product_adapter/v1"
+    );
+    assert_eq!(
+        manifest.host_apis[0].section.as_str(),
+        "product_adapter.inbound"
+    );
+    assert_eq!(
+        manifest.host_apis[1].id.as_str(),
+        "ironclaw.capability_provider/v1"
+    );
+    assert_eq!(
+        manifest.host_apis[1].section.as_str(),
+        "capability_provider.tools"
+    );
+}
+
+#[test]
+fn host_api_manifests_require_contract_registry() {
+    let err = ExtensionManifestV2::parse(
+        &telegram_multi_host_api_manifest(),
+        ManifestSource::InstalledLocal,
+        &catalog(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+}
+
+#[test]
+fn rejects_unknown_host_api_fail_closed() {
+    let registry = host_api_registry();
+    let toml = telegram_multi_host_api_manifest()
+        .replace("ironclaw.product_adapter/v1", "ironclaw.unknown/v1");
+    let err = ExtensionManifestV2::parse_with_host_api_contracts(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &registry,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ManifestV2Error::UnknownHostApi { .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn rejects_duplicate_single_instance_host_api() {
+    let registry = host_api_registry();
+    let toml = telegram_multi_host_api_manifest()
+        + r#"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.more_tools"
+
+[capability_provider.more_tools]
+capabilities = [{ id = "edit_message" }]
+"#;
+    let err = ExtensionManifestV2::parse_with_host_api_contracts(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &registry,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ManifestV2Error::DuplicateHostApi { .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn allows_duplicate_multi_instance_host_api() {
+    let registry = host_api_registry();
+    let toml = telegram_multi_host_api_manifest()
+        + r#"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.admin"
+
+[product_adapter.admin]
+surface_kind = "telegram_admin"
+"#;
+    let manifest = ExtensionManifestV2::parse_with_host_api_contracts(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &registry,
+    )
+    .unwrap();
+    assert_eq!(manifest.host_apis.len(), 3);
+}
+
+#[test]
+fn rejects_missing_referenced_host_api_section() {
+    let registry = host_api_registry();
+    let toml = telegram_multi_host_api_manifest().replace(
+        "section = \"product_adapter.inbound\"",
+        "section = \"product_adapter.missing\"",
+    );
+    let err = ExtensionManifestV2::parse_with_host_api_contracts(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &registry,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ManifestV2Error::MissingHostApiSection { .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn rejects_unreferenced_operational_sections_but_allows_metadata() {
+    let registry = host_api_registry();
+    let toml = telegram_multi_host_api_manifest()
+        + r#"
+
+[product_adapter.stale]
+surface_kind = "stale"
+
+[metadata.display]
+icon = "telegram"
+
+[x.experimental]
+note = "ignored by core parser"
+"#;
+    let err = ExtensionManifestV2::parse_with_host_api_contracts(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &registry,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ManifestV2Error::UnreferencedOperationalSection { .. }),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn rejects_top_level_capabilities_when_host_api_contracts_are_declared() {
+    let registry = host_api_registry();
+    let toml = telegram_multi_host_api_manifest()
+        + r#"
+
+[[capabilities]]
+id = "telegram.legacy"
+description = "legacy"
+default_permission = "allow"
+visibility = "host_internal"
+input_schema_ref = "schemas/telegram/legacy.input.v1.json"
+output_schema_ref = "schemas/telegram/legacy.output.v1.json"
+"#;
+    let err = ExtensionManifestV2::parse_with_host_api_contracts(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &registry,
+    )
+    .unwrap_err();
+    assert!(matches!(err, ManifestV2Error::Invalid { .. }), "{err:?}");
+}
+
+#[test]
+fn duplicate_contract_registration_does_not_replace_existing_contract() {
+    let product = Arc::new(FakeHostApiContract::new(
+        "ironclaw.product_adapter/v1",
+        "product_adapter",
+        HostApiMultiplicity::Multiple,
+        "surface_kind",
+    ));
+    let replacement = Arc::new(FakeHostApiContract::new(
+        "ironclaw.product_adapter/v1",
+        "product_adapter",
+        HostApiMultiplicity::Multiple,
+        "replacement_only",
+    ));
+    let capabilities = Arc::new(FakeHostApiContract::new(
+        "ironclaw.capability_provider/v1",
+        "capability_provider",
+        HostApiMultiplicity::Single,
+        "capabilities",
+    ));
+    let mut registry = HostApiContractRegistry::new();
+    registry.register(product).unwrap();
+    let err = registry.register(replacement).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            ManifestV2Error::DuplicateHostApiContractRegistration { .. }
+        ),
+        "{err:?}"
+    );
+    registry.register(capabilities).unwrap();
+
+    ExtensionManifestV2::parse_with_host_api_contracts(
+        &telegram_multi_host_api_manifest(),
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &registry,
+    )
+    .unwrap();
+}
+
+#[test]
+fn rejects_overlapping_host_api_section_ownership() {
+    let registry = host_api_registry();
+    let toml = format!(
+        r#"
+schema_version = "{schema}"
+id = "telegram"
+name = "Telegram"
+version = "0.1.0"
+description = "Telegram product adapter and tools"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/telegram.wasm"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.inbound"
+
+[product_adapter]
+surface_kind = "telegram_root"
+
+[product_adapter.inbound]
+surface_kind = "telegram"
+"#,
+        schema = MANIFEST_SCHEMA_VERSION,
+    );
+
+    let err = ExtensionManifestV2::parse_with_host_api_contracts(
+        &toml,
+        ManifestSource::InstalledLocal,
+        &catalog(),
+        &registry,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, ManifestV2Error::DuplicateHostApiSection { .. }),
+        "{err:?}"
+    );
 }

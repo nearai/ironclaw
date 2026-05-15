@@ -11,13 +11,17 @@ use async_trait::async_trait;
 use ironclaw_agent_loop::{
     executor::{AgentLoopExecutor, AgentLoopExecutorError, CanonicalAgentLoopExecutor, HostStage},
     family::{LoopFamily, LoopFamilyId, LoopFamilyRegistry},
-    state::{CHECKPOINT_SCHEMA_ID, CHECKPOINT_SCHEMA_VERSION, CheckpointKind, LoopExecutionState},
+    state::{
+        CHECKPOINT_SCHEMA_ID, CHECKPOINT_SCHEMA_VERSION, CheckpointKind, CheckpointPayloadError,
+        LoopExecutionState,
+    },
 };
 use ironclaw_turns::{
-    LoopExit, RunProfileVersion,
+    LoopExit, LoopExitId, LoopFailureKind, RunProfileVersion,
     run_profile::{
         AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
-        AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopDriverId,
+        AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, AgentLoopHostError,
+        LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopDriverId, LoopRunContext,
     },
 };
 
@@ -91,16 +95,50 @@ impl AgentLoopDriver for PlannedDriver {
             .execute_family(self.family.as_ref(), host, initial)
             .await
             .map_err(map_executor_error)
-            .and_then(reject_blocked_exit_until_resume_supported)
     }
 
     async fn resume(
         &self,
         request: AgentLoopDriverResumeRequest,
-        _host: &(dyn AgentLoopDriverHost + Send + Sync),
+        host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
-        validate_resume_request(&request, &self.descriptor)?;
-        Err(pending_resume_error())
+        let run_context = host.run_context();
+        validate_resume_request(&request, run_context, &self.descriptor)?;
+        let payload = match host
+            .load_checkpoint_payload(LoadCheckpointPayloadRequest {
+                checkpoint_id: request.checkpoint_id,
+                expected_schema_id: run_context.checkpoint_schema_id.clone(),
+                expected_schema_version: run_context.checkpoint_schema_version,
+            })
+            .await
+        {
+            Ok(payload) => payload,
+            Err(error) => {
+                log_resume_load_error(error);
+                return checkpoint_unavailable_exit(run_context.run_id);
+            }
+        };
+
+        let checkpoint_kind = match resumable_checkpoint_kind_from_host(payload.kind) {
+            Ok(kind) => kind,
+            Err(()) => return checkpoint_unavailable_exit(run_context.run_id),
+        };
+
+        let initial = match LoopExecutionState::from_checkpoint_payload(
+            payload.payload.as_bytes(),
+            checkpoint_kind,
+        ) {
+            Ok(initial) => initial,
+            Err(error) => {
+                log_resume_payload_error(error);
+                return checkpoint_unavailable_exit(run_context.run_id);
+            }
+        };
+
+        self.executor
+            .execute_family(self.family.as_ref(), host, initial)
+            .await
+            .map_err(map_executor_error)
     }
 }
 
@@ -131,20 +169,20 @@ fn validate_run_request(
 
 fn validate_resume_request(
     request: &AgentLoopDriverResumeRequest,
+    run_context: &LoopRunContext,
     descriptor: &AgentLoopDriverDescriptor,
 ) -> Result<(), AgentLoopDriverError> {
-    validate_descriptor_assignment(&request.resolved_run_profile.loop_driver, descriptor)?;
-    let want = descriptor.checkpoint_schema_id.as_ref();
-    let have = request
-        .resolved_run_profile
-        .loop_driver
-        .checkpoint_schema_id
-        .as_ref();
-    if want != have {
+    if request.turn_id != run_context.turn_id || request.run_id != run_context.run_id {
         return Err(AgentLoopDriverError::InvalidRequest {
-            reason: "checkpoint schema id does not match driver descriptor".to_string(),
+            reason: "driver request does not match loop host run context".to_string(),
         });
     }
+    if request.resolved_run_profile != run_context.resolved_run_profile {
+        return Err(AgentLoopDriverError::InvalidRequest {
+            reason: "driver request profile does not match loop host run context".to_string(),
+        });
+    }
+    validate_descriptor_assignment(&request.resolved_run_profile.loop_driver, descriptor)?;
     Ok(())
 }
 
@@ -158,24 +196,6 @@ fn validate_descriptor_assignment(
         });
     }
     Ok(())
-}
-
-fn pending_resume_error() -> AgentLoopDriverError {
-    AgentLoopDriverError::Unavailable {
-        reason: "planned driver resume requires WS-10 checkpoint payload loading".to_string(),
-    }
-}
-
-fn reject_blocked_exit_until_resume_supported(
-    exit: LoopExit,
-) -> Result<LoopExit, AgentLoopDriverError> {
-    if matches!(exit, LoopExit::Blocked(_)) {
-        return Err(AgentLoopDriverError::Unavailable {
-            reason: "planned driver blocked exits require WS-10 checkpoint payload loading"
-                .to_string(),
-        });
-    }
-    Ok(exit)
 }
 
 pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriverError {
@@ -200,6 +220,29 @@ pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriv
     }
 }
 
+fn log_resume_load_error(error: AgentLoopHostError) {
+    tracing::warn!(?error, "planned driver could not load checkpoint payload");
+}
+
+fn log_resume_payload_error(error: CheckpointPayloadError) {
+    tracing::warn!(?error, "planned driver could not decode checkpoint payload");
+}
+
+fn checkpoint_unavailable_exit(
+    run_id: ironclaw_turns::TurnRunId,
+) -> Result<LoopExit, AgentLoopDriverError> {
+    let exit_id =
+        LoopExitId::new(format!("exit:{run_id}-checkpoint-unavailable")).map_err(|_| {
+            AgentLoopDriverError::Failed {
+                reason_kind: "driver_bug".to_string(),
+            }
+        })?;
+    Ok(LoopExit::failed(
+        LoopFailureKind::CheckpointUnavailable,
+        exit_id,
+    ))
+}
+
 fn host_stage_name(stage: HostStage) -> &'static str {
     match stage {
         HostStage::Prompt => "Prompt",
@@ -207,7 +250,6 @@ fn host_stage_name(stage: HostStage) -> &'static str {
         HostStage::Capability => "Capability",
         HostStage::Transcript => "Transcript",
         HostStage::Checkpoint => "Checkpoint",
-        HostStage::Progress => "Progress",
         HostStage::Input => "Input",
     }
 }
@@ -221,14 +263,44 @@ fn checkpoint_kind_name(kind: CheckpointKind) -> &'static str {
     }
 }
 
+fn resumable_checkpoint_kind_from_host(kind: LoopCheckpointKind) -> Result<CheckpointKind, ()> {
+    match kind {
+        LoopCheckpointKind::BeforeModel => Ok(CheckpointKind::BeforeModel),
+        LoopCheckpointKind::BeforeBlock => Ok(CheckpointKind::BeforeBlock),
+        LoopCheckpointKind::BeforeSideEffect | LoopCheckpointKind::Final => {
+            tracing::warn!(
+                ?kind,
+                "planned driver cannot resume checkpoint kind without exact continuation semantics"
+            );
+            Err(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::build_loop_family_registry;
-    use ironclaw_turns::{
-        LoopBlocked, LoopBlockedKind, LoopExitId, LoopGateRef, TurnCheckpointId,
-        run_profile::{CheckpointSchemaId, LoopCheckpointStateRef, LoopDriverId},
+    use ironclaw_agent_loop::test_support::{
+        MockAgentLoopDriverHost, MockHostCall, test_run_context,
     };
+    use ironclaw_turns::{
+        LoopMessageRef, RedactedCheckpointPayload, TurnCheckpointId,
+        run_profile::{
+            AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef,
+            BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome,
+            CapabilityInvocation, CapabilityOutcome, CheckpointSchemaId, FinalizeAssistantMessage,
+            LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCapabilityPort,
+            LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle,
+            LoopContextPort, LoopContextRequest, LoopDriverId, LoopInputAckToken, LoopInputBatch,
+            LoopInputCursor, LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse,
+            LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest,
+            LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopTranscriptPort,
+            StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
+            VisibleCapabilitySurface,
+        },
+    };
+    use std::sync::Mutex;
 
     #[test]
     fn default_planned_driver_descriptor_uses_default_family_identity() {
@@ -296,45 +368,6 @@ mod tests {
     }
 
     #[test]
-    fn planned_resume_pending_error_is_unavailable() {
-        let descriptor = descriptor_for_driver_id(
-            LoopDriverId::new(PLANNED_DRIVER_DEFAULT_ID).expect("valid"),
-            RunProfileVersion::new(1),
-        )
-        .expect("descriptor");
-        let request_descriptor = descriptor.clone();
-
-        validate_descriptor_assignment(&request_descriptor, &descriptor)
-            .expect("matching descriptor");
-        assert_eq!(
-            pending_resume_error(),
-            AgentLoopDriverError::Unavailable {
-                reason: "planned driver resume requires WS-10 checkpoint payload loading"
-                    .to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn blocked_exits_are_unavailable_until_resume_is_supported() {
-        let blocked = LoopExit::Blocked(LoopBlocked {
-            kind: LoopBlockedKind::Approval,
-            gate_ref: LoopGateRef::new("gate:approval").expect("valid"),
-            checkpoint_id: TurnCheckpointId::new(),
-            state_ref: LoopCheckpointStateRef::new("checkpoint:state").expect("valid"),
-            exit_id: LoopExitId::new("exit:blocked").expect("valid"),
-        });
-
-        assert_eq!(
-            reject_blocked_exit_until_resume_supported(blocked).expect_err("blocked pending WS10"),
-            AgentLoopDriverError::Unavailable {
-                reason: "planned driver blocked exits require WS-10 checkpoint payload loading"
-                    .to_string()
-            }
-        );
-    }
-
-    #[test]
     fn executor_cancelled_error_maps_to_failed_not_unavailable() {
         let mapped = map_executor_error(AgentLoopExecutorError::Cancelled);
 
@@ -344,5 +377,456 @@ mod tests {
                 reason_kind: "interrupted_unexpectedly".to_string()
             }
         );
+    }
+
+    #[tokio::test]
+    async fn resume_missing_checkpoint_payload_returns_checkpoint_unavailable_exit() {
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+        let (host, _checkpoints) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .build();
+
+        let result = driver
+            .resume(
+                AgentLoopDriverResumeRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    checkpoint_id: TurnCheckpointId::new(),
+                    resolved_run_profile: context.resolved_run_profile.clone(),
+                },
+                &host,
+            )
+            .await;
+
+        assert_checkpoint_unavailable_exit(result);
+    }
+
+    #[tokio::test]
+    async fn resume_loads_checkpoint_payload_and_continues_from_loaded_state() {
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+        let mut restored_state = LoopExecutionState::initial_for_run(&context);
+        restored_state.iteration = 7;
+        let checkpoint_id = TurnCheckpointId::new();
+        let loaded = LoadedCheckpointPayload {
+            kind: LoopCheckpointKind::BeforeModel,
+            schema_id: context.checkpoint_schema_id.clone(),
+            schema_version: context.checkpoint_schema_version,
+            payload: RedactedCheckpointPayload::new(
+                serde_json::to_vec(&restored_state).expect("serialize checkpoint state"),
+            )
+            .expect("valid checkpoint payload"),
+        };
+        let (inner, checkpoints) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .build();
+        let host = ResumePayloadHost::new(inner, checkpoint_id, loaded);
+
+        let result = driver
+            .resume(
+                AgentLoopDriverResumeRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    checkpoint_id,
+                    resolved_run_profile: context.resolved_run_profile.clone(),
+                },
+                &host,
+            )
+            .await;
+
+        result.expect("resume should continue the loop");
+        assert_eq!(host.load_call_count(), 1);
+        assert!(host.call_log().contains(&MockHostCall::StreamModel));
+        assert_eq!(
+            checkpoints.sequence().first(),
+            Some(&(CheckpointKind::BeforeModel, 7)),
+            "first executor checkpoint must start from the loaded state"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_rejects_wrong_loop_family_before_loading_checkpoint() {
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+        let (host, _checkpoints) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .build();
+        let mut resolved_run_profile = context.resolved_run_profile.clone();
+        resolved_run_profile.loop_driver.id =
+            LoopDriverId::new("reborn:other-loop").expect("valid");
+
+        let result = driver
+            .resume(
+                AgentLoopDriverResumeRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    checkpoint_id: TurnCheckpointId::new(),
+                    resolved_run_profile,
+                },
+                &host,
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(AgentLoopDriverError::InvalidRequest { reason })
+                if reason == "driver request profile does not match loop host run context"
+        ));
+        assert!(
+            host.call_log().is_empty(),
+            "invalid family must fail before any host port is invoked"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_schema_mismatch_load_error_returns_checkpoint_unavailable_exit() {
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+        let checkpoint_id = TurnCheckpointId::new();
+        let loaded = LoadedCheckpointPayload {
+            kind: LoopCheckpointKind::BeforeModel,
+            schema_id: CheckpointSchemaId::new("different_checkpoint_schema").expect("valid"),
+            schema_version: context.checkpoint_schema_version,
+            payload: RedactedCheckpointPayload::new(b"{}".to_vec())
+                .expect("valid checkpoint payload"),
+        };
+        let (inner, _checkpoints) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .build();
+        let host = ResumePayloadHost::new(inner, checkpoint_id, loaded);
+
+        let result = driver
+            .resume(
+                AgentLoopDriverResumeRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    checkpoint_id,
+                    resolved_run_profile: context.resolved_run_profile.clone(),
+                },
+                &host,
+            )
+            .await;
+
+        assert_checkpoint_unavailable_exit(result);
+        assert_eq!(host.load_call_count(), 1);
+        assert!(
+            host.call_log().is_empty(),
+            "invalid checkpoint load must fail before executor host ports"
+        );
+    }
+
+    #[tokio::test]
+    async fn planned_driver_resume_schema_version_drift_fails_cleanly() {
+        // Stage a valid checkpoint payload under schema_version = 1 (current).
+        // Resume with a run context bumped to schema_version = 2.
+        // The host sees expected_schema_version = 2 but stored = 1 -> Invalid
+        // -> mapped to a terminal checkpoint_unavailable loop exit.
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let mut context = run_context_for_driver(&driver);
+        let checkpoint_id = TurnCheckpointId::new();
+
+        // The stored payload carries the old (correct) schema version.
+        let stored_schema_version = context.checkpoint_schema_version;
+        let loaded = LoadedCheckpointPayload {
+            kind: LoopCheckpointKind::BeforeModel,
+            schema_id: context.checkpoint_schema_id.clone(),
+            schema_version: stored_schema_version,
+            payload: RedactedCheckpointPayload::new(b"{}".to_vec())
+                .expect("valid checkpoint payload"),
+        };
+
+        // Bump the run context's schema version to simulate a driver upgrade.
+        let bumped_version = RunProfileVersion::new(stored_schema_version.as_u64() + 1);
+        context.checkpoint_schema_version = bumped_version;
+        context.resolved_run_profile.checkpoint_schema_version = bumped_version;
+
+        let (inner, _checkpoints) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .build();
+        let host = ResumePayloadHost::new(inner, checkpoint_id, loaded);
+
+        let result = driver
+            .resume(
+                AgentLoopDriverResumeRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    checkpoint_id,
+                    resolved_run_profile: context.resolved_run_profile.clone(),
+                },
+                &host,
+            )
+            .await;
+
+        assert_checkpoint_unavailable_exit(result);
+        assert_eq!(host.load_call_count(), 1);
+        assert!(
+            host.call_log().is_empty(),
+            "schema version drift must fail before any executor host ports are invoked"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_unsupported_checkpoint_kind_returns_checkpoint_unavailable_exit() {
+        let registry = build_loop_family_registry().expect("registry");
+        let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
+        let context = run_context_for_driver(&driver);
+        let checkpoint_id = TurnCheckpointId::new();
+        let loaded = LoadedCheckpointPayload {
+            kind: LoopCheckpointKind::BeforeSideEffect,
+            schema_id: context.checkpoint_schema_id.clone(),
+            schema_version: context.checkpoint_schema_version,
+            payload: RedactedCheckpointPayload::new(b"{}".to_vec())
+                .expect("valid checkpoint payload"),
+        };
+        let (inner, _checkpoints) = MockAgentLoopDriverHost::builder()
+            .run_context(context.clone())
+            .build();
+        let host = ResumePayloadHost::new(inner, checkpoint_id, loaded);
+
+        let result = driver
+            .resume(
+                AgentLoopDriverResumeRequest {
+                    turn_id: context.turn_id,
+                    run_id: context.run_id,
+                    checkpoint_id,
+                    resolved_run_profile: context.resolved_run_profile.clone(),
+                },
+                &host,
+            )
+            .await;
+
+        assert_checkpoint_unavailable_exit(result);
+        assert_eq!(host.load_call_count(), 1);
+        assert!(
+            host.call_log().is_empty(),
+            "unsupported checkpoint kinds must fail before executor host ports"
+        );
+    }
+
+    fn run_context_for_driver(
+        driver: &PlannedDriver,
+    ) -> ironclaw_turns::run_profile::LoopRunContext {
+        let descriptor = driver.descriptor();
+        let mut context = test_run_context("planned-driver-resume");
+        context.resolved_run_profile.loop_driver = descriptor.clone();
+        context.resolved_run_profile.checkpoint_schema_id = descriptor
+            .checkpoint_schema_id
+            .clone()
+            .expect("planned driver checkpoint schema");
+        context.resolved_run_profile.checkpoint_schema_version = descriptor
+            .checkpoint_schema_version
+            .expect("planned driver checkpoint schema version");
+        context.loop_driver_id = descriptor.id;
+        context.loop_driver_version = descriptor.version;
+        context.checkpoint_schema_id = context.resolved_run_profile.checkpoint_schema_id.clone();
+        context.checkpoint_schema_version = context.resolved_run_profile.checkpoint_schema_version;
+        context
+    }
+
+    fn assert_checkpoint_unavailable_exit(result: Result<LoopExit, AgentLoopDriverError>) {
+        match result.expect("resume should return a terminal failed loop exit") {
+            LoopExit::Failed(failed) => {
+                assert_eq!(failed.reason_kind, LoopFailureKind::CheckpointUnavailable);
+                assert!(
+                    failed.exit_id.as_str().ends_with("-checkpoint-unavailable"),
+                    "checkpoint resume failures should use a checkpoint-specific exit id"
+                );
+            }
+            other => panic!("expected checkpoint_unavailable failed exit, got {other:?}"),
+        }
+    }
+
+    struct ResumePayloadHost {
+        inner: MockAgentLoopDriverHost,
+        checkpoint_id: TurnCheckpointId,
+        loaded: LoadedCheckpointPayload,
+        load_calls: Mutex<usize>,
+    }
+
+    impl ResumePayloadHost {
+        fn new(
+            inner: MockAgentLoopDriverHost,
+            checkpoint_id: TurnCheckpointId,
+            loaded: LoadedCheckpointPayload,
+        ) -> Self {
+            Self {
+                inner,
+                checkpoint_id,
+                loaded,
+                load_calls: Mutex::new(0),
+            }
+        }
+
+        fn load_call_count(&self) -> usize {
+            *self.load_calls.lock().expect("load call lock")
+        }
+
+        fn call_log(&self) -> Vec<MockHostCall> {
+            self.inner.call_log()
+        }
+    }
+
+    impl LoopRunInfoPort for ResumePayloadHost {
+        fn run_context(&self) -> &LoopRunContext {
+            self.inner.run_context()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LoopContextPort for ResumePayloadHost {
+        async fn load_loop_context(
+            &self,
+            request: LoopContextRequest,
+        ) -> Result<LoopContextBundle, AgentLoopHostError> {
+            self.inner.load_loop_context(request).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LoopPromptPort for ResumePayloadHost {
+        async fn build_prompt_bundle(
+            &self,
+            request: LoopPromptBundleRequest,
+        ) -> Result<LoopPromptBundle, AgentLoopHostError> {
+            self.inner.build_prompt_bundle(request).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LoopInputPort for ResumePayloadHost {
+        async fn poll_inputs(
+            &self,
+            after: LoopInputCursor,
+            limit: usize,
+        ) -> Result<LoopInputBatch, AgentLoopHostError> {
+            self.inner.poll_inputs(after, limit).await
+        }
+
+        async fn ack_inputs(
+            &self,
+            tokens: Vec<LoopInputAckToken>,
+        ) -> Result<(), AgentLoopHostError> {
+            self.inner.ack_inputs(tokens).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LoopModelPort for ResumePayloadHost {
+        async fn stream_model(
+            &self,
+            request: LoopModelRequest,
+        ) -> Result<LoopModelResponse, AgentLoopHostError> {
+            self.inner.stream_model(request).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LoopCapabilityPort for ResumePayloadHost {
+        async fn visible_capabilities(
+            &self,
+            request: VisibleCapabilityRequest,
+        ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+            self.inner.visible_capabilities(request).await
+        }
+
+        async fn invoke_capability(
+            &self,
+            request: CapabilityInvocation,
+        ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+            self.inner.invoke_capability(request).await
+        }
+
+        async fn invoke_capability_batch(
+            &self,
+            request: CapabilityBatchInvocation,
+        ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            self.inner.invoke_capability_batch(request).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LoopTranscriptPort for ResumePayloadHost {
+        async fn begin_assistant_draft(
+            &self,
+            request: BeginAssistantDraft,
+        ) -> Result<LoopMessageRef, AgentLoopHostError> {
+            self.inner.begin_assistant_draft(request).await
+        }
+
+        async fn update_assistant_draft(
+            &self,
+            request: UpdateAssistantDraft,
+        ) -> Result<(), AgentLoopHostError> {
+            self.inner.update_assistant_draft(request).await
+        }
+
+        async fn finalize_assistant_message(
+            &self,
+            request: FinalizeAssistantMessage,
+        ) -> Result<LoopMessageRef, AgentLoopHostError> {
+            self.inner.finalize_assistant_message(request).await
+        }
+
+        async fn append_capability_result_ref(
+            &self,
+            request: AppendCapabilityResultRef,
+        ) -> Result<LoopMessageRef, AgentLoopHostError> {
+            self.inner.append_capability_result_ref(request).await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LoopCheckpointPort for ResumePayloadHost {
+        async fn checkpoint(
+            &self,
+            request: LoopCheckpointRequest,
+        ) -> Result<TurnCheckpointId, AgentLoopHostError> {
+            self.inner.checkpoint(request).await
+        }
+
+        async fn stage_checkpoint_payload(
+            &self,
+            request: StageCheckpointPayloadRequest,
+        ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
+            self.inner.stage_checkpoint_payload(request).await
+        }
+
+        async fn load_checkpoint_payload(
+            &self,
+            request: LoadCheckpointPayloadRequest,
+        ) -> Result<LoadedCheckpointPayload, AgentLoopHostError> {
+            *self.load_calls.lock().expect("load call lock") += 1;
+            if request.checkpoint_id != self.checkpoint_id {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "test checkpoint not found",
+                ));
+            }
+            if request.expected_schema_id != self.loaded.schema_id
+                || request.expected_schema_version != self.loaded.schema_version
+            {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Invalid,
+                    "test checkpoint schema mismatch",
+                ));
+            }
+            Ok(self.loaded.clone())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LoopProgressPort for ResumePayloadHost {
+        async fn emit_loop_progress(
+            &self,
+            event: LoopProgressEvent,
+        ) -> Result<(), AgentLoopHostError> {
+            self.inner.emit_loop_progress(event).await
+        }
     }
 }

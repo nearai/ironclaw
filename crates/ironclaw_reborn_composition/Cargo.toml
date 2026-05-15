@@ -2,6 +2,12 @@
 name = "ironclaw_reborn_composition"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.92"
+description = "Facade-shaped production composition root for IronClaw Reborn"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
 publish = false
 
 [features]
@@ -47,9 +53,12 @@ ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+tracing = "0.1"
 
 [dev-dependencies]
+serde_json = "1"
 tempfile = "3"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 tokio = { version = "1", features = ["macros", "rt", "time"] }

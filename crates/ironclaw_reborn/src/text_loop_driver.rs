@@ -173,11 +173,11 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
     );
 
     match error.kind {
-        AgentLoopHostErrorKind::InvalidInvocation | AgentLoopHostErrorKind::ScopeMismatch => {
-            AgentLoopDriverError::InvalidRequest {
-                reason: format!("{stage}: {}", error.kind.as_str()),
-            }
-        }
+        AgentLoopHostErrorKind::InvalidInvocation
+        | AgentLoopHostErrorKind::Invalid
+        | AgentLoopHostErrorKind::ScopeMismatch => AgentLoopDriverError::InvalidRequest {
+            reason: format!("{stage}: {}", error.kind.as_str()),
+        },
         AgentLoopHostErrorKind::Unavailable | AgentLoopHostErrorKind::Cancelled => {
             AgentLoopDriverError::Unavailable {
                 reason: format!("{stage}: {}", error.kind.as_str()),
@@ -213,6 +213,7 @@ fn loop_failure_kind_name(kind: LoopFailureKind) -> &'static str {
         LoopFailureKind::IterationLimit => "iteration_limit",
         LoopFailureKind::InvalidModelOutput => "invalid_model_output",
         LoopFailureKind::CheckpointRejected => "checkpoint_rejected",
+        LoopFailureKind::CheckpointUnavailable => "checkpoint_unavailable",
         LoopFailureKind::TranscriptWriteFailed => "transcript_write_failed",
         LoopFailureKind::DriverBug => "driver_bug",
         LoopFailureKind::InterruptedUnexpectedly => "interrupted_unexpectedly",
