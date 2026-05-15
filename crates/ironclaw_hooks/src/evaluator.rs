@@ -254,38 +254,16 @@ fn resolve_event_id(hook_id: HookId, ctx: &BeforeCapabilityHookContext) -> Predi
     if let Some(caller_id) = ctx.caller_event_id.as_ref() {
         return caller_id.clone();
     }
-    synth_event_id(hook_id, ctx)
-}
-
-/// Synthesize a per-call-unique event id. Used by [`resolve_event_id`] only
-/// when the caller has not supplied a stable id via
-/// [`BeforeCapabilityHookContext::caller_event_id`]; see that function's
-/// documentation for the load-bearing semantics.
-///
-/// The id is the hex digest of `(hook_id, capability_name, arguments_digest,
-/// process-local counter)`. The counter guarantees uniqueness across calls
-/// even when (hook, ctx, now) are bit-identical (which happens routinely
-/// in tests and can happen in production under tight loops on coarse
-/// clocks).
-fn synth_event_id(hook_id: HookId, ctx: &BeforeCapabilityHookContext) -> PredicateEventId {
-    use std::fmt::Write;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(hook_id.as_bytes());
-    hasher.update(ctx.capability_name.as_bytes());
-    hasher.update(&ctx.arguments_digest);
-    hasher.update(&seq.to_le_bytes());
-    let digest = hasher.finalize();
-    let mut s = String::with_capacity(64);
-    for byte in digest.as_bytes() {
-        write!(s, "{byte:02x}").expect("writing to String never fails"); // safety: std::fmt::Write for String is infallible
-    }
-    // Synth output is always a 64-char hex digest — no NUL, never empty —
-    // so skip the per-call validation in `PredicateEventId::new`.
-    PredicateEventId::new_unchecked(s)
+    // Synth path moved to predicate_state next to the backend that
+    // consumes the id format (henrypark133 nit on PR #3635). Pass raw
+    // bytes/&str rather than a `&BeforeCapabilityHookContext` so the
+    // helper stays in `predicate_state` (a leaf module below `points`)
+    // without inverting the module dependency.
+    PredicateEventId::synth(
+        hook_id.as_bytes(),
+        &ctx.capability_name,
+        &ctx.arguments_digest,
+    )
 }
 
 impl Default for PredicateEvaluator {

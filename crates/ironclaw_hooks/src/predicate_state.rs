@@ -159,6 +159,54 @@ impl PredicateEventId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Synthesize a per-call-unique event id. Used by the evaluator's
+    /// `resolve_event_id` fallback only when the caller has not supplied
+    /// a stable id via [`crate::points::BeforeCapabilityHookContext::caller_event_id`];
+    /// see that path's documentation for the load-bearing semantics.
+    ///
+    /// The id is the hex digest of `(hook_id, capability_name,
+    /// arguments_digest, process-local counter)`. The counter guarantees
+    /// uniqueness across calls even when `(hook, ctx)` are bit-identical
+    /// (which happens routinely in tests and can happen in production
+    /// under tight loops on coarse clocks).
+    ///
+    /// The argument shape is `(&[u8], &str, &[u8])` rather than
+    /// `&BeforeCapabilityHookContext` so this function can live in
+    /// `predicate_state` next to its consumer (the backend) without
+    /// inverting the module dependency graph
+    /// (`predicate_state` is a leaf below `points`).
+    ///
+    /// Lives here rather than in `evaluator` because the id format —
+    /// 64-char lowercase hex, no NUL, never empty — is part of the
+    /// backend's durable contract (henrypark133 nit on PR #3635).
+    pub(crate) fn synth(
+        hook_id_bytes: &[u8],
+        capability_name: &str,
+        arguments_digest: &[u8],
+    ) -> Self {
+        use std::fmt::Write;
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let seq = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(hook_id_bytes);
+        hasher.update(capability_name.as_bytes());
+        hasher.update(arguments_digest);
+        hasher.update(&seq.to_le_bytes());
+        let digest = hasher.finalize();
+        let mut s = String::with_capacity(64);
+        for byte in digest.as_bytes() {
+            // RATIONALE: std::fmt::Write for String is infallible
+            // (henrypark133 nit on PR #3635 — was `// safety:`, which
+            // by convention pairs with `unsafe` blocks; renaming to
+            // RATIONALE avoids confusion with that convention).
+            write!(s, "{byte:02x}").expect("writing to String never fails");
+        }
+        // Synth output is always a 64-char hex digest — no NUL, never
+        // empty — so skip the per-call validation in `Self::new`.
+        Self::new_unchecked(s)
+    }
 }
 
 /// Error surface for the backend. Durable backends use this to signal
@@ -535,6 +583,23 @@ mod tests {
         assert_eq!(
             PredicateEventId::new("abc\0def"),
             Err(PredicateEventIdError::ContainsNul)
+        );
+    }
+
+    /// henrypark133 nit #5 on PR #3635: pin the synth output shape. The
+    /// 64-char lowercase-hex format is part of the durable backend's
+    /// expectation (e.g. Postgres `uuid` UNIQUE constraint accepts hex)
+    /// — a refactor that silently changes the length or character set
+    /// would break that contract without surfacing a test failure.
+    #[test]
+    fn synth_event_id_is_64_char_lowercase_hex() {
+        let id = PredicateEventId::synth(b"hookid-bytes", "cap.x", &[0xAB, 0xCD]);
+        let s = id.as_str();
+        assert_eq!(s.len(), 64, "synth output must be exactly 64 chars");
+        assert!(
+            s.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+            "synth output must be lowercase hex: {s}"
         );
     }
 
