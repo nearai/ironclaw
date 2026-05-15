@@ -317,6 +317,62 @@ fn scoped_path_rejects_raw_host_paths_urls_and_traversal() {
 }
 
 #[test]
+fn scoped_path_redacts_all_rejected_values_in_error_display() {
+    for invalid in [
+        "",
+        "relative/path",
+        "/workspace/../../secret",
+        "/workspace/has\0nul",
+        "\\server\\share\\private.txt",
+        "\\\\server\\share\\private.txt",
+        "file:///etc/passwd",
+        "https://example.com/private/file",
+        "/Users/alice/project/private.txt",
+        "/opt/ironclaw/project/private.txt",
+        "/tmp/ironclaw/project/private.txt",
+        "C:\\Users\\alice\\project\\private.txt",
+        "C:/Users/alice/project/private.txt",
+    ] {
+        let message = ScopedPath::new(invalid).unwrap_err().to_string();
+        assert!(
+            invalid.is_empty() || !message.contains(invalid),
+            "{invalid:?} must not be echoed in {message:?}"
+        );
+        assert!(
+            message.contains("<redacted path>"),
+            "{invalid:?} should use redacted placeholder in {message:?}"
+        );
+    }
+}
+
+#[test]
+fn virtual_path_accepts_all_frozen_v1_roots() {
+    for root in [
+        "/engine",
+        "/system/settings",
+        "/system/extensions",
+        "/system/skills",
+        "/users",
+        "/projects",
+        "/memory",
+        "/artifacts",
+        "/tmp",
+        "/secrets",
+        "/events",
+    ] {
+        assert!(
+            VirtualPath::new(root).is_ok(),
+            "frozen V1 root {root:?} should be accepted"
+        );
+        let child = format!("{root}/child");
+        assert!(
+            VirtualPath::new(child).is_ok(),
+            "children of frozen V1 root {root:?} should be accepted"
+        );
+    }
+}
+
+#[test]
 fn virtual_path_requires_known_root_and_rejects_traversal() {
     assert!(VirtualPath::new("/projects/p1/threads/t1").is_ok());
     assert!(VirtualPath::new("/system/extensions/echo/state").is_ok());

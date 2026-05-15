@@ -28,7 +28,7 @@ use crate::provider::{
 };
 
 /// AWS Bedrock provider using the native Converse API.
-pub struct BedrockProvider {
+pub(crate) struct BedrockProvider {
     client: Client,
     /// Base model ID for display purposes (without prefix).
     display_model: String,
@@ -43,7 +43,7 @@ impl BedrockProvider {
     ///
     /// Async because the AWS SDK config loader requires an async context
     /// to resolve credentials from SSO profiles, IMDS, etc.
-    pub async fn new(config: &BedrockConfig) -> Result<Self, LlmError> {
+    pub(crate) async fn new(config: &BedrockConfig) -> Result<Self, LlmError> {
         let cross_region_prefix = config
             .cross_region
             .as_ref()

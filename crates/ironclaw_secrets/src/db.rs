@@ -21,11 +21,11 @@ const CREDENTIAL_ACCOUNTS_FOR_SCOPE_QUERY_LIMIT: i64 = 1001;
 const SECRET_STORE_KEY_CHECK_ID: &str = "active";
 const SECRET_STORE_KEY_CHECK_PLAINTEXT: &str = "reborn-secret-store-key-check-v1";
 
+use crate::legacy_store::{DecryptedSecret, Secret, SecretRef};
 use crate::{
     CreateSecretParams, CredentialAccount, CredentialAccountId, CredentialAccountStatus,
     CredentialAccountStore, CredentialBrokerError, CredentialSession, CredentialSessionId,
-    CredentialSessionStore, DecryptedSecret, Secret, SecretConsumeResult, SecretError, SecretRef,
-    SecretsCrypto, SecretsStore,
+    CredentialSessionStore, SecretConsumeResult, SecretError, SecretsCrypto, SecretsStore,
 };
 
 #[cfg(feature = "libsql")]
@@ -591,7 +591,7 @@ async fn libsql_upsert_session(
             key.mission_id,
             key.thread_id,
             key.invocation_id,
-            session.correlation_id().to_string(),
+            session.correlation_id().to_private_storage_string(),
             session.account_id().as_str(),
             session.expires_at().map(|value| value.to_rfc3339()),
             session.max_uses().map(|value| value as i64),
@@ -616,7 +616,7 @@ async fn libsql_get_session_record(
     let mut rows = conn
         .query(
             "SELECT account_id, expires_at, max_uses, uses, encrypted_payload, payload_key_salt FROM reborn_credential_sessions WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 AND project_id = ?4 AND mission_id = ?5 AND thread_id = ?6 AND invocation_id = ?7 AND session_id = ?8",
-            libsql::params![key.tenant_id, key.user_id, key.agent_id, key.project_id, key.mission_id, key.thread_id, key.invocation_id, session_id.to_string()],
+            libsql::params![key.tenant_id, key.user_id, key.agent_id, key.project_id, key.mission_id, key.thread_id, key.invocation_id, session_id.to_private_storage_string()],
         )
         .await
         .map_err(db_error)?;
@@ -661,7 +661,7 @@ async fn libsql_consume_session_record(
                 key.mission_id,
                 key.thread_id,
                 key.invocation_id,
-                session_id.to_string(),
+                session_id.to_private_storage_string(),
                 now.to_rfc3339(),
             ],
         )
@@ -768,7 +768,7 @@ async fn postgres_upsert_session(
     let key = DbScopeKey::from_full_scope(session.scope());
     let max_uses = session.max_uses().map(|value| value as i64);
     let payload = encrypt_session_payload(crypto, session)?;
-    client.execute("INSERT INTO reborn_credential_sessions (tenant_id, user_id, agent_id, project_id, mission_id, thread_id, invocation_id, session_id, account_id, expires_at, max_uses, uses, payload, encrypted_payload, payload_key_salt) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, '{}'::jsonb, $13, $14) ON CONFLICT(tenant_id, user_id, agent_id, project_id, mission_id, thread_id, invocation_id, session_id) DO UPDATE SET account_id = EXCLUDED.account_id, expires_at = EXCLUDED.expires_at, max_uses = EXCLUDED.max_uses, uses = EXCLUDED.uses, payload = '{}'::jsonb, encrypted_payload = EXCLUDED.encrypted_payload, payload_key_salt = EXCLUDED.payload_key_salt", &[&key.tenant_id, &key.user_id, &key.agent_id, &key.project_id, &key.mission_id, &key.thread_id, &key.invocation_id, &session.correlation_id().to_string(), &session.account_id().as_str(), &session.expires_at().map(|value| value.to_rfc3339()), &max_uses, &(uses as i64), &payload.encrypted_value, &payload.key_salt]).await.map_err(db_error)?;
+    client.execute("INSERT INTO reborn_credential_sessions (tenant_id, user_id, agent_id, project_id, mission_id, thread_id, invocation_id, session_id, account_id, expires_at, max_uses, uses, payload, encrypted_payload, payload_key_salt) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, '{}'::jsonb, $13, $14) ON CONFLICT(tenant_id, user_id, agent_id, project_id, mission_id, thread_id, invocation_id, session_id) DO UPDATE SET account_id = EXCLUDED.account_id, expires_at = EXCLUDED.expires_at, max_uses = EXCLUDED.max_uses, uses = EXCLUDED.uses, payload = '{}'::jsonb, encrypted_payload = EXCLUDED.encrypted_payload, payload_key_salt = EXCLUDED.payload_key_salt", &[&key.tenant_id, &key.user_id, &key.agent_id, &key.project_id, &key.mission_id, &key.thread_id, &key.invocation_id, &session.correlation_id().to_private_storage_string(), &session.account_id().as_str(), &session.expires_at().map(|value| value.to_rfc3339()), &max_uses, &(uses as i64), &payload.encrypted_value, &payload.key_salt]).await.map_err(db_error)?;
     Ok(())
 }
 
@@ -791,7 +791,7 @@ async fn postgres_get_session_record(
                 &key.mission_id,
                 &key.thread_id,
                 &key.invocation_id,
-                &session_id.to_string(),
+                &session_id.to_private_storage_string(),
             ],
         )
         .await
@@ -837,7 +837,7 @@ async fn postgres_consume_session_record(
                 &key.mission_id,
                 &key.thread_id,
                 &key.invocation_id,
-                &session_id.to_string(),
+                &session_id.to_private_storage_string(),
                 &now.to_rfc3339(),
             ],
         )
@@ -1934,7 +1934,7 @@ impl From<&CredentialSession> for PersistedCredentialSession {
             allowed_targets: session.allowed_targets.clone(),
             expires_at: session.expires_at,
             max_uses: session.max_uses,
-            correlation_id: session.correlation_id.to_string(),
+            correlation_id: session.correlation_id.to_private_storage_string(),
         }
     }
 }

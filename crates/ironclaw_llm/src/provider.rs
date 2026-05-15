@@ -47,7 +47,7 @@ impl ImageUrl {
 }
 
 /// Normalize an OpenAI image detail hint, defaulting to `"auto"` when absent.
-pub fn normalize_openai_image_detail(detail: Option<&str>) -> String {
+pub(crate) fn normalize_openai_image_detail(detail: Option<&str>) -> String {
     match detail
         .map(str::trim)
         .filter(|detail| !detail.is_empty())
@@ -675,7 +675,7 @@ pub fn sanitize_tool_messages(messages: &mut [ChatMessage]) {
 /// This typed enum replaces stringly-typed parameter names across the codebase,
 /// providing type safety and single-point-of-maintenance for parameter handling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum UnsupportedParam {
+pub(crate) enum UnsupportedParam {
     Temperature,
     MaxTokens,
     StopSequences,
@@ -683,7 +683,7 @@ pub enum UnsupportedParam {
 
 impl UnsupportedParam {
     /// Get the string name of this parameter for config/error messages.
-    pub fn name(&self) -> &'static str {
+    pub(crate) fn name(&self) -> &'static str {
         match self {
             UnsupportedParam::Temperature => "temperature",
             UnsupportedParam::MaxTokens => "max_tokens",
@@ -696,7 +696,7 @@ impl UnsupportedParam {
 ///
 /// This is the single helper function used by all providers to remove
 /// parameters they don't support, replacing duplicate stringly-typed logic.
-pub fn strip_unsupported_completion_params(
+pub(crate) fn strip_unsupported_completion_params(
     unsupported: &std::collections::HashSet<String>,
     req: &mut CompletionRequest,
 ) {
@@ -719,7 +719,7 @@ pub fn strip_unsupported_completion_params(
 /// This is the single helper function used by all providers to remove
 /// parameters they don't support from tool calls, replacing duplicate stringly-typed logic.
 ///
-pub fn strip_unsupported_tool_params(
+pub(crate) fn strip_unsupported_tool_params(
     unsupported: &std::collections::HashSet<String>,
     req: &mut ToolCompletionRequest,
 ) {

@@ -2,14 +2,7 @@ use ironclaw_host_api::{NetworkScheme, NetworkTarget};
 
 use crate::error::NetworkHttpError;
 
-pub fn scheme_label(scheme: NetworkScheme) -> &'static str {
-    match scheme {
-        NetworkScheme::Http => "http",
-        NetworkScheme::Https => "https",
-    }
-}
-
-pub fn network_target_for_url(
+pub(crate) fn network_target_for_url(
     raw: &str,
     request_bytes: u64,
 ) -> Result<NetworkTarget, NetworkHttpError> {
@@ -52,7 +45,7 @@ pub fn network_target_for_url(
     })
 }
 
-pub fn default_port(scheme: NetworkScheme) -> u16 {
+pub(crate) fn default_port(scheme: NetworkScheme) -> u16 {
     match scheme {
         NetworkScheme::Http => 80,
         NetworkScheme::Https => 443,

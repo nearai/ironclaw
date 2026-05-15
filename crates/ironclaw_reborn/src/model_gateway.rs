@@ -13,14 +13,18 @@ use ironclaw_llm::{
 use ironclaw_loop_support::{
     HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
     HostManagedModelMessage, HostManagedModelMessageRole, HostManagedModelRequest,
-    HostManagedModelResponse, HostManagedModelRouteSnapshot, ThreadBackedLoopModelPort,
+    HostManagedModelResponse, HostManagedModelRouteSnapshot, ThreadBackedLoopContextPort,
+    ThreadBackedLoopModelPort,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
     TurnId, TurnRunId,
     run_profile::{
-        AgentLoopHostError, LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest,
-        LoopModelPort, LoopModelResponse, LoopSafeSummary, ModelProfileId,
+        AgentLoopHostError, AgentLoopHostErrorKind, HostManagedLoopPromptPort,
+        InMemoryLoopHostMilestoneSink, LoopModelGateway, LoopModelGatewayError,
+        LoopModelGatewayRequest, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelProfileId,
+        PromptMode,
     },
 };
 
@@ -109,6 +113,8 @@ where
         &self,
         request: LoopModelGatewayRequest,
     ) -> Result<LoopModelResponse, LoopModelGatewayError> {
+        self.issue_host_prompt_bundle(&request.context, &request.request)
+            .await?;
         ThreadBackedLoopModelPort::new(
             Arc::clone(&self.thread_service),
             self.thread_scope.clone(),
@@ -119,6 +125,56 @@ where
         .stream_model(request.request)
         .await
         .map_err(host_error_to_model_gateway_error)
+    }
+}
+
+impl<S, G> ThreadBackedLoopModelGateway<S, G>
+where
+    S: SessionThreadService + ?Sized + Send + Sync,
+    G: HostManagedModelGateway + ?Sized + Send + Sync,
+{
+    async fn issue_host_prompt_bundle(
+        &self,
+        context: &LoopRunContext,
+        request: &LoopModelRequest,
+    ) -> Result<(), LoopModelGatewayError> {
+        let context_port = Arc::new(ThreadBackedLoopContextPort::new(
+            Arc::clone(&self.thread_service),
+            self.thread_scope.clone(),
+            context.clone(),
+            self.max_messages,
+        ));
+        let prompt_port = HostManagedLoopPromptPort::new(
+            context.clone(),
+            context_port,
+            Arc::new(InMemoryLoopHostMilestoneSink::default()),
+        );
+        let prompt_bundle = prompt_port
+            .build_prompt_bundle(LoopPromptBundleRequest {
+                mode: PromptMode::TextOnly,
+                context_cursor: None,
+                surface_version: request.surface_version.clone(),
+                checkpoint_state_ref: None,
+                max_messages: Some(self.max_messages.min(u32::MAX as usize) as u32),
+                inline_messages: Vec::new(),
+            })
+            .await
+            .map_err(host_error_to_model_gateway_error)?;
+
+        if prompt_bundle.messages != request.messages {
+            return Err(host_error_to_model_gateway_error(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "model request does not match the host-built prompt bundle",
+            )));
+        }
+        if prompt_bundle.surface_version != request.surface_version {
+            return Err(host_error_to_model_gateway_error(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "model request surface version does not match the host-built prompt bundle",
+            )));
+        }
+
+        Ok(())
     }
 }
 

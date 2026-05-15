@@ -89,12 +89,12 @@ fanout path. The milestone-sink substrate is the canonical chain.)
 - `crates/ironclaw_reborn/src/milestone_events.rs` —
   `DurableLoopHostMilestoneSink::runtime_event_for_milestone` (line
   167) matches `LoopHostMilestoneKind` exhaustively. Adding new
-  variants forces matching arms here even if the projection is
-  intentionally a no-op for the new milestones: each new variant
-  gets an explicit `Ok(None)` arm (drop-on-floor at the durable-event
-  projection layer) or a `RuntimeEvent` projection arm — the brief
-  author picks per variant at PR time, but every new variant MUST
-  appear in this match.
+  variants forces matching arms here. WS-12 keeps progress durability
+  in the milestone-sink substrate and does not add typed
+  `RuntimeEventKind` rows for progress milestones, because the runtime
+  event DTO would drop useful payload such as counters, gate kind, and
+  checkpoint kind. Each new progress variant gets an explicit
+  `Ok(None)` arm at the durable-runtime-event projection layer.
 - `crates/ironclaw_agent_loop/src/canonical_executor.rs` (WS-6 file) —
   emission points described in §3.4 fire the new variants. The
   existing `DriverNote` emissions (Planning at top of loop, Waiting
@@ -227,12 +227,15 @@ gains arms for each new variant returning the snake-cased name.
 
 ### 3.3 New `LoopHostMilestoneEmitter` methods
 
-Each new `LoopProgressEvent` variant routes to a corresponding
-emitter method. Two of the six already exist on the emitter
-(`prompt_bundle_built` and `checkpoint_created` at
-[`milestones.rs:177,231`](../../../crates/ironclaw_turns/src/run_profile/milestones.rs))
-— the `HostManagedLoopProgressPort` match calls them with the same
-arguments. Four new methods land in this brief:
+Each new `LoopProgressEvent` variant either routes to a corresponding
+emitter method or is explicitly ignored when another host port already
+emits the canonical milestone. `PromptBundleBuilt` is emitted by
+`HostManagedLoopPromptPort::build_prompt_bundle` with the real bundle
+ref and redacted skill metadata. `CheckpointCreated` is emitted by
+`HostManagedLoopCheckpointPort::checkpoint` with the durable checkpoint
+id. The progress-port echoes for `PromptBundleBuilt` and
+`CheckpointWritten` are therefore no-ops to avoid duplicate or weaker
+milestones. Four new methods land in this brief:
 
 ```rust
 //! crates/ironclaw_turns/src/run_profile/milestones.rs (delta)
@@ -338,20 +341,13 @@ impl LoopProgressPort for HostManagedLoopProgressPort {
             // NEW (WS-12):
             LoopProgressEvent::IterationStarted { iteration } =>
                 emitter.iteration_started(iteration).await,
-            LoopProgressEvent::PromptBundleBuilt {
-                iteration, bundle_ref, mode, surface_version,
-                message_count, identity_message_count, instruction_snippet_count,
-            } => {
-                // Compose `skill_context` from snippet/identity counts;
-                // the existing emitter method already accepts the
-                // bundle-shape metadata. Drop the iteration field here
-                // (already implied by milestone ordering) — or expose
-                // it on a thin successor variant if observers need it.
-                emitter.prompt_bundle_built(
-                    bundle_ref, mode, surface_version,
-                    message_count as usize,
-                    Vec::new(),  // skill_context: filled at PR time
-                ).await
+            LoopProgressEvent::PromptBundleBuilt { .. } => {
+                // Prompt construction already emits the canonical
+                // `PromptBundleBuilt` milestone from `HostManagedLoopPromptPort`,
+                // including the bundle ref and redacted skill-context metadata.
+                // Treat the executor progress echo as advisory to avoid duplicate
+                // prompt milestones for the same bundle.
+                Ok(())
             }
             LoopProgressEvent::CapabilityBatchStarted {
                 iteration, call_count, policy,
@@ -364,16 +360,11 @@ impl LoopProgressPort for HostManagedLoopProgressPort {
                 ).await,
             LoopProgressEvent::GateBlocked { iteration, gate_kind } =>
                 emitter.gate_blocked(iteration, gate_kind).await,
-            LoopProgressEvent::CheckpointWritten { iteration: _, kind } => {
-                // CheckpointCreated milestone takes a checkpoint_id; the
-                // BeforeBlock/Final flows already emit it from inside
-                // HostManagedLoopCheckpointPort::checkpoint at line 1567.
-                // The new `CheckpointWritten` LoopProgressEvent variant
-                // is therefore advisory only at this layer — the canonical
-                // emission for `CheckpointKind` is already wired. Treat
-                // this arm as `Ok(())` to avoid double-emission, or
-                // promote it to a dedicated emitter method if observers
-                // need the iteration counter alongside the kind.
+            LoopProgressEvent::CheckpointWritten { .. } => {
+                // `HostManagedLoopCheckpointPort::checkpoint` publishes the
+                // canonical checkpoint milestone with the durable checkpoint id.
+                // `CheckpointWritten` carries only the checkpoint kind/iteration,
+                // so emitting it here would either duplicate or weaken that record.
                 Ok(())
             }
         }
@@ -393,9 +384,11 @@ Three properties the impl must respect:
 2. **No raw content** — payloads are counts + ids + version refs +
    `LoopSafeSummary` only. The executor never hands the adapter a
    prompt body, args, or error message.
-3. **Stable cardinality per iteration** — exactly one emission per
-   `LoopProgressEvent` (with the `CheckpointWritten` exception in §3.5
-   above to prevent double-emission).
+3. **Stable cardinality per iteration** — exactly one canonical
+   milestone for each host-owned boundary. `PromptBundleBuilt` and
+   `CheckpointWritten` are advisory progress echoes at this layer
+   because prompt and checkpoint ports already emit the canonical
+   records.
 
 ### 3.6 No driver-config change
 
@@ -440,6 +433,9 @@ Unit tests (in `crates/ironclaw_reborn` — alongside existing
 - `loop_driver_host::tests::progress_port_checkpoint_written_no_double_emit`
   — assert `CheckpointWritten` does not double-fire next to the
   existing `CheckpointCreated` milestone (§3.5 contract).
+- `loop_driver_host::tests::progress_port_prompt_bundle_built_no_double_emit`
+  — assert the progress echo does not duplicate the prompt port's
+  canonical `PromptBundleBuilt` milestone.
 - `loop_driver_host::tests::progress_port_driver_note_unchanged` —
   regression: existing `DriverNote` arm still works after the match
   expansion.
@@ -453,18 +449,18 @@ Integration tests (in `crates/ironclaw_reborn`, gated behind
 - `planned_driver_emits_iteration_milestones_in_order` — drive one
   iteration that takes the AssistantReply branch; observe in-memory
   sink; assert the ordered sequence:
-  `IterationStarted, PromptBundleBuilt, CheckpointWritten(BeforeModel),
-  AssistantReplyFinalized, CheckpointWritten(Final), LoopCompleted`.
+  `IterationStarted, PromptBundleBuilt, CheckpointCreated(BeforeModel),
+  AssistantReplyFinalized, CheckpointCreated(Final), LoopCompleted`.
 - `planned_driver_emits_capability_batch_milestones` — drive an
   iteration that takes the CapabilityCalls branch with one batch of
   three calls (two completed + one denied); assert:
-  `IterationStarted, PromptBundleBuilt, CheckpointWritten(BeforeModel),
-  CheckpointWritten(BeforeSideEffect), CapabilityBatchStarted(call_count=3),
+  `IterationStarted, PromptBundleBuilt, CheckpointCreated(BeforeModel),
+  CheckpointCreated(BeforeSideEffect), CapabilityBatchStarted(call_count=3),
   CapabilityBatchCompleted(result_count=2, denied_count=1, gated_count=0, failed_count=0),
-  CheckpointWritten(Final), LoopCompleted`.
+  CheckpointCreated(Final), LoopCompleted`.
 - `planned_driver_emits_gate_blocked_on_approval_required` — drive a
   call that returns `ApprovalRequired`; assert
-  `GateBlocked(gate_kind=Approval), CheckpointWritten(BeforeBlock),
+  `GateBlocked(gate_kind=Approval), CheckpointCreated(BeforeBlock),
   LoopBlocked` sequence.
 
 ## 6. Out of scope (for this brief)

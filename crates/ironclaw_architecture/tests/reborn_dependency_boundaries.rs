@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf, process::Command};
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::PathBuf,
+    process::Command,
+};
 
 use serde_json::Value;
 
@@ -35,6 +39,32 @@ fn reborn_boundary_rules_active_crates_are_workspace_members() {
             manifest.display()
         );
     }
+}
+
+#[test]
+fn reborn_virtual_roots_match_storage_placement_contract() {
+    let root = workspace_root();
+    let path_source = std::fs::read_to_string(root.join("crates/ironclaw_host_api/src/path.rs"))
+        .expect("host API path source must be readable");
+    let storage_contract =
+        std::fs::read_to_string(root.join("docs/reborn/contracts/storage-placement.md"))
+            .expect("storage placement contract must be readable");
+    let filesystem_contract =
+        std::fs::read_to_string(root.join("docs/reborn/contracts/filesystem.md"))
+            .expect("filesystem contract must be readable");
+
+    let implemented = extract_virtual_roots_const(&path_source);
+    let storage = extract_storage_placement_roots(&storage_contract);
+    let filesystem = extract_filesystem_namespace_roots(&filesystem_contract);
+
+    assert_eq!(
+        implemented, storage,
+        "ironclaw_host_api VIRTUAL_ROOTS must match storage-placement.md canonical roots"
+    );
+    assert_eq!(
+        filesystem, storage,
+        "filesystem.md namespace roots must match storage-placement.md canonical roots"
+    );
 }
 
 #[test]
@@ -1347,6 +1377,76 @@ fn workspace_root() -> PathBuf {
         .and_then(|path| path.parent())
         .expect("architecture crate must live under crates/ironclaw_architecture")
         .to_path_buf()
+}
+
+fn extract_virtual_roots_const(source: &str) -> BTreeSet<String> {
+    let const_body = source
+        .split("const VIRTUAL_ROOTS: &[&str] = &[")
+        .nth(1)
+        .and_then(|tail| tail.split("];").next())
+        .expect("VIRTUAL_ROOTS const array must be present");
+    extract_quoted_absolute_paths(const_body)
+}
+
+fn extract_storage_placement_roots(contract: &str) -> BTreeSet<String> {
+    contract
+        .lines()
+        .filter_map(|line| {
+            let root = line
+                .strip_prefix("| `")?
+                .split('`')
+                .next()
+                .expect("table cell must close code span");
+            let root = if root.starts_with("/engine/") {
+                "/engine"
+            } else {
+                root
+            };
+            Some(root.to_string())
+        })
+        .filter(|root| is_canonical_virtual_root(root))
+        .collect()
+}
+
+fn extract_filesystem_namespace_roots(contract: &str) -> BTreeSet<String> {
+    let roots_block = contract
+        .split("Frozen V1 canonical virtual roots")
+        .nth(1)
+        .and_then(|tail| tail.split("Recommended meaning:").next())
+        .expect("filesystem.md must list frozen V1 canonical virtual roots");
+    roots_block
+        .lines()
+        .map(str::trim)
+        .filter(|line| is_canonical_virtual_root(line))
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn extract_quoted_absolute_paths(source: &str) -> BTreeSet<String> {
+    source
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix('"')?.split('"').next())
+        .filter(|root| is_canonical_virtual_root(root))
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn is_canonical_virtual_root(value: &str) -> bool {
+    matches!(
+        value,
+        "/engine"
+            | "/system/settings"
+            | "/system/extensions"
+            | "/system/skills"
+            | "/users"
+            | "/projects"
+            | "/memory"
+            | "/artifacts"
+            | "/tmp"
+            | "/secrets"
+            | "/events"
+    )
 }
 
 fn package_dependencies(package: &Value) -> Option<(String, Vec<String>)> {

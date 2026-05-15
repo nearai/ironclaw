@@ -620,7 +620,7 @@ impl LibSqlStore {
 }
 
 #[derive(Clone)]
-pub struct LibSqlDurableEventLog {
+pub(crate) struct LibSqlDurableEventLog {
     store: LibSqlStore,
 }
 
@@ -657,7 +657,7 @@ impl DurableEventLog for LibSqlDurableEventLog {
 }
 
 #[derive(Clone)]
-pub struct LibSqlDurableAuditLog {
+pub(crate) struct LibSqlDurableAuditLog {
     store: LibSqlStore,
 }
 

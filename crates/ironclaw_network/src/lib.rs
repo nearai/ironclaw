@@ -5,6 +5,7 @@
 //! and owns outbound HTTP transport for host-mediated runtime requests. It does
 //! not inject secrets, reserve resources, emit audit/events, or run product
 //! workflow.
+#![warn(unreachable_pub)]
 
 mod egress;
 mod error;
@@ -15,15 +16,11 @@ mod types;
 mod url_target;
 
 pub use egress::{NetworkHttpEgress, NetworkHttpTransport, PolicyNetworkHttpEgress};
-pub use error::{NetworkHttpError, NetworkHttpErrorKind};
-pub use policy::{
-    NetworkPolicyEnforcer, NetworkPolicyError, StaticNetworkPolicyEnforcer, host_matches_pattern,
-    is_private_or_loopback_ip, network_policy_allows, target_matches_pattern,
-};
-pub use resolver::{NetworkResolver, SystemNetworkResolver};
+pub use error::NetworkHttpError;
+pub use policy::{NetworkPolicyEnforcer, StaticNetworkPolicyEnforcer};
+pub use resolver::NetworkResolver;
 pub use transport::ReqwestNetworkTransport;
 pub use types::{
-    DEFAULT_RESPONSE_BODY_LIMIT, NetworkHttpRequest, NetworkHttpResponse, NetworkPermit,
-    NetworkRequest, NetworkTransportRequest, NetworkUsage,
+    DEFAULT_RESPONSE_BODY_LIMIT, NetworkHttpRequest, NetworkHttpResponse, NetworkRequest,
+    NetworkTransportRequest, NetworkUsage,
 };
-pub use url_target::{default_port, network_target_for_url, scheme_label};

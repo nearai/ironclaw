@@ -30,21 +30,21 @@
 //! The main crate sends [`TuiEvent`]s via the handle's `event_tx`, and
 //! receives user messages via `msg_rx`. The TUI never calls into the
 //! main crate directly.
+#![warn(unreachable_pub)]
 
-pub mod app;
-pub mod event;
-pub mod input;
-pub mod layout;
-pub mod render;
-pub mod spinner;
-pub mod theme;
-pub mod widgets;
+mod app;
+mod event;
+mod input;
+mod layout;
+mod render;
+mod spinner;
+mod theme;
+mod widgets;
 
 pub use app::{TuiAppConfig, TuiAppHandle, start_tui};
 pub use event::{
     EngineThreadDetailEntry, EngineThreadEntry, EngineThreadMessageEntry, HistoryApprovalRequest,
-    HistoryMessage, ThreadEntry, TuiAttachment, TuiEvent, TuiLogEntry, TuiUiAction, TuiUserMessage,
+    HistoryMessage, ThreadEntry, TuiEvent, TuiUiAction, TuiUserMessage,
 };
 pub use layout::TuiLayout;
-pub use theme::Theme;
-pub use widgets::{AppState, SkillCategory, ToolCategory};
+pub use widgets::{SkillCategory, ToolCategory};

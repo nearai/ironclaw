@@ -4,7 +4,7 @@ pub use ironclaw_wasm_sandbox_core::SandboxLimits as ProductAdapterComponentLimi
 
 pub const PRODUCT_ADAPTER_WIT_VERSION: &str = "0.1.0";
 
-pub const DEFAULT_MAX_COMPONENT_BYTES: usize = 16 * 1024 * 1024;
+pub(crate) const DEFAULT_MAX_COMPONENT_BYTES: usize = 16 * 1024 * 1024;
 
 pub(crate) const MAX_LOGS_PER_EXECUTION: usize = 1_000;
 pub(crate) const MAX_LOG_MESSAGE_BYTES: usize = 4 * 1024;

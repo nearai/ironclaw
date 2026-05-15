@@ -10,14 +10,14 @@
 
 ## 1. Scope
 
-Land the top-layer abstraction that profile resolution targets: `LoopFamily` as a first-class, Builtin-only, opaque bundle of (`LoopFamilyId`, `ComponentIdentity`, planner). The registry is a Guice-style singleton constructed once at startup; `Arc<LoopFamilyRegistry>` is plumbed into `TurnRunner`. Strategy traits stay sealed inside `ironclaw_agent_loop` — extensions never compose strategies; they extend via hooks (see master doc §9 and §9.1).
+Land the top-layer abstraction that profile resolution targets: `LoopFamily` as a first-class, Builtin-only, opaque bundle of (`LoopFamilyId`, `ComponentIdentity`, planner). The registry is a Guice-style singleton constructed by the `ironclaw_reborn` composition root; TurnRunner selection/plumbing is deferred until the planned-driver and run-profile selection workstreams land. Strategy traits stay sealed inside `ironclaw_agent_loop` — extensions never compose strategies; they extend via hooks (see master doc §9 and §9.1).
 
 This brief establishes:
 
 - `LoopFamilyId` — string-shaped newtype with associated consts for known ids.
 - `ComponentIdentity` — content-addressed versioning primitive carried in checkpoint payload metadata and `LoopFamily.version`. Subsumes WS-4's `PlannerId`.
 - `LoopFamily` — opaque type, `pub(crate)` constructor; holds the planner and identifies the family.
-- `LoopFamilyRegistry` — singleton, built once via `LoopFamilyRegistry::builtin()` from `ironclaw_reborn`'s composition root, immutable thereafter.
+- `LoopFamilyRegistry` — singleton, built once by `ironclaw_reborn::app_loop_family::build_loop_family_registry()` from framework-provided family factories, immutable thereafter.
 - `families::default` factory — the one production family in this skeleton.
 
 ## 2. Files
@@ -28,12 +28,12 @@ This brief establishes:
 
 ### EXTEND
 - `crates/ironclaw_agent_loop/src/lib.rs` — export `family`, `families`. Keep strategy modules `pub(crate)`.
-- `crates/ironclaw_reborn/src/app_loop_family.rs` (NEW) — `pub fn build_loop_family_registry() -> Arc<LoopFamilyRegistry>` calling `LoopFamilyRegistry::builtin()`. This is the composition root: it's the one place that knows which families exist.
-- `crates/ironclaw_reborn/src/turn_runner.rs` — `TurnRunner` constructor accepts `Arc<LoopFamilyRegistry>`; resolution path replaces direct `DefaultPlanner` instantiation.
+- `crates/ironclaw_reborn/src/app_loop_family.rs` (NEW) — `pub fn build_loop_family_registry() -> Result<Arc<LoopFamilyRegistry>, LoopFamilyRegistryError>` calling `LoopFamilyRegistry::with_families(...)`. This is the composition root: it's the one place that knows which families exist.
 
 ### NOT TOUCHED in this brief
 - Strategy trait visibilities — WS-1/2/3 land them as `pub(crate)`; this brief just consumes them.
 - `PlannedDriver` generic-collapse — WS-7 owns that.
+- `TurnRunner` family resolution/plumbing — WS-7/WS-14 own the runner-facing path once `PlannedDriver` and run-profile selection exist.
 - Master doc — separate amendment lands the cross-references.
 
 ## 3. Specification
@@ -43,23 +43,33 @@ This brief establishes:
 ```rust
 //! crates/ironclaw_agent_loop/src/family.rs
 
+use std::borrow::Cow;
+
 /// Identity for a Builtin loop family. String-shaped newtype: associated
 /// consts name well-known ids; the type is open so future Builtin families
 /// can add their own const without touching an enum.
 ///
 /// Profile JSON serializes as `"default"`, `"coding"`, etc. — flat strings.
 /// The registry is the authority on which ids are bound; deserialization
-/// success is independent of registry membership.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct LoopFamilyId(pub &'static str);
+/// validates the id shape but is independent of registry membership.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LoopFamilyId(Cow<'static, str>);
 
 impl LoopFamilyId {
-    pub const DEFAULT: Self = Self("default");
+    pub const DEFAULT: Self = Self(Cow::Borrowed("default"));
     // future Builtin families add consts here (e.g. `pub const CODING`)
+
+    pub fn new(id: impl Into<Cow<'static, str>>) -> Result<Self, String> {
+        let id = id.into();
+        validate_loop_family_id(id.as_ref())?;
+        Ok(Self(id))
+    }
+
+    pub fn as_str(&self) -> &str { self.0.as_ref() }
 }
 
 impl std::fmt::Display for LoopFamilyId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.0) }
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str(self.as_str()) }
 }
 ```
 
@@ -79,7 +89,7 @@ impl std::fmt::Display for LoopFamilyId {
 /// checkpoints.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ComponentIdentity {
-    pub id: &'static str,
+    pub id: Cow<'static, str>,
     pub digest: ComponentDigest,
 }
 
@@ -87,11 +97,21 @@ pub struct ComponentIdentity {
 #[serde(transparent)]
 pub struct ComponentDigest(pub [u8; 32]);   // blake3-32 over canonicalized composition
 
+impl ComponentDigest {
+    pub fn from_blake3(bytes: impl AsRef<[u8]>) -> Self {
+        Self(*blake3::hash(bytes.as_ref()).as_bytes())
+    }
+}
+
 impl ComponentIdentity {
     /// Constructs an identity for a family. The digest derivation policy is
     /// owned by the family factory; this constructor is just packaging.
-    pub const fn new(id: &'static str, digest: ComponentDigest) -> Self {
-        Self { id, digest }
+    pub const fn from_static(id: &'static str, digest: ComponentDigest) -> Self {
+        Self { id: Cow::Borrowed(id), digest }
+    }
+
+    pub fn new(id: impl Into<Cow<'static, str>>, digest: ComponentDigest) -> Self {
+        Self { id: id.into(), digest }
     }
 }
 ```
@@ -158,9 +178,9 @@ impl LoopFamily {
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Guice-style singleton registry. Built once at startup via
-/// `LoopFamilyRegistry::builtin()` (called from `ironclaw_reborn`'s
-/// composition root), shared via `Arc<Self>`, immutable thereafter.
+/// Guice-style singleton registry. Built once at startup by
+/// `ironclaw_reborn`'s composition root, shared via `Arc<Self>`, immutable
+/// thereafter.
 ///
 /// There is intentionally NO public `register()` method and NO `Builder` —
 /// the set of families is fixed at compile time. Adding a family means
@@ -181,17 +201,22 @@ impl LoopFamilyRegistry {
     /// observability tests.
     pub fn ids(&self) -> impl Iterator<Item = &LoopFamilyId> { self.families.keys() }
 
-    /// Constructs a registry containing exactly the provided families. The
-    /// only public constructor — both `builtin()` (in `ironclaw_reborn`) and
-    /// the test variant call into this. Crates outside the framework do not
-    /// call this directly under normal circumstances; the discipline is that
-    /// `builtin()` is the production entry point.
-    pub fn with_families(families: Vec<Arc<LoopFamily>>) -> Arc<Self> {
+    /// Constructs a registry containing exactly the provided families and
+    /// rejects duplicate ids. This is the only public registry constructor;
+    /// production calls it from `ironclaw_reborn::app_loop_family`.
+    pub fn with_families(
+        families: Vec<Arc<LoopFamily>>,
+    ) -> Result<Arc<Self>, LoopFamilyRegistryError> {
         let mut map = HashMap::with_capacity(families.len());
         for f in families {
+            if map.contains_key(f.id()) {
+                return Err(LoopFamilyRegistryError::DuplicateFamilyId {
+                    id: f.id().clone(),
+                });
+            }
             map.insert(f.id().clone(), f);
         }
-        Arc::new(Self { families: map })
+        Ok(Arc::new(Self { families: map }))
     }
 }
 ```
@@ -221,7 +246,7 @@ pub fn default() -> LoopFamily {
         Arc::new(DefaultPlanner::compose_default());
     LoopFamily::new(
         LoopFamilyId::DEFAULT,
-        ComponentIdentity::new(
+        ComponentIdentity::from_static(
             "default",
             default_family_digest(),
         ),
@@ -229,15 +254,22 @@ pub fn default() -> LoopFamily {
     )
 }
 
-fn default_family_digest() -> ComponentDigest {
-    // blake3 over the canonicalized strategy composition fingerprint:
-    // family id, strategy type identities, strategy config bytes, and the
-    // CHECKPOINT_SCHEMA_ID/version. This must be deterministic before any
-    // resume-compatible driver registration. A static zero digest is
-    // forbidden because it silently resumes old checkpoints under new planner
-    // semantics.
-    ComponentDigest::from_blake3(DEFAULT_FAMILY_FINGERPRINT_BYTES)
-}
+#[cfg(test)]
+const DEFAULT_FAMILY_FINGERPRINT: &[u8] =
+    b"ironclaw_agent_loop.default_family.v1:planner=DefaultLoopFamilyPlanner;schema=component_identity_v1;family_id=default";
+
+/// Stable digest: BLAKE3-256 of `DEFAULT_FAMILY_FINGERPRINT`.
+///
+/// Update this digest when the default family composition, planner behavior,
+/// or identity schema changes in a replay-relevant way. Tests recompute the
+/// BLAKE3 digest from `DEFAULT_FAMILY_FINGERPRINT` so this constant cannot
+/// silently drift to another algorithm or stale preimage.
+pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
+    0x40, 0xe2, 0xeb, 0x31, 0x69, 0x81, 0x22, 0x31,
+    0x39, 0x76, 0x00, 0x25, 0x49, 0x4a, 0x0e, 0x14,
+    0xb5, 0xa1, 0x7a, 0x0a, 0x57, 0x59, 0x7d, 0xcd,
+    0xa7, 0x48, 0xae, 0x38, 0x11, 0x75, 0xf8, 0x0f,
+]);
 ```
 
 ### 3.6 Composition root in `ironclaw_reborn`
@@ -246,17 +278,18 @@ fn default_family_digest() -> ComponentDigest {
 //! crates/ironclaw_reborn/src/app_loop_family.rs (NEW)
 
 use std::sync::Arc;
-use ironclaw_agent_loop::family::LoopFamilyRegistry;
+use ironclaw_agent_loop::family::{LoopFamilyRegistry, LoopFamilyRegistryError};
 use ironclaw_agent_loop::families;
 
 /// Build the production loop-family registry. Called exactly once during
-/// app startup; the resulting `Arc<LoopFamilyRegistry>` is plumbed through
-/// `TurnRunner` construction and stays for the process lifetime.
+/// app startup; the resulting `Arc<LoopFamilyRegistry>` stays for the process
+/// lifetime. Runner plumbing is deferred until the planned-driver and
+/// run-profile selection workstreams land.
 ///
 /// Adding a new family means adding a `families::<name>()` call in this
 /// function — the only place that knows which families exist. The framework
 /// crate (`ironclaw_agent_loop`) does NOT enumerate; it exports factories.
-pub fn build_loop_family_registry() -> Arc<LoopFamilyRegistry> {
+pub fn build_loop_family_registry() -> Result<Arc<LoopFamilyRegistry>, LoopFamilyRegistryError> {
     LoopFamilyRegistry::with_families(vec![
         Arc::new(families::default()),
         // future: Arc::new(families::coding()), Arc::new(families::routine()), ...
@@ -264,9 +297,11 @@ pub fn build_loop_family_registry() -> Arc<LoopFamilyRegistry> {
 }
 ```
 
-### 3.7 `TurnRunner` resolution path
+### 3.7 Deferred `TurnRunner` resolution path
 
-`TurnRunner` (existing in `ironclaw_reborn::turn_runner`) gains an `Arc<LoopFamilyRegistry>` field and uses it during run-claim:
+`TurnRunner` resolution is intentionally not wired in this workstream. WS-3.5 establishes the registry type, the default family factory, and the Reborn composition root only. The runner-facing path lands with the planned-driver/run-profile workstreams after `PlannedDriver::from_family` and `ResolvedRunProfile.loop_family_id` exist.
+
+The future target remains:
 
 ```rust
 impl TurnRunner {
@@ -284,13 +319,18 @@ impl TurnRunner {
             .ok_or(Error::UnknownLoopFamily {
                 id: profile.loop_family_id.clone(),
             })?;
-        let driver = PlannedDriver::from_family(family, self.executor.clone());
+        let driver = PlannedDriver::from_family(
+            profile.loop_driver.id.clone(),
+            family,
+            self.executor.clone(),
+            profile.loop_driver.version,
+        );
         driver.run(self.host.clone(), /* request */).await
     }
 }
 ```
 
-`ResolvedRunProfile` gains `loop_family_id: LoopFamilyId` per the master doc §4.5 amendment. This is the field-rename/replacement for what would otherwise have been a `PlannerId`-style reference.
+`ResolvedRunProfile` gains `loop_family_id: LoopFamilyId` per the master doc §4.5 amendment in the owning run-profile migration. This is the field-rename/replacement for what would otherwise have been a `PlannerId`-style reference.
 
 ### 3.8 Sealed-trait enforcement check
 
@@ -326,20 +366,20 @@ fn strategy_traits_are_sealed() {
 - [ ] `cargo check -p ironclaw_reborn` passes (composition root compiles)
 - [ ] `cargo clippy --all --benches --tests --examples --all-features` zero warnings
 - [ ] Unit tests in `ironclaw_agent_loop`:
-  - [ ] `LoopFamilyId::DEFAULT.0 == "default"`
+  - [ ] `LoopFamilyId::DEFAULT.as_str() == "default"`
   - [ ] `LoopFamilyId` round-trips through `serde_json` as a flat string
   - [ ] `ComponentIdentity` round-trips through `serde_json`
   - [ ] `families::default().id() == &LoopFamilyId::DEFAULT`
   - [ ] `families::default().version().id == "default"`
 - [ ] Unit tests in `ironclaw_reborn`:
-  - [ ] `build_loop_family_registry().get(&LoopFamilyId::DEFAULT).is_some()`
-  - [ ] `build_loop_family_registry().get(&LoopFamilyId("unknown")).is_none()`
+  - [ ] `build_loop_family_registry()?.get(&LoopFamilyId::DEFAULT).is_some()`
+  - [ ] `build_loop_family_registry()?.get(&LoopFamilyId::new("unknown")?).is_none()`
 - [ ] Negative invariants (manual review checklist; no compile-fail harness in this brief):
   - [ ] No `pub fn new` on `LoopFamily` outside `ironclaw_agent_loop`
   - [ ] No `pub fn register` on `LoopFamilyRegistry`
   - [ ] No `Builder`-style mutation on `LoopFamilyRegistry`
   - [ ] No `pub` strategy trait re-export at `ironclaw_agent_loop::strategies::*`
-- [ ] `with_families` is the only public registry constructor; `builtin()`-style calling code lives in `ironclaw_reborn::app_loop_family`, not in `ironclaw_agent_loop`
+- [ ] `with_families` is the only public registry constructor; production calling code lives in `ironclaw_reborn::app_loop_family`, not in `ironclaw_agent_loop`
 - [ ] No `unwrap()` / `expect()` outside test code
 
 ## 5. Out of scope

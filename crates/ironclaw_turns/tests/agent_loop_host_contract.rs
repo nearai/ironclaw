@@ -16,23 +16,24 @@ use ironclaw_turns::{
     events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
+        BatchPolicyKind, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
-        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
+        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion, ConcurrencyHint,
         FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
         InstructionSafetyContext, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage,
         LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata,
-        LoopDriverId, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneEmitter,
-        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor,
-        LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
-        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
-        LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, ModelCallOutcome, ParentLoopOutput,
-        PromptMode, PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
+        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputBatch,
+        LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
+        LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage,
+        LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopRunInfoPort, LoopTranscriptPort, ModelCallOutcome, ParentLoopOutput, PromptMode,
+        PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -284,17 +285,18 @@ async fn instruction_bundle_builder_orders_sections_and_rebuilds_deterministical
             runtime: RuntimeKind::FirstParty,
             safe_name: "Echo".to_string(),
             safe_description: "Echo safe input".to_string(),
+            concurrency_hint: ConcurrencyHint::SafeForParallel,
         }],
     };
     let request = InstructionBundleRequest {
         context_bundle: LoopContextBundle {
             identity_messages: vec![LoopContextMessage {
-                message_ref: LoopMessageRef::new("msg:identity").unwrap(),
+                message_ref: Some(LoopMessageRef::new("msg:identity").unwrap()),
                 role: "system".to_string(),
                 safe_summary: "identity safe".to_string(),
             }],
             messages: vec![LoopContextMessage {
-                message_ref: LoopMessageRef::new("msg:user-message").unwrap(),
+                message_ref: Some(LoopMessageRef::new("msg:user-message").unwrap()),
                 role: "user".to_string(),
                 safe_summary: "user safe".to_string(),
             }],
@@ -526,6 +528,7 @@ async fn instruction_bundle_builder_allows_tool_result_reference_context_message
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -610,12 +613,15 @@ async fn loop_prompt_port_builds_text_only_bundle_from_context_refs() {
             surface_version: Some(surface_version.clone()),
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
 
     assert!(bundle.bundle_ref.is_for_run(&host.context));
     assert_eq!(bundle.surface_version, Some(surface_version));
+    assert_eq!(bundle.identity_message_count, 0);
+    assert_eq!(bundle.instruction_snippet_count, 0);
     assert_eq!(
         bundle.messages,
         vec![LoopModelMessage {
@@ -625,6 +631,35 @@ async fn loop_prompt_port_builds_text_only_bundle_from_context_refs() {
     );
     assert_eq!(host.effects(), vec!["context"]);
     assert_eq!(host.milestone_kind_names(), vec!["prompt_bundle_built"]);
+}
+
+#[tokio::test]
+async fn prompt_bundle_authority_consumes_grant_after_successful_model_authorization() {
+    let context = claimed_run_context().await;
+    let authority = LoopPromptBundleAuthority::default();
+    let messages = vec![LoopModelMessage {
+        role: "user".to_string(),
+        content_ref: LoopMessageRef::new("msg:user-message").unwrap(),
+    }];
+    let bundle = LoopPromptBundle {
+        bundle_ref: LoopPromptBundleRef::for_run(&context, "bundle-once").unwrap(),
+        messages: messages.clone(),
+        surface_version: None,
+        instruction_fingerprint: None,
+        identity_message_count: 0,
+        instruction_snippet_count: 0,
+    };
+    authority.issue_bundle(&context, &bundle).unwrap();
+
+    let grant = authority
+        .authorize_latest_model_request(&context, &messages, &None)
+        .unwrap();
+    assert_eq!(grant.messages, messages);
+
+    let error = authority
+        .authorize_latest_model_request(&context, &grant.messages, &None)
+        .unwrap_err();
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
 }
 
 #[tokio::test]
@@ -658,6 +693,7 @@ async fn loop_prompt_port_uses_current_surface_version_lookup_each_build() {
             surface_version: Some(surface_v1.clone()),
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -672,11 +708,60 @@ async fn loop_prompt_port_uses_current_surface_version_lookup_each_build() {
             surface_version: Some(surface_v1),
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
     assert_eq!(error.kind, AgentLoopHostErrorKind::StaleSurface);
     assert_eq!(host.effects(), vec!["context"]);
+}
+
+#[tokio::test]
+async fn loop_milestone_emitter_publishes_loop_progress_kinds() {
+    let host = RecordingAgentLoopHost::new(claimed_run_context().await);
+    let emitter = host.milestone_emitter();
+
+    emitter.iteration_started(3).await.unwrap();
+    emitter
+        .capability_batch_started(3, 2, BatchPolicyKind::Parallel)
+        .await
+        .unwrap();
+    emitter
+        .capability_batch_completed(3, 1, 0, 1, 0)
+        .await
+        .unwrap();
+    emitter.gate_blocked(3, LoopGateKind::Auth).await.unwrap();
+
+    let milestones = host.milestones();
+    assert!(matches!(
+        milestones[0].kind,
+        LoopHostMilestoneKind::IterationStarted { iteration: 3 }
+    ));
+    assert!(matches!(
+        milestones[1].kind,
+        LoopHostMilestoneKind::CapabilityBatchStarted {
+            iteration: 3,
+            call_count: 2,
+            policy: BatchPolicyKind::Parallel,
+        }
+    ));
+    assert!(matches!(
+        milestones[2].kind,
+        LoopHostMilestoneKind::CapabilityBatchCompleted {
+            iteration: 3,
+            result_count: 1,
+            denied_count: 0,
+            gated_count: 1,
+            failed_count: 0,
+        }
+    ));
+    assert!(matches!(
+        milestones[3].kind,
+        LoopHostMilestoneKind::GateBlocked {
+            iteration: 3,
+            gate_kind: LoopGateKind::Auth,
+        }
+    ));
 }
 
 #[tokio::test]
@@ -698,11 +783,14 @@ async fn loop_prompt_port_materializes_instruction_snippets_as_system_refs() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
 
     assert_eq!(bundle.messages.len(), 2);
+    assert_eq!(bundle.identity_message_count, 0);
+    assert_eq!(bundle.instruction_snippet_count, 1);
     assert_eq!(bundle.messages[0].role, "system");
     assert_eq!(
         bundle.messages[0].content_ref,
@@ -733,6 +821,7 @@ async fn loop_prompt_port_preserves_mid_conversation_system_message_order() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -778,6 +867,7 @@ async fn loop_prompt_port_keeps_identity_before_skill_snippets_and_records_skill
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -843,6 +933,7 @@ async fn loop_prompt_port_rejects_unsupported_prompt_mode() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -873,6 +964,7 @@ async fn loop_prompt_port_rejects_malformed_same_run_checkpoint_ref() {
                 .unwrap(),
             ),
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -905,6 +997,7 @@ async fn loop_prompt_port_rejects_cross_run_checkpoint_ref() {
                 LoopCheckpointStateRef::for_run(&other_context, "foreign-state").unwrap(),
             ),
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -935,6 +1028,7 @@ async fn loop_prompt_port_rejects_cross_run_context_cursor() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -963,6 +1057,7 @@ async fn loop_prompt_port_rejects_checkpoint_state_ref_until_supported() {
                 LoopCheckpointStateRef::for_run(&host.context, "resume-state").unwrap(),
             ),
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -988,6 +1083,7 @@ async fn loop_prompt_port_rejects_unvalidated_surface_version() {
             surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1014,6 +1110,7 @@ async fn loop_prompt_port_rejects_stale_surface_version() {
             surface_version: Some(CapabilitySurfaceVersion::new("surface-v1").unwrap()),
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1042,6 +1139,7 @@ async fn loop_prompt_port_rejects_unstored_synthetic_instruction_refs() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1064,6 +1162,7 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             runtime: RuntimeKind::FirstParty,
             safe_name: "Echo".to_string(),
             safe_description: "Echo safe input".to_string(),
+            concurrency_hint: ConcurrencyHint::SafeForParallel,
         }],
     };
     let port = HostManagedLoopPromptPort::new(
@@ -1087,6 +1186,7 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             surface_version: Some(surface.version),
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -1130,6 +1230,7 @@ async fn loop_prompt_port_rejects_zero_message_limit() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(0),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -1155,6 +1256,7 @@ async fn loop_prompt_port_clamps_default_and_requested_message_limits() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -1175,6 +1277,7 @@ async fn loop_prompt_port_clamps_default_and_requested_message_limits() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -1194,6 +1297,7 @@ async fn loop_prompt_port_clamps_default_and_requested_message_limits() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(u32::MAX),
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -1230,6 +1334,7 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: None,
+            inline_messages: Vec::new(),
         })
         .await
         .unwrap();
@@ -1476,6 +1581,7 @@ impl AgentLoopDriver for ReplyDriver {
                 surface_version: Some(surface.version),
                 checkpoint_state_ref: None,
                 max_messages: Some(8),
+                inline_messages: Vec::new(),
             })
             .await
             .map_err(driver_error)?;
@@ -1729,6 +1835,7 @@ impl RecordingAgentLoopHost {
                     runtime: RuntimeKind::Wasm,
                     safe_name: "Echo".to_string(),
                     safe_description: "Returns an opaque result ref".to_string(),
+                    concurrency_hint: ConcurrencyHint::Exclusive,
                 }],
             },
             context_message_safe_summary: "hello".to_string(),
@@ -1750,7 +1857,7 @@ impl RecordingAgentLoopHost {
         safe_summary: impl Into<String>,
     ) -> Self {
         self.context_system_messages.push(LoopContextMessage {
-            message_ref: LoopMessageRef::new(message_ref.into()).unwrap(),
+            message_ref: Some(LoopMessageRef::new(message_ref.into()).unwrap()),
             role: "system".to_string(),
             safe_summary: safe_summary.into(),
         });
@@ -1764,7 +1871,7 @@ impl RecordingAgentLoopHost {
         safe_summary: impl Into<String>,
     ) -> Self {
         self.context_tail_messages.push(LoopContextMessage {
-            message_ref: LoopMessageRef::new(message_ref.into()).unwrap(),
+            message_ref: Some(LoopMessageRef::new(message_ref.into()).unwrap()),
             role: role.into(),
             safe_summary: safe_summary.into(),
         });
@@ -1863,7 +1970,7 @@ impl LoopContextPort for RecordingAgentLoopHost {
         self.context_requests.lock().unwrap().push(request);
         self.record("context");
         let mut messages = vec![LoopContextMessage {
-            message_ref: LoopMessageRef::new("msg:user-message").unwrap(),
+            message_ref: Some(LoopMessageRef::new("msg:user-message").unwrap()),
             role: "user".to_string(),
             safe_summary: self.context_message_safe_summary.clone(),
         }];
@@ -1918,13 +2025,17 @@ impl LoopPromptPort for RecordingAgentLoopHost {
             messages: context
                 .messages
                 .into_iter()
-                .map(|message| LoopModelMessage {
-                    role: message.role,
-                    content_ref: message.message_ref,
+                .filter_map(|message| {
+                    message.message_ref.map(|content_ref| LoopModelMessage {
+                        role: message.role,
+                        content_ref,
+                    })
                 })
                 .collect(),
             surface_version: request.surface_version,
             instruction_fingerprint: None,
+            identity_message_count: 0,
+            instruction_snippet_count: 0,
         };
         self.milestone_emitter()
             .prompt_bundle_built(

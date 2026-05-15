@@ -24,7 +24,7 @@ use ironclaw_dispatcher::{
 };
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
-    InMemoryAuditSink, InMemoryEventSink,
+    InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
 };
 use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime};
 #[cfg(feature = "libsql")]
@@ -324,7 +324,9 @@ fn classify_component_type<T: 'static>() -> ProductionImplementationReadiness {
             || type_id == TypeId::of::<InMemoryApprovalRequestStore>()
             || type_id == TypeId::of::<InMemoryCapabilityLeaseStore>()
             || type_id == TypeId::of::<InMemoryEventSink>()
+            || type_id == TypeId::of::<InMemoryDurableEventLog>()
             || type_id == TypeId::of::<InMemoryAuditSink>()
+            || type_id == TypeId::of::<InMemoryDurableAuditLog>()
             || type_id == TypeId::of::<InMemorySecretStore>()
             || type_id == TypeId::of::<EmptyWasmRuntimeCredentials>()
             || type_id == TypeId::of::<InMemoryTurnStateStore>()
@@ -411,7 +413,7 @@ where
         ));
         Self {
             registry,
-            trust_policy: Arc::new(HostTrustPolicy::empty()),
+            trust_policy: Arc::new(HostTrustPolicy::fail_closed()),
             trust_policy_configured: false,
             filesystem,
             governor,
@@ -665,7 +667,7 @@ where
 
     /// Attaches the host-owned trust policy used by the produced
     /// [`DefaultHostRuntime`]. Without this, the service graph keeps the
-    /// default empty policy and capability dispatch fails closed.
+    /// default fail-closed policy and capability dispatch is denied.
     pub fn with_trust_policy<T>(mut self, trust_policy: Arc<T>) -> Self
     where
         T: TrustPolicy + 'static,
@@ -1882,7 +1884,7 @@ struct FirstPartyRuntimeAdapter {
 }
 
 impl FirstPartyRuntimeAdapter {
-    pub fn from_registry(
+    pub(crate) fn from_registry(
         registry: Arc<FirstPartyCapabilityRegistry>,
         filesystem: Arc<dyn RootFilesystem>,
     ) -> Self {
@@ -1998,7 +2000,7 @@ struct WasmRuntimeAdapter {
 }
 
 impl WasmRuntimeAdapter {
-    pub fn new(
+    pub(crate) fn new(
         runtime: WitToolRuntime,
         host: WitToolHost,
         network_policy_store: Arc<NetworkObligationPolicyStore>,
@@ -2015,7 +2017,7 @@ impl WasmRuntimeAdapter {
         }
     }
 
-    pub fn try_new(
+    pub(crate) fn try_new(
         config: WitToolRuntimeConfig,
         host: WitToolHost,
         network_policy_store: Arc<NetworkObligationPolicyStore>,
@@ -2145,7 +2147,7 @@ struct RuntimeDispatchProcessExecutor {
 }
 
 impl RuntimeDispatchProcessExecutor {
-    pub fn new(dispatcher: Arc<dyn CapabilityDispatcher>) -> Self {
+    pub(crate) fn new(dispatcher: Arc<dyn CapabilityDispatcher>) -> Self {
         Self { dispatcher }
     }
 }

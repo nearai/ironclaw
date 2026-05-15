@@ -3,6 +3,7 @@
 //! This crate adapts durable Reborn support boundaries (threads/transcripts plus
 //! host-managed model gateways) into the narrow `AgentLoopHost` ports. It does
 //! not own provider clients, tool dispatchers, secrets, or runtime handles.
+#![warn(unreachable_pub)]
 
 use std::{
     collections::{HashMap, HashSet},
@@ -35,9 +36,9 @@ use ironclaw_turns::{
         CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
         LoopContextBundle, LoopContextMessage, LoopContextPort, LoopContextRequest,
         LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor, LoopModelMessage,
-        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopRunContext, LoopRunInfoPort,
-        LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput,
-        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopModelPort, LoopModelRequest, LoopModelResponse, LoopPromptBundleAuthority,
+        LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk,
+        ParentLoopOutput, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
         sanitize_model_visible_text,
     },
 };
@@ -457,6 +458,7 @@ where
     run_context: LoopRunContext,
     gateway: Arc<G>,
     max_messages: usize,
+    prompt_authority: LoopPromptBundleAuthority,
     milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
@@ -480,6 +482,7 @@ where
             run_context,
             gateway,
             max_messages,
+            prompt_authority: LoopPromptBundleAuthority::shared(),
             milestone_sink: None,
             skill_context_source: None,
             instruction_materialization_store: None,
@@ -500,6 +503,7 @@ where
             run_context,
             gateway,
             max_messages,
+            prompt_authority: LoopPromptBundleAuthority::shared(),
             milestone_sink: Some(milestone_sink),
             skill_context_source: None,
             instruction_materialization_store: None,
@@ -508,6 +512,14 @@ where
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
         self.skill_context_source = Some(source);
+        self
+    }
+
+    pub fn with_prompt_bundle_authority(
+        mut self,
+        prompt_authority: LoopPromptBundleAuthority,
+    ) -> Self {
+        self.prompt_authority = prompt_authority;
         self
     }
 
@@ -548,7 +560,12 @@ where
                 .model_profile_id
                 .clone()
         });
-        let resolved_messages = self.resolve_model_messages(request.messages).await?;
+        let prompt_grant = self.prompt_authority.authorize_latest_model_request(
+            &self.run_context,
+            &request.messages,
+            &request.surface_version,
+        )?;
+        let resolved_messages = self.resolve_model_messages(prompt_grant.messages).await?;
         self.emit_model_started(requested_model_profile_id).await;
         let gateway_response = match self
             .gateway
@@ -851,9 +868,12 @@ pub struct HostManagedModelResponse {
 impl HostManagedModelResponse {
     pub fn assistant_reply(content: impl Into<String>) -> Self {
         let content = content.into();
+        let safe_content = sanitize_model_visible_text(content);
         Self {
-            safe_text_deltas: vec![sanitize_model_visible_text(content.clone())],
-            output: ParentLoopOutput::AssistantReply(AssistantReply { content }),
+            safe_text_deltas: vec![safe_content.clone()],
+            output: ParentLoopOutput::AssistantReply(AssistantReply {
+                content: safe_content,
+            }),
         }
     }
 }
@@ -996,7 +1016,7 @@ fn model_visible_status(status: MessageStatus) -> bool {
 fn context_message_to_loop_message(message: ContextMessage) -> Option<LoopContextMessage> {
     let message_ref = message_ref_from_context(&message)?;
     Some(LoopContextMessage {
-        message_ref,
+        message_ref: Some(message_ref),
         role: role_for_kind(message.kind).to_string(),
         safe_summary: safe_context_summary(message.kind).to_string(),
     })

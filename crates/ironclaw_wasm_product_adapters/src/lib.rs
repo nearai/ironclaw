@@ -29,17 +29,18 @@
 //!   today; it will move into a WASM component once a component artifact lands.
 
 #![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
 
-pub mod auth_verifier;
+mod auth_verifier;
 mod bindings;
-pub mod component_runtime;
-pub mod config;
-pub mod egress_policy;
-pub mod runner;
-pub mod store;
+mod component_runtime;
+mod config;
+mod egress_policy;
+mod runner;
+mod store;
 
 pub use auth_verifier::{
-    HmacWebhookAuth, SharedSecretHeaderAuth, VerificationOutcome, WebhookAuthVerifier,
+    Clock, HmacWebhookAuth, SharedSecretHeaderAuth, VerificationOutcome, WebhookAuthVerifier,
 };
 pub use component_runtime::{
     ComponentManifest, ParsedInboundResult, PreparedProductAdapterComponent,

@@ -8,7 +8,7 @@ use crate::LoopDiagnosticRef;
 
 use super::host::{
     AgentLoopHostError, AgentLoopHostErrorKind, LoopModelPort, LoopModelRequest, LoopModelResponse,
-    LoopRunContext, LoopSafeSummary, sanitize_model_visible_text,
+    LoopRunContext, LoopSafeSummary, ParentLoopOutput, sanitize_model_visible_text,
 };
 use super::milestones::{LoopHostMilestoneEmitter, LoopHostMilestoneSink};
 
@@ -330,6 +330,9 @@ fn sanitize_model_response(mut response: LoopModelResponse) -> LoopModelResponse
     for chunk in &mut response.chunks {
         chunk.safe_text_delta =
             sanitize_model_visible_text(std::mem::take(&mut chunk.safe_text_delta));
+    }
+    if let ParentLoopOutput::AssistantReply(reply) = &mut response.output {
+        reply.content = sanitize_model_visible_text(std::mem::take(&mut reply.content));
     }
     response
 }

@@ -63,10 +63,16 @@ impl fmt::Display for MountAlias {
 
 const VIRTUAL_ROOTS: &[&str] = &[
     "/engine",
+    "/system/settings",
     "/system/extensions",
+    "/system/skills",
     "/users",
     "/projects",
     "/memory",
+    "/artifacts",
+    "/tmp",
+    "/secrets",
+    "/events",
 ];
 
 /// Common raw host-path prefixes rejected before scoped-path normalization.
@@ -90,6 +96,8 @@ const RAW_HOST_PREFIXES: &[&str] = &[
     "/proc/",
     "/sys/",
 ];
+
+const REDACTED_PATH_VALUE: &str = "<redacted path>";
 
 impl Serialize for VirtualPath {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -179,11 +187,14 @@ impl ScopedPath {
     pub fn new(value: impl Into<String>) -> Result<Self, HostApiError> {
         let raw = value.into();
         if looks_like_url(&raw) {
-            return Err(HostApiError::invalid_path(raw, "URLs are not scoped paths"));
+            return Err(HostApiError::invalid_path(
+                REDACTED_PATH_VALUE,
+                "URLs are not scoped paths",
+            ));
         }
         if looks_like_windows_path(&raw) {
             return Err(HostApiError::invalid_path(
-                raw,
+                REDACTED_PATH_VALUE,
                 "Windows host paths are not scoped paths",
             ));
         }
@@ -192,7 +203,7 @@ impl ScopedPath {
             .any(|prefix| raw.starts_with(prefix))
         {
             return Err(HostApiError::invalid_path(
-                raw,
+                REDACTED_PATH_VALUE,
                 "raw host paths are not scoped paths",
             ));
         }
@@ -224,23 +235,30 @@ enum PathKind {
 }
 
 fn normalize_absolute_path(raw: String, kind: PathKind) -> Result<String, HostApiError> {
+    let invalid_value = invalid_path_error_value(&raw, kind);
     if raw.is_empty() {
-        return Err(HostApiError::invalid_path(raw, "path must not be empty"));
+        return Err(HostApiError::invalid_path(
+            invalid_value,
+            "path must not be empty",
+        ));
     }
     if raw.contains('\0') || raw.chars().any(char::is_control) {
         return Err(HostApiError::invalid_path(
-            raw,
+            invalid_value,
             "NUL/control characters are not allowed",
         ));
     }
     if raw.contains('\\') {
         return Err(HostApiError::invalid_path(
-            raw,
+            invalid_value,
             "backslashes are not allowed",
         ));
     }
     if !raw.starts_with('/') {
-        return Err(HostApiError::invalid_path(raw, "path must be absolute"));
+        return Err(HostApiError::invalid_path(
+            invalid_value,
+            "path must be absolute",
+        ));
     }
 
     let mut parts = Vec::new();
@@ -249,7 +267,7 @@ fn normalize_absolute_path(raw: String, kind: PathKind) -> Result<String, HostAp
             "" | "." => {}
             ".." => {
                 return Err(HostApiError::invalid_path(
-                    raw,
+                    invalid_value,
                     "`..` segments are not allowed",
                 ));
             }
@@ -259,7 +277,7 @@ fn normalize_absolute_path(raw: String, kind: PathKind) -> Result<String, HostAp
 
     if parts.is_empty() {
         return Err(HostApiError::invalid_path(
-            raw,
+            invalid_value,
             "root path is not valid here",
         ));
     }
@@ -272,6 +290,13 @@ fn normalize_absolute_path(raw: String, kind: PathKind) -> Result<String, HostAp
         ));
     }
     Ok(normalized)
+}
+
+fn invalid_path_error_value(raw: &str, kind: PathKind) -> String {
+    match kind {
+        PathKind::Scoped => REDACTED_PATH_VALUE.to_string(),
+        PathKind::Virtual | PathKind::MountAlias => raw.to_string(),
+    }
 }
 
 fn looks_like_url(value: &str) -> bool {

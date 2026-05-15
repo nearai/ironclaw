@@ -3,10 +3,11 @@
 //! Each [`Spinner`] has an `interval_ms` (frame duration) and a `frames` slice.
 //! The active frame is computed from elapsed time so spinners animate at their
 //! natural speed regardless of the TUI tick rate.
+#![allow(dead_code)] // Scaffolding; some items kept for future use.
 
 /// A spinner animation definition.
 #[derive(Debug, Clone, Copy)]
-pub struct Spinner {
+pub(crate) struct Spinner {
     /// Milliseconds per frame.
     pub interval_ms: u64,
     /// Animation frames cycled in order.
@@ -16,7 +17,7 @@ pub struct Spinner {
 impl Spinner {
     /// Return the frame to display given the number of TUI ticks elapsed
     /// and the TUI tick interval in milliseconds.
-    pub fn frame(&self, tick_count: usize, tick_ms: u64) -> &'static str {
+    pub(crate) fn frame(&self, tick_count: usize, tick_ms: u64) -> &'static str {
         let elapsed_ms = tick_count as u64 * tick_ms;
         let idx = (elapsed_ms / self.interval_ms) as usize % self.frames.len();
         self.frames[idx]
@@ -25,7 +26,7 @@ impl Spinner {
 
 /// Named spinner variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SpinnerKind {
+pub(crate) enum SpinnerKind {
     #[default]
     Dots,
     Dots2,
@@ -40,7 +41,7 @@ pub enum SpinnerKind {
 
 impl SpinnerKind {
     /// Get the [`Spinner`] definition for this variant.
-    pub fn definition(self) -> Spinner {
+    pub(crate) fn definition(self) -> Spinner {
         match self {
             Self::Dots => DOTS,
             Self::Dots2 => DOTS2,
@@ -55,7 +56,7 @@ impl SpinnerKind {
     }
 
     /// All available spinner variants.
-    pub const ALL: &'static [SpinnerKind] = &[
+    pub(crate) const ALL: &'static [SpinnerKind] = &[
         Self::Dots,
         Self::Dots2,
         Self::Line,
@@ -68,7 +69,7 @@ impl SpinnerKind {
     ];
 
     /// Human-readable name.
-    pub fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Dots => "dots",
             Self::Dots2 => "dots2",
@@ -85,37 +86,37 @@ impl SpinnerKind {
 
 // ── Spinner definitions ────────────────────────────────────────────────
 
-pub const DOTS: Spinner = Spinner {
+pub(crate) const DOTS: Spinner = Spinner {
     interval_ms: 80,
     frames: &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
 };
 
-pub const DOTS2: Spinner = Spinner {
+pub(crate) const DOTS2: Spinner = Spinner {
     interval_ms: 80,
     frames: &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"],
 };
 
-pub const LINE: Spinner = Spinner {
+pub(crate) const LINE: Spinner = Spinner {
     interval_ms: 130,
     frames: &["-", "\\", "|", "/"],
 };
 
-pub const ARC: Spinner = Spinner {
+pub(crate) const ARC: Spinner = Spinner {
     interval_ms: 100,
     frames: &["◜", "◠", "◝", "◞", "◡", "◟"],
 };
 
-pub const STAR: Spinner = Spinner {
+pub(crate) const STAR: Spinner = Spinner {
     interval_ms: 70,
     frames: &["✶", "✸", "✹", "✺", "✹", "✷"],
 };
 
-pub const BOUNCE: Spinner = Spinner {
+pub(crate) const BOUNCE: Spinner = Spinner {
     interval_ms: 120,
     frames: &["⠁", "⠂", "⠄", "⠂"],
 };
 
-pub const BOUNCING_BAR: Spinner = Spinner {
+pub(crate) const BOUNCING_BAR: Spinner = Spinner {
     interval_ms: 80,
     frames: &[
         "[    ]", "[=   ]", "[==  ]", "[=== ]", "[ ===]", "[  ==]", "[   =]", "[    ]", "[   =]",
@@ -123,12 +124,12 @@ pub const BOUNCING_BAR: Spinner = Spinner {
     ],
 };
 
-pub const MOON: Spinner = Spinner {
+pub(crate) const MOON: Spinner = Spinner {
     interval_ms: 80,
     frames: &["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"],
 };
 
-pub const HAMBURGER: Spinner = Spinner {
+pub(crate) const HAMBURGER: Spinner = Spinner {
     interval_ms: 100,
     frames: &["☱", "☲", "☴"],
 };

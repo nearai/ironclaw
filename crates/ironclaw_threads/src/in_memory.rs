@@ -5,12 +5,13 @@ use ironclaw_host_api::ThreadId;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::identifiers::SummaryArtifactId;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, ContextMessage, ContextWindow, CreateSummaryArtifactRequest,
     EnsureThreadRequest, LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
     RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SessionThreadService, SummaryArtifact, SummaryArtifactId, ThreadHistory,
+    SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
     UpdateAssistantDraftRequest,
 };

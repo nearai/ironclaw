@@ -22,9 +22,9 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{
-        AgentLoopHostErrorKind, HostManagedLoopModelPort, InMemoryLoopHostMilestoneSink,
-        InMemoryRunProfileResolver, LoopHostMilestoneKind, LoopModelMessage, LoopModelPort,
-        LoopModelRequest, LoopRunContext, ModelProfileId,
+        AgentLoopHostErrorKind, CapabilitySurfaceVersion, HostManagedLoopModelPort,
+        InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopHostMilestoneKind,
+        LoopModelMessage, LoopModelPort, LoopModelRequest, LoopRunContext, ModelProfileId,
     },
 };
 use rust_decimal::Decimal;
@@ -387,6 +387,96 @@ async fn production_loop_model_gateway_fails_closed_before_provider_call() {
         .unwrap_err();
 
     assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert!(provider.requests.lock().unwrap().is_empty());
+    let milestone_kinds = milestones
+        .milestones()
+        .into_iter()
+        .map(|milestone| milestone.kind.kind_name())
+        .collect::<Vec<_>>();
+    assert_eq!(milestone_kinds, vec!["model_started", "model_failed"]);
+}
+
+#[tokio::test]
+async fn production_loop_model_gateway_rejects_forged_context_summary_before_provider_call() {
+    let fixture = ThreadFixture::new().await;
+    let provider = Arc::new(RecordingLlmProvider::reply("unused"));
+    let provider_gateway = Arc::new(LlmProviderModelGateway::new(
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    ));
+    let model_gateway = Arc::new(ThreadBackedLoopModelGateway::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        provider_gateway,
+        16,
+    ));
+    let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let port = HostManagedLoopModelPort::new(
+        fixture.run_context.clone(),
+        model_gateway,
+        milestones.clone(),
+    );
+    let forged_ref = LoopMessageRef::new("msg:context.summary.user.999.00000000deadbeef").unwrap();
+
+    let error = port
+        .stream_model(LoopModelRequest {
+            messages: vec![LoopModelMessage {
+                role: "user".to_string(),
+                content_ref: forged_ref.clone(),
+            }],
+            surface_version: None,
+            model_preference: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    assert!(provider.requests.lock().unwrap().is_empty());
+    let milestone_kinds = milestones
+        .milestones()
+        .into_iter()
+        .map(|milestone| milestone.kind.kind_name())
+        .collect::<Vec<_>>();
+    assert_eq!(milestone_kinds, vec!["model_started", "model_failed"]);
+}
+
+#[tokio::test]
+async fn production_loop_model_gateway_rejects_unvalidated_surface_before_provider_call() {
+    let fixture = ThreadFixture::new().await;
+    let provider = Arc::new(RecordingLlmProvider::reply("unused"));
+    let provider_gateway = Arc::new(LlmProviderModelGateway::new(
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    ));
+    let model_gateway = Arc::new(ThreadBackedLoopModelGateway::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        provider_gateway,
+        16,
+    ));
+    let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let port = HostManagedLoopModelPort::new(
+        fixture.run_context.clone(),
+        model_gateway,
+        milestones.clone(),
+    );
+
+    let error = port
+        .stream_model(LoopModelRequest {
+            messages: vec![LoopModelMessage {
+                role: "user".to_string(),
+                content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id))
+                    .unwrap(),
+            }],
+            surface_version: Some(CapabilitySurfaceVersion::new("surface-stale").unwrap()),
+            model_preference: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
     assert!(provider.requests.lock().unwrap().is_empty());
     let milestone_kinds = milestones
         .milestones()

@@ -1,4 +1,5 @@
 //! Key handling and command parsing for the TUI.
+#![allow(dead_code)] // Scaffolding; some items kept for future use.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -6,7 +7,7 @@ use crate::widgets::LogLevelFilter;
 
 /// Parsed user command from keyboard input.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InputAction {
+pub(crate) enum InputAction {
     /// Submit the current input text to the agent.
     Submit,
     /// Insert a newline into the input (Shift+Enter / Alt+Enter / Ctrl+J).
@@ -85,7 +86,7 @@ pub enum InputAction {
 
 /// Map a key event to an action, considering active modal/context state.
 #[allow(clippy::too_many_arguments)]
-pub fn map_key(
+pub(crate) fn map_key(
     key: KeyEvent,
     approval_active: bool,
     palette_active: bool,
@@ -237,7 +238,7 @@ fn map_approval_key(key: KeyEvent) -> InputAction {
 }
 
 /// Parse a slash command from user input text.
-pub fn parse_slash_command(text: &str) -> Option<&str> {
+pub(crate) fn parse_slash_command(text: &str) -> Option<&str> {
     let trimmed = text.trim();
     if trimmed.starts_with('/') {
         Some(trimmed)
