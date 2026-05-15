@@ -151,16 +151,16 @@ impl ToolDispatcher {
         //    for any caller that names a tool string directly, regardless of
         //    what the LLM saw. Only applied for Channel sources — Routine and
         //    System callers are internal and bypass routing.
-        if let DispatchSource::Channel(ref channel) = source {
-            if let Some(ref routing_arc) = self.channel_routing {
-                let routing = routing_arc.read().await;
-                if let Some(ref config) = *routing {
-                    let builtin_names = self.registry.builtin_tool_names().await;
-                    if !config.is_tool_permitted(channel, &resolved_name, &builtin_names) {
-                        return Err(ToolError::ExecutionFailed(format!(
-                            "tool '{resolved_name}' is not available on channel '{channel}'"
-                        )));
-                    }
+        if let DispatchSource::Channel(ref channel) = source
+            && let Some(ref routing_arc) = self.channel_routing
+        {
+            let routing = routing_arc.read().await;
+            if let Some(ref config) = *routing {
+                let builtin_names = self.registry.builtin_tool_names().await;
+                if !config.is_tool_permitted(channel, &resolved_name, &builtin_names) {
+                    return Err(ToolError::ExecutionFailed(format!(
+                        "tool '{resolved_name}' is not available on channel '{channel}'"
+                    )));
                 }
             }
         }
