@@ -496,16 +496,9 @@ impl ProductInboundEnvelope {
         payload: UserMessagePayload,
     ) -> Result<Self, ProductAdapterError> {
         payload.validate()?;
-        Ok(Self {
-            adapter_id: self.adapter_id.clone(),
-            installation_id: self.installation_id.clone(),
-            external_event_id: self.external_event_id.clone(),
-            external_actor_ref: self.external_actor_ref.clone(),
-            external_conversation_ref: self.external_conversation_ref.clone(),
-            auth_claim: self.auth_claim.clone(),
-            received_at: self.received_at,
-            payload: ProductInboundPayload::UserMessage(payload),
-        })
+        let mut envelope = self.clone();
+        envelope.payload = ProductInboundPayload::UserMessage(payload);
+        Ok(envelope)
     }
 
     pub fn source_binding_key(&self) -> String {
