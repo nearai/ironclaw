@@ -48,6 +48,7 @@ the contracts.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -158,6 +159,82 @@ def _history_has_tool_install(
     return _walk(history)
 
 
+# When the probe fails, we want enough breadcrumbs in the artifact to
+# diagnose what the agent actually did without re-running the canary.
+# The slack notifier surfaces `details.error` plus the structured
+# fields it knows about; extra keys we drop into `details` show up in
+# the artifact for whoever opens the failing-lane drilldown.
+_TOOL_CALL_KEYS = ("tool_name", "name", "function", "action")
+
+
+def _collect_tool_calls(history: dict[str, Any]) -> list[str]:
+    """Best-effort enumeration of tool-call names found in history.
+
+    Matches a few common envelope shapes the gateway has used:
+    ``tool_calls: [{"name": ...}]`` on assistant messages, top-level
+    ``tool_name``/``action`` on turn records, ``<tool_output name="...">``
+    on tool-result content. Deduplicates while preserving order so the
+    diagnostic doesn't double-count parallel dispatches.
+    """
+    seen: list[str] = []
+
+    def _add(name: Any) -> None:
+        if isinstance(name, str) and name and name not in seen:
+            seen.append(name)
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key == "tool_calls" and isinstance(value, list):
+                    for call in value:
+                        if isinstance(call, dict):
+                            _add(call.get("name") or call.get("function"))
+                elif key in _TOOL_CALL_KEYS and isinstance(value, str):
+                    _add(value)
+                else:
+                    _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+        elif isinstance(node, str):
+            # `<tool_output name="...">` wrapping
+            import re
+
+            for m in re.finditer(r'<tool_output\s+name="([^"]+)"', node):
+                _add(m.group(1))
+
+    _walk(history)
+    return seen
+
+
+def _last_assistant_text(history: dict[str, Any]) -> str:
+    """Pull the last assistant-side text we can find for diagnostics.
+
+    Tolerates the ``turns: [{response: "..."}]`` shape the gateway uses
+    today plus common message-list shapes. Truncated so the artifact
+    stays small.
+    """
+    candidates: list[str] = []
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key in ("response", "content", "text"):
+                value = node.get(key)
+                if isinstance(value, str) and value:
+                    candidates.append(value)
+            for value in node.values():
+                if not isinstance(value, str):
+                    _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(history)
+    if not candidates:
+        return ""
+    return candidates[-1][:300]
+
+
 def _history_text(history: dict[str, Any]) -> str:
     chunks: list[str] = []
 
@@ -264,6 +341,17 @@ async def run(
             ),
             "forbidden_fragments_seen": forbidden_hits,
             "history_length_chars": len(text),
+            # Diagnostic surface — only meaningful on failure but cheap
+            # enough to always emit. The probe's primary failure mode
+            # ("agent didn't reach tool_install") has too many possible
+            # root causes (LLM-surface regression / approval gate parked
+            # / auth env not propagated / wrong engine version) to
+            # distinguish without seeing what the agent actually did.
+            "tool_calls_observed": _collect_tool_calls(history),
+            "pending_gate": (history.get("pending_gate") if isinstance(history, dict) else None),
+            "last_assistant_text": _last_assistant_text(history),
+            "agent_auto_approve_env": os.environ.get("AGENT_AUTO_APPROVE_TOOLS"),
+            "allow_local_tools_env": os.environ.get("ALLOW_LOCAL_TOOLS"),
         }
         if not success:
             # Build a short, structured error string so the slack
