@@ -49,6 +49,13 @@ use crate::{
     SecretMaterial, SecretMetadata, SecretStore, SecretStoreError, SecretsCrypto,
 };
 
+/// Maximum number of CAS retries before a multi-process write loop gives up
+/// and surfaces a transient backend error. Mirrors the bound used in
+/// `ironclaw_engine::store::filesystem` and `ironclaw_authorization` — three
+/// attempts is enough to absorb realistic contention without papering over
+/// pathological hot-spots that should be surfaced to the caller.
+const CAS_RETRY_ATTEMPTS: usize = 3;
+
 // -- Serialized DTOs --------------------------------------------------------
 //
 // These types are intentionally private. They carry encrypted payload bytes
@@ -370,47 +377,93 @@ where
     ) -> Result<SecretMaterial, SecretStoreError> {
         let lock = filesystem_secret_lock_for_lease(scope, lease_id);
         let _guard = lock.lock().await;
-        let mut lease = self.read_lease(scope, lease_id).await?.ok_or_else(|| {
-            SecretStoreError::UnknownLease {
-                scope: Box::new(scope.clone()),
-                lease_id,
+        // The process-local mutex above only serializes writers in this
+        // process; multi-process callers sharing the same backend root could
+        // otherwise both observe an `Active` lease, both decrypt, and both
+        // overwrite the consumed marker. Re-read and retry on
+        // `FilesystemError::VersionMismatch` so a concurrent consume from
+        // another process loses the race deterministically. Pattern mirrors
+        // `ironclaw_engine::store::filesystem::update_thread_state`.
+        let path = lease_path(scope, lease_id)?;
+        for _ in 0..CAS_RETRY_ATTEMPTS {
+            let Some(versioned) = self
+                .filesystem
+                .get(&path)
+                .await
+                .map_err(fs_to_secret_store_error)?
+            else {
+                return Err(SecretStoreError::UnknownLease {
+                    scope: Box::new(scope.clone()),
+                    lease_id,
+                });
+            };
+            let mut lease: StoredLease = deserialize_secret(&versioned.entry.body)?;
+            if !same_scope_for_lease(&lease.scope, scope) {
+                return Err(SecretStoreError::UnknownLease {
+                    scope: Box::new(scope.clone()),
+                    lease_id,
+                });
             }
-        })?;
-        let now = Utc::now();
-        let effective = Self::effective_status(&lease, now);
-        match effective {
-            SecretLeaseStatus::Active => {}
-            SecretLeaseStatus::Consumed => {
-                return Err(SecretStoreError::LeaseConsumed { lease_id });
-            }
-            SecretLeaseStatus::Revoked => {
-                return Err(SecretStoreError::LeaseRevoked { lease_id });
-            }
-            SecretLeaseStatus::Expired => {
-                if lease.status != SecretLeaseStatus::Expired {
-                    lease.status = SecretLeaseStatus::Expired;
-                    self.write_lease(&lease).await?;
+            let now = Utc::now();
+            let effective = Self::effective_status(&lease, now);
+            match effective {
+                SecretLeaseStatus::Active => {}
+                SecretLeaseStatus::Consumed => {
+                    return Err(SecretStoreError::LeaseConsumed { lease_id });
                 }
-                return Err(SecretStoreError::LeaseExpired { lease_id });
+                SecretLeaseStatus::Revoked => {
+                    return Err(SecretStoreError::LeaseRevoked { lease_id });
+                }
+                SecretLeaseStatus::Expired => {
+                    if lease.status != SecretLeaseStatus::Expired {
+                        lease.status = SecretLeaseStatus::Expired;
+                        // Best-effort expiry promotion. If another writer
+                        // raced us we'll observe Expired on the next read
+                        // and return the same error to the caller.
+                        let body = serialize_secret(&lease)?;
+                        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+                        match self
+                            .filesystem
+                            .put(&path, entry, CasExpectation::Version(versioned.version))
+                            .await
+                        {
+                            Ok(_) | Err(FilesystemError::VersionMismatch { .. }) => {}
+                            Err(error) => return Err(fs_to_secret_store_error(error)),
+                        }
+                    }
+                    return Err(SecretStoreError::LeaseExpired { lease_id });
+                }
+            }
+
+            let stored = self
+                .read_secret(scope, &lease.handle)
+                .await?
+                .ok_or_else(|| SecretStoreError::UnknownSecret {
+                    scope: Box::new(scope.clone()),
+                    handle: lease.handle.clone(),
+                })?;
+            let decrypted = self
+                .crypto
+                .decrypt(&stored.encrypted_value, &stored.key_salt)
+                .map_err(secret_error_to_store_error)?;
+            let material = SecretMaterial::from(decrypted.expose().to_string());
+
+            lease.status = SecretLeaseStatus::Consumed;
+            let body = serialize_secret(&lease)?;
+            let entry = Entry::bytes(body).with_content_type(ContentType::json());
+            match self
+                .filesystem
+                .put(&path, entry, CasExpectation::Version(versioned.version))
+                .await
+            {
+                Ok(_) => return Ok(material),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(fs_to_secret_store_error(error)),
             }
         }
-
-        let stored = self
-            .read_secret(scope, &lease.handle)
-            .await?
-            .ok_or_else(|| SecretStoreError::UnknownSecret {
-                scope: Box::new(scope.clone()),
-                handle: lease.handle.clone(),
-            })?;
-        let decrypted = self
-            .crypto
-            .decrypt(&stored.encrypted_value, &stored.key_salt)
-            .map_err(secret_error_to_store_error)?;
-        let material = SecretMaterial::from(decrypted.expose().to_string());
-
-        lease.status = SecretLeaseStatus::Consumed;
-        self.write_lease(&lease).await?;
-        Ok(material)
+        Err(SecretStoreError::StoreUnavailable {
+            reason: "secret lease consume retry limit exceeded".to_string(),
+        })
     }
 
     async fn revoke(
@@ -444,6 +497,18 @@ where
         &self,
         scope: &ResourceScope,
     ) -> Result<Vec<SecretLease>, SecretStoreError> {
+        // TODO(perf): this is an N+1 scan — list_dir over the per-owner
+        // lease root followed by one `get` per lease entry. The cardinality
+        // is bounded because `lease_root` already encodes the full owner
+        // prefix (tenant/user/[agent]/[project]), so only the missions /
+        // threads / invocations under that owner contribute, and active
+        // one-shot leases are short-lived (TTL `DEFAULT_SECRET_LEASE_TTL_SECONDS`).
+        // If we add an index here it should sit on a composite scope-derived
+        // key (mission_id + thread_id + invocation_id) and route through
+        // `RootFilesystem::query` with `Filter::Eq` — the secrets store
+        // currently declares no indexes (no `ensure_*` calls in `new`), so
+        // adding that path is a follow-up. Until then, the list+get fan-out
+        // is acceptable because N is bounded by the owner prefix.
         let root = lease_root(scope)?;
         let entries = match self.filesystem.list_dir(&root).await {
             Ok(entries) => entries,
@@ -705,30 +770,44 @@ where
         let path = credential_session_path(scope, session_id)?;
         let lock = filesystem_session_lock(&path);
         let _guard = lock.lock().await;
-        let Some(versioned) = self
-            .filesystem
-            .get(&path)
-            .await
-            .map_err(fs_to_broker_error)?
-        else {
-            return Err(CredentialBrokerError::UnknownSession { session_id });
-        };
-        let mut stored: StoredSession = deserialize_credential(&versioned.entry.body)?;
-        let wire: SerializableCredentialSession =
-            self.decrypt_payload(&stored.encrypted_payload, &stored.key_salt)?;
-        if wire.scope != *scope {
-            return Err(CredentialBrokerError::UnknownSession { session_id });
+        // Multi-process callers sharing the same backend root must not both
+        // pass the max-uses check and overwrite each other's increment. We
+        // load the current version, evaluate the use-limit condition, and
+        // write the incremented counter with a CAS expectation. On
+        // `VersionMismatch` we re-read, re-evaluate the condition, and retry.
+        // Pattern mirrors `ironclaw_engine::store::filesystem::update_thread_state`.
+        for _ in 0..CAS_RETRY_ATTEMPTS {
+            let Some(versioned) = self
+                .filesystem
+                .get(&path)
+                .await
+                .map_err(fs_to_broker_error)?
+            else {
+                return Err(CredentialBrokerError::UnknownSession { session_id });
+            };
+            let mut stored: StoredSession = deserialize_credential(&versioned.entry.body)?;
+            let wire: SerializableCredentialSession =
+                self.decrypt_payload(&stored.encrypted_payload, &stored.key_salt)?;
+            if wire.scope != *scope {
+                return Err(CredentialBrokerError::UnknownSession { session_id });
+            }
+            ensure_stored_session_usable(&wire, stored.uses, session_id, now)?;
+            stored.uses += 1;
+            let body = serialize_credential(&stored)?;
+            let entry = Entry::bytes(body).with_content_type(ContentType::json());
+            match self
+                .filesystem
+                .put(&path, entry, CasExpectation::Version(versioned.version))
+                .await
+            {
+                Ok(_) => return wire.into_session(),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(fs_to_broker_error(error)),
+            }
         }
-        ensure_stored_session_usable(&wire, stored.uses, session_id, now)?;
-        stored.uses += 1;
-        let body = serialize_credential(&stored)?;
-        let entry = Entry::bytes(body).with_content_type(ContentType::json());
-        self.filesystem
-            .put(&path, entry, CasExpectation::Any)
-            .await
-            .map(|_| ())
-            .map_err(fs_to_broker_error)?;
-        wire.into_session()
+        Err(CredentialBrokerError::BrokerUnavailable {
+            reason: "credential session use retry limit exceeded".to_string(),
+        })
     }
 }
 
@@ -1290,5 +1369,222 @@ mod tests {
             !raw.contains("leak-sentinel-92ab"),
             "credential account label must be encrypted at rest"
         );
+    }
+
+    // ─── CAS retry regression tests (PR #3679 review fix) ───────────────
+    //
+    // The next two tests simulate a concurrent multi-process writer landing
+    // between the read and the CAS write inside `consume` /
+    // `consume_session_use`. They wrap `InMemoryBackend` with a
+    // `VersionRacingBackend` that, on the first `put` against the watched
+    // path with a `CasExpectation::Version(_)`, bumps the stored version
+    // out-of-band before delegating. The delegated put then fails with
+    // `FilesystemError::VersionMismatch`, the retry loop re-reads, and the
+    // second attempt succeeds.
+
+    use std::sync::Arc as StdArc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use ironclaw_filesystem::{
+        BackendCapabilities, DirEntry, FileStat, Filter, IndexSpec, Page, RecordVersion,
+        RootFilesystem, VersionedEntry,
+    };
+
+    struct VersionRacingBackend {
+        inner: StdArc<InMemoryBackend>,
+        watched: String,
+        raced: AtomicBool,
+    }
+
+    impl VersionRacingBackend {
+        fn new(inner: StdArc<InMemoryBackend>, watched: VirtualPath) -> Self {
+            Self {
+                inner,
+                watched: watched.as_str().to_string(),
+                raced: AtomicBool::new(false),
+            }
+        }
+
+        fn raced(&self) -> bool {
+            self.raced.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl RootFilesystem for VersionRacingBackend {
+        fn capabilities(&self) -> BackendCapabilities {
+            self.inner.capabilities()
+        }
+
+        async fn put(
+            &self,
+            path: &VirtualPath,
+            entry: Entry,
+            cas: CasExpectation,
+        ) -> Result<RecordVersion, FilesystemError> {
+            // Only race the first `put` with a versioned CAS against the
+            // watched path. Everything else (initial `Any` writes, retries,
+            // unrelated paths) goes through untouched.
+            let should_race = path.as_str() == self.watched
+                && matches!(cas, CasExpectation::Version(_))
+                && !self.raced.swap(true, Ordering::SeqCst);
+            if should_race && let Some(current) = self.inner.get(path).await? {
+                // Out-of-band write under `Any` to bump the path's stored
+                // version. This is what a competing process's `put` would
+                // look like to our backend — the entry body is a copy of
+                // the current entry so the lease state itself doesn't
+                // change, only the version moves forward. After the OOB
+                // bump the caller's CAS version is stale, so the delegated
+                // put below will return VersionMismatch — exactly the
+                // contention shape the retry loop must absorb.
+                let _ = self
+                    .inner
+                    .put(path, current.entry, CasExpectation::Any)
+                    .await;
+            }
+            self.inner.put(path, entry, cas).await
+        }
+
+        async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+            self.inner.get(path).await
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            self.inner.list_dir(path).await
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            self.inner.stat(path).await
+        }
+
+        async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            self.inner.delete(path).await
+        }
+
+        async fn query(
+            &self,
+            path: &VirtualPath,
+            filter: &Filter,
+            page: Page,
+        ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+            self.inner.query(path, filter, page).await
+        }
+
+        async fn ensure_index(
+            &self,
+            path: &VirtualPath,
+            spec: &IndexSpec,
+        ) -> Result<(), FilesystemError> {
+            self.inner.ensure_index(path, spec).await
+        }
+    }
+
+    #[tokio::test]
+    async fn filesystem_secret_store_consume_retries_on_version_mismatch() {
+        // First write the lease through a plain backend so the lease and
+        // secret material exist, then swap in the racing backend so the
+        // very next `put` (the consume's CAS write) hits a forced
+        // VersionMismatch.
+        let inner = StdArc::new(InMemoryBackend::new());
+        let bootstrap_store = FilesystemSecretStore::new(StdArc::clone(&inner), test_crypto());
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("api_key").unwrap();
+        bootstrap_store
+            .put(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("super-secret-cas"),
+            )
+            .await
+            .unwrap();
+        let lease = bootstrap_store.lease_once(&scope, &handle).await.unwrap();
+
+        let lease_path_for_test = lease_path(&scope, lease.id).unwrap();
+        let racing = StdArc::new(VersionRacingBackend::new(
+            StdArc::clone(&inner),
+            lease_path_for_test,
+        ));
+        let racing_store = FilesystemSecretStore::new(StdArc::clone(&racing), test_crypto());
+
+        let material = racing_store.consume(&scope, lease.id).await.unwrap();
+        assert_eq!(material.expose_secret(), "super-secret-cas");
+        assert!(
+            racing.raced(),
+            "racing backend must have observed the first put and bumped the version"
+        );
+        // Lease is now consumed; a second consume must return LeaseConsumed,
+        // proving the retried CAS write actually persisted the new state.
+        let second = racing_store.consume(&scope, lease.id).await.unwrap_err();
+        assert!(second.is_consumed());
+    }
+
+    #[tokio::test]
+    async fn filesystem_broker_consume_session_use_retries_on_version_mismatch() {
+        let inner = StdArc::new(InMemoryBackend::new());
+        let bootstrap_broker =
+            FilesystemCredentialBroker::new(StdArc::clone(&inner), test_crypto());
+        let scope = sample_scope("tenant-a", "user-a");
+        let account_id = CredentialAccountId::new("openai_cas").unwrap();
+        let account = sample_account(
+            scope.clone(),
+            account_id.clone(),
+            SecretHandle::new("openai_cas_key").unwrap(),
+        );
+        bootstrap_broker.put_account(account.clone()).await.unwrap();
+
+        let in_memory = InMemoryCredentialBroker::new();
+        in_memory.put_account(account).unwrap();
+        let session = in_memory
+            .create_session(crate::CredentialSessionRequest {
+                scope: scope.clone(),
+                invocation_id: scope.invocation_id,
+                capability_id: CapabilityId::new("openai.chat").unwrap(),
+                extension_id: ExtensionId::new("openai").unwrap(),
+                account_id: account_id.clone(),
+                method: NetworkMethod::Get,
+                url: "https://api.example.com/v1/models".to_string(),
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(60)),
+                max_uses: Some(3),
+            })
+            .unwrap();
+        bootstrap_broker
+            .issue_session(session.clone())
+            .await
+            .unwrap();
+        let correlation = session.correlation_id();
+        let session_path_for_test = credential_session_path(&scope, correlation).unwrap();
+
+        let racing = StdArc::new(VersionRacingBackend::new(
+            StdArc::clone(&inner),
+            session_path_for_test,
+        ));
+        let racing_broker = FilesystemCredentialBroker::new(StdArc::clone(&racing), test_crypto());
+
+        racing_broker
+            .consume_session_use(&scope, correlation, Utc::now())
+            .await
+            .unwrap();
+        assert!(
+            racing.raced(),
+            "racing backend must have observed the first put and bumped the version"
+        );
+
+        // After the retried increment lands, two further legitimate
+        // consumes should bring `uses` to 3 (the max) and the next call
+        // must fail with the use-limit error — proving the retry actually
+        // wrote the incremented counter rather than dropping it.
+        racing_broker
+            .consume_session_use(&scope, correlation, Utc::now())
+            .await
+            .unwrap();
+        racing_broker
+            .consume_session_use(&scope, correlation, Utc::now())
+            .await
+            .unwrap();
+        let exceeded = racing_broker
+            .consume_session_use(&scope, correlation, Utc::now())
+            .await
+            .unwrap_err();
+        assert!(exceeded.is_use_limit_exceeded());
     }
 }
