@@ -73,9 +73,15 @@ const VIRTUAL_ROOTS: &[&str] = &[
     "/tmp",
     "/secrets",
     "/events",
+    // Legacy `src/db/` filesystem facades under the kernel-storage rework.
+    // Roots are stable mount prefixes; they remain valid even after the
+    // libSQL/Postgres backends are removed.
     "/sandbox",
     "/routines",
     "/tool_failures",
+    "/identities",
+    "/pairing",
+    "/workspace",
 ];
 
 /// Common raw host-path prefixes rejected before scoped-path normalization.
