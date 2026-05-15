@@ -499,9 +499,9 @@ impl WebUiService for FakeWebUiService {
         if let Some(outcome) = state.create_thread_outcome.clone() {
             return Ok(outcome);
         }
-        let thread_id = command
-            .requested_thread_id
-            .unwrap_or_else(|| ThreadId::new("thread:fake-webui").expect("fake thread id"));
+        let thread_id = command.requested_thread_id.unwrap_or_else(|| {
+            ThreadId::new("thread:fake-webui").expect("fake thread id") // safety: test-support fake; literal id is always valid
+        });
         Ok(WebUiThreadCreated { thread_id })
     }
 

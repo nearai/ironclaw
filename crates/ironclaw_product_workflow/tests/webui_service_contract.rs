@@ -341,6 +341,88 @@ async fn create_thread_requires_agent_context() {
     assert!(!err.retryable());
 }
 
+// C1 regression: a browser retry (same client_action_id, no requested_thread_id)
+// must NOT produce two distinct threads. Previously `Uuid::new_v4()` made each
+// call yield a fresh thread; the fix derives the id from client_action_id, so
+// the underlying ensure_thread call becomes idempotent on retry.
+#[tokio::test]
+async fn create_thread_is_idempotent_on_client_action_id() {
+    let (_threads, _coordinator, _projections, service) = build_service();
+    let first = service
+        .create_thread(WebUiCreateThreadCommand {
+            caller: caller_with_agent(),
+            client_action_id: idempotency("create-idem"),
+            requested_thread_id: None,
+        })
+        .await
+        .expect("first create");
+    let second = service
+        .create_thread(WebUiCreateThreadCommand {
+            caller: caller_with_agent(),
+            client_action_id: idempotency("create-idem"),
+            requested_thread_id: None,
+        })
+        .await
+        .expect("second create");
+    assert_eq!(
+        first.thread_id, second.thread_id,
+        "same client_action_id must produce the same thread_id"
+    );
+
+    // And a different idempotency key should still produce a distinct thread.
+    let other = service
+        .create_thread(WebUiCreateThreadCommand {
+            caller: caller_with_agent(),
+            client_action_id: idempotency("create-idem-other"),
+            requested_thread_id: None,
+        })
+        .await
+        .expect("other create");
+    assert_ne!(first.thread_id, other.thread_id);
+}
+
+// H1 regression: ThreadScopeMismatch — a caller asking for a `requested_thread_id`
+// that already exists under a different `(tenant, agent)` scope must surface as
+// Forbidden (403), not as ThreadServiceUnavailable (503). The previous catch-all
+// collapsed every SessionThreadError to 503, which would cause browsers to
+// retry forever against a thread they have no right to.
+#[tokio::test]
+async fn create_thread_scope_mismatch_maps_to_forbidden() {
+    let (_threads, _coordinator, _projections, service) = build_service();
+    let shared_thread = thread_id("thread:webui:shared");
+
+    let alice = caller_with_agent(); // agent:agent-alpha
+    service
+        .create_thread(WebUiCreateThreadCommand {
+            caller: alice,
+            client_action_id: idempotency("scope-1"),
+            requested_thread_id: Some(shared_thread.clone()),
+        })
+        .await
+        .expect("alice creates the thread under agent-alpha");
+
+    // Bob is a different agent on the same tenant, asking for the SAME
+    // thread_id. The thread service returns ThreadScopeMismatch.
+    let bob = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("user-bob").expect("user"),
+        Some(AgentId::new("agent-bravo").expect("agent")),
+        None,
+    );
+    let err = service
+        .create_thread(WebUiCreateThreadCommand {
+            caller: bob,
+            client_action_id: idempotency("scope-2"),
+            requested_thread_id: Some(shared_thread),
+        })
+        .await
+        .expect_err("scope mismatch");
+
+    assert_eq!(err, WebUiServiceError::Forbidden);
+    assert_eq!(err.status_code(), 403);
+    assert!(!err.retryable());
+}
+
 // ---------------------------------------------------------------------------
 // send_message
 // ---------------------------------------------------------------------------
@@ -441,16 +523,13 @@ async fn send_message_maps_turn_error_to_typed_rejection() {
         .await
         .expect_err("expected unauthorized");
 
-    match err {
-        WebUiServiceError::TurnRejected {
-            category,
-            status_code,
-        } => {
-            assert_eq!(category, TurnErrorCategory::Unauthorized);
-            assert_eq!(status_code, 403);
+    match &err {
+        WebUiServiceError::TurnRejected { category } => {
+            assert_eq!(*category, TurnErrorCategory::Unauthorized);
         }
         other => panic!("expected TurnRejected, got {other:?}"),
     }
+    assert_eq!(err.status_code(), 403);
 }
 
 #[tokio::test]
@@ -586,15 +665,18 @@ async fn resolve_gate_approved_routes_to_resume_turn() {
     assert!(coordinator.cancels().is_empty());
 }
 
+// C2 regression: previously this arm fell through to resume_turn and silently
+// dropped `credential_ref`. The fix is to fail loud with Unsupported until the
+// credential-binding port lands. If/when that port exists, this test should be
+// flipped back to "routes to resume_turn after binding credential".
 #[tokio::test]
-async fn resolve_gate_credential_provided_routes_to_resume_turn() {
+async fn resolve_gate_credential_provided_returns_unsupported_until_binding_port_exists() {
     let (_threads, coordinator, _projections, service) = build_service();
     let caller = caller_with_agent();
     let scope = turn_scope_for(&caller, &thread_id("thread:webui:iota"));
     let run_id = TurnRunId::new();
-    coordinator.program_resume(Ok(resume_response(run_id)));
 
-    let outcome = service
+    let err = service
         .resolve_gate(WebUiResolveGateCommand {
             scope,
             actor: caller.actor(),
@@ -606,10 +688,20 @@ async fn resolve_gate_credential_provided_routes_to_resume_turn() {
             },
         })
         .await
-        .expect("resolve gate");
+        .expect_err("CredentialProvided is currently unsupported");
 
-    assert!(matches!(outcome, WebUiGateResolved::Resumed { .. }));
-    assert_eq!(coordinator.resumes().len(), 1);
+    match &err {
+        WebUiServiceError::Unsupported { what } => {
+            assert_eq!(*what, "credential_provided_gate_resolution");
+        }
+        other => panic!("expected Unsupported, got {other:?}"),
+    }
+    assert_eq!(err.status_code(), 501);
+    assert!(!err.retryable());
+    // Crucially: the facade must NOT have called resume_turn or cancel_run
+    // when it doesn't know how to honor the credential.
+    assert!(coordinator.resumes().is_empty());
+    assert!(coordinator.cancels().is_empty());
 }
 
 #[tokio::test]

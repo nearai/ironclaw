@@ -143,8 +143,11 @@ pub struct WebUiGetTimelineCommand {
 /// Opaque cursor that the browser passes back into subsequent timeline reads.
 ///
 /// Handlers may serialize the wrapped JSON to the browser but must not
-/// reach into the inner projection cursor.
+/// reach into the inner projection cursor. `#[serde(transparent)]` keeps
+/// the wire shape identical to the inner `ProjectionCursor`, so browsers
+/// see a clean JSON object instead of the default tuple-struct encoding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct WebUiTimelineCursor(ProjectionCursor);
 
 impl WebUiTimelineCursor {
@@ -233,32 +236,60 @@ pub struct WebUiTimelineReplay {
 /// Redacted error surface for WebUI handlers.
 ///
 /// All internal reasons (provider details, host paths, raw store errors) are
-/// summarized into stable variants so callers can map them to HTTP status
-/// codes without leaking provider/internal detail.
+/// summarized into stable variants so handlers can map them to HTTP status
+/// codes via [`WebUiServiceError::status_code`] without leaking
+/// provider/internal detail.
+///
+/// Variants are deliberately classified by **what the browser should do**
+/// (re-snapshot, retry, prompt, give up) rather than by which downstream
+/// service produced the error, so a single redaction rule applies regardless
+/// of source.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum WebUiServiceError {
     /// Caller lacks an agent binding required for the requested operation.
     #[error("caller is missing required agent context")]
     MissingAgentContext,
 
-    /// The thread store is temporarily unavailable.
-    #[error("thread service unavailable")]
-    ThreadServiceUnavailable,
+    /// The requested resource (thread, run, message) does not exist for
+    /// this caller.
+    #[error("resource not found")]
+    NotFound,
 
-    /// The turn coordinator rejected the request with a typed category.
+    /// The caller is not authorized for this resource. The most common case
+    /// is a thread that exists under a different `(tenant, agent)` scope.
+    #[error("forbidden")]
+    Forbidden,
+
+    /// The request conflicts with current state (e.g. transitioning a
+    /// message from an incompatible status, idempotency key reused across
+    /// different threads, message already past the draft phase).
+    #[error("request conflicts with current state")]
+    Conflict,
+
+    /// Input failed shape validation inside the facade (e.g. cursor scope
+    /// mismatch, invalid summary range, malformed ref).
+    #[error("invalid input")]
+    InvalidInput,
+
+    /// The turn coordinator rejected the request with a typed category. The
+    /// `status_code()` mapping is derived from the category so handlers
+    /// don't need to know the turn-error vocabulary directly.
     #[error("turn coordinator rejected request")]
-    TurnRejected {
-        category: TurnErrorCategory,
-        status_code: u16,
-    },
+    TurnRejected { category: TurnErrorCategory },
 
-    /// A transient downstream failure; safe to retry.
+    /// A transient downstream failure (durable store backend, serialization,
+    /// projection source). Safe to retry.
     #[error("transient downstream failure")]
     Transient,
 
-    /// Input failed shape validation inside the facade (e.g. ref construction).
-    #[error("invalid input")]
-    InvalidInput,
+    /// The operation is recognized by the facade but the underlying capability
+    /// is not yet wired in the current slice. Handlers should treat this as a
+    /// permanent failure for the request, not a retryable one.
+    ///
+    /// Currently used for `WebUiGateResolution::CredentialProvided`, which
+    /// requires a credential-binding port that does not exist in Slice 1.
+    #[error("operation not yet supported: {what}")]
+    Unsupported { what: &'static str },
 
     /// The supplied timeline cursor is older than the durable log can replay
     /// from. The browser must drop the cursor and call
@@ -277,27 +308,38 @@ impl WebUiServiceError {
     /// HTTP status code suggested for this error.
     pub fn status_code(&self) -> u16 {
         match self {
-            Self::MissingAgentContext => 400,
-            Self::ThreadServiceUnavailable => 503,
-            Self::TurnRejected { status_code, .. } => *status_code,
+            Self::MissingAgentContext | Self::InvalidInput => 400,
+            Self::Forbidden => 403,
+            Self::NotFound => 404,
+            // 409 Conflict: thread/message state mismatch, or the browser's
+            // view diverged from the durable log.
+            Self::Conflict | Self::TimelineRebaseRequired { .. } => 409,
+            Self::TurnRejected { category } => turn_category_status_code(*category),
             Self::Transient => 503,
-            Self::InvalidInput => 400,
-            // 409 Conflict: the browser's view diverged from the durable log;
-            // it must re-snapshot before further timeline reads succeed.
-            Self::TimelineRebaseRequired { .. } => 409,
+            Self::Unsupported { .. } => 501,
         }
     }
 
     /// Whether this error is safe to retry from the browser.
     pub fn retryable(&self) -> bool {
-        matches!(self, Self::Transient | Self::ThreadServiceUnavailable)
-            || matches!(
-                self,
-                Self::TurnRejected {
-                    status_code: 429 | 503,
-                    ..
-                }
-            )
+        match self {
+            Self::Transient => true,
+            Self::TurnRejected { category } => {
+                matches!(turn_category_status_code(*category), 429 | 503)
+            }
+            _ => false,
+        }
+    }
+}
+
+fn turn_category_status_code(category: TurnErrorCategory) -> u16 {
+    match category {
+        TurnErrorCategory::ThreadBusy | TurnErrorCategory::Conflict => 409,
+        TurnErrorCategory::AdmissionRejected => 429,
+        TurnErrorCategory::ScopeNotFound => 404,
+        TurnErrorCategory::Unauthorized => 403,
+        TurnErrorCategory::InvalidRequest => 400,
+        TurnErrorCategory::Unavailable => 503,
     }
 }
 
@@ -314,18 +356,38 @@ impl From<ProjectionError> for WebUiServiceError {
 }
 
 impl From<SessionThreadError> for WebUiServiceError {
-    fn from(_value: SessionThreadError) -> Self {
-        Self::ThreadServiceUnavailable
+    fn from(value: SessionThreadError) -> Self {
+        match value {
+            // Resource does not exist for this caller.
+            SessionThreadError::UnknownThread { .. }
+            | SessionThreadError::UnknownMessage { .. } => Self::NotFound,
+            // Authorization boundary: the thread/idempotency key exists but
+            // belongs to a different (tenant, agent) scope or different
+            // canonical thread. Surface as 403 so the browser does not
+            // infinitely retry against a forbidden resource.
+            SessionThreadError::ThreadScopeMismatch { .. } => Self::Forbidden,
+            // State precondition mismatch: the message already moved past the
+            // status this operation needs, or the same idempotency key was
+            // previously bound to a different thread.
+            SessionThreadError::MessageNotDraft { .. }
+            | SessionThreadError::InvalidMessageTransition { .. }
+            | SessionThreadError::IdempotentReplayThreadMismatch { .. } => Self::Conflict,
+            // Caller-supplied input is structurally invalid.
+            SessionThreadError::InvalidSummaryRange { .. }
+            | SessionThreadError::OverlappingSummaryRange { .. } => Self::InvalidInput,
+            // Backend / generated-id / serialization failures are retryable.
+            SessionThreadError::GeneratedThreadId(_)
+            | SessionThreadError::Serialization(_)
+            | SessionThreadError::Deserialization(_)
+            | SessionThreadError::Backend(_) => Self::Transient,
+        }
     }
 }
 
 impl From<TurnError> for WebUiServiceError {
     fn from(value: TurnError) -> Self {
-        let category = value.category();
-        let status_code = value.adapter_status_code();
         Self::TurnRejected {
-            category,
-            status_code,
+            category: value.category(),
         }
     }
 }
@@ -364,15 +426,20 @@ impl WebUiService for DefaultWebUiService {
     ) -> Result<WebUiThreadCreated, WebUiServiceError> {
         let WebUiCreateThreadCommand {
             caller,
-            client_action_id: _,
+            client_action_id,
             requested_thread_id,
         } = command;
 
+        // C1 fix: when the browser omits `requested_thread_id`, derive a
+        // deterministic id from the client-supplied idempotency key. A naive
+        // `Uuid::new_v4()` here would create a fresh thread on every retry
+        // (network drops, double-submit), violating the implicit idempotency
+        // contract carried by `IdempotencyKey`.
         let thread_id = match requested_thread_id {
             Some(id) => id,
-            None => generate_webui_thread_id()?,
+            None => derive_webui_thread_id(&client_action_id)?,
         };
-        let scope = webui_thread_scope(&caller, &thread_id)?;
+        let scope = webui_thread_scope(&caller)?;
 
         let record = self
             .thread_service
@@ -524,8 +591,7 @@ impl WebUiService for DefaultWebUiService {
         } = command;
 
         match resolution {
-            WebUiGateResolution::Approved { .. }
-            | WebUiGateResolution::CredentialProvided { .. } => {
+            WebUiGateResolution::Approved { .. } => {
                 let source_binding_id = webui_binding_id(&actor);
                 let source_binding_ref = build_source_binding_ref(&source_binding_id)?;
                 let reply_target_binding_ref = build_reply_target_binding_ref(&source_binding_id)?;
@@ -545,6 +611,16 @@ impl WebUiService for DefaultWebUiService {
                     run_id: response.run_id,
                 })
             }
+            // C2 fix: previously this arm fell through to `resume_turn` and
+            // silently dropped `credential_ref`. The run would resume with no
+            // credential actually bound, and the next tool call would either
+            // re-trigger the auth gate or fail with a missing-credential
+            // error. The credential-binding port that would make this
+            // resolution honest does not exist in product_workflow yet, so
+            // we fail loud with a typed Unsupported error rather than lie.
+            WebUiGateResolution::CredentialProvided { .. } => Err(WebUiServiceError::Unsupported {
+                what: "credential_provided_gate_resolution",
+            }),
             WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
                 let response = self
                     .turn_coordinator
@@ -597,15 +673,17 @@ impl WebUiService for DefaultWebUiService {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn generate_webui_thread_id() -> Result<ThreadId, WebUiServiceError> {
-    ThreadId::new(format!("thread:webui:{}", Uuid::new_v4()))
-        .map_err(|_| WebUiServiceError::InvalidInput)
+/// Derive a deterministic `ThreadId` from the browser-supplied idempotency
+/// key. Same `client_action_id` → same thread_id, so `ensure_thread` makes
+/// the retry path a no-op instead of creating a duplicate row.
+fn derive_webui_thread_id(
+    client_action_id: &IdempotencyKey,
+) -> Result<ThreadId, WebUiServiceError> {
+    let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, client_action_id.as_str().as_bytes());
+    ThreadId::new(format!("thread:webui:{id}")).map_err(|_| WebUiServiceError::InvalidInput)
 }
 
-fn webui_thread_scope(
-    caller: &WebUiAuthenticatedCaller,
-    _thread_id: &ThreadId,
-) -> Result<ThreadScope, WebUiServiceError> {
+fn webui_thread_scope(caller: &WebUiAuthenticatedCaller) -> Result<ThreadScope, WebUiServiceError> {
     let Some(agent_id) = caller.agent_id.clone() else {
         return Err(WebUiServiceError::MissingAgentContext);
     };
