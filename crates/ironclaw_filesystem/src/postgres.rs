@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
 
+use crate::backend::EventRecord;
 use crate::db::{
     child_path_like_pattern, db_error, direct_children, directory_append_error,
     directory_write_error, escape_like_literal, escape_like_with_trailing_wildcard, is_not_found,
@@ -10,9 +11,9 @@ use crate::db::{
     valid_engine_path, virtual_path_prefixes,
 };
 use crate::{
-    BackendCapabilities, CasExpectation, ContentType, DirEntry, Entry, FileStat, FileType,
-    FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexSpec, IndexValue, Page,
-    RecordKind, RecordVersion, RootFilesystem, VersionedEntry,
+    BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
+    FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexSpec,
+    IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
 };
 
 #[cfg(feature = "postgres")]
@@ -58,9 +59,10 @@ impl PostgresRootFilesystem {
 impl RootFilesystem for PostgresRootFilesystem {
     fn capabilities(&self) -> BackendCapabilities {
         // sql_typical: read/write/append/list/stat/delete/records/query/
-        // IndexExact/IndexPrefix/CAS. Events + FTS/Vector indexes stay off
-        // until their respective backend ports land.
-        BackendCapabilities::sql_typical()
+        // IndexExact/IndexPrefix/CAS. Events join the set once the
+        // append/tail backing table lands (V30); FTS/Vector indexes stay
+        // off until their respective backend ports land.
+        BackendCapabilities::sql_typical().with(Capability::Events)
     }
 
     async fn put(
@@ -538,6 +540,60 @@ impl RootFilesystem for PostgresRootFilesystem {
         Ok(())
     }
 
+    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
+        let client = self.client().await?;
+        let row = client
+            .query_one(
+                r#"
+                INSERT INTO root_filesystem_events (path, payload)
+                VALUES ($1, $2)
+                RETURNING id
+                "#,
+                &[&path.as_str(), &payload],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::AppendFile, error))?;
+        let id: i64 = row.get("id");
+        seq_no_from_i64(path, id)
+    }
+
+    async fn tail(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        let client = self.client().await?;
+        let from_raw = i64::try_from(from.get()).map_err(|_| {
+            backend_error(
+                path.clone(),
+                FilesystemOperation::Tail,
+                "tail cursor exceeds i64",
+            )
+        })?;
+        let rows = client
+            .query(
+                r#"
+                SELECT id, payload
+                FROM root_filesystem_events
+                WHERE path = $1 AND id > $2
+                ORDER BY id ASC
+                "#,
+                &[&path.as_str(), &from_raw],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Tail, error))?;
+        rows.into_iter()
+            .map(|row| {
+                let id: i64 = row.get("id");
+                let payload: Vec<u8> = row.get("payload");
+                Ok(EventRecord {
+                    seq: seq_no_from_i64(path, id)?,
+                    payload,
+                })
+            })
+            .collect()
+    }
+
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let mut client = self.client().await?;
         let transaction = client
@@ -861,6 +917,30 @@ fn build_entry(
 }
 
 #[cfg(feature = "postgres")]
+fn seq_no_from_i64(path: &VirtualPath, raw: i64) -> Result<SeqNo, FilesystemError> {
+    u64::try_from(raw)
+        .map(SeqNo::from_backend)
+        .map_err(|_| FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::Tail,
+            reason: format!("event seq {raw} is not representable"),
+        })
+}
+
+#[cfg(feature = "postgres")]
+fn backend_error(
+    path: VirtualPath,
+    operation: FilesystemOperation,
+    reason: impl Into<String>,
+) -> FilesystemError {
+    FilesystemError::Backend {
+        path,
+        operation,
+        reason: reason.into(),
+    }
+}
+
+#[cfg(feature = "postgres")]
 const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = concat!(
     include_str!("../../../migrations/V26__root_filesystem_entries.sql"),
     "\n",
@@ -869,4 +949,6 @@ const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = concat!(
     include_str!("../../../migrations/V28__root_filesystem_records.sql"),
     "\n",
     include_str!("../../../migrations/V29__root_filesystem_index_specs.sql"),
+    "\n",
+    include_str!("../../../migrations/V30__root_filesystem_events.sql"),
 );

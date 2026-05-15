@@ -1024,13 +1024,15 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         },
         BoundaryRule {
             crate_name: "ironclaw_reborn_event_store",
+            // ironclaw_filesystem is permitted: FilesystemEventLog routes the
+            // durable log through the universal RootFilesystem dispatch
+            // fabric. See `2026-05-14-universal-fs-dispatch.md`.
             forbidden: vec![
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                "ironclaw_filesystem",
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
                 "ironclaw_network",
@@ -1051,6 +1053,11 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
+                // ironclaw_filesystem is permitted: FilesystemSecretStore /
+                // FilesystemCredentialBroker route secret + credential
+                // persistence through ScopedFilesystem under the
+                // universal-fs-dispatch rework (plan
+                // 2026-05-14-universal-fs-dispatch).
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
                 "ironclaw_processes",

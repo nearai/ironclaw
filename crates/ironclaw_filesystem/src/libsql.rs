@@ -4,6 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
 
+use crate::backend::EventRecord;
 use crate::db::{
     child_path_like_pattern, direct_children, directory_append_error, directory_write_error,
     escape_like_literal, escape_like_with_trailing_wildcard, is_not_found, libsql_db_error,
@@ -11,9 +12,9 @@ use crate::db::{
     valid_engine_path, virtual_path_prefixes,
 };
 use crate::{
-    BackendCapabilities, CasExpectation, ContentType, DirEntry, Entry, FileStat, FileType,
-    FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexSpec, IndexValue, Page,
-    RecordKind, RecordVersion, RootFilesystem, VersionedEntry,
+    BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
+    FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexSpec,
+    IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
 };
 
 #[cfg(feature = "libsql")]
@@ -42,6 +43,7 @@ impl LibSqlRootFilesystem {
         ensure_libsql_root_is_dir_column(&conn).await?;
         ensure_libsql_records_columns(&conn).await?;
         ensure_libsql_index_specs_table(&conn).await?;
+        ensure_libsql_events_table(&conn).await?;
         Ok(())
     }
 
@@ -68,9 +70,10 @@ impl LibSqlRootFilesystem {
 impl RootFilesystem for LibSqlRootFilesystem {
     fn capabilities(&self) -> BackendCapabilities {
         // sql_typical covers read/write/append/list/stat/delete/records/query
-        // /IndexExact/IndexPrefix/CAS. Events stay off until the append/tail
-        // backend port lands; IndexFts/Vector ditto.
-        BackendCapabilities::sql_typical()
+        // /IndexExact/IndexPrefix/CAS. Events advertise once the append/tail
+        // backing table is in place; IndexFts/Vector stay off until their
+        // respective backend ports land.
+        BackendCapabilities::sql_typical().with(Capability::Events)
     }
 
     async fn put(
@@ -616,6 +619,86 @@ impl RootFilesystem for LibSqlRootFilesystem {
         Ok(())
     }
 
+    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
+        let conn = self.connect().await?;
+        // INTEGER PRIMARY KEY AUTOINCREMENT assigns a fresh monotonic id per
+        // insert. We capture the assigned id via last_insert_rowid() under
+        // the same connection so concurrent writers don't observe each
+        // other's rowids — libsql's per-connection model gives us that
+        // for free.
+        conn.execute(
+            r#"
+            INSERT INTO root_filesystem_events (path, payload, created_at)
+            VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            "#,
+            libsql::params![path.as_str(), libsql::Value::Blob(payload)],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::AppendFile, error))?;
+        let mut rows = conn
+            .query("SELECT last_insert_rowid()", ())
+            .await
+            .map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::AppendFile, error)
+            })?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::AppendFile, error))?
+            .ok_or_else(|| FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::AppendFile,
+                reason: "last_insert_rowid returned no row after insert".to_string(),
+            })?;
+        let seq_raw: i64 = row.get(0).map_err(|error| {
+            libsql_db_error(path.clone(), FilesystemOperation::AppendFile, error)
+        })?;
+        seq_no_from_i64(path, seq_raw, FilesystemOperation::AppendFile)
+    }
+
+    async fn tail(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        let conn = self.connect().await?;
+        let from_raw = i64::try_from(from.get()).map_err(|_| FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::Tail,
+            reason: "tail cursor exceeds i64".to_string(),
+        })?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT seq, payload
+                FROM root_filesystem_events
+                WHERE path = ?1 AND seq > ?2
+                ORDER BY seq ASC
+                "#,
+                libsql::params![path.as_str(), from_raw],
+            )
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Tail, error))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Tail, error))?
+        {
+            let seq_raw: i64 = row
+                .get(0)
+                .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Tail, error))?;
+            let payload: Vec<u8> = row
+                .get(1)
+                .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Tail, error))?;
+            out.push(EventRecord {
+                seq: seq_no_from_i64(path, seq_raw, FilesystemOperation::Tail)?,
+                payload,
+            });
+        }
+        Ok(out)
+    }
+
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let conn = self.connect().await?;
         let transaction = conn.transaction().await.map_err(|error| {
@@ -908,6 +991,31 @@ async fn ensure_libsql_index_specs_table(conn: &libsql::Connection) -> Result<()
     Ok(())
 }
 
+#[cfg(feature = "libsql")]
+async fn ensure_libsql_events_table(conn: &libsql::Connection) -> Result<(), FilesystemError> {
+    conn.execute_batch(LIBSQL_EVENTS_SCHEMA)
+        .await
+        .map_err(|error| {
+            libsql_db_error(valid_engine_path(), FilesystemOperation::AppendFile, error)
+        })?;
+    Ok(())
+}
+
+#[cfg(feature = "libsql")]
+fn seq_no_from_i64(
+    path: &VirtualPath,
+    raw: i64,
+    operation: FilesystemOperation,
+) -> Result<SeqNo, FilesystemError> {
+    u64::try_from(raw)
+        .map(SeqNo::from_backend)
+        .map_err(|_| FilesystemError::Backend {
+            path: path.clone(),
+            operation,
+            reason: format!("event seq {raw} is not representable"),
+        })
+}
+
 /// Translate a [`Filter`] tree into a libsql WHERE-clause fragment.
 ///
 /// Reviewer (PR #3661) flagged that the prior version's "skip empty
@@ -1108,4 +1216,16 @@ CREATE TABLE IF NOT EXISTS root_filesystem_index_specs (
     kind TEXT NOT NULL,
     PRIMARY KEY (prefix, name)
 );
+"#;
+
+#[cfg(feature = "libsql")]
+const LIBSQL_EVENTS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS root_filesystem_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT NOT NULL,
+    payload BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_root_filesystem_events_path_seq
+    ON root_filesystem_events(path, seq);
 "#;

@@ -6,8 +6,9 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::{
-    CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation, Filter, IndexKey,
-    IndexKind, IndexName, IndexSpec, IndexValue, LibSqlRootFilesystem, Page, RecordKind,
+    Capability, CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation, Filter,
+    IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, LibSqlRootFilesystem, Page, RecordKind,
+    SeqNo,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::VirtualPath;
@@ -676,6 +677,76 @@ async fn libsql_query_paginates_results() {
 }
 
 #[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_append_and_tail_assigns_monotonic_seqno() {
+    let filesystem = libsql_root().await;
+    let log = VirtualPath::new("/events/engine").unwrap();
+
+    let s1 = filesystem.append(&log, b"a".to_vec()).await.unwrap();
+    let s2 = filesystem.append(&log, b"b".to_vec()).await.unwrap();
+    let s3 = filesystem.append(&log, b"c".to_vec()).await.unwrap();
+    assert!(s1 < s2 && s2 < s3);
+
+    // tail-from-zero returns every record in order.
+    let from_zero = filesystem.tail(&log, SeqNo::ZERO).await.unwrap();
+    assert_eq!(from_zero.len(), 3);
+    assert_eq!(from_zero[0].payload, b"a".to_vec());
+    assert_eq!(from_zero[1].payload, b"b".to_vec());
+    assert_eq!(from_zero[2].payload, b"c".to_vec());
+    assert_eq!(from_zero[0].seq, s1);
+    assert_eq!(from_zero[2].seq, s3);
+
+    // tail-from-N skips earlier records (exclusive).
+    let from_first = filesystem.tail(&log, s1).await.unwrap();
+    assert_eq!(from_first.len(), 2);
+    assert_eq!(from_first[0].seq, s2);
+    assert_eq!(from_first[1].seq, s3);
+
+    // tail-from-last returns nothing.
+    let from_last = filesystem.tail(&log, s3).await.unwrap();
+    assert!(from_last.is_empty());
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_append_distinct_paths_share_global_seq_but_are_isolated_on_tail() {
+    // Each path's tail returns only its own records, even though the
+    // underlying `INTEGER PRIMARY KEY AUTOINCREMENT` assigns global seqs.
+    // What matters at the trait surface is that `tail(path, from)` filters
+    // by path and that seqs are monotonic per path.
+    let filesystem = libsql_root().await;
+    let a = VirtualPath::new("/events/engine/a").unwrap();
+    let b = VirtualPath::new("/events/engine/b").unwrap();
+
+    let a1 = filesystem.append(&a, b"a1".to_vec()).await.unwrap();
+    let b1 = filesystem.append(&b, b"b1".to_vec()).await.unwrap();
+    let a2 = filesystem.append(&a, b"a2".to_vec()).await.unwrap();
+
+    let tail_a = filesystem.tail(&a, SeqNo::ZERO).await.unwrap();
+    let tail_b = filesystem.tail(&b, SeqNo::ZERO).await.unwrap();
+
+    assert_eq!(tail_a.len(), 2);
+    assert_eq!(tail_a[0].seq, a1);
+    assert_eq!(tail_a[1].seq, a2);
+    assert_eq!(tail_a[0].payload, b"a1".to_vec());
+    assert_eq!(tail_a[1].payload, b"a2".to_vec());
+
+    assert_eq!(tail_b.len(), 1);
+    assert_eq!(tail_b[0].seq, b1);
+    assert_eq!(tail_b[0].payload, b"b1".to_vec());
+
+    // Per-path seq is monotonic.
+    assert!(a1 < a2);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_capabilities_advertise_events() {
+    let filesystem = libsql_root().await;
+    assert!(filesystem.capabilities().has(Capability::Events));
+}
+
+#[cfg(feature = "libsql")]
 async fn libsql_root() -> TestLibSqlRootFilesystem {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("root-filesystem.db");
@@ -701,7 +772,11 @@ async fn libsql_root() -> TestLibSqlRootFilesystem {
 #[cfg(feature = "postgres")]
 mod postgres_tests {
     use super::*;
-    use ironclaw_filesystem::PostgresRootFilesystem;
+    use ironclaw_filesystem::{
+        Capability, CasExpectation, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
+        IndexSpec, IndexValue, Page, PostgresRootFilesystem, RecordKind, SeqNo,
+    };
+    use ironclaw_host_api::VirtualPath;
 
     async fn postgres_pool() -> Option<deadpool_postgres::Pool> {
         if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
@@ -1048,5 +1123,75 @@ mod postgres_tests {
         assert!(got.entry.indexed.is_empty());
         assert_eq!(got.entry.body, b"opaque");
         assert!(got.version > v1);
+    }
+
+    #[tokio::test]
+    async fn postgres_append_and_tail_assigns_monotonic_seqno() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        // Per-test unique log path (under `/secrets/leases` as a known
+        // VirtualPath root) so concurrent runs against a shared DB don't
+        // see each other's events.
+        let log = VirtualPath::new(format!("{prefix}/events_log")).unwrap();
+
+        let s1 = fs.append(&log, b"a".to_vec()).await.unwrap();
+        let s2 = fs.append(&log, b"b".to_vec()).await.unwrap();
+        let s3 = fs.append(&log, b"c".to_vec()).await.unwrap();
+        assert!(s1 < s2 && s2 < s3);
+
+        // tail-from-zero returns every record in order, with correct payloads.
+        let from_zero = fs.tail(&log, SeqNo::ZERO).await.unwrap();
+        assert_eq!(from_zero.len(), 3);
+        assert_eq!(from_zero[0].payload, b"a".to_vec());
+        assert_eq!(from_zero[1].payload, b"b".to_vec());
+        assert_eq!(from_zero[2].payload, b"c".to_vec());
+        assert_eq!(from_zero[0].seq, s1);
+        assert_eq!(from_zero[2].seq, s3);
+
+        // tail-from-N skips earlier records (exclusive).
+        let from_first = fs.tail(&log, s1).await.unwrap();
+        assert_eq!(from_first.len(), 2);
+        assert_eq!(from_first[0].seq, s2);
+        assert_eq!(from_first[1].seq, s3);
+
+        // tail-from-last returns nothing.
+        assert!(fs.tail(&log, s3).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn postgres_append_distinct_paths_are_isolated_on_tail() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let a = VirtualPath::new(format!("{prefix}/events_a")).unwrap();
+        let b = VirtualPath::new(format!("{prefix}/events_b")).unwrap();
+
+        let a1 = fs.append(&a, b"a1".to_vec()).await.unwrap();
+        let _ = fs.append(&b, b"b1".to_vec()).await.unwrap();
+        let a2 = fs.append(&a, b"a2".to_vec()).await.unwrap();
+
+        let tail_a = fs.tail(&a, SeqNo::ZERO).await.unwrap();
+        let tail_b = fs.tail(&b, SeqNo::ZERO).await.unwrap();
+
+        assert_eq!(tail_a.len(), 2);
+        assert_eq!(tail_a[0].seq, a1);
+        assert_eq!(tail_a[1].seq, a2);
+        assert_eq!(tail_a[0].payload, b"a1".to_vec());
+        assert_eq!(tail_a[1].payload, b"a2".to_vec());
+
+        assert_eq!(tail_b.len(), 1);
+        assert_eq!(tail_b[0].payload, b"b1".to_vec());
+
+        // Per-path seq is monotonic even though the BIGSERIAL is shared.
+        assert!(a1 < a2);
+    }
+
+    #[tokio::test]
+    async fn postgres_capabilities_advertise_events() {
+        let Some((fs, _prefix)) = postgres_root().await else {
+            return;
+        };
+        assert!(fs.capabilities().has(Capability::Events));
     }
 }

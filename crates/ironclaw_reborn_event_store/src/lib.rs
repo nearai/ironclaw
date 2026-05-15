@@ -33,12 +33,15 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+mod filesystem_store;
 #[cfg(feature = "libsql")]
 mod libsql_store;
 #[cfg(feature = "postgres")]
 mod postgres_store;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod sql_common;
+
+pub use filesystem_store::{FilesystemDurableAuditLog, FilesystemDurableEventLog};
 
 /// Backend configuration for Reborn durable event/audit stores.
 #[derive(Debug)]
