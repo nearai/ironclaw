@@ -18,7 +18,6 @@ hex = "0.4"
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
-ironclaw_storage = { path = "../ironclaw_storage" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 serde = { version = "1", features = ["derive"] }
