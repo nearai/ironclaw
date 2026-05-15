@@ -88,7 +88,16 @@ id's uniqueness contract and was removed in this revision.
       hook_id       bytea NOT NULL,
       capability    text NOT NULL,
       occurred_at   timestamptz NOT NULL,
-      event_id      uuid PRIMARY KEY -- for replay dedup
+      event_id      uuid NOT NULL,
+      -- Dedup is scoped to the counter key, NOT global on `event_id`.
+      -- `caller_event_id` is per capability invocation, so two
+      -- predicate-backed hooks observing the same invocation share the
+      -- same event_id; a global PRIMARY KEY on event_id would let the
+      -- first hook's INSERT win and silently undercount the second
+      -- hook's bucket (serrrfirat HIGH on PR #3635 5-15 review). Same
+      -- scope as the trait's replay-refusal contract: dedup within
+      -- (tenant_id, hook_id, capability) only.
+      PRIMARY KEY (tenant_id, hook_id, capability, event_id)
   );
   CREATE INDEX ix_hook_invocation_events_window ON hook_invocation_events
       (tenant_id, hook_id, capability, occurred_at DESC);
@@ -100,7 +109,10 @@ id's uniqueness contract and was removed in this revision.
       field         text NOT NULL,
       occurred_at   timestamptz NOT NULL,
       value         numeric NOT NULL,
-      event_id      uuid PRIMARY KEY
+      event_id      uuid NOT NULL,
+      -- Same per-counter-key dedup scope as the invocation table; the
+      -- additional `field` dimension is part of the counter key.
+      PRIMARY KEY (tenant_id, hook_id, capability, field, event_id)
   );
   CREATE INDEX ix_hook_value_events_window ON hook_value_events
       (tenant_id, hook_id, capability, field, occurred_at DESC);

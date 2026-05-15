@@ -90,13 +90,45 @@ pub(crate) struct ValueKey {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PredicateEventId(String);
 
+/// Format-validation error for [`PredicateEventId::new`].
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum PredicateEventIdError {
+    #[error("predicate event id must not be empty")]
+    Empty,
+    #[error("predicate event id must not contain NUL bytes")]
+    ContainsNul,
+}
+
 impl PredicateEventId {
-    /// Construct from any string-like value. Callers should pass a
-    /// stable, host-assigned identity (e.g. a `RuntimeEventId` hex). The
-    /// hook context enforces a non-empty / NUL-free invariant at
-    /// `with_caller_event_id`; this constructor itself stays permissive
-    /// so internal synth paths can mint ids freely.
-    pub fn new(value: impl Into<String>) -> Self {
+    /// Construct from any string-like value, validating non-empty and
+    /// NUL-free at the type boundary. Returns
+    /// [`PredicateEventIdError`] on rejection. Validation happens HERE
+    /// (not at the `BeforeCapabilityHookContext::with_caller_event_id`
+    /// setter) because the field on the context is `pub` and a caller
+    /// could otherwise bypass the setter to assign an invalid id —
+    /// henrypark133 MEDIUM regression from serrrfirat's 5-15 review on
+    /// PR #3635.
+    ///
+    /// For tests and the evaluator's internal synth path that mint ids
+    /// from known-good shapes (e.g. blake3 hex digests, hash-counter
+    /// tuples), use [`Self::new_unchecked`] to bypass the per-call
+    /// validation.
+    pub fn new(value: impl Into<String>) -> Result<Self, PredicateEventIdError> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err(PredicateEventIdError::Empty);
+        }
+        if value.as_bytes().contains(&0) {
+            return Err(PredicateEventIdError::ContainsNul);
+        }
+        Ok(Self(value))
+    }
+
+    /// Construct without per-call validation. Reserved for internal
+    /// synth paths and tests that mint ids from formats already known
+    /// to satisfy the contract (e.g. fixed-length hex digests).
+    /// External callers should use [`Self::new`].
+    pub fn new_unchecked(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
@@ -130,13 +162,17 @@ pub(crate) enum PredicateBackendError {
 ///
 /// # Replay refusal contract
 ///
-/// When `event_id` matches a previously-recorded event for the same
-/// `key`, the call is a no-op against the stored history. The backend
-/// still returns the current in-window count/sum, but the duplicate
-/// `event_id` does not contribute a second entry. The in-memory
-/// backend implements this via a small per-key seen-id set; durable
-/// backends should use `INSERT … ON CONFLICT (event_id) DO NOTHING`
-/// or equivalent.
+/// Dedup is scoped to the counter `key`, NOT to `event_id` globally.
+/// When `event_id` matches a previously-recorded event **for the same
+/// `key`**, the call is a no-op against that key's history; the same
+/// `event_id` against a *different* `key` still records normally. The
+/// in-memory backend implements this via a per-key seen-id set; durable
+/// backends should use `INSERT … ON CONFLICT (tenant_id, hook_id,
+/// capability[, field], event_id) DO NOTHING` so two predicate-backed
+/// hooks observing the same capability invocation (which share a
+/// `caller_event_id`) don't undercount each other (serrrfirat HIGH on
+/// PR #3635 5-15 review — see also the schema in successor doc
+/// `03-persistent-counter.md`).
 pub(crate) trait PredicateStateBackend: Send + Sync {
     /// Record an invocation at `now` against `key` (idempotent against
     /// `event_id`) and return the resulting in-window count after
@@ -428,7 +464,36 @@ mod tests {
     }
 
     fn ev(s: &str) -> PredicateEventId {
-        PredicateEventId::new(s)
+        // Test fixture ids are well-formed; use unchecked.
+        PredicateEventId::new_unchecked(s)
+    }
+
+    /// serrrfirat MEDIUM regression on PR #3635: caller-facing
+    /// `PredicateEventId::new` must reject empty + NUL-bearing values
+    /// at the type boundary so durable backends can't ever receive
+    /// invalid ids by way of a public-field direct assignment on the
+    /// hook context.
+    #[test]
+    fn predicate_event_id_rejects_empty() {
+        assert_eq!(PredicateEventId::new(""), Err(PredicateEventIdError::Empty));
+    }
+
+    #[test]
+    fn predicate_event_id_rejects_nul_bytes() {
+        assert_eq!(
+            PredicateEventId::new("abc\0def"),
+            Err(PredicateEventIdError::ContainsNul)
+        );
+    }
+
+    #[test]
+    fn predicate_event_id_accepts_typical_hex_digest() {
+        assert!(
+            PredicateEventId::new(
+                "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
+            )
+            .is_ok()
+        );
     }
 
     #[test]

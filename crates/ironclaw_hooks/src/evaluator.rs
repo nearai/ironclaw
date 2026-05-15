@@ -283,7 +283,9 @@ fn synth_event_id(hook_id: HookId, ctx: &BeforeCapabilityHookContext) -> Predica
     for byte in digest.as_bytes() {
         write!(s, "{byte:02x}").expect("writing to String never fails"); // safety: std::fmt::Write for String is infallible
     }
-    PredicateEventId::new(s)
+    // Synth output is always a 64-char hex digest — no NUL, never empty —
+    // so skip the per-call validation in `PredicateEventId::new`.
+    PredicateEventId::new_unchecked(s)
 }
 
 impl Default for PredicateEvaluator {
@@ -507,7 +509,8 @@ mod tests {
         };
         let stable_id = crate::predicate_state::PredicateEventId::new(
             "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
-        );
+        )
+        .expect("fixture id passes format validation");
         let ctx_with_id = ctx("cap.x").with_caller_event_id(stable_id);
         let now = Instant::now();
 
@@ -526,7 +529,8 @@ mod tests {
         // — bringing total to 2, still under the cap.
         let second_id = crate::predicate_state::PredicateEventId::new(
             "ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555",
-        );
+        )
+        .expect("fixture id passes format validation");
         let ctx_second = ctx("cap.x").with_caller_event_id(second_id);
         assert_eq!(
             evaluator.evaluate_at(hook_id(), &spec, &ctx_second, now),
@@ -536,7 +540,8 @@ mod tests {
         let third_id = crate::predicate_state::PredicateEventId::new(
             // henrypark133 nit #10: pin a 64-char hex like the synth output.
             "1111222211112222111122221111222211112222111122221111222211112222",
-        );
+        )
+        .expect("fixture id passes format validation");
         let ctx_third = ctx("cap.x").with_caller_event_id(third_id);
         assert!(matches!(
             evaluator.evaluate_at(hook_id(), &spec, &ctx_third, now),

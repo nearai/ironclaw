@@ -94,22 +94,19 @@ impl BeforeCapabilityHookContext {
     /// Builder-style setter for the stable per-invocation event id used by
     /// predicate-state replay dedup. See [`Self::caller_event_id`].
     ///
-    /// Rejects empty strings and ids containing NUL bytes (henrypark133
-    /// must-fix #3 on PR #3635). Durable backends that constrain ids to
-    /// UUIDs or other shapes would fail cryptically on such values; rather
-    /// than ship an inconsistent surface, the in-memory path enforces a
-    /// minimum format invariant at construction. If validation fails, the
-    /// returned context has `caller_event_id == None` and predicate
-    /// dedup falls through to the synth path.
+    /// The non-empty / NUL-free invariant is enforced at the
+    /// [`crate::predicate_state::PredicateEventId::new`] type boundary —
+    /// any caller bypassing this setter to assign the public field
+    /// directly would still need to construct a `PredicateEventId`,
+    /// which itself validates format (serrrfirat MEDIUM on PR #3635
+    /// 5-15 review). The previous version validated only here, which a
+    /// `Some(PredicateEventId::new_unchecked(""))` direct assignment
+    /// could trivially bypass.
     #[must_use]
     pub fn with_caller_event_id(
         mut self,
         caller_event_id: crate::predicate_state::PredicateEventId,
     ) -> Self {
-        if caller_event_id.as_str().is_empty() || caller_event_id.as_str().as_bytes().contains(&0) {
-            tracing::warn!("caller_event_id rejected: must be non-empty and contain no NUL bytes");
-            return self;
-        }
         self.caller_event_id = Some(caller_event_id);
         self
     }
