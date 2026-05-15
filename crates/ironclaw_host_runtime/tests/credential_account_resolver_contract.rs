@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_extensions::{HostApiId, ManifestSectionPath};
 use ironclaw_host_api::{
@@ -249,6 +250,36 @@ async fn rejects_account_from_different_extension() {
 }
 
 #[tokio::test]
+async fn rejects_store_returning_different_account_id() {
+    let scope = sample_scope();
+    let requested_account_id = CredentialAccountId::new("telegram_bot").unwrap();
+    let returned_account_id = CredentialAccountId::new("other_telegram_bot").unwrap();
+    let handle = SecretHandle::new("telegram_bot_token").unwrap();
+    let store = Arc::new(MismatchedAccountStore {
+        account: sample_account(&scope, &returned_account_id, &handle),
+    });
+    let resolver = CredentialAccountResolver::new(
+        Arc::clone(&store),
+        [requirement(&requested_account_id, &handle, None, true)],
+    );
+
+    let error = resolver
+        .resolve_for_wasm(&resolver_request(
+            &scope,
+            "https://api.telegram.org/bot123/sendMessage",
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CredentialAccountResolverError::Broker(
+            CredentialBrokerError::CredentialScopeMismatch { .. }
+        )
+    ));
+}
+
+#[tokio::test]
 async fn rejects_request_outside_account_target_policy() {
     let scope = sample_scope();
     let account_id = CredentialAccountId::new("telegram_bot").unwrap();
@@ -404,4 +435,33 @@ fn extension_id() -> ExtensionId {
 
 fn capability_id() -> CapabilityId {
     CapabilityId::new("telegram.send_message").unwrap()
+}
+
+struct MismatchedAccountStore {
+    account: CredentialAccount,
+}
+
+#[async_trait]
+impl ironclaw_secrets::CredentialAccountStore for MismatchedAccountStore {
+    async fn put_account(
+        &self,
+        account: CredentialAccount,
+    ) -> Result<CredentialAccount, CredentialBrokerError> {
+        Ok(account)
+    }
+
+    async fn get_account(
+        &self,
+        _scope: &ResourceScope,
+        _account_id: &CredentialAccountId,
+    ) -> Result<Option<CredentialAccount>, CredentialBrokerError> {
+        Ok(Some(self.account.clone()))
+    }
+
+    async fn accounts_for_scope(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<CredentialAccount>, CredentialBrokerError> {
+        Ok(vec![self.account.clone()])
+    }
 }

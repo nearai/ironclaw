@@ -149,6 +149,12 @@ where
                 continue;
             };
 
+            if account.id != requirement.account_id {
+                return Err(CredentialBrokerError::CredentialScopeMismatch {
+                    account_id: requirement.account_id.clone(),
+                }
+                .into());
+            }
             if !account_matches_request(&account, request) {
                 return Err(CredentialBrokerError::CredentialExtensionMismatch {
                     account_id: requirement.account_id.clone(),
