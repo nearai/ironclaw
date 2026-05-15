@@ -1,4 +1,4 @@
-//! Migration runner for the standalone Reborn host.
+//! Migration runner for the Reborn Telegram v2 host.
 //!
 //! Owns the two tables backing the ProductWorkflow:
 //!   * `product_inbound_actions` — idempotency ledger

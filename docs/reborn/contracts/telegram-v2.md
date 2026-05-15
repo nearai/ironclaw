@@ -1,12 +1,14 @@
 # Telegram WASM v2 ProductAdapter
 
-**Status:** First-slice tracer-bullet for #3285. Runs as a standalone
-binary; the v1 agent has zero awareness it exists.
+**Status:** First-slice tracer-bullet for #3285. Runs inside the
+standalone `ironclaw-reborn` binary; the v1 agent has zero awareness
+it exists.
 **Adapter crate:** `ironclaw_telegram_v2_adapter` (parse + render only).
 **Storage crate:** `ironclaw_product_workflow_storage` (durable
 ledger + binding + outbound + egress shim, libSQL + Postgres).
 **Host crate:** `ironclaw_reborn_telegram_v2_host` (composition +
-webhook router + binary entrypoint).
+webhook router + serve loop, library-only; wired into the
+`ironclaw-reborn` binary behind the `telegram-v2` Cargo feature).
 **Host runtime:** `ironclaw_wasm_product_adapters`.
 **Contract:** `ironclaw_product_adapters` (see `product-adapters.md`).
 
@@ -28,7 +30,7 @@ The first slice is intentionally narrow:
   `TurnCoordinator` and the existing render path activates — no other
   piece of the contract changes.
 - Production traffic enters a separate process — `cargo build --bin
-  ironclaw-reborn-telegram-host` — not the v1 agent binary.
+  ironclaw-reborn` then `ironclaw-reborn run` — not the v1 agent binary.
 
 ## Authentication
 
@@ -146,14 +148,16 @@ concurrent webhook delivery.
 
 ## Default-off behavior
 
-V2 lives in a separate binary (`ironclaw-reborn-telegram-host`). The v1
-agent binary has zero awareness of v2 — no compile-time dependency on
-any Reborn product-layer crate, no wiring code, no config field, no
-runtime flag. The two binaries coexist only at the operator level: an
-operator who wants both v1 and v2 Telegram channels needs to point them
-at *different* Telegram bot tokens / webhook URLs. There is no
-in-process exclusivity guard because there are no two paths in the same
-process to guard.
+V2 lives in a separate binary (`ironclaw-reborn`), wired in from
+`ironclaw_reborn_telegram_v2_host` behind the `telegram-v2` Cargo
+feature on `ironclaw_reborn_cli`. The v1 agent binary has zero
+awareness of v2 — no compile-time dependency on any Reborn
+product-layer crate, no wiring code, no config field, no runtime flag.
+The two binaries coexist only at the operator level: an operator who
+wants both v1 and v2 Telegram channels needs to point them at
+*different* Telegram bot tokens / webhook URLs. There is no in-process
+exclusivity guard because there are no two paths in the same process
+to guard.
 
 The standalone host fails closed at startup if neither `DATABASE_URL`
 (Postgres) nor `LIBSQL_PATH` (libSQL) is set. Operators who want

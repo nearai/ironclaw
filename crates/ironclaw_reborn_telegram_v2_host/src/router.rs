@@ -1,4 +1,4 @@
-//! Axum webhook route for the standalone Reborn Telegram v2 host.
+//! Axum webhook route for the Reborn Telegram v2 host.
 //!
 //! Pattern: `POST /webhook/telegram-v2/{installation_id}` — delegates the
 //! whole webhook lifecycle to [`NativeProductAdapterRunner::process_webhook`]

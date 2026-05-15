@@ -1,4 +1,4 @@
-//! End-to-end coverage for the standalone Reborn Telegram v2 host.
+//! End-to-end coverage for the Reborn Telegram v2 host.
 //!
 //! Wires the full stack — webhook router → NativeProductAdapterRunner →
 //! parse_inbound → DefaultProductWorkflow → StubInboundTurnService → ledger

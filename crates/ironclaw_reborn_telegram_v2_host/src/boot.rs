@@ -1,8 +1,9 @@
-//! Boot-time orchestration for the standalone Reborn Telegram v2 host.
+//! Boot-time orchestration for the Reborn Telegram v2 host.
 //!
 //! Stitches together: storage layer (`composition`), the stubbed inbound turn
 //! service, the Telegram adapter + workflow + native runner, and the axum
-//! router. Returns the router for the binary's `main.rs` to serve.
+//! router. Returns the router for the crate's top-level `serve` helper to
+//! hand off to `axum::serve`.
 
 use std::collections::HashMap;
 use std::num::NonZeroUsize;

@@ -1,23 +1,25 @@
 # `ironclaw_reborn_telegram_v2_host`
 
-Standalone host for the Reborn Telegram v2 channel. Ships as its own binary
-(`ironclaw-reborn-telegram-host`); **the v1 `ironclaw` agent has zero
-awareness this crate exists**.
+Library crate that owns the Reborn Telegram v2 webhook serve loop. Wired
+into the `ironclaw-reborn` binary (`crates/ironclaw_reborn_cli/`) behind
+the `telegram-v2` Cargo feature (default-on); the `run` subcommand
+env-detects Telegram v2 and calls [`serve_from_env`] when configured.
 
-This addresses the architectural concern raised on PR #3590: Reborn
-product-layer code should not be wired into the production agent binary by
-default. The v1 binary has no compile-time dependency on this crate, no
-runtime entry point that touches it, and no shared in-process state.
+**The v1 `ironclaw` agent has zero awareness this crate exists.** This
+addresses the architectural concern raised on PR #3590: Reborn
+product-layer code should not be wired into the production agent binary
+by default. The v1 binary has no compile-time dependency on this crate,
+no runtime entry point that touches it, and no shared in-process state.
 
 ## Why "stubbed reply path"
 
-Today the binary terminates inbound at the durable ledger / binding write
-and acks 200 OK to Telegram. There is no Telegram reply. This is intentional:
-there is no Reborn agent loop in `src/` yet (the loop ships across PRs
-#3544 / #3550 / #3586). The tracer's purpose is to lock down the inbound
-contract — webhook auth, parse, idempotency, binding persistence, ledger
-settlement — so that swapping in the real loop is a one-line change in
-[`boot.rs`].
+Today the serve loop terminates inbound at the durable ledger / binding
+write and acks 200 OK to Telegram. There is no Telegram reply. This is
+intentional: there is no Reborn agent loop in `src/` yet (the loop ships
+across PRs #3544 / #3550 / #3586). The tracer's purpose is to lock down
+the inbound contract — webhook auth, parse, idempotency, binding
+persistence, ledger settlement — so that swapping in the real loop is a
+one-line change in [`boot.rs`].
 
 When the Reborn loop lands:
 
@@ -31,7 +33,7 @@ When the Reborn loop lands:
 
 | File | Role |
 |------|------|
-| `src/lib.rs` | Re-exports + crate-level docs |
+| `src/lib.rs` | Public API: `serve`, `serve_from_env`, `init_tracing`, `telegram_v2_configured_in_env`. Also owns `connect_backend` (libSQL / Postgres). |
 | `src/boot.rs` | Builds adapter + workflow + native runner + axum router |
 | `src/composition.rs` | Builds the durable storage stack (ledger, binding, outbound, thread service) against libSQL or Postgres |
 | `src/config.rs` | `HostConfig::from_env()` — reads `IRONCLAW_REBORN_LISTEN_ADDR`, `LIBSQL_PATH` / `DATABASE_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `REBORN_TELEGRAM_V2_INSTALLATION_ID` |
@@ -39,7 +41,6 @@ When the Reborn loop lands:
 | `src/inbound_turn.rs` | `StubInboundTurnService` — persists the binding, returns `Submitted`, **no reply produced** |
 | `src/migrations.rs` | Own migration runner for `product_inbound_actions` + `product_bindings` |
 | `src/router.rs` | axum handler for `POST /webhook/telegram-v2/{installation_id}` |
-| `src/bin/ironclaw-reborn-telegram-host.rs` | Binary entry point |
 
 ## Call path
 
@@ -69,9 +70,14 @@ export LIBSQL_PATH=~/.ironclaw-reborn.db          # required (or DATABASE_URL fo
 # export REBORN_TELEGRAM_V2_INSTALLATION_ID=default
 # export IRONCLAW_REBORN_LISTEN_ADDR=127.0.0.1:8090
 
-cargo build --bin ironclaw-reborn-telegram-host
-./target/debug/ironclaw-reborn-telegram-host
+cargo build --bin ironclaw-reborn
+./target/debug/ironclaw-reborn run
 ```
+
+When `TELEGRAM_BOT_TOKEN` is set in the environment, `ironclaw-reborn
+run` enters the long-lived serve loop. When it's unset, `run` falls
+through to the existing runtime-shell snapshot — the same behavior as
+before this crate was wired in.
 
 The host fails closed at startup if neither `DATABASE_URL` (Postgres) nor
 `LIBSQL_PATH` (libSQL) is set. Ephemeral in-memory storage is available
@@ -95,6 +101,14 @@ Reborn host: inbound resolved + bound; reply path stubbed (no Reborn agent loop 
 ```
 
 …and Telegram receives a 200 ack. No outbound `sendMessage` is dispatched.
+
+## Disabling Telegram v2
+
+Build the CLI with `--no-default-features` (or `--no-default-features
+--features libsql` to keep storage support enabled but exclude the
+Telegram crate) to omit this host entirely. `ironclaw-reborn run` will
+then always print the runtime-shell snapshot. Future channels follow the
+same opt-out pattern via their own feature flags.
 
 ## Refs
 

@@ -44,8 +44,9 @@ pub struct RebornProductRuntimeConfig {
     pub telegram_declared_hosts: Vec<ironclaw_product_adapters::DeclaredEgressHost>,
 }
 
-/// Backend-specific handles. Exactly one variant is active; the binary's
-/// `main.rs` constructs the matching variant from env.
+/// Backend-specific handles. Exactly one variant is active; the crate's
+/// top-level `connect_backend` helper constructs the matching variant from
+/// env-resolved config.
 pub enum BackendHandles {
     #[cfg(feature = "libsql")]
     LibSql(Arc<libsql::Database>),

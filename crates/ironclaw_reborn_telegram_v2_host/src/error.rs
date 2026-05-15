@@ -1,4 +1,4 @@
-//! Local error type for the standalone Reborn Telegram v2 host.
+//! Local error type for the Reborn Telegram v2 host.
 //!
 //! Deliberately not derived from any v1 error type — this crate has no
 //! dependency on the `ironclaw` lib.

@@ -23,9 +23,25 @@ ironclaw_reborn = { path = "../ironclaw_reborn", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 serde_json = "1"
 
+# Optional: Telegram v2 channel host. Gated behind the `telegram-v2` feature
+# (default-on). Future channels (Slack, Discord, WeChat per #3577) follow
+# the same pattern — each ships as its own optional dep behind its own
+# feature flag, and `commands/run.rs` env-detects and boots whichever are
+# enabled. Storage backend features (`libsql`, `postgres`) forward to the
+# host crate via the `?` syntax so we never pull libSQL/Postgres in unless
+# `telegram-v2` is on.
+ironclaw_reborn_telegram_v2_host = { path = "../ironclaw_reborn_telegram_v2_host", version = "0.1.0", optional = true, default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
+
 [[bin]]
 name = "ironclaw-reborn"
 path = "src/main.rs"
+
+[features]
+default = ["telegram-v2", "libsql"]
+telegram-v2 = ["dep:ironclaw_reborn_telegram_v2_host", "dep:tokio"]
+libsql = ["ironclaw_reborn_telegram_v2_host?/libsql"]
+postgres = ["ironclaw_reborn_telegram_v2_host?/postgres"]
 
 [dev-dependencies]
 tempfile = "3"

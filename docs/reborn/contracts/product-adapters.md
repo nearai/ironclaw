@@ -148,11 +148,13 @@ The host:
 
 ## Default-off + cutover
 
-V2 product adapters run in a **separate binary** from the v1 agent — see
-`crates/ironclaw_reborn_telegram_v2_host/` and the
-`ironclaw-reborn-telegram-host` bin target. The v1 agent binary has no
-compile-time dependency on any Reborn product-layer crate. There is no
-in-process feature flag, no v1/v2 exclusivity guard, and no
+V2 product adapters run in a **separate binary** from the v1 agent —
+the `ironclaw-reborn` bin target in `crates/ironclaw_reborn_cli/`,
+which pulls in each channel's host crate (e.g.
+`crates/ironclaw_reborn_telegram_v2_host/`) behind a per-channel Cargo
+feature (`telegram-v2`, future `slack-v2`, ...). The v1 agent binary
+has no compile-time dependency on any Reborn product-layer crate. There
+is no in-process feature flag, no v1/v2 exclusivity guard, and no
 config-level cutover, because the two paths simply cannot coexist in
 the same process. An operator running both v1 Telegram and v2 Telegram
 must point them at distinct bot tokens / webhook URLs (operator-level
@@ -161,7 +163,9 @@ concern, not a code concern).
 Future v2 product adapters (Slack, Discord, etc.) are expected to follow
 the same pattern: their host crate lives next to
 `ironclaw_reborn_telegram_v2_host`, links the same storage / adapter /
-runner crates, and exposes its own binary entrypoint.
+runner crates, exposes a library `serve_from_env` entry point, and
+slots into `ironclaw-reborn run` behind its own Cargo feature on
+`ironclaw_reborn_cli`.
 
 ## Status
 
@@ -175,7 +179,7 @@ runner crates, and exposes its own binary entrypoint.
 | Egress policy enforcement | `[implemented slice]` |
 | `NativeProductAdapterRunner` | `[implemented slice]` |
 | Telegram v2 native adapter | `[implemented slice]` (`ironclaw_telegram_v2_adapter`) |
-| Telegram v2 production host | `[implemented slice, stub reply]` (`ironclaw_reborn_telegram_v2_host`, binary `ironclaw-reborn-telegram-host`) — full inbound contract end-to-end; reply path stubbed until Reborn agent loop ships (PRs #3544 / #3550 / #3586) |
+| Telegram v2 production host | `[implemented slice, stub reply]` (`ironclaw_reborn_telegram_v2_host`, wired into the `ironclaw-reborn` binary behind the `telegram-v2` feature) — full inbound contract end-to-end; reply path stubbed until Reborn agent loop ships (PRs #3544 / #3550 / #3586) |
 | wasmtime component-model glue | `[contract exists]` (WIT in `crates/ironclaw_wasm_product_adapters/wit/product_adapter.wit`) |
 | Web / Slack / Discord / WhatsApp / Feishu / Signal v2 adapters | `[not implemented]` |
 | Production wiring of v2 webhook route | `[not implemented]` (default-off flag exists; route registration is a follow-up) |

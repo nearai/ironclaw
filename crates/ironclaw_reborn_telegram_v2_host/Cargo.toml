@@ -3,20 +3,18 @@ name = "ironclaw_reborn_telegram_v2_host"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
-description = "Standalone Reborn Telegram v2 webhook host — receives Telegram webhooks, persists inbound actions + bindings via ProductWorkflow, stubs the reply path until the Reborn agent loop ships."
+description = "Reborn Telegram v2 webhook host — receives Telegram webhooks, persists inbound actions + bindings via ProductWorkflow, stubs the reply path until the Reborn agent loop ships."
 license = "MIT OR Apache-2.0"
 publish = false
 
-# Built as a separate binary so the experimental Reborn product-layer stack
-# never links into the v1 agent binary. With the Reborn agent loop absent in
-# src/ today, the reply path is intentionally stubbed: this binary stores
-# webhook deliveries durably (ledger + binding) and acks 200, then halts.
-# Once the Reborn loop ships, swap the stub for DefaultInboundTurnService +
+# Library-only crate. The serve loop ships inside the `ironclaw-reborn`
+# binary (in `ironclaw_reborn_cli`), wired up from its `run` subcommand
+# when Telegram v2 env is set. The v1 `ironclaw` agent has no compile-time
+# dependency on this crate. With the Reborn agent loop absent in src/
+# today, the reply path is intentionally stubbed: this layer stores webhook
+# deliveries durably (ledger + binding) and acks 200, then halts. Once the
+# Reborn loop ships, swap the stub for DefaultInboundTurnService +
 # TurnCoordinator without touching v1.
-
-[[bin]]
-name = "ironclaw-reborn-telegram-host"
-path = "src/bin/ironclaw-reborn-telegram-host.rs"
 
 [dependencies]
 # Reborn product-layer stack

@@ -8,9 +8,46 @@ pub(crate) struct RunCommand;
 
 impl RunCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
+        if try_serve_telegram_v2()? {
+            // serve_from_env returns Ok(()) on graceful axum shutdown; the
+            // runtime-shell snapshot is only meaningful when no channel
+            // booted, so skip it in that case.
+            return Ok(());
+        }
         RuntimeShellReport::initialize(context).print();
         Ok(())
     }
+}
+
+/// If a Reborn channel is configured in env, boot it and block on its serve
+/// loop until shutdown. Returns `true` when a channel ran (and exited), or
+/// `false` when none was configured and the caller should fall through to
+/// the runtime-shell snapshot.
+///
+/// Future channels (Slack/Discord/WeChat per #3577) plug in here by adding
+/// another `cfg(feature = "...")` arm that calls their host crate's
+/// `serve_from_env`. Multiple channels in one process require composing
+/// their `Router`s onto a single axum app — out of scope until the second
+/// channel lands.
+#[cfg(feature = "telegram-v2")]
+fn try_serve_telegram_v2() -> anyhow::Result<bool> {
+    if !ironclaw_reborn_telegram_v2_host::telegram_v2_configured_in_env() {
+        return Ok(false);
+    }
+    ironclaw_reborn_telegram_v2_host::init_tracing();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| anyhow::anyhow!("build tokio runtime: {e}"))?;
+    runtime
+        .block_on(ironclaw_reborn_telegram_v2_host::serve_from_env())
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    Ok(true)
+}
+
+#[cfg(not(feature = "telegram-v2"))]
+fn try_serve_telegram_v2() -> anyhow::Result<bool> {
+    Ok(false)
 }
 
 /// Side-effect-free runtime-shell snapshot for the standalone Reborn binary.

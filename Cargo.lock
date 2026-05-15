@@ -4599,8 +4599,10 @@ dependencies = [
  "clap_complete",
  "ironclaw_reborn",
  "ironclaw_reborn_config",
+ "ironclaw_reborn_telegram_v2_host",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]
