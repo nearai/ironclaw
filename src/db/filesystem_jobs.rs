@@ -37,7 +37,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{
-    CasExpectation, Entry, FilesystemError, Filter, IndexKey, IndexValue, Page, RecordKind,
+    CasExpectation, Entry, FilesystemError, Filter, IndexKey, IndexValue, RecordKind,
     RecordVersion, RootFilesystem,
 };
 use ironclaw_host_api::VirtualPath;
@@ -565,14 +565,11 @@ where
     ) -> Result<(), DatabaseError> {
         // We have to find the estimation by id across all job buckets; the
         // filesystem layout puts estimations under their owning job. Query
-        // the entire `/engine/jobs` subtree by id.
+        // the entire `/engine/jobs` subtree by id, draining every page so
+        // jobs with >MAX_LIMIT total entries don't silently miss the row.
         let prefix = jobs_root()?;
         let filter = Filter::All; // narrow path-side check below
-        let results = self
-            .filesystem
-            .query(&prefix, &filter, Page::new(0, Page::MAX_LIMIT))
-            .await
-            .map_err(super::filesystem_conversations::fs_err_to_database)?;
+        let results = run_query(&self.filesystem, &prefix, &filter).await?;
         for v in results {
             if v.entry.kind.as_ref().map(|k| k.as_str()) != Some(KIND_ESTIMATION) {
                 continue;
@@ -768,19 +765,19 @@ fn build_job_entry(stored: &StoredJob, body: Vec<u8>) -> Result<Entry, DatabaseE
     Ok(entry)
 }
 
+/// Page-aware backing query used by every job/action/estimation listing path.
+///
+/// Delegates to the shared `query_all_pages` helper in
+/// `filesystem_conversations` so the same loop services both sub-trait
+/// facades — the helper drains every page until a short page is returned,
+/// instead of single-shot `Page::new(0, Page::MAX_LIMIT)` which silently
+/// truncated at 1024 entries (PR #3679 P2 fix).
 async fn run_query<F: RootFilesystem>(
     filesystem: &Arc<F>,
     prefix: &VirtualPath,
     filter: &Filter,
 ) -> Result<Vec<ironclaw_filesystem::VersionedEntry>, DatabaseError> {
-    match filesystem
-        .query(prefix, filter, Page::new(0, Page::MAX_LIMIT))
-        .await
-    {
-        Ok(r) => Ok(r),
-        Err(error) if super::filesystem_conversations::is_not_found(&error) => Ok(Vec::new()),
-        Err(error) => Err(super::filesystem_conversations::fs_err_to_database(error)),
-    }
+    super::filesystem_conversations::query_all_pages(filesystem, prefix, filter).await
 }
 
 async fn list_agent_jobs_inner<F: RootFilesystem>(
@@ -926,7 +923,7 @@ fn job_lock(id: Uuid) -> RecordLock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_filesystem::{InMemoryBackend, Page};
     use rust_decimal_macros::dec;
     use std::time::Duration;
 
@@ -1121,6 +1118,62 @@ mod tests {
             .await
             .unwrap();
         assert!(store.get_job(missing).await.unwrap().is_none());
+    }
+
+    /// Regression: PR #3679 codex review P2 — `run_query` used to fetch a
+    /// single `Page::new(0, Page::MAX_LIMIT)` page, which silently truncated
+    /// listings at 1024 entries. This test writes more than `MAX_LIMIT`
+    /// actions on a single job and asserts the full count comes back through
+    /// `get_job_actions` (which calls `run_query` under the hood).
+    #[tokio::test]
+    async fn get_job_actions_drains_pages_beyond_max_limit() {
+        let store = new_store();
+        let ctx = sample_ctx("user-a");
+        let job_id = ctx.job_id;
+        store.save_job(&ctx).await.unwrap();
+        let total: usize = (Page::MAX_LIMIT as usize) + 3;
+        for i in 0..total {
+            let action = ActionRecord::new(i as u32, "echo", serde_json::json!({"i": i})).succeed(
+                Some("ok".to_string()),
+                serde_json::json!({"out": i}),
+                Duration::from_millis(1),
+            );
+            store.save_action(job_id, &action).await.unwrap();
+        }
+        let actions = store.get_job_actions(job_id).await.unwrap();
+        assert_eq!(actions.len(), total);
+        // Sort by sequence in run_query is in-memory after the drain — make
+        // sure the order is stable end-to-end.
+        for (i, a) in actions.iter().enumerate() {
+            assert_eq!(a.sequence, i as u32);
+        }
+    }
+
+    /// Regression: PR #3679 codex review P2 — `agent_job_summary` /
+    /// `list_agent_jobs` both delegated through `run_query`. With >MAX_LIMIT
+    /// jobs in the store the single-page query missed rows entirely.
+    #[tokio::test]
+    async fn list_agent_jobs_drains_pages_beyond_max_limit() {
+        let store = new_store();
+        // Write more jobs than fit in one MAX_LIMIT page. Each job is a
+        // distinct Uuid, so the action/llm_calls/estimation sub-paths don't
+        // dilute the result set.
+        let total: usize = (Page::MAX_LIMIT as usize) + 7;
+        let mut expected_ids = Vec::with_capacity(total);
+        for _ in 0..total {
+            let ctx = sample_ctx("user-a");
+            expected_ids.push(ctx.job_id);
+            store.save_job(&ctx).await.unwrap();
+        }
+        let listed = store.list_agent_jobs().await.unwrap();
+        assert_eq!(
+            listed.len(),
+            total,
+            "list_agent_jobs must drain every page; previously capped at {}",
+            Page::MAX_LIMIT
+        );
+        let summary = store.agent_job_summary().await.unwrap();
+        assert_eq!(summary.total, total);
     }
 
     #[tokio::test]

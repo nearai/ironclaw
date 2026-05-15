@@ -146,15 +146,7 @@ where
             key: key_conv,
             value: IndexValue::Text(conversation_id.to_string()),
         };
-        let results = match self
-            .filesystem
-            .query(&prefix, &filter, Page::new(0, Page::MAX_LIMIT))
-            .await
-        {
-            Ok(r) => r,
-            Err(error) if is_not_found(&error) => return Ok(Vec::new()),
-            Err(error) => return Err(fs_err_to_database(error)),
-        };
+        let results = query_all_pages(&self.filesystem, &prefix, &filter).await?;
         let mut out = Vec::with_capacity(results.len());
         for v in results {
             if v.entry.kind.as_ref().map(|k| k.as_str()) != Some(KIND_MESSAGE) {
@@ -646,15 +638,7 @@ where
         filter: &Filter,
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError> {
-        let results = match self
-            .filesystem
-            .query(prefix, filter, Page::new(0, Page::MAX_LIMIT))
-            .await
-        {
-            Ok(r) => r,
-            Err(error) if is_not_found(&error) => return Ok(Vec::new()),
-            Err(error) => return Err(fs_err_to_database(error)),
-        };
+        let results = query_all_pages(&self.filesystem, prefix, filter).await?;
         let mut convs: Vec<StoredConversation> = Vec::with_capacity(results.len());
         for v in results {
             if v.entry.kind.as_ref().map(|k| k.as_str()) != Some(KIND_CONVERSATION) {
@@ -720,6 +704,44 @@ where
 
 fn truncate_chars(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
+}
+
+/// Drains every page of a `query` until the backend returns a short page.
+///
+/// Single `query(prefix, filter, Page::new(0, Page::MAX_LIMIT))` calls silently
+/// truncate at 1024 entries because `Page::MAX_LIMIT == 1024`. Callers that
+/// fetch-then-sort-in-Rust (conversation message listings, summary builds,
+/// job/action listings) miss every row past the cap, and `has_more` flags
+/// computed by the caller become meaningless. Loop until a page comes back
+/// short. PR #3679 P2 fix.
+///
+/// Exposed `pub(crate)` so `filesystem_jobs.rs` reuses the same loop instead
+/// of growing its own copy.
+pub(crate) async fn query_all_pages<F: RootFilesystem>(
+    filesystem: &Arc<F>,
+    prefix: &VirtualPath,
+    filter: &Filter,
+) -> Result<Vec<ironclaw_filesystem::VersionedEntry>, DatabaseError> {
+    let mut out = Vec::new();
+    let mut offset: u64 = 0;
+    loop {
+        let page = Page::new(offset, Page::MAX_LIMIT);
+        let entries = match filesystem.query(prefix, filter, page).await {
+            Ok(entries) => entries,
+            Err(error) if is_not_found(&error) => return Ok(out),
+            Err(error) => return Err(fs_err_to_database(error)),
+        };
+        let received = entries.len() as u64;
+        out.extend(entries);
+        // A short page (less than MAX_LIMIT) means we've reached the end.
+        // A zero-length page also ends the loop and prevents infinite spin
+        // if the backend ever returns an unexpected empty trailing page.
+        if received < Page::MAX_LIMIT as u64 {
+            break;
+        }
+        offset = offset.saturating_add(received);
+    }
+    Ok(out)
 }
 
 async fn write_message<F: RootFilesystem>(
@@ -1169,6 +1191,52 @@ mod tests {
             .unwrap()
             .last_activity;
         assert!(after >= before);
+    }
+
+    /// Regression: PR #3679 codex review P2 — `list_messages_internal` used to
+    /// fetch a single page of `Page::MAX_LIMIT` and sort in memory, silently
+    /// truncating conversations with more than 1024 messages. This drives the
+    /// callers (`list_conversation_messages` + `list_conversation_messages_paginated`)
+    /// and asserts the full count round-trips.
+    #[tokio::test]
+    async fn list_messages_drains_pages_beyond_max_limit() {
+        let store = new_store();
+        let conv = store
+            .create_conversation("gateway", "user-a", None)
+            .await
+            .unwrap();
+        // One past MAX_LIMIT so the loop must perform a second page fetch.
+        let total: usize = (Page::MAX_LIMIT as usize) + 5;
+        for i in 0..total {
+            store
+                .add_conversation_message(conv, "user", &format!("msg {i}"))
+                .await
+                .unwrap();
+        }
+        // Direct listing returns every message.
+        let messages = store.list_conversation_messages(conv).await.unwrap();
+        assert_eq!(messages.len(), total);
+        // Newest-window pagination computes has_more against the full set,
+        // not the truncated first page. Asking for fewer than `total` rows
+        // must report has_more = true.
+        let (page, has_more) = store
+            .list_conversation_messages_paginated(conv, None, 10)
+            .await
+            .unwrap();
+        assert_eq!(page.len(), 10);
+        assert!(
+            has_more,
+            "has_more must reflect rows past the first page; got false with {} total messages",
+            total
+        );
+        // Asking for >= total rows must yield has_more = false and the full
+        // count, regardless of where the MAX_LIMIT page boundary lands.
+        let (page_all, has_more_all) = store
+            .list_conversation_messages_paginated(conv, None, total as i64 + 10)
+            .await
+            .unwrap();
+        assert_eq!(page_all.len(), total);
+        assert!(!has_more_all);
     }
 
     #[tokio::test]
