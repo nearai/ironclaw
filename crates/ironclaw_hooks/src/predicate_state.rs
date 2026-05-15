@@ -87,6 +87,30 @@ pub(crate) struct ValueKey {
 /// callers can stamp it with whatever uniquely identifies the
 /// originating event (e.g. a `RuntimeEventId` hex, an arguments digest
 /// + timestamp tuple, a synthetic UUID for tests).
+///
+/// # Trust boundary — host-assigned, NEVER tenant-supplied
+///
+/// `PredicateEventId` is a **host-assigned** identity. The host runtime
+/// is responsible for minting it from authoritative sources it controls
+/// (the dispatcher's `RuntimeEventId`, an arguments digest, a host-side
+/// blake3 hash) before threading it through
+/// [`BeforeCapabilityHookContext::caller_event_id`].
+///
+/// It MUST NOT be propagated unchanged from any tenant-controlled
+/// surface (capability arguments, manifest fields, extension WASM
+/// memory, untrusted HTTP request bodies). A tenant that can choose
+/// its own `PredicateEventId` can either:
+///
+/// - **Undercount themselves into infinity** by sending the same id on
+///   every call — the backend treats every invocation as a duplicate
+///   and the rate cap never fires.
+/// - **Poison another tenant's bucket** if id namespaces ever overlap
+///   (the per-key scoping defends against this, but the trust property
+///   is "host-assigned" — don't trust it to be tenant-isolated).
+///
+/// The validation in [`Self::new`] (non-empty, NUL-free) is a format
+/// invariant for durable backends, NOT a trust check. Empty / NUL
+/// rejection alone does not make a tenant-supplied id safe.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PredicateEventId(String);
 
@@ -159,6 +183,19 @@ pub(crate) enum PredicateBackendError {
 /// Implementations holding the same lock / transaction across both
 /// halves are correct; splitting them is a race that lets the cap
 /// drift past `max` (codex Critical on PR #3635).
+///
+/// # Trust boundary on `event_id`
+///
+/// The `event_id` argument is a **host-assigned** identity, per
+/// [`PredicateEventId`]'s trust-boundary docs. Backend implementations
+/// MAY assume `event_id` was minted by trusted host code from
+/// authoritative sources (dispatcher event id, host-side hash); they
+/// MUST NOT treat it as adversarial input from the tenant. The host is
+/// responsible for ensuring no tenant-controlled bytes flow into
+/// `event_id` unfiltered — see [`PredicateEventId`] for the threat
+/// description. The format invariants enforced by
+/// [`PredicateEventId::new`] (non-empty, NUL-free) are a durability
+/// contract for SQL backends, NOT a trust check.
 ///
 /// # Replay refusal contract
 ///
