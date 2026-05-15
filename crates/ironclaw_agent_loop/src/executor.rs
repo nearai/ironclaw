@@ -100,7 +100,7 @@ struct CheckpointWrite {
 
 #[derive(Debug)]
 enum BatchStep {
-    Continue(LoopExecutionState),
+    Continue(Box<LoopExecutionState>),
     Exit(LoopExit),
 }
 
@@ -223,7 +223,7 @@ impl CanonicalAgentLoopExecutor {
                         .execute_capability_batch(planner, host, state, &surface, calls)
                         .await?
                     {
-                        BatchStep::Continue(next) => state = next,
+                        BatchStep::Continue(next) => state = *next,
                         BatchStep::Exit(exit) => return Ok(exit),
                     }
 
@@ -374,14 +374,14 @@ impl CanonicalAgentLoopExecutor {
                 .handle_capability_error(planner, host, state, call, summary)
                 .await?
             {
-                BatchStep::Continue(next) => state = next,
+                BatchStep::Continue(next) => state = *next,
                 BatchStep::Exit(exit) => return Ok(BatchStep::Exit(exit)),
             }
         }
 
         state.stop_state.last_batch_total = visible_calls.len() as u32;
         if visible_calls.is_empty() {
-            return Ok(BatchStep::Continue(state));
+            return Ok(BatchStep::Continue(Box::new(state)));
         }
 
         let batch = host
@@ -412,12 +412,12 @@ impl CanonicalAgentLoopExecutor {
                 .handle_capability_outcome(planner, host, state, call, outcome)
                 .await?
             {
-                BatchStep::Continue(next) => state = next,
+                BatchStep::Continue(next) => state = *next,
                 BatchStep::Exit(exit) => return Ok(BatchStep::Exit(exit)),
             }
         }
 
-        Ok(BatchStep::Continue(state))
+        Ok(BatchStep::Continue(Box::new(state)))
     }
 
     async fn handle_capability_outcome(
@@ -431,7 +431,7 @@ impl CanonicalAgentLoopExecutor {
         match outcome {
             CapabilityOutcome::Completed(result) => {
                 push_completed_result(&mut state, result);
-                Ok(BatchStep::Continue(state))
+                Ok(BatchStep::Continue(Box::new(state)))
             }
             CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
                 self.handle_gate(planner, host, state, GateKind::Approval, gate_ref)
@@ -493,7 +493,7 @@ impl CanonicalAgentLoopExecutor {
             {
                 RecoveryOutcome::SkipResult { recovery } => {
                     state.recovery_state = recovery;
-                    return Ok(BatchStep::Continue(state));
+                    return Ok(BatchStep::Continue(Box::new(state)));
                 }
                 RecoveryOutcome::Abort {
                     recovery,
@@ -513,7 +513,7 @@ impl CanonicalAgentLoopExecutor {
                 } => {
                     if matches!(summary.class, CapabilityErrorClass::PolicyDenied) {
                         state.recovery_state = recovery;
-                        return Ok(BatchStep::Continue(state));
+                        return Ok(BatchStep::Continue(Box::new(state)));
                     }
                     state.recovery_state = recovery;
                     honor_retry_alteration(alter.as_ref())?;
@@ -534,7 +534,7 @@ impl CanonicalAgentLoopExecutor {
                         promoted => match promoted {
                             CapabilityOutcome::Completed(result) => {
                                 push_completed_result(&mut state, result);
-                                return Ok(BatchStep::Continue(state));
+                                return Ok(BatchStep::Continue(Box::new(state)));
                             }
                             CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
                                 return self
@@ -618,7 +618,7 @@ impl CanonicalAgentLoopExecutor {
             }
             GateOutcome::SkipAndContinue { gate } => {
                 state.gate_state = gate;
-                Ok(BatchStep::Continue(state))
+                Ok(BatchStep::Continue(Box::new(state)))
             }
             GateOutcome::Abort { gate, failure_kind } => {
                 state.gate_state = gate;
