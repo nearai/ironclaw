@@ -155,6 +155,8 @@ pub enum HostIdentityContextBuildError {
     UnknownIdentityFile,
     #[error("identity context path is invalid")]
     InvalidIdentityFile,
+    /// Reserved for a future hard-limit mode. Currently, `build_identity_messages_from_candidates`
+    /// truncates silently on budget overflow rather than returning this error.
     #[error("identity context budget exceeded")]
     ContextBudgetExceeded,
     #[error("identity context budget misconfigured")]
