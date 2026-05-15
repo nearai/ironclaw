@@ -550,6 +550,21 @@ jobs:
       COMMAND_TIMEOUT: 60m
       STRICT_ARTIFACT_SCRUB: "true"
     steps:
+      - name: Preflight disk space
+        # The only self-hosted runner the canary uses. Nothing in this
+        # workflow cleans ~/.cargo, ~/.rustup, or runner _diag between
+        # jobs, so a wedged disk shows up as opaque mid-build failures
+        # we can't see (test-output.log isn't uploaded). Fail loudly
+        # with a clear marker instead — at least 10 GiB free on /.
+        run: |
+          df -h /
+          avail_kb=$(df --output=avail / | tail -1 | tr -d ' ')
+          min_kb=$((10 * 1024 * 1024))
+          if [ "$avail_kb" -lt "$min_kb" ]; then
+            echo "::error::Self-hosted runner low on disk: ${avail_kb} KiB available, need ${min_kb} KiB (~10 GiB)."
+            exit 1
+          fi
+          echo "Disk OK: ${avail_kb} KiB available on /."
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
@@ -570,11 +585,16 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: live-canary-private-oauth-summary
+          # results.json is emitted by scripts/live-canary/emit_results_json.py
+          # and contains only test names + outcomes + bounded panic messages
+          # — no URLs, tokens, or payloads — so it is scrub-safe to upload
+          # even under STRICT_ARTIFACT_SCRUB=true.
           path: |
             artifacts/live-canary/**/summary.md
             artifacts/live-canary/**/env-summary.txt
             artifacts/live-canary/**/trace-fixture-status.txt
             artifacts/live-canary/**/scrub-matches.txt
+            artifacts/live-canary/**/results.json
           retention-days: 7
 
   provider-matrix:

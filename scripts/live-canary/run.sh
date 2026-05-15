@@ -51,6 +51,7 @@ LOG_FILE="${RUN_DIR}/test-output.log"
 SUMMARY_FILE="${RUN_DIR}/summary.md"
 ENV_FILE="${RUN_DIR}/env-summary.txt"
 TRACE_STATUS_FILE="${RUN_DIR}/trace-fixture-status.txt"
+RESULTS_FILE="${RUN_DIR}/results.json"
 
 : > "${LOG_FILE}"
 
@@ -65,9 +66,22 @@ finish() {
   status=$?
   record_trace_status || true
   write_summary || true
+  emit_results_json || true
   log "[live-canary] summary=${SUMMARY_FILE}"
   log "[live-canary] log=${LOG_FILE}"
   exit "${status}"
+}
+
+emit_results_json() {
+  # No-op for non-cargo lanes (auth-* uses JUnit XML, workflow-canary
+  # writes its own results.json from python). The helper bails silently
+  # when it can't find a `test result:` line or when the output file
+  # already exists.
+  python3 "$(dirname "$0")/emit_results_json.py" \
+    --log "${LOG_FILE}" \
+    --out "${RESULTS_FILE}" \
+    --lane "${LANE}" \
+    --provider "${PROVIDER}" 2>&1 | tee -a "${LOG_FILE}" >/dev/null
 }
 
 write_env_summary() {
