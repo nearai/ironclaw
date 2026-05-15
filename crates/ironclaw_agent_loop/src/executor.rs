@@ -261,7 +261,10 @@ impl CanonicalAgentLoopExecutor {
         let mut recorded_failure = false;
         for _ in 0..MAX_MODEL_RETRIES {
             match host.stream_model(request.clone()).await {
-                Ok(response) => return Ok(ModelStep::Response(Box::new(state), response)),
+                Ok(response) => {
+                    state.recovery_state = state.recovery_state.cleared_attempts();
+                    return Ok(ModelStep::Response(Box::new(state), response));
+                }
                 Err(error) => {
                     if error.kind == AgentLoopHostErrorKind::Cancelled {
                         return Err(AgentLoopExecutorError::Cancelled);
@@ -443,13 +446,7 @@ impl CanonicalAgentLoopExecutor {
                     .await
             }
             CapabilityOutcome::SpawnedProcess(handle) => {
-                let gate_ref = ironclaw_turns::LoopGateRef::new(format!(
-                    "gate:process-{}",
-                    opaque_token(handle.process_ref.as_str())
-                ))
-                .map_err(|_| AgentLoopExecutorError::PlannerContract {
-                    detail: "process ref could not be converted to gate ref",
-                })?;
+                let gate_ref = process_gate_ref(&handle.process_ref)?;
                 self.handle_gate(planner, host, state, GateKind::Resource, gate_ref)
                     .await
             }
@@ -555,15 +552,7 @@ impl CanonicalAgentLoopExecutor {
                                     .await;
                             }
                             CapabilityOutcome::SpawnedProcess(handle) => {
-                                let gate_ref = ironclaw_turns::LoopGateRef::new(format!(
-                                    "gate:process-{}",
-                                    opaque_token(handle.process_ref.as_str())
-                                ))
-                                .map_err(|_| {
-                                    AgentLoopExecutorError::PlannerContract {
-                                        detail: "process ref could not be converted to gate ref",
-                                    }
-                                })?;
+                                let gate_ref = process_gate_ref(&handle.process_ref)?;
                                 return self
                                     .handle_gate(planner, host, state, GateKind::Resource, gate_ref)
                                     .await;
@@ -1009,6 +998,7 @@ fn push_call_signature_once(
 }
 
 fn push_completed_result(state: &mut LoopExecutionState, result: CapabilityResultMessage) {
+    state.recovery_state = state.recovery_state.cleared_attempts();
     state.result_refs.push(result.result_ref);
     if result.terminate_hint {
         state.stop_state.terminate_hints_in_last_batch = state
@@ -1018,17 +1008,15 @@ fn push_completed_result(state: &mut LoopExecutionState, result: CapabilityResul
     }
 }
 
-fn opaque_token(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect()
+fn process_gate_ref(
+    process_ref: &ironclaw_turns::run_profile::LoopProcessRef,
+) -> Result<ironclaw_turns::LoopGateRef, AgentLoopExecutorError> {
+    let digest = blake3::hash(process_ref.as_str().as_bytes());
+    ironclaw_turns::LoopGateRef::new(format!("gate:process-{}", digest.to_hex())).map_err(|_| {
+        AgentLoopExecutorError::PlannerContract {
+            detail: "process ref could not be converted to gate ref",
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1048,11 +1036,11 @@ mod tests {
             ContextProfileId, LoopCancelReasonKind, LoopCheckpointRequest, LoopCheckpointStateRef,
             LoopContextBundle, LoopContextRequest, LoopDriverId, LoopInputBatch, LoopInputCursor,
             LoopInputCursorToken, LoopInterruptKind, LoopModelMessage, LoopModelResponse,
-            LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest, LoopRunContext,
-            LoopRunInfoPort, ModelProfileId, ModelStreamChunk, RedactedRunProfileProvenance,
-            ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
-            RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
-            StageCheckpointPayloadRequest, SteeringPolicy,
+            LoopProcessRef, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
+            LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk,
+            RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
+            ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
+            SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
         },
     };
 
@@ -1559,6 +1547,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn model_retry_success_clears_recovery_state() {
+        let host =
+            MockHost::new(vec![reply_response()]).with_model_errors(vec![AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "model unavailable",
+            )]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        assert!(matches!(exit, LoopExit::Completed(_)));
+        assert_eq!(host.model_requests().len(), 2);
+        assert_eq!(final_staged_state(&host).recovery_state, Default::default());
+    }
+
+    #[tokio::test]
     async fn stale_surface_capability_call_is_policy_denied_before_host_invocation() {
         let host = MockHost::new(vec![stale_surface_calls_response(), reply_response()]);
         let executor = CanonicalAgentLoopExecutor;
@@ -1691,6 +1699,19 @@ mod tests {
             .expect("execute");
 
         assert!(matches!(exit, LoopExit::Completed(_)));
+        assert_eq!(final_staged_state(&host).recovery_state, Default::default());
+    }
+
+    #[test]
+    fn process_gate_ref_hashes_full_process_ref() {
+        let first = LoopProcessRef::new("process:alpha").expect("valid");
+        let second = LoopProcessRef::new("process:alpha-2").expect("valid");
+
+        let first_gate = process_gate_ref(&first).expect("gate ref");
+        let second_gate = process_gate_ref(&second).expect("gate ref");
+
+        assert!(first_gate.as_str().starts_with("gate:process-"));
+        assert_ne!(first_gate, second_gate);
     }
 
     fn reply_response() -> LoopModelResponse {
@@ -1787,6 +1808,17 @@ mod tests {
             LoopCheckpointKind::BeforeBlock => CheckpointKind::BeforeBlock,
             LoopCheckpointKind::Final => CheckpointKind::Final,
         }
+    }
+
+    fn final_staged_state(host: &MockHost) -> LoopExecutionState {
+        let staged_payloads = host.staged_payloads();
+        let final_payload = staged_payloads
+            .iter()
+            .rev()
+            .find(|request| request.kind == LoopCheckpointKind::Final)
+            .expect("final checkpoint payload");
+        LoopExecutionState::from_checkpoint_payload(&final_payload.payload, CheckpointKind::Final)
+            .expect("checkpoint payload")
     }
 
     fn test_run_context() -> LoopRunContext {
