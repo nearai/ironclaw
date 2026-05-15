@@ -25,21 +25,23 @@ use ironclaw_host_runtime::{
     VisibleCapability, VisibleCapabilityAccess,
 };
 use ironclaw_loop_support::{
-    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
-    HostIdentityMessageContent, HostInputBatch, HostInputEnvelope, HostInputQueue,
-    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse, HostSkillContextBuildError,
-    HostSkillContextCandidate, HostSkillContextSource, IdentityApplicability, IdentityFileName,
-    identity_message_ref,
+    EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, HostIdentityMessageContent, HostInputBatch, HostInputEnvelope,
+    HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
+    HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
+    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
+    IdentityApplicability, IdentityFileName, ProductLiveCancellationProbe, RunCancellationFactory,
+    RunCancellationHandle, identity_message_ref,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, HostRuntimeLoopCapabilityPort,
     LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter, ModelRoute,
-    ModelRoutePolicy, ModelSelectionMode, ModelSlot, RebornLoopDriverHostFactory,
-    RebornLoopDriverHostRequest, StaticModelRouteResolver, TextOnlyLoopHostConfig,
-    TextOnlyModelReplyDriver, build_default_planned_runtime, default_planned_run_profile_resolver,
+    ModelRoutePolicy, ModelRouteResolver, ModelSelectionMode, ModelSlot,
+    RebornLoopDriverHostFactory, RebornLoopDriverHostRequest, StaticModelRouteResolver,
+    TextOnlyLoopHostConfig, TextOnlyModelReplyDriver, build_default_planned_runtime,
+    build_product_live_planned_runtime, default_planned_run_profile_resolver,
     driver_registry::{DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey},
     loop_exit_applier::{
         BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
@@ -1942,6 +1944,51 @@ async fn planned_host_factory_sanitizes_capability_profile_resolver_errors() {
 }
 
 #[tokio::test]
+async fn profiled_capability_surface_resolver_errors_are_sanitized() {
+    let fixture = HostFixture::new("thread-planned-host-sanitized-surface", "hello").await;
+    let planned = default_planned_run_profile_resolver()
+        .unwrap()
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    let mut claimed = fixture.claimed.clone();
+    claimed.state.resolved_run_profile_id = planned.profile_id.clone();
+    claimed.state.resolved_run_profile_version = planned.loop_driver.version;
+    claimed.resolved_run_profile = planned;
+    let loop_run_context = LoopRunContext::new(
+        fixture.context.scope.clone(),
+        fixture.context.turn_id,
+        fixture.context.run_id,
+        claimed.resolved_run_profile.clone(),
+    );
+    let request = RebornLoopDriverHostRequest {
+        claimed_run: claimed,
+        loop_run_context,
+    };
+
+    let error = fixture
+        .factory()
+        .build_text_only_host_with_profiled_capabilities(
+            request,
+            Arc::new(EmptyLoopCapabilityPort),
+            Arc::new(FailingCapabilitySurfaceProfileResolver::internal(
+                "raw resolver failure sk-secret /host/path tool_input",
+            )),
+        )
+        .await
+        .expect_err("resolver failure should fail host construction");
+    let reason = error.to_string();
+
+    assert!(
+        reason.contains("capability surface profile could not be resolved"),
+        "reason: {reason}"
+    );
+    assert!(!reason.contains("sk-secret"), "reason: {reason}");
+    assert!(!reason.contains("/host/path"), "reason: {reason}");
+    assert!(!reason.contains("tool_input"), "reason: {reason}");
+}
+
+#[tokio::test]
 async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_host_factory() {
     let fixture = HostFixture::new_unsubmitted("thread-runtime-planned-default", "hello").await;
     let turn_store = Arc::new(InMemoryTurnStateStore::default());
@@ -2050,6 +2097,70 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
             if denied.reason_kind.as_str() == "surface_profile_denied"
     ));
     assert!(runtime.invocations().is_empty());
+}
+
+// Identity source is now required by the `DefaultPlannedRuntimeParts` type
+// signature (WS-16), so the previous fail-closed runtime gate is enforced at
+// compile time. The dynamic gate test has been retired alongside the dead
+// `is_none()` check; the "builds when all required adapters are present" test
+// below still proves the happy-path readiness contract.
+
+#[tokio::test]
+async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
+    let fixture = HostFixture::new_unsubmitted("thread-product-live-ready", "hello").await;
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor("demo.allowed"),
+    ])));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let capability_factory = Arc::new(TestHostRuntimeCapabilityFactory {
+        runtime,
+        visible_request: host_runtime_visible_request(&fixture, ["demo"]),
+        io,
+        milestone_sink: fixture.milestone_sink.clone(),
+    });
+    let model_route_resolver: Arc<dyn ModelRouteResolver> = Arc::new(
+        StaticModelRouteResolver::new(ModelRoutePolicy::new(
+            ModelSelectionMode::DeveloperAnyConfigured,
+        ))
+        .with_route(
+            ModelSlot::Default,
+            ModelRoute::new("nearai", "qwen3-coder").unwrap(),
+        ),
+    );
+
+    let composition = build_product_live_planned_runtime(DefaultPlannedRuntimeParts {
+        turn_state: turn_store.clone(),
+        thread_service: fixture.thread_service.clone(),
+        thread_scope: fixture.thread_scope.clone(),
+        model_gateway: fixture.gateway.clone(),
+        checkpoint_state_store: fixture.checkpoint_state_store.clone(),
+        loop_checkpoint_store: turn_store.clone(),
+        milestone_sink: fixture.milestone_sink.clone(),
+        capability_factory,
+        capability_surface_resolver: Arc::new(StaticCapabilitySurfaceProfileResolver::new(
+            CapabilityAllowSet::allowlist([CapabilityId::new("demo.allowed").unwrap()]),
+        )),
+        loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
+            fixture.thread_service.clone(),
+            Arc::clone(&turn_store) as Arc<dyn TurnStateStore>,
+            turn_store,
+        )),
+        config: DefaultPlannedRuntimeConfig::default(),
+        model_route_resolver: Some(model_route_resolver),
+        cancellation_factory: Some(Arc::new(ReadyRunCancellationFactory::default())),
+        skill_context_source: None,
+        input_queue: Some(Arc::new(EmptyHostInputQueue)),
+        identity_context_source: Arc::new(EmptyIdentityContextSource),
+    })
+    .expect("all product-live adapters should satisfy readiness");
+
+    let resolved = composition
+        .run_profile_resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    assert_eq!(resolved.profile_id.as_str(), "reborn-planned-default");
 }
 
 #[tokio::test]
@@ -4882,6 +4993,126 @@ impl CapabilitySurfaceProfileResolver for FailingCapabilitySurfaceProfileResolve
         _run_context: &LoopRunContext,
     ) -> Result<CapabilityAllowSet, CapabilityResolveError> {
         Err(CapabilityResolveError::internal(self.reason.clone()))
+    }
+}
+
+struct EmptyHostInputQueue;
+
+#[async_trait]
+impl HostInputQueue for EmptyHostInputQueue {
+    async fn next_after(
+        &self,
+        _run_id: TurnRunId,
+        after: LoopInputCursorToken,
+        _limit: usize,
+    ) -> Result<HostInputBatch, HostInputQueueError> {
+        Ok(HostInputBatch {
+            inputs: Vec::<HostInputEnvelope>::new(),
+            next_cursor: after,
+        })
+    }
+
+    async fn ack_consumed(
+        &self,
+        _run_id: TurnRunId,
+        _tokens: Vec<LoopInputAckToken>,
+    ) -> Result<(), HostInputQueueError> {
+        Ok(())
+    }
+}
+
+struct EmptyIdentityContextSource;
+
+#[async_trait]
+impl HostIdentityContextSource for EmptyIdentityContextSource {
+    async fn load_identity_candidates(
+        &self,
+        _run_context: &LoopRunContext,
+        _mode: PromptMode,
+    ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
+        Ok(Vec::new())
+    }
+}
+
+#[derive(Default)]
+struct ReadyRunCancellationFactory {
+    handles: Arc<Mutex<HashMap<TurnRunId, RunCancellationHandle>>>,
+}
+
+#[async_trait]
+impl RunCancellationFactory for ReadyRunCancellationFactory {
+    async fn handle_for_run(
+        &self,
+        _scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<RunCancellationHandle, AgentLoopHostError> {
+        let handle = RunCancellationHandle::default();
+        self.handles
+            .lock()
+            .expect("ready cancellation lock poisoned")
+            .insert(run_id, handle.clone());
+        Ok(handle)
+    }
+
+    fn product_live_cancellation_probe(&self) -> Option<Box<dyn ProductLiveCancellationProbe>> {
+        let run_id = TurnRunId::new();
+        let handle = RunCancellationHandle::default();
+        self.handles
+            .lock()
+            .expect("ready cancellation lock poisoned")
+            .insert(run_id, handle);
+        Some(Box::new(ReadyRunCancellationProbe {
+            handles: Arc::clone(&self.handles),
+            run_id,
+        }))
+    }
+
+    fn is_product_cancellation_observed(
+        &self,
+        run_id: TurnRunId,
+    ) -> Result<bool, AgentLoopHostError> {
+        Ok(self
+            .handles
+            .lock()
+            .expect("ready cancellation lock poisoned")
+            .get(&run_id)
+            .map(|handle| handle.is_requested())
+            .unwrap_or(false))
+    }
+}
+
+struct ReadyRunCancellationProbe {
+    handles: Arc<Mutex<HashMap<TurnRunId, RunCancellationHandle>>>,
+    run_id: TurnRunId,
+}
+
+impl ReadyRunCancellationProbe {
+    fn handle_for(&self) -> Result<RunCancellationHandle, AgentLoopHostError> {
+        self.handles
+            .lock()
+            .expect("ready cancellation lock poisoned")
+            .get(&self.run_id)
+            .cloned()
+            .ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "product cancellation probe handle was not retained",
+                )
+            })
+    }
+}
+
+impl ProductLiveCancellationProbe for ReadyRunCancellationProbe {
+    fn request_cancellation(
+        &self,
+        reason_kind: LoopCancelReasonKind,
+    ) -> Result<(), AgentLoopHostError> {
+        self.handle_for()?.request(reason_kind);
+        Ok(())
+    }
+
+    fn is_cancellation_observed(&self) -> Result<bool, AgentLoopHostError> {
+        Ok(self.handle_for()?.is_requested())
     }
 }
 

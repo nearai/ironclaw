@@ -1334,6 +1334,12 @@ fn is_legacy_text_only_driver_key(key: &LoopDriverRegistryKey) -> bool {
             .is_some_and(|version| version.as_u64() == LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_VERSION)
 }
 
+fn model_route_error_to_host_error(error: ModelRouteError) -> RebornLoopDriverHostError {
+    RebornLoopDriverHostError::InvalidRequest {
+        reason: format!("model route resolution failed: {}", error.kind().as_str()),
+    }
+}
+
 fn capability_resolve_error_to_host_error(
     error: CapabilityResolveError,
 ) -> RebornLoopDriverHostError {
@@ -1346,12 +1352,6 @@ fn capability_resolve_error_to_host_error(
     };
     RebornLoopDriverHostError::InvalidRequest {
         reason: reason.to_string(),
-    }
-}
-
-fn model_route_error_to_host_error(error: ModelRouteError) -> RebornLoopDriverHostError {
-    RebornLoopDriverHostError::InvalidRequest {
-        reason: format!("model route resolution failed: {}", error.kind().as_str()),
     }
 }
 

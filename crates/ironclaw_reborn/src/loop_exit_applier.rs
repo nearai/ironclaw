@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_loop_support::RunCancellationFactory;
 use ironclaw_threads::{
     MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
@@ -158,6 +159,8 @@ where
     thread_service: Arc<S>,
     turn_state_store: Arc<dyn TurnStateStore>,
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
+    thread_scope: Option<ThreadScope>,
+    cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
 }
 
 impl<S> ThreadCheckpointLoopExitEvidencePort<S>
@@ -173,7 +176,32 @@ where
             thread_service,
             turn_state_store,
             loop_checkpoint_store,
+            thread_scope: None,
+            cancellation_factory: None,
         }
+    }
+
+    pub fn new_with_thread_scope(
+        thread_service: Arc<S>,
+        turn_state_store: Arc<dyn TurnStateStore>,
+        loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
+        thread_scope: ThreadScope,
+    ) -> Self {
+        Self {
+            thread_service,
+            turn_state_store,
+            loop_checkpoint_store,
+            thread_scope: Some(thread_scope),
+            cancellation_factory: None,
+        }
+    }
+
+    pub fn with_cancellation_factory(
+        mut self,
+        cancellation_factory: Arc<dyn RunCancellationFactory>,
+    ) -> Self {
+        self.cancellation_factory = Some(cancellation_factory);
+        self
     }
 }
 
@@ -192,7 +220,13 @@ where
         if request.reply_message_refs.is_empty() {
             return Ok(true);
         }
-        let thread_scope = thread_scope_from_turn_scope(request.scope)?;
+        let thread_scope = match &self.thread_scope {
+            Some(thread_scope) => {
+                ensure_thread_scope_matches_turn_scope(thread_scope, request.scope)?;
+                thread_scope.clone()
+            }
+            None => thread_scope_from_turn_scope(request.scope)?,
+        };
         let history = self
             .thread_service
             .list_thread_history(ThreadHistoryRequest {
@@ -261,6 +295,15 @@ where
         _turn_id: TurnId,
         run_id: TurnRunId,
     ) -> Result<bool, TurnError> {
+        if let Some(cancellation_factory) = self.cancellation_factory.as_ref()
+            && cancellation_factory
+                .is_product_cancellation_observed(run_id)
+                .map_err(|error| TurnError::Unavailable {
+                    reason: error.safe_summary,
+                })?
+        {
+            return Ok(true);
+        }
         let state = self
             .turn_state_store
             .get_run_state(GetRunStateRequest {
@@ -305,6 +348,28 @@ fn thread_scope_from_turn_scope(scope: &TurnScope) -> Result<ThreadScope, TurnEr
         owner_user_id: None,
         mission_id: None,
     })
+}
+
+fn ensure_thread_scope_matches_turn_scope(
+    thread_scope: &ThreadScope,
+    turn_scope: &TurnScope,
+) -> Result<(), TurnError> {
+    let Some(agent_id) = turn_scope.agent_id.as_ref() else {
+        return Err(TurnError::InvalidRequest {
+            reason: "thread checkpoint loop-exit evidence requires agent-scoped turn scope"
+                .to_string(),
+        });
+    };
+    if thread_scope.tenant_id != turn_scope.tenant_id
+        || &thread_scope.agent_id != agent_id
+        || thread_scope.project_id.as_ref() != turn_scope.project_id.as_ref()
+    {
+        return Err(TurnError::InvalidRequest {
+            reason: "thread checkpoint loop-exit evidence scope does not match turn scope"
+                .to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn message_id_from_ref(message_ref: &LoopMessageRef) -> Option<ThreadMessageId> {

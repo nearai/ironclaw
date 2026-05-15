@@ -209,3 +209,31 @@ where
         self.store.get_run_state(request).await
     }
 }
+
+#[async_trait]
+impl<C> TurnCoordinator for Arc<C>
+where
+    C: TurnCoordinator + ?Sized,
+{
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.as_ref().submit_turn(request).await
+    }
+
+    async fn resume_turn(
+        &self,
+        request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        self.as_ref().resume_turn(request).await
+    }
+
+    async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        self.as_ref().cancel_run(request).await
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        self.as_ref().get_run_state(request).await
+    }
+}

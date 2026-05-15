@@ -8,14 +8,14 @@ pub(crate) struct RunCommand;
 
 impl RunCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
-        RuntimeShellReport::initialize(context).print();
+        RuntimeReadinessSnapshot::initialize(context).print();
         Ok(())
     }
 }
 
-/// Side-effect-free runtime-shell snapshot for the standalone Reborn binary.
+/// Side-effect-free runtime readiness snapshot for the standalone Reborn binary.
 #[derive(Debug, Clone)]
-struct RuntimeShellReport {
+struct RuntimeReadinessSnapshot {
     config: RebornBootConfig,
     text_only_driver: ComponentStatus,
     planned_driver: ComponentStatus,
@@ -48,7 +48,7 @@ impl ComponentStatus {
     }
 }
 
-impl RuntimeShellReport {
+impl RuntimeReadinessSnapshot {
     fn initialize(context: RebornCliContext) -> Self {
         let mut registry = ironclaw_reborn::driver_registry::DriverRegistry::new();
         let text_only_driver =
@@ -73,14 +73,13 @@ impl RuntimeShellReport {
     }
 
     fn print(&self) {
-        println!("IronClaw Reborn runtime shell");
+        println!("IronClaw Reborn runtime readiness snapshot");
         println!("binary: ironclaw-reborn");
         println!("version: {}", env!("CARGO_PKG_VERSION"));
         println!("reborn_home: {}", self.config.home().path().display());
         println!("home_source: {}", self.config.home().source_label());
         println!("profile: {}", self.config.profile());
         println!("v1_state: not-used");
-        println!("driver_registry: initialized");
         println!(
             "text_only_driver: {}",
             self.text_only_driver.render("initialized")
@@ -89,12 +88,20 @@ impl RuntimeShellReport {
             "planned_driver: {}",
             self.planned_driver.render("initialized")
         );
-        let runtime_shell_initialized =
+        let driver_registry_initialized =
             self.text_only_driver.is_initialized() && self.planned_driver.is_initialized();
         println!(
-            "runtime_shell: {}",
-            if runtime_shell_initialized {
+            "driver_registry: {}",
+            if driver_registry_initialized {
                 "initialized"
+            } else {
+                "unavailable"
+            }
+        );
+        println!(
+            "local_runtime_shell_readiness: {}",
+            if driver_registry_initialized && self.planned_default_profile.is_initialized() {
+                "ready"
             } else {
                 "unavailable"
             }

@@ -333,7 +333,9 @@ mod tests {
         );
         assert_eq!(
             descriptor.checkpoint_schema_id,
-            Some(CheckpointSchemaId::new(PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID).expect("valid"))
+            Some(
+                CheckpointSchemaId::new(crate::PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID).expect("valid")
+            )
         );
         assert_eq!(
             descriptor.checkpoint_schema_version,

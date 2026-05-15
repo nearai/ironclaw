@@ -133,6 +133,29 @@ pub trait RunCancellationFactory: Send + Sync {
     ) -> Result<RunCancellationHandle, AgentLoopHostError>;
 
     fn notify_run_wake(&self, _wake: &TurnRunWake) {}
+
+    fn product_live_cancellation_probe(&self) -> Option<Box<dyn ProductLiveCancellationProbe>> {
+        None
+    }
+
+    fn is_product_cancellation_observed(
+        &self,
+        _run_id: TurnRunId,
+    ) -> Result<bool, AgentLoopHostError> {
+        Ok(false)
+    }
+}
+
+/// Executable product-path cancellation probe used to gate product-live runtime
+/// wiring. Implementations must exercise the same request/observe path product
+/// code uses for a retained run handle.
+pub trait ProductLiveCancellationProbe: Send + Sync {
+    fn request_cancellation(
+        &self,
+        reason_kind: LoopCancelReasonKind,
+    ) -> Result<(), AgentLoopHostError>;
+
+    fn is_cancellation_observed(&self) -> Result<bool, AgentLoopHostError>;
 }
 
 /// Runtime liveness contract for run cancellation observation.
@@ -147,6 +170,32 @@ pub enum RunCancellationObservationKind {
 impl RunCancellationObservationKind {
     pub fn is_live_capable(self) -> bool {
         matches!(self, Self::LiveCapable)
+    }
+}
+
+/// Product-live readiness evidence for a run cancellation source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductLiveCancellationReadiness {
+    /// The source cannot be cancelled or observed from the product path.
+    Inert,
+    /// Product code retains per-run handles and can request or observe cancellation.
+    ExternallyControllable,
+}
+
+pub fn verify_product_live_cancellation_probe(
+    factory: &dyn RunCancellationFactory,
+) -> Result<ProductLiveCancellationReadiness, AgentLoopHostError> {
+    let Some(probe) = factory.product_live_cancellation_probe() else {
+        return Ok(ProductLiveCancellationReadiness::Inert);
+    };
+    if probe.is_cancellation_observed()? {
+        return Ok(ProductLiveCancellationReadiness::Inert);
+    }
+    probe.request_cancellation(LoopCancelReasonKind::UserRequested)?;
+    if probe.is_cancellation_observed()? {
+        Ok(ProductLiveCancellationReadiness::ExternallyControllable)
+    } else {
+        Ok(ProductLiveCancellationReadiness::Inert)
     }
 }
 

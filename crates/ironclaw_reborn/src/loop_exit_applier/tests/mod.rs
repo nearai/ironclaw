@@ -1,8 +1,11 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{TenantId, ThreadId};
-use ironclaw_threads::InMemorySessionThreadService;
+use ironclaw_host_api::{AgentId, TenantId, ThreadId};
+use ironclaw_threads::{
+    AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
+    ThreadScope,
+};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GetLoopCheckpointRequest, GetRunStateRequest, LoopBlocked, LoopBlockedKind, LoopCheckpointKind,
@@ -317,6 +320,75 @@ async fn applier_rejects_agentless_transcript_evidence_before_transition() {
 
     assert!(matches!(err, TurnError::InvalidRequest { .. }));
     assert_eq!(transition.apply_count(), 0);
+}
+
+#[tokio::test]
+async fn thread_checkpoint_evidence_rejects_stored_thread_scope_mismatch() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let requested_scope = TurnScope::new(
+        TenantId::new("tenant").expect("valid"),
+        Some(AgentId::new("agent-request").expect("valid")),
+        None,
+        ThreadId::new("thread").expect("valid"),
+    );
+    let stored_scope = ThreadScope {
+        tenant_id: requested_scope.tenant_id.clone(),
+        agent_id: AgentId::new("agent-stored").expect("valid"),
+        project_id: None,
+        owner_user_id: None,
+        mission_id: None,
+    };
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: stored_scope.clone(),
+            thread_id: Some(requested_scope.thread_id.clone()),
+            created_by_actor_id: "user:test".to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    let run_id = TurnRunId::new();
+    let draft = thread_service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: stored_scope.clone(),
+            thread_id: requested_scope.thread_id.clone(),
+            turn_run_id: run_id.to_string(),
+            content: MessageContent::text("wrong-scope reply"),
+        })
+        .await
+        .expect("draft");
+    thread_service
+        .finalize_assistant_message(
+            &stored_scope,
+            &requested_scope.thread_id,
+            draft.message_id,
+            MessageContent::text("wrong-scope reply"),
+        )
+        .await
+        .expect("finalized");
+    let evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
+        thread_service,
+        Arc::new(ironclaw_turns::InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
+        Arc::new(PanicLoopCheckpointStore),
+        stored_scope,
+    );
+    let message_ref =
+        LoopMessageRef::new(format!("msg:{}", draft.message_id)).expect("valid message ref");
+
+    let err = evidence
+        .verify_completion_refs(CompletionEvidenceRequest {
+            scope: &requested_scope,
+            turn_id: TurnId::new(),
+            run_id,
+            reply_message_refs: &[message_ref],
+            result_refs: &[],
+        })
+        .await
+        .expect_err("stored thread scope must match request scope before history is trusted");
+
+    assert!(matches!(err, TurnError::InvalidRequest { .. }));
+    assert!(err.to_string().contains("scope does not match"));
 }
 
 #[tokio::test]
