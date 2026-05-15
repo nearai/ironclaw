@@ -207,6 +207,29 @@ impl HookRegistry {
                 binding.point
             )));
         }
+        // henrypark133 should-fix #1 on PR #3640: event-triggered bindings
+        // are meaningless without an event-kind filter — the dispatcher
+        // matches by kind, so a missing filter silently matches nothing
+        // (a no-op binding). Conversely, only event-triggered bindings
+        // can carry an event-kind filter (other points are kind-agnostic).
+        // Enforce the biconditional at install time so misconfigured
+        // bindings fail loud.
+        let is_event_point = matches!(binding.point, HookPointSpec::EventTriggered);
+        let has_kind_filter = binding.event_kind_filter.is_some();
+        if is_event_point && !has_kind_filter {
+            return Err(HookError::RegistryConstruction(format!(
+                "event-triggered binding `{}` must declare an event_kind_filter; \
+                 without one the dispatcher would never match",
+                binding.hook_id
+            )));
+        }
+        if !is_event_point && has_kind_filter {
+            return Err(HookError::RegistryConstruction(format!(
+                "binding `{}` at point {:?} must not declare an event_kind_filter; \
+                 only EventTriggered bindings use kind filters",
+                binding.hook_id, binding.point
+            )));
+        }
         // Hook IDs must be globally unique across the registry. A duplicate
         // ID at the same point would allow the same physical hook to appear
         // twice in a single dispatch snapshot; a duplicate at a different

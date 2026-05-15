@@ -7,6 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use futures_util::FutureExt;
 use ironclaw_events::{DurableEventLog, EventCursor, EventStreamKey, ReadScope};
 use ironclaw_hooks::dispatch::{HookDispatcher, HookDispatcherBuilder};
 use ironclaw_hooks::middleware::{
@@ -389,7 +390,20 @@ pub type HookDispatcherBuilderFactory =
 /// Default number of durable runtime events read per subscription poll.
 pub const DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_BATCH_LIMIT: usize = 64;
 
-/// Default delay between empty/error subscription polls.
+/// Default delay between empty/error subscription polls. Combined with
+/// [`DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_BATCH_LIMIT`], this is the
+/// current first-line throttle for event-triggered dispatch fanout:
+/// the subscription processes at most `batch_limit` events per
+/// `poll_interval`, so a storm produced by mutual recursion between
+/// two installed hooks cycles at the poll-interval rate rather than
+/// unboundedly.
+///
+/// The full per-hook DoS budget Henry flagged as required for the
+/// Installed tier (henrypark133 should-fix #4 on PR #3640) — a per-
+/// hook rate cap with poisoning + milestone on overrun — is tracked
+/// as a follow-up. The existing self-trigger guard catches the most
+/// common direct-recursion pattern; the throttle here bounds indirect
+/// patterns until the proper budget design lands.
 pub const DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Pull-driven durable runtime-event subscription for event-triggered hooks.
@@ -398,7 +412,25 @@ pub const DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_POLL_INTERVAL: Duration = Duratio
 /// dispatches matching hooks through the per-build [`HookDispatcher`]. Because
 /// events are pulled from the durable log after append, the runtime event
 /// producer does not wait for hook execution or hook backpressure.
-#[derive(Clone)]
+/// Configuration for a single event-triggered hook subscription.
+///
+/// `Clone` is intentionally **not** derived. Cloning and spawning twice
+/// would create two consumers reading from the same `start_cursor` and
+/// dispatching each hook twice (henrypark133 should-fix #2 on PR
+/// #3640). The factory deliberately uses
+/// [`Self::clone_for_independent_spawn`] in its one call site so the
+/// dual-consumer property is visible at the seam.
+///
+/// # Replay semantics
+///
+/// The subscription is **at-least-once**. Restarting from the same
+/// `start_cursor` replays every event whose cursor is `>= start_cursor`
+/// — including events already dispatched before the prior shutdown.
+/// Cursor persistence is the caller's responsibility; for once-only
+/// delivery, the caller must commit progress at hook completion and
+/// resume from `last_committed_cursor + 1`. This is documented here
+/// (henrypark133 should-fix #6 on PR #3640) rather than only in the
+/// design doc since it's a load-bearing public-API property.
 pub struct EventTriggeredHookSubscription {
     log: Arc<dyn DurableEventLog>,
     stream: EventStreamKey,
@@ -409,6 +441,22 @@ pub struct EventTriggeredHookSubscription {
 }
 
 impl EventTriggeredHookSubscription {
+    /// Cheap deep-copy of the configuration so the factory can mint one
+    /// independent background task per host build. Named verbosely
+    /// because the alternative (`Clone` derive) would let external
+    /// callers create two simultaneous consumers of the same stream by
+    /// accident — see the type-level rustdoc above.
+    pub(crate) fn clone_for_independent_spawn(&self) -> Self {
+        Self {
+            log: Arc::clone(&self.log),
+            stream: self.stream.clone(),
+            read_scope: self.read_scope.clone(),
+            start_cursor: self.start_cursor,
+            batch_limit: self.batch_limit,
+            poll_interval: self.poll_interval,
+        }
+    }
+
     pub fn new(
         log: Arc<dyn DurableEventLog>,
         stream: EventStreamKey,
@@ -522,9 +570,35 @@ impl EventTriggeredHookSubscription {
         run_context: LoopRunContext,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     ) -> EventTriggeredHookSubscriptionHandle {
+        // henrypark133 should-fix #3 on PR #3640: wrap the background
+        // task body in `catch_unwind`. Without it, a panic in `run()`
+        // terminates the task silently — no operator-visible signal.
+        // On panic, emit the same `EventSubscriptionTerminated`
+        // milestone the `ReplayGap` path already emits so audit/SSE
+        // consumers learn the subscription died and why.
+        let panic_sink = Arc::clone(&milestone_sink);
+        let panic_run_context = run_context.clone();
         let task = tokio::spawn(async move {
-            self.run(dispatcher, tenant_id, run_context, milestone_sink)
+            let outcome = std::panic::AssertUnwindSafe(self.run(
+                dispatcher,
+                tenant_id,
+                run_context,
+                milestone_sink,
+            ))
+            .catch_unwind()
+            .await;
+            if outcome.is_err() {
+                tracing::error!(
+                    "event-triggered hook subscription task panicked; \
+                     emitting EventSubscriptionTerminated milestone"
+                );
+                emit_subscription_terminated_note(
+                    &panic_sink,
+                    &panic_run_context,
+                    "event subscription stopped: task panic",
+                )
                 .await;
+            }
         });
         EventTriggeredHookSubscriptionHandle { task }
     }
@@ -1102,7 +1176,7 @@ where
                 subscription
                     .validate_against_run_scope(&run_context.scope, &self.thread_scope)
                     .map_err(|reason| RebornLoopDriverHostError::ScopeMismatch { reason })?;
-                Some(subscription.clone().spawn(
+                Some(subscription.clone_for_independent_spawn().spawn(
                     Arc::clone(dispatcher),
                     run_context.scope.tenant_id.clone(),
                     run_context.clone(),
