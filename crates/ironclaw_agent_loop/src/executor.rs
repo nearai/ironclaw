@@ -217,14 +217,28 @@ impl CanonicalAgentLoopExecutor {
                     );
                 }
             }
-            state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+            state = match self
+                .checkpoint_and_exit_if_cancelled_after_pending_input_ack(
+                    host,
+                    state,
+                    &mut pending_input_ack,
+                )
+                .await?
+            {
                 CancelCheck::Continue(state) => *state,
                 CancelCheck::Exit(exit) => return Ok(exit),
             };
 
             let context_request = planner.context().plan_context_request(&state).await;
             let prompt_mode = context_request.mode;
-            state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+            state = match self
+                .checkpoint_and_exit_if_cancelled_after_pending_input_ack(
+                    host,
+                    state,
+                    &mut pending_input_ack,
+                )
+                .await?
+            {
                 CancelCheck::Continue(state) => *state,
                 CancelCheck::Exit(exit) => return Ok(exit),
             };
@@ -247,13 +261,27 @@ impl CanonicalAgentLoopExecutor {
                 },
             )
             .await;
-            state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+            state = match self
+                .checkpoint_and_exit_if_cancelled_after_pending_input_ack(
+                    host,
+                    state,
+                    &mut pending_input_ack,
+                )
+                .await?
+            {
                 CancelCheck::Continue(state) => *state,
                 CancelCheck::Exit(exit) => return Ok(exit),
             };
 
             let surface_filter = planner.capability().filter(&state).await;
-            state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+            state = match self
+                .checkpoint_and_exit_if_cancelled_after_pending_input_ack(
+                    host,
+                    state,
+                    &mut pending_input_ack,
+                )
+                .await?
+            {
                 CancelCheck::Continue(state) => *state,
                 CancelCheck::Exit(exit) => return Ok(exit),
             };
@@ -265,7 +293,14 @@ impl CanonicalAgentLoopExecutor {
                 })?;
             apply_capability_filter(&mut surface, &surface_filter);
             state.surface_version = Some(surface.version.clone());
-            state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+            state = match self
+                .checkpoint_and_exit_if_cancelled_after_pending_input_ack(
+                    host,
+                    state,
+                    &mut pending_input_ack,
+                )
+                .await?
+            {
                 CancelCheck::Continue(state) => *state,
                 CancelCheck::Exit(exit) => return Ok(exit),
             };
@@ -368,12 +403,17 @@ impl CanonicalAgentLoopExecutor {
                                         Some(checked.checkpoint_id),
                                     );
                                 }
-                                state =
-                                    match self.checkpoint_and_exit_if_cancelled(host, state).await?
-                                    {
-                                        CancelCheck::Continue(state) => *state,
-                                        CancelCheck::Exit(exit) => return Ok(exit),
-                                    };
+                                state = match self
+                                    .checkpoint_and_exit_if_cancelled_after_pending_input_ack(
+                                        host,
+                                        state,
+                                        &mut pending_input_ack,
+                                    )
+                                    .await?
+                                {
+                                    CancelCheck::Continue(state) => *state,
+                                    CancelCheck::Exit(exit) => return Ok(exit),
+                                };
                                 if drained_inputs.drained {
                                     state.iteration = state.iteration.saturating_add(1);
                                     continue;
@@ -946,6 +986,13 @@ impl CanonicalAgentLoopExecutor {
         host: &(dyn AgentLoopDriverHost + Send + Sync),
         state: LoopExecutionState,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
+        // Called when a capability invocation surfaced `CapabilityFailureKind::Cancelled`
+        // and no `LoopCancellationSignal` is in scope, so the cooperative-boundary
+        // reason cannot be derived from a signal. `cancelled_exit` hardcodes
+        // `LoopCancelledReasonKind::HostCancellation` which currently coarsens
+        // every reason variant; if `LoopCancelledReasonKind` gains finer-grained
+        // variants this site must switch to `cancelled_exit_with_reason` with the
+        // capability-specific reason.
         let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
         Ok(BatchStep::Exit(cancelled_exit(
             host,
@@ -1057,7 +1104,11 @@ impl CanonicalAgentLoopExecutor {
                 cancelled_reason_from_signal(&signal),
                 Some(checked.checkpoint_id),
             )?)),
-            Err(_)
+            // Permissive profile: only checkpoint-write failures are absorbed
+            // into a checkpoint-free `Cancelled` exit. Other variants (e.g.
+            // `HostUnavailable`) must propagate so the runner can apply its
+            // recovery policy.
+            Err(AgentLoopExecutorError::CheckpointFailed { .. })
                 if !host
                     .run_context()
                     .resolved_run_profile
@@ -1071,6 +1122,54 @@ impl CanonicalAgentLoopExecutor {
                     None,
                 )?))
             }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn checkpoint_and_exit_if_cancelled_after_pending_input_ack(
+        &self,
+        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        state: LoopExecutionState,
+        pending_input_ack: &mut PendingInputAck,
+    ) -> Result<CancelCheck, AgentLoopExecutorError> {
+        let Some(signal) = host.observe_cancellation() else {
+            return Ok(CancelCheck::Continue(Box::new(state)));
+        };
+
+        let fallback_state = state.clone();
+        match self.checkpoint(host, state, CheckpointKind::Final).await {
+            Ok(checked) => {
+                pending_input_ack.ack(host).await?;
+                Ok(CancelCheck::Exit(cancelled_exit_with_reason(
+                    host,
+                    checked.state,
+                    cancelled_reason_from_signal(&signal),
+                    Some(checked.checkpoint_id),
+                )?))
+            }
+            // Permissive profile: absorb only checkpoint-write failures. The
+            // pending ack is intentionally NOT flushed here — no durable
+            // checkpoint was written, so advancing the input cursor would
+            // commit progress that the runner has no record of.
+            Err(AgentLoopExecutorError::CheckpointFailed { .. })
+                if !host
+                    .run_context()
+                    .resolved_run_profile
+                    .checkpoint_policy
+                    .require_final_checkpoint =>
+            {
+                Ok(CancelCheck::Exit(cancelled_exit_with_reason(
+                    host,
+                    fallback_state,
+                    cancelled_reason_from_signal(&signal),
+                    None,
+                )?))
+            }
+            // Strict profile (or non-checkpoint error variant): propagate the
+            // error so the runner sees the same failure mode as
+            // `checkpoint_and_exit_if_cancelled`. Returning `Ok(LoopExit::failed)`
+            // would silently mask `HostUnavailable` and break the strict
+            // require-final-checkpoint contract.
             Err(error) => Err(error),
         }
     }
@@ -1552,7 +1651,7 @@ mod tests {
 
     use crate::default_planner::DefaultPlanner;
     use crate::family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId};
-    use crate::strategies::CapabilityStrategy;
+    use crate::strategies::{CapabilityStrategy, InputDrainStrategy};
 
     use super::*;
 
@@ -1579,6 +1678,7 @@ mod tests {
         progress_events: Arc<Mutex<Vec<ironclaw_turns::run_profile::LoopProgressEvent>>>,
         fail_progress_port: bool,
         cancellation: Arc<Mutex<Option<LoopCancellationSignal>>>,
+        cancel_after_poll_inputs: Arc<Mutex<bool>>,
         cancel_after_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
         cancel_after_model_response: Arc<Mutex<bool>>,
         cancel_after_batch_invocation: Arc<Mutex<bool>>,
@@ -1606,6 +1706,7 @@ mod tests {
                 progress_events: Arc::new(Mutex::new(Vec::new())),
                 fail_progress_port: false,
                 cancellation: Arc::new(Mutex::new(None)),
+                cancel_after_poll_inputs: Arc::new(Mutex::new(false)),
                 cancel_after_checkpoint: Arc::new(Mutex::new(None)),
                 cancel_after_model_response: Arc::new(Mutex::new(false)),
                 cancel_after_batch_invocation: Arc::new(Mutex::new(false)),
@@ -1700,6 +1801,11 @@ mod tests {
             self
         }
 
+        fn cancel_after_poll_inputs(self) -> Self {
+            *self.cancel_after_poll_inputs.lock().expect("lock") = true;
+            self
+        }
+
         fn cancel_after_model_response(self) -> Self {
             *self.cancel_after_model_response.lock().expect("lock") = true;
             self
@@ -1732,6 +1838,22 @@ mod tests {
     impl CapabilityStrategy for FixedCapabilityStrategy {
         async fn filter(&self, _state: &LoopExecutionState) -> CapabilityFilter {
             self.filter.clone()
+        }
+    }
+
+    struct FixedDrainStrategy {
+        drain_steering: bool,
+        drain_followup: bool,
+    }
+
+    #[async_trait]
+    impl InputDrainStrategy for FixedDrainStrategy {
+        async fn drain_steering(&self, _state: &LoopExecutionState) -> bool {
+            self.drain_steering
+        }
+
+        async fn drain_followup(&self, _state: &LoopExecutionState) -> bool {
+            self.drain_followup
         }
     }
 
@@ -1784,6 +1906,9 @@ mod tests {
             _limit: usize,
         ) -> Result<LoopInputBatch, AgentLoopHostError> {
             if let Some(batch) = self.input_batches.lock().expect("lock").pop_front() {
+                if *self.cancel_after_poll_inputs.lock().expect("lock") {
+                    self.request_cancellation(LoopCancelReasonKind::UserRequested);
+                }
                 return Ok(batch);
             }
             Ok(LoopInputBatch {
@@ -2503,6 +2628,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancellation_after_steering_drain_flushes_pending_input_ack() {
+        let host = MockHost::new(vec![reply_response()]);
+        let run_context = host.run_context().clone();
+        let next_cursor = input_cursor(&run_context, "input-cursor:after-user-before-cancel");
+        let host = host
+            .with_input_batches(vec![LoopInputBatch {
+                inputs: vec![LoopInput::UserMessage {
+                    message_ref: message_ref("msg:user-drained-before-cancel"),
+                }],
+                input_acks: vec![input_ack(
+                    &run_context,
+                    "input-cursor:after-user-before-cancel",
+                    "input-ack:after-user-before-cancel",
+                )],
+                next_cursor: next_cursor.clone(),
+            }])
+            .cancel_after_poll_inputs();
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        assert!(matches!(exit, LoopExit::Cancelled(_)));
+        assert_eq!(
+            host.acked_input_tokens(),
+            vec![LoopInputAckToken::new("input-ack:after-user-before-cancel").expect("valid")]
+        );
+        assert_eq!(
+            host.events(),
+            vec!["checkpoint:final".to_string(), "ack_inputs".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_pending_input_ack_strict_profile_propagates_checkpoint_error() {
+        // Strict-profile checkpoint failure via the pending-input-ack helper must
+        // propagate `CheckpointFailed` (mirroring the non-ack helper), not return
+        // `Ok(LoopExit::failed)`. Returning `Ok` would mask the failure and bypass
+        // the strict require-final-checkpoint contract.
+        let host = MockHost::new(vec![reply_response()]);
+        let run_context = host.run_context().clone();
+        let next_cursor = input_cursor(&run_context, "input-cursor:after-user-before-cancel");
+        let host = host
+            .with_input_batches(vec![LoopInputBatch {
+                inputs: vec![LoopInput::UserMessage {
+                    message_ref: message_ref("msg:user-drained-before-cancel"),
+                }],
+                input_acks: vec![input_ack(
+                    &run_context,
+                    "input-cursor:after-user-before-cancel",
+                    "input-ack:after-user-before-cancel",
+                )],
+                next_cursor: next_cursor.clone(),
+            }])
+            .cancel_after_poll_inputs()
+            .with_require_final_checkpoint(true)
+            .fail_checkpoint(LoopCheckpointKind::Final);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let err = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect_err("expected executor error on strict-profile checkpoint failure");
+
+        assert_eq!(
+            err,
+            AgentLoopExecutorError::CheckpointFailed {
+                stage: CheckpointKind::Final
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_followup_drain_flushes_pending_input_ack() {
+        let host = MockHost::new(vec![reply_response()]);
+        let run_context = host.run_context().clone();
+        let next_cursor = input_cursor(&run_context, "input-cursor:after-followup-before-cancel");
+        let host = host
+            .with_input_batches(vec![LoopInputBatch {
+                inputs: vec![LoopInput::FollowUp {
+                    message_ref: message_ref("msg:followup-drained-before-cancel"),
+                }],
+                input_acks: vec![input_ack(
+                    &run_context,
+                    "input-cursor:after-followup-before-cancel",
+                    "input-ack:after-followup-before-cancel",
+                )],
+                next_cursor: next_cursor.clone(),
+            }])
+            .cancel_after_poll_inputs();
+        let family = family_with_drain(false, true);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&family, &host, state)
+            .await
+            .expect("execute");
+
+        assert!(matches!(exit, LoopExit::Cancelled(_)));
+        assert_eq!(
+            host.acked_input_tokens(),
+            vec![LoopInputAckToken::new("input-ack:after-followup-before-cancel").expect("valid")]
+        );
+        assert_eq!(
+            host.events(),
+            vec![
+                "checkpoint:before_model".to_string(),
+                "checkpoint:final".to_string(),
+                "ack_inputs".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn model_cancelled_returns_cancelled_without_retry() {
         let host = MockHost::new(Vec::new()).with_model_errors(vec![AgentLoopHostError::new(
             AgentLoopHostErrorKind::Cancelled,
@@ -3003,6 +3247,17 @@ mod tests {
         let id = LoopFamilyId::new("executor-filter-test").expect("valid test family id");
         let version =
             ComponentIdentity::from_static("executor-filter-test", ComponentDigest([1; 32]));
+        LoopFamily::new(id, version, Arc::new(planner))
+    }
+
+    fn family_with_drain(drain_steering: bool, drain_followup: bool) -> LoopFamily {
+        let planner = DefaultPlanner::compose_default().with_drain(Arc::new(FixedDrainStrategy {
+            drain_steering,
+            drain_followup,
+        }));
+        let id = LoopFamilyId::new("executor-drain-test").expect("valid test family id");
+        let version =
+            ComponentIdentity::from_static("executor-drain-test", ComponentDigest([2; 32]));
         LoopFamily::new(id, version, Arc::new(planner))
     }
 
