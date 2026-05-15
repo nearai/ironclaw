@@ -13,9 +13,10 @@ use ironclaw_turns::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, BatchPolicyKind,
         CapabilityBatchInvocation, CapabilityCallCandidate, CapabilityFailureKind,
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, FinalizeAssistantMessage,
-        LoopCheckpointKind, LoopCheckpointRequest, LoopDriverNoteKind, LoopGateKind, LoopInput,
-        LoopInputAckToken, LoopInputBatch, LoopModelRequest, LoopProgressEvent, ParentLoopOutput,
-        StageCheckpointPayloadRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopCancelReasonKind, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
+        LoopDriverNoteKind, LoopGateKind, LoopInput, LoopInputAckToken, LoopInputBatch,
+        LoopModelRequest, LoopProgressEvent, ParentLoopOutput, StageCheckpointPayloadRequest,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -298,11 +299,6 @@ impl CanonicalAgentLoopExecutor {
                 }
                 ModelStep::Exit(exit) => return Ok(exit),
             };
-            state = match self.checkpoint_and_exit_if_cancelled(host, state).await? {
-                CancelCheck::Continue(state) => *state,
-                CancelCheck::Exit(exit) => return Ok(exit),
-            };
-
             match model_response.output {
                 ParentLoopOutput::AssistantReply(reply) => {
                     let reply_ref = host
@@ -568,6 +564,10 @@ impl CanonicalAgentLoopExecutor {
             .checkpoint(host, state, CheckpointKind::BeforeSideEffect)
             .await?
             .state;
+        match self.checkpoint_and_exit_if_cancelled(host, state).await? {
+            CancelCheck::Continue(next) => state = *next,
+            CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
+        }
 
         let mut signatures = HashSet::new();
         for call in denied_calls {
@@ -617,10 +617,6 @@ impl CanonicalAgentLoopExecutor {
             })
             .await
             .map_err(capability_host_error)?;
-        match self.checkpoint_and_exit_if_cancelled(host, state).await? {
-            CancelCheck::Continue(next) => state = *next,
-            CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
-        }
 
         if batch.outcomes.len() > visible_calls.len()
             || (!batch.stopped_on_suspension && batch.outcomes.len() != visible_calls.len())
@@ -651,10 +647,7 @@ impl CanonicalAgentLoopExecutor {
                 .await?
             {
                 BatchStep::Continue(next) => {
-                    state = match self.checkpoint_and_exit_if_cancelled(host, *next).await? {
-                        CancelCheck::Continue(next) => *next,
-                        CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
-                    };
+                    state = *next;
                 }
                 BatchStep::Exit(exit) => return Ok(BatchStep::Exit(exit)),
             }
@@ -795,10 +788,6 @@ impl CanonicalAgentLoopExecutor {
                         .invoke_capability(capability_invocation_from_candidate(call.clone()))
                         .await
                         .map_err(capability_host_error)?;
-                    match self.checkpoint_and_exit_if_cancelled(host, state).await? {
-                        CancelCheck::Continue(next) => state = *next,
-                        CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
-                    }
                     match retry {
                         CapabilityOutcome::Failed(failure) => {
                             if failure.error_kind == CapabilityFailureKind::Cancelled {
@@ -882,11 +871,11 @@ impl CanonicalAgentLoopExecutor {
         match planner.gate().handle(&state, &summary).await {
             GateOutcome::Block { gate } => {
                 state.gate_state = gate;
+                state.last_gate = Some(gate_ref.clone());
                 match self.checkpoint_and_exit_if_cancelled(host, state).await? {
                     CancelCheck::Continue(next) => state = *next,
                     CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
                 }
-                state.last_gate = Some(gate_ref.clone());
                 self.emit_progress(
                     host,
                     LoopProgressEvent::GateBlocked {
@@ -956,6 +945,7 @@ impl CanonicalAgentLoopExecutor {
             host,
             checked.state,
             Some(checked.checkpoint_id),
+            LoopCancelledReasonKind::HostCancellation,
         )?))
     }
 
@@ -1047,7 +1037,7 @@ impl CanonicalAgentLoopExecutor {
         host: &(dyn AgentLoopDriverHost + Send + Sync),
         state: LoopExecutionState,
     ) -> Result<CancelCheck, AgentLoopExecutorError> {
-        let Some(_signal) = host.observe_cancellation() else {
+        let Some(signal) = host.observe_cancellation() else {
             return Ok(CancelCheck::Continue(Box::new(state)));
         };
 
@@ -1057,6 +1047,7 @@ impl CanonicalAgentLoopExecutor {
                 host,
                 checked.state,
                 Some(checked.checkpoint_id),
+                cancelled_reason_from_signal(&signal),
             )?)),
             Err(_)
                 if !host
@@ -1065,7 +1056,12 @@ impl CanonicalAgentLoopExecutor {
                     .checkpoint_policy
                     .require_final_checkpoint =>
             {
-                Ok(CancelCheck::Exit(cancelled_exit(host, fallback_state, None)?))
+                Ok(CancelCheck::Exit(cancelled_exit(
+                    host,
+                    fallback_state,
+                    None,
+                    cancelled_reason_from_signal(&signal),
+                )?))
             }
             Err(_) => Ok(CancelCheck::Exit(LoopExit::failed(
                 LoopFailureKind::CheckpointRejected,
@@ -1241,6 +1237,16 @@ fn failed_exit(
     }))
 }
 
+fn cancelled_reason_from_signal(signal: &LoopCancellationSignal) -> LoopCancelledReasonKind {
+    // LoopCancelReasonKind preserves host/input detail; LoopExit currently exposes
+    // the coarser terminal taxonomy, so every observed signal maps explicitly here.
+    match signal.reason_kind {
+        LoopCancelReasonKind::UserRequested
+        | LoopCancelReasonKind::Superseded
+        | LoopCancelReasonKind::Policy => LoopCancelledReasonKind::HostCancellation,
+    }
+}
+
 fn cancelled_exit(
     host: &(dyn AgentLoopDriverHost + Send + Sync),
     state: LoopExecutionState,
@@ -1259,6 +1265,7 @@ fn cancelled_exit_with_reason(
     state: LoopExecutionState,
     reason_kind: LoopCancelledReasonKind,
     checkpoint_id: Option<ironclaw_turns::TurnCheckpointId>,
+    reason_kind: LoopCancelledReasonKind,
 ) -> Result<LoopExit, AgentLoopExecutorError> {
     Ok(LoopExit::Cancelled(LoopCancelled {
         reason_kind,
@@ -1565,6 +1572,8 @@ mod tests {
         fail_progress_port: bool,
         cancellation: Arc<Mutex<Option<LoopCancellationSignal>>>,
         cancel_after_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
+        cancel_after_model_response: Arc<Mutex<bool>>,
+        cancel_after_batch_invocation: Arc<Mutex<bool>>,
         fail_checkpoint: Arc<Mutex<Option<LoopCheckpointKind>>>,
     }
 
@@ -1590,6 +1599,8 @@ mod tests {
                 fail_progress_port: false,
                 cancellation: Arc::new(Mutex::new(None)),
                 cancel_after_checkpoint: Arc::new(Mutex::new(None)),
+                cancel_after_model_response: Arc::new(Mutex::new(false)),
+                cancel_after_batch_invocation: Arc::new(Mutex::new(false)),
                 fail_checkpoint: Arc::new(Mutex::new(None)),
             }
         }
@@ -1678,6 +1689,16 @@ mod tests {
 
         fn cancel_after_checkpoint(self, kind: LoopCheckpointKind) -> Self {
             *self.cancel_after_checkpoint.lock().expect("lock") = Some(kind);
+            self
+        }
+
+        fn cancel_after_model_response(self) -> Self {
+            *self.cancel_after_model_response.lock().expect("lock") = true;
+            self
+        }
+
+        fn cancel_after_batch_invocation(self) -> Self {
+            *self.cancel_after_batch_invocation.lock().expect("lock") = true;
             self
         }
 
@@ -1787,7 +1808,8 @@ mod tests {
             if let Some(error) = self.model_errors.lock().expect("lock").pop_front() {
                 return Err(error);
             }
-            self.model_responses
+            let response = self
+                .model_responses
                 .lock()
                 .expect("lock")
                 .pop_front()
@@ -1796,7 +1818,11 @@ mod tests {
                         AgentLoopHostErrorKind::Internal,
                         "model script exhausted",
                     )
-                })
+                })?;
+            if *self.cancel_after_model_response.lock().expect("lock") {
+                self.request_cancellation(LoopCancelReasonKind::UserRequested);
+            }
+            Ok(response)
         }
     }
 
@@ -1842,7 +1868,8 @@ mod tests {
         ) -> Result<ironclaw_turns::run_profile::CapabilityBatchOutcome, AgentLoopHostError>
         {
             self.batch_invocations.lock().expect("lock").push(request);
-            self.batch_outcomes
+            let outcome = self
+                .batch_outcomes
                 .lock()
                 .expect("lock")
                 .pop_front()
@@ -1851,7 +1878,11 @@ mod tests {
                         AgentLoopHostErrorKind::Internal,
                         "batch script exhausted",
                     )
-                })
+                })?;
+            if *self.cancel_after_batch_invocation.lock().expect("lock") {
+                self.request_cancellation(LoopCancelReasonKind::UserRequested);
+            }
+            Ok(outcome)
         }
     }
 
@@ -2756,6 +2787,75 @@ mod tests {
             host.checkpoint_kinds(),
             vec![LoopCheckpointKind::BeforeModel, LoopCheckpointKind::Final]
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_model_response_preserves_assistant_reply() {
+        let host = MockHost::new(vec![reply_response()]).cancel_after_model_response();
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        assert!(matches!(exit, LoopExit::Cancelled(_)));
+        assert_eq!(host.model_requests().len(), 1);
+        assert_eq!(
+            final_staged_state(&host).assistant_refs,
+            vec![message_ref("msg:assistant")]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_before_side_effect_checkpoint_skips_capability_call() {
+        let host = MockHost::new(vec![calls_response()])
+            .cancel_after_checkpoint(LoopCheckpointKind::BeforeSideEffect);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        assert!(matches!(exit, LoopExit::Cancelled(_)));
+        assert!(host.batch_invocations().is_empty());
+        assert_eq!(
+            host.checkpoint_kinds(),
+            vec![
+                LoopCheckpointKind::BeforeModel,
+                LoopCheckpointKind::BeforeSideEffect,
+                LoopCheckpointKind::Final,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_capability_batch_preserves_completed_result() {
+        let result_ref = LoopResultRef::new("result:late-cancel").expect("valid");
+        let host = MockHost::new(vec![calls_response()])
+            .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                    result_ref: result_ref.clone(),
+                    safe_summary: "completed before cancellation".to_string(),
+                    terminate_hint: true,
+                })],
+                stopped_on_suspension: false,
+            }])
+            .cancel_after_batch_invocation();
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        assert!(matches!(exit, LoopExit::Cancelled(_)));
+        assert_eq!(host.batch_invocations().len(), 1);
+        assert_eq!(final_staged_state(&host).result_refs, vec![result_ref]);
     }
 
     #[tokio::test]

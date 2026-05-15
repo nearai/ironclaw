@@ -1619,6 +1619,8 @@ pub trait LoopProgressPort: Send + Sync {
 /// The canonical executor consults this between strategy calls. The method is
 /// intentionally synchronous and non-blocking: implementations should expose a
 /// cheap snapshot, usually backed by an atomic flag plus immutable signal data.
+/// This is cooperative boundary observation, not preemption: host calls that
+/// are already in flight must opt into their own abort/cancellation mechanism.
 pub trait LoopCancellationPort: Send + Sync {
     /// Returns `Some(signal)` once cancellation has been requested for this run.
     ///

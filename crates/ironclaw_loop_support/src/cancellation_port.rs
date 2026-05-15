@@ -22,11 +22,18 @@ pub struct RunCancellationHandle {
 
 impl RunCancellationHandle {
     pub fn request(&self, reason_kind: LoopCancelReasonKind) {
+        if self.fired.load(Ordering::Acquire) {
+            return;
+        }
+        let mut signal_lock = self.signal.write();
+        if signal_lock.is_some() {
+            return;
+        }
         let signal = LoopCancellationSignal {
             reason_kind,
             requested_at: Utc::now(),
         };
-        *self.signal.write() = Some(signal);
+        *signal_lock = Some(signal);
         self.fired.store(true, Ordering::Release);
     }
 
@@ -167,6 +174,21 @@ mod tests {
         let first = port.observe_cancellation();
         assert_eq!(port.observe_cancellation(), first);
         assert_eq!(port.observe_cancellation(), first);
+    }
+
+    #[test]
+    fn duplicate_request_preserves_first_signal() {
+        let handle = RunCancellationHandle::default();
+        let port = RunStateLoopCancellationPort::new(handle.clone());
+
+        handle.request(LoopCancelReasonKind::UserRequested);
+        let first = port.observe_cancellation().expect("first signal");
+
+        handle.request(LoopCancelReasonKind::Policy);
+
+        let second = port.observe_cancellation().expect("second signal");
+        assert_eq!(second, first);
+        assert_eq!(second.reason_kind, LoopCancelReasonKind::UserRequested);
     }
 
     #[test]
