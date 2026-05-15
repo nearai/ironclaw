@@ -25,6 +25,8 @@ pub mod libsql;
 pub mod libsql_migrations;
 
 pub mod cached_settings;
+pub mod filesystem_conversations;
+pub mod filesystem_jobs;
 
 use std::collections::HashMap;
 use std::sync::Arc;

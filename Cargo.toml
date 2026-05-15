@@ -118,6 +118,7 @@ jsonschema = { version = "0.45", default-features = false }
 # Shared types
 ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.1" }
 ironclaw_host_api = { path = "crates/ironclaw_host_api", version = "0.1.0" }
+ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
 ironclaw_runtime_policy = { path = "crates/ironclaw_runtime_policy", version = "0.1.0" }
 
 # Safety/sanitization
