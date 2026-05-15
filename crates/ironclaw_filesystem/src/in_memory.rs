@@ -218,10 +218,38 @@ impl RootFilesystem for InMemoryBackend {
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         let state = self.state.lock().await;
         let prefix = with_trailing_slash(path.as_str());
-        let mut matched: Vec<(&String, &StoredEntry)> = state
+        let candidates: Vec<(&String, &StoredEntry)> = state
             .entries
             .iter()
             .filter(|(key, _)| key.as_str() == path.as_str() || key.starts_with(&prefix))
+            .collect();
+        if let Some((key, embedding, limit)) = top_level_vector_nearest(filter) {
+            let mut ranked: Vec<(&String, &StoredEntry, f32)> = candidates
+                .into_iter()
+                .filter_map(|(p, stored)| {
+                    let stored_vec = match stored.entry.indexed.get(key) {
+                        Some(IndexValue::Bytes(bytes)) => decode_embedding_blob(bytes)?,
+                        _ => return None,
+                    };
+                    cosine_similarity(embedding, &stored_vec).map(|s| (p, stored, s))
+                })
+                .collect();
+            ranked.sort_by(|a, b| {
+                b.2.partial_cmp(&a.2)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.0.cmp(b.0))
+            });
+            ranked.truncate(limit as usize);
+            return Ok(ranked
+                .into_iter()
+                .map(|(_, stored, _)| VersionedEntry {
+                    entry: stored.entry.clone(),
+                    version: stored.version,
+                })
+                .collect());
+        }
+        let mut matched: Vec<(&String, &StoredEntry)> = candidates
+            .into_iter()
             .filter(|(_, stored)| filter_matches(filter, &stored.entry.indexed))
             .collect();
         matched.sort_by(|a, b| a.0.cmp(b.0));
@@ -247,14 +275,19 @@ impl RootFilesystem for InMemoryBackend {
         spec: &IndexSpec,
     ) -> Result<(), FilesystemError> {
         let mut state = self.state.lock().await;
-        // Reject specs whose kind we don't claim to serve.
-        match spec.kind {
-            IndexKind::Exact | IndexKind::Prefix => {}
-            IndexKind::Fts | IndexKind::Vector { .. } => {
-                return Err(FilesystemError::Unsupported {
-                    path: path.clone(),
-                    operation: FilesystemOperation::EnsureIndex,
-                });
+        // The in-memory backend serves Exact/Prefix natively, and serves
+        // Fts/Vector as brute-force linear scans driven by the filter
+        // translator. Reject only specs we genuinely can't materialize.
+        match &spec.kind {
+            IndexKind::Exact | IndexKind::Prefix | IndexKind::Fts => {}
+            IndexKind::Vector { dim } => {
+                if *dim == 0 {
+                    return Err(FilesystemError::IndexConflict {
+                        path: path.clone(),
+                        name: spec.name.clone(),
+                        reason: crate::IndexConflictReason::SpecMismatch,
+                    });
+                }
             }
         }
         let bucket = state.indexes.entry(path.as_str().to_string()).or_default();
@@ -398,9 +431,81 @@ fn filter_matches(
             }
             None => false,
         },
+        Filter::Fts { key, query } => match indexed.get(key) {
+            Some(IndexValue::Text(stored)) => fts_naive_matches(stored, query),
+            _ => false,
+        },
+        // VectorNearest is handled at the top of `query` because it ranks
+        // rather than predicates. Surfacing it here (e.g. nested inside an
+        // And) is treated as "any row with a vector under `key`": ranking
+        // requires the full candidate set and a limit, and the in-memory
+        // backend evaluates compound filters per-row.
+        Filter::VectorNearest { key, .. } => {
+            matches!(indexed.get(key), Some(IndexValue::Bytes(_)))
+        }
         Filter::And(children) => children.iter().all(|f| filter_matches(f, indexed)),
         Filter::Or(children) => children.iter().any(|f| filter_matches(f, indexed)),
     }
+}
+
+/// Coarse FTS approximation: tokenize the query on whitespace and require
+/// every token to appear (case-insensitively) in the stored text. This
+/// matches FTS5's default `AND`-of-terms behavior closely enough for the
+/// in-memory reference; the SQL backends use the real engines.
+fn fts_naive_matches(stored: &str, query: &str) -> bool {
+    let stored_lower = stored.to_lowercase();
+    query
+        .split_whitespace()
+        .all(|token| stored_lower.contains(&token.to_lowercase()))
+}
+
+/// If `filter` is a top-level `VectorNearest` (the only shape the SQL
+/// backends and this reference implementation evaluate by ranking rather
+/// than predication), return its components.
+fn top_level_vector_nearest(filter: &Filter) -> Option<(&IndexKey, &[f32], u32)> {
+    if let Filter::VectorNearest {
+        key,
+        embedding,
+        limit,
+    } = filter
+    {
+        return Some((key, embedding, *limit));
+    }
+    None
+}
+
+/// Decode a little-endian `f32` blob written by `encode_embedding_blob` (or
+/// any caller using the same format). Returns `None` if the blob is empty or
+/// has a length that isn't a multiple of `f32`'s size.
+fn decode_embedding_blob(bytes: &[u8]) -> Option<Vec<f32>> {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
+        return None;
+    }
+    Some(
+        bytes
+            .chunks_exact(std::mem::size_of::<f32>())
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect(),
+    )
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
+    if left.len() != right.len() || left.is_empty() {
+        return None;
+    }
+    let mut dot = 0.0_f32;
+    let mut left_norm = 0.0_f32;
+    let mut right_norm = 0.0_f32;
+    for (l, r) in left.iter().zip(right.iter()) {
+        dot += l * r;
+        left_norm += l * l;
+        right_norm += r * r;
+    }
+    if left_norm <= 0.0 || right_norm <= 0.0 {
+        return None;
+    }
+    let score = dot / (left_norm.sqrt() * right_norm.sqrt());
+    if score.is_finite() { Some(score) } else { None }
 }
 
 fn with_trailing_slash(s: &str) -> String {
@@ -547,16 +652,93 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ensure_index_rejects_unsupported_kind() {
+    async fn ensure_index_accepts_fts_and_vector_kinds() {
+        // The in-memory reference now serves FTS as a substring scan and
+        // Vector as a brute-force cosine rank; both are accepted at
+        // declaration time. Backend implementations may still decline
+        // (e.g. a backend without pgvector); the trait-level capability
+        // declaration is what gates real backends.
         let fs = InMemoryBackend::new();
         let prefix = vpath("/memory");
-        let spec = IndexSpec::new(
+        let fts = IndexSpec::new(
             IndexName::new("by_chunk").unwrap(),
             vec![key("chunk_id")],
             IndexKind::Fts,
         );
-        let err = fs.ensure_index(&prefix, &spec).await.unwrap_err();
-        assert!(matches!(err, FilesystemError::Unsupported { .. }));
+        fs.ensure_index(&prefix, &fts).await.unwrap();
+        let vector = IndexSpec::new(
+            IndexName::new("by_vec").unwrap(),
+            vec![key("embedding")],
+            IndexKind::Vector { dim: 384 },
+        );
+        fs.ensure_index(&prefix, &vector).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fts_filter_matches_naive_substring_tokens() {
+        let fs = InMemoryBackend::new();
+        let kind = RecordKind::new("chunk").unwrap();
+        for (path, text) in [
+            ("/memory/A", "the quick brown fox"),
+            ("/memory/B", "lazy dogs sleep"),
+            ("/memory/C", "the fox jumps over"),
+        ] {
+            let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+                .unwrap()
+                .with_indexed(key("content"), IndexValue::Text(text.into()));
+            fs.put(&vpath(path), entry, CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+        let results = fs
+            .query(
+                &vpath("/memory"),
+                &Filter::Fts {
+                    key: key("content"),
+                    query: "fox".into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn vector_nearest_returns_top_k_by_cosine() {
+        let fs = InMemoryBackend::new();
+        let kind = RecordKind::new("chunk").unwrap();
+        let blob = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|f| f.to_le_bytes()).collect() };
+        for (path, vec) in [
+            ("/memory/A", vec![1.0_f32, 0.0, 0.0]),
+            ("/memory/B", vec![0.9_f32, 0.1, 0.0]),
+            ("/memory/C", vec![0.0_f32, 0.0, 1.0]),
+        ] {
+            let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+                .unwrap()
+                .with_indexed(key("embedding"), IndexValue::Bytes(blob(&vec)));
+            fs.put(&vpath(path), entry, CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+        let results = fs
+            .query(
+                &vpath("/memory"),
+                &Filter::VectorNearest {
+                    key: key("embedding"),
+                    embedding: vec![1.0_f32, 0.0, 0.0],
+                    limit: 2,
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        // /memory/A is the closest match (identical vector).
+        assert_eq!(
+            results[0].entry.indexed.get(&key("embedding")),
+            Some(&IndexValue::Bytes(blob(&[1.0, 0.0, 0.0])))
+        );
     }
 
     #[tokio::test]

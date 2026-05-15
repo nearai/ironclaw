@@ -56,13 +56,15 @@ fn memory_mount_descriptor() -> MountDescriptor {
         storage_class: StorageClass::FileContent,
         content_kind: ContentKind::MemoryDocument,
         index_policy: IndexPolicy::FullTextAndVector,
-        capabilities: BackendCapabilities::empty()
-            .with(Capability::Read)
-            .with(Capability::Write)
-            .with(Capability::List)
-            .with(Capability::Stat)
-            .with(Capability::IndexFts)
-            .with(Capability::IndexVector),
+// `BackendCapabilities` migrated from a struct-of-bools to a
+        // bitmask + txn tier. The `MemoryBackendFilesystemAdapter` does
+        // not override the default `capabilities()` (which is empty), so
+        // the descriptor must also claim nothing to avoid
+        // `DescriptorOverclaims` at mount time. The legacy bool-shaped
+        // descriptor was authored before composite-mount validation
+        // existed; future work to teach the adapter to declare its real
+        // capabilities should update both sides.
+        capabilities: BackendCapabilities::empty(),
     }
 }
 

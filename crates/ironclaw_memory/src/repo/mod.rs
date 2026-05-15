@@ -15,6 +15,7 @@ use crate::path::{
 };
 use crate::search::{MemorySearchRequest, MemorySearchResult};
 
+mod filesystem;
 mod in_memory;
 #[cfg(feature = "libsql")]
 mod libsql;
@@ -25,6 +26,7 @@ mod native_postgres;
 #[cfg(feature = "postgres")]
 mod postgres;
 
+pub use filesystem::FilesystemMemoryDocumentRepository;
 pub use in_memory::InMemoryMemoryDocumentRepository;
 #[cfg(feature = "libsql")]
 pub use libsql::LibSqlMemoryDocumentRepository;

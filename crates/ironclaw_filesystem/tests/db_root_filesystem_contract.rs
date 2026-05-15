@@ -401,16 +401,165 @@ async fn libsql_ensure_index_is_idempotent_and_conflict_aware() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
-async fn libsql_ensure_index_rejects_fts_and_vector_kinds() {
+async fn libsql_ensure_index_accepts_fts_kind_and_filter_matches_text() {
+    // FTS5 vtable + sync triggers are created at declaration time, and
+    // existing rows are backfilled. After the index is declared, a
+    // Filter::Fts query against the same key finds matching documents.
     let filesystem = libsql_root().await;
     let prefix = VirtualPath::new("/memory").unwrap();
+    let kind = RecordKind::new("chunk").unwrap();
+    let content = IndexKey::new("content").unwrap();
+    // Insert before declaring the index so backfill kicks in.
+    for (path, body) in [
+        ("/memory/a", "the quick brown fox jumps"),
+        ("/memory/b", "the lazy dog sleeps"),
+        ("/memory/c", "a brown bear naps in the woods"),
+    ] {
+        let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(content.clone(), IndexValue::Text(body.into()));
+        filesystem
+            .put(
+                &VirtualPath::new(path).unwrap(),
+                entry,
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    }
     let spec = IndexSpec::new(
-        IndexName::new("by_chunk").unwrap(),
-        vec![IndexKey::new("chunk_id").unwrap()],
+        IndexName::new("by_content").unwrap(),
+        vec![content.clone()],
         IndexKind::Fts,
     );
-    let err = filesystem.ensure_index(&prefix, &spec).await.unwrap_err();
-    assert!(matches!(err, FilesystemError::Unsupported { .. }));
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+    // Redeclaration is idempotent.
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+
+    let results = filesystem
+        .query(
+            &prefix,
+            &Filter::Fts {
+                key: content,
+                query: "brown".into(),
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 2);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_fts_filter_picks_up_inserts_through_triggers() {
+    // After ensure_index, inserting a new row through put() updates the
+    // FTS5 shadow table via the AFTER INSERT trigger.
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/memory/triggered").unwrap();
+    let kind = RecordKind::new("chunk").unwrap();
+    let content = IndexKey::new("content").unwrap();
+
+    let spec = IndexSpec::new(
+        IndexName::new("by_content_trig").unwrap(),
+        vec![content.clone()],
+        IndexKind::Fts,
+    );
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+
+    let entry = Entry::record(kind, &serde_json::json!({}))
+        .unwrap()
+        .with_indexed(content.clone(), IndexValue::Text("emerald city".into()));
+    filesystem
+        .put(
+            &VirtualPath::new("/memory/triggered/x").unwrap(),
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    let results = filesystem
+        .query(
+            &prefix,
+            &Filter::Fts {
+                key: content,
+                query: "emerald".into(),
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_vector_index_round_trips_and_ranks_by_cosine() {
+    // IndexKind::Vector is accepted at declaration; storage shape is
+    // IndexValue::Bytes (LE-encoded f32s) in the indexed projection;
+    // VectorNearest ranks the candidate set by cosine and returns top-k.
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/memory/vec").unwrap();
+    let kind = RecordKind::new("chunk").unwrap();
+    let embedding_key = IndexKey::new("embedding").unwrap();
+
+    let spec = IndexSpec::new(
+        IndexName::new("by_vec").unwrap(),
+        vec![embedding_key.clone()],
+        IndexKind::Vector { dim: 3 },
+    );
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+    // Re-declaration is idempotent.
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+    // A conflicting dim is rejected.
+    let conflict = IndexSpec::new(
+        IndexName::new("by_vec").unwrap(),
+        vec![embedding_key.clone()],
+        IndexKind::Vector { dim: 4 },
+    );
+    let err = filesystem
+        .ensure_index(&prefix, &conflict)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FilesystemError::IndexConflict { .. }));
+
+    let blob = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    for (path, vec) in [
+        ("/memory/vec/A", vec![1.0_f32, 0.0, 0.0]),
+        ("/memory/vec/B", vec![0.9, 0.1, 0.0]),
+        ("/memory/vec/C", vec![0.0, 0.0, 1.0]),
+    ] {
+        let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(embedding_key.clone(), IndexValue::Bytes(blob(&vec)));
+        filesystem
+            .put(
+                &VirtualPath::new(path).unwrap(),
+                entry,
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    }
+    let results = filesystem
+        .query(
+            &prefix,
+            &Filter::VectorNearest {
+                key: embedding_key.clone(),
+                embedding: vec![1.0, 0.0, 0.0],
+                limit: 2,
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    // /memory/vec/A is closest (identical vector).
+    assert_eq!(
+        results[0].entry.indexed.get(&embedding_key),
+        Some(&IndexValue::Bytes(blob(&[1.0, 0.0, 0.0])))
+    );
 }
 
 #[cfg(feature = "libsql")]
@@ -1094,6 +1243,104 @@ mod postgres_tests {
                 .unwrap()
                 .len(),
             2
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_fts_index_filter_finds_documents_by_token() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let prefix_path = VirtualPath::new(&prefix).unwrap();
+        let kind = RecordKind::new("chunk").unwrap();
+        let content = IndexKey::new("content").unwrap();
+        let spec = IndexSpec::new(
+            IndexName::new("by_content").unwrap(),
+            vec![content.clone()],
+            IndexKind::Fts,
+        );
+        fs.ensure_index(&prefix_path, &spec).await.unwrap();
+        // Redeclaration is idempotent.
+        fs.ensure_index(&prefix_path, &spec).await.unwrap();
+        for (leaf, body) in [
+            ("a", "the quick brown fox jumps"),
+            ("b", "the lazy dog sleeps"),
+            ("c", "a brown bear naps"),
+        ] {
+            let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+                .unwrap()
+                .with_indexed(content.clone(), IndexValue::Text(body.into()));
+            fs.put(&vpath(&prefix, leaf), entry, CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+        let results = fs
+            .query(
+                &prefix_path,
+                &Filter::Fts {
+                    key: content,
+                    query: "brown".into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn postgres_vector_index_ranks_by_cosine_brute_force() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let prefix_path = VirtualPath::new(&prefix).unwrap();
+        let kind = RecordKind::new("chunk").unwrap();
+        let embedding_key = IndexKey::new("embedding").unwrap();
+        let spec = IndexSpec::new(
+            IndexName::new("by_vec").unwrap(),
+            vec![embedding_key.clone()],
+            IndexKind::Vector { dim: 3 },
+        );
+        fs.ensure_index(&prefix_path, &spec).await.unwrap();
+        // Re-declaration with a different dim is rejected.
+        let conflict = IndexSpec::new(
+            IndexName::new("by_vec").unwrap(),
+            vec![embedding_key.clone()],
+            IndexKind::Vector { dim: 4 },
+        );
+        let err = fs.ensure_index(&prefix_path, &conflict).await.unwrap_err();
+        assert!(matches!(err, FilesystemError::IndexConflict { .. }));
+
+        let blob = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|f| f.to_le_bytes()).collect() };
+        for (leaf, vec) in [
+            ("A", vec![1.0_f32, 0.0, 0.0]),
+            ("B", vec![0.9, 0.1, 0.0]),
+            ("C", vec![0.0, 0.0, 1.0]),
+        ] {
+            let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+                .unwrap()
+                .with_indexed(embedding_key.clone(), IndexValue::Bytes(blob(&vec)));
+            fs.put(&vpath(&prefix, leaf), entry, CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+        let results = fs
+            .query(
+                &prefix_path,
+                &Filter::VectorNearest {
+                    key: embedding_key.clone(),
+                    embedding: vec![1.0, 0.0, 0.0],
+                    limit: 2,
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        // First result must be the identical vector (A).
+        assert_eq!(
+            results[0].entry.indexed.get(&embedding_key),
+            Some(&IndexValue::Bytes(blob(&[1.0, 0.0, 0.0])))
         );
     }
 

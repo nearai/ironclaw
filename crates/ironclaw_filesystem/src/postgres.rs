@@ -59,10 +59,16 @@ impl PostgresRootFilesystem {
 impl RootFilesystem for PostgresRootFilesystem {
     fn capabilities(&self) -> BackendCapabilities {
         // sql_typical: read/write/append/list/stat/delete/records/query/
-        // IndexExact/IndexPrefix/CAS. Events join the set once the
-        // append/tail backing table lands (V30); FTS/Vector indexes stay
-        // off until their respective backend ports land.
-        BackendCapabilities::sql_typical().with(Capability::Events)
+        // IndexExact/IndexPrefix/CAS. Events join the set with the V30
+        // append/tail backing table. Postgres has native `tsvector` /
+        // `plainto_tsquery` so we advertise IndexFts. Vector indexing is
+        // currently a brute-force cosine ranker against `indexed->>'key'`
+        // values stored as IndexValue::Bytes; we advertise IndexVector but
+        // do not require pgvector.
+        BackendCapabilities::sql_typical()
+            .with(Capability::Events)
+            .with(Capability::IndexFts)
+            .with(Capability::IndexVector)
     }
 
     async fn put(
@@ -238,12 +244,8 @@ impl RootFilesystem for PostgresRootFilesystem {
         let kind_str = match &spec.kind {
             IndexKind::Exact => "exact".to_string(),
             IndexKind::Prefix => "prefix".to_string(),
-            IndexKind::Fts | IndexKind::Vector { .. } => {
-                return Err(FilesystemError::Unsupported {
-                    path: path.clone(),
-                    operation: FilesystemOperation::EnsureIndex,
-                });
-            }
+            IndexKind::Fts => "fts".to_string(),
+            IndexKind::Vector { dim } => format!("vector:{dim}"),
         };
         if spec.keys.is_empty() {
             return Err(FilesystemError::IndexConflict {
@@ -301,19 +303,58 @@ impl RootFilesystem for PostgresRootFilesystem {
         }
 
         let index_name = sql_index_name(path.as_str(), spec.name.as_str());
-        let expressions: Vec<String> = spec
-            .keys
-            .iter()
-            .map(|k| format!("((indexed->>'{}'))", k.as_str()))
-            .collect();
-        let ddl = format!(
-            "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries ({})",
-            expressions.join(", ")
-        );
-        client
-            .batch_execute(&ddl)
-            .await
-            .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?;
+        match &spec.kind {
+            IndexKind::Exact | IndexKind::Prefix => {
+                let expressions: Vec<String> = spec
+                    .keys
+                    .iter()
+                    .map(|k| format!("((indexed->>'{}'))", k.as_str()))
+                    .collect();
+                let ddl = format!(
+                    "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries ({})",
+                    expressions.join(", ")
+                );
+                client.batch_execute(&ddl).await.map_err(|error| {
+                    db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+            }
+            IndexKind::Fts => {
+                if spec.keys.len() != 1 {
+                    return Err(FilesystemError::IndexConflict {
+                        path: path.clone(),
+                        name: spec.name.clone(),
+                        reason: crate::IndexConflictReason::SpecMismatch,
+                    });
+                }
+                let fts_key = spec.keys[0].as_str();
+                // GIN expression index on a `to_tsvector(...)` over the
+                // indexed JSON projection. Postgres `to_tsvector` returns
+                // `tsvector`, which GIN indexes natively. The matching
+                // predicate at query time uses `@@ plainto_tsquery`.
+                let ddl = format!(
+                    "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries \
+                     USING GIN (to_tsvector('english', COALESCE(indexed->>'{fts_key}', '')))"
+                );
+                client.batch_execute(&ddl).await.map_err(|error| {
+                    db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+            }
+            IndexKind::Vector { dim } => {
+                if *dim == 0 {
+                    return Err(FilesystemError::IndexConflict {
+                        path: path.clone(),
+                        name: spec.name.clone(),
+                        reason: crate::IndexConflictReason::SpecMismatch,
+                    });
+                }
+                // Vector storage = IndexValue::Bytes in the indexed JSON
+                // projection. No per-row table or DDL is required; queries
+                // brute-force cosine over the candidate set. pgvector
+                // support could be layered in later via a dialect probe
+                // (`SELECT * FROM pg_extension WHERE extname='vector'`)
+                // without changing this trait surface.
+            }
+        }
         Ok(())
     }
 
@@ -323,6 +364,17 @@ impl RootFilesystem for PostgresRootFilesystem {
         filter: &Filter,
         page: Page,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        // Vector-nearest is evaluated by ranking the candidate set in Rust.
+        if let Filter::VectorNearest {
+            key,
+            embedding,
+            limit,
+        } = filter
+        {
+            return self
+                .vector_nearest_query(path, key, embedding, *limit)
+                .await;
+        }
         let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
         let path_str = path.as_str().to_string();
         let prefix_pattern = escape_like_with_trailing_wildcard(&format!("{}/%", path.as_str()));
@@ -717,6 +769,54 @@ impl PostgresRootFilesystem {
         Ok(row.is_some())
     }
 
+    /// Brute-force cosine ranker over candidate rows in this prefix whose
+    /// indexed projection has an `IndexValue::Bytes` value at `key`. Used
+    /// when the caller's filter is a top-level `VectorNearest`.
+    async fn vector_nearest_query(
+        &self,
+        path: &VirtualPath,
+        key: &IndexKey,
+        embedding: &[f32],
+        limit: u32,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let client = self.client().await?;
+        let prefix_pattern = escape_like_with_trailing_wildcard(&format!("{}/%", path.as_str()));
+        let rows = client
+            .query(
+                "SELECT path, contents, content_type, kind, indexed, version \
+                 FROM root_filesystem_entries \
+                 WHERE is_dir = FALSE AND (path = $1 OR path LIKE $2 ESCAPE '!')",
+                &[&path.as_str(), &prefix_pattern],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
+        let mut ranked: Vec<(VersionedEntry, f32)> = Vec::new();
+        for row in rows {
+            let row_path: String = row.get("path");
+            let row_path = VirtualPath::new(row_path)?;
+            let body: Vec<u8> = row.get("contents");
+            let content_type_raw: String = row.get("content_type");
+            let kind_raw: Option<String> = row.get("kind");
+            let indexed_value: serde_json::Value = row.get("indexed");
+            let version_raw: i64 = row.get("version");
+            let entry = build_entry(&row_path, body, content_type_raw, kind_raw, indexed_value)?;
+            let Some(IndexValue::Bytes(bytes)) = entry.indexed.get(key) else {
+                continue;
+            };
+            let Some(vec) = decode_embedding_blob(bytes) else {
+                continue;
+            };
+            let Some(score) = cosine_similarity(embedding, &vec) else {
+                continue;
+            };
+            let version = record_version_from_i64(&row_path, version_raw)?;
+            ranked.push((VersionedEntry { entry, version }, score));
+        }
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.truncate(limit as usize);
+        Ok(ranked.into_iter().map(|(entry, _)| entry).collect())
+    }
+
     async fn current_version_with_client(
         &self,
         client: &tokio_postgres::Client,
@@ -816,6 +916,26 @@ fn translate_filter(
             }
             Ok(())
         }
+        Filter::Fts { key, query } => {
+            // `plainto_tsquery` is the user-input-safe parser; we never
+            // splice the user query into SQL. Match against an expression
+            // identical to the `to_tsvector(...)` used by the GIN index in
+            // ensure_index so the planner can use it.
+            params.push(Box::new(query.clone()));
+            out.push_str(&format!(
+                "(to_tsvector('english', COALESCE(indexed->>'{}', '')) @@ plainto_tsquery('english', ${}))",
+                key.as_str(),
+                params.len()
+            ));
+            Ok(())
+        }
+        Filter::VectorNearest { .. } => Err(FilesystemError::Unsupported {
+            // Same reason as libsql: VectorNearest is a ranking operation
+            // and is evaluated at the top-level `query` method, not as a
+            // WHERE-clause predicate. Nested usage is unsupported.
+            path: path.clone(),
+            operation: FilesystemOperation::Query,
+        }),
         Filter::And(children) => translate_compound(path, children, " AND ", "TRUE", out, params),
         Filter::Or(children) => translate_compound(path, children, " OR ", "FALSE", out, params),
     }
@@ -885,6 +1005,39 @@ fn bind_index_value(
     };
     params.push(bound);
     Ok(params.len())
+}
+
+#[cfg(feature = "postgres")]
+fn decode_embedding_blob(bytes: &[u8]) -> Option<Vec<f32>> {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
+        return None;
+    }
+    Some(
+        bytes
+            .chunks_exact(std::mem::size_of::<f32>())
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect(),
+    )
+}
+
+#[cfg(feature = "postgres")]
+fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
+    if left.len() != right.len() || left.is_empty() {
+        return None;
+    }
+    let mut dot = 0.0_f32;
+    let mut left_norm = 0.0_f32;
+    let mut right_norm = 0.0_f32;
+    for (l, r) in left.iter().zip(right.iter()) {
+        dot += l * r;
+        left_norm += l * l;
+        right_norm += r * r;
+    }
+    if left_norm <= 0.0 || right_norm <= 0.0 {
+        return None;
+    }
+    let score = dot / (left_norm.sqrt() * right_norm.sqrt());
+    if score.is_finite() { Some(score) } else { None }
 }
 
 #[cfg(feature = "postgres")]

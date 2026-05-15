@@ -70,10 +70,14 @@ impl LibSqlRootFilesystem {
 impl RootFilesystem for LibSqlRootFilesystem {
     fn capabilities(&self) -> BackendCapabilities {
         // sql_typical covers read/write/append/list/stat/delete/records/query
-        // /IndexExact/IndexPrefix/CAS. Events advertise once the append/tail
-        // backing table is in place; IndexFts/Vector stay off until their
-        // respective backend ports land.
-        BackendCapabilities::sql_typical().with(Capability::Events)
+        // /IndexExact/IndexPrefix/CAS. The append/tail backing table is in
+        // place so Events is on; FTS5 is built into libSQL and a brute-force
+        // cosine ranker for vectors is implemented in Rust, so IndexFts and
+        // IndexVector are advertised here too.
+        BackendCapabilities::sql_typical()
+            .with(Capability::Events)
+            .with(Capability::IndexFts)
+            .with(Capability::IndexVector)
     }
 
     async fn put(
@@ -271,17 +275,18 @@ impl RootFilesystem for LibSqlRootFilesystem {
         path: &VirtualPath,
         spec: &IndexSpec,
     ) -> Result<(), FilesystemError> {
-        // Only Exact and Prefix index kinds are supported on the SQL backends
-        // in this port. FTS / Vector live behind their own follow-up port.
+        // Exact/Prefix create a SQLite expression index over the indexed JSON
+        // projection. Fts creates an FTS5 virtual table mirroring the
+        // indexed text key on this prefix, kept in sync by AFTER INSERT/
+        // UPDATE/DELETE triggers. Vector { dim } records the dimension in
+        // the spec catalog; storage uses IndexValue::Bytes in the indexed
+        // projection and brute-force cosine on query (the libSQL vector
+        // extension is unreliable across builds).
         let kind_str = match &spec.kind {
             IndexKind::Exact => "exact".to_string(),
             IndexKind::Prefix => "prefix".to_string(),
-            IndexKind::Fts | IndexKind::Vector { .. } => {
-                return Err(FilesystemError::Unsupported {
-                    path: path.clone(),
-                    operation: FilesystemOperation::EnsureIndex,
-                });
-            }
+            IndexKind::Fts => "fts".to_string(),
+            IndexKind::Vector { dim } => format!("vector:{dim}"),
         };
         if spec.keys.is_empty() {
             return Err(FilesystemError::IndexConflict {
@@ -362,18 +367,128 @@ impl RootFilesystem for LibSqlRootFilesystem {
         drop(rows);
 
         let index_name = sql_index_name(path.as_str(), spec.name.as_str());
-        let expressions: Vec<String> = spec
-            .keys
-            .iter()
-            .map(|k| format!("json_extract(indexed, '$.{}')", k.as_str()))
-            .collect();
-        let ddl = format!(
-            "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries ({})",
-            expressions.join(", ")
-        );
-        conn.execute(&ddl, ()).await.map_err(|error| {
-            libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
-        })?;
+        match &spec.kind {
+            IndexKind::Exact | IndexKind::Prefix => {
+                let expressions: Vec<String> = spec
+                    .keys
+                    .iter()
+                    .map(|k| format!("json_extract(indexed, '$.{}')", k.as_str()))
+                    .collect();
+                let ddl = format!(
+                    "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries ({})",
+                    expressions.join(", ")
+                );
+                conn.execute(&ddl, ()).await.map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+            }
+            IndexKind::Fts => {
+                // FTS indexes need exactly one text key; the FTS5 vtable has
+                // one shadow column per indexed key, but the filter surface
+                // currently exposes Fts { key, query } as single-keyed.
+                if spec.keys.len() != 1 {
+                    return Err(FilesystemError::IndexConflict {
+                        path: path.clone(),
+                        name: spec.name.clone(),
+                        reason: crate::IndexConflictReason::SpecMismatch,
+                    });
+                }
+                let fts_key = spec.keys[0].as_str();
+                let path_prefix = path.as_str();
+                let trailing_prefix = format!("{}/", path_prefix.trim_end_matches('/'));
+                let trailing_pattern =
+                    escape_like_with_trailing_wildcard(&format!("{trailing_prefix}%"));
+                let exact_path_lit = path_prefix.replace('\'', "''");
+                let trailing_pattern_lit = trailing_pattern.replace('\'', "''");
+                // FTS5 vtable: stores (path, text). We mirror per-mount-
+                // prefix so different prefixes (with different keys) don't
+                // collide on a single FTS table.
+                let fts_table = format!("{index_name}_fts");
+                let create_vtab = format!(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS {fts_table} \
+                     USING fts5(path UNINDEXED, content)"
+                );
+                conn.execute(&create_vtab, ()).await.map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+                // Triggers keep the FTS table in sync with entries whose
+                // path is within this prefix. They extract the indexed
+                // text via json_extract; non-text values fall through as
+                // empty strings (FTS5 won't match them).
+                let trigger_insert = format!(
+                    "CREATE TRIGGER IF NOT EXISTS {index_name}_ai \
+                     AFTER INSERT ON root_filesystem_entries \
+                     WHEN new.is_dir = 0 \
+                       AND (new.path = '{exact_path_lit}' OR new.path LIKE '{trailing_pattern_lit}' ESCAPE '!') \
+                     BEGIN \
+                       INSERT INTO {fts_table}(path, content) \
+                       VALUES (new.path, COALESCE(json_extract(new.indexed, '$.{fts_key}'), '')); \
+                     END"
+                );
+                conn.execute(&trigger_insert, ()).await.map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+                let trigger_update = format!(
+                    "CREATE TRIGGER IF NOT EXISTS {index_name}_au \
+                     AFTER UPDATE ON root_filesystem_entries \
+                     WHEN new.is_dir = 0 \
+                       AND (new.path = '{exact_path_lit}' OR new.path LIKE '{trailing_pattern_lit}' ESCAPE '!') \
+                     BEGIN \
+                       DELETE FROM {fts_table} WHERE path = old.path; \
+                       INSERT INTO {fts_table}(path, content) \
+                       VALUES (new.path, COALESCE(json_extract(new.indexed, '$.{fts_key}'), '')); \
+                     END"
+                );
+                conn.execute(&trigger_update, ()).await.map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+                let trigger_delete = format!(
+                    "CREATE TRIGGER IF NOT EXISTS {index_name}_ad \
+                     AFTER DELETE ON root_filesystem_entries \
+                     WHEN old.is_dir = 0 \
+                       AND (old.path = '{exact_path_lit}' OR old.path LIKE '{trailing_pattern_lit}' ESCAPE '!') \
+                     BEGIN \
+                       DELETE FROM {fts_table} WHERE path = old.path; \
+                     END"
+                );
+                conn.execute(&trigger_delete, ()).await.map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+                // Backfill any rows present before the index was declared.
+                let backfill = format!(
+                    "INSERT INTO {fts_table}(path, content) \
+                     SELECT path, COALESCE(json_extract(indexed, '$.{fts_key}'), '') \
+                     FROM root_filesystem_entries \
+                     WHERE is_dir = 0 \
+                       AND (path = ?1 OR path LIKE ?2 ESCAPE '!') \
+                       AND NOT EXISTS \
+                           (SELECT 1 FROM {fts_table} WHERE {fts_table}.path = root_filesystem_entries.path)"
+                );
+                conn.execute(
+                    &backfill,
+                    libsql::params![path_prefix, trailing_pattern.clone()],
+                )
+                .await
+                .map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+            }
+            IndexKind::Vector { dim } => {
+                // Storage shape: IndexValue::Bytes under the indexed key.
+                // The vector dim was recorded in the spec catalog above so
+                // re-declaration with a different dim is rejected as a
+                // SpecMismatch. No per-row table or index is created; the
+                // brute-force ranker scans entries in this prefix at
+                // query time. Validate dim > 0 here as a guardrail.
+                if *dim == 0 {
+                    return Err(FilesystemError::IndexConflict {
+                        path: path.clone(),
+                        name: spec.name.clone(),
+                        reason: crate::IndexConflictReason::SpecMismatch,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
@@ -383,6 +498,19 @@ impl RootFilesystem for LibSqlRootFilesystem {
         filter: &Filter,
         page: Page,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        // Vector-nearest is a top-k ranking operation; evaluate by scanning
+        // the candidate set in this prefix and ranking by cosine in Rust.
+        if let Filter::VectorNearest {
+            key,
+            embedding,
+            limit,
+        } = filter
+        {
+            return self
+                .vector_nearest_query(path, key, embedding, *limit)
+                .await;
+        }
+        let fts_tables = self.discover_fts_tables_for_filter(path, filter).await?;
         let mut params: Vec<libsql::Value> = vec![libsql::Value::Text(path.as_str().to_string())];
         let prefix_pattern = format!("{}/%", path.as_str());
         params.push(libsql::Value::Text(escape_like_with_trailing_wildcard(
@@ -390,7 +518,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
         )));
 
         let mut conditions = String::new();
-        translate_filter(path, filter, &mut conditions, &mut params)?;
+        translate_filter(path, filter, &mut conditions, &mut params, &fts_tables)?;
 
         let mut sql = String::from(
             "SELECT path, contents, content_type, kind, indexed, version \
@@ -897,6 +1025,143 @@ impl LibSqlRootFilesystem {
             .is_some())
     }
 
+    /// Resolve every FTS index name covering `path` whose first key is
+    /// referenced by `filter`. Returns a map from index-key (the JSON
+    /// indexed-projection key) to the FTS5 vtable name created by
+    /// `ensure_index`. Used by the WHERE-clause translator.
+    async fn discover_fts_tables_for_filter(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+    ) -> Result<std::collections::HashMap<String, String>, FilesystemError> {
+        let mut keys: Vec<String> = Vec::new();
+        collect_fts_keys(filter, &mut keys);
+        if keys.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let conn = self.connect().await?;
+        let mut out = std::collections::HashMap::new();
+        // Scan the spec catalog for FTS specs whose prefix is path or any
+        // ancestor (so callers may declare the index on a higher prefix
+        // and query a child path).
+        let candidate_prefixes = ancestor_prefixes(path.as_str());
+        let placeholders: Vec<String> = (1..=candidate_prefixes.len())
+            .map(|i| format!("?{i}"))
+            .collect();
+        let sql = format!(
+            "SELECT prefix, name, keys FROM root_filesystem_index_specs \
+             WHERE kind = 'fts' AND prefix IN ({})",
+            placeholders.join(", ")
+        );
+        let params: Vec<libsql::Value> = candidate_prefixes
+            .iter()
+            .map(|p| libsql::Value::Text(p.clone()))
+            .collect();
+        let mut rows = conn
+            .query(&sql, params)
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?
+        {
+            let prefix: String = row.get(0).map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let name: String = row.get(1).map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let keys_json: String = row.get(2).map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let parsed_keys: Vec<String> =
+                serde_json::from_str(&keys_json).map_err(|_| FilesystemError::Backend {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Query,
+                    reason: "corrupt index spec keys".to_string(),
+                })?;
+            let Some(first_key) = parsed_keys.first() else {
+                continue;
+            };
+            if !keys.iter().any(|k| k == first_key) {
+                continue;
+            }
+            // First match wins; if the caller declared multiple FTS
+            // indexes for the same key on overlapping prefixes the most
+            // specific (longest matching prefix) wins because the
+            // candidate_prefixes list is ordered most-specific-first
+            // below.
+            out.entry(first_key.clone())
+                .or_insert_with(|| format!("{}_fts", sql_index_name(&prefix, &name)));
+        }
+        Ok(out)
+    }
+
+    /// Brute-force cosine over candidates under `path` whose indexed
+    /// projection has an `IndexValue::Bytes` value at `key` decoded as a
+    /// little-endian f32 buffer of any non-zero length matching the query
+    /// embedding's length. Returns the top `limit` results.
+    async fn vector_nearest_query(
+        &self,
+        path: &VirtualPath,
+        key: &IndexKey,
+        embedding: &[f32],
+        limit: u32,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let conn = self.connect().await?;
+        let prefix_pattern = format!("{}/%", path.as_str());
+        let escaped = escape_like_with_trailing_wildcard(&prefix_pattern);
+        // Pull every row in this prefix that has *some* value under the
+        // indexed key. Filter to byte values + matching length in Rust.
+        let sql = "SELECT path, contents, content_type, kind, indexed, version \
+                   FROM root_filesystem_entries \
+                   WHERE is_dir = 0 AND (path = ?1 OR path LIKE ?2 ESCAPE '!')";
+        let mut rows = conn
+            .query(sql, libsql::params![path.as_str(), escaped.clone()])
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?;
+        let mut ranked: Vec<(VersionedEntry, f32)> = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?
+        {
+            let row_path: String = row.get(0).map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let row_path = VirtualPath::new(row_path)?;
+            let body: Vec<u8> = row.get(1).map_err(|error| {
+                libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let content_type_raw: String = row.get(2).map_err(|error| {
+                libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let kind_raw: Option<String> = row.get(3).ok();
+            let indexed_raw: String = row.get(4).map_err(|error| {
+                libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let version_raw: i64 = row.get(5).map_err(|error| {
+                libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let entry = build_entry(&row_path, body, content_type_raw, kind_raw, indexed_raw)?;
+            let Some(IndexValue::Bytes(bytes)) = entry.indexed.get(key) else {
+                continue;
+            };
+            let Some(vec) = decode_embedding_blob(bytes) else {
+                continue;
+            };
+            let Some(score) = cosine_similarity(embedding, &vec) else {
+                continue;
+            };
+            let version = record_version_from_i64(&row_path, version_raw)?;
+            ranked.push((VersionedEntry { entry, version }, score));
+        }
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.truncate(limit as usize);
+        Ok(ranked.into_iter().map(|(entry, _)| entry).collect())
+    }
+
     async fn current_version(
         &self,
         path: &VirtualPath,
@@ -1031,6 +1296,7 @@ fn translate_filter(
     filter: &Filter,
     out: &mut String,
     params: &mut Vec<libsql::Value>,
+    fts_tables: &std::collections::HashMap<String, String>,
 ) -> Result<(), FilesystemError> {
     match filter {
         Filter::All => {
@@ -1083,8 +1349,35 @@ fn translate_filter(
             ));
             Ok(())
         }
-        Filter::And(children) => translate_compound(path, children, " AND ", "TRUE", out, params),
-        Filter::Or(children) => translate_compound(path, children, " OR ", "FALSE", out, params),
+        Filter::Fts { key, query } => {
+            let Some(fts_table) = fts_tables.get(key.as_str()) else {
+                return Err(FilesystemError::Unsupported {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Query,
+                });
+            };
+            params.push(libsql::Value::Text(query.clone()));
+            out.push_str(&format!(
+                "(path IN (SELECT path FROM {fts_table} WHERE {fts_table} MATCH ?{}))",
+                params.len()
+            ));
+            Ok(())
+        }
+        Filter::VectorNearest { .. } => Err(FilesystemError::Unsupported {
+            // VectorNearest is evaluated by the top-level `query` method,
+            // not inside the WHERE fragment. Reaching the translator
+            // means a caller composed it inside an And/Or — which would
+            // throw away the ranking. Surface as Unsupported so the
+            // caller restructures the query.
+            path: path.clone(),
+            operation: FilesystemOperation::Query,
+        }),
+        Filter::And(children) => {
+            translate_compound(path, children, " AND ", "TRUE", out, params, fts_tables)
+        }
+        Filter::Or(children) => {
+            translate_compound(path, children, " OR ", "FALSE", out, params, fts_tables)
+        }
     }
 }
 
@@ -1096,6 +1389,7 @@ fn translate_compound(
     empty_identity: &str,
     out: &mut String,
     params: &mut Vec<libsql::Value>,
+    fts_tables: &std::collections::HashMap<String, String>,
 ) -> Result<(), FilesystemError> {
     if children.is_empty() {
         out.push_str(empty_identity);
@@ -1109,10 +1403,79 @@ fn translate_compound(
         // Recurse: every child now produces a non-empty fragment thanks to
         // the `Filter::All -> TRUE` rule, so we don't need the prior
         // "skip empty" branch that broke `Or([])`/`And([All])`.
-        translate_filter(path, child, out, params)?;
+        translate_filter(path, child, out, params, fts_tables)?;
     }
     out.push(')');
     Ok(())
+}
+
+#[cfg(feature = "libsql")]
+fn collect_fts_keys(filter: &Filter, out: &mut Vec<String>) {
+    match filter {
+        Filter::Fts { key, .. } => {
+            let k = key.as_str().to_string();
+            if !out.contains(&k) {
+                out.push(k);
+            }
+        }
+        Filter::And(children) | Filter::Or(children) => {
+            for child in children {
+                collect_fts_keys(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// All ancestor paths of `path`, **most specific first**, ending at `/`.
+/// Used to find an FTS index declared on a higher prefix that should still
+/// cover descendant queries.
+#[cfg(feature = "libsql")]
+fn ancestor_prefixes(path: &str) -> Vec<String> {
+    let mut out = vec![path.trim_end_matches('/').to_string()];
+    let mut cur = path.trim_end_matches('/').to_string();
+    while let Some(idx) = cur.rfind('/') {
+        if idx == 0 {
+            out.push("/".to_string());
+            break;
+        }
+        cur.truncate(idx);
+        out.push(cur.clone());
+    }
+    out
+}
+
+#[cfg(feature = "libsql")]
+fn decode_embedding_blob(bytes: &[u8]) -> Option<Vec<f32>> {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
+        return None;
+    }
+    Some(
+        bytes
+            .chunks_exact(std::mem::size_of::<f32>())
+            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+            .collect(),
+    )
+}
+
+#[cfg(feature = "libsql")]
+fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
+    if left.len() != right.len() || left.is_empty() {
+        return None;
+    }
+    let mut dot = 0.0_f32;
+    let mut left_norm = 0.0_f32;
+    let mut right_norm = 0.0_f32;
+    for (l, r) in left.iter().zip(right.iter()) {
+        dot += l * r;
+        left_norm += l * l;
+        right_norm += r * r;
+    }
+    if left_norm <= 0.0 || right_norm <= 0.0 {
+        return None;
+    }
+    let score = dot / (left_norm.sqrt() * right_norm.sqrt());
+    if score.is_finite() { Some(score) } else { None }
 }
 
 #[cfg(feature = "libsql")]

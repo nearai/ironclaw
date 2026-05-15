@@ -242,7 +242,11 @@ impl IndexSpec {
 /// Backends that cannot serve a particular variant on a given index (e.g. a
 /// `Range` on an FTS index) fail with [`FilesystemError::Unsupported`](
 /// crate::FilesystemError::Unsupported).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Eq` is not derived because [`Filter::VectorNearest`] carries a `Vec<f32>`
+/// embedding, and `f32` doesn't implement `Eq`. `PartialEq` is enough for the
+/// places this type is compared (tests + serde round-trips).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum Filter {
     /// Match every record under the queried prefix.
@@ -263,6 +267,29 @@ pub enum Filter {
         key: IndexKey,
         lo: IndexValue,
         hi: IndexValue,
+    },
+    /// Full-text search on a text-valued indexed `key`. Requires the index
+    /// to be `IndexKind::Fts`. `query` is a free-form search string; each
+    /// backend translates to its native query language (FTS5 MATCH on
+    /// libSQL, `plainto_tsquery` on PostgreSQL).
+    Fts {
+        key: IndexKey,
+        query: String,
+    },
+    /// Vector-similarity search on a vector-valued indexed `key`. Requires
+    /// the index to be `IndexKind::Vector { dim }` with a matching `dim`.
+    /// `embedding` is the query vector; results are ranked by descending
+    /// cosine similarity and the top `limit` returned.
+    ///
+    /// `limit` truncates after similarity ranking. This overrides the
+    /// caller's [`Page::limit`] on the surrounding query — vector search
+    /// is inherently a top-k operation and pagination through ranked
+    /// results would require carrying a similarity cursor that the index
+    /// surface doesn't expose.
+    VectorNearest {
+        key: IndexKey,
+        embedding: Vec<f32>,
+        limit: u32,
     },
     And(Vec<Filter>),
     Or(Vec<Filter>),
