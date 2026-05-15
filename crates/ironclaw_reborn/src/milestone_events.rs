@@ -197,6 +197,13 @@ impl DurableLoopHostMilestoneSink {
                 capability_id(LOOP_RUN_CAPABILITY_ID)?,
                 loop_failure_kind(reason_kind),
             ),
+            // PromptBundleBuilt and CheckpointCreated are suppressed here intentionally.
+            // Checkpoint durability is owned by LoopCheckpointPort::write_checkpoint; the
+            // CheckpointCreated runtime-event milestone is emitted there with the authoritative
+            // durable payload. The CheckpointWritten progress event is an advisory echo only —
+            // emitting it here would create a duplicate weaker record. WS-10 resume must rely
+            // on the checkpoint-port milestone, NOT this progress echo.
+            // Similarly, PromptBundleBuilt is emitted by LoopPromptPort with richer context.
             LoopHostMilestoneKind::IterationStarted { .. }
             | LoopHostMilestoneKind::PromptBundleBuilt { .. }
             | LoopHostMilestoneKind::CapabilityInvoked { .. }

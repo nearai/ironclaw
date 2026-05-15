@@ -72,7 +72,6 @@ pub enum HostStage {
     Capability,
     Transcript,
     Checkpoint,
-    Progress,
     Input,
 }
 
@@ -1081,6 +1080,9 @@ fn capability_batch_counts(outcomes: &[CapabilityOutcome]) -> (u32, u32, u32, u3
             CapabilityOutcome::ApprovalRequired { .. }
             | CapabilityOutcome::AuthRequired { .. }
             | CapabilityOutcome::ResourceBlocked { .. }
+            // SpawnedProcess: treated as gated — it is a non-completing, non-failing, non-denied
+            // outcome that defers completion to a background process. Grouped with gated to avoid
+            // treating it as completed or failed in batch accounting.
             | CapabilityOutcome::SpawnedProcess(_) => gated_count += 1,
             CapabilityOutcome::Failed(_) => failed_count += 1,
         }
