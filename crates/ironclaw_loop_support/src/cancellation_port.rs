@@ -1,44 +1,90 @@
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
 };
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_turns::{
-    TurnRunId,
+    GetRunStateRequest, TurnRunId, TurnRunWake, TurnRunWakeNotifier, TurnScope, TurnStateStore,
+    TurnStatus,
     run_profile::{
-        AgentLoopHostError, LoopCancelReasonKind, LoopCancellationPort, LoopCancellationSignal,
+        AgentLoopHostError, AgentLoopHostErrorKind, LoopCancelReasonKind, LoopCancellationPort,
+        LoopCancellationSignal,
     },
 };
 use parking_lot::RwLock;
+
+const DEFAULT_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+#[derive(Clone)]
+struct RunCancellationRequester {
+    fired: Arc<AtomicBool>,
+    signal: Arc<RwLock<Option<LoopCancellationSignal>>>,
+    owner: Weak<()>,
+}
+
+impl RunCancellationRequester {
+    fn request(&self, reason_kind: LoopCancelReasonKind) {
+        request_cancellation(&self.fired, &self.signal, reason_kind);
+    }
+
+    fn is_owner_alive(&self) -> bool {
+        self.owner.upgrade().is_some()
+    }
+}
+
+fn request_cancellation(
+    fired: &AtomicBool,
+    signal: &RwLock<Option<LoopCancellationSignal>>,
+    reason_kind: LoopCancelReasonKind,
+) {
+    if fired.load(Ordering::Acquire) {
+        return;
+    }
+    let mut signal_lock = signal.write();
+    if signal_lock.is_some() {
+        return;
+    }
+    let new_signal = LoopCancellationSignal {
+        reason_kind,
+        requested_at: Utc::now(),
+    };
+    *signal_lock = Some(new_signal);
+    // Publish `fired` while the write guard is still held so any reader that
+    // observes `fired == true` via Acquire is also guaranteed to see the
+    // populated `signal_lock`, independent of the RwLock's own ordering.
+    fired.store(true, Ordering::Release);
+    drop(signal_lock);
+}
 
 /// Snapshot handle the host runtime owns and flips on cancellation.
 #[derive(Clone, Default)]
 pub struct RunCancellationHandle {
     fired: Arc<AtomicBool>,
     signal: Arc<RwLock<Option<LoopCancellationSignal>>>,
+    owner: Arc<()>,
 }
 
 impl RunCancellationHandle {
     pub fn request(&self, reason_kind: LoopCancelReasonKind) {
-        if self.fired.load(Ordering::Acquire) {
-            return;
-        }
-        let mut signal_lock = self.signal.write();
-        if signal_lock.is_some() {
-            return;
-        }
-        let signal = LoopCancellationSignal {
-            reason_kind,
-            requested_at: Utc::now(),
-        };
-        *signal_lock = Some(signal);
-        self.fired.store(true, Ordering::Release);
+        request_cancellation(&self.fired, &self.signal, reason_kind);
     }
 
     pub fn is_requested(&self) -> bool {
         self.fired.load(Ordering::Acquire)
+    }
+
+    fn requester(&self) -> RunCancellationRequester {
+        RunCancellationRequester {
+            fired: Arc::clone(&self.fired),
+            signal: Arc::clone(&self.signal),
+            owner: Arc::downgrade(&self.owner),
+        }
     }
 }
 
@@ -82,8 +128,11 @@ pub trait RunCancellationFactory: Send + Sync {
 
     async fn handle_for_run(
         &self,
+        scope: &TurnScope,
         run_id: TurnRunId,
     ) -> Result<RunCancellationHandle, AgentLoopHostError>;
+
+    fn notify_run_wake(&self, _wake: &TurnRunWake) {}
 }
 
 /// Runtime liveness contract for run cancellation observation.
@@ -101,6 +150,189 @@ impl RunCancellationObservationKind {
     }
 }
 
+/// Run cancellation factory backed by durable turn state.
+///
+/// Handles are seeded from the current run state before being returned and are
+/// registered for later wake-driven flips. A lightweight polling fallback
+/// covers runtimes that have not yet wired the wake notifier into their cancel
+/// path.
+pub struct TurnStateRunCancellationFactory {
+    store: Arc<dyn TurnStateStore>,
+    handles: Arc<RwLock<HashMap<TurnRunId, Vec<RunCancellationRequester>>>>,
+    poll_interval: Duration,
+}
+
+impl TurnStateRunCancellationFactory {
+    pub fn new(store: Arc<dyn TurnStateStore>) -> Self {
+        Self {
+            store,
+            handles: Arc::new(RwLock::new(HashMap::new())),
+            poll_interval: DEFAULT_CANCEL_POLL_INTERVAL,
+        }
+    }
+
+    pub fn with_poll_interval(mut self, poll_interval: Duration) -> Self {
+        self.poll_interval = poll_interval;
+        self
+    }
+
+    fn notify_cancel_requested(&self, run_id: TurnRunId) {
+        // Atomically drain the entry so any concurrent `register` that arrives
+        // after this point starts a fresh vec instead of being silently dropped
+        // by a follow-up `remove_run`.
+        let requesters = self.handles.write().remove(&run_id);
+        if let Some(requesters) = requesters {
+            for requester in requesters {
+                requester.request(LoopCancelReasonKind::UserRequested);
+            }
+        }
+    }
+
+    async fn read_run_status(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<TurnStatus, AgentLoopHostError> {
+        self.store
+            .get_run_state(GetRunStateRequest {
+                scope: scope.clone(),
+                run_id,
+            })
+            .await
+            .map(|state| state.status)
+            .map_err(turn_state_error_to_host_error)
+    }
+
+    async fn seed_from_state(
+        &self,
+        scope: &TurnScope,
+        requester: &RunCancellationRequester,
+        run_id: TurnRunId,
+    ) -> Result<TurnStatus, AgentLoopHostError> {
+        let status = self.read_run_status(scope, run_id).await?;
+        if status == TurnStatus::CancelRequested {
+            requester.request(LoopCancelReasonKind::UserRequested);
+        }
+        Ok(status)
+    }
+
+    fn register(&self, run_id: TurnRunId, requester: RunCancellationRequester) {
+        self.handles
+            .write()
+            .entry(run_id)
+            .or_default()
+            .push(requester);
+    }
+
+    fn remove_run(&self, run_id: TurnRunId) {
+        remove_run_handles(&self.handles, run_id);
+    }
+
+    #[cfg(test)]
+    fn registered_run_count(&self) -> usize {
+        self.handles.read().len()
+    }
+
+    fn spawn_polling_fallback(
+        &self,
+        scope: TurnScope,
+        run_id: TurnRunId,
+        requester: RunCancellationRequester,
+    ) {
+        let store = Arc::clone(&self.store);
+        let handles = Arc::clone(&self.handles);
+        let base_interval = self.poll_interval;
+        tokio::spawn(async move {
+            // Exponential backoff caps long-lived stuck runs (e.g. `RecoveryRequired`)
+            // at one poll every `MAX_POLL_INTERVAL` instead of hammering the store at
+            // `base_interval` for the full owner lifetime.
+            const MAX_POLL_INTERVAL: Duration = Duration::from_secs(5);
+            let mut interval = base_interval;
+            while requester.is_owner_alive() && !requester.fired.load(Ordering::Acquire) {
+                let status = store
+                    .get_run_state(GetRunStateRequest {
+                        scope: scope.clone(),
+                        run_id,
+                    })
+                    .await
+                    .map(|state| state.status);
+                match status {
+                    Ok(TurnStatus::CancelRequested) => {
+                        requester.request(LoopCancelReasonKind::UserRequested);
+                        break;
+                    }
+                    Ok(status) if status.is_terminal() => break,
+                    Ok(_) | Err(_) => {
+                        interval = (interval.saturating_mul(2)).min(MAX_POLL_INTERVAL);
+                    }
+                }
+                tokio::time::sleep(interval).await;
+            }
+            remove_run_handles(&handles, run_id);
+        });
+    }
+}
+
+#[async_trait]
+impl RunCancellationFactory for TurnStateRunCancellationFactory {
+    async fn handle_for_run(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<RunCancellationHandle, AgentLoopHostError> {
+        let handle = RunCancellationHandle::default();
+        let requester = handle.requester();
+        let first_status = self.seed_from_state(scope, &requester, run_id).await?;
+        if first_status == TurnStatus::CancelRequested || first_status.is_terminal() {
+            return Ok(handle);
+        }
+        self.register(run_id, requester.clone());
+        // Once registered, any error path MUST drop the entry; otherwise the
+        // caller never receives `handle`, the `Weak<()>` owner dies, and the
+        // `RunCancellationRequester` leaks in `self.handles` forever.
+        match self.seed_from_state(scope, &requester, run_id).await {
+            Ok(second_status)
+                if second_status == TurnStatus::CancelRequested || second_status.is_terminal() =>
+            {
+                self.remove_run(run_id);
+            }
+            Ok(_) => {
+                self.spawn_polling_fallback(scope.clone(), run_id, requester);
+            }
+            Err(error) => {
+                self.remove_run(run_id);
+                return Err(error);
+            }
+        }
+        Ok(handle)
+    }
+
+    fn notify_run_wake(&self, wake: &TurnRunWake) {
+        if wake.status == TurnStatus::CancelRequested {
+            self.notify_cancel_requested(wake.run_id);
+        } else if wake.status.is_terminal() {
+            self.remove_run(wake.run_id);
+        }
+    }
+}
+
+impl TurnRunWakeNotifier for TurnStateRunCancellationFactory {
+    fn notify_queued_run(
+        &self,
+        wake: TurnRunWake,
+    ) -> Result<(), ironclaw_turns::TurnRunWakeNotifyError> {
+        self.notify_run_wake(&wake);
+        Ok(())
+    }
+}
+
+fn turn_state_error_to_host_error(_error: ironclaw_turns::TurnError) -> AgentLoopHostError {
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::Unavailable,
+        "turn state was unavailable while building cancellation handle",
+    )
+}
+
 /// Default factory used until the host runtime wires real cancel observation.
 pub struct AlwaysAliveRunCancellationFactory;
 
@@ -112,10 +344,18 @@ impl RunCancellationFactory for AlwaysAliveRunCancellationFactory {
 
     async fn handle_for_run(
         &self,
+        _scope: &TurnScope,
         _run_id: TurnRunId,
     ) -> Result<RunCancellationHandle, AgentLoopHostError> {
         Ok(RunCancellationHandle::default())
     }
+}
+
+fn remove_run_handles(
+    handles: &RwLock<HashMap<TurnRunId, Vec<RunCancellationRequester>>>,
+    run_id: TurnRunId,
+) {
+    handles.write().remove(&run_id);
 }
 
 #[cfg(test)]
@@ -125,12 +365,21 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::Utc;
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
     use ironclaw_turns::run_profile::{LoopCancelReasonKind, LoopCancellationPort};
-    use ironclaw_turns::{TurnRunId, run_profile::AgentLoopHostError};
+    use ironclaw_turns::{
+        AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
+        ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
+        RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
+        SubmitTurnResponse, TurnAdmissionPolicy, TurnError, TurnId, TurnRunId, TurnRunState,
+        TurnRunWake, TurnRunWakeNotifier, TurnScope, TurnStateStore, TurnStatus,
+        run_profile::AgentLoopHostError,
+    };
 
     use super::{
         AlwaysAliveLoopCancellationPort, AlwaysAliveRunCancellationFactory, RunCancellationFactory,
         RunCancellationHandle, RunCancellationObservationKind, RunStateLoopCancellationPort,
+        TurnStateRunCancellationFactory,
     };
 
     struct TestLiveCancellationFactory;
@@ -139,9 +388,79 @@ mod tests {
     impl RunCancellationFactory for TestLiveCancellationFactory {
         async fn handle_for_run(
             &self,
+            _scope: &TurnScope,
             _run_id: TurnRunId,
         ) -> Result<RunCancellationHandle, AgentLoopHostError> {
             Ok(RunCancellationHandle::default())
+        }
+    }
+
+    struct StaticTurnStateStore {
+        state: TurnRunState,
+    }
+
+    impl StaticTurnStateStore {
+        fn new(state: TurnRunState) -> Self {
+            Self { state }
+        }
+    }
+
+    #[async_trait]
+    impl TurnStateStore for StaticTurnStateStore {
+        async fn submit_turn(
+            &self,
+            _request: SubmitTurnRequest,
+            _admission_policy: &dyn TurnAdmissionPolicy,
+            _run_profile_resolver: &dyn RunProfileResolver,
+        ) -> Result<SubmitTurnResponse, TurnError> {
+            panic!("submit_turn should not be called by cancellation factory tests")
+        }
+
+        async fn resume_turn(
+            &self,
+            _request: ResumeTurnRequest,
+        ) -> Result<ResumeTurnResponse, TurnError> {
+            panic!("resume_turn should not be called by cancellation factory tests")
+        }
+
+        async fn request_cancel(
+            &self,
+            _request: CancelRunRequest,
+        ) -> Result<CancelRunResponse, TurnError> {
+            panic!("request_cancel should not be called by cancellation factory tests")
+        }
+
+        async fn get_run_state(
+            &self,
+            request: GetRunStateRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            assert_eq!(request.scope, self.state.scope);
+            assert_eq!(request.run_id, self.state.run_id);
+            Ok(self.state.clone())
+        }
+    }
+
+    fn test_run_state(status: TurnStatus) -> TurnRunState {
+        let tenant_id = TenantId::new("tenant-cancel-factory").unwrap();
+        let agent_id = AgentId::new("agent-cancel-factory").unwrap();
+        let project_id = ProjectId::new("project-cancel-factory").unwrap();
+        let thread_id = ThreadId::new("thread-cancel-factory").unwrap();
+        TurnRunState {
+            scope: TurnScope::new(tenant_id, Some(agent_id), Some(project_id), thread_id),
+            turn_id: TurnId::new(),
+            run_id: TurnRunId::new(),
+            status,
+            accepted_message_ref: AcceptedMessageRef::new("accepted-cancel-factory").unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-cancel-factory").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-cancel-factory").unwrap(),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            resolved_model_route: None,
+            received_at: Utc::now(),
+            checkpoint_id: None,
+            gate_ref: None,
+            failure: None,
+            event_cursor: EventCursor(1),
         }
     }
 
@@ -244,8 +563,180 @@ mod tests {
         );
         assert!(!factory.observation_kind().is_live_capable());
 
-        let handle = factory.handle_for_run(TurnRunId::new()).await.unwrap();
+        let state = test_run_state(TurnStatus::Running);
+        let handle = factory
+            .handle_for_run(&state.scope, TurnRunId::new())
+            .await
+            .unwrap();
         assert!(!handle.is_requested());
+    }
+
+    #[tokio::test]
+    async fn turn_state_factory_seeds_already_cancel_requested_run() {
+        let state = test_run_state(TurnStatus::CancelRequested);
+        let factory = TurnStateRunCancellationFactory::new(Arc::new(StaticTurnStateStore::new(
+            state.clone(),
+        )));
+
+        let handle = factory
+            .handle_for_run(&state.scope, state.run_id)
+            .await
+            .unwrap();
+
+        assert!(handle.is_requested());
+        let port = RunStateLoopCancellationPort::new(handle);
+        let signal = port.observe_cancellation().expect("cancel signal");
+        assert_eq!(signal.reason_kind, LoopCancelReasonKind::UserRequested);
+    }
+
+    #[tokio::test]
+    async fn turn_state_factory_flips_registered_handle_from_cancel_wake() {
+        let state = test_run_state(TurnStatus::Running);
+        let factory = TurnStateRunCancellationFactory::new(Arc::new(StaticTurnStateStore::new(
+            state.clone(),
+        )))
+        .with_poll_interval(Duration::from_secs(60));
+        let handle = factory
+            .handle_for_run(&state.scope, state.run_id)
+            .await
+            .unwrap();
+        assert!(!handle.is_requested());
+
+        factory
+            .notify_queued_run(TurnRunWake {
+                scope: state.scope,
+                run_id: state.run_id,
+                status: TurnStatus::CancelRequested,
+                event_cursor: EventCursor(2),
+            })
+            .unwrap();
+
+        assert!(handle.is_requested());
+    }
+
+    #[tokio::test]
+    async fn turn_state_factory_prunes_run_after_cancel_wake() {
+        let state = test_run_state(TurnStatus::Running);
+        let factory = TurnStateRunCancellationFactory::new(Arc::new(StaticTurnStateStore::new(
+            state.clone(),
+        )))
+        .with_poll_interval(Duration::from_secs(60));
+        let _handle = factory
+            .handle_for_run(&state.scope, state.run_id)
+            .await
+            .unwrap();
+        assert_eq!(factory.registered_run_count(), 1);
+
+        factory
+            .notify_queued_run(TurnRunWake {
+                scope: state.scope,
+                run_id: state.run_id,
+                status: TurnStatus::CancelRequested,
+                event_cursor: EventCursor(2),
+            })
+            .unwrap();
+
+        assert_eq!(factory.registered_run_count(), 0);
+    }
+
+    struct MutableTurnStateStore {
+        state: std::sync::Mutex<TurnRunState>,
+    }
+
+    impl MutableTurnStateStore {
+        fn new(state: TurnRunState) -> Self {
+            Self {
+                state: std::sync::Mutex::new(state),
+            }
+        }
+
+        fn set_status(&self, status: TurnStatus) {
+            self.state.lock().unwrap().status = status;
+        }
+    }
+
+    #[async_trait]
+    impl TurnStateStore for MutableTurnStateStore {
+        async fn submit_turn(
+            &self,
+            _request: SubmitTurnRequest,
+            _admission_policy: &dyn TurnAdmissionPolicy,
+            _run_profile_resolver: &dyn RunProfileResolver,
+        ) -> Result<SubmitTurnResponse, TurnError> {
+            panic!("submit_turn should not be called by cancellation factory tests")
+        }
+
+        async fn resume_turn(
+            &self,
+            _request: ResumeTurnRequest,
+        ) -> Result<ResumeTurnResponse, TurnError> {
+            panic!("resume_turn should not be called by cancellation factory tests")
+        }
+
+        async fn request_cancel(
+            &self,
+            _request: CancelRunRequest,
+        ) -> Result<CancelRunResponse, TurnError> {
+            panic!("request_cancel should not be called by cancellation factory tests")
+        }
+
+        async fn get_run_state(
+            &self,
+            _request: GetRunStateRequest,
+        ) -> Result<TurnRunState, TurnError> {
+            Ok(self.state.lock().unwrap().clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_state_factory_polling_fallback_fires_without_wake() {
+        let initial = test_run_state(TurnStatus::Running);
+        let store = Arc::new(MutableTurnStateStore::new(initial.clone()));
+        let factory = TurnStateRunCancellationFactory::new(store.clone())
+            .with_poll_interval(Duration::from_millis(5));
+        let handle = factory
+            .handle_for_run(&initial.scope, initial.run_id)
+            .await
+            .unwrap();
+        assert!(!handle.is_requested());
+
+        // Transition durable state without dispatching a wake — only the
+        // polling-fallback task can discover the flip.
+        store.set_status(TurnStatus::CancelRequested);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !handle.is_requested() {
+            if std::time::Instant::now() > deadline {
+                panic!("polling fallback never observed cancel-requested transition");
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_state_factory_prunes_run_after_terminal_wake() {
+        let state = test_run_state(TurnStatus::Running);
+        let factory = TurnStateRunCancellationFactory::new(Arc::new(StaticTurnStateStore::new(
+            state.clone(),
+        )))
+        .with_poll_interval(Duration::from_secs(60));
+        let handle = factory
+            .handle_for_run(&state.scope, state.run_id)
+            .await
+            .unwrap();
+        assert_eq!(factory.registered_run_count(), 1);
+
+        factory
+            .notify_queued_run(TurnRunWake {
+                scope: state.scope,
+                run_id: state.run_id,
+                status: TurnStatus::Completed,
+                event_cursor: EventCursor(2),
+            })
+            .unwrap();
+
+        assert!(!handle.is_requested());
+        assert_eq!(factory.registered_run_count(), 0);
     }
 
     #[test]

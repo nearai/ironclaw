@@ -6,11 +6,11 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_loop_support::{
-    AlwaysAliveRunCancellationFactory, CapabilitySurfaceProfileFilter,
-    CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort, HostIdentityContextSource,
-    HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource,
-    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
-    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort,
+    CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort,
+    HostIdentityContextSource, HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort,
+    HostSkillContextSource, RunCancellationFactory, RunCancellationObservationKind,
+    RunStateLoopCancellationPort, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
+    ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
@@ -19,7 +19,8 @@ use crate::model_routes::{ModelRouteError, ModelRouteResolver, ModelSlot};
 use ironclaw_turns::{
     CheckpointStateStore, GetCheckpointStateRequest, GetLoopCheckpointRequest,
     LoopCheckpointStateRef, LoopCheckpointStore, PutCheckpointStateRequest,
-    PutLoopCheckpointRequest, RunProfileId, TurnCheckpointId, TurnError, TurnStatus,
+    PutLoopCheckpointRequest, RunProfileId, TurnCheckpointId, TurnError, TurnRunWake,
+    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome,
@@ -179,15 +180,20 @@ where
     S: SessionThreadService + ?Sized + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         thread_service: Arc<S>,
         thread_scope: ThreadScope,
         model_gateway: Arc<G>,
         checkpoint_state_store: Arc<dyn CheckpointStateStore>,
+        turn_state_store: Arc<dyn TurnStateStore>,
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
         config: TextOnlyLoopHostConfig,
     ) -> Self {
+        let cancellation_factory: Arc<dyn RunCancellationFactory> = Arc::new(
+            TurnStateRunCancellationFactory::new(Arc::clone(&turn_state_store)),
+        );
         Self {
             thread_service,
             thread_scope,
@@ -198,7 +204,7 @@ where
             milestone_sink,
             model_accountant: Arc::new(NoOpBudgetAccountant),
             model_policy_guard: Arc::new(NoOpPolicyGuard),
-            cancellation_factory: Arc::new(AlwaysAliveRunCancellationFactory),
+            cancellation_factory,
             config,
             skill_context_source: None,
             safety_context: None,
@@ -395,7 +401,7 @@ where
         ));
         let cancellation_handle = self
             .cancellation_factory
-            .handle_for_run(run_context.run_id)
+            .handle_for_run(&run_context.scope, run_context.run_id)
             .await
             .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
                 reason: error.safe_summary,
@@ -454,6 +460,17 @@ where
             .resolve_model_route(slot)
             .map_err(model_route_error_to_host_error)?;
         Ok(run_context.with_resolved_model_route(snapshot.to_loop_model_route_snapshot()))
+    }
+}
+
+impl<S, G> TurnRunWakeNotifier for RebornLoopDriverHostFactory<S, G>
+where
+    S: SessionThreadService + ?Sized + Send + Sync + 'static,
+    G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
+{
+    fn notify_queued_run(&self, wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
+        self.cancellation_factory.notify_run_wake(&wake);
+        Ok(())
     }
 }
 

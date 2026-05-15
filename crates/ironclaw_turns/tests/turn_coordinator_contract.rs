@@ -809,6 +809,45 @@ async fn resume_turn_wakes_runner_for_same_run_after_requeue() {
 }
 
 #[tokio::test]
+async fn cancel_run_wakes_runner_for_active_cancel_requested_run() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let notifier = Arc::new(RecordingWakeNotifier::default());
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(notifier.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    notifier.clear();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let cancelled = coordinator
+        .cancel_run(cancel_request("thread-a", run_id, "idem-cancel-a"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        notifier.wakes(),
+        vec![TurnRunWake {
+            scope: scope("thread-a"),
+            run_id,
+            status: TurnStatus::CancelRequested,
+            event_cursor: cancelled.event_cursor,
+        }]
+    );
+}
+
+#[tokio::test]
 async fn submit_turn_ignores_wake_notification_failure_after_persisting_run() {
     let store = Arc::new(InMemoryTurnStateStore::default());
     let coordinator = DefaultTurnCoordinator::new(store.clone())
