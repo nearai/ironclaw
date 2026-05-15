@@ -120,11 +120,31 @@ mod persona_tests {
     ///   - `dummy_fallback`: used when the env var is unset. Satisfies
     ///     the auth pre-flight; tools will 401 against the real API.
     const PERSONA_CREDENTIALS: &[(&str, &str, &str)] = &[
-        ("github_token", "LIVE_CANARY_GITHUB_TOKEN", "ghp_mock_persona_canary_token"),
-        ("google_oauth_token", "LIVE_CANARY_GOOGLE_OAUTH_TOKEN", "ya29.mock_persona_canary"),
-        ("slack_bot_token", "LIVE_CANARY_SLACK_BOT_TOKEN", "xoxb-mock-persona-canary"),
-        ("telegram_bot_token", "LIVE_CANARY_TELEGRAM_BOT_TOKEN", "111222333:MOCK_PERSONA_CANARY"),
-        ("composio_api_key", "LIVE_CANARY_COMPOSIO_API_KEY", "mock-composio-persona-canary"),
+        (
+            "github_token",
+            "LIVE_CANARY_GITHUB_TOKEN",
+            "ghp_mock_persona_canary_token",
+        ),
+        (
+            "google_oauth_token",
+            "LIVE_CANARY_GOOGLE_OAUTH_TOKEN",
+            "ya29.mock_persona_canary",
+        ),
+        (
+            "slack_bot_token",
+            "LIVE_CANARY_SLACK_BOT_TOKEN",
+            "xoxb-mock-persona-canary",
+        ),
+        (
+            "telegram_bot_token",
+            "LIVE_CANARY_TELEGRAM_BOT_TOKEN",
+            "111222333:MOCK_PERSONA_CANARY",
+        ),
+        (
+            "composio_api_key",
+            "LIVE_CANARY_COMPOSIO_API_KEY",
+            "mock-composio-persona-canary",
+        ),
     ];
 
     struct PersonaCheck {
