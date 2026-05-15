@@ -77,19 +77,6 @@ impl PredicateEvaluator {
         }
     }
 
-    /// Test-only constructor with an explicit backend. The durable
-    /// backend trait isn't finalized (it still takes `Instant`, which
-    /// doesn't serialize across processes — see serrrfirat MED on PR
-    /// #3635 and the predicate_state module docs), so production code
-    /// must not inject backends through this seam. Gated to
-    /// `#[cfg(test)]` per henrypark133 must-fix #4 on PR #3635: the
-    /// previous `#[allow(dead_code)]` gating left it reachable from
-    /// release builds and invited future callers to use an unstable API.
-    #[cfg(test)]
-    pub(crate) fn with_backend(backend: Arc<dyn PredicateStateBackend>) -> Self {
-        Self { backend }
-    }
-
     /// Total LRU evictions observed by the underlying backend. Operators
     /// should alert when this advances. Threat-model finding D5.
     pub fn evictions_observed(&self) -> u64 {

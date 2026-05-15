@@ -181,31 +181,21 @@ pub(crate) trait PredicateStateBackend: Send + Sync {
     }
 }
 
-/// In-process backend. Preserves the original [`PredicateEvaluator`]
-/// semantics: tenant-keyed sliding windows, LRU eviction at
-/// [`MAX_HISTORY_KEYS`] per map, and the `evictions` counter for
-/// operator monitoring.
-///
-/// State is per-instance; cross-process consistency + restart survival
-/// require a durable backend (separate PR).
-/// Per-key entry tracking timestamps + their originating `event_id`s.
-///
-/// Each entry stores `(timestamp, event_id)`. Dedup is "does any
-/// in-window entry have this id?" — so the dedup memory is exactly
-/// the in-window entry set. This guarantees:
-///
-/// 1. **No silent dedup loss under load** (codex P1 #1): no
-///    fixed-size dedup ring that can age out an id whose timestamp
-///    is still live in the window.
-/// 2. **Empty buckets get removed** (codex P1 #2): when `entries` is
-///    trimmed to empty, the bucket is dropped from the outer map so
-///    it can't become a zombie LRU-skip.
 /// Per-key history bucket. Maintains `entries` (the FIFO window) AND a
 /// companion `dedup_ids` set so duplicate-id checks are O(1) instead of
 /// O(n) — the previous linear scan serialized every evaluator call under
 /// the outer mutex at high in-window entry counts (henrypark133 must-fix
-/// #1 on PR #3635). Invariant: `dedup_ids` is exactly the set of
-/// `event_id` values currently in `entries`; every push/pop updates both.
+/// #1 on PR #3635).
+///
+/// Invariants:
+///
+/// - `dedup_ids` is exactly the set of `event_id` values currently in
+///   `entries`; every push/pop updates both.
+/// - No silent dedup loss under load (codex P1 #1): the dedup memory is
+///   the in-window entry set itself, not a fixed-size ring.
+/// - Empty buckets get removed (codex P1 #2): when `entries` is trimmed
+///   to empty, the bucket is dropped from the outer map so it can't
+///   become a zombie LRU-skip.
 #[derive(Debug, Default)]
 struct InvocationBucket {
     entries: VecDeque<(Instant, PredicateEventId)>,
@@ -244,6 +234,13 @@ impl ValueBucket {
     }
 }
 
+/// In-process backend. Preserves the original [`PredicateEvaluator`]
+/// semantics: tenant-keyed sliding windows, LRU eviction at
+/// [`MAX_HISTORY_KEYS`] per map, and the `evictions` counter for
+/// operator monitoring.
+///
+/// State is per-instance; cross-process consistency + restart survival
+/// require a durable backend (separate PR).
 pub(crate) struct InMemoryPredicateStateBackend {
     invocation_history: Mutex<HashMap<InvocationKey, InvocationBucket>>,
     value_history: Mutex<HashMap<ValueKey, ValueBucket>>,
