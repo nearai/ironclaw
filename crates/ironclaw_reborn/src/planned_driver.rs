@@ -290,14 +290,14 @@ mod tests {
             AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef,
             BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome,
             CapabilityInvocation, CapabilityOutcome, CheckpointSchemaId, FinalizeAssistantMessage,
-            LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCapabilityPort,
-            LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle,
-            LoopContextPort, LoopContextRequest, LoopDriverId, LoopInputAckToken, LoopInputBatch,
-            LoopInputCursor, LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse,
-            LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest,
-            LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopTranscriptPort,
-            StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
-            VisibleCapabilitySurface,
+            LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancellationPort,
+            LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
+            LoopCheckpointStateRef, LoopContextBundle, LoopContextPort, LoopContextRequest,
+            LoopDriverId, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
+            LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
+            LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
+            LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, StageCheckpointPayloadRequest,
+            UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
         },
     };
     use std::sync::Mutex;
@@ -827,6 +827,12 @@ mod tests {
             event: LoopProgressEvent,
         ) -> Result<(), AgentLoopHostError> {
             self.inner.emit_loop_progress(event).await
+        }
+    }
+
+    impl LoopCancellationPort for ResumePayloadHost {
+        fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
+            None
         }
     }
 }

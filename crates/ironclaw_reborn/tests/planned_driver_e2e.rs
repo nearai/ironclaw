@@ -17,13 +17,13 @@ use ironclaw_turns::{
         AppendCapabilityResultRef, BeginAssistantDraft, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome, FinalizeAssistantMessage,
         LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancelReasonKind,
-        LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopCheckpointStateRef, LoopContextBundle, LoopContextPort, LoopContextRequest, LoopInput,
-        LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort, LoopModelPort,
-        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
-        LoopTranscriptPort, StageCheckpointPayloadRequest, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
+        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextPort,
+        LoopContextRequest, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
+        LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
+        LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, StageCheckpointPayloadRequest,
+        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -507,5 +507,11 @@ impl LoopProgressPort for ForbiddenResumeHost {
         _event: LoopProgressEvent,
     ) -> Result<(), AgentLoopHostError> {
         Err(self.forbidden_call("emit_loop_progress"))
+    }
+}
+
+impl LoopCancellationPort for ForbiddenResumeHost {
+    fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
+        None
     }
 }
