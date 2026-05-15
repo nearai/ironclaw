@@ -1334,12 +1334,25 @@ where
         self.with_hook_dispatcher_factory(move || Arc::clone(&dispatcher))
     }
 
-    /// Install a [`HookDispatcherBuilder`], deferring `.build_arc()` until
-    /// the factory finalizes wiring. This is the preferred entry point for
-    /// callers that construct the dispatcher inline alongside the factory:
-    /// it lets the factory own the Arc-wrap. Routes through the legacy
-    /// [`Self::with_hook_dispatcher`] adapter; for true per-run isolation use
-    /// [`Self::with_hook_dispatcher_factory`] directly.
+    /// **DEPRECATED.** Earlier docs claimed this would defer `.build_arc()`
+    /// until the host factory finalizes wiring, but the implementation
+    /// always called it eagerly and routed through the legacy shared-
+    /// dispatcher adapter (serrrfirat P2 #3 on PR #3573). Callers using
+    /// this path lost per-run dispatcher isolation and the run-scoped
+    /// milestone sink. Use [`Self::with_hook_dispatcher_builder_factory`]
+    /// — pass a closure that builds a fresh builder per host — for the
+    /// behavior this method's name implied, or
+    /// [`Self::with_hook_dispatcher`] if you actually want the shared
+    /// dispatcher.
+    #[deprecated(
+        since = "0.1.0",
+        note = "this method always called build_arc() eagerly and routed \
+                through the shared-dispatcher adapter, contradicting the \
+                doc-claimed deferred semantics. Use \
+                `with_hook_dispatcher_builder_factory(|| builder())` for \
+                per-build isolation, or `with_hook_dispatcher(...)` if you \
+                meant the shared adapter explicitly."
+    )]
     pub fn with_hook_dispatcher_builder(self, builder: HookDispatcherBuilder) -> Self {
         self.with_hook_dispatcher(builder.build_arc())
     }
