@@ -974,20 +974,65 @@ fn send_pairing_reply(channel_id: &str, code: &str) -> Result<(), String> {
     }
 }
 
+// Private-use Unicode chars used as internal sentinels by `markdown_to_mrkdwn`
+// to bracket references into the `protected` arena. User input is filtered of
+// these before processing, so any remaining occurrence after step 1 was
+// written by our own code and refers to a valid arena index.
+const MRKDWN_PROTECT_START: char = '\u{E000}';
+const MRKDWN_PROTECT_END: char = '\u{E001}';
+
+/// Single-pass expansion of `<PROTECT_START><idx><PROTECT_END>` sentinel
+/// references in `s` against the `protected` arena. Unrecognized references
+/// (bad index, non-numeric body) are emitted verbatim. Used both for the
+/// final restore and for pre-expanding URL/text before pushing a generated
+/// link span (so the span we push contains no further references).
+fn expand_protected_spans(s: &str, protected: &[String]) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    loop {
+        let Some(start) = rest.find(MRKDWN_PROTECT_START) else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let after_start = &rest[start + MRKDWN_PROTECT_START.len_utf8()..];
+        let Some(end) = after_start.find(MRKDWN_PROTECT_END) else {
+            out.push_str(&rest[start..]);
+            break;
+        };
+        let idx_str = &after_start[..end];
+        match idx_str.parse::<usize>().ok().and_then(|i| protected.get(i)) {
+            Some(span) => out.push_str(span),
+            None => {
+                out.push(MRKDWN_PROTECT_START);
+                out.push_str(idx_str);
+                out.push(MRKDWN_PROTECT_END);
+            }
+        }
+        rest = &after_start[end + MRKDWN_PROTECT_END.len_utf8()..];
+    }
+    out
+}
+
+/// Escape characters that would break Slack's `<url|text>` parser when they
+/// appear in the visible label. Slack uses `&lt;` / `&gt;` for the literal
+/// `<` / `>` characters; `&` is left alone because escaping it as `&amp;`
+/// would double-escape input the agent already encoded.
+fn escape_mrkdwn_label(text: &str) -> String {
+    text.replace('<', "&lt;").replace('>', "&gt;")
+}
+
 fn markdown_to_mrkdwn(input: &str) -> String {
     if input.is_empty() {
         return String::new();
     }
-
-    const PROTECT_START: char = '\u{E000}';
-    const PROTECT_END: char = '\u{E001}';
 
     // Strip our internal sentinel chars from untrusted input so a message
     // containing literal `\u{E000}N\u{E001}` cannot interfere with the
     // protect/restore mechanism below.
     let sanitized: String = input
         .chars()
-        .filter(|c| *c != PROTECT_START && *c != PROTECT_END)
+        .filter(|c| *c != MRKDWN_PROTECT_START && *c != MRKDWN_PROTECT_END)
         .collect();
     let input = sanitized.as_str();
 
@@ -1023,9 +1068,9 @@ fn markdown_to_mrkdwn(input: &str) -> String {
                 let span = &input[start..end];
                 let idx = protected.len();
                 protected.push(span.to_string());
-                tmp.push(PROTECT_START);
+                tmp.push(MRKDWN_PROTECT_START);
                 tmp.push_str(&idx.to_string());
-                tmp.push(PROTECT_END);
+                tmp.push(MRKDWN_PROTECT_END);
                 i = end;
                 continue;
             }
@@ -1083,13 +1128,37 @@ fn markdown_to_mrkdwn(input: &str) -> String {
         };
         let url = &after_bracket[1..close_paren];
 
+        // Expand any sentinel refs embedded in url/text by step 1 so the
+        // link span we push into the arena contains no further references —
+        // the final restore pass does not re-scan content it has already
+        // emitted, so a buried sentinel would otherwise leak into the output
+        // as raw U+E000/U+E001 characters.
+        let url_expanded = expand_protected_spans(url, &protected);
+        let text_expanded = expand_protected_spans(text, &protected);
+
+        // If the URL contains characters that would break Slack's
+        // `<url|text>` parser, fall back to leaving the original markdown
+        // form intact. RFC 3986 disallows these in URLs anyway.
+        if url_expanded.contains(['<', '>', '|']) {
+            link_out.push('[');
+            link_out.push_str(text);
+            link_out.push_str("](");
+            link_out.push_str(url);
+            link_out.push(')');
+            s = &after_bracket[close_paren + 1..];
+            continue;
+        }
+
         // Push the generated `<url|text>` into the protected arena so the
-        // global `**`/`~~` replacement below can't rewrite anything inside it.
+        // global `**`/`~~` replacement below can't rewrite anything inside
+        // it. Escape `<` / `>` in the visible label so they render literally
+        // rather than opening/closing a Slack span.
+        let span = format!("<{}|{}>", url_expanded, escape_mrkdwn_label(&text_expanded));
         let idx = protected.len();
-        protected.push(format!("<{}|{}>", url, text));
-        link_out.push(PROTECT_START);
+        protected.push(span);
+        link_out.push(MRKDWN_PROTECT_START);
         link_out.push_str(&idx.to_string());
-        link_out.push(PROTECT_END);
+        link_out.push(MRKDWN_PROTECT_END);
 
         s = &after_bracket[close_paren + 1..];
     }
@@ -1099,39 +1168,7 @@ fn markdown_to_mrkdwn(input: &str) -> String {
     // This is intentionally minimal and does not attempt full Markdown parsing.
     let out = link_out.replace("~~", "~").replace("**", "*");
 
-    // Restore protected <...> spans.
-    let mut restored = String::with_capacity(out.len());
-    let mut rest = out.as_str();
-    loop {
-        let Some(start) = rest.find(PROTECT_START) else {
-            restored.push_str(rest);
-            break;
-        };
-        restored.push_str(&rest[..start]);
-        let after_start = &rest[start + PROTECT_START.len_utf8()..];
-        let Some(end) = after_start.find(PROTECT_END) else {
-            restored.push_str(rest);
-            break;
-        };
-        let idx_str = &after_start[..end];
-        if let Ok(idx) = idx_str.parse::<usize>() {
-            if let Some(span) = protected.get(idx) {
-                restored.push_str(span);
-            } else {
-                restored.push(PROTECT_START);
-                restored.push_str(idx_str);
-                restored.push(PROTECT_END);
-            }
-        } else {
-            restored.push(PROTECT_START);
-            restored.push_str(idx_str);
-            restored.push(PROTECT_END);
-        }
-
-        rest = &after_start[end + PROTECT_END.len_utf8()..];
-    }
-
-    restored
+    expand_protected_spans(&out, &protected)
 }
 
 /// Interpret a Slack `chat.postMessage` response body (returned with HTTP 200)
@@ -1806,5 +1843,38 @@ mod tests {
         // formatting markers. The chars are stripped at the boundary.
         let input = "a\u{E000}0\u{E001}b **c**";
         assert_eq!(markdown_to_mrkdwn(input), "a0b *c*");
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_escapes_brackets_in_link_label() {
+        // `<` and `>` in the visible label would otherwise open/close a
+        // Slack span and break the link. They must render as literal text.
+        assert_eq!(
+            markdown_to_mrkdwn("[a<b>c](https://e.com)"),
+            "<https://e.com|a&lt;b&gt;c>",
+        );
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_falls_back_when_url_has_pipe_or_gt() {
+        // A `|` or `>` inside the URL would corrupt `<url|text>`. The
+        // converter leaves the original markdown form intact instead.
+        assert_eq!(
+            markdown_to_mrkdwn("[x](https://e.com/a|b)"),
+            "[x](https://e.com/a|b)",
+        );
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_link_with_slack_native_span_inside_label() {
+        // A Slack-native `<...>` span inside the markdown link label is
+        // protected by step 1, then expanded again before the link span is
+        // pushed — guaranteeing the final output contains no leftover
+        // sentinel characters and the bracket chars are escaped for the
+        // label.
+        assert_eq!(
+            markdown_to_mrkdwn("[<@U1> there](https://e.com)"),
+            "<https://e.com|&lt;@U1&gt; there>",
+        );
     }
 }
