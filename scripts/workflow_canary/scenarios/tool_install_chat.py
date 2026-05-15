@@ -255,17 +255,23 @@ def _history_text(history: dict[str, Any]) -> str:
 async def _wait_for_install(
     client: httpx.AsyncClient, base_url: str, name: str, deadline: float
 ) -> tuple[bool, dict[str, Any] | None]:
-    """Poll until the extension is `installed=true` or deadline expires.
+    """Poll until the extension appears in /api/extensions or deadline expires.
 
-    Returns (installed, last_extension_seen).
+    The /api/extensions response carries no boolean ``installed`` field —
+    presence in the list is itself the install confirmation. The runtime
+    state lives in ``authenticated`` / ``active`` / ``tools`` which can
+    legitimately stay false for a freshly-installed extension that
+    still needs OAuth (the natural end state for this probe — gmail
+    parks on an auth gate after install, which is exactly the flow we
+    want to verify).
+
+    Returns (registered, last_extension_seen).
     """
     last: dict[str, Any] | None = None
     while time.perf_counter() < deadline:
         ext = await _get_extension(client, base_url, name)
         if ext is not None:
-            last = ext
-            if ext.get("installed") is True:
-                return True, ext
+            return True, ext
         await asyncio.sleep(POLL_INTERVAL_S)
     return False, last
 
@@ -314,28 +320,39 @@ async def run(
                 ]
 
             deadline = time.perf_counter() + TIMEOUT_S
-            installed, ext = await _wait_for_install(
+            registered, ext = await _wait_for_install(
                 client, base_url, TARGET_EXTENSION, deadline
             )
 
             history = await _read_history(client, base_url, thread_id)
         text = _history_text(history)
-        tool_install_seen = _history_has_tool_install(history, TARGET_EXTENSION)
+        # Use the structured tool-call enumerator rather than the
+        # substring walker — production tool calls live as
+        # `{"name": "tool_install", "arguments": {"name": "gmail"}}`
+        # where the two needles live in different string fields, so a
+        # same-string-only walker silently misses them. The
+        # _history_has_tool_install helper is kept as a defensive
+        # back-stop for envelope shapes where the name does appear
+        # inline as a string.
+        tool_install_seen = (
+            "tool_install" in _collect_tool_calls(history)
+            or _history_has_tool_install(history, TARGET_EXTENSION)
+        )
         forbidden_hits = [frag for frag in FORBIDDEN_FRAGMENTS if frag in text]
 
         latency_ms = int((time.perf_counter() - started) * 1000)
         success = (
-            installed and tool_install_seen and not forbidden_hits
+            registered and tool_install_seen and not forbidden_hits
         )
 
         details: dict[str, Any] = {
             "thread_id": thread_id,
             "trigger_prompt": TRIGGER_PROMPT,
             "target_extension": TARGET_EXTENSION,
-            "installed": installed,
+            "extension_registered": registered,
             "tool_install_seen_in_history": tool_install_seen,
             "extension_state": (
-                {k: ext.get(k) for k in ("installed", "authenticated", "active")}
+                {k: ext.get(k) for k in ("authenticated", "active", "needs_setup")}
                 if ext is not None
                 else None
             ),
@@ -358,16 +375,17 @@ async def run(
             # reason field surfaces the actual failure mode and not
             # just "False".
             reasons: list[str] = []
-            if not installed:
+            if not registered:
                 reasons.append(
-                    f"{TARGET_EXTENSION} did not reach installed=true within "
-                    f"{TIMEOUT_S:.0f}s — the agent likely cannot see "
-                    "tool_install on its callable surface"
+                    f"{TARGET_EXTENSION} did not appear in /api/extensions "
+                    f"within {TIMEOUT_S:.0f}s — install never reached the "
+                    "extension manager"
                 )
             if not tool_install_seen:
                 reasons.append(
                     "no tool_install invocation observed in history — "
-                    "agent surface regression"
+                    "agent surface regression (tool_install hidden from "
+                    "callable surface)"
                 )
             if forbidden_hits:
                 reasons.append(f"forbidden fragments: {forbidden_hits}")
