@@ -1553,6 +1553,75 @@ async fn event_triggered_subscription_with_foreign_user_stream_fails_host_build(
     );
 }
 
+/// serrrfirat MED on PR #3640: a `ReplayGap` from the durable log used to
+/// log a warn and silently break the subscription loop. Now it surfaces an
+/// `EventSubscriptionTerminated` `DriverNote` milestone so SSE/audit
+/// consumers can see that the subscription died and why.
+#[tokio::test]
+async fn event_triggered_replay_gap_emits_subscription_terminated_milestone() {
+    use ironclaw_turns::run_profile::{LoopDriverNoteKind, LoopHostMilestoneKind};
+    let fixture = Fixture::new().await;
+    let scope = runtime_scope(&fixture);
+    let stream = EventStreamKey::from_scope(&scope);
+    let log = Arc::new(InMemoryDurableEventLog::new());
+
+    for i in 0..3 {
+        log.append(RuntimeEvent::hook_decision_emitted(
+            scope.clone(),
+            runtime_capability("hooks.gap"),
+            HookId::for_builtin(&format!("tests::gap_{i}"), HookVersion::ONE).to_hex(),
+            "pass",
+            None,
+        ))
+        .await
+        .expect("append");
+    }
+    log.truncate_before_or_at(&stream, RuntimeEventCursor::new(2))
+        .expect("truncate");
+
+    let dispatcher = event_triggered_dispatcher(
+        RuntimeEventKind::HookDecisionEmitted,
+        Arc::new(Mutex::new(Vec::new())),
+    );
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let milestone_sink = fixture.milestone_sink.clone();
+    let _host = fixture
+        .factory()
+        .with_hook_dispatcher(dispatcher)
+        .with_event_subscription(event_log_subscription(
+            Arc::clone(&log),
+            stream,
+            RuntimeEventCursor::origin(),
+        ))
+        .build_text_only_host_with_capabilities(fixture.request(), inner)
+        .await
+        .expect("host builds; ReplayGap surfaces from the background task");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let milestones = milestone_sink.milestones();
+        let found = milestones.iter().any(|m| {
+            matches!(
+                &m.kind,
+                LoopHostMilestoneKind::DriverNote {
+                    kind: LoopDriverNoteKind::EventSubscriptionTerminated,
+                    ..
+                }
+            )
+        });
+        if found {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!(
+                "expected an EventSubscriptionTerminated DriverNote milestone after \
+                 the subscription hit a ReplayGap; got {milestones:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test]
 async fn event_triggered_sink_is_observer_only_at_caller_boundary() {
     let fixture = Fixture::new().await;

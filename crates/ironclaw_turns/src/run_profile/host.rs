@@ -1758,6 +1758,12 @@ pub enum LoopDriverNoteKind {
     Planning,
     Waiting,
     Retrying,
+    /// An event-triggered hook subscription stopped before the run did —
+    /// typically because the durable event log reported a replay gap that
+    /// the subscription cannot bridge without losing events. Surfaced as
+    /// an operator-visible note so the missing telemetry isn't silently
+    /// invisible (serrrfirat MED on PR #3640).
+    EventSubscriptionTerminated,
 }
 
 #[async_trait]

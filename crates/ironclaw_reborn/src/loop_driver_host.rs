@@ -519,14 +519,23 @@ impl EventTriggeredHookSubscription {
         self,
         dispatcher: Arc<HookDispatcher>,
         tenant_id: ironclaw_host_api::TenantId,
+        run_context: LoopRunContext,
+        milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     ) -> EventTriggeredHookSubscriptionHandle {
         let task = tokio::spawn(async move {
-            self.run(dispatcher, tenant_id).await;
+            self.run(dispatcher, tenant_id, run_context, milestone_sink)
+                .await;
         });
         EventTriggeredHookSubscriptionHandle { task }
     }
 
-    async fn run(self, dispatcher: Arc<HookDispatcher>, tenant_id: ironclaw_host_api::TenantId) {
+    async fn run(
+        self,
+        dispatcher: Arc<HookDispatcher>,
+        tenant_id: ironclaw_host_api::TenantId,
+        run_context: LoopRunContext,
+        milestone_sink: Arc<dyn LoopHostMilestoneSink>,
+    ) {
         let mut cursor = self.start_cursor;
         loop {
             match self
@@ -560,11 +569,24 @@ impl EventTriggeredHookSubscription {
                     requested,
                     earliest,
                 }) => {
-                    tracing::warn!(
+                    tracing::error!(
                         ?requested,
                         ?earliest,
                         "event-triggered hook subscription stopped after replay gap"
                     );
+                    // serrrfirat #3640 MED: replay gaps used to be a silent
+                    // warn+break. Surface as an operator-visible milestone
+                    // so missing hook deliveries are auditable. Fail-closed:
+                    // we break out of the loop after emitting because the
+                    // subscription's at-most-once contract is already broken
+                    // and resuming from `earliest` would silently lose the
+                    // events in the gap.
+                    emit_subscription_terminated_note(
+                        &milestone_sink,
+                        &run_context,
+                        "event subscription stopped: replay gap",
+                    )
+                    .await;
                     break;
                 }
                 Err(error) => {
@@ -576,6 +598,43 @@ impl EventTriggeredHookSubscription {
                 }
             }
         }
+    }
+}
+
+async fn emit_subscription_terminated_note(
+    sink: &Arc<dyn LoopHostMilestoneSink>,
+    run_context: &LoopRunContext,
+    safe_summary: &str,
+) {
+    let summary = match ironclaw_turns::run_profile::LoopSafeSummary::new(safe_summary) {
+        Ok(s) => s,
+        Err(_) => {
+            // Should never happen for our static strings, but if a future
+            // caller passes something the validator rejects, just log and
+            // proceed without the milestone rather than panicking inside
+            // the background task.
+            tracing::error!(
+                rejected = safe_summary,
+                "subscription-terminated note rejected by LoopSafeSummary::new"
+            );
+            return;
+        }
+    };
+    let milestone = ironclaw_turns::run_profile::LoopHostMilestone {
+        scope: run_context.scope.clone(),
+        turn_id: run_context.turn_id,
+        run_id: run_context.run_id,
+        loop_driver_id: run_context.loop_driver_id.clone(),
+        kind: ironclaw_turns::run_profile::LoopHostMilestoneKind::DriverNote {
+            kind: ironclaw_turns::run_profile::LoopDriverNoteKind::EventSubscriptionTerminated,
+            safe_summary: summary,
+        },
+    };
+    if let Err(error) = sink.publish_loop_milestone(milestone).await {
+        tracing::error!(
+            error = %error,
+            "failed to emit EventSubscriptionTerminated milestone"
+        );
     }
 }
 
@@ -1043,11 +1102,12 @@ where
                 subscription
                     .validate_against_run_scope(&run_context.scope, &self.thread_scope)
                     .map_err(|reason| RebornLoopDriverHostError::ScopeMismatch { reason })?;
-                Some(
-                    subscription
-                        .clone()
-                        .spawn(Arc::clone(dispatcher), run_context.scope.tenant_id.clone()),
-                )
+                Some(subscription.clone().spawn(
+                    Arc::clone(dispatcher),
+                    run_context.scope.tenant_id.clone(),
+                    run_context.clone(),
+                    Arc::clone(&self.milestone_sink) as _,
+                ))
             }
             _ => None,
         };
