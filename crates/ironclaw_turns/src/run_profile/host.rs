@@ -224,6 +224,7 @@ bounded_loop_ref!(
     "input-cursor:",
     256
 );
+bounded_loop_ref!(LoopInputAckToken, "loop input ack token", "input-ack:", 256);
 bounded_loop_ref!(LoopProcessRef, "loop process ref", "process:", 256);
 
 impl LoopCheckpointStateRef {
@@ -687,7 +688,15 @@ impl LoopInputCursor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopInputBatch {
     pub inputs: Vec<LoopInput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_acks: Vec<LoopInputAck>,
     pub next_cursor: LoopInputCursor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopInputAck {
+    pub cursor: LoopInputCursor,
+    pub token: LoopInputAckToken,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -725,7 +734,7 @@ pub trait LoopInputPort: Send + Sync {
         limit: usize,
     ) -> Result<LoopInputBatch, AgentLoopHostError>;
 
-    async fn ack_inputs(&self, cursor: LoopInputCursor) -> Result<(), AgentLoopHostError>;
+    async fn ack_inputs(&self, tokens: Vec<LoopInputAckToken>) -> Result<(), AgentLoopHostError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]

@@ -25,9 +25,10 @@ use ironclaw_host_runtime::{
     VisibleCapability, VisibleCapabilityAccess,
 };
 use ironclaw_loop_support::{
-    HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-    HostManagedModelRequest, HostManagedModelResponse, HostSkillContextBuildError,
-    HostSkillContextCandidate, HostSkillContextSource,
+    HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
+    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelRequest,
+    HostManagedModelResponse, HostSkillContextBuildError, HostSkillContextCandidate,
+    HostSkillContextSource,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::{
@@ -68,7 +69,7 @@ use ironclaw_turns::{
     GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
     InMemoryRunProfileResolver, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopBlocked,
     LoopBlockedKind, LoopCheckpointRecord, LoopCheckpointStore, LoopCompleted, LoopCompletionKind,
-    LoopExit, LoopExitId, LoopGateRef, LoopResultRef, PutCheckpointStateRequest,
+    LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, PutCheckpointStateRequest,
     PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId,
     RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SourceBindingRef,
     SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnId,
@@ -81,11 +82,11 @@ use ironclaw_turns::{
         LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
         LoopCheckpointStateRef, LoopContextRequest, LoopDriverId, LoopDriverNoteKind, LoopGateKind,
         LoopHostMilestone, LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageRole,
-        LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
-        LoopModelGatewayError, LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot,
-        LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopSafeSummary, ModelCallOutcome, ParentLoopOutput, PromptMode, SkillVisibility,
-        StageCheckpointPayloadRequest, VisibleCapabilityRequest,
+        LoopInput, LoopInputAckToken, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPort, LoopModelRequest,
+        LoopModelRouteSnapshot, LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopSafeSummary, ModelCallOutcome, ParentLoopOutput, PromptMode,
+        SkillVisibility, StageCheckpointPayloadRequest, VisibleCapabilityRequest,
     },
     runner::ClaimedTurnRun,
 };
@@ -113,7 +114,10 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
         .await
         .unwrap();
     assert!(input.inputs.is_empty());
-    host_dyn.ack_inputs(input.next_cursor).await.unwrap();
+    host_dyn
+        .ack_inputs(input.input_acks.into_iter().map(|ack| ack.token).collect())
+        .await
+        .unwrap();
 
     let surface = host_dyn
         .visible_capabilities(VisibleCapabilityRequest)
@@ -542,7 +546,7 @@ async fn text_only_model_reply_driver_runs_prompt_model_transcript_path() {
 }
 
 #[tokio::test]
-async fn text_only_model_reply_driver_preserves_non_secret_marker_reply_text() {
+async fn text_only_model_reply_driver_redacts_credential_marker_reply_text() {
     let mut fixture = HostFixture::new("thread-driver-marker-reply", "hello config").await;
     fixture.gateway.set_response(Ok(HostManagedModelResponse {
         safe_text_deltas: vec!["Use OPENAI_API_KEY in the environment".to_string()],
@@ -575,7 +579,7 @@ async fn text_only_model_reply_driver_preserves_non_secret_marker_reply_text() {
     assert_eq!(assistant.status, MessageStatus::Finalized);
     assert_eq!(
         assistant.content.as_deref(),
-        Some("Use OPENAI_API_KEY in the environment")
+        Some("Use [redacted] in the environment")
     );
 }
 
@@ -2435,25 +2439,120 @@ async fn no_extra_loop_input_port_rejects_foreign_cursor() {
 }
 
 #[tokio::test]
-async fn no_extra_loop_input_port_ack_rejects_foreign_cursor() {
+async fn no_extra_loop_input_port_accepts_empty_ack_batch() {
     let fixture = HostFixture::new("thread-host-input-ack", "hello").await;
     let host = fixture.build_host().await;
-    let other_context = LoopRunContext::new(
-        fixture.context.scope.clone(),
-        fixture.context.turn_id,
-        TurnRunId::new(),
-        fixture.context.resolved_run_profile.clone(),
-    );
+
+    host.ack_inputs(Vec::new()).await.unwrap();
+}
+
+#[tokio::test]
+async fn no_extra_loop_input_port_rejects_unissued_ack_token() {
+    let fixture = HostFixture::new("thread-host-input-ack-forged", "hello").await;
+    let host = fixture.build_host().await;
 
     let error = host
-        .ack_inputs(LoopInputCursor::from_host_token(
-            &other_context,
-            LoopInputCursorToken::new("input-cursor:foreign-ack").unwrap(),
-        ))
+        .ack_inputs(vec![LoopInputAckToken::new("input-ack:forged").unwrap()])
         .await
         .unwrap_err();
 
-    assert_eq!(error.kind, AgentLoopHostErrorKind::ScopeMismatch);
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+}
+
+/// Regression test for the `with_input_queue` factory composition path.
+///
+/// Proves that `RebornLoopDriverHostFactory::with_input_queue` actually wires the
+/// provided `HostInputQueue` into the host's `LoopInputPort` — i.e. the factory
+/// does not silently drop the queue. If the wiring were ever broken, `poll_inputs`
+/// would return an empty batch (the `NoExtraLoopInputPort` default) instead of
+/// delivering the steering message.
+#[tokio::test]
+async fn input_queue_wired_through_factory_drains_steering_message() {
+    let fixture = HostFixture::new("thread-host-input-queue-factory", "hello input queue").await;
+
+    let steering_ref = LoopMessageRef::new("msg:steering-factory-test").unwrap();
+    let queue = Arc::new(SingleMessageQueue::new(LoopInput::Steering {
+        message_ref: steering_ref.clone(),
+    }));
+
+    let host = fixture
+        .factory()
+        .with_input_queue(queue as Arc<dyn HostInputQueue>)
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+
+    let batch = host
+        .poll_inputs(LoopInputCursor::origin_for_run(&fixture.context), 8)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        batch.inputs,
+        vec![LoopInput::Steering {
+            message_ref: steering_ref
+        }],
+        "factory should wire input_queue into the host's LoopInputPort"
+    );
+    assert_eq!(batch.input_acks.len(), 1, "one ack token should be issued");
+}
+
+/// A minimal in-memory `HostInputQueue` that serves exactly one input item,
+/// then returns empty batches.
+struct SingleMessageQueue {
+    input: Mutex<Option<LoopInput>>,
+}
+
+impl SingleMessageQueue {
+    fn new(input: LoopInput) -> Self {
+        Self {
+            input: Mutex::new(Some(input)),
+        }
+    }
+}
+
+#[async_trait]
+impl HostInputQueue for SingleMessageQueue {
+    async fn next_after(
+        &self,
+        _run_id: TurnRunId,
+        after: ironclaw_turns::run_profile::LoopInputCursorToken,
+        _limit: usize,
+    ) -> Result<HostInputBatch, HostInputQueueError> {
+        let pending = self.input.lock().expect("queue lock").take();
+        match pending {
+            Some(input) => {
+                let cursor =
+                    ironclaw_turns::run_profile::LoopInputCursorToken::new("input-cursor:1")
+                        .unwrap();
+                let ack_token =
+                    ironclaw_turns::run_profile::LoopInputAckToken::new("input-ack:1").unwrap();
+                Ok(HostInputBatch {
+                    inputs: vec![HostInputEnvelope {
+                        input,
+                        cursor: cursor.clone(),
+                        ack_token,
+                    }],
+                    next_cursor: cursor,
+                })
+            }
+            None => Ok(HostInputBatch {
+                inputs: Vec::new(),
+                next_cursor: after,
+            }),
+        }
+    }
+
+    async fn ack_consumed(
+        &self,
+        _run_id: TurnRunId,
+        _tokens: Vec<ironclaw_turns::run_profile::LoopInputAckToken>,
+    ) -> Result<(), HostInputQueueError> {
+        Ok(())
+    }
 }
 
 #[tokio::test]

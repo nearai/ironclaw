@@ -292,11 +292,12 @@ mod tests {
             CapabilityInvocation, CapabilityOutcome, CheckpointSchemaId, FinalizeAssistantMessage,
             LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCapabilityPort,
             LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle,
-            LoopContextPort, LoopContextRequest, LoopDriverId, LoopInputBatch, LoopInputCursor,
-            LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
-            LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
-            LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, StageCheckpointPayloadRequest,
-            UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+            LoopContextPort, LoopContextRequest, LoopDriverId, LoopInputAckToken, LoopInputBatch,
+            LoopInputCursor, LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse,
+            LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest,
+            LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopTranscriptPort,
+            StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
+            VisibleCapabilitySurface,
         },
     };
     use std::sync::Mutex;
@@ -707,8 +708,11 @@ mod tests {
             self.inner.poll_inputs(after, limit).await
         }
 
-        async fn ack_inputs(&self, cursor: LoopInputCursor) -> Result<(), AgentLoopHostError> {
-            self.inner.ack_inputs(cursor).await
+        async fn ack_inputs(
+            &self,
+            tokens: Vec<LoopInputAckToken>,
+        ) -> Result<(), AgentLoopHostError> {
+            self.inner.ack_inputs(tokens).await
         }
     }
 

@@ -35,7 +35,8 @@
 //! tripping it should add a deliberate serialization layer with its own
 //! schema.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::Arc;
 
 use ironclaw_host_api::{
     CapabilityId, CapabilityProfileId, CapabilityProfileSchemaRef, EffectKind, ExtensionId,
@@ -89,6 +90,170 @@ pub enum CapabilityVisibility {
     HostInternal,
     /// Reachable through the gateway/API surface only.
     Api,
+}
+
+/// Host API contract identifier declared by an extension manifest.
+///
+/// This is the manifest-level contract discriminator, for example
+/// `ironclaw.product_adapter/v1` or `ironclaw.capability_provider/v1`. It is
+/// not a runtime kind, trust level, permission grant, or adapter factory.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HostApiId(String);
+
+impl HostApiId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ManifestV2Error> {
+        let value = value.into();
+        validate_host_api_id(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for HostApiId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// Dotted path to a manifest section owned by a host API contract handler.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ManifestSectionPath(String);
+
+impl ManifestSectionPath {
+    pub fn new(value: impl Into<String>) -> Result<Self, ManifestV2Error> {
+        let value = value.into();
+        validate_section_path(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn segments(&self) -> impl Iterator<Item = &str> {
+        self.0.split('.')
+    }
+
+    fn is_prefix_of(&self, other: &ManifestSectionPath) -> bool {
+        other
+            .as_str()
+            .strip_prefix(self.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+    }
+}
+
+impl std::fmt::Display for ManifestSectionPath {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+/// One host API contract instance declared by a manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostApiRefV2 {
+    pub id: HostApiId,
+    pub section: ManifestSectionPath,
+}
+
+/// Contract-defined cardinality for repeated host API instances.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostApiMultiplicity {
+    Single,
+    Multiple,
+}
+
+/// Host API contract validator registered by composition.
+///
+/// `ironclaw_extensions` owns the generic envelope and section dispatch. Domain
+/// crates own section patterns, cardinality, typed schema validation, and
+/// projection into their read models.
+pub trait HostApiManifestContract: Send + Sync {
+    fn id(&self) -> &HostApiId;
+
+    fn multiplicity(&self) -> HostApiMultiplicity {
+        HostApiMultiplicity::Single
+    }
+
+    fn accepts_section_path(&self, section: &ManifestSectionPath) -> bool;
+
+    fn validate_section(
+        &self,
+        host_api: &HostApiRefV2,
+        section: &toml::Value,
+    ) -> Result<(), String>;
+}
+
+/// Composition-wired registry of host API manifest contracts.
+pub struct HostApiContractRegistry {
+    contracts: BTreeMap<HostApiId, Arc<dyn HostApiManifestContract>>,
+}
+
+impl HostApiContractRegistry {
+    pub fn new() -> Self {
+        Self {
+            contracts: BTreeMap::new(),
+        }
+    }
+
+    pub fn register(
+        &mut self,
+        contract: Arc<dyn HostApiManifestContract>,
+    ) -> Result<(), ManifestV2Error> {
+        let id = contract.id().clone();
+        if self.contracts.contains_key(&id) {
+            return Err(ManifestV2Error::DuplicateHostApiContractRegistration { id });
+        }
+        self.contracts.insert(id, contract);
+        Ok(())
+    }
+
+    fn validate_manifest(
+        &self,
+        manifest: &ExtensionManifestV2,
+        sections: &ManifestSectionsV2,
+    ) -> Result<(), ManifestV2Error> {
+        let mut counts: BTreeMap<&HostApiId, usize> = BTreeMap::new();
+        for host_api in &manifest.host_apis {
+            let contract = self.contracts.get(&host_api.id).ok_or_else(|| {
+                ManifestV2Error::UnknownHostApi {
+                    id: host_api.id.clone(),
+                }
+            })?;
+            let count = counts.entry(&host_api.id).or_insert(0);
+            *count += 1;
+            if *count > 1 && contract.multiplicity() != HostApiMultiplicity::Multiple {
+                return Err(ManifestV2Error::DuplicateHostApi {
+                    id: host_api.id.clone(),
+                });
+            }
+            if !contract.accepts_section_path(&host_api.section) {
+                return Err(ManifestV2Error::HostApiSectionRejected {
+                    id: host_api.id.clone(),
+                    section: host_api.section.clone(),
+                    reason: "section path is not accepted by host API contract".to_string(),
+                });
+            }
+            let section = sections.get(&host_api.section)?;
+            contract
+                .validate_section(host_api, section)
+                .map_err(|reason| ManifestV2Error::HostApiSectionRejected {
+                    id: host_api.id.clone(),
+                    section: host_api.section.clone(),
+                    reason,
+                })?;
+        }
+        sections.reject_unreferenced_operational_sections(&manifest.host_apis)?;
+        Ok(())
+    }
+}
+
+impl Default for HostApiContractRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Validated v2 capability declaration.
@@ -182,6 +347,15 @@ pub struct ExtensionManifestV2 {
     /// the policy; they must not read this field as authoritative.
     pub descriptor_trust_default: TrustClass,
     pub runtime: ExtensionRuntimeV2,
+    /// Host API contracts this extension implements. Empty only for legacy v2
+    /// capability-only manifests during cutover.
+    ///
+    /// Contract handlers must treat manifest trust fields as untrusted
+    /// declaration metadata. Runtime authority and effective trust must come
+    /// from composition-owned trust policy evaluation, not from
+    /// [`descriptor_trust_default`](Self::descriptor_trust_default) or the raw
+    /// [`requested_trust`](Self::requested_trust) request.
+    pub host_apis: Vec<HostApiRefV2>,
     pub capabilities: Vec<CapabilityDeclV2>,
 }
 
@@ -194,6 +368,28 @@ pub enum ManifestV2Error {
     Parse { reason: String },
     #[error("invalid extension manifest: {reason}")]
     Invalid { reason: String },
+    #[error("invalid host API id '{value}': {reason}")]
+    InvalidHostApiId { value: String, reason: String },
+    #[error("invalid manifest section path '{value}': {reason}")]
+    InvalidSectionPath { value: String, reason: String },
+    #[error("unknown host API id {id}")]
+    UnknownHostApi { id: HostApiId },
+    #[error("duplicate host API contract registration {id}")]
+    DuplicateHostApiContractRegistration { id: HostApiId },
+    #[error("host API {id} does not allow multiple instances")]
+    DuplicateHostApi { id: HostApiId },
+    #[error("manifest section {section} is referenced more than once")]
+    DuplicateHostApiSection { section: ManifestSectionPath },
+    #[error("host API {id} rejected section {section}: {reason}")]
+    HostApiSectionRejected {
+        id: HostApiId,
+        section: ManifestSectionPath,
+        reason: String,
+    },
+    #[error("manifest section {section} was referenced by host_api but does not exist")]
+    MissingHostApiSection { section: ManifestSectionPath },
+    #[error("manifest section {section} is operational but not referenced by host_api")]
+    UnreferencedOperationalSection { section: ManifestSectionPath },
     #[error("schema_version must be '{expected}', got '{actual}'")]
     SchemaVersion {
         expected: &'static str,
@@ -278,10 +474,38 @@ impl ExtensionManifestV2 {
                 max: MAX_MANIFEST_BYTES,
             });
         }
-        let raw: RawManifestV2 = toml::from_str(input).map_err(|error| ManifestV2Error::Parse {
-            reason: error.to_string(),
-        })?;
-        Self::from_raw(raw, source, host_port_catalog)
+        let document = RawManifestDocumentV2::parse(input)?;
+        if !document.raw.host_api.is_empty() {
+            return Err(ManifestV2Error::Invalid {
+                reason: "host_api manifests require parse_with_host_api_contracts".to_string(),
+            });
+        }
+        if let Some(key) = document.sections.first_non_envelope_top_level_key() {
+            return Err(ManifestV2Error::Parse {
+                reason: format!("unknown top-level field {key:?}"),
+            });
+        }
+        Self::from_raw(document.raw, source, host_port_catalog, &document.sections)
+    }
+
+    /// Parse a v2 manifest and validate every `[[host_api]]` contract through
+    /// the composition-supplied registry.
+    pub fn parse_with_host_api_contracts(
+        input: &str,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+        registry: &HostApiContractRegistry,
+    ) -> Result<Self, ManifestV2Error> {
+        if input.len() > MAX_MANIFEST_BYTES {
+            return Err(ManifestV2Error::ManifestTooLarge {
+                bytes: input.len(),
+                max: MAX_MANIFEST_BYTES,
+            });
+        }
+        let document = RawManifestDocumentV2::parse(input)?;
+        let manifest = Self::from_raw(document.raw, source, host_port_catalog, &document.sections)?;
+        registry.validate_manifest(&manifest, &document.sections)?;
+        Ok(manifest)
     }
 
     /// Construct a manifest from an already-deserialized raw representation.
@@ -289,6 +513,7 @@ impl ExtensionManifestV2 {
         raw: RawManifestV2,
         source: ManifestSource,
         host_port_catalog: &HostPortCatalog,
+        sections: &ManifestSectionsV2,
     ) -> Result<Self, ManifestV2Error> {
         if raw.schema_version != MANIFEST_SCHEMA_VERSION {
             return Err(ManifestV2Error::SchemaVersion {
@@ -315,9 +540,17 @@ impl ExtensionManifestV2 {
                 reason: "description must not be empty".to_string(),
             });
         }
-        if raw.capabilities.is_empty() {
+        if raw.capabilities.is_empty() && raw.host_api.is_empty() {
             return Err(ManifestV2Error::Invalid {
-                reason: "at least one capability is required".to_string(),
+                reason: "at least one host_api contract or legacy capability is required"
+                    .to_string(),
+            });
+        }
+        if !raw.host_api.is_empty() && !raw.capabilities.is_empty() {
+            return Err(ManifestV2Error::Invalid {
+                reason:
+                    "top-level capabilities are not allowed when host_api contracts are declared"
+                        .to_string(),
             });
         }
 
@@ -352,6 +585,8 @@ impl ExtensionManifestV2 {
             });
         }
 
+        let host_apis = validate_host_api_refs(raw.host_api, sections)?;
+
         let mut seen_capabilities = BTreeSet::new();
         let mut capabilities = Vec::with_capacity(raw.capabilities.len());
         for raw_cap in raw.capabilities {
@@ -372,6 +607,7 @@ impl ExtensionManifestV2 {
             requested_trust,
             descriptor_trust_default,
             runtime,
+            host_apis,
             capabilities,
         })
     }
@@ -499,6 +735,84 @@ impl CapabilityDeclV2 {
     }
 }
 
+fn validate_host_api_refs(
+    raw_refs: Vec<RawHostApiRefV2>,
+    sections: &ManifestSectionsV2,
+) -> Result<Vec<HostApiRefV2>, ManifestV2Error> {
+    let mut seen_sections: BTreeSet<ManifestSectionPath> = BTreeSet::new();
+    let mut refs = Vec::with_capacity(raw_refs.len());
+    for raw_ref in raw_refs {
+        let host_api = HostApiRefV2 {
+            id: HostApiId::new(raw_ref.id)?,
+            section: ManifestSectionPath::new(raw_ref.section)?,
+        };
+        if seen_sections.iter().any(|seen| {
+            seen == &host_api.section
+                || seen.is_prefix_of(&host_api.section)
+                || host_api.section.is_prefix_of(seen)
+        }) {
+            return Err(ManifestV2Error::DuplicateHostApiSection {
+                section: host_api.section,
+            });
+        }
+        seen_sections.insert(host_api.section.clone());
+        sections.get(&host_api.section)?;
+        refs.push(host_api);
+    }
+    Ok(refs)
+}
+
+fn validate_host_api_id(value: &str) -> Result<(), ManifestV2Error> {
+    let raise = |reason: &str| ManifestV2Error::InvalidHostApiId {
+        value: value.to_string(),
+        reason: reason.to_string(),
+    };
+    if value.is_empty() {
+        return Err(raise("must not be empty"));
+    }
+    if !value.contains("/v") {
+        return Err(raise("must include an explicit /vN contract version"));
+    }
+    if value.starts_with('.') || value.ends_with('.') || value.contains("..") {
+        return Err(raise("dotted name segments must not be empty"));
+    }
+    for ch in value.chars() {
+        if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-' | '/'))
+        {
+            return Err(raise(
+                "only lowercase ASCII letters, digits, '.', '_', '-', and '/' are allowed",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_section_path(value: &str) -> Result<(), ManifestV2Error> {
+    let raise = |reason: &str| ManifestV2Error::InvalidSectionPath {
+        value: value.to_string(),
+        reason: reason.to_string(),
+    };
+    if value.is_empty() {
+        return Err(raise("must not be empty"));
+    }
+    if value.starts_with('.') || value.ends_with('.') || value.contains("..") {
+        return Err(raise("section path segments must not be empty"));
+    }
+    for segment in value.split('.') {
+        if segment.is_empty() {
+            return Err(raise("section path segments must not be empty"));
+        }
+        for ch in segment.chars() {
+            if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+                return Err(raise(
+                    "only ASCII letters, digits, '_', '-', and '.' separators are allowed",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_wasm_module_ref(value: &str) -> Result<(), ManifestV2Error> {
     let raise = |reason: &str| ManifestV2Error::InvalidWasmModuleRef {
         value: value.to_string(),
@@ -617,6 +931,153 @@ fn requested_trust_to_descriptor_trust(requested: RequestedTrustClass) -> TrustC
 
 // ---- Raw deserialization shapes --------------------------------------------
 
+struct RawManifestDocumentV2 {
+    raw: RawManifestV2,
+    sections: ManifestSectionsV2,
+}
+
+impl RawManifestDocumentV2 {
+    fn parse(input: &str) -> Result<Self, ManifestV2Error> {
+        let value: toml::Value = toml::from_str(input).map_err(|error| ManifestV2Error::Parse {
+            reason: error.to_string(),
+        })?;
+        let table = value.as_table().ok_or_else(|| ManifestV2Error::Parse {
+            reason: "manifest root must be a TOML table".to_string(),
+        })?;
+        let mut envelope = toml::value::Table::new();
+        for (key, value) in table {
+            if is_envelope_key(key) {
+                envelope.insert(key.clone(), value.clone());
+            } else if !value.is_table() {
+                return Err(ManifestV2Error::Parse {
+                    reason: format!("unknown top-level field {key:?}"),
+                });
+            }
+        }
+        let raw: RawManifestV2 =
+            toml::Value::Table(envelope)
+                .try_into()
+                .map_err(|error: toml::de::Error| ManifestV2Error::Parse {
+                    reason: error.to_string(),
+                })?;
+        Ok(Self {
+            raw,
+            sections: ManifestSectionsV2 {
+                table: table.clone(),
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ManifestSectionsV2 {
+    table: toml::value::Table,
+}
+
+impl ManifestSectionsV2 {
+    fn first_non_envelope_top_level_key(&self) -> Option<&str> {
+        self.table
+            .keys()
+            .find(|key| !is_envelope_key(key))
+            .map(String::as_str)
+    }
+
+    fn get(&self, path: &ManifestSectionPath) -> Result<&toml::Value, ManifestV2Error> {
+        let mut current = &self.table;
+        let mut segments = path.segments().peekable();
+        while let Some(segment) = segments.next() {
+            let value =
+                current
+                    .get(segment)
+                    .ok_or_else(|| ManifestV2Error::MissingHostApiSection {
+                        section: path.clone(),
+                    })?;
+            if segments.peek().is_none() {
+                if value.is_table() {
+                    return Ok(value);
+                }
+                return Err(ManifestV2Error::MissingHostApiSection {
+                    section: path.clone(),
+                });
+            }
+            current = value
+                .as_table()
+                .ok_or_else(|| ManifestV2Error::MissingHostApiSection {
+                    section: path.clone(),
+                })?;
+        }
+        Err(ManifestV2Error::MissingHostApiSection {
+            section: path.clone(),
+        })
+    }
+
+    fn reject_unreferenced_operational_sections(
+        &self,
+        host_apis: &[HostApiRefV2],
+    ) -> Result<(), ManifestV2Error> {
+        if host_apis.is_empty() {
+            return Ok(());
+        }
+        let referenced: BTreeSet<_> = host_apis
+            .iter()
+            .map(|entry| entry.section.clone())
+            .collect();
+        for path in self.operational_table_paths()? {
+            let used = referenced.iter().any(|section| {
+                section == &path || path.is_prefix_of(section) || section.is_prefix_of(&path)
+            });
+            if !used {
+                return Err(ManifestV2Error::UnreferencedOperationalSection { section: path });
+            }
+        }
+        Ok(())
+    }
+
+    fn operational_table_paths(&self) -> Result<Vec<ManifestSectionPath>, ManifestV2Error> {
+        let mut paths = Vec::new();
+        collect_operational_table_paths(&self.table, None, &mut paths)?;
+        Ok(paths)
+    }
+}
+
+fn collect_operational_table_paths(
+    table: &toml::value::Table,
+    prefix: Option<&str>,
+    paths: &mut Vec<ManifestSectionPath>,
+) -> Result<(), ManifestV2Error> {
+    for (key, value) in table {
+        let path = match prefix {
+            Some(prefix) => format!("{prefix}.{key}"),
+            None => key.clone(),
+        };
+        let root = path.split('.').next().unwrap_or_default();
+        if is_envelope_key(root) || matches!(root, "metadata" | "x") {
+            continue;
+        }
+        if let Some(child) = value.as_table() {
+            let section_path = ManifestSectionPath::new(path.clone())?;
+            paths.push(section_path);
+            collect_operational_table_paths(child, Some(&path), paths)?;
+        }
+    }
+    Ok(())
+}
+
+fn is_envelope_key(key: &str) -> bool {
+    matches!(
+        key,
+        "schema_version"
+            | "id"
+            | "name"
+            | "version"
+            | "description"
+            | "trust"
+            | "runtime"
+            | "capabilities"
+            | "host_api"
+    )
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawManifestV2 {
@@ -631,6 +1092,8 @@ struct RawManifestV2 {
     )]
     trust: RequestedTrustClass,
     runtime: RawRuntimeV2,
+    #[serde(default)]
+    host_api: Vec<RawHostApiRefV2>,
     #[serde(default)]
     capabilities: Vec<RawCapabilityV2>,
 }
@@ -653,6 +1116,13 @@ where
             "unsupported trust value {other:?}; expected one of untrusted, third_party, first_party_requested, system_requested"
         ))),
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHostApiRefV2 {
+    id: String,
+    section: String,
 }
 
 #[derive(Debug, Deserialize)]

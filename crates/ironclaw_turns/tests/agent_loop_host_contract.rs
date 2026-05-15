@@ -26,14 +26,14 @@ use ironclaw_turns::{
         LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage,
         LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata,
         LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
-        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputBatch,
-        LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
-        LoopModelGateway, LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage,
-        LoopModelPolicyGuard, LoopModelPort, LoopModelRequest, LoopModelResponse,
-        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleAuthority,
-        LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopTranscriptPort, ModelCallOutcome, ParentLoopOutput, PromptMode,
-        PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken,
+        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,
+        LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard, LoopModelPort,
+        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+        LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, ModelCallOutcome, ParentLoopOutput,
+        PromptMode, PromptSkillContextMetadata, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::{ClaimRunRequest, TurnRunTransitionPort},
 };
@@ -1993,6 +1993,7 @@ impl LoopInputPort for RecordingAgentLoopHost {
     ) -> Result<LoopInputBatch, AgentLoopHostError> {
         Ok(LoopInputBatch {
             inputs: Vec::new(),
+            input_acks: Vec::new(),
             next_cursor: LoopInputCursor::from_host_token(
                 &self.context,
                 LoopInputCursorToken::new("input-cursor:0").unwrap(),
@@ -2000,7 +2001,7 @@ impl LoopInputPort for RecordingAgentLoopHost {
         })
     }
 
-    async fn ack_inputs(&self, _cursor: LoopInputCursor) -> Result<(), AgentLoopHostError> {
+    async fn ack_inputs(&self, _tokens: Vec<LoopInputAckToken>) -> Result<(), AgentLoopHostError> {
         Ok(())
     }
 }

@@ -478,7 +478,7 @@ impl ironclaw_turns::run_profile::LoopInputPort for StubHost {
 
     async fn ack_inputs(
         &self,
-        _cursor: ironclaw_turns::run_profile::LoopInputCursor,
+        _tokens: Vec<ironclaw_turns::run_profile::LoopInputAckToken>,
     ) -> Result<(), AgentLoopHostError> {
         unimplemented!("stub host: never called by mock driver")
     }

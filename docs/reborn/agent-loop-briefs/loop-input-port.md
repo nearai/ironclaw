@@ -46,8 +46,8 @@ Crate ownership (per master doc §12 follow-up rule):
   `ThreadBackedLoopTranscriptPort`, `ThreadBackedLoopModelPort`,
   `EmptyLoopCapabilityPort` in
   [`crates/ironclaw_loop_support/src/lib.rs`](../../../crates/ironclaw_loop_support/src/lib.rs)) are the templates.
-- **Composition wiring** — `ironclaw_reborn` (just a config field on
-  `PlannedDriverConfig`).
+- **Composition wiring** — `ironclaw_reborn` (`RebornLoopDriverHostFactory`
+  gains `with_input_queue()` and composes the adapter at host-build time).
 - **Contract crate** — `ironclaw_turns` changes `LoopInputPort::ack_inputs`
   from cursor-through ack to exact-token ack and exposes the token type
   the adapter passes through. `LoopInputCursor` remains the read position.
@@ -66,9 +66,10 @@ Crate ownership (per master doc §12 follow-up rule):
   `LoopInputBatch`/envelope metadata needed by the executor.
 - `crates/ironclaw_loop_support/src/lib.rs` — module declarations and
   re-exports.
-- `crates/ironclaw_reborn/src/planned_driver.rs` (WS-7 file) —
-  `PlannedDriverConfig` gains `Arc<dyn HostInputQueue>`; the driver's
-  host-build hook composes `HostQueueLoopInputPort` in.
+- `crates/ironclaw_reborn/src/loop_driver_host.rs` —
+  `RebornLoopDriverHostFactory` gains an `input_queue: Option<Arc<dyn HostInputQueue>>`
+  field and the `with_input_queue()` builder method; the factory's host-build step
+  composes `HostQueueLoopInputPort` (or the stub `EmptyLoopInputPort` when unset).
 
 ### NOT TOUCHED
 - `crates/ironclaw_reborn/tests/loop_driver_host.rs` — the in-memory
@@ -343,33 +344,42 @@ validation. Reusing a port across runs is a programming error — the
 scope/run_id check in `poll_inputs`/`ack_inputs` rejects it
 defensively.
 
-## 4. Composition in `PlannedDriverConfig`
+## 4. Composition in `RebornLoopDriverHostFactory`
+
+The implementation departs from the originally planned `PlannedDriverConfig` field.
+`input_queue` is wired in via the builder method `with_input_queue()` on
+`RebornLoopDriverHostFactory`, which is the factory composition point already
+used for all other per-host-build dependencies (store, gateway, etc.).
 
 ```rust
-//! crates/ironclaw_reborn/src/planned_driver.rs (delta)
+//! crates/ironclaw_reborn/src/loop_driver_host.rs (delta)
 
-pub struct PlannedDriverConfig {
-    // ... fields from WS-7, WS-9, WS-10, WS-15 ...
-    pub input_queue: Arc<dyn HostInputQueue>,
-}
-
-impl PlannedDriver {
-    async fn build_input_port(
-        &self,
-        run_context: &LoopRunContext,
-    ) -> Result<Arc<dyn LoopInputPort>, AgentLoopHostError> {
-        Ok(Arc::new(HostQueueLoopInputPort::new(
-            self.config.input_queue.clone(),
-            run_context.clone(),
-        )))
+impl<S, G> RebornLoopDriverHostFactory<S, G> {
+    /// Attaches a host input queue; the factory composes `HostQueueLoopInputPort`
+    /// for each claimed run. If not set, the factory falls back to the stub
+    /// `EmptyLoopInputPort`.
+    pub fn with_input_queue(mut self, queue: Arc<dyn HostInputQueue>) -> Self {
+        self.input_queue = Some(queue);
+        self
     }
 }
 ```
 
+At host-build time (inside the `HostFactory::build_host` call path), the factory
+constructs a `HostQueueLoopInputPort` from the stored queue and the per-run
+`LoopRunContext`:
+
+```rust
+let input: Arc<dyn LoopInputPort> = match self.input_queue.as_ref() {
+    Some(queue) => Arc::new(HostQueueLoopInputPort::new(queue.clone(), run_context.clone())),
+    None => Arc::new(EmptyLoopInputPort),
+};
+```
+
 The host runtime's queue implementation is constructed at app-startup
-time (it's a singleton across the process) and passed into every
-`PlannedDriverConfig`. Per-run binding happens inside the driver's
-host build.
+time (it's a singleton across the process) and passed into the factory
+via `with_input_queue`. Per-run binding happens inside the factory's
+host-build step, not at `PlannedDriverConfig` construction time.
 
 ## 5. Verification
 

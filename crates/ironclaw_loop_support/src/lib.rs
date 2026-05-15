@@ -13,6 +13,8 @@ use std::{
 mod capability_allow_set;
 mod capability_port;
 mod capability_surface_filter;
+mod input_port;
+mod input_queue;
 mod skill_context;
 
 pub use capability_allow_set::{
@@ -23,6 +25,8 @@ pub use capability_port::{
     LoopCapabilityInputResolver, LoopCapabilityResultWriter, concurrency_hint_from_effects,
 };
 pub use capability_surface_filter::CapabilitySurfaceProfileFilter;
+pub use input_port::HostQueueLoopInputPort;
+pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
 pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     build_skill_run_snapshot,
