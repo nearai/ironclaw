@@ -74,16 +74,17 @@ use ironclaw_turns::{
     TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
-        CapabilitySurfaceVersion, FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink,
-        InstructionSafetyContext, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextRequest, LoopDriverId,
-        LoopDriverNoteKind, LoopHostMilestone, LoopInlineMessage, LoopInlineMessageRole,
-        LoopInputCursor, LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant,
-        LoopModelGatewayError, LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot,
-        LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopSafeSummary, ModelCallOutcome, ParentLoopOutput, PromptMode, SkillVisibility,
-        StageCheckpointPayloadRequest, VisibleCapabilityRequest,
+        CapabilityDeniedReasonKind, CapabilityFailureKind, CapabilityInputRef,
+        CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
+        FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
+        LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
+        LoopCheckpointStateRef, LoopContextRequest, LoopDriverId, LoopDriverNoteKind,
+        LoopHostMilestone, LoopInlineMessage, LoopInlineMessageRole, LoopInputCursor,
+        LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError,
+        LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelCallOutcome,
+        ParentLoopOutput, PromptMode, SkillVisibility, StageCheckpointPayloadRequest,
+        VisibleCapabilityRequest,
     },
     runner::ClaimedTurnRun,
 };
@@ -3092,7 +3093,13 @@ async fn text_only_host_maps_explicit_unknown_runtime_outcome_to_failure() {
     let CapabilityOutcome::Failed(failure) = outcome else {
         panic!("expected failed capability outcome");
     };
-    assert_eq!(failure.error_kind, "streaming");
+    assert_eq!(
+        failure.error_kind,
+        CapabilityFailureKind::Unknown(
+            ironclaw_turns::run_profile::CapabilityFailureKindValue::new("streaming")
+                .expect("valid failure kind")
+        )
+    );
     assert_eq!(
         failure.safe_summary,
         "streaming outcomes are not supported by this loop port"

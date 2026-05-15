@@ -30,17 +30,17 @@ use ironclaw_turns::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
-        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, ConcurrencyHint,
-        FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
-        InMemoryInstructionMaterializationStore, InstructionMaterializationStore,
-        InstructionSafetyContext, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopContextBundle, LoopContextPort, LoopContextRequest, LoopHostMilestoneEmitter,
-        LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,
-        LoopModelGatewayRequest, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopProcessRef, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
-        LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
-        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, NoOpBudgetAccountant,
+        CapabilityFailureKind, CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
+        ConcurrencyHint, FinalizeAssistantMessage, HostManagedLoopModelPort,
+        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
+        InstructionMaterializationStore, InstructionSafetyContext, LoopCapabilityPort,
+        LoopCheckpointPort, LoopCheckpointRequest, LoopContextBundle, LoopContextPort,
+        LoopContextRequest, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputBatch,
+        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
+        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPolicyGuard, LoopModelPort,
+        LoopModelRequest, LoopModelResponse, LoopProcessRef, LoopProgressEvent, LoopProgressPort,
+        LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, NoOpBudgetAccountant,
         NoOpPolicyGuard, ProcessHandleSummary, StageCheckpointPayloadRequest, UpdateAssistantDraft,
         VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
@@ -831,7 +831,7 @@ async fn runtime_outcome_to_loop(
                 })
             } else {
                 CapabilityOutcome::Failed(CapabilityFailure {
-                    error_kind: failure.kind.as_str().to_string(),
+                    error_kind: runtime_failure_kind_to_loop(failure.kind),
                     safe_summary: runtime_safe_summary(
                         failure.message,
                         "capability invocation failed",
@@ -841,7 +841,12 @@ async fn runtime_outcome_to_loop(
         }
         RuntimeCapabilityOutcome::Unknown(unknown) => {
             CapabilityOutcome::Failed(CapabilityFailure {
-                error_kind: unknown.kind,
+                error_kind: CapabilityFailureKind::unknown(unknown.kind).map_err(|_| {
+                    AgentLoopHostError::new(
+                        AgentLoopHostErrorKind::Internal,
+                        "unknown capability outcome kind could not be represented",
+                    )
+                })?,
                 safe_summary: runtime_safe_summary(
                     unknown.message,
                     "capability invocation returned an unknown outcome",
@@ -849,6 +854,23 @@ async fn runtime_outcome_to_loop(
             })
         }
     })
+}
+
+fn runtime_failure_kind_to_loop(kind: RuntimeFailureKind) -> CapabilityFailureKind {
+    match kind {
+        RuntimeFailureKind::Authorization => CapabilityFailureKind::Authorization,
+        RuntimeFailureKind::Backend => CapabilityFailureKind::Backend,
+        RuntimeFailureKind::Cancelled => CapabilityFailureKind::Cancelled,
+        RuntimeFailureKind::Dispatcher => CapabilityFailureKind::Dispatcher,
+        RuntimeFailureKind::InvalidInput => CapabilityFailureKind::InvalidInput,
+        RuntimeFailureKind::MissingRuntime => CapabilityFailureKind::MissingRuntime,
+        RuntimeFailureKind::Network => CapabilityFailureKind::Network,
+        RuntimeFailureKind::OutputTooLarge => CapabilityFailureKind::OutputTooLarge,
+        RuntimeFailureKind::Process => CapabilityFailureKind::Process,
+        RuntimeFailureKind::Resource => CapabilityFailureKind::Resource,
+        RuntimeFailureKind::Unknown => CapabilityFailureKind::Permanent,
+        _ => CapabilityFailureKind::Permanent,
+    }
 }
 
 fn ensure_runtime_outcome_matches(

@@ -1208,8 +1208,110 @@ impl<'de> Deserialize<'de> for CapabilityDeniedReasonKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityFailure {
-    pub error_kind: String,
+    pub error_kind: CapabilityFailureKind,
     pub safe_summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CapabilityFailureKind {
+    Authorization,
+    Backend,
+    Cancelled,
+    Dispatcher,
+    InvalidInput,
+    MissingRuntime,
+    Network,
+    OutputTooLarge,
+    PolicyDenied,
+    Process,
+    Resource,
+    Transient,
+    Unavailable,
+    Internal,
+    Permanent,
+    Unknown(CapabilityFailureKindValue),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CapabilityFailureKindValue(String);
+
+impl CapabilityFailureKindValue {
+    pub fn new(value: impl Into<String>) -> Result<Self, String> {
+        validate_loop_safe_identifier(value.into(), "capability failure kind", 128).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl CapabilityFailureKind {
+    pub fn unknown(value: impl Into<String>) -> Result<Self, String> {
+        CapabilityFailureKindValue::new(value).map(Self::Unknown)
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Authorization => "authorization",
+            Self::Backend => "backend",
+            Self::Cancelled => "cancelled",
+            Self::Dispatcher => "dispatcher",
+            Self::InvalidInput => "invalid_input",
+            Self::MissingRuntime => "missing_runtime",
+            Self::Network => "network",
+            Self::OutputTooLarge => "output_too_large",
+            Self::PolicyDenied => "policy_denied",
+            Self::Process => "process",
+            Self::Resource => "resource",
+            Self::Transient => "transient",
+            Self::Unavailable => "unavailable",
+            Self::Internal => "internal",
+            Self::Permanent => "permanent",
+            Self::Unknown(value) => value.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for CapabilityFailureKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for CapabilityFailureKind {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for CapabilityFailureKind {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "authorization" => Ok(Self::Authorization),
+            "backend" => Ok(Self::Backend),
+            "cancelled" => Ok(Self::Cancelled),
+            "dispatcher" => Ok(Self::Dispatcher),
+            "invalid_input" => Ok(Self::InvalidInput),
+            "missing_runtime" => Ok(Self::MissingRuntime),
+            "network" => Ok(Self::Network),
+            "output_too_large" => Ok(Self::OutputTooLarge),
+            "policy_denied" => Ok(Self::PolicyDenied),
+            "process" => Ok(Self::Process),
+            "resource" => Ok(Self::Resource),
+            "transient" => Ok(Self::Transient),
+            "unavailable" => Ok(Self::Unavailable),
+            "internal" => Ok(Self::Internal),
+            "permanent" => Ok(Self::Permanent),
+            _ => Self::unknown(value).map_err(serde::de::Error::custom),
+        }
+    }
 }
 
 #[async_trait]

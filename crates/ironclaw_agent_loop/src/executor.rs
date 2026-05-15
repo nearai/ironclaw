@@ -7,14 +7,14 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use ironclaw_turns::{
-    LoopBlocked, LoopBlockedKind, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId,
-    LoopFailed, LoopFailureKind,
+    LoopBlocked, LoopBlockedKind, LoopCancelled, LoopCancelledReasonKind, LoopCompleted,
+    LoopCompletionKind, LoopExit, LoopExitId, LoopFailed, LoopFailureKind,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
-        CapabilityCallCandidate, CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
-        FinalizeAssistantMessage, LoopCheckpointKind, LoopCheckpointRequest, LoopInput,
-        LoopModelRequest, ParentLoopOutput, StageCheckpointPayloadRequest,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilityCallCandidate, CapabilityFailureKind, CapabilityInvocation, CapabilityOutcome,
+        CapabilityResultMessage, FinalizeAssistantMessage, LoopCheckpointKind,
+        LoopCheckpointRequest, LoopInput, LoopInputCursor, LoopModelRequest, ParentLoopOutput,
+        StageCheckpointPayloadRequest, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -104,6 +104,48 @@ enum BatchStep {
     Exit(LoopExit),
 }
 
+#[derive(Debug, Default)]
+struct PendingInputAck {
+    cursor: Option<LoopInputCursor>,
+}
+
+impl PendingInputAck {
+    fn is_empty(&self) -> bool {
+        self.cursor.is_none()
+    }
+
+    fn replace(&mut self, cursor: Option<LoopInputCursor>) -> Result<(), AgentLoopExecutorError> {
+        if cursor.is_some() && self.cursor.is_some() {
+            return Err(AgentLoopExecutorError::PlannerContract {
+                detail: "input ack was advanced before prior ack became durable",
+            });
+        }
+        self.cursor = cursor.or_else(|| self.cursor.take());
+        Ok(())
+    }
+
+    async fn ack(
+        &mut self,
+        host: &(dyn AgentLoopDriverHost + Send + Sync),
+    ) -> Result<(), AgentLoopExecutorError> {
+        let Some(cursor) = self.cursor.take() else {
+            return Ok(());
+        };
+        host.ack_inputs(cursor)
+            .await
+            .map_err(|_| AgentLoopExecutorError::HostUnavailable {
+                stage: HostStage::Input,
+            })
+    }
+}
+
+#[derive(Debug)]
+struct DrainedInputs {
+    state: LoopExecutionState,
+    drained: bool,
+    ack_cursor: Option<LoopInputCursor>,
+}
+
 impl CanonicalAgentLoopExecutor {
     async fn execute_canonical(
         &self,
@@ -112,10 +154,12 @@ impl CanonicalAgentLoopExecutor {
         mut state: LoopExecutionState,
     ) -> Result<LoopExit, AgentLoopExecutorError> {
         let planner = family.planner();
+        let mut pending_input_ack = PendingInputAck::default();
 
         loop {
             if state.iteration >= planner.budget().iteration_limit(&state) {
                 let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
+                pending_input_ack.ack(host).await?;
                 return failed_exit(
                     host,
                     checked.state,
@@ -124,8 +168,10 @@ impl CanonicalAgentLoopExecutor {
                 );
             }
 
-            if planner.drain().drain_steering(&state).await {
-                state = self.drain_user_inputs(host, state).await?;
+            if pending_input_ack.is_empty() && planner.drain().drain_steering(&state).await {
+                let drained = self.drain_user_inputs(host, state).await?;
+                state = drained.state;
+                pending_input_ack.replace(drained.ack_cursor)?;
             }
 
             let context_request = planner.context().plan_context_request(&state).await;
@@ -150,6 +196,7 @@ impl CanonicalAgentLoopExecutor {
                 .checkpoint(host, state, CheckpointKind::BeforeModel)
                 .await?
                 .state;
+            pending_input_ack.ack(host).await?;
 
             let model_preference =
                 model_preference_to_host(planner.model().preference(&state).await)?;
@@ -195,20 +242,24 @@ impl CanonicalAgentLoopExecutor {
                     {
                         StopOutcome::Stop { stop, kind } => {
                             state.stop_state = stop;
-                            return self.exit_for_stop(host, state, kind).await;
+                            let exit = self.exit_for_stop(host, state, kind).await?;
+                            pending_input_ack.ack(host).await?;
+                            return Ok(exit);
                         }
                         StopOutcome::Continue { stop } => {
                             state.stop_state = stop;
                             if planner.drain().drain_followup(&state).await {
-                                let (next, drained) = self.drain_followup(host, state).await?;
-                                state = next;
-                                if drained {
+                                let drained_inputs = self.drain_followup(host, state).await?;
+                                state = drained_inputs.state;
+                                pending_input_ack.replace(drained_inputs.ack_cursor)?;
+                                if drained_inputs.drained {
                                     state.iteration = state.iteration.saturating_add(1);
                                     continue;
                                 }
                             }
                             let checked =
                                 self.checkpoint(host, state, CheckpointKind::Final).await?;
+                            pending_input_ack.ack(host).await?;
                             return completed_exit(
                                 host,
                                 checked.state,
@@ -239,7 +290,9 @@ impl CanonicalAgentLoopExecutor {
                     {
                         StopOutcome::Stop { stop, kind } => {
                             state.stop_state = stop;
-                            return self.exit_for_stop(host, state, kind).await;
+                            let exit = self.exit_for_stop(host, state, kind).await?;
+                            pending_input_ack.ack(host).await?;
+                            return Ok(exit);
                         }
                         StopOutcome::Continue { stop } => {
                             state.stop_state = stop;
@@ -394,9 +447,7 @@ impl CanonicalAgentLoopExecutor {
                 stop_on_first_suspension,
             })
             .await
-            .map_err(|_| AgentLoopExecutorError::HostUnavailable {
-                stage: HostStage::Capability,
-            })?;
+            .map_err(capability_host_error)?;
 
         if batch.outcomes.len() > visible_calls.len()
             || (!batch.stopped_on_suspension && batch.outcomes.len() != visible_calls.len())
@@ -446,8 +497,7 @@ impl CanonicalAgentLoopExecutor {
                     .await
             }
             CapabilityOutcome::SpawnedProcess(handle) => {
-                let gate_ref = process_gate_ref(&handle.process_ref)?;
-                self.handle_gate(planner, host, state, GateKind::Resource, gate_ref)
+                self.fail_unsupported_process_wait(host, state, &handle.process_ref)
                     .await
             }
             CapabilityOutcome::Denied(denied) => {
@@ -463,6 +513,9 @@ impl CanonicalAgentLoopExecutor {
                     .await
             }
             CapabilityOutcome::Failed(failure) => {
+                if failure.error_kind == CapabilityFailureKind::Cancelled {
+                    return self.cancelled_after_checkpoint(host, state).await;
+                }
                 state
                     .recent_failure_kinds
                     .push(capability_failure_kind(&failure.error_kind));
@@ -520,11 +573,12 @@ impl CanonicalAgentLoopExecutor {
                     let retry = host
                         .invoke_capability(capability_invocation_from_candidate(call.clone()))
                         .await
-                        .map_err(|_| AgentLoopExecutorError::HostUnavailable {
-                            stage: HostStage::Capability,
-                        })?;
+                        .map_err(capability_host_error)?;
                     match retry {
                         CapabilityOutcome::Failed(failure) => {
+                            if failure.error_kind == CapabilityFailureKind::Cancelled {
+                                return self.cancelled_after_checkpoint(host, state).await;
+                            }
                             summary = CapabilityErrorSummary {
                                 class: capability_error_class(&failure.error_kind),
                                 safe_summary: sanitized_strategy_summary(failure.safe_summary)?,
@@ -552,9 +606,8 @@ impl CanonicalAgentLoopExecutor {
                                     .await;
                             }
                             CapabilityOutcome::SpawnedProcess(handle) => {
-                                let gate_ref = process_gate_ref(&handle.process_ref)?;
                                 return self
-                                    .handle_gate(planner, host, state, GateKind::Resource, gate_ref)
+                                    .fail_unsupported_process_wait(host, state, &handle.process_ref)
                                     .await;
                             }
                             CapabilityOutcome::Denied(denied) => {
@@ -633,6 +686,34 @@ impl CanonicalAgentLoopExecutor {
         }
     }
 
+    async fn fail_unsupported_process_wait(
+        &self,
+        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        state: LoopExecutionState,
+        _process_ref: &ironclaw_turns::run_profile::LoopProcessRef,
+    ) -> Result<BatchStep, AgentLoopExecutorError> {
+        let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
+        Ok(BatchStep::Exit(failed_exit(
+            host,
+            checked.state,
+            LoopFailureKind::CapabilityProtocolError,
+            Some(checked.checkpoint_id),
+        )?))
+    }
+
+    async fn cancelled_after_checkpoint(
+        &self,
+        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        state: LoopExecutionState,
+    ) -> Result<BatchStep, AgentLoopExecutorError> {
+        let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
+        Ok(BatchStep::Exit(cancelled_exit(
+            host,
+            checked.state,
+            Some(checked.checkpoint_id),
+        )?))
+    }
+
     async fn exit_for_stop(
         &self,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
@@ -704,7 +785,7 @@ impl CanonicalAgentLoopExecutor {
         &self,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
         mut state: LoopExecutionState,
-    ) -> Result<LoopExecutionState, AgentLoopExecutorError> {
+    ) -> Result<DrainedInputs, AgentLoopExecutorError> {
         let batch = host
             .poll_inputs(state.input_cursor.clone(), MAX_INPUT_DRAIN)
             .await
@@ -715,22 +796,23 @@ impl CanonicalAgentLoopExecutor {
             &batch.inputs,
             UserFacingInputDrainMode::Steering,
         );
+        let mut ack_cursor = None;
         if consumed {
-            host.ack_inputs(batch.next_cursor.clone())
-                .await
-                .map_err(|_| AgentLoopExecutorError::HostUnavailable {
-                    stage: HostStage::Input,
-                })?;
+            ack_cursor = Some(batch.next_cursor.clone());
             state.input_cursor = batch.next_cursor;
         }
-        Ok(state)
+        Ok(DrainedInputs {
+            state,
+            drained: consumed,
+            ack_cursor,
+        })
     }
 
     async fn drain_followup(
         &self,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
         mut state: LoopExecutionState,
-    ) -> Result<(LoopExecutionState, bool), AgentLoopExecutorError> {
+    ) -> Result<DrainedInputs, AgentLoopExecutorError> {
         let batch = host
             .poll_inputs(state.input_cursor.clone(), MAX_INPUT_DRAIN)
             .await
@@ -741,15 +823,16 @@ impl CanonicalAgentLoopExecutor {
             &batch.inputs,
             UserFacingInputDrainMode::FollowUp,
         );
+        let mut ack_cursor = None;
         if consumed {
-            host.ack_inputs(batch.next_cursor.clone())
-                .await
-                .map_err(|_| AgentLoopExecutorError::HostUnavailable {
-                    stage: HostStage::Input,
-                })?;
+            ack_cursor = Some(batch.next_cursor.clone());
             state.input_cursor = batch.next_cursor;
         }
-        Ok((state, consumed))
+        Ok(DrainedInputs {
+            state,
+            drained: consumed,
+            ack_cursor,
+        })
     }
 }
 
@@ -833,6 +916,19 @@ fn failed_exit(
     }))
 }
 
+fn cancelled_exit(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    _state: LoopExecutionState,
+    checkpoint_id: Option<ironclaw_turns::TurnCheckpointId>,
+) -> Result<LoopExit, AgentLoopExecutorError> {
+    Ok(LoopExit::Cancelled(LoopCancelled {
+        reason_kind: LoopCancelledReasonKind::HostCancellation,
+        checkpoint_id,
+        interrupted_message_refs: Vec::new(),
+        exit_id: exit_id(host, "cancelled")?,
+    }))
+}
+
 fn exit_id(
     host: &(dyn AgentLoopDriverHost + Send + Sync),
     suffix: &'static str,
@@ -889,21 +985,45 @@ fn model_error_class(error: &AgentLoopHostError) -> Option<ModelErrorClass> {
     }
 }
 
-fn capability_error_class(kind: &str) -> CapabilityErrorClass {
-    match kind {
-        "transient" | "unavailable" => CapabilityErrorClass::Transient,
-        "input_invalid" => CapabilityErrorClass::InputInvalid,
-        "policy_denied" => CapabilityErrorClass::PolicyDenied,
-        "internal" => CapabilityErrorClass::Internal,
-        _ => CapabilityErrorClass::Permanent,
+fn capability_host_error(error: AgentLoopHostError) -> AgentLoopExecutorError {
+    if error.kind == AgentLoopHostErrorKind::Cancelled {
+        return AgentLoopExecutorError::Cancelled;
+    }
+    AgentLoopExecutorError::HostUnavailable {
+        stage: HostStage::Capability,
     }
 }
 
-fn capability_failure_kind(kind: &str) -> LoopFailureKind {
-    if kind == "policy_denied" {
-        LoopFailureKind::PolicyDenied
-    } else {
-        LoopFailureKind::CapabilityProtocolError
+fn capability_error_class(kind: &CapabilityFailureKind) -> CapabilityErrorClass {
+    match kind {
+        CapabilityFailureKind::Network | CapabilityFailureKind::Transient => {
+            CapabilityErrorClass::Transient
+        }
+        CapabilityFailureKind::Backend
+        | CapabilityFailureKind::MissingRuntime
+        | CapabilityFailureKind::Unavailable => CapabilityErrorClass::Unavailable,
+        CapabilityFailureKind::InvalidInput => CapabilityErrorClass::InputInvalid,
+        CapabilityFailureKind::Authorization | CapabilityFailureKind::PolicyDenied => {
+            CapabilityErrorClass::PolicyDenied
+        }
+        CapabilityFailureKind::Dispatcher | CapabilityFailureKind::Internal => {
+            CapabilityErrorClass::Internal
+        }
+        CapabilityFailureKind::Cancelled => CapabilityErrorClass::Permanent,
+        CapabilityFailureKind::OutputTooLarge
+        | CapabilityFailureKind::Process
+        | CapabilityFailureKind::Resource
+        | CapabilityFailureKind::Permanent
+        | CapabilityFailureKind::Unknown(_) => CapabilityErrorClass::Permanent,
+    }
+}
+
+fn capability_failure_kind(kind: &CapabilityFailureKind) -> LoopFailureKind {
+    match kind {
+        CapabilityFailureKind::Authorization | CapabilityFailureKind::PolicyDenied => {
+            LoopFailureKind::PolicyDenied
+        }
+        _ => LoopFailureKind::CapabilityProtocolError,
     }
 }
 
@@ -1008,17 +1128,6 @@ fn push_completed_result(state: &mut LoopExecutionState, result: CapabilityResul
     }
 }
 
-fn process_gate_ref(
-    process_ref: &ironclaw_turns::run_profile::LoopProcessRef,
-) -> Result<ironclaw_turns::LoopGateRef, AgentLoopExecutorError> {
-    let digest = blake3::hash(process_ref.as_str().as_bytes());
-    ironclaw_turns::LoopGateRef::new(format!("gate:process-{}", digest.to_hex())).map_err(|_| {
-        AgentLoopExecutorError::PlannerContract {
-            detail: "process ref could not be converted to gate ref",
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -1038,9 +1147,10 @@ mod tests {
             LoopInputCursorToken, LoopInterruptKind, LoopModelMessage, LoopModelResponse,
             LoopProcessRef, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
             LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk,
-            RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
-            ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
-            SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
+            ProcessHandleSummary, RedactedRunProfileProvenance, ResolvedRunProfile,
+            ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+            RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest,
+            SteeringPolicy,
         },
     };
 
@@ -1067,6 +1177,7 @@ mod tests {
         batch_invocations: Arc<Mutex<Vec<CapabilityBatchInvocation>>>,
         single_invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
         staged_payloads: Arc<Mutex<Vec<StageCheckpointPayloadRequest>>>,
+        events: Arc<Mutex<Vec<String>>>,
         prompt_surface_version: Option<CapabilitySurfaceVersion>,
         visible_surface_version: CapabilitySurfaceVersion,
     }
@@ -1086,6 +1197,7 @@ mod tests {
                 batch_invocations: Arc::new(Mutex::new(Vec::new())),
                 single_invocations: Arc::new(Mutex::new(Vec::new())),
                 staged_payloads: Arc::new(Mutex::new(Vec::new())),
+                events: Arc::new(Mutex::new(Vec::new())),
                 prompt_surface_version: Some(surface_version()),
                 visible_surface_version: surface_version(),
             }
@@ -1144,6 +1256,10 @@ mod tests {
 
         fn staged_payloads(&self) -> Vec<StageCheckpointPayloadRequest> {
             self.staged_payloads.lock().expect("lock").clone()
+        }
+
+        fn events(&self) -> Vec<String> {
+            self.events.lock().expect("lock").clone()
         }
     }
 
@@ -1214,6 +1330,10 @@ mod tests {
         }
 
         async fn ack_inputs(&self, cursor: LoopInputCursor) -> Result<(), AgentLoopHostError> {
+            self.events
+                .lock()
+                .expect("lock")
+                .push("ack_inputs".to_string());
             self.acked_input_cursors.lock().expect("lock").push(cursor);
             Ok(())
         }
@@ -1313,6 +1433,10 @@ mod tests {
             &self,
             request: LoopCheckpointRequest,
         ) -> Result<TurnCheckpointId, AgentLoopHostError> {
+            self.events
+                .lock()
+                .expect("lock")
+                .push(format!("checkpoint:{}", request.kind.as_str()));
             self.checkpoints.lock().expect("lock").push(request.kind);
             Ok(TurnCheckpointId::new())
         }
@@ -1499,7 +1623,9 @@ mod tests {
             .await
             .expect("drain");
 
-        assert_eq!(next.input_cursor, initial_cursor);
+        assert_eq!(next.state.input_cursor, initial_cursor);
+        assert!(!next.drained);
+        assert!(next.ack_cursor.is_none());
         assert!(host.acked_input_cursors().is_empty());
     }
 
@@ -1522,11 +1648,42 @@ mod tests {
         let executor = CanonicalAgentLoopExecutor;
         let state = LoopExecutionState::initial_for_run(host.run_context());
 
-        let (next, drained) = executor.drain_followup(&host, state).await.expect("drain");
+        let next = executor.drain_followup(&host, state).await.expect("drain");
 
-        assert!(!drained);
-        assert_eq!(next.input_cursor, initial_cursor);
+        assert!(!next.drained);
+        assert_eq!(next.state.input_cursor, initial_cursor);
+        assert!(next.ack_cursor.is_none());
         assert!(host.acked_input_cursors().is_empty());
+    }
+
+    #[tokio::test]
+    async fn steering_drain_acks_only_after_cursor_checkpoint_is_durable() {
+        let host = MockHost::new(vec![reply_response()]);
+        let next_cursor = input_cursor(host.run_context(), "input-cursor:after-user");
+        let host = host.with_input_batches(vec![LoopInputBatch {
+            inputs: vec![LoopInput::UserMessage {
+                message_ref: message_ref("msg:user-drained"),
+            }],
+            next_cursor: next_cursor.clone(),
+        }]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        assert!(matches!(exit, LoopExit::Completed(_)));
+        assert_eq!(host.acked_input_cursors(), vec![next_cursor]);
+        assert_eq!(
+            host.events(),
+            vec![
+                "checkpoint:before_model".to_string(),
+                "ack_inputs".to_string(),
+                "checkpoint:final".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1544,6 +1701,48 @@ mod tests {
 
         assert!(matches!(result, Err(AgentLoopExecutorError::Cancelled)));
         assert_eq!(host.model_requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn capability_cancelled_returns_cancelled_exit_without_retry() {
+        let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+            ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::Failed(
+                    ironclaw_turns::run_profile::CapabilityFailure {
+                        error_kind: CapabilityFailureKind::Cancelled,
+                        safe_summary: "capability cancelled".to_string(),
+                    },
+                )],
+                stopped_on_suspension: false,
+            },
+        ]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        match exit {
+            LoopExit::Cancelled(cancelled) => {
+                assert_eq!(
+                    cancelled.reason_kind,
+                    LoopCancelledReasonKind::HostCancellation
+                );
+                assert!(cancelled.checkpoint_id.is_some());
+            }
+            other => panic!("expected cancelled exit, got {other:?}"),
+        }
+        assert!(host.single_invocations().is_empty());
+        assert_eq!(
+            host.checkpoint_kinds(),
+            vec![
+                LoopCheckpointKind::BeforeModel,
+                LoopCheckpointKind::BeforeSideEffect,
+                LoopCheckpointKind::Final,
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1677,7 +1876,7 @@ mod tests {
             .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
                 outcomes: vec![CapabilityOutcome::Failed(
                     ironclaw_turns::run_profile::CapabilityFailure {
-                        error_kind: "transient".to_string(),
+                        error_kind: CapabilityFailureKind::Transient,
                         safe_summary: "temporary failure".to_string(),
                     },
                 )],
@@ -1702,16 +1901,40 @@ mod tests {
         assert_eq!(final_staged_state(&host).recovery_state, Default::default());
     }
 
-    #[test]
-    fn process_gate_ref_hashes_full_process_ref() {
-        let first = LoopProcessRef::new("process:alpha").expect("valid");
-        let second = LoopProcessRef::new("process:alpha-2").expect("valid");
+    #[tokio::test]
+    async fn spawned_process_fails_closed_until_process_wait_contract_exists() {
+        let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+            ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::SpawnedProcess(ProcessHandleSummary {
+                    process_ref: LoopProcessRef::new("process:alpha").expect("valid"),
+                    safe_summary: "spawned".to_string(),
+                })],
+                stopped_on_suspension: false,
+            },
+        ]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
 
-        let first_gate = process_gate_ref(&first).expect("gate ref");
-        let second_gate = process_gate_ref(&second).expect("gate ref");
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
 
-        assert!(first_gate.as_str().starts_with("gate:process-"));
-        assert_ne!(first_gate, second_gate);
+        match exit {
+            LoopExit::Failed(failed) => {
+                assert_eq!(failed.reason_kind, LoopFailureKind::CapabilityProtocolError);
+                assert!(failed.checkpoint_id.is_some());
+            }
+            other => panic!("expected failed exit, got {other:?}"),
+        }
+        assert_eq!(
+            host.checkpoint_kinds(),
+            vec![
+                LoopCheckpointKind::BeforeModel,
+                LoopCheckpointKind::BeforeSideEffect,
+                LoopCheckpointKind::Final,
+            ]
+        );
     }
 
     fn reply_response() -> LoopModelResponse {
