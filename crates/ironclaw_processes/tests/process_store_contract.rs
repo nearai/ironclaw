@@ -1873,6 +1873,19 @@ impl RootFilesystem for BackendErrorFilesystem {
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         Err(backend_error(path, FilesystemOperation::Stat))
     }
+
+    // After the PR #3666 fix that breaks the put/write_file recursion, the
+    // trait's default `get` is `Unsupported`. A test backend that wants to
+    // fault-inject through the unified read path has to override `get`
+    // explicitly — same shape that `LocalFilesystem` adopts in its native
+    // impl. Mirroring the same fault here keeps the consumer test
+    // exercising the "backend error mentions not_found" propagation.
+    async fn get(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, FilesystemError> {
+        Err(backend_error(path, FilesystemOperation::ReadFile))
+    }
 }
 
 fn backend_error(path: &VirtualPath, operation: FilesystemOperation) -> FilesystemError {

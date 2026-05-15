@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_events::sanitize_error_kind;
-use ironclaw_filesystem::{FilesystemError, RootFilesystem};
+use ironclaw_filesystem::{CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{ProcessId, ResourceScope, VirtualPath};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -87,8 +87,20 @@ where
 
     async fn write_record(&self, record: &ProcessRecord) -> Result<(), ProcessError> {
         let path = process_record_path(&record.scope, record.process_id)?;
-        let bytes = serialize_pretty(record)?;
-        self.filesystem.as_ref().write_file(&path, &bytes).await?;
+        let body = serialize_pretty(record)?;
+        // Entry::bytes (kind=None) keeps the legacy on-disk layout — JSON
+        // file at `process_record_path`. The unified `put` op gives us the
+        // same write semantics as `write_file` against any backend, and
+        // backends that support records natively (libSQL, Postgres,
+        // InMemoryBackend) will still store the body as an opaque entry.
+        // Once LocalFilesystem grows native put with sidecar metadata, the
+        // consumer can switch to Entry::record(process_record_kind, ...)
+        // without changing the on-disk layout.
+        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        self.filesystem
+            .as_ref()
+            .put(&path, entry, CasExpectation::Any)
+            .await?;
         Ok(())
     }
 
@@ -120,12 +132,12 @@ where
     async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
         let _guard = self.transition_lock.lock().await;
         let path = process_record_path(&start.scope, start.process_id)?;
-        let existing = match self.filesystem.as_ref().read_file(&path).await {
-            Ok(_) => true,
-            Err(error) if is_not_found(&error) => false,
-            Err(error) => return Err(error.into()),
-        };
-        if existing {
+        // Existence check uses `get` (unified read) so it works regardless of
+        // whether the backend has native put. Atomicity is provided by the
+        // transition_lock per the single-instance invariant in this struct's
+        // docstring. A future migration can switch to `CasExpectation::Absent`
+        // once every backend in production exposes native put.
+        if self.filesystem.as_ref().get(&path).await?.is_some() {
             return Err(ProcessError::ProcessAlreadyExists {
                 process_id: start.process_id,
             });
@@ -188,12 +200,10 @@ where
         process_id: ProcessId,
     ) -> Result<Option<ProcessRecord>, ProcessError> {
         let path = process_record_path(scope, process_id)?;
-        let bytes = match self.filesystem.as_ref().read_file(&path).await {
-            Ok(bytes) => bytes,
-            Err(error) if is_not_found(&error) => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let Some(versioned) = self.filesystem.as_ref().get(&path).await? else {
+            return Ok(None);
         };
-        let record = deserialize::<ProcessRecord>(&bytes)?;
+        let record = deserialize::<ProcessRecord>(&versioned.entry.body)?;
         ensure_process_record_matches(&record, process_id)?;
         if same_scope_owner(&record.scope, scope) {
             Ok(Some(record))
@@ -215,8 +225,19 @@ where
         let mut records = Vec::new();
         for entry in entries {
             if entry.name.ends_with(".json") {
-                let bytes = self.filesystem.as_ref().read_file(&entry.path).await?;
-                let record = deserialize::<ProcessRecord>(&bytes)?;
+                // Reviewer (PR #3666) flagged: a `get` returning `None` after
+                // `list_dir` enumerated the path indicates a race or backend
+                // inconsistency. Returning a partial process list silently
+                // hides this; surface it as `NotFound` so callers see the
+                // same failure shape they got with the legacy `read_file`
+                // path.
+                let Some(versioned) = self.filesystem.as_ref().get(&entry.path).await? else {
+                    return Err(ProcessError::Filesystem(format!(
+                        "process record listed but missing at {}",
+                        entry.path
+                    )));
+                };
+                let record = deserialize::<ProcessRecord>(&versioned.entry.body)?;
                 if same_scope_owner(&record.scope, scope) {
                     records.push(record);
                 }
@@ -252,8 +273,12 @@ where
 
     async fn write_result(&self, record: &ProcessResultRecord) -> Result<(), ProcessError> {
         let path = process_result_path(&record.scope, record.process_id)?;
-        let bytes = serialize_pretty(record)?;
-        self.filesystem.as_ref().write_file(&path, &bytes).await?;
+        let body = serialize_pretty(record)?;
+        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        self.filesystem
+            .as_ref()
+            .put(&path, entry, CasExpectation::Any)
+            .await?;
         Ok(())
     }
 
@@ -264,8 +289,15 @@ where
         output: &Value,
     ) -> Result<VirtualPath, ProcessError> {
         let path = process_output_path(scope, process_id)?;
-        let bytes = serialize_pretty(output)?;
-        self.filesystem.as_ref().write_file(&path, &bytes).await?;
+        let body = serialize_pretty(output)?;
+        // Output blobs are opaque JSON files — no schema kind, no indexed
+        // projection. Stored as an Entry with `kind=None` so reads stay
+        // backwards-compatible with any caller that uses `read_file`.
+        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        self.filesystem
+            .as_ref()
+            .put(&path, entry, CasExpectation::Any)
+            .await?;
         Ok(path)
     }
 
@@ -355,12 +387,10 @@ where
         process_id: ProcessId,
     ) -> Result<Option<ProcessResultRecord>, ProcessError> {
         let path = process_result_path(scope, process_id)?;
-        let bytes = match self.filesystem.as_ref().read_file(&path).await {
-            Ok(bytes) => bytes,
-            Err(error) if is_not_found(&error) => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let Some(versioned) = self.filesystem.as_ref().get(&path).await? else {
+            return Ok(None);
         };
-        let record = deserialize::<ProcessResultRecord>(&bytes)?;
+        let record = deserialize::<ProcessResultRecord>(&versioned.entry.body)?;
         ensure_result_record_matches(&record, process_id)?;
         if same_scope_owner(&record.scope, scope) {
             Ok(Some(record))
@@ -391,12 +421,10 @@ where
                 expected_output_ref.as_str()
             )));
         }
-        let bytes = match self.filesystem.as_ref().read_file(&output_ref).await {
-            Ok(bytes) => bytes,
-            Err(error) if is_not_found(&error) => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let Some(versioned) = self.filesystem.as_ref().get(&output_ref).await? else {
+            return Ok(None);
         };
-        deserialize::<Value>(&bytes).map(Some)
+        deserialize::<Value>(&versioned.entry.body).map(Some)
     }
 }
 
