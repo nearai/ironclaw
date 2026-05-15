@@ -2,8 +2,8 @@
 
 use chrono::Utc;
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, IndexKey, IndexValue, RecordKind,
-    RootFilesystem,
+    CasExpectation, ContentType, Entry, FilesystemError, IndexKey, IndexKind, IndexName, IndexSpec,
+    IndexValue, RecordKind, RootFilesystem,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -13,6 +13,16 @@ use crate::workspace::{ChunkWrite, MemoryChunk};
 
 use super::paths;
 use super::{FilesystemWorkspaceStore, fs_to_workspace_error};
+
+/// Index name for the chunk content full-text index.
+pub(super) const FTS_INDEX_NAME: &str = "chunk_content_fts";
+/// Index name for the chunk embedding vector index.
+pub(super) const VECTOR_INDEX_NAME: &str = "chunk_embedding_vec";
+/// Placeholder dimension recorded in the vector index spec catalog.
+/// Backends only validate this is non-zero; the brute-force ranker accepts
+/// any matching `IndexValue::Bytes` length at query time. Per-write
+/// embedding dimensions are still enforced by the ranker on a length match.
+pub(super) const VECTOR_INDEX_PLACEHOLDER_DIM: u32 = 1;
 
 const CHUNK_KIND: &str = "memory_chunk";
 
@@ -230,11 +240,7 @@ where
     // single-key lookup — but this trait method takes only the chunk_id,
     // not the document_id, so we fall back to scanning every chunk dir
     // under `/workspace/chunks`.
-    let chunks_root = ironclaw_host_api::VirtualPath::new("/workspace/chunks".to_string())
-        .map_err(|e| WorkspaceError::InvalidPath {
-            path: "/workspace/chunks".to_string(),
-            reason: e.to_string(),
-        })?;
+    let chunks_root = paths::chunks_root()?;
     let doc_dirs = match store.filesystem.list_dir(&chunks_root).await {
         Ok(entries) => entries,
         Err(FilesystemError::NotFound { .. }) => return Ok(()),
@@ -284,11 +290,7 @@ pub(super) async fn list_without_embeddings<F>(
 where
     F: RootFilesystem,
 {
-    let chunks_root = ironclaw_host_api::VirtualPath::new("/workspace/chunks".to_string())
-        .map_err(|e| WorkspaceError::InvalidPath {
-            path: "/workspace/chunks".to_string(),
-            reason: e.to_string(),
-        })?;
+    let chunks_root = paths::chunks_root()?;
     let doc_dirs = match store.filesystem.list_dir(&chunks_root).await {
         Ok(entries) => entries,
         Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
@@ -331,5 +333,61 @@ where
 fn serialization_error(error: serde_json::Error) -> WorkspaceError {
     WorkspaceError::SearchFailed {
         reason: format!("workspace chunk serialization: {error}"),
+    }
+}
+
+/// Lazily declare the FTS + Vector indexes on `/workspace/chunks` so the
+/// backend can serve `Filter::Fts` / `Filter::VectorNearest` natively
+/// when its capabilities advertise them. Idempotent.
+///
+/// Returns `Ok(true)` when both indexes are declared (native hybrid
+/// search is available) and `Ok(false)` when the backend rejected the
+/// declaration with `FilesystemError::Unsupported` — callers should
+/// then fall back to scan-and-rank. Any other backend error propagates.
+///
+/// Mirrors the `FilesystemMemoryDocumentRepository` shape in
+/// `crates/ironclaw_memory/src/repo/filesystem.rs`: indexes are
+/// declared once per process at the prefix the chunk store writes
+/// under, so triggers/backfill on the libsql side catch every chunk
+/// regardless of which doc it belongs to.
+pub(super) async fn ensure_chunk_indexes<F>(
+    store: &FilesystemWorkspaceStore<F>,
+) -> Result<bool, WorkspaceError>
+where
+    F: RootFilesystem,
+{
+    let root = paths::chunks_root()?;
+    let fts_key = IndexKey::new(fs_keys::CONTENT).map_err(|e| WorkspaceError::SearchFailed {
+        reason: format!("content index key: {e}"),
+    })?;
+    let fts_name = IndexName::new(FTS_INDEX_NAME).map_err(|e| WorkspaceError::SearchFailed {
+        reason: format!("fts index name: {e}"),
+    })?;
+    let fts_spec = IndexSpec::new(fts_name, vec![fts_key], IndexKind::Fts);
+
+    match store.filesystem.ensure_index(&root, &fts_spec).await {
+        Ok(()) => {}
+        Err(FilesystemError::Unsupported { .. }) => return Ok(false),
+        Err(error) => return Err(fs_to_workspace_error(error)),
+    }
+
+    let vec_key = IndexKey::new(fs_keys::EMBEDDING).map_err(|e| WorkspaceError::SearchFailed {
+        reason: format!("embedding index key: {e}"),
+    })?;
+    let vec_name = IndexName::new(VECTOR_INDEX_NAME).map_err(|e| WorkspaceError::SearchFailed {
+        reason: format!("vector index name: {e}"),
+    })?;
+    let vec_spec = IndexSpec::new(
+        vec_name,
+        vec![vec_key],
+        IndexKind::Vector {
+            dim: VECTOR_INDEX_PLACEHOLDER_DIM,
+        },
+    );
+
+    match store.filesystem.ensure_index(&root, &vec_spec).await {
+        Ok(()) => Ok(true),
+        Err(FilesystemError::Unsupported { .. }) => Ok(false),
+        Err(error) => Err(fs_to_workspace_error(error)),
     }
 }

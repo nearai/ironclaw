@@ -772,6 +772,12 @@ impl PostgresRootFilesystem {
     /// Brute-force cosine ranker over candidate rows in this prefix whose
     /// indexed projection has an `IndexValue::Bytes` value at `key`. Used
     /// when the caller's filter is a top-level `VectorNearest`.
+    ///
+    /// Two-phase to bound memory on large prefixes (review feedback on
+    /// the unified-FS rework): first SELECT `(path, indexed, version)`
+    /// for every candidate, rank by cosine in Rust, then `get()` the
+    /// top-k entries to materialize bodies. Rows outside the cutoff
+    /// never have their `contents` bytea loaded.
     async fn vector_nearest_query(
         &self,
         path: &VirtualPath,
@@ -783,24 +789,30 @@ impl PostgresRootFilesystem {
         let prefix_pattern = escape_like_with_trailing_wildcard(&format!("{}/%", path.as_str()));
         let rows = client
             .query(
-                "SELECT path, contents, content_type, kind, indexed, version \
+                "SELECT path, indexed, version \
                  FROM root_filesystem_entries \
                  WHERE is_dir = FALSE AND (path = $1 OR path LIKE $2 ESCAPE '!')",
                 &[&path.as_str(), &prefix_pattern],
             )
             .await
             .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
-        let mut ranked: Vec<(VersionedEntry, f32)> = Vec::new();
+        let mut ranked: Vec<(VirtualPath, RecordVersion, f32)> = Vec::new();
         for row in rows {
             let row_path: String = row.get("path");
             let row_path = VirtualPath::new(row_path)?;
-            let body: Vec<u8> = row.get("contents");
-            let content_type_raw: String = row.get("content_type");
-            let kind_raw: Option<String> = row.get("kind");
             let indexed_value: serde_json::Value = row.get("indexed");
             let version_raw: i64 = row.get("version");
-            let entry = build_entry(&row_path, body, content_type_raw, kind_raw, indexed_value)?;
-            let Some(IndexValue::Bytes(bytes)) = entry.indexed.get(key) else {
+            let indexed: BTreeMap<IndexKey, IndexValue> = if indexed_value.is_null() {
+                BTreeMap::new()
+            } else {
+                serde_json::from_value(indexed_value).map_err(|_| {
+                    FilesystemError::DeserializeIndexed {
+                        path: row_path.clone(),
+                        operation: FilesystemOperation::Query,
+                    }
+                })?
+            };
+            let Some(IndexValue::Bytes(bytes)) = indexed.get(key) else {
                 continue;
             };
             let Some(vec) = decode_embedding_blob(bytes) else {
@@ -810,11 +822,24 @@ impl PostgresRootFilesystem {
                 continue;
             };
             let version = record_version_from_i64(&row_path, version_raw)?;
-            ranked.push((VersionedEntry { entry, version }, score));
+            ranked.push((row_path, version, score));
         }
-        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
         ranked.truncate(limit as usize);
-        Ok(ranked.into_iter().map(|(entry, _)| entry).collect())
+        // Release the client so each `get()` below claims its own
+        // pooled connection rather than serializing through one.
+        drop(client);
+        let mut out = Vec::with_capacity(ranked.len());
+        for (row_path, _version, _score) in ranked {
+            let Some(versioned) = self.get(&row_path).await? else {
+                // Concurrent delete between the ranking SELECT and
+                // the body fetch — skip rather than error so the
+                // search doesn't blow up on a race.
+                continue;
+            };
+            out.push(versioned);
+        }
+        Ok(out)
     }
 
     async fn current_version_with_client(

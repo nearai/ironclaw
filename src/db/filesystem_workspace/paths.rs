@@ -47,6 +47,10 @@ pub(super) fn chunks_root_for_doc(doc_id: Uuid) -> Result<VirtualPath, Workspace
     VirtualPath::new(format!("/workspace/chunks/{doc_id}")).map_err(invalid_path)
 }
 
+pub(super) fn chunks_root() -> Result<VirtualPath, WorkspaceError> {
+    VirtualPath::new("/workspace/chunks".to_string()).map_err(invalid_path)
+}
+
 pub(super) fn chunk_path(doc_id: Uuid, chunk_index: i32) -> Result<VirtualPath, WorkspaceError> {
     if chunk_index < 0 {
         return Err(WorkspaceError::InvalidPath {
