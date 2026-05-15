@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.2](https://github.com/nearai/ironclaw/compare/ironclaw-v0.28.1...ironclaw-v0.28.2) - 2026-05-14
+
+### Fixed
+
+- *(extensions)* restore chat-driven `tool_install` + fix double-invoke + auto-approve footgun ([#3559](https://github.com/nearai/ironclaw/pull/3559))
+
+### Changed
+
+- *(llm)* hide provider-specific auth, model fetch, and embeddings config behind facades ([#3416](https://github.com/nearai/ironclaw/pull/3416))
+
+### Tests
+
+- *(e2e)* unxfail two auth-matrix tests now that contracts match ([#3589](https://github.com/nearai/ironclaw/pull/3589))
+- *(e2e)* make Skills lifecycle deterministic ([#3309](https://github.com/nearai/ironclaw/pull/3309))
+
 ## [0.28.1](https://github.com/nearai/ironclaw/compare/ironclaw-v0.28.0...ironclaw-v0.28.1) - 2026-05-11
 
 ### Added

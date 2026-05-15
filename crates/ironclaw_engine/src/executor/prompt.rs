@@ -32,6 +32,36 @@ const CODEACT_PREAMBLE: &str = include_str!("../../prompts/codeact_preamble.md")
 /// The strategy/closing block appended after the dynamic metadata sections.
 const CODEACT_POSTAMBLE: &str = include_str!("../../prompts/codeact_postamble.md");
 
+/// Structured-tools-only preamble used when `IRONCLAW_DISABLE_CODEACT` is set.
+const STRUCTURED_TOOL_PREAMBLE: &str = r#"You are IronClaw, a personal AI assistant.
+
+## Execution mode
+
+Use the provider's structured tool_calls interface for every action.
+Do not emit Python, repl, py, or other executable fenced code blocks.
+Do not call tools as Python functions.
+Do not write tool invocations in assistant text. Never output `[[call_tool ...]]`, `<tool_call>`, `<function_call>`, JSON tool-call blobs, or function-style calls such as `tool_name(...)`.
+Only the provider-level `tool_calls` field invokes tools. If you need a tool, return a structured tool call instead of describing or printing the call.
+When no action is needed, answer in plain text.
+"#;
+
+/// Structured-tools-only postamble used when `IRONCLAW_DISABLE_CODEACT` is set.
+const STRUCTURED_TOOL_POSTAMBLE: &str = r#"
+## Strategy
+
+Use structured tool calls when you need data, persistence, external effects, or system state.
+After tool results are available, continue with another structured tool call or return the final plain-text answer.
+Some integrations use literal UI blocks such as `[[choice_set]]...[[/choice_set]]` in final user-facing text. These are UI markup only; do not invent other bracketed control blocks, especially `[[call_tool ...]]`.
+"#;
+
+/// Whether CodeAct (Tier 1 Python execution) is disabled by env var.
+pub fn codeact_disabled() -> bool {
+    matches!(
+        std::env::var("IRONCLAW_DISABLE_CODEACT").as_deref(),
+        Ok("true" | "1")
+    )
+}
+
 /// Marker for the engine-owned CodeAct system prompt.
 const CODEACT_SYSTEM_PROMPT_MARKER: &str = "<!-- ironclaw:codeact-system-prompt -->\n";
 const CODEACT_LEGACY_OPENING: &str = "You are an AI assistant with a Python REPL environment.";
@@ -79,7 +109,13 @@ pub async fn build_codeact_system_prompt(
     } else {
         None
     };
-    build_codeact_system_prompt_inner(capabilities, compact_actions, overlay.as_deref(), platform)
+    build_codeact_system_prompt_inner(
+        codeact_disabled(),
+        capabilities,
+        compact_actions,
+        overlay.as_deref(),
+        platform,
+    )
 }
 
 /// Build the system prompt using pre-fetched memory docs.
@@ -94,18 +130,36 @@ pub fn build_codeact_system_prompt_with_docs(
     platform: Option<&PlatformInfo>,
 ) -> String {
     let overlay = extract_prompt_overlay(system_docs);
-    build_codeact_system_prompt_inner(capabilities, compact_actions, overlay.as_deref(), platform)
+    build_codeact_system_prompt_inner(
+        codeact_disabled(),
+        capabilities,
+        compact_actions,
+        overlay.as_deref(),
+        platform,
+    )
 }
 
 /// Shared prompt builder used by both the async and pre-fetched-docs variants.
-fn build_codeact_system_prompt_inner(
+///
+/// `disable_codeact` is threaded as an explicit parameter (rather than read
+/// from the env directly) so tests can exercise both branches without
+/// process-global env mutation.
+pub(crate) fn build_codeact_system_prompt_inner(
+    disable_codeact: bool,
     capabilities: &[CapabilitySummary],
     compact_actions: &[ActionDef],
     overlay: Option<&str>,
     platform: Option<&PlatformInfo>,
 ) -> String {
+    tracing::debug!(codeact_disabled = disable_codeact, "engine v2 prompt mode");
+    let (preamble, postamble) = if disable_codeact {
+        (STRUCTURED_TOOL_PREAMBLE, STRUCTURED_TOOL_POSTAMBLE)
+    } else {
+        (CODEACT_PREAMBLE, CODEACT_POSTAMBLE)
+    };
+
     let mut prompt = String::from(CODEACT_SYSTEM_PROMPT_MARKER);
-    prompt.push_str(CODEACT_PREAMBLE);
+    prompt.push_str(preamble);
 
     // Inject platform identity and runtime metadata
     if let Some(info) = platform {
@@ -130,19 +184,28 @@ fn build_codeact_system_prompt_inner(
         }
     }
 
-    let compact_actions: Vec<_> = compact_actions
-        .iter()
-        .filter(|action| matches!(action.model_tool_surface, ModelToolSurface::CompactToolInfo))
-        .collect();
+    // In disabled-CodeAct mode the "Enabled Tools" listing is omitted:
+    // compact actions are emitted into the provider tool list (see
+    // `LlmBridgeAdapter::complete`) with their full schemas, so the prompt
+    // would only duplicate that surface and the `tool_info` schema-lookup
+    // instruction wouldn't apply. Without this guard, compact tools used to
+    // appear in the prompt as "available" but never made it into
+    // `tool_calls`, leaving them effectively unreachable (PR #3665 review).
+    if !disable_codeact {
+        let compact_actions: Vec<_> = compact_actions
+            .iter()
+            .filter(|action| matches!(action.model_tool_surface, ModelToolSurface::CompactToolInfo))
+            .collect();
 
-    if !compact_actions.is_empty() {
-        prompt.push_str(CODEACT_ENABLED_TOOLS_HEADING);
-        prompt.push('\n');
-        prompt.push_str(
-            "These enabled tools are shown in compact form. Before calling one, always check its schema with `tool_info(name=\"<tool>\", detail=\"schema\")`.\n\n",
-        );
-        for action in compact_actions {
-            prompt.push_str(&render_enabled_tool(action));
+        if !compact_actions.is_empty() {
+            prompt.push_str(CODEACT_ENABLED_TOOLS_HEADING);
+            prompt.push('\n');
+            prompt.push_str(
+                "These enabled tools are shown in compact form. Before calling one, always check its schema with `tool_info(name=\"<tool>\", detail=\"schema\")`.\n\n",
+            );
+            for action in compact_actions {
+                prompt.push_str(&render_enabled_tool(action));
+            }
         }
     }
 
@@ -163,7 +226,7 @@ fn build_codeact_system_prompt_inner(
         }
     }
 
-    prompt.push_str(CODEACT_POSTAMBLE);
+    prompt.push_str(postamble);
     prompt
 }
 
@@ -754,5 +817,76 @@ mod tests {
         assert!(refreshed.contains("## Prior Knowledge (from completed threads)"));
         assert!(refreshed.contains("GitHub API Skill"));
         assert!(refreshed.contains("/missing"));
+    }
+
+    /// PR #3665 review (serrrfirat). With CodeAct disabled the structured-tool
+    /// prompt previously listed compact actions under "## Enabled Tools" with
+    /// a `tool_info` schema-lookup instruction — but the LLM adapter only
+    /// emitted FullSchema actions to the provider tool list. The result was
+    /// that compact tools (mission_create, gmail_send, notion_search, ...)
+    /// appeared in the prompt as "available" but could not be called via
+    /// `tool_calls`. Fix: skip the "Enabled Tools" section in disabled mode
+    /// and emit every action into the provider tool list instead (the
+    /// adapter-side half of this fix lives in `src/bridge/llm_adapter.rs`).
+    #[test]
+    fn disabled_codeact_omits_enabled_tools_section_and_keeps_activatable() {
+        let actions = vec![
+            ActionDef {
+                name: "mission_create".into(),
+                description: "Create scheduled or event-driven missions.".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: Vec::new(),
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::CompactToolInfo,
+                discovery: None,
+            },
+            ActionDef {
+                name: "http".into(),
+                description: "Make HTTP requests.".into(),
+                parameters_schema: serde_json::json!({"type": "object"}),
+                effects: Vec::new(),
+                requires_approval: false,
+                model_tool_surface: ModelToolSurface::FullSchema,
+                discovery: None,
+            },
+        ];
+        let capabilities = vec![CapabilitySummary {
+            name: "gmail".into(),
+            display_name: Some("Gmail".into()),
+            kind: CapabilitySummaryKind::Provider,
+            status: CapabilityStatus::NeedsSetup,
+            description: Some("Gmail integration".into()),
+            action_preview: vec!["gmail_send".into()],
+            routing_hint: None,
+        }];
+
+        // Enabled (control): the existing section renders.
+        let enabled = build_codeact_system_prompt_inner(false, &capabilities, &actions, None, None);
+        assert!(enabled.contains("## Enabled Tools"));
+        assert!(enabled.contains("- `mission_create`"));
+        assert!(enabled.contains("## Activatable Integrations"));
+
+        // Disabled: section is gone, but Activatable Integrations stays
+        // (the model still needs to know what `tool_install` can target),
+        // and `mission_create` does NOT appear in the prompt — it's only
+        // reachable via the provider tool list now.
+        let disabled = build_codeact_system_prompt_inner(true, &capabilities, &actions, None, None);
+        assert!(
+            !disabled.contains("## Enabled Tools"),
+            "Enabled Tools section must be omitted in disabled-CodeAct mode"
+        );
+        assert!(
+            !disabled.contains("mission_create"),
+            "compact action must not appear in prompt — it's in the provider tool list"
+        );
+        assert!(
+            !disabled.contains("detail=\"schema\""),
+            "schema-lookup instruction is meaningless when provider sends full schemas \
+             (the `detail=\"summary\"` reference in Activatable Integrations is fine)"
+        );
+        assert!(
+            disabled.contains("## Activatable Integrations"),
+            "Activatable Integrations is still needed so the model can tool_install"
+        );
     }
 }
