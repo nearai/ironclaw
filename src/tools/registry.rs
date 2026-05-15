@@ -144,7 +144,21 @@ pub struct ToolRegistry {
     /// Active engine version. Controls which tools are visible via
     /// `tool_definitions()`, `all()`, etc. Defaults to V1.
     engine_version: EngineVersion,
+    /// Names blocked by the `DISABLE_TOOLS_LIST` kill-switch. Set once at
+    /// registry construction; every `register*` path consults this and
+    /// refuses to insert a matching tool, and every `get*` / `resolve_name`
+    /// path treats matching names as unregistered. Stored as a plain
+    /// `HashSet` because the list only changes at startup — wrapping in a
+    /// lock would let an extension-install path mutate a "kill-switch"
+    /// at runtime, defeating the whole point.
+    disabled_tools: std::collections::HashSet<String>,
 }
+
+/// Stable prefix on the error message returned when a dispatch is denied
+/// because the tool name appears in `DISABLE_TOOLS_LIST`. Callers (e.g. the
+/// integration test, future audit-row aggregators) match on this prefix to
+/// distinguish kill-switch denials from generic "tool not found" failures.
+pub const DISABLE_TOOLS_DENIAL_PREFIX: &str = "DISABLE_TOOLS_LIST denial: ";
 
 impl ToolRegistry {
     fn tool_definition(tool: &Arc<dyn Tool>) -> ToolDefinition {
@@ -173,7 +187,44 @@ impl ToolRegistry {
             http_interceptor: None,
             message_tool: RwLock::new(None),
             engine_version: EngineVersion::V1,
+            disabled_tools: std::collections::HashSet::new(),
         }
+    }
+
+    /// Seed the kill-switch deny-list from `DISABLE_TOOLS_LIST`. Names are
+    /// normalised by inserting both the underscore and hyphen alias variants
+    /// for each entry, so a deny-list of `["secret_delete"]` blocks an
+    /// extension that registers `secret-delete` (or vice versa) — without
+    /// requiring the operator to know which variant the extension picked.
+    /// Must be called before wrapping in `Arc` (consumes self).
+    pub fn with_disabled_tools<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for raw in names {
+            let name = raw.into();
+            if name.is_empty() {
+                continue;
+            }
+            let alt_underscore = name.replace('-', "_");
+            let alt_hyphen = name.replace('_', "-");
+            self.disabled_tools.insert(name);
+            self.disabled_tools.insert(alt_underscore);
+            self.disabled_tools.insert(alt_hyphen);
+        }
+        self
+    }
+
+    /// Returns true if `name` (or any hyphen/underscore alias) is on the
+    /// kill-switch deny-list. Cheap — synchronous set lookup, no locks.
+    pub fn is_disabled(&self, name: &str) -> bool {
+        if self.disabled_tools.is_empty() {
+            return false;
+        }
+        self.disabled_tools.contains(name)
+            || self.disabled_tools.contains(&name.replace('-', "_"))
+            || self.disabled_tools.contains(&name.replace('_', "-"))
     }
 
     /// Create a registry with credential injection support.
@@ -241,12 +292,23 @@ impl ToolRegistry {
 
     /// Register a tool. Rejects dynamic tools that try to shadow a protected built-in name.
     /// Also rejects tool names containing `.` which conflicts with settings path parsing.
+    /// Also rejects names on the `DISABLE_TOOLS_LIST` kill-switch — extension
+    /// installs / MCP hot-reloads must not silently re-introduce a tool an
+    /// operator has explicitly disabled.
     pub async fn register(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
         if name.contains('.') {
             tracing::warn!(
                 tool = %name,
                 "Rejecting tool registration: name contains '.' which conflicts with settings path parsing"
+            );
+            return;
+        }
+        if self.is_disabled(&name) {
+            tracing::warn!(
+                tool = %name,
+                reason = "DISABLE_TOOLS_LIST",
+                "Rejected tool registration: name is on the kill-switch deny-list"
             );
             return;
         }
@@ -265,12 +327,21 @@ impl ToolRegistry {
 
     /// Register a tool (sync version for startup, marks as built-in).
     /// Also rejects tool names containing `.` which conflicts with settings path parsing.
+    /// Also rejects names on the `DISABLE_TOOLS_LIST` kill-switch.
     pub fn register_sync(&self, tool: Arc<dyn Tool>) {
         let name = tool.name().to_string();
         if name.contains('.') {
             tracing::warn!(
                 tool = %name,
                 "Rejecting tool registration: name contains '.' which conflicts with settings path parsing"
+            );
+            return;
+        }
+        if self.is_disabled(&name) {
+            tracing::warn!(
+                tool = %name,
+                reason = "DISABLE_TOOLS_LIST",
+                "Rejected tool registration: name is on the kill-switch deny-list"
             );
             return;
         }
@@ -318,7 +389,15 @@ impl ToolRegistry {
     /// found, so that tool calls from LLM providers that normalise hyphens
     /// (e.g. `notion_notion_search` vs the registered `notion_notion-search`)
     /// still resolve correctly.
+    ///
+    /// Returns `None` for any tool on the `DISABLE_TOOLS_LIST` kill-switch
+    /// (defense-in-depth: the register*-time check should already have
+    /// blocked it, but any path that bypasses registration is still
+    /// neutralised at lookup time).
     pub async fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        if self.is_disabled(name) {
+            return None;
+        }
         let tools = self.tools.read().await;
         let key = Self::resolve_key(&tools, name)?;
         tools.get(&key).map(Arc::clone)
@@ -327,13 +406,20 @@ impl ToolRegistry {
     /// Resolve a caller-provided action/tool name to the registered tool id.
     ///
     /// Tries exact match first, then hyphen→underscore (LLM normalization),
-    /// then underscore→hyphen (legacy WASM extensions).
+    /// then underscore→hyphen (legacy WASM extensions). Returns `None` for
+    /// any name on the kill-switch deny-list.
     pub async fn resolve_name(&self, name: &str) -> Option<String> {
+        if self.is_disabled(name) {
+            return None;
+        }
         let tools = self.tools.read().await;
         Self::resolve_key(&tools, name)
     }
 
     pub async fn get_resolved(&self, name: &str) -> Option<(String, Arc<dyn Tool>)> {
+        if self.is_disabled(name) {
+            return None;
+        }
         let tools = self.tools.read().await;
         let key = Self::resolve_key(&tools, name)?;
         let tool = tools.get(&key).map(Arc::clone)?;
@@ -1163,37 +1249,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disable_tools_list_loop_removes_named_tools() {
-        // Mirrors the loop in `AppBuilder::build_all` that applies
-        // `config.agent.disabled_tools` after all registration completes.
-        // Verifies named tools are gone and unrelated tools survive.
-        let registry = ToolRegistry::new();
-        registry.register_builtin_tools();
+    async fn disabled_tool_rejected_at_async_registration() {
+        // Addresses zmanian's blocker #1 on PR #3548 — enforcement must be
+        // continuous, not a one-shot post-registration loop, so a later
+        // extension install / MCP hot-reload cannot silently re-introduce
+        // a tool the operator disabled.
+        let registry = ToolRegistry::new().with_disabled_tools(["echo".to_string()]);
+        registry.register(Arc::new(EchoTool)).await;
 
-        assert!(registry.has("echo").await, "precondition: echo registered");
-        assert!(registry.has("time").await, "precondition: time registered");
-        assert!(registry.has("json").await, "precondition: json registered");
+        assert!(
+            !registry.has("echo").await,
+            "register() must refuse a kill-switched name"
+        );
+    }
 
-        let disabled = vec!["echo".to_string(), "json".to_string()];
-        for name in &disabled {
-            registry.unregister(name).await;
-        }
+    #[test]
+    fn disabled_tool_rejected_at_sync_registration() {
+        // Sync registration is the startup path for built-ins. Same rule:
+        // disabling a built-in name keeps it off the registry from boot.
+        let registry = ToolRegistry::new().with_disabled_tools(["echo".to_string()]);
+        registry.register_sync(Arc::new(EchoTool));
 
-        assert!(!registry.has("echo").await, "echo should be removed");
-        assert!(!registry.has("json").await, "json should be removed");
-        assert!(registry.has("time").await, "time should remain");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        rt.block_on(async {
+            assert!(
+                !registry.has("echo").await,
+                "register_sync() must refuse a kill-switched name"
+            );
+        });
     }
 
     #[tokio::test]
-    async fn disable_tools_list_missing_name_is_no_op() {
-        // Names not present in the registry must not panic — the loop in
-        // `build_all` logs at debug level and moves on.
-        let registry = ToolRegistry::new();
-        registry.register_builtin_tools();
+    async fn is_disabled_treats_hyphen_and_underscore_as_equivalent() {
+        // If an operator types `secret-delete` into DISABLE_TOOLS_LIST but
+        // an extension registers `secret_delete` (or vice versa), the
+        // deny-list must catch both — extensions don't pick a canonical
+        // form consistently, and the kill-switch's value is precisely that
+        // the operator doesn't have to know the registered form.
+        let registry = ToolRegistry::new().with_disabled_tools(["secret-delete".to_string()]);
+        assert!(registry.is_disabled("secret-delete"));
+        assert!(registry.is_disabled("secret_delete"));
 
-        let result = registry.unregister("does_not_exist").await;
-        assert!(result.is_none(), "absent tool should yield None");
-        assert!(registry.has("echo").await, "other tools unaffected");
+        let registry2 = ToolRegistry::new().with_disabled_tools(["secret_delete".to_string()]);
+        assert!(registry2.is_disabled("secret-delete"));
+        assert!(registry2.is_disabled("secret_delete"));
+    }
+
+    #[tokio::test]
+    async fn disabled_tool_unreachable_via_get_resolved_as_defense_in_depth() {
+        // Even if a registration path forgets to consult is_disabled() and
+        // somehow inserts the tool, lookup time still neutralises it. This
+        // is the second line of defense and is what dispatch.rs relies on
+        // for the "tool not found" path being unreachable for blocked names.
+        let registry = ToolRegistry::new().with_disabled_tools(["echo".to_string()]);
+        // Bypass register() by inserting directly — simulates "any future
+        // registration path that didn't consult the deny-list".
+        registry
+            .tools
+            .write()
+            .await
+            .insert("echo".to_string(), Arc::new(EchoTool));
+
+        assert!(registry.get("echo").await.is_none());
+        assert!(registry.get_resolved("echo").await.is_none());
+        assert!(registry.resolve_name("echo").await.is_none());
     }
 
     #[tokio::test]

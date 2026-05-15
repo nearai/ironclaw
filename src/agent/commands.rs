@@ -1262,6 +1262,7 @@ mod tests {
                 use_planning: false,
                 session_idle_timeout: Duration::from_secs(300),
                 allow_local_tools: false,
+                disabled_tools: Vec::new(),
                 max_cost_per_day_cents: None,
                 max_actions_per_hour: None,
                 max_cost_per_user_per_day_cents: None,

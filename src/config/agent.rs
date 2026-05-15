@@ -15,8 +15,14 @@ use crate::settings::Settings;
 /// nothing but separators.
 fn parse_disabled_tools(raw: Option<String>) -> Vec<String> {
     let Some(s) = raw else { return Vec::new() };
-    let trimmed = s.trim().trim_start_matches('[').trim_end_matches(']');
-    trimmed
+    // `strip_prefix` / `strip_suffix` remove at most ONE bracket each, so
+    // `[[shell]]` becomes `[shell]` (the inner bracket survives, the per-item
+    // trim treats it as part of the name). `trim_*_matches` was greedy and
+    // chewed every leading/trailing `[` / `]`, masking malformed input.
+    let outer = s.trim();
+    let outer = outer.strip_prefix('[').unwrap_or(outer);
+    let outer = outer.strip_suffix(']').unwrap_or(outer);
+    outer
         .split(',')
         .map(|item| {
             item.trim()
@@ -229,9 +235,7 @@ mod tests {
     #[test]
     fn parse_disabled_tools_bracketed_quoted() {
         assert_eq!(
-            parse_disabled_tools(Some(
-                "[\"secret_delete\", \"memory_write\"]".to_string()
-            )),
+            parse_disabled_tools(Some("[\"secret_delete\", \"memory_write\"]".to_string())),
             vec!["secret_delete", "memory_write"]
         );
     }
@@ -241,6 +245,24 @@ mod tests {
         assert_eq!(
             parse_disabled_tools(Some(" secret_delete , , shell ".to_string())),
             vec!["secret_delete", "shell"]
+        );
+    }
+
+    #[test]
+    fn parse_disabled_tools_strips_at_most_one_bracket_each_side() {
+        // Gemini + zmanian flagged that `trim_start_matches('[')` chewed
+        // every leading `[`, so `[[shell]]` silently parsed as `shell`
+        // instead of `[shell]`. Switched to `strip_prefix` / `strip_suffix`
+        // (single-char) — assert the new behavior is non-greedy.
+        assert_eq!(
+            parse_disabled_tools(Some("[[shell]]".to_string())),
+            vec!["[shell]"],
+            "only ONE outer bracket should be stripped on each side"
+        );
+        // A well-formed bracketed list still unwraps cleanly.
+        assert_eq!(
+            parse_disabled_tools(Some("[shell]".to_string())),
+            vec!["shell"]
         );
     }
 

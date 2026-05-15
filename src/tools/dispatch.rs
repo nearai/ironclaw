@@ -120,6 +120,17 @@ impl ToolDispatcher {
         user_id: &str,
         source: DispatchSource,
     ) -> Result<ToolOutput, ToolError> {
+        // Kill-switch denial (DISABLE_TOOLS_LIST). Check FIRST so a denied
+        // dispatch is distinguishable in the audit log from a typo / unknown
+        // tool. We still create a system job + persist a failed ActionRecord
+        // so SREs investigating an incident can query
+        //  `agent_jobs JOIN job_actions WHERE error LIKE 'DISABLE_TOOLS_LIST denial:%'`
+        // and see every blocked attempt with its caller, source, and timestamp.
+        if self.registry.is_disabled(tool_name) {
+            return Err(self
+                .record_disable_tools_denial(tool_name, &params, user_id, &source)
+                .await);
+        }
         let (resolved_name, tool) =
             self.registry.get_resolved(tool_name).await.ok_or_else(|| {
                 ToolError::ExecutionFailed(format!("tool not found: {tool_name}"))
@@ -236,6 +247,66 @@ impl ToolDispatcher {
     /// Access the underlying tool registry.
     pub fn registry(&self) -> &Arc<ToolRegistry> {
         &self.registry
+    }
+
+    /// Emit the audit + structured-log artifacts for a `DISABLE_TOOLS_LIST`
+    /// denial and return the error to surface to the caller. Best-effort:
+    /// failure to create the system job or persist the action only logs at
+    /// `debug!` — the denial itself MUST still be returned to the caller, so
+    /// a transient DB error cannot accidentally let a blocked dispatch
+    /// proceed.
+    async fn record_disable_tools_denial(
+        &self,
+        tool_name: &str,
+        params: &serde_json::Value,
+        user_id: &str,
+        source: &DispatchSource,
+    ) -> ToolError {
+        let reason = format!(
+            "{}tool '{tool_name}' is blocked by the operator kill-switch",
+            crate::tools::registry::DISABLE_TOOLS_DENIAL_PREFIX
+        );
+
+        // Structured warn-level event for log-based alerting. Don't include
+        // raw params (could contain sensitive values; the dispatch path's
+        // normal redaction hasn't happened yet at this point).
+        tracing::warn!(
+            tool = %tool_name,
+            user_id = %user_id,
+            source = %source,
+            reason = "DISABLE_TOOLS_LIST",
+            "tool dispatch denied by operator kill-switch"
+        );
+
+        // Persist a failed ActionRecord so the denial is queryable in
+        // `job_actions`. Skip params redaction (no schema, no sensitive_params
+        // declared) — we record only the raw input shape, which is bounded
+        // by JSON-Schema validation on legitimate callers and by the agent
+        // tool-call surface on LLM callers.
+        let source_label = source.to_string();
+        match self.store.create_system_job(user_id, &source_label).await {
+            Ok(job_id) => {
+                let action = ActionRecord::new(0, tool_name, params.clone())
+                    .fail(reason.clone(), std::time::Duration::ZERO);
+                if let Err(e) = self.store.save_action(job_id, &action).await {
+                    debug!(
+                        error = %e,
+                        tool = %tool_name,
+                        job_id = %job_id,
+                        "failed to persist DISABLE_TOOLS_LIST denial audit row"
+                    );
+                }
+            }
+            Err(e) => {
+                debug!(
+                    error = %e,
+                    tool = %tool_name,
+                    "failed to create system job for DISABLE_TOOLS_LIST denial"
+                );
+            }
+        }
+
+        ToolError::ExecutionFailed(reason)
     }
 }
 
@@ -370,6 +441,18 @@ mod integration_tests {
         Arc<ToolRegistry>,
         tempfile::TempDir,
     ) {
+        test_dispatcher_with_registry(Arc::new(ToolRegistry::new())).await
+    }
+
+    async fn test_dispatcher_with_registry(
+        registry: Arc<ToolRegistry>,
+    ) -> (
+        Arc<ToolDispatcher>,
+        Arc<LibSqlBackend>,
+        Arc<dyn Database>,
+        Arc<ToolRegistry>,
+        tempfile::TempDir,
+    ) {
         let dir = tempfile::tempdir().expect("tempdir");
         let concrete = Arc::new(
             LibSqlBackend::new_local(&dir.path().join("test.db"))
@@ -398,7 +481,6 @@ mod integration_tests {
         .await
         .expect("create user");
 
-        let registry = Arc::new(ToolRegistry::new());
         let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
             max_output_length: 65_536,
             injection_check_enabled: false,
@@ -812,6 +894,85 @@ mod integration_tests {
         assert!(
             result.is_ok(),
             "unprotected target must succeed; got: {result:?}"
+        );
+    }
+
+    /// Caller-level regression for zmanian's review on PR #3548 (blockers #1
+    /// and #2): DISABLE_TOOLS_LIST enforcement must live on the dispatch
+    /// path (not just at startup), and a blocked dispatch must emit a
+    /// distinct audit row so SRE / incident tooling can see denials. This
+    /// drives `ToolDispatcher::dispatch` end-to-end against the real
+    /// libSQL-backed store — the previous PR only had Python trajectory
+    /// tests and unit tests on the helper, violating the
+    /// test-through-the-caller rule.
+    #[tokio::test]
+    async fn dispatch_denies_disabled_tool_with_distinct_audit_row() {
+        let registry =
+            Arc::new(ToolRegistry::new().with_disabled_tools(["recording_stub".to_string()]));
+        let (dispatcher, backend, db, registry, _dir) =
+            test_dispatcher_with_registry(registry).await;
+
+        // Defense-in-depth precondition: register() refused the tool, so
+        // dispatch is reaching the deny check via is_disabled() — not via
+        // the tool happening not to exist.
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        registry
+            .register(Arc::new(RecordingTool {
+                captured: Arc::clone(&captured),
+            }))
+            .await;
+        assert!(
+            !registry.has("recording_stub").await,
+            "registry must refuse a disabled tool at register time"
+        );
+
+        let result = dispatcher
+            .dispatch(
+                "recording_stub",
+                serde_json::json!({ "message": "should be blocked" }),
+                "tester",
+                DispatchSource::Channel("gateway".into()),
+            )
+            .await;
+
+        // Distinct, parseable error — NOT the generic "tool not found"
+        // path that a typo would hit. The DISABLE_TOOLS_DENIAL_PREFIX
+        // constant is the contract callers grep for.
+        let err = result.expect_err("dispatch of a disabled tool must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(crate::tools::registry::DISABLE_TOOLS_DENIAL_PREFIX),
+            "error must use the kill-switch prefix to distinguish from 'tool not found'; got: {msg}"
+        );
+        assert!(
+            msg.contains("recording_stub"),
+            "error must name the blocked tool; got: {msg}"
+        );
+
+        // Tool itself must NEVER be reached.
+        assert!(
+            captured.lock().expect("captured lock").is_none(),
+            "blocked tool's execute() must not run"
+        );
+
+        // Audit row exists and is distinguishable from a generic failure:
+        // - one system job for the channel:gateway source.
+        // - one ActionRecord with success=false and the denial prefix in `error`.
+        let system_jobs = fetch_system_jobs_for_user(&backend, "tester").await;
+        let (job_id, _) = system_jobs
+            .iter()
+            .find(|(_, title)| title == "System: channel:gateway")
+            .cloned()
+            .expect("denial must produce a system job");
+        let actions = db.get_job_actions(job_id).await.expect("get job actions");
+        assert_eq!(actions.len(), 1, "exactly one denial audit row");
+        let action = &actions[0];
+        assert_eq!(action.tool_name, "recording_stub");
+        assert!(!action.success, "denial row must be marked success=false");
+        let error_text = action.error.clone().expect("denial row must carry error");
+        assert!(
+            error_text.contains(crate::tools::registry::DISABLE_TOOLS_DENIAL_PREFIX),
+            "audit row error must carry the kill-switch prefix so SRE can grep; got: {error_text}"
         );
     }
 }
