@@ -210,6 +210,21 @@ pub(crate) enum PredicateBackendError {
 /// `caller_event_id`) don't undercount each other (serrrfirat HIGH on
 /// PR #3635 5-15 review — see also the schema in successor doc
 /// `03-persistent-counter.md`).
+///
+/// # Cross-process replay limits (in-memory backend)
+///
+/// Replay dedup on [`InMemoryPredicateStateBackend`] is **process-local**.
+/// An `event_id` recorded on host A is unknown to host B: replaying the
+/// same `event_id` against host B will count as a fresh invocation,
+/// double-counting against the logical cap. The in-memory backend
+/// therefore does NOT defend against multi-host replay; that property
+/// requires the durable backend (see successor doc
+/// `03-persistent-counter.md`), where the SQL `UNIQUE` constraint on
+/// `(tenant_id, hook_id, capability[, field], event_id)` enforces dedup
+/// across every host pointing at the same database
+/// (henrypark133 security note on PR #3635). Threat-model finding D5a
+/// also captures the high-cardinality-key LRU-eviction variant that lets
+/// an attacker reset another tenant's counter on the in-memory backend.
 pub(crate) trait PredicateStateBackend: Send + Sync {
     /// Record an invocation at `now` against `key` (idempotent against
     /// `event_id`) and return the resulting in-window count after
@@ -832,7 +847,154 @@ mod tests {
         assert_eq!(backend.evictions_observed(), 1);
     }
 
-    /// henrypark133 missing-coverage #1 on PR #3635: prove the atomic
+    /// henrypark133 missing-coverage on PR #3635: drive the LRU eviction
+    /// path through the **public** `record_invocation` API at
+    /// `MAX_HISTORY_KEYS + 1` keys. The previous coverage manually crafted
+    /// buckets and called `evict_lru_invocation` directly; this exercises
+    /// the production code path (overflow → LRU → eviction counter
+    /// advances → cap holds). The full 8192-key sweep would be slow under
+    /// `cargo test`, so we drive it through a smaller in-process cap by
+    /// inserting `MAX_HISTORY_KEYS + 1` distinct keys and asserting the
+    /// map never exceeds `MAX_HISTORY_KEYS`.
+    #[test]
+    fn lru_eviction_via_public_api_holds_max_history_keys_cap() {
+        let backend = InMemoryPredicateStateBackend::new();
+        let now = Instant::now();
+        // Insert MAX_HISTORY_KEYS + 1 distinct keys via the public API.
+        // Each key gets a single invocation; the (MAX_HISTORY_KEYS + 1)th
+        // record_invocation must trigger LRU eviction so the map never
+        // exceeds MAX_HISTORY_KEYS.
+        for i in 0..=MAX_HISTORY_KEYS {
+            let key = InvocationKey {
+                hook_id: hook_id(),
+                tenant_id: tenant(),
+                capability: format!("cap.{i}"),
+            };
+            let _ = backend
+                .record_invocation(&key, &ev(&format!("e{i}")), now, Duration::from_secs(60))
+                .expect("record ok");
+        }
+        let map = backend.invocation_history.lock().expect("lock ok");
+        assert_eq!(
+            map.len(),
+            MAX_HISTORY_KEYS,
+            "LRU must hold the map at the configured cap after public-API overflow"
+        );
+        drop(map);
+        assert!(
+            backend.evictions_observed() >= 1,
+            "evictions counter must advance when the cap is hit via the public API"
+        );
+    }
+
+    /// henrypark133 missing-coverage on PR #3635: exact-cutoff boundary
+    /// behavior. The trim condition is `front_ts < cutoff`, so an entry
+    /// recorded at exactly `cutoff` is RETAINED, not trimmed. Pin that
+    /// boundary so a future refactor to `<=` would fail loud.
+    #[test]
+    fn in_memory_invocation_retains_entry_at_exact_window_cutoff() {
+        let backend = InMemoryPredicateStateBackend::new();
+        let key = InvocationKey {
+            hook_id: hook_id(),
+            tenant_id: tenant(),
+            capability: "cap.boundary".to_string(),
+        };
+        let window = Duration::from_secs(60);
+        let t0 = Instant::now();
+        // Record at t0.
+        let _ = backend
+            .record_invocation(&key, &ev("e-at-t0"), t0, window)
+            .expect("ok");
+        // At t0 + window, the cutoff is exactly t0; t0 is NOT strictly less
+        // than t0, so the original entry must still be in-window.
+        let count_at_exact_cutoff = backend
+            .record_invocation(&key, &ev("e-at-boundary"), t0 + window, window)
+            .expect("ok");
+        assert_eq!(
+            count_at_exact_cutoff, 2,
+            "entry whose timestamp equals the cutoff is retained (< cutoff trim, not <=)"
+        );
+        // One nanosecond past the cutoff, the original entry IS trimmed.
+        let count_just_past = backend
+            .record_invocation(
+                &key,
+                &ev("e-just-past"),
+                t0 + window + Duration::from_nanos(1),
+                window,
+            )
+            .expect("ok");
+        // After the just-past call: e-at-t0 is now strictly older than
+        // cutoff and gets trimmed; e-at-boundary and e-just-past remain.
+        assert_eq!(
+            count_just_past, 2,
+            "entry strictly older than cutoff is trimmed"
+        );
+    }
+
+    /// henrypark133 missing-coverage on PR #3635: cross-type event-id
+    /// isolation. The same `event_id` used in BOTH
+    /// `record_invocation` and `record_value` must NOT collide — the two
+    /// maps key on disjoint types (`InvocationKey` vs `ValueKey`), so
+    /// dedup in one must not suppress the other.
+    #[test]
+    fn event_id_dedup_is_isolated_across_invocation_and_value_maps() {
+        let backend = InMemoryPredicateStateBackend::new();
+        let inv_key = InvocationKey {
+            hook_id: hook_id(),
+            tenant_id: tenant(),
+            capability: "cap.cross".to_string(),
+        };
+        let val_key = ValueKey {
+            hook_id: hook_id(),
+            tenant_id: tenant(),
+            capability: "cap.cross".to_string(),
+            field: "amount".to_string(),
+        };
+        let shared = ev("shared-event-id");
+        let now = Instant::now();
+        let inv_count = backend
+            .record_invocation(&inv_key, &shared, now, Duration::from_secs(60))
+            .expect("ok");
+        let val_sum = backend
+            .record_value(
+                &val_key,
+                &shared,
+                now,
+                Decimal::from(42),
+                Duration::from_secs(60),
+            )
+            .expect("ok");
+        assert_eq!(
+            inv_count, 1,
+            "invocation count records normally; value map's dedup state must not pre-empt it"
+        );
+        assert_eq!(
+            val_sum,
+            Decimal::from(42),
+            "value sum records normally; invocation map's dedup state must not pre-empt it"
+        );
+        // Replay each — within its own map the shared id is now a dup.
+        let inv_count_replay = backend
+            .record_invocation(&inv_key, &shared, now, Duration::from_secs(60))
+            .expect("ok");
+        let val_sum_replay = backend
+            .record_value(
+                &val_key,
+                &shared,
+                now,
+                Decimal::from(42),
+                Duration::from_secs(60),
+            )
+            .expect("ok");
+        assert_eq!(inv_count_replay, 1, "intra-map dedup still works");
+        assert_eq!(
+            val_sum_replay,
+            Decimal::from(42),
+            "intra-map dedup still works"
+        );
+    }
+
+    /// henrypark133 missing-coverage on PR #3635: prove the atomic
     /// record-and-read contract holds under concurrent writers. N threads
     /// each call `record_invocation` once with a distinct `event_id`; the
     /// final observed count must equal N (no lost-update race).
