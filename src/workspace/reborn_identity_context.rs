@@ -105,6 +105,13 @@ impl WorkspaceIdentityContextSource {
 impl HostIdentityContextSource for WorkspaceIdentityContextSource {
     async fn load_identity_candidates(
         &self,
+        // TODO: run_context policy gating for personal files in group/shared runs.
+        // Currently summary_only_path() provides structural protection (no raw content),
+        // but USER.md and assistant directives summaries are still visible in group-run
+        // prompts. When LoopRunContext gains an explicit group-chat/shared-thread policy bit
+        // (planned for WS17), gate these paths: exclude summary-only candidates whose
+        // applicability is PersonalOnly when run_context.is_shared_context() is true.
+        // Required test: group_run_excludes_personal_file_summaries_without_policy_grant
         _run_context: &LoopRunContext,
         _mode: PromptMode,
     ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {

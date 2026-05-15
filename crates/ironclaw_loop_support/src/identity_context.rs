@@ -89,9 +89,6 @@ pub enum IdentityTrustLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityApplicability {
     Always,
-    /// Reserved for host sources that have text-only identity context. The
-    /// workspace source does not currently emit this variant.
-    OnTextOnly,
     OnCodeAct,
 }
 
@@ -239,7 +236,6 @@ pub fn is_identity_model_message_ref(message_ref: &LoopMessageRef) -> bool {
 fn applies(applicability: IdentityApplicability, mode: PromptMode) -> bool {
     match applicability {
         IdentityApplicability::Always => true,
-        IdentityApplicability::OnTextOnly => mode == PromptMode::TextOnly,
         IdentityApplicability::OnCodeAct => mode == PromptMode::CodeAct,
     }
 }
@@ -283,7 +279,9 @@ const FNV_IDENTITY_OFFSET: u64 = 0xcbf29ce484222325;
 const FNV_IDENTITY_PRIME: u64 = 0x00000100000001B3;
 
 fn stable_identity_hash(name: &str, content: &str) -> u64 {
-    // FNV-1a keeps identity refs stable without pulling in a hashing dependency.
+    // FNV-1a: non-cryptographic, collision-safe for content addressing within a run.
+    // Not suitable for security purposes — used only to detect identity file drift
+    // between candidate load and model resolution within the same process.
     let mut hash = FNV_IDENTITY_OFFSET;
     for &byte in name.as_bytes() {
         hash ^= u64::from(byte);

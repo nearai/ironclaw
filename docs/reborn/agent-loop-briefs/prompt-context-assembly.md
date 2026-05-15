@@ -626,3 +626,22 @@ Integration test (in `crates/ironclaw_reborn`):
 - Identity-file authoring tools, CLI commands to seed `SOUL.md`, etc.
 - Per-thread / per-run identity overrides — the first cut treats
   identity as workspace-scoped, not run-scoped.
+
+## 8. Deferred
+
+**Finding #2 (serrrfirat): Group-run policy gating for personal identity files.**
+
+`WorkspaceIdentityContextSource::load_identity_candidates` currently ignores
+`run_context` entirely. `summary_only_path()` provides structural protection
+— `USER.md` and `context/assistant-directives.md` expose only a one-line
+summary rather than raw content — but that summary is still visible in
+group-run or shared-thread prompts where personal-profile context may not
+be appropriate.
+
+Deferred to WS17 when `LoopRunContext` gains an explicit
+group-chat/shared-thread policy bit (`is_shared_context()`). At that point,
+`load_identity_candidates` should exclude summary-only candidates whose
+applicability would be `PersonalOnly` when the policy bit is set. A required
+regression test (`group_run_excludes_personal_file_summaries_without_policy_grant`)
+is also deferred. The code-side TODO is in
+`src/workspace/reborn_identity_context.rs`.

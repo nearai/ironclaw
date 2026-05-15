@@ -821,7 +821,7 @@ where
                 let Some(source) = self.identity_context_source.as_deref() else {
                     return Err(AgentLoopHostError::new(
                         AgentLoopHostErrorKind::InvalidInvocation,
-                        "identity message ref is unavailable",
+                        "identity message ref is unavailable: no identity source configured for this host",
                     ));
                 };
                 if requested_role != HostManagedModelMessageRole::System {
@@ -837,7 +837,7 @@ where
                     .ok_or_else(|| {
                         AgentLoopHostError::new(
                             AgentLoopHostErrorKind::InvalidInvocation,
-                            "identity message reference is unavailable",
+                            "identity message ref is unavailable: source returned no content for this ref",
                         )
                     })?;
                 resolved.push(HostManagedModelMessage {
