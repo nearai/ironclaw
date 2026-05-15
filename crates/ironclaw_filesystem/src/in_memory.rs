@@ -26,6 +26,7 @@ use ironclaw_host_api::VirtualPath;
 use tokio::sync::Mutex;
 
 use crate::backend::{EventRecord, StorageTxn};
+use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
     BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FileType, FilesystemError,
     FilesystemOperation, Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page,
@@ -485,40 +486,6 @@ fn top_level_vector_nearest(filter: &Filter) -> Option<(&IndexKey, &[f32], u32)>
         return Some((key, embedding, *limit));
     }
     None
-}
-
-/// Decode a little-endian `f32` blob written by `encode_embedding_blob` (or
-/// any caller using the same format). Returns `None` if the blob is empty or
-/// has a length that isn't a multiple of `f32`'s size.
-fn decode_embedding_blob(bytes: &[u8]) -> Option<Vec<f32>> {
-    if bytes.is_empty() || !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
-        return None;
-    }
-    Some(
-        bytes
-            .chunks_exact(std::mem::size_of::<f32>())
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-            .collect(),
-    )
-}
-
-fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
-    if left.len() != right.len() || left.is_empty() {
-        return None;
-    }
-    let mut dot = 0.0_f32;
-    let mut left_norm = 0.0_f32;
-    let mut right_norm = 0.0_f32;
-    for (l, r) in left.iter().zip(right.iter()) {
-        dot += l * r;
-        left_norm += l * l;
-        right_norm += r * r;
-    }
-    if left_norm <= 0.0 || right_norm <= 0.0 {
-        return None;
-    }
-    let score = dot / (left_norm.sqrt() * right_norm.sqrt());
-    if score.is_finite() { Some(score) } else { None }
 }
 
 fn with_trailing_slash(s: &str) -> String {

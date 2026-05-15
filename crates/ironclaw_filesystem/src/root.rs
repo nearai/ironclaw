@@ -141,7 +141,7 @@ pub trait RootFilesystem: Send + Sync {
         path: &VirtualPath,
         _payload: Vec<u8>,
     ) -> Result<SeqNo, FilesystemError> {
-        unsupported(path, FilesystemOperation::Tail)
+        unsupported(path, FilesystemOperation::Append)
     }
 
     /// Read events at `path` starting at `from` (exclusive). Returns at most

@@ -10,6 +10,7 @@ use crate::db::{
     not_found, record_version_from_i64, sql_index_name, system_time_from_unix_seconds,
     valid_engine_path, virtual_path_prefixes,
 };
+use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
     BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
     FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexSpec,
@@ -604,9 +605,9 @@ impl RootFilesystem for PostgresRootFilesystem {
                 &[&path.as_str(), &payload],
             )
             .await
-            .map_err(|error| db_error(path.clone(), FilesystemOperation::AppendFile, error))?;
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Append, error))?;
         let id: i64 = row.get("id");
-        seq_no_from_i64(path, id)
+        seq_no_from_i64(path, id, FilesystemOperation::Append)
     }
 
     async fn tail(
@@ -639,7 +640,7 @@ impl RootFilesystem for PostgresRootFilesystem {
                 let id: i64 = row.get("id");
                 let payload: Vec<u8> = row.get("payload");
                 Ok(EventRecord {
-                    seq: seq_no_from_i64(path, id)?,
+                    seq: seq_no_from_i64(path, id, FilesystemOperation::Tail)?,
                     payload,
                 })
             })
@@ -824,11 +825,32 @@ impl PostgresRootFilesystem {
             let version = record_version_from_i64(&row_path, version_raw)?;
             ranked.push((row_path, version, score));
         }
-        ranked.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        // Sort by descending cosine score, then ascending path for a stable
+        // tie-breaker so equal-score rows truncate deterministically across
+        // runs and across backends. The in-memory reference uses the same
+        // tie-breaker; this keeps cross-backend behavior aligned.
+        ranked.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.as_str().cmp(b.0.as_str()))
+        });
         ranked.truncate(limit as usize);
         // Release the client so each `get()` below claims its own
         // pooled connection rather than serializing through one.
         drop(client);
+        self.materialize_ranked(ranked).await
+    }
+
+    /// Phase-2 of [`vector_nearest_query`]: load full [`VersionedEntry`]
+    /// bodies for the ranked-and-truncated candidate set. Mirrors the
+    /// libSQL backend's `materialize_ranked`, including the silently-skip
+    /// behaviour when a candidate path disappears between phase-1
+    /// ranking and the phase-2 `get`. Pulled out so the concurrent-delete
+    /// branch has a deterministic test seam.
+    pub(crate) async fn materialize_ranked(
+        &self,
+        ranked: Vec<(VirtualPath, RecordVersion, f32)>,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         let mut out = Vec::with_capacity(ranked.len());
         for (row_path, _version, _score) in ranked {
             let Some(versioned) = self.get(&row_path).await? else {
@@ -904,6 +926,16 @@ fn translate_filter(
             Ok(())
         }
         Filter::Range { key, lo, hi } => {
+            // Mixed-variant bounds have no meaningful BETWEEN. Reject rather
+            // than fall through to a lexicographic-on-text comparison that
+            // silently produces wrong results. Matches the in-memory
+            // backend's `discriminant(lo) == discriminant(hi)` requirement.
+            if std::mem::discriminant(lo) != std::mem::discriminant(hi) {
+                return Err(FilesystemError::Unsupported {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Query,
+                });
+            }
             // PR #3661 reviewer fix: when both bounds are `I64`, cast both
             // the extracted JSON text and bound params to `BIGINT` so the
             // BETWEEN comparison is numeric. Otherwise `'2' BETWEEN '10'
@@ -1033,39 +1065,6 @@ fn bind_index_value(
 }
 
 #[cfg(feature = "postgres")]
-fn decode_embedding_blob(bytes: &[u8]) -> Option<Vec<f32>> {
-    if bytes.is_empty() || !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
-        return None;
-    }
-    Some(
-        bytes
-            .chunks_exact(std::mem::size_of::<f32>())
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-            .collect(),
-    )
-}
-
-#[cfg(feature = "postgres")]
-fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
-    if left.len() != right.len() || left.is_empty() {
-        return None;
-    }
-    let mut dot = 0.0_f32;
-    let mut left_norm = 0.0_f32;
-    let mut right_norm = 0.0_f32;
-    for (l, r) in left.iter().zip(right.iter()) {
-        dot += l * r;
-        left_norm += l * l;
-        right_norm += r * r;
-    }
-    if left_norm <= 0.0 || right_norm <= 0.0 {
-        return None;
-    }
-    let score = dot / (left_norm.sqrt() * right_norm.sqrt());
-    if score.is_finite() { Some(score) } else { None }
-}
-
-#[cfg(feature = "postgres")]
 fn build_entry(
     path: &VirtualPath,
     body: Vec<u8>,
@@ -1095,12 +1094,16 @@ fn build_entry(
 }
 
 #[cfg(feature = "postgres")]
-fn seq_no_from_i64(path: &VirtualPath, raw: i64) -> Result<SeqNo, FilesystemError> {
+fn seq_no_from_i64(
+    path: &VirtualPath,
+    raw: i64,
+    operation: FilesystemOperation,
+) -> Result<SeqNo, FilesystemError> {
     u64::try_from(raw)
         .map(SeqNo::from_backend)
         .map_err(|_| FilesystemError::Backend {
             path: path.clone(),
-            operation: FilesystemOperation::Tail,
+            operation,
             reason: format!("event seq {raw} is not representable"),
         })
 }

@@ -5,7 +5,7 @@ use ironclaw_host_api::{MountPermissions, MountView, ScopedPath, VirtualPath};
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
     CasExpectation, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, Filter,
-    IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
+    IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, VersionedEntry, path_prefix_matches,
 };
 
 /// Invocation-scoped filesystem view over [`ScopedPath`] values.
@@ -107,8 +107,9 @@ where
         path: &ScopedPath,
         payload: Vec<u8>,
     ) -> Result<SeqNo, FilesystemError> {
-        // Append on the event plane is a write — permission mirrors AppendFile.
-        let virtual_path = self.resolve_with_permission(path, FilesystemOperation::AppendFile)?;
+        // Append on the event plane is a write — distinct from the legacy
+        // byte-plane AppendFile but maps to the same `permissions.write`.
+        let virtual_path = self.resolve_with_permission(path, FilesystemOperation::Append)?;
         self.root.append(&virtual_path, payload).await
     }
 
@@ -233,22 +234,22 @@ where
 fn operation_allowed(permissions: &MountPermissions, operation: FilesystemOperation) -> bool {
     match operation {
         FilesystemOperation::ReadFile => permissions.read,
-        FilesystemOperation::WriteFile => permissions.write,
-        FilesystemOperation::AppendFile => permissions.write,
+        FilesystemOperation::WriteFile
+        | FilesystemOperation::AppendFile
+        | FilesystemOperation::CreateDirAll
+        | FilesystemOperation::EnsureIndex
+        | FilesystemOperation::BeginTxn
+        | FilesystemOperation::Append => permissions.write,
         FilesystemOperation::ListDir => permissions.list,
         // Stat is metadata-only: either read authority or list authority reveals
         // equivalent existence/type information without file contents.
         FilesystemOperation::Stat => permissions.read || permissions.list,
         FilesystemOperation::Delete => permissions.delete,
-        FilesystemOperation::CreateDirAll => permissions.write,
         FilesystemOperation::MountLocal => false,
         // Query enumerates records, so requires both read (to see contents) and
         // list (to enumerate). Either alone is insufficient.
         FilesystemOperation::Query => permissions.read && permissions.list,
-        // Index/transaction declarations mutate the mount's structural state.
-        FilesystemOperation::EnsureIndex => permissions.write,
-        FilesystemOperation::BeginTxn => permissions.write,
-        // Tail mirrors read on the byte plane (append is covered by AppendFile).
+        // Tail reads from the event log; mirrors read on the byte plane.
         FilesystemOperation::Tail => permissions.read,
     }
 }
@@ -280,6 +281,22 @@ impl ScopedStorageTxn {
             })
         }
     }
+
+    /// Reject per-op paths that fall outside the txn's `mount_prefix`. The
+    /// `StorageTxn` doc commits to `PathOutsideMount` for cross-prefix
+    /// accesses; this wrapper enforces that contract for every backend that
+    /// supports `begin`, so a write-only caller granted txn access at
+    /// `/projects/foo` can't drive an `/secrets/...` write through the raw
+    /// txn handle. Without this check, the underlying backend would be the
+    /// only line of defence and a future backend that forgot the check
+    /// would silently bypass scope.
+    fn check_path(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        if path_prefix_matches(self.mount_prefix.as_str(), path.as_str()) {
+            Ok(())
+        } else {
+            Err(FilesystemError::PathOutsideMount { path: path.clone() })
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -291,16 +308,19 @@ impl StorageTxn for ScopedStorageTxn {
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
         self.check(FilesystemOperation::WriteFile)?;
+        self.check_path(path)?;
         self.inner.put(path, entry, cas).await
     }
 
     async fn get(&mut self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
         self.check(FilesystemOperation::ReadFile)?;
+        self.check_path(path)?;
         self.inner.get(path).await
     }
 
     async fn delete(&mut self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.check(FilesystemOperation::Delete)?;
+        self.check_path(path)?;
         self.inner.delete(path).await
     }
 
@@ -312,5 +332,473 @@ impl StorageTxn for ScopedStorageTxn {
 
     async fn rollback(self: Box<Self>) {
         self.inner.rollback().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Caller-level tests for the operation gates added with the unified
+    //! storage surface. The matrix below exercises each `MountPermissions`
+    //! axis against each new op and asserts that the permission denial
+    //! happens at the `ScopedFilesystem` boundary — before any backend
+    //! dispatch — so a future backend that forgets a check still inherits
+    //! the wrapper's gate. The companion `txn_*` tests drive a stub
+    //! [`StorageTxn`] backend to lock in the per-op ACL and the mount-
+    //! prefix containment check on `ScopedStorageTxn` (it has no shipped
+    //! backend yet, so this is the only place those guarantees are
+    //! exercised).
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use ironclaw_host_api::{
+        MountAlias, MountGrant, MountPermissions, MountView, ScopedPath, VirtualPath,
+    };
+
+    use super::*;
+    use crate::in_memory::InMemoryBackend;
+    use crate::{
+        CasExpectation, Entry, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind,
+        IndexName, IndexSpec, Page, RecordKind, SeqNo,
+    };
+
+    /// Coerce `Result<T, FilesystemError>` to its error without requiring
+    /// `T: Debug`. `Box<dyn StorageTxn>` isn't `Debug`, so `unwrap_err()`
+    /// can't be used directly on the result of `scoped.begin(...)`.
+    fn expect_err<T>(result: Result<T, FilesystemError>) -> FilesystemError {
+        match result {
+            Ok(_) => panic!("expected an error"),
+            Err(err) => err,
+        }
+    }
+
+    fn scoped_in_memory(permissions: MountPermissions) -> ScopedFilesystem<InMemoryBackend> {
+        // Mount the alias at the engine subtree (an allowed virtual root)
+        // so query/ensure_index/append/tail all hit the in-memory backend
+        // through a real `ScopedPath` → `VirtualPath` resolution.
+        ScopedFilesystem::new(
+            Arc::new(InMemoryBackend::new()),
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/workspace").unwrap(),
+                VirtualPath::new("/engine/scoped_test").unwrap(),
+                permissions,
+            )])
+            .unwrap(),
+        )
+    }
+
+    fn no_op(read: bool, write: bool, list: bool, delete: bool) -> MountPermissions {
+        MountPermissions {
+            read,
+            write,
+            list,
+            delete,
+            execute: false,
+        }
+    }
+
+    fn record_with_scope(scope: &str) -> Entry {
+        Entry::record(
+            RecordKind::new("test_kind").unwrap(),
+            &serde_json::json!({}),
+        )
+        .unwrap()
+        .with_indexed(
+            IndexKey::new("scope").unwrap(),
+            crate::IndexValue::Text(scope.into()),
+        )
+    }
+
+    // ─── query requires read AND list ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn query_denies_when_read_missing_even_with_list() {
+        let scoped = scoped_in_memory(no_op(false, false, true, false));
+        let err = scoped
+            .query(
+                &ScopedPath::new("/workspace").unwrap(),
+                &Filter::All,
+                Page::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FilesystemError::PermissionDenied {
+                operation: FilesystemOperation::Query,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn query_denies_when_list_missing_even_with_read() {
+        let scoped = scoped_in_memory(no_op(true, false, false, false));
+        let err = scoped
+            .query(
+                &ScopedPath::new("/workspace").unwrap(),
+                &Filter::All,
+                Page::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FilesystemError::PermissionDenied {
+                operation: FilesystemOperation::Query,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn query_succeeds_with_read_and_list() {
+        let scoped = scoped_in_memory(no_op(true, true, true, false));
+        scoped
+            .put(
+                &ScopedPath::new("/workspace/a").unwrap(),
+                record_with_scope("acme"),
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+        let results = scoped
+            .query(
+                &ScopedPath::new("/workspace").unwrap(),
+                &Filter::All,
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    // ─── ensure_index requires write ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn ensure_index_denies_when_write_missing() {
+        let scoped = scoped_in_memory(no_op(true, false, true, false));
+        let spec = IndexSpec::new(
+            IndexName::new("by_scope").unwrap(),
+            vec![IndexKey::new("scope").unwrap()],
+            IndexKind::Exact,
+        );
+        let err = scoped
+            .ensure_index(&ScopedPath::new("/workspace").unwrap(), &spec)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FilesystemError::PermissionDenied {
+                operation: FilesystemOperation::EnsureIndex,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn ensure_index_succeeds_with_write() {
+        let scoped = scoped_in_memory(no_op(false, true, false, false));
+        let spec = IndexSpec::new(
+            IndexName::new("by_scope").unwrap(),
+            vec![IndexKey::new("scope").unwrap()],
+            IndexKind::Exact,
+        );
+        scoped
+            .ensure_index(&ScopedPath::new("/workspace").unwrap(), &spec)
+            .await
+            .unwrap();
+    }
+
+    // ─── append (event-plane) requires write ──────────────────────────────
+
+    #[tokio::test]
+    async fn append_event_denies_when_write_missing() {
+        let scoped = scoped_in_memory(no_op(true, false, true, false));
+        let err = scoped
+            .append(&ScopedPath::new("/workspace/log").unwrap(), b"x".to_vec())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FilesystemError::PermissionDenied {
+                operation: FilesystemOperation::Append,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn append_event_succeeds_with_write_and_returns_monotonic_seq() {
+        let scoped = scoped_in_memory(no_op(false, true, false, false));
+        let s1 = scoped
+            .append(&ScopedPath::new("/workspace/log").unwrap(), b"a".to_vec())
+            .await
+            .unwrap();
+        let s2 = scoped
+            .append(&ScopedPath::new("/workspace/log").unwrap(), b"b".to_vec())
+            .await
+            .unwrap();
+        assert!(s2 > s1);
+    }
+
+    // ─── tail requires read ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tail_denies_when_read_missing() {
+        let scoped = scoped_in_memory(no_op(false, true, true, false));
+        let err = scoped
+            .tail(&ScopedPath::new("/workspace/log").unwrap(), SeqNo::ZERO)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FilesystemError::PermissionDenied {
+                operation: FilesystemOperation::Tail,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn tail_succeeds_with_read_and_write() {
+        // Append needs write, tail needs read. Verifying tail goes
+        // through requires a scope with both; the denial path is covered
+        // by tail_denies_when_read_missing above.
+        let scoped = scoped_in_memory(no_op(true, true, false, false));
+        let s1 = scoped
+            .append(
+                &ScopedPath::new("/workspace/log").unwrap(),
+                b"hello".to_vec(),
+            )
+            .await
+            .unwrap();
+        let events = scoped
+            .tail(&ScopedPath::new("/workspace/log").unwrap(), SeqNo::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].seq, s1);
+    }
+
+    // ─── begin requires write (capability-gated; in-memory rejects natively) ──
+
+    #[tokio::test]
+    async fn begin_denies_when_write_missing() {
+        let scoped = scoped_in_memory(no_op(true, false, true, false));
+        let err = expect_err(scoped.begin(&ScopedPath::new("/workspace").unwrap()).await);
+        assert!(matches!(
+            err,
+            FilesystemError::PermissionDenied {
+                operation: FilesystemOperation::BeginTxn,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn begin_with_write_propagates_backend_unsupported() {
+        // The in-memory backend doesn't implement begin natively. With
+        // permission granted, the wrapper passes through to the backend
+        // which returns Unsupported. The point is that PermissionDenied
+        // is not the error — the gate let it through.
+        let scoped = scoped_in_memory(no_op(false, true, false, false));
+        let err = expect_err(scoped.begin(&ScopedPath::new("/workspace").unwrap()).await);
+        assert!(
+            matches!(
+                err,
+                FilesystemError::Unsupported {
+                    operation: FilesystemOperation::BeginTxn,
+                    ..
+                }
+            ),
+            "expected Unsupported (gate let it through), got {err:?}"
+        );
+    }
+
+    // ─── ScopedStorageTxn ACL + path containment ──────────────────────────
+    //
+    // No shipped backend implements `begin()` natively yet, so we stub one
+    // here. The stub returns a `StubTxn` that records the last path each op
+    // received so the test can assert the wrapper rejected escape attempts
+    // before they reached the inner txn.
+
+    #[derive(Default)]
+    struct TxnStubBackend;
+
+    #[async_trait]
+    impl RootFilesystem for TxnStubBackend {
+        async fn list_dir(
+            &self,
+            _path: &VirtualPath,
+        ) -> Result<Vec<crate::DirEntry>, FilesystemError> {
+            Ok(Vec::new())
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<crate::FileStat, FilesystemError> {
+            Ok(crate::FileStat {
+                path: path.clone(),
+                file_type: crate::FileType::Directory,
+                len: 0,
+                modified: None,
+                sensitive: false,
+            })
+        }
+
+        async fn begin(&self, _path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+            Ok(Box::new(StubTxn::default()))
+        }
+    }
+
+    #[derive(Default)]
+    struct StubTxn {
+        seen_put: Option<VirtualPath>,
+        seen_get: Option<VirtualPath>,
+        seen_delete: Option<VirtualPath>,
+    }
+
+    #[async_trait]
+    impl StorageTxn for StubTxn {
+        async fn put(
+            &mut self,
+            path: &VirtualPath,
+            _entry: Entry,
+            _cas: CasExpectation,
+        ) -> Result<RecordVersion, FilesystemError> {
+            self.seen_put = Some(path.clone());
+            Ok(RecordVersion::from_backend(1))
+        }
+
+        async fn get(
+            &mut self,
+            path: &VirtualPath,
+        ) -> Result<Option<VersionedEntry>, FilesystemError> {
+            self.seen_get = Some(path.clone());
+            Ok(None)
+        }
+
+        async fn delete(&mut self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            self.seen_delete = Some(path.clone());
+            Ok(())
+        }
+
+        async fn commit(self: Box<Self>) -> Result<(), FilesystemError> {
+            Ok(())
+        }
+
+        async fn rollback(self: Box<Self>) {}
+    }
+
+    fn scoped_txn_stub(permissions: MountPermissions) -> ScopedFilesystem<TxnStubBackend> {
+        ScopedFilesystem::new(
+            Arc::new(TxnStubBackend),
+            MountView::new(vec![MountGrant::new(
+                MountAlias::new("/workspace").unwrap(),
+                VirtualPath::new("/engine/scoped_txn").unwrap(),
+                permissions,
+            )])
+            .unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn scoped_txn_rejects_put_outside_mount_prefix() {
+        // The mount prefix resolves to /engine/scoped_txn. A txn caller
+        // who somehow has a VirtualPath outside that prefix must be
+        // rejected with PathOutsideMount before the inner backend sees
+        // it — the trait doc commits to this guarantee for every txn
+        // backend, and the wrapper is the only place that holds across
+        // future backends.
+        let scoped = scoped_txn_stub(MountPermissions::read_write());
+        let mut txn = scoped
+            .begin(&ScopedPath::new("/workspace").unwrap())
+            .await
+            .unwrap();
+        let escape = VirtualPath::new("/secrets/api_key").unwrap();
+        let err = txn
+            .put(&escape, Entry::bytes(b"leak".to_vec()), CasExpectation::Any)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FilesystemError::PathOutsideMount { .. }));
+    }
+
+    #[tokio::test]
+    async fn scoped_txn_rejects_get_outside_mount_prefix() {
+        let scoped = scoped_txn_stub(MountPermissions::read_write());
+        let mut txn = scoped
+            .begin(&ScopedPath::new("/workspace").unwrap())
+            .await
+            .unwrap();
+        let escape = VirtualPath::new("/secrets/api_key").unwrap();
+        let err = txn.get(&escape).await.unwrap_err();
+        assert!(matches!(err, FilesystemError::PathOutsideMount { .. }));
+    }
+
+    #[tokio::test]
+    async fn scoped_txn_rejects_delete_outside_mount_prefix() {
+        let scoped = scoped_txn_stub(MountPermissions {
+            read: true,
+            write: true,
+            list: true,
+            delete: true,
+            execute: false,
+        });
+        let mut txn = scoped
+            .begin(&ScopedPath::new("/workspace").unwrap())
+            .await
+            .unwrap();
+        let escape = VirtualPath::new("/secrets/api_key").unwrap();
+        let err = txn.delete(&escape).await.unwrap_err();
+        assert!(matches!(err, FilesystemError::PathOutsideMount { .. }));
+    }
+
+    #[tokio::test]
+    async fn scoped_txn_allows_put_inside_mount_prefix() {
+        // Sanity check: paths under the mount prefix still reach the
+        // inner backend. Without this we couldn't tell whether the
+        // outside-prefix tests were rejecting legitimate calls too.
+        let scoped = scoped_txn_stub(MountPermissions::read_write());
+        let mut txn = scoped
+            .begin(&ScopedPath::new("/workspace").unwrap())
+            .await
+            .unwrap();
+        let inside = VirtualPath::new("/engine/scoped_txn/file").unwrap();
+        txn.put(&inside, Entry::bytes(b"ok".to_vec()), CasExpectation::Any)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn scoped_txn_per_op_acl_blocks_write_without_write_permission() {
+        // ScopedFilesystem::begin needs write (BeginTxn maps to write).
+        // Grant write to authorize begin, then carry the ACL into the
+        // wrapper. A separate scoped scope with only `read` would never
+        // reach begin (BeginTxn requires write), so this matrix covers
+        // the "txn-time ACL diverges from initial grant" concern by
+        // dropping permissions through the per-op path inside the txn.
+        //
+        // To exercise the per-op denial path (PR #3659 review fix) we
+        // construct a scope whose grant has `write` (so begin succeeds)
+        // but no `delete`, and assert delete inside the txn returns the
+        // ACL error rather than reaching the inner backend.
+        let scoped = scoped_txn_stub(MountPermissions::read_write());
+        let mut txn = scoped
+            .begin(&ScopedPath::new("/workspace").unwrap())
+            .await
+            .unwrap();
+        let inside = VirtualPath::new("/engine/scoped_txn/file").unwrap();
+        let err = txn.delete(&inside).await.unwrap_err();
+        match err {
+            FilesystemError::Backend {
+                operation: FilesystemOperation::Delete,
+                reason,
+                ..
+            } => {
+                assert!(
+                    reason.contains("permission"),
+                    "expected permission-denial reason, got {reason}"
+                );
+            }
+            other => panic!("expected Backend(permission), got {other:?}"),
+        }
     }
 }

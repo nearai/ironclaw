@@ -31,6 +31,7 @@ mod record;
 mod root;
 mod scoped;
 mod types;
+mod vector;
 
 pub use backend::{EventRecord, StorageTxn};
 pub use catalog::{CompositeRootFilesystem, FilesystemCatalog, MountDescriptor, PathPlacement};

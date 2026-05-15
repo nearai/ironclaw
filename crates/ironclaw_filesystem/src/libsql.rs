@@ -11,6 +11,7 @@ use crate::db::{
     not_found, record_version_from_i64, sql_index_name, system_time_from_unix_seconds,
     valid_engine_path, virtual_path_prefixes,
 };
+use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
     BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
     FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexSpec,
@@ -31,20 +32,45 @@ impl LibSqlRootFilesystem {
 
     pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
         let conn = self.connect().await?;
-        conn.execute_batch(LIBSQL_ROOT_FILESYSTEM_SCHEMA)
-            .await
-            .map_err(|error| {
-                libsql_db_error(
-                    valid_engine_path(),
-                    FilesystemOperation::CreateDirAll,
-                    error,
-                )
-            })?;
-        ensure_libsql_root_is_dir_column(&conn).await?;
-        ensure_libsql_records_columns(&conn).await?;
-        ensure_libsql_index_specs_table(&conn).await?;
-        ensure_libsql_events_table(&conn).await?;
-        Ok(())
+        // Wrap every step in a single SQLite transaction so a mid-migration
+        // crash can't leave concurrent readers observing a half-migrated
+        // schema (e.g. `is_dir` column present but `version` missing). SQLite
+        // supports transactional DDL — CREATE TABLE, CREATE INDEX, and
+        // ALTER TABLE ADD COLUMN all participate in BEGIN/COMMIT.
+        //
+        // `BEGIN IMMEDIATE` acquires the write lock up front so two
+        // concurrent processes attempting first-time migration serialise
+        // rather than both racing the pragma checks.
+        conn.execute("BEGIN IMMEDIATE", ()).await.map_err(|error| {
+            libsql_db_error(
+                valid_engine_path(),
+                FilesystemOperation::CreateDirAll,
+                error,
+            )
+        })?;
+        let result = run_libsql_migrations_inner(&conn).await;
+        match result {
+            Ok(()) => conn
+                .execute("COMMIT", ())
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    libsql_db_error(
+                        valid_engine_path(),
+                        FilesystemOperation::CreateDirAll,
+                        error,
+                    )
+                }),
+            Err(err) => {
+                // Best-effort rollback. If ROLLBACK itself fails (e.g. the
+                // connection is already aborted) we still surface the
+                // original migration error to the caller — `_` is the
+                // documented pattern for unwinding here. SQLite auto-rolls-
+                // back on connection close as a final safety net.
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
+        }
     }
 
     async fn connect(&self) -> Result<libsql::Connection, FilesystemError> {
@@ -789,26 +815,24 @@ impl RootFilesystem for LibSqlRootFilesystem {
             libsql::params![path.as_str(), libsql::Value::Blob(payload)],
         )
         .await
-        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::AppendFile, error))?;
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
         let mut rows = conn
             .query("SELECT last_insert_rowid()", ())
             .await
-            .map_err(|error| {
-                libsql_db_error(path.clone(), FilesystemOperation::AppendFile, error)
-            })?;
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
         let row = rows
             .next()
             .await
-            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::AppendFile, error))?
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?
             .ok_or_else(|| FilesystemError::Backend {
                 path: path.clone(),
-                operation: FilesystemOperation::AppendFile,
+                operation: FilesystemOperation::Append,
                 reason: "last_insert_rowid returned no row after insert".to_string(),
             })?;
-        let seq_raw: i64 = row.get(0).map_err(|error| {
-            libsql_db_error(path.clone(), FilesystemOperation::AppendFile, error)
-        })?;
-        seq_no_from_i64(path, seq_raw, FilesystemOperation::AppendFile)
+        let seq_raw: i64 = row
+            .get(0)
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
+        seq_no_from_i64(path, seq_raw, FilesystemOperation::Append)
     }
 
     async fn tail(
@@ -902,6 +926,26 @@ impl RootFilesystem for LibSqlRootFilesystem {
         })?;
         Ok(())
     }
+}
+
+/// Body of `run_migrations` extracted so the outer caller can wrap the
+/// whole sequence in BEGIN IMMEDIATE / COMMIT with one rollback path.
+#[cfg(feature = "libsql")]
+async fn run_libsql_migrations_inner(conn: &libsql::Connection) -> Result<(), FilesystemError> {
+    conn.execute_batch(LIBSQL_ROOT_FILESYSTEM_SCHEMA)
+        .await
+        .map_err(|error| {
+            libsql_db_error(
+                valid_engine_path(),
+                FilesystemOperation::CreateDirAll,
+                error,
+            )
+        })?;
+    ensure_libsql_root_is_dir_column(conn).await?;
+    ensure_libsql_records_columns(conn).await?;
+    ensure_libsql_index_specs_table(conn).await?;
+    ensure_libsql_events_table(conn).await?;
+    Ok(())
 }
 
 #[cfg(feature = "libsql")]
@@ -1190,13 +1234,38 @@ impl LibSqlRootFilesystem {
             let version = record_version_from_i64(&row_path, version_raw)?;
             ranked.push((row_path, version, score));
         }
-        ranked.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        // Sort by descending cosine score, then ascending path for a stable
+        // tie-breaker so equal-score rows truncate deterministically across
+        // runs and across backends. The in-memory reference uses the same
+        // tie-breaker; this keeps cross-backend behavior aligned.
+        ranked.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.as_str().cmp(b.0.as_str()))
+        });
         ranked.truncate(limit as usize);
         // Materialize bodies only for the top-k. Drop the streaming
         // iterator + connection so each `get()` claims its own
         // connection via the pool helper.
         drop(rows);
         drop(conn);
+        self.materialize_ranked(ranked).await
+    }
+
+    /// Phase-2 of [`vector_nearest_query`]: load full [`VersionedEntry`]
+    /// bodies for the ranked-and-truncated candidate set.
+    ///
+    /// A path that disappears between phase-1 ranking and phase-2 `get` is
+    /// silently dropped from the result — the search "fails open" so a
+    /// concurrent delete doesn't blow up an in-flight query. Pulled out
+    /// of `vector_nearest_query` to give the concurrent-delete branch a
+    /// deterministic test seam (otherwise we'd need to time a delete
+    /// between the phase-1 SELECT and phase-2 `get` from outside the
+    /// function, which the runtime gives no control over).
+    pub(crate) async fn materialize_ranked(
+        &self,
+        ranked: Vec<(VirtualPath, RecordVersion, f32)>,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         let mut out = Vec::with_capacity(ranked.len());
         for (row_path, _version, _score) in ranked {
             let Some(versioned) = self.get(&row_path).await? else {
@@ -1309,7 +1378,7 @@ async fn ensure_libsql_events_table(conn: &libsql::Connection) -> Result<(), Fil
     conn.execute_batch(LIBSQL_EVENTS_SCHEMA)
         .await
         .map_err(|error| {
-            libsql_db_error(valid_engine_path(), FilesystemOperation::AppendFile, error)
+            libsql_db_error(valid_engine_path(), FilesystemOperation::Append, error)
         })?;
     Ok(())
 }
@@ -1380,6 +1449,17 @@ fn translate_filter(
             Ok(())
         }
         Filter::Range { key, lo, hi } => {
+            // Mixed-variant bounds (e.g. `lo: I64(0)`, `hi: Text("x")`) have
+            // no meaningful BETWEEN — reject closed rather than fall back to
+            // lexicographic comparison. Matches the in-memory backend's
+            // `discriminant(lo) == discriminant(hi)` requirement and keeps
+            // cross-backend semantics aligned.
+            if std::mem::discriminant(lo) != std::mem::discriminant(hi) {
+                return Err(FilesystemError::Unsupported {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Query,
+                });
+            }
             // PR #3659 review fix: guard the comparison with a JSON-type
             // check so a row whose stored value at `$.{key}` is a different
             // variant (e.g. text under a numeric range) does NOT participate
@@ -1388,11 +1468,10 @@ fn translate_filter(
             // entirely on a cast failure.
             let lo_idx = bind_index_value(path, lo, params)?;
             let hi_idx = bind_index_value(path, hi, params)?;
-            let expected_json_type = index_value_json_type(lo);
+            let json_type_guard = index_value_json_type_guard(key, lo);
             out.push_str(&format!(
-                "(json_type(indexed, '$.{}') = '{expected_json_type}' \
+                "({json_type_guard} \
                  AND json_extract(indexed, '$.{}') BETWEEN ?{lo_idx} AND ?{hi_idx})",
-                key.as_str(),
                 key.as_str(),
             ));
             Ok(())
@@ -1494,39 +1573,6 @@ fn ancestor_prefixes(path: &str) -> Vec<String> {
 }
 
 #[cfg(feature = "libsql")]
-fn decode_embedding_blob(bytes: &[u8]) -> Option<Vec<f32>> {
-    if bytes.is_empty() || !bytes.len().is_multiple_of(std::mem::size_of::<f32>()) {
-        return None;
-    }
-    Some(
-        bytes
-            .chunks_exact(std::mem::size_of::<f32>())
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-            .collect(),
-    )
-}
-
-#[cfg(feature = "libsql")]
-fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f32> {
-    if left.len() != right.len() || left.is_empty() {
-        return None;
-    }
-    let mut dot = 0.0_f32;
-    let mut left_norm = 0.0_f32;
-    let mut right_norm = 0.0_f32;
-    for (l, r) in left.iter().zip(right.iter()) {
-        dot += l * r;
-        left_norm += l * l;
-        right_norm += r * r;
-    }
-    if left_norm <= 0.0 || right_norm <= 0.0 {
-        return None;
-    }
-    let score = dot / (left_norm.sqrt() * right_norm.sqrt());
-    if score.is_finite() { Some(score) } else { None }
-}
-
-#[cfg(feature = "libsql")]
 fn bind_index_value(
     path: &VirtualPath,
     value: &IndexValue,
@@ -1547,18 +1593,27 @@ fn bind_index_value(
     Ok(params.len())
 }
 
-/// Maps an [`IndexValue`] variant to the corresponding SQLite `json_type`
-/// discriminator string. Used to guard `Filter::Range` so cross-variant
-/// stored values don't participate in BETWEEN comparisons (PR #3659 review
-/// fix).
+/// Build a `json_type(indexed, '$.{key}')`-shaped guard expression that
+/// admits only rows whose stored value at `$.{key}` is the same JSON shape
+/// as `value`. Used to guard `Filter::Range` so cross-variant stored values
+/// don't participate in BETWEEN comparisons (PR #3659 review fix).
+///
+/// SQLite's `json_type` returns the literal strings `"true"` / `"false"` for
+/// JSON booleans rather than `"boolean"`, so the bool guard checks for
+/// either. A prior version emitted `= 'integer'` for `IndexValue::Bool`,
+/// which never matched a stored boolean and silently dropped every row.
 #[cfg(feature = "libsql")]
-fn index_value_json_type(value: &IndexValue) -> &'static str {
+fn index_value_json_type_guard(key: &IndexKey, value: &IndexValue) -> String {
+    let key = key.as_str();
     match value {
-        IndexValue::Text(_) => "text",
-        IndexValue::I64(_) => "integer",
-        // SQLite's json_type returns "true" / "false" for booleans, not "boolean".
-        IndexValue::Bool(_) => "integer", // we encode bools as 0/1 integers above
-        IndexValue::Bytes(_) => "text",
+        IndexValue::Text(_) => format!("json_type(indexed, '$.{key}') = 'text'"),
+        IndexValue::I64(_) => format!("json_type(indexed, '$.{key}') = 'integer'"),
+        IndexValue::Bool(_) => {
+            format!("json_type(indexed, '$.{key}') IN ('true', 'false')")
+        }
+        // Bytes can't reach this code: `bind_index_value` rejects Bytes
+        // bounds with Unsupported before the guard is built.
+        IndexValue::Bytes(_) => format!("json_type(indexed, '$.{key}') = 'text'"),
     }
 }
 
@@ -1640,3 +1695,72 @@ CREATE TABLE IF NOT EXISTS root_filesystem_events (
 CREATE INDEX IF NOT EXISTS idx_root_filesystem_events_path_seq
     ON root_filesystem_events(path, seq);
 "#;
+
+#[cfg(test)]
+mod tests {
+    //! Deterministic regression tests for libSQL behaviours that aren't
+    //! easily exercised from the integration test surface (`tests/`),
+    //! either because they need `pub(crate)` seams or because they
+    //! manipulate state between internal phases. Cross-backend
+    //! contract tests live in `tests/db_root_filesystem_contract.rs`;
+    //! tests here cover internals that the integration surface can't
+    //! reach.
+
+    use super::*;
+    use crate::{CasExpectation, Entry, RecordKind};
+    use ironclaw_host_api::VirtualPath;
+
+    async fn fresh_backend() -> (LibSqlRootFilesystem, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("vector-test.db");
+        let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let fs = LibSqlRootFilesystem::new(db);
+        fs.run_migrations().await.unwrap();
+        (fs, dir)
+    }
+
+    /// Drive the phase-2 materialize step directly with a synthesised
+    /// ranked candidate list that includes a path which no longer exists
+    /// in the backend. Locks in the "fail open on concurrent delete"
+    /// branch in `vector_nearest_query` — between phase-1 ranking and
+    /// the phase-2 `get`, a row may have been deleted by another writer;
+    /// the query must skip that row rather than fail. We can't time a
+    /// real concurrent delete from outside the function, so the
+    /// extracted `materialize_ranked` seam stands in for it.
+    #[tokio::test]
+    async fn materialize_ranked_silently_skips_missing_paths() {
+        let (fs, _dir) = fresh_backend().await;
+        let present = VirtualPath::new("/memory/present").unwrap();
+        let missing = VirtualPath::new("/memory/never_inserted").unwrap();
+
+        // Only `present` is inserted — `missing` never exists in the DB,
+        // which is exactly the state phase-2 sees if `missing` was ranked
+        // in phase 1 but deleted before the get() call.
+        let kind = RecordKind::new("chunk").unwrap();
+        let entry = Entry::record(kind, &serde_json::json!({})).unwrap();
+        fs.put(&present, entry, CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        let ranked = vec![
+            (present.clone(), RecordVersion::from_backend(1), 0.9_f32),
+            (missing.clone(), RecordVersion::from_backend(1), 0.5_f32),
+        ];
+        let out = fs.materialize_ranked(ranked).await.unwrap();
+        // The missing row is dropped silently; the present row survives.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, present);
+    }
+
+    /// Companion to the test above: materialize_ranked must surface
+    /// non-NotFound errors (anything other than the get-returns-None
+    /// branch) rather than swallowing them. Empty ranked list short-
+    /// circuits to an empty result without touching the DB — verify
+    /// no implicit work happens for a no-op call.
+    #[tokio::test]
+    async fn materialize_ranked_empty_input_returns_empty_output() {
+        let (fs, _dir) = fresh_backend().await;
+        let out = fs.materialize_ranked(Vec::new()).await.unwrap();
+        assert!(out.is_empty());
+    }
+}

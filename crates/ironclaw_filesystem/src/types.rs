@@ -13,8 +13,12 @@ use crate::record::RecordVersion;
 /// *intent* of an operation against the underlying [`MountPermissions`]
 /// surface and are reused by the unified `put`/`get` ops as their permission
 /// witness — `put` is a write, `get` is a read. The newer variants
-/// (`Query`, `EnsureIndex`, `BeginTxn`, `Tail`) describe operations that have
-/// no analogue in the legacy enum.
+/// (`Query`, `EnsureIndex`, `BeginTxn`, `Append`, `Tail`) describe operations
+/// that have no analogue in the legacy enum.
+///
+/// `AppendFile` is the legacy byte-plane append onto a regular file; `Append`
+/// is the event-plane append that assigns a [`SeqNo`](crate::SeqNo). They are
+/// distinct operations even though both map to `permissions.write`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilesystemOperation {
     MountLocal,
@@ -28,6 +32,7 @@ pub enum FilesystemOperation {
     Query,
     EnsureIndex,
     BeginTxn,
+    Append,
     Tail,
 }
 
@@ -45,6 +50,7 @@ impl std::fmt::Display for FilesystemOperation {
             Self::Query => "query",
             Self::EnsureIndex => "ensure_index",
             Self::BeginTxn => "begin_txn",
+            Self::Append => "append",
             Self::Tail => "tail",
         })
     }

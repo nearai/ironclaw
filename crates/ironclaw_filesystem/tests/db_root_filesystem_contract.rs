@@ -813,6 +813,174 @@ async fn libsql_query_prefix_filter_literal_percent_is_not_a_wildcard() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_query_range_on_bool_finds_matching_rows() {
+    // Regression test for the libSQL Range/Bool bug: SQLite's `json_type`
+    // returns the literal strings `"true"` / `"false"` for JSON booleans
+    // (not `"boolean"`/`"integer"`). A prior `json_type = 'integer'`
+    // guard never matched and silently dropped every bool row. The fix
+    // recognises both string variants; this test locks it in so a future
+    // refactor of `index_value_json_type_guard` can't regress.
+    let filesystem = libsql_root().await;
+    let kind = RecordKind::new("flag").unwrap();
+    let flag_key = IndexKey::new("enabled").unwrap();
+    let prefix = VirtualPath::new("/secrets/leases/bool_range").unwrap();
+    for (path, enabled) in [
+        ("/secrets/leases/bool_range/T", true),
+        ("/secrets/leases/bool_range/F", false),
+    ] {
+        let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(flag_key.clone(), IndexValue::Bool(enabled));
+        filesystem
+            .put(
+                &VirtualPath::new(path).unwrap(),
+                entry,
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    }
+    // Range covering the full bool space — both rows must match.
+    let results = filesystem
+        .query(
+            &prefix,
+            &Filter::Range {
+                key: flag_key.clone(),
+                lo: IndexValue::Bool(false),
+                hi: IndexValue::Bool(true),
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        2,
+        "libSQL Range on Bool must return both rows; prior bug dropped them"
+    );
+
+    // Single-value range — only `true` row matches.
+    let only_true = filesystem
+        .query(
+            &prefix,
+            &Filter::Range {
+                key: flag_key,
+                lo: IndexValue::Bool(true),
+                hi: IndexValue::Bool(true),
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(only_true.len(), 1);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_query_range_rejects_mixed_variant_bounds() {
+    // Mixed-variant bounds (e.g. I64 lo + Text hi) used to silently fall
+    // through to a lexicographic-on-text comparison that returned the
+    // wrong rows. After the discriminant guard they're rejected with
+    // Unsupported, matching the in-memory backend's
+    // `discriminant(lo) == discriminant(hi)` requirement.
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/secrets/leases/mixed").unwrap();
+    let err = filesystem
+        .query(
+            &prefix,
+            &Filter::Range {
+                key: IndexKey::new("k").unwrap(),
+                lo: IndexValue::I64(0),
+                hi: IndexValue::Text("z".into()),
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            FilesystemError::Unsupported {
+                operation: FilesystemOperation::Query,
+                ..
+            }
+        ),
+        "expected Unsupported for mixed-variant Range bounds, got {err:?}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_vector_nearest_stable_tie_break_on_equal_cosine() {
+    // Regression test for the tie-breaker fix: equal-cosine candidates
+    // used to truncate non-deterministically because the SQL backends
+    // omitted the secondary path comparator. Two identical embeddings
+    // under different paths must now sort by path ascending and the
+    // top-1 truncation must always pick the lex-smaller path.
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/memory/tie_break").unwrap();
+    let kind = RecordKind::new("chunk").unwrap();
+    let embedding_key = IndexKey::new("embedding").unwrap();
+    let spec = IndexSpec::new(
+        IndexName::new("by_vec_tie").unwrap(),
+        vec![embedding_key.clone()],
+        IndexKind::Vector { dim: 3 },
+    );
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+    let blob: Vec<u8> = [1.0_f32, 0.0, 0.0]
+        .iter()
+        .flat_map(|f| f.to_le_bytes())
+        .collect();
+    for leaf in ["zz", "aa", "mm"] {
+        let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(embedding_key.clone(), IndexValue::Bytes(blob.clone()));
+        filesystem
+            .put(
+                &VirtualPath::new(format!("/memory/tie_break/{leaf}")).unwrap(),
+                entry,
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    }
+    // Three identical embeddings; the top-1 truncation must always pick
+    // `aa` (lex-smallest) because the tie-breaker sorts by path.
+    let top_one = filesystem
+        .query(
+            &prefix,
+            &Filter::VectorNearest {
+                key: embedding_key.clone(),
+                embedding: vec![1.0, 0.0, 0.0],
+                limit: 1,
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(top_one.len(), 1);
+    assert_eq!(top_one[0].path.as_str(), "/memory/tie_break/aa");
+
+    // Top-2 picks `aa` then `mm` deterministically.
+    let top_two = filesystem
+        .query(
+            &prefix,
+            &Filter::VectorNearest {
+                key: embedding_key,
+                embedding: vec![1.0, 0.0, 0.0],
+                limit: 2,
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(top_two.len(), 2);
+    assert_eq!(top_two[0].path.as_str(), "/memory/tie_break/aa");
+    assert_eq!(top_two[1].path.as_str(), "/memory/tie_break/mm");
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_query_paginates_results() {
     let filesystem = libsql_root().await;
     let kind = RecordKind::new("lease").unwrap();
@@ -1206,6 +1374,92 @@ mod postgres_tests {
             .await
             .unwrap();
         assert_eq!(results.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn postgres_query_range_rejects_mixed_variant_bounds() {
+        // Mixed-variant bounds used to silently lex-compare on text and
+        // return the wrong rows. The discriminant guard now rejects them
+        // with Unsupported on Postgres just like the in-memory and libSQL
+        // backends, keeping cross-backend semantics aligned.
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let prefix_path = VirtualPath::new(&prefix).unwrap();
+        let err = fs
+            .query(
+                &prefix_path,
+                &Filter::Range {
+                    key: IndexKey::new("k").unwrap(),
+                    lo: IndexValue::I64(0),
+                    hi: IndexValue::Text("z".into()),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                FilesystemError::Unsupported {
+                    operation: FilesystemOperation::Query,
+                    ..
+                }
+            ),
+            "expected Unsupported for mixed-variant Range bounds, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_vector_nearest_stable_tie_break_on_equal_cosine() {
+        // Equal-cosine candidates must truncate deterministically.
+        // Mirrors the libSQL tie-break test so cross-backend behavior
+        // stays aligned with the in-memory reference (which has carried
+        // the secondary `path.cmp` tie-breaker since the original
+        // implementation).
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let prefix_path = VirtualPath::new(&prefix).unwrap();
+        let kind = RecordKind::new("chunk").unwrap();
+        let embedding_key = IndexKey::new("embedding").unwrap();
+        let spec = IndexSpec::new(
+            IndexName::new("by_vec_tie").unwrap(),
+            vec![embedding_key.clone()],
+            IndexKind::Vector { dim: 3 },
+        );
+        fs.ensure_index(&prefix_path, &spec).await.unwrap();
+        let blob: Vec<u8> = [1.0_f32, 0.0, 0.0]
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        for leaf in ["zz", "aa", "mm"] {
+            let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+                .unwrap()
+                .with_indexed(embedding_key.clone(), IndexValue::Bytes(blob.clone()));
+            fs.put(&vpath(&prefix, leaf), entry, CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+        let top_one = fs
+            .query(
+                &prefix_path,
+                &Filter::VectorNearest {
+                    key: embedding_key,
+                    embedding: vec![1.0, 0.0, 0.0],
+                    limit: 1,
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(top_one.len(), 1);
+        // The lex-smallest path among the three identical embeddings wins.
+        assert!(
+            top_one[0].path.as_str().ends_with("/aa"),
+            "expected /aa to win lex tie-break, got {}",
+            top_one[0].path
+        );
     }
 
     #[tokio::test]
