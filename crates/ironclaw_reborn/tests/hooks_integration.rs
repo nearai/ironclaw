@@ -1553,6 +1553,97 @@ async fn event_triggered_subscription_with_foreign_user_stream_fails_host_build(
     );
 }
 
+/// serrrfirat MED on PR #3640: a hook subscribing to its own lifecycle
+/// events (HookFailed/HookDispatched/HookDecisionEmitted) with a scope
+/// that matches its own provider would otherwise be dispatched for events
+/// describing its OWN executions — the dispatch loop's emit_failure /
+/// emit_decision projections cause N+1, infinite storm. The dispatcher now
+/// skips events whose `event.hook_id` equals the binding's own hook id for
+/// hook-lifecycle event kinds.
+#[tokio::test]
+async fn event_triggered_self_lifecycle_event_does_not_redispatch() {
+    let fixture = Fixture::new().await;
+    let scope = runtime_scope(&fixture);
+    let stream = EventStreamKey::from_scope(&scope);
+    let log = Arc::new(InMemoryDurableEventLog::new());
+    let ext = ironclaw_host_api::ExtensionId::new("ext-self").expect("valid ext");
+
+    // The subscription's own hook id (matches what
+    // `event_triggered_dispatcher_with_scope` derives).
+    let subscriber_hook_id = HookId::derive(
+        &ExtensionId(ext.as_str().to_string()),
+        "0.0.1",
+        &HookLocalId(format!("event-{:?}", RuntimeEventKind::HookFailed)),
+        HookVersion::ONE,
+    );
+
+    // Event #1: a HookFailed whose `hook_id` is the subscriber's own id and
+    // whose `provider` matches its own extension. Without the self-trigger
+    // skip, this would dispatch the subscriber and start the storm.
+    log.append(RuntimeEvent::hook_failed(
+        scope.clone(),
+        runtime_capability("hooks.self_failed"),
+        subscriber_hook_id.to_hex(),
+        "panic",
+        "fail_isolated",
+        Some(ext.clone()),
+    ))
+    .await
+    .expect("append self-targeted hook failure event");
+    // Event #2: a HookFailed about a DIFFERENT hook, same provider — this
+    // SHOULD fire the subscription (control case, proves the filter is
+    // narrow).
+    let other_hook_id = HookId::derive(
+        &ExtensionId(ext.as_str().to_string()),
+        "0.0.1",
+        &HookLocalId("some-other-hook".to_string()),
+        HookVersion::ONE,
+    );
+    log.append(RuntimeEvent::hook_failed(
+        scope,
+        runtime_capability("hooks.other_failed"),
+        other_hook_id.to_hex(),
+        "panic",
+        "fail_isolated",
+        Some(ext.clone()),
+    ))
+    .await
+    .expect("append foreign-hook failure event");
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let _host = fixture
+        .factory()
+        .with_hook_dispatcher(event_triggered_dispatcher_with_scope(
+            RuntimeEventKind::HookFailed,
+            Arc::clone(&seen),
+            HookBindingScope::OwnCapabilities,
+            ext.as_str(),
+            None,
+        ))
+        .with_event_subscription(event_log_subscription(
+            Arc::clone(&log),
+            stream,
+            RuntimeEventCursor::origin(),
+        ))
+        .build_text_only_host_with_capabilities(fixture.request(), inner)
+        .await
+        .expect("host builds");
+
+    let events = wait_for_seen_events(&seen, 1).await;
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly one event should fire — the self-targeted one is suppressed"
+    );
+    assert_eq!(
+        events[0].hook_id.as_deref(),
+        Some(other_hook_id.to_hex().as_str()),
+        "only the OTHER hook's failure should fire; the subscriber's own \
+         lifecycle event is suppressed to break the self-trigger loop"
+    );
+}
+
 /// serrrfirat MED on PR #3640: a `ReplayGap` from the durable log used to
 /// log a warn and silently break the subscription loop. Now it surfaces an
 /// `EventSubscriptionTerminated` `DriverNote` milestone so SSE/audit

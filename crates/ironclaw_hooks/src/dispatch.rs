@@ -1170,6 +1170,23 @@ impl HookDispatcher {
             ) {
                 continue;
             }
+            // serrrfirat MED #3 on PR #3640: skip self-observation. A hook
+            // that subscribes to a hook-lifecycle event kind
+            // (HookDispatched/HookDecisionEmitted/HookFailed) and whose
+            // owning_extension scope happens to match its own provider would
+            // otherwise be dispatched for events about ITS OWN execution —
+            // a `HookFailed` from dispatch N triggers dispatch N+1, which
+            // fails again, infinite storm. Skip when the event's hook_id
+            // (the lifecycle subject) equals the binding's own hook_id.
+            // This does not cover the broader case of a hook emitting
+            // arbitrary RuntimeEvents through a captured `DurableEventLog`
+            // — that requires architectural restriction on what hooks can
+            // capture, tracked separately.
+            if is_hook_lifecycle_kind(event.kind)
+                && event.hook_id.as_deref() == Some(binding.hook_id.to_hex().as_str())
+            {
+                continue;
+            }
             let Some(hook) = self.event_triggered.get(&binding.hook_id) else {
                 self.poison_with_failure(
                     binding.hook_id,
@@ -1677,6 +1694,21 @@ impl HookDispatcher {
             Err(_) => None,
         }
     }
+}
+
+/// Returns `true` if `kind` is one of the hook-lifecycle event kinds emitted
+/// by the dispatcher itself when a hook is dispatched/decides/fails. These
+/// are the kinds that can drive self-trigger storms when a hook subscribes
+/// to them with a scope that matches its own provider; the dispatch loop
+/// skips events whose `hook_id` equals the binding's own id (see
+/// `dispatch_event_triggered_at`).
+fn is_hook_lifecycle_kind(kind: RuntimeEventKind) -> bool {
+    matches!(
+        kind,
+        RuntimeEventKind::HookDispatched
+            | RuntimeEventKind::HookDecisionEmitted
+            | RuntimeEventKind::HookFailed
+    )
 }
 
 fn decision_kind_for(point: HookPointSpec) -> crate::trust::DecisionKind {
