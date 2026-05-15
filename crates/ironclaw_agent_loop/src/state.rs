@@ -28,6 +28,7 @@ use ironclaw_turns::{
 /// legacy `&'static str` form because the `ComponentIdentity` migration is
 /// deferred to follow-up PRs (#3470/#3524/#3462) per the brief.
 pub const CHECKPOINT_SCHEMA_ID: &str = "reborn:default-loop-v1";
+pub const CHECKPOINT_SCHEMA_VERSION: u64 = 1;
 
 /// Immutable execution state threaded through the loop.
 ///

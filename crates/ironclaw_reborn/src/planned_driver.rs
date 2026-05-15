@@ -11,16 +11,17 @@ use async_trait::async_trait;
 use ironclaw_agent_loop::{
     executor::{AgentLoopExecutor, AgentLoopExecutorError, CanonicalAgentLoopExecutor, HostStage},
     family::{LoopFamily, LoopFamilyId, LoopFamilyRegistry},
-    state::{CHECKPOINT_SCHEMA_ID, CheckpointKind, LoopExecutionState},
+    state::{CHECKPOINT_SCHEMA_ID, CHECKPOINT_SCHEMA_VERSION, CheckpointKind, LoopExecutionState},
 };
 use ironclaw_turns::{
     LoopExit, RunProfileVersion,
     run_profile::{
         AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError, AgentLoopDriverHost,
-        AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest,
+        AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopDriverId,
     },
 };
 
+pub const PLANNED_DRIVER_DEFAULT_ID: &str = "reborn:planned-default";
 const PLANNED_DRIVER_VERSION: u64 = 1;
 
 /// Non-generic adapter from one resolved loop family to `AgentLoopDriver`.
@@ -32,11 +33,12 @@ pub struct PlannedDriver {
 
 impl PlannedDriver {
     pub fn from_family(
+        driver_id: LoopDriverId,
         family: Arc<LoopFamily>,
         executor: Arc<CanonicalAgentLoopExecutor>,
         version: RunProfileVersion,
     ) -> Result<Self, AgentLoopDriverError> {
-        let descriptor = descriptor_for_family(family.id(), version)?;
+        let descriptor = descriptor_for_driver_id(driver_id, version)?;
         Ok(Self {
             descriptor,
             family,
@@ -45,6 +47,7 @@ impl PlannedDriver {
     }
 
     pub fn from_registry(
+        driver_id: LoopDriverId,
         registry: &LoopFamilyRegistry,
         id: &LoopFamilyId,
         executor: Arc<CanonicalAgentLoopExecutor>,
@@ -55,13 +58,14 @@ impl PlannedDriver {
             .ok_or_else(|| AgentLoopDriverError::InvalidRequest {
                 reason: format!("unknown loop family: {id}"),
             })?;
-        Self::from_family(family, executor, version)
+        Self::from_family(driver_id, family, executor, version)
     }
 
     pub fn default_from_registry(
         registry: &LoopFamilyRegistry,
     ) -> Result<Self, AgentLoopDriverError> {
         Self::from_registry(
+            planned_default_driver_id()?,
             registry,
             &LoopFamilyId::DEFAULT,
             Arc::new(CanonicalAgentLoopExecutor),
@@ -87,6 +91,7 @@ impl AgentLoopDriver for PlannedDriver {
             .execute_family(self.family.as_ref(), host, initial)
             .await
             .map_err(map_executor_error)
+            .and_then(reject_blocked_exit_until_resume_supported)
     }
 
     async fn resume(
@@ -95,20 +100,25 @@ impl AgentLoopDriver for PlannedDriver {
         _host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
         validate_resume_request(&request, &self.descriptor)?;
-        Err(AgentLoopDriverError::InvalidRequest {
-            reason: "planned driver resume requires WS-10 checkpoint payload loading".to_string(),
-        })
+        Err(pending_resume_error())
     }
 }
 
-fn descriptor_for_family(
-    family_id: &LoopFamilyId,
+fn planned_default_driver_id() -> Result<LoopDriverId, AgentLoopDriverError> {
+    LoopDriverId::new(PLANNED_DRIVER_DEFAULT_ID)
+        .map_err(|reason| AgentLoopDriverError::InvalidRequest { reason })
+}
+
+fn descriptor_for_driver_id(
+    driver_id: LoopDriverId,
     version: RunProfileVersion,
 ) -> Result<AgentLoopDriverDescriptor, AgentLoopDriverError> {
-    let driver_id = format!("reborn:{family_id}-loop");
-    AgentLoopDriverDescriptor::new(driver_id, version)
+    AgentLoopDriverDescriptor::new(driver_id.as_str(), version)
         .map_err(|reason| AgentLoopDriverError::InvalidRequest { reason })?
-        .with_checkpoint_schema(CHECKPOINT_SCHEMA_ID, version)
+        .with_checkpoint_schema(
+            CHECKPOINT_SCHEMA_ID,
+            RunProfileVersion::new(CHECKPOINT_SCHEMA_VERSION),
+        )
         .map_err(|reason| AgentLoopDriverError::InvalidRequest { reason })
 }
 
@@ -150,8 +160,30 @@ fn validate_descriptor_assignment(
     Ok(())
 }
 
+fn pending_resume_error() -> AgentLoopDriverError {
+    AgentLoopDriverError::Unavailable {
+        reason: "planned driver resume requires WS-10 checkpoint payload loading".to_string(),
+    }
+}
+
+fn reject_blocked_exit_until_resume_supported(
+    exit: LoopExit,
+) -> Result<LoopExit, AgentLoopDriverError> {
+    if matches!(exit, LoopExit::Blocked(_)) {
+        return Err(AgentLoopDriverError::Unavailable {
+            reason: "planned driver blocked exits require WS-10 checkpoint payload loading"
+                .to_string(),
+        });
+    }
+    Ok(exit)
+}
+
 pub(crate) fn map_executor_error(error: AgentLoopExecutorError) -> AgentLoopDriverError {
-    tracing::warn!(?error, "planned driver executor returned sanitized error");
+    if matches!(error, AgentLoopExecutorError::Cancelled) {
+        tracing::debug!(?error, "planned driver executor cancelled");
+    } else {
+        tracing::warn!(?error, "planned driver executor returned sanitized error");
+    }
     match error {
         AgentLoopExecutorError::HostUnavailable { stage } => AgentLoopDriverError::Unavailable {
             reason: format!("{}: unavailable", host_stage_name(stage)),
@@ -193,21 +225,112 @@ fn checkpoint_kind_name(kind: CheckpointKind) -> &'static str {
 mod tests {
     use super::*;
     use crate::build_loop_family_registry;
-    use ironclaw_turns::run_profile::{CheckpointSchemaId, LoopDriverId};
+    use ironclaw_turns::{
+        LoopBlocked, LoopBlockedKind, LoopExitId, LoopGateRef, TurnCheckpointId,
+        run_profile::{CheckpointSchemaId, LoopCheckpointStateRef, LoopDriverId},
+    };
 
     #[test]
     fn default_planned_driver_descriptor_uses_default_family_identity() {
-        let registry = build_loop_family_registry();
+        let registry = build_loop_family_registry().expect("registry");
         let driver = PlannedDriver::default_from_registry(&registry).expect("driver");
         let descriptor = driver.descriptor();
 
         assert_eq!(
             descriptor.id,
-            LoopDriverId::new("reborn:default-loop").expect("valid")
+            LoopDriverId::new(PLANNED_DRIVER_DEFAULT_ID).expect("valid")
         );
         assert_eq!(
             descriptor.checkpoint_schema_id,
             Some(CheckpointSchemaId::new(CHECKPOINT_SCHEMA_ID).expect("valid"))
+        );
+        assert_eq!(
+            descriptor.checkpoint_schema_version,
+            Some(RunProfileVersion::new(CHECKPOINT_SCHEMA_VERSION))
+        );
+    }
+
+    #[test]
+    fn descriptor_for_family_uses_independent_checkpoint_schema_version() {
+        let descriptor = descriptor_for_driver_id(
+            LoopDriverId::new("reborn:custom-planned").expect("valid"),
+            RunProfileVersion::new(PLANNED_DRIVER_VERSION + 1),
+        )
+        .expect("descriptor");
+
+        assert_eq!(
+            descriptor.version,
+            RunProfileVersion::new(PLANNED_DRIVER_VERSION + 1)
+        );
+        assert_eq!(
+            descriptor.checkpoint_schema_version,
+            Some(RunProfileVersion::new(CHECKPOINT_SCHEMA_VERSION))
+        );
+    }
+
+    #[test]
+    fn validate_descriptor_assignment_rejects_wrong_driver() {
+        let descriptor = descriptor_for_driver_id(
+            LoopDriverId::new(PLANNED_DRIVER_DEFAULT_ID).expect("valid"),
+            RunProfileVersion::new(1),
+        )
+        .expect("descriptor");
+        let wrong_descriptor =
+            AgentLoopDriverDescriptor::new("reborn:other-loop", RunProfileVersion::new(1))
+                .expect("wrong descriptor")
+                .with_checkpoint_schema(
+                    CHECKPOINT_SCHEMA_ID,
+                    RunProfileVersion::new(CHECKPOINT_SCHEMA_VERSION),
+                )
+                .expect("wrong checkpoint schema");
+
+        let err = validate_descriptor_assignment(&wrong_descriptor, &descriptor)
+            .expect_err("descriptor mismatch should be rejected");
+
+        assert_eq!(
+            err,
+            AgentLoopDriverError::InvalidRequest {
+                reason: "driver request profile is not assigned to this planned driver".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn planned_resume_pending_error_is_unavailable() {
+        let descriptor = descriptor_for_driver_id(
+            LoopDriverId::new(PLANNED_DRIVER_DEFAULT_ID).expect("valid"),
+            RunProfileVersion::new(1),
+        )
+        .expect("descriptor");
+        let request_descriptor = descriptor.clone();
+
+        validate_descriptor_assignment(&request_descriptor, &descriptor)
+            .expect("matching descriptor");
+        assert_eq!(
+            pending_resume_error(),
+            AgentLoopDriverError::Unavailable {
+                reason: "planned driver resume requires WS-10 checkpoint payload loading"
+                    .to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn blocked_exits_are_unavailable_until_resume_is_supported() {
+        let blocked = LoopExit::Blocked(LoopBlocked {
+            kind: LoopBlockedKind::Approval,
+            gate_ref: LoopGateRef::new("gate:approval").expect("valid"),
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: LoopCheckpointStateRef::new("checkpoint:state").expect("valid"),
+            exit_id: LoopExitId::new("exit:blocked").expect("valid"),
+        });
+
+        assert_eq!(
+            reject_blocked_exit_until_resume_supported(blocked).expect_err("blocked pending WS10"),
+            AgentLoopDriverError::Unavailable {
+                reason: "planned driver blocked exits require WS-10 checkpoint payload loading"
+                    .to_string()
+            }
         );
     }
 

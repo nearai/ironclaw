@@ -319,7 +319,12 @@ impl TurnRunner {
             .ok_or(Error::UnknownLoopFamily {
                 id: profile.loop_family_id.clone(),
             })?;
-        let driver = PlannedDriver::from_family(family, self.executor.clone());
+        let driver = PlannedDriver::from_family(
+            profile.loop_driver.id.clone(),
+            family,
+            self.executor.clone(),
+            profile.loop_driver.version,
+        );
         driver.run(self.host.clone(), /* request */).await
     }
 }
