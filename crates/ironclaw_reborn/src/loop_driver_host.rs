@@ -212,7 +212,6 @@ where
     where
         F: RunCancellationFactory + 'static,
     {
-        let factory: Arc<dyn RunCancellationFactory> = factory;
         self.cancellation_factory = factory;
         self
     }

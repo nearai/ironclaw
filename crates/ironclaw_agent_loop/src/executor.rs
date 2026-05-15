@@ -62,6 +62,12 @@ pub enum AgentLoopExecutorError {
     PlannerContract { detail: &'static str },
     #[error("checkpoint write failed at {stage:?}")]
     CheckpointFailed { stage: CheckpointKind },
+    /// Constructed when a model or capability call returns a cancelled outcome
+    /// (i.e. `AgentLoopHostErrorKind::Cancelled` or `CapabilityFailureKind::Cancelled`
+    /// surfaces from an in-flight external call). Between-call boundary cancellation
+    /// — detected cooperatively by `checkpoint_and_exit_if_cancelled` — returns
+    /// `LoopExit::Cancelled` directly and never constructs this variant.
+    /// WS16 will build further on this split when product adapters are wired.
     #[error("cancelled by host before any LoopExit could be produced")]
     Cancelled,
 }
@@ -1032,6 +1038,9 @@ impl CanonicalAgentLoopExecutor {
         let _ = host.emit_loop_progress(event).await;
     }
 
+    // Cancellation is checked cooperatively at N boundary points between external calls.
+    // A macro refactor was considered but deferred; the explicit sites are self-documenting
+    // and the boundary count is stable for this workstream.
     async fn checkpoint_and_exit_if_cancelled(
         &self,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
@@ -1240,6 +1249,10 @@ fn failed_exit(
 fn cancelled_reason_from_signal(signal: &LoopCancellationSignal) -> LoopCancelledReasonKind {
     // LoopCancelReasonKind preserves host/input detail; LoopExit currently exposes
     // the coarser terminal taxonomy, so every observed signal maps explicitly here.
+    //
+    // Reason coarsened to HostCancellation intentionally: the loop exit taxonomy
+    // does not expose raw reason_kind to the product layer at this WS boundary.
+    // WS16/WS17 can map finer-grained reasons when the product adapter is wired.
     match signal.reason_kind {
         LoopCancelReasonKind::UserRequested
         | LoopCancelReasonKind::Superseded
