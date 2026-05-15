@@ -12,16 +12,16 @@
 Bridge the framework crate (`ironclaw_agent_loop`) to the runner-facing `AgentLoopDriver` trait (`ironclaw_turns`). One small struct + one trait impl in `ironclaw_reborn`.
 
 - `PlannedDriver` struct — **non-generic**. Holds `Arc<LoopFamily>` (opaque to this crate; produced by WS-3.5's registry) and `Arc<CanonicalAgentLoopExecutor>`. No `<P, E>` type parameters.
-- `impl AgentLoopDriver for PlannedDriver` — wires `run` and `resume` through to the executor.
+- `impl AgentLoopDriver for PlannedDriver` — wires fresh `run` calls through to the executor. `resume` validates the request but returns `Unavailable` until WS-10 adds checkpoint payload loading.
 - Sanitized error mapping from `AgentLoopExecutorError` to `AgentLoopDriverError`.
 - Driver descriptor produced from the registry/profile `LoopDriverId`; the checkpoint payload separately records the family's `LoopFamilyId` and `ComponentIdentity` for resume compatibility (the framework's reserved checkpoint schema is `CHECKPOINT_SCHEMA_ID` from WS-0).
 - Constructor `PlannedDriver::from_family(driver_id, family, executor)` — the canonical path. `TurnRunner` resolves a family from `Arc<LoopFamilyRegistry>` (WS-3.5) then constructs the driver under the registry/profile driver id. No direct planner injection exists.
+- Blocked exits are rejected as `Unavailable` in WS-7, because emitting a resumable `LoopExit::Blocked` before WS-10 can reload checkpoint payloads would persist runs that cannot continue.
 
 ## 2. Files
 
 ### NEW
 - `crates/ironclaw_reborn/src/planned_driver.rs` — struct, impl, error mapping
-- `crates/ironclaw_reborn/CLAUDE.md` — crate guardrail (see §6 below). Today this crate has no top-level CLAUDE.md; WS-7 introduces one alongside `PlannedDriver` since this is the first non-trivial integration code landing here under the new framework.
 
 ### EXTEND (only if registry wiring is included)
 - `crates/ironclaw_reborn/src/driver_registry.rs` — register the planned driver under its descriptor
@@ -45,7 +45,7 @@ use ironclaw_agent_loop::{
     canonical_executor::CanonicalAgentLoopExecutor,
     executor::{AgentLoopExecutor, AgentLoopExecutorError, HostStage},
     family::{LoopFamily, LoopFamilyId, LoopFamilyRegistry},
-    state::{CHECKPOINT_SCHEMA_ID, LoopExecutionState},
+    state::{CHECKPOINT_SCHEMA_ID, CHECKPOINT_SCHEMA_VERSION, LoopExecutionState},
 };
 use ironclaw_turns::{
     LoopExit, RunProfileVersion,
@@ -95,7 +95,10 @@ impl PlannedDriver {
         // for resume compatibility.
         let descriptor = AgentLoopDriverDescriptor::new(driver_id.as_str(), version)
             .map_err(|reason| AgentLoopDriverError::InvalidRequest { reason })?
-            .with_checkpoint_schema(CHECKPOINT_SCHEMA_ID, version)
+            .with_checkpoint_schema(
+                CHECKPOINT_SCHEMA_ID,
+                RunProfileVersion::new(CHECKPOINT_SCHEMA_VERSION),
+            )
             .map_err(|reason| AgentLoopDriverError::InvalidRequest { reason })?;
 
         Ok(Self { descriptor, family, executor })
@@ -128,7 +131,7 @@ impl AgentLoopDriver for PlannedDriver {
         host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
         validate_run_request(&request, &self.descriptor)?;
-        let initial = LoopExecutionState::initial(&request.run_context);
+        let initial = LoopExecutionState::initial_for_run(host.run_context());
         // The executor consumes `&LoopFamily` directly. The
         // `pub(crate) fn planner()` accessor on `LoopFamily` is invisible
         // outside `ironclaw_agent_loop`, so `PlannedDriver` cannot reach
@@ -137,40 +140,35 @@ impl AgentLoopDriver for PlannedDriver {
             .execute_family(self.family.as_ref(), host, initial)
             .await
             .map_err(map_executor_error)
+            .and_then(reject_blocked_exit_until_resume_supported)
     }
 
     async fn resume(
         &self,
         request: AgentLoopDriverResumeRequest,
-        host: &(dyn AgentLoopDriverHost + Send + Sync),
+        _host: &(dyn AgentLoopDriverHost + Send + Sync),
     ) -> Result<LoopExit, AgentLoopDriverError> {
         validate_resume_request(&request, &self.descriptor)?;
-        // Use the canonical WS-10 load-side request/response shape — see
-        // `checkpoint-store-and-resume.md` §3.1.
-        let loaded = host
-            .load_checkpoint_payload(LoadCheckpointPayloadRequest {
-                checkpoint_id: request.checkpoint_id,
-                expected_schema_id: request.resolved_run_profile.loop_driver
-                    .checkpoint_schema_id.clone(),
-                expected_schema_version: request.resolved_run_profile.loop_driver
-                    .checkpoint_schema_version,
-            })
-            .await
-            .map_err(|_| AgentLoopDriverError::Unavailable {
-                reason: "checkpoint:unavailable".to_string(),
-            })?;
-        let resumed = LoopExecutionState::from_checkpoint_payload(
-                loaded.payload.as_bytes(),
-                loaded.kind,
-            )
-            .map_err(|e| AgentLoopDriverError::Failed {
-                reason_kind: format!("checkpoint_rejected:{e}"),
-            })?;
-        self.executor
-            .execute_family(self.family.as_ref(), host, resumed)
-            .await
-            .map_err(map_executor_error)
+        Err(pending_resume_error())
     }
+}
+
+fn pending_resume_error() -> AgentLoopDriverError {
+    AgentLoopDriverError::Unavailable {
+        reason: "planned driver resume requires WS-10 checkpoint payload loading".to_string(),
+    }
+}
+
+fn reject_blocked_exit_until_resume_supported(
+    exit: LoopExit,
+) -> Result<LoopExit, AgentLoopDriverError> {
+    if matches!(exit, LoopExit::Blocked(_)) {
+        return Err(AgentLoopDriverError::Unavailable {
+            reason: "planned driver blocked exits require WS-10 checkpoint payload loading"
+                .to_string(),
+        });
+    }
+    Ok(exit)
 }
 ```
 
@@ -303,18 +301,20 @@ when there's a real use case (typically the first follow-up loop-family PR).
 - [ ] Trait conformance: `fn _check(_: &PlannedDriver) where PlannedDriver: AgentLoopDriver {}` (no generics)
 - [ ] Round-trip test: `PlannedDriver::from_registry(LoopDriverId::from_trusted_static("reborn:planned-default"), &registry, &LoopFamilyId::DEFAULT, executor, v1)` succeeds against `LoopFamilyRegistry::with_families(vec![Arc::new(families::default())])`; descriptor's `id` is `"reborn:planned-default"`; descriptor's `checkpoint_schema_id` is `CHECKPOINT_SCHEMA_ID`; checkpoint metadata separately records `LoopFamilyId::DEFAULT`
 - [ ] Resolution failure: `PlannedDriver::from_registry(LoopDriverId::from_trusted_static("reborn:planned-default"), &empty_registry, &LoopFamilyId("nope"), …)` returns `Err(InvalidRequest { reason: "unknown loop family: nope" })`
+- [ ] `resume` validates descriptor/schema assignment but returns `Unavailable { reason: "planned driver resume requires WS-10 checkpoint payload loading" }` until WS-10 lands the load path
+- [ ] `LoopExit::Blocked` from the executor is rejected as `Unavailable` until WS-10 can reload checkpoint payloads
 - [ ] Error-mapping tests:
   - `map_executor_error(HostUnavailable { stage: Model })` → `Unavailable { reason: "Model: unavailable" }`
   - `map_executor_error(CheckpointFailed { stage: BeforeModel })` → `Failed { reason_kind: "checkpoint_rejected:BeforeModel" }`
   - mapped `AgentLoopDriverError` debug output contains no raw provider names, no `/` paths, no secret-shaped strings (mirror the existing `text_loop_driver` test pattern)
-- [ ] Smoke test using a `MockAgentLoopDriverHost` that returns a Reply on first call:
-  - `PlannedDriver::run(req, &host)` returns `LoopExit::Completed` with assistant ref
-  - host recorder shows the four-checkpoint sequence (`BeforeModel`, `Final`)
-- [ ] Resume smoke test: load a checkpoint payload produced by serializing `LoopExecutionState`; assert `from_checkpoint_payload` accepts it; assert mismatched schema id is rejected with `Failed { reason_kind: "checkpoint_rejected:..." }`
+- [ ] Driver-side E2E smoke through `PlannedDriver::run` is tracked in WS-8 (`e2e-integration-tests.md`)
+- [ ] Full checkpoint load/resume smoke is tracked in WS-10 (`checkpoint-store-and-resume.md`)
 
 ## 5. Out of scope
 
 - A real `LoopCapabilityPort` (still `EmptyLoopCapabilityPort` until a tool-capable driver lands)
+- Checkpoint payload loading and true `resume` execution — WS-10 owns the load-side host port and resume path
+- Driver-side E2E proof through `PlannedDriver::run` — WS-8 owns the feature-gated test-support module and integration suite
 - Registry wiring — optional; recommended but not required for the skeleton
 - Migration of `TextOnlyModelReplyDriver` to a `TextOnlyPlanner` factory — explicitly deferred per master doc §11
 - `ModelRouteChain` migration of `LoopRunContext.resolved_model_route` — deferred per master doc §9
