@@ -67,29 +67,31 @@ use ironclaw_trust::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, AgentLoopDriverDescriptor, AgentLoopDriverError,
-    AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, CheckpointStateStore,
-    DefaultTurnCoordinator, EventCursor, GetCheckpointStateRequest, GetLoopCheckpointRequest,
-    GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    InMemoryRunProfileResolver, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopBlocked,
-    LoopBlockedKind, LoopCheckpointRecord, LoopCheckpointStore, LoopCompleted, LoopCompletionKind,
-    LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, PutCheckpointStateRequest,
-    PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId,
-    RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnId,
-    TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, CancelRunRequest, CancelRunResponse,
+    CheckpointStateStore, DefaultTurnCoordinator, EventCursor, GetCheckpointStateRequest,
+    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore,
+    InMemoryLoopCheckpointStore, InMemoryRunProfileResolver, InMemoryTurnStateStore,
+    InMemoryTurnStateStoreLimits, LoopBlocked, LoopBlockedKind, LoopCheckpointRecord,
+    LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef,
+    LoopMessageRef, LoopResultRef, PutCheckpointStateRequest, PutLoopCheckpointRequest,
+    ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId, RunProfileResolutionRequest,
+    RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    TurnActor, TurnAdmissionPolicy, TurnCoordinator, TurnError, TurnId, TurnLeaseToken, TurnRunId,
+    TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityFailureKind, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
         FinalizeAssistantMessage, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
-        LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
-        LoopCheckpointStateRef, LoopContextRequest, LoopDriverId, LoopDriverNoteKind, LoopGateKind,
-        LoopHostMilestone, LoopHostMilestoneKind, LoopInlineMessage, LoopInlineMessageRole,
-        LoopInput, LoopInputAckToken, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelGatewayError, LoopModelPort, LoopModelRequest,
-        LoopModelRouteSnapshot, LoopProgressEvent, LoopPromptBundleRequest, LoopPromptPort,
-        LoopRunContext, LoopSafeSummary, ModelCallOutcome, ParentLoopOutput, PromptMode,
-        SkillVisibility, StageCheckpointPayloadRequest, VisibleCapabilityRequest,
+        LoopCancelReasonKind, LoopCancellationPort, LoopCapabilityPort, LoopCheckpointKind,
+        LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextRequest,
+        LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone, LoopHostMilestoneKind,
+        LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAckToken, LoopInputCursor,
+        LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError,
+        LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelCallOutcome,
+        ParentLoopOutput, PromptMode, SkillVisibility, StageCheckpointPayloadRequest,
+        VisibleCapabilityRequest,
     },
     runner::{ClaimRunRequest, ClaimedTurnRun, TurnRunTransitionPort},
 };
@@ -952,6 +954,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
     let evidence: Arc<dyn LoopExitEvidencePort> =
         Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
             thread_service.clone(),
+            turn_store.clone(),
             loop_checkpoint_store.clone(),
         ));
     let applier = Arc::new(LoopExitApplier::new(transition_port, evidence));
@@ -962,6 +965,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
         thread_scope.clone(),
         gateway.clone(),
         Arc::new(InMemoryCheckpointStateStore::default()),
+        turn_store.clone(),
         loop_checkpoint_store,
         milestone_sink,
         TextOnlyLoopHostConfig {
@@ -1651,6 +1655,7 @@ async fn turn_runner_worker_records_recovery_when_real_host_factory_rejects_clai
         Arc::clone(&fixture.gateway),
         fixture.checkpoint_state_store.clone(),
         turn_store.clone(),
+        turn_store.clone(),
         fixture.milestone_sink.clone(),
         TextOnlyLoopHostConfig {
             max_messages: 8,
@@ -1958,6 +1963,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
     ));
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         fixture.thread_service.clone(),
+        turn_store.clone(),
         turn_store.clone(),
     ));
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
@@ -2676,6 +2682,38 @@ async fn text_only_host_factory_threads_identity_source_to_prompt_and_model() {
 }
 
 #[tokio::test]
+async fn text_only_host_default_cancellation_factory_observes_durable_cancel_request() {
+    let fixture = HostFixture::new("thread-host-default-cancel", "hello").await;
+    let mut durable_state = fixture.claimed.state.clone();
+    durable_state.status = TurnStatus::CancelRequested;
+    let factory = RebornLoopDriverHostFactory::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        Arc::clone(&fixture.gateway),
+        fixture.checkpoint_state_store.clone(),
+        Arc::new(StaticTurnStateStore::new(durable_state)),
+        fixture.loop_checkpoint_store.clone(),
+        fixture.milestone_sink.clone(),
+        TextOnlyLoopHostConfig {
+            max_messages: 8,
+            require_model_route_snapshot: false,
+        },
+    );
+
+    assert!(factory.cancellation_observation_kind().is_live_capable());
+    let host = factory
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+
+    let signal = host.observe_cancellation().expect("cancel signal");
+    assert_eq!(signal.reason_kind, LoopCancelReasonKind::UserRequested);
+}
+
+#[tokio::test]
 async fn text_only_host_factory_rejects_thread_scope_mismatch() {
     let fixture = HostFixture::new("thread-host-thread-scope-mismatch", "hello").await;
     let wrong_scope = ThreadScope {
@@ -2687,6 +2725,7 @@ async fn text_only_host_factory_rejects_thread_scope_mismatch() {
         wrong_scope,
         Arc::clone(&fixture.gateway),
         fixture.checkpoint_state_store.clone(),
+        fixture.turn_state_store.clone(),
         fixture.loop_checkpoint_store.clone(),
         fixture.milestone_sink.clone(),
         TextOnlyLoopHostConfig {
@@ -5347,6 +5386,7 @@ impl HostFactory for CapabilityHostFactory {
             self.thread_scope.clone(),
             self.model_gateway.clone(),
             self.checkpoint_state_store.clone(),
+            Arc::new(StaticTurnStateStore::new(claimed.state.clone())),
             self.loop_checkpoint_store.clone(),
             self.milestone_sink.clone(),
             TextOnlyLoopHostConfig {
@@ -5592,9 +5632,52 @@ fn loop_exit_applier_for_fixture(
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
     let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
         Arc::clone(&fixture.thread_service),
+        turn_store.clone(),
         loop_checkpoint_store,
     ));
     Arc::new(LoopExitApplier::new(turn_store, evidence))
+}
+
+struct StaticTurnStateStore {
+    state: Mutex<TurnRunState>,
+}
+
+impl StaticTurnStateStore {
+    fn new(state: TurnRunState) -> Self {
+        Self {
+            state: Mutex::new(state),
+        }
+    }
+}
+
+#[async_trait]
+impl TurnStateStore for StaticTurnStateStore {
+    async fn submit_turn(
+        &self,
+        _request: SubmitTurnRequest,
+        _admission_policy: &dyn TurnAdmissionPolicy,
+        _run_profile_resolver: &dyn RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        panic!("submit_turn should not be called by static test turn state store")
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
+        panic!("resume_turn should not be called by static test turn state store")
+    }
+
+    async fn request_cancel(
+        &self,
+        _request: CancelRunRequest,
+    ) -> Result<CancelRunResponse, TurnError> {
+        panic!("request_cancel should not be called by static test turn state store")
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        Ok(self.state.lock().unwrap().clone())
+    }
 }
 
 async fn queue_fixture_turn(
@@ -5648,6 +5731,7 @@ async fn queue_fixture_turn(
 struct HostFixture {
     thread_service: Arc<InMemorySessionThreadService>,
     checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
+    turn_state_store: Arc<StaticTurnStateStore>,
     loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
     gateway: Arc<RecordingGateway>,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
@@ -5748,6 +5832,7 @@ impl HostFixture {
             runner_id: TurnRunnerId::new(),
             lease_token: TurnLeaseToken::new(),
         };
+        let turn_state_store = Arc::new(StaticTurnStateStore::new(claimed.state.clone()));
         let context = LoopRunContext::new(turn_scope, turn_id, run_id, resolved);
         if mark_submitted {
             thread_service
@@ -5765,6 +5850,7 @@ impl HostFixture {
         Self {
             thread_service,
             checkpoint_state_store,
+            turn_state_store,
             loop_checkpoint_store,
             gateway,
             milestone_sink,
@@ -5815,6 +5901,7 @@ impl HostFixture {
             self.thread_scope.clone(),
             Arc::clone(&self.gateway),
             self.checkpoint_state_store.clone(),
+            self.turn_state_store.clone(),
             loop_checkpoint_store,
             self.milestone_sink.clone(),
             config,

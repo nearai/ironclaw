@@ -31,11 +31,13 @@ use ironclaw_threads::{
     SessionThreadService, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, EventCursor, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    InMemoryRunProfileResolver, LoopCompletionKind, LoopExitId, LoopFailureKind,
-    ReplyTargetBindingRef, RunProfileId, RunProfileResolutionRequest, RunProfileResolver,
-    RunProfileVersion, SourceBindingRef, TurnCheckpointId, TurnId, TurnLeaseToken, TurnRunId,
-    TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
+    InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
+    LoopCompletionKind, LoopExitId, LoopFailureKind, ReplyTargetBindingRef, ResumeTurnRequest,
+    RunProfileId, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionPolicy, TurnCheckpointId,
+    TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
+    TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostErrorKind, BatchPolicyKind, FinalizeAssistantMessage, LoopCheckpointKind,
         LoopDriverId, LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter,
@@ -655,12 +657,55 @@ fn read_all_file_bytes_lossy(root: &Path) -> String {
 struct HostFixture {
     thread_service: Arc<InMemorySessionThreadService>,
     checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
+    turn_state_store: Arc<StaticTurnStateStore>,
     loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
     gateway: Arc<ControlledGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     thread_scope: ThreadScope,
     claimed: ClaimedTurnRun,
     context: LoopRunContext,
+}
+
+struct StaticTurnStateStore {
+    state: Mutex<TurnRunState>,
+}
+
+impl StaticTurnStateStore {
+    fn new(state: TurnRunState) -> Self {
+        Self {
+            state: Mutex::new(state),
+        }
+    }
+}
+
+#[async_trait]
+impl TurnStateStore for StaticTurnStateStore {
+    async fn submit_turn(
+        &self,
+        _request: SubmitTurnRequest,
+        _admission_policy: &dyn TurnAdmissionPolicy,
+        _run_profile_resolver: &dyn RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        panic!("submit_turn should not be called by static test turn state store")
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
+        panic!("resume_turn should not be called by static test turn state store")
+    }
+
+    async fn request_cancel(
+        &self,
+        _request: CancelRunRequest,
+    ) -> Result<CancelRunResponse, TurnError> {
+        panic!("request_cancel should not be called by static test turn state store")
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        Ok(self.state.lock().unwrap().clone())
+    }
 }
 
 impl HostFixture {
@@ -739,6 +784,7 @@ impl HostFixture {
             runner_id: TurnRunnerId::new(),
             lease_token: TurnLeaseToken::new(),
         };
+        let turn_state_store = Arc::new(StaticTurnStateStore::new(claimed.state.clone()));
         let context = LoopRunContext::new(turn_scope, turn_id, run_id, resolved);
         thread_service
             .mark_message_submitted(
@@ -762,6 +808,7 @@ impl HostFixture {
         Self {
             thread_service,
             checkpoint_state_store,
+            turn_state_store,
             loop_checkpoint_store,
             gateway,
             milestone_sink,
@@ -777,6 +824,7 @@ impl HostFixture {
             self.thread_scope.clone(),
             Arc::clone(&self.gateway),
             self.checkpoint_state_store.clone(),
+            self.turn_state_store.clone(),
             self.loop_checkpoint_store.clone(),
             Arc::clone(&self.milestone_sink),
             TextOnlyLoopHostConfig {

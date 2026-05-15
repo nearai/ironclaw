@@ -4,12 +4,14 @@ use async_trait::async_trait;
 use ironclaw_host_api::{TenantId, ThreadId};
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
-    AcceptedMessageRef, EventCursor, GateRef, GetLoopCheckpointRequest, LoopBlocked,
-    LoopBlockedKind, LoopCheckpointKind, LoopCheckpointRecord, LoopCheckpointStateRef,
-    LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopFailed,
-    LoopFailureKind, LoopGateRef, LoopMessageRef, PutLoopCheckpointRequest, ReplyTargetBindingRef,
-    RunProfileVersion, SanitizedFailure, SourceBindingRef, TurnCheckpointId, TurnError, TurnId,
-    TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
+    GetLoopCheckpointRequest, GetRunStateRequest, LoopBlocked, LoopBlockedKind, LoopCheckpointKind,
+    LoopCheckpointRecord, LoopCheckpointStateRef, LoopCheckpointStore, LoopCompleted,
+    LoopCompletionKind, LoopExit, LoopExitId, LoopFailed, LoopFailureKind, LoopGateRef,
+    LoopMessageRef, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnRequest,
+    ResumeTurnResponse, RunProfileVersion, SanitizedFailure, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId,
+    TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{CheckpointSchemaId, LoopDriverId},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -178,6 +180,56 @@ async fn observed_host_cancellation_still_requires_final_checkpoint_when_configu
 }
 
 #[tokio::test]
+async fn thread_checkpoint_evidence_accepts_durable_cancel_requested_run() {
+    let claimed = claimed_run();
+    let mut observed_state = claimed.state.clone();
+    observed_state.status = TurnStatus::CancelRequested;
+    let transition = Arc::new(RecordingTransitionPort::new());
+    let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(StaticTurnStateStore::new(observed_state)),
+        Arc::new(PanicLoopCheckpointStore),
+    ));
+    let applier = Arc::new(LoopExitApplier::new(transition.clone(), evidence));
+    let exit = LoopExit::Cancelled(ironclaw_turns::LoopCancelled {
+        reason_kind: ironclaw_turns::LoopCancelledReasonKind::HostCancellation,
+        checkpoint_id: None,
+        interrupted_message_refs: vec![],
+        exit_id: test_exit_id(),
+    });
+
+    let state = applier.apply(&claimed, exit).await.expect("applied");
+
+    assert_eq!(state.status, TurnStatus::Cancelled);
+    assert_eq!(transition.apply_count(), 1);
+}
+
+#[tokio::test]
+async fn thread_checkpoint_evidence_accepts_durable_cancelled_run() {
+    let claimed = claimed_run();
+    let mut observed_state = claimed.state.clone();
+    observed_state.status = TurnStatus::Cancelled;
+    let transition = Arc::new(RecordingTransitionPort::new());
+    let evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(StaticTurnStateStore::new(observed_state)),
+        Arc::new(PanicLoopCheckpointStore),
+    ));
+    let applier = Arc::new(LoopExitApplier::new(transition.clone(), evidence));
+    let exit = LoopExit::Cancelled(ironclaw_turns::LoopCancelled {
+        reason_kind: ironclaw_turns::LoopCancelledReasonKind::HostCancellation,
+        checkpoint_id: None,
+        interrupted_message_refs: vec![],
+        exit_id: test_exit_id(),
+    });
+
+    let state = applier.apply(&claimed, exit).await.expect("applied");
+
+    assert_eq!(state.status, TurnStatus::Cancelled);
+    assert_eq!(transition.apply_count(), 1);
+}
+
+#[tokio::test]
 async fn invalid_exit_after_before_side_effect_requires_recovery() {
     let evidence = InMemoryLoopExitEvidencePort::new()
         .with_latest_checkpoint_kind(Some(LoopCheckpointKind::BeforeSideEffect));
@@ -333,8 +385,51 @@ fn text_checkpoint_evidence(
 ) -> ThreadCheckpointLoopExitEvidencePort<InMemorySessionThreadService> {
     ThreadCheckpointLoopExitEvidencePort::new(
         Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(StaticTurnStateStore::new(claimed_run().state)),
         loop_checkpoint_store,
     )
+}
+
+struct StaticTurnStateStore {
+    state: TurnRunState,
+}
+
+impl StaticTurnStateStore {
+    fn new(state: TurnRunState) -> Self {
+        Self { state }
+    }
+}
+
+#[async_trait]
+impl TurnStateStore for StaticTurnStateStore {
+    async fn submit_turn(
+        &self,
+        _request: SubmitTurnRequest,
+        _admission_policy: &dyn ironclaw_turns::TurnAdmissionPolicy,
+        _run_profile_resolver: &dyn ironclaw_turns::RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        panic!("submit_turn should not be called by evidence tests")
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        panic!("resume_turn should not be called by evidence tests")
+    }
+
+    async fn request_cancel(
+        &self,
+        _request: CancelRunRequest,
+    ) -> Result<CancelRunResponse, TurnError> {
+        panic!("request_cancel should not be called by evidence tests")
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        assert_eq!(request.scope, self.state.scope);
+        assert_eq!(request.run_id, self.state.run_id);
+        Ok(self.state.clone())
+    }
 }
 
 struct PanicLoopCheckpointStore;

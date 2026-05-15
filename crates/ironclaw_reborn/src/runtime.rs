@@ -160,11 +160,13 @@ where
             .with_wake_notifier(wake_notifier),
     );
 
+    let turn_state_store: Arc<dyn TurnStateStore> = parts.turn_state.clone();
     let mut host_factory = RebornLoopDriverHostFactory::new(
         Arc::clone(&parts.thread_service),
         parts.thread_scope,
         Arc::clone(&parts.model_gateway),
         parts.checkpoint_state_store,
+        turn_state_store,
         Arc::clone(&parts.loop_checkpoint_store),
         parts.milestone_sink,
         parts.config.host,
