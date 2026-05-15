@@ -21,9 +21,9 @@ use ironclaw_turns::{
         LoopCheckpointStateRef, LoopContextBundle, LoopContextPort, LoopContextRequest, LoopInput,
         LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort, LoopModelPort,
         LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
-        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopTranscriptPort,
-        StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
+        LoopTranscriptPort, StageCheckpointPayloadRequest, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
