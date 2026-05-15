@@ -30,6 +30,7 @@ pub mod gate;
 pub mod memory;
 pub mod reliability;
 pub mod runtime;
+pub mod store;
 pub mod traits;
 pub mod types;
 pub mod workspace;
@@ -62,6 +63,10 @@ pub use traits::effect::{EffectExecutor, ThreadExecutionContext};
 pub use traits::llm::{LlmBackend, LlmCallConfig, LlmOutput};
 pub use traits::store::Store;
 pub use traits::workspace::WorkspaceReader;
+
+// ── Re-exports: store implementations ────────────────────────
+
+pub use store::FilesystemStore;
 
 // ── Re-exports: capability ────────────────────────────────────
 
