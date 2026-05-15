@@ -17,10 +17,11 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_threads::{InMemorySessionThreadService, MessageStatus, SessionThreadService};
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
-    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError, TurnId,
-    TurnRunId, TurnRunState, TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
+    EventCursor, GetRunStateRequest, InMemoryTurnStateStore, ReplyTargetBindingRef,
+    ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnRunId,
+    TurnRunState, TurnStatus,
 };
 use serde_json::json;
 
@@ -287,6 +288,127 @@ async fn duplicate_submit_replays_prior_handoff_without_second_submission() {
         RebornSubmitTurnResponse::AlreadySubmitted { .. }
     ));
     assert_eq!(coordinator.submission_count(), 1);
+}
+
+#[tokio::test]
+async fn duplicate_submit_rejects_cross_thread_reuse_of_same_client_action() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator.clone());
+
+    services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-cross-thread",
+                "thread_id": "thread-alpha",
+                "content": "hello once"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("first submit succeeds");
+
+    let err = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-cross-thread",
+                "thread_id": "thread-beta",
+                "content": "hello twice"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("cross-thread duplicate is rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.status_code, 409);
+    assert_eq!(coordinator.submission_count(), 1);
+
+    let alpha_timeline = services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+            },
+        )
+        .await
+        .expect("alpha timeline");
+    assert_eq!(alpha_timeline.messages.len(), 1);
+
+    let beta_err = services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-beta".to_string(),
+            },
+        )
+        .await
+        .expect_err("beta thread was never created");
+    assert_eq!(beta_err.code, RebornServicesErrorCode::NotFound);
+}
+
+#[tokio::test]
+async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(DefaultTurnCoordinator::new(Arc::new(
+        InMemoryTurnStateStore::default(),
+    )));
+    let services = Arc::new(RebornServices::new(threads, coordinator));
+
+    let request = || {
+        serde_json::from_value::<WebUiSendMessageRequest>(json!({
+            "client_action_id": "send-concurrent",
+            "thread_id": "thread-alpha",
+            "content": "hello once"
+        }))
+        .expect("request")
+    };
+
+    let first = {
+        let services = services.clone();
+        tokio::spawn(async move { services.submit_turn(caller(), request()).await })
+    };
+    let second = {
+        let services = services.clone();
+        tokio::spawn(async move { services.submit_turn(caller(), request()).await })
+    };
+
+    let first = first.await.expect("first task join").expect("first submit");
+    let second = second
+        .await
+        .expect("second task join")
+        .expect("second submit");
+
+    let first_run_id = match &first {
+        RebornSubmitTurnResponse::Submitted { run_id, .. }
+        | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
+        RebornSubmitTurnResponse::DeferredBusy { .. } => {
+            panic!("duplicate submit must not defer while deduping")
+        }
+    };
+    let second_run_id = match &second {
+        RebornSubmitTurnResponse::Submitted { run_id, .. }
+        | RebornSubmitTurnResponse::AlreadySubmitted { run_id, .. } => *run_id,
+        RebornSubmitTurnResponse::DeferredBusy { .. } => {
+            panic!("duplicate submit must not defer while deduping")
+        }
+    };
+    assert_eq!(first_run_id, second_run_id);
+
+    let timeline = services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+            },
+        )
+        .await
+        .expect("timeline");
+    assert_eq!(timeline.messages.len(), 1);
+    assert_eq!(timeline.messages[0].status, MessageStatus::Submitted);
+    assert_eq!(timeline.messages[0].content.as_deref(), Some("hello once"));
 }
 
 #[tokio::test]

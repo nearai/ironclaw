@@ -13,14 +13,14 @@ use ironclaw_product_adapters::{
     ProductAdapterError, ProjectionStream, ProjectionSubscriptionRequest,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageStatus,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService,
-    ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest,
+    MessageContent, MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest,
-    SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnScope,
+    AcceptedMessageRef, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
+    ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope,
 };
 use uuid::Uuid;
 
@@ -131,6 +131,13 @@ impl RebornServicesApi for RebornServices {
             .await
             .map_err(map_thread_error)?
         {
+            if replay.thread_id != scope.thread_id {
+                return Err(RebornServicesError::from_status(
+                    RebornServicesErrorCode::Conflict,
+                    409,
+                    false,
+                ));
+            }
             match replay.status {
                 MessageStatus::Submitted => {
                     let run_id = parse_replay_run_id(replay.turn_run_id)?;
@@ -209,7 +216,7 @@ impl RebornServicesApi for RebornServices {
             source_binding_ref,
             reply_target_binding_ref,
             requested_run_profile: None,
-            idempotency_key: client_action_id,
+            idempotency_key: client_action_id.clone(),
             received_at: Utc::now(),
         };
 
@@ -223,16 +230,16 @@ impl RebornServicesApi for RebornServices {
                 event_cursor,
                 ..
             }) => {
-                self.thread_service
-                    .mark_message_submitted(
-                        &thread_scope,
-                        &handoff.thread_id,
-                        handoff.message_id,
-                        turn_id.to_string(),
-                        run_id.to_string(),
-                    )
-                    .await
-                    .map_err(map_thread_error)?;
+                mark_message_submitted_or_replay(
+                    &*self.thread_service,
+                    &thread_scope,
+                    &handoff,
+                    &source_binding_id,
+                    &client_action_id,
+                    turn_id.to_string(),
+                    run_id.to_string(),
+                )
+                .await?;
 
                 Ok(RebornSubmitTurnResponse::Submitted {
                     thread_id: handoff.thread_id,
@@ -246,14 +253,14 @@ impl RebornServicesApi for RebornServices {
                 })
             }
             Err(TurnError::ThreadBusy(busy)) => {
-                self.thread_service
-                    .mark_message_deferred_busy(
-                        &thread_scope,
-                        &handoff.thread_id,
-                        handoff.message_id,
-                    )
-                    .await
-                    .map_err(map_thread_error)?;
+                mark_message_deferred_busy_or_replay(
+                    &*self.thread_service,
+                    &thread_scope,
+                    &handoff,
+                    &source_binding_id,
+                    &client_action_id,
+                )
+                .await?;
 
                 Ok(RebornSubmitTurnResponse::DeferredBusy {
                     thread_id: handoff.thread_id,
@@ -397,6 +404,89 @@ struct AcceptedWebUiMessage {
     reply_target_binding_id: String,
 }
 
+async fn mark_message_submitted_or_replay(
+    thread_service: &dyn SessionThreadService,
+    thread_scope: &ThreadScope,
+    handoff: &AcceptedWebUiMessage,
+    source_binding_id: &str,
+    client_action_id: &IdempotencyKey,
+    turn_id: String,
+    run_id: String,
+) -> Result<(), RebornServicesError> {
+    match thread_service
+        .mark_message_submitted(
+            thread_scope,
+            &handoff.thread_id,
+            handoff.message_id,
+            turn_id,
+            run_id.clone(),
+        )
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) => reconcile_terminal_duplicate(
+            thread_service,
+            handoff,
+            source_binding_id,
+            client_action_id,
+            |replay| replay.status == MessageStatus::Submitted && replay.turn_run_id == Some(run_id),
+            error,
+        )
+        .await,
+    }
+}
+
+async fn mark_message_deferred_busy_or_replay(
+    thread_service: &dyn SessionThreadService,
+    thread_scope: &ThreadScope,
+    handoff: &AcceptedWebUiMessage,
+    source_binding_id: &str,
+    client_action_id: &IdempotencyKey,
+) -> Result<(), RebornServicesError> {
+    match thread_service
+        .mark_message_deferred_busy(thread_scope, &handoff.thread_id, handoff.message_id)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) => reconcile_terminal_duplicate(
+            thread_service,
+            handoff,
+            source_binding_id,
+            client_action_id,
+            |replay| replay.status == MessageStatus::DeferredBusy,
+            error,
+        )
+        .await,
+    }
+}
+
+async fn reconcile_terminal_duplicate(
+    thread_service: &dyn SessionThreadService,
+    handoff: &AcceptedWebUiMessage,
+    source_binding_id: &str,
+    client_action_id: &IdempotencyKey,
+    matches_replay: impl FnOnce(&AcceptedInboundMessageReplay) -> bool,
+    original_error: SessionThreadError,
+) -> Result<(), RebornServicesError> {
+    let replay = thread_service
+        .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
+            source_binding_id: source_binding_id.to_string(),
+            external_event_id: client_action_id.as_str().to_string(),
+        })
+        .await
+        .map_err(map_thread_error)?;
+    match replay {
+        Some(replay)
+            if replay.thread_id == handoff.thread_id
+                && replay.message_id == handoff.message_id
+                && matches_replay(&replay) =>
+        {
+            Ok(())
+        }
+        _ => Err(map_thread_error(original_error)),
+    }
+}
+
 /// Optional create-thread helper for routes that want an explicit allocation
 /// before first turn submission.
 ///
@@ -528,7 +618,10 @@ fn webui_source_binding_id(scope: &TurnScope, actor: &TurnActor) -> String {
             "agent",
             scope.agent_id.as_ref().map(AgentId::as_str).unwrap_or("")
         ),
-        segment("thread", scope.thread_id.as_str()),
+        segment(
+            "project",
+            scope.project_id.as_ref().map(ironclaw_host_api::ProjectId::as_str).unwrap_or("")
+        ),
         segment("actor", actor.user_id.as_str())
     )
 }
