@@ -37,8 +37,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{
-    CasExpectation, Entry, Filter, IndexKey, IndexValue, Page, RecordKind, RecordVersion,
-    RootFilesystem,
+    CasExpectation, Entry, FilesystemError, Filter, IndexKey, IndexValue, Page, RecordKind,
+    RecordVersion, RootFilesystem,
 };
 use ironclaw_host_api::VirtualPath;
 use rust_decimal::Decimal;
@@ -185,6 +185,21 @@ where
             .await
             .map_err(super::filesystem_conversations::fs_err_to_database)
     }
+
+    /// Like [`Self::write_job`] but surfaces the raw filesystem error so
+    /// CAS retry loops can match on `VersionMismatch` without parsing
+    /// error strings.
+    async fn write_job_cas(
+        &self,
+        stored: &StoredJob,
+        cas: CasExpectation,
+    ) -> Result<Result<RecordVersion, FilesystemError>, DatabaseError> {
+        let path = job_path(stored.id)?;
+        let body =
+            serde_json::to_vec(stored).map_err(|e| DatabaseError::Serialization(e.to_string()))?;
+        let entry = build_job_entry(stored, body)?;
+        Ok(self.filesystem.put(&path, entry, cas).await)
+    }
 }
 
 #[async_trait]
@@ -252,29 +267,49 @@ where
     ) -> Result<(), DatabaseError> {
         let lock = job_lock(id);
         let _guard = lock.lock().await;
-        let Some((mut stored, version)) = self.read_job(id).await? else {
-            return Ok(());
-        };
-        stored.status = status.to_string();
-        stored.failure_reason = failure_reason.map(str::to_string);
-        let _ = self
-            .write_job(&stored, CasExpectation::Version(version))
-            .await?;
-        Ok(())
+        // CAS retry: the per-job mutex above is process-local, so a
+        // concurrent `save_job` from another process can still race this
+        // status transition. Re-read on `VersionMismatch` and re-apply.
+        loop {
+            let Some((mut stored, version)) = self.read_job(id).await? else {
+                return Ok(());
+            };
+            stored.status = status.to_string();
+            stored.failure_reason = failure_reason.map(str::to_string);
+            match self
+                .write_job_cas(&stored, CasExpectation::Version(version))
+                .await?
+            {
+                Ok(_) => return Ok(()),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => {
+                    return Err(super::filesystem_conversations::fs_err_to_database(error));
+                }
+            }
+        }
     }
 
     async fn mark_job_stuck(&self, id: Uuid) -> Result<(), DatabaseError> {
         let lock = job_lock(id);
         let _guard = lock.lock().await;
-        let Some((mut stored, version)) = self.read_job(id).await? else {
-            return Ok(());
-        };
-        stored.status = JobState::Stuck.to_string();
-        stored.stuck_since = Some(Utc::now());
-        let _ = self
-            .write_job(&stored, CasExpectation::Version(version))
-            .await?;
-        Ok(())
+        // CAS retry: same rationale as `update_job_status`.
+        loop {
+            let Some((mut stored, version)) = self.read_job(id).await? else {
+                return Ok(());
+            };
+            stored.status = JobState::Stuck.to_string();
+            stored.stuck_since = Some(Utc::now());
+            match self
+                .write_job_cas(&stored, CasExpectation::Version(version))
+                .await?
+            {
+                Ok(_) => return Ok(()),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => {
+                    return Err(super::filesystem_conversations::fs_err_to_database(error));
+                }
+            }
+        }
     }
 
     async fn get_stuck_jobs(&self) -> Result<Vec<Uuid>, DatabaseError> {
@@ -1054,7 +1089,7 @@ mod tests {
             .iter()
             .filter(|v| v.entry.kind.as_ref().map(|k| k.as_str()) == Some(KIND_ESTIMATION))
             .find_map(|v| serde_json::from_slice::<StoredEstimation>(&v.entry.body).ok())
-            .unwrap_or_else(|_| unreachable!("estimation persisted"));
+            .unwrap_or_else(|| unreachable!("estimation persisted"));
         assert_eq!(stored.actual_cost.as_deref(), Some("0.04"));
         assert_eq!(stored.actual_time_secs, Some(25));
     }

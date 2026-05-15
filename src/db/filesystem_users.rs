@@ -32,7 +32,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, IndexKey, IndexValue, RecordKind,
-    RootFilesystem,
+    RecordVersion, RootFilesystem,
 };
 use ironclaw_host_api::VirtualPath;
 use rust_decimal::Decimal;
@@ -200,13 +200,56 @@ where
     }
 
     async fn read_user(&self, id: &str) -> Result<Option<UserRecord>, DatabaseError> {
+        Ok(self.read_user_versioned(id).await?.map(|(u, _)| u))
+    }
+
+    async fn read_user_versioned(
+        &self,
+        id: &str,
+    ) -> Result<Option<(UserRecord, RecordVersion)>, DatabaseError> {
         let path = Self::user_path(id)?;
         let Some(versioned) = self.filesystem.get(&path).await.map_err(fs_to_db_error)? else {
             return Ok(None);
         };
         let serializable: SerializableUser = serde_json::from_slice(&versioned.entry.body)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-        Ok(Some(serializable.into_record()))
+        Ok(Some((serializable.into_record(), versioned.version)))
+    }
+
+    /// Read-modify-write a user record under optimistic CAS.
+    ///
+    /// Re-reads on `VersionMismatch` and re-applies `mutate` until the put
+    /// succeeds, the record is gone, or a non-CAS error surfaces. The
+    /// process-local locking in the engine FilesystemStore is insufficient
+    /// for multi-process shared roots
+    /// (`crates/ironclaw_filesystem/CLAUDE.md` invariant 2: CAS is the
+    /// floor); this loop is the same shape as
+    /// `FilesystemRoutineStore::update_routine_runtime`.
+    async fn update_user_with<Mutate>(
+        &self,
+        id: &str,
+        mut mutate: Mutate,
+    ) -> Result<(), DatabaseError>
+    where
+        Mutate: FnMut(&mut UserRecord),
+    {
+        loop {
+            let Some((mut user, version)) = self.read_user_versioned(id).await? else {
+                return Ok(());
+            };
+            mutate(&mut user);
+            let path = Self::user_path(&user.id)?;
+            let entry = Self::build_user_entry(&user)?;
+            match self
+                .filesystem
+                .put(&path, entry, CasExpectation::Version(version))
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(fs_to_db_error(error)),
+            }
+        }
     }
 
     async fn read_users(&self) -> Result<Vec<UserRecord>, DatabaseError> {
@@ -243,24 +286,21 @@ where
         Ok(out)
     }
 
-    async fn write_user(&self, user: &UserRecord) -> Result<(), DatabaseError> {
-        let path = Self::user_path(&user.id)?;
-        let entry = Self::build_user_entry(user)?;
-        self.filesystem
-            .put(&path, entry, CasExpectation::Any)
-            .await
-            .map(|_| ())
-            .map_err(fs_to_db_error)
+    async fn read_token(&self, token_id: Uuid) -> Result<Option<StoredToken>, DatabaseError> {
+        Ok(self.read_token_versioned(token_id).await?.map(|(t, _)| t))
     }
 
-    async fn read_token(&self, token_id: Uuid) -> Result<Option<StoredToken>, DatabaseError> {
+    async fn read_token_versioned(
+        &self,
+        token_id: Uuid,
+    ) -> Result<Option<(StoredToken, RecordVersion)>, DatabaseError> {
         let path = Self::token_path(token_id)?;
         let Some(versioned) = self.filesystem.get(&path).await.map_err(fs_to_db_error)? else {
             return Ok(None);
         };
         let stored: StoredToken = serde_json::from_slice(&versioned.entry.body)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
-        Ok(Some(stored))
+        Ok(Some((stored, versioned.version)))
     }
 
     async fn write_token(&self, stored: &StoredToken) -> Result<(), DatabaseError> {
@@ -271,6 +311,39 @@ where
             .await
             .map(|_| ())
             .map_err(fs_to_db_error)
+    }
+
+    /// Read-modify-write a token record under optimistic CAS. Mirrors
+    /// `update_user_with` for the token mount. Returns `None` if the token
+    /// row was never present; otherwise returns `Some(mutate_result)` once
+    /// the put commits.
+    async fn update_token_with<R, Mutate>(
+        &self,
+        token_id: Uuid,
+        mut mutate: Mutate,
+    ) -> Result<Option<R>, DatabaseError>
+    where
+        Mutate: FnMut(&mut StoredToken) -> Option<R>,
+    {
+        loop {
+            let Some((mut stored, version)) = self.read_token_versioned(token_id).await? else {
+                return Ok(None);
+            };
+            let Some(result) = mutate(&mut stored) else {
+                return Ok(None);
+            };
+            let path = Self::token_path(stored.record.id)?;
+            let entry = Self::build_token_entry(&stored)?;
+            match self
+                .filesystem
+                .put(&path, entry, CasExpectation::Version(version))
+                .await
+            {
+                Ok(_) => return Ok(Some(result)),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(fs_to_db_error(error)),
+            }
+        }
     }
 
     async fn list_tokens(&self) -> Result<Vec<StoredToken>, DatabaseError> {
@@ -354,21 +427,19 @@ where
     }
 
     async fn update_user_status(&self, id: &str, status: &str) -> Result<(), DatabaseError> {
-        let Some(mut user) = self.read_user(id).await? else {
-            return Ok(());
-        };
-        user.status = status.to_string();
-        user.updated_at = Utc::now();
-        self.write_user(&user).await
+        self.update_user_with(id, |user| {
+            user.status = status.to_string();
+            user.updated_at = Utc::now();
+        })
+        .await
     }
 
     async fn update_user_role(&self, id: &str, role: &str) -> Result<(), DatabaseError> {
-        let Some(mut user) = self.read_user(id).await? else {
-            return Ok(());
-        };
-        user.role = role.to_string();
-        user.updated_at = Utc::now();
-        self.write_user(&user).await
+        self.update_user_with(id, |user| {
+            user.role = role.to_string();
+            user.updated_at = Utc::now();
+        })
+        .await
     }
 
     async fn update_user_profile(
@@ -377,23 +448,21 @@ where
         display_name: &str,
         metadata: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        let Some(mut user) = self.read_user(id).await? else {
-            return Ok(());
-        };
-        user.display_name = display_name.to_string();
-        user.metadata = metadata.clone();
-        user.updated_at = Utc::now();
-        self.write_user(&user).await
+        self.update_user_with(id, |user| {
+            user.display_name = display_name.to_string();
+            user.metadata = metadata.clone();
+            user.updated_at = Utc::now();
+        })
+        .await
     }
 
     async fn record_login(&self, id: &str) -> Result<(), DatabaseError> {
-        let Some(mut user) = self.read_user(id).await? else {
-            return Ok(());
-        };
-        let now = Utc::now();
-        user.last_login_at = Some(now);
-        user.updated_at = now;
-        self.write_user(&user).await
+        self.update_user_with(id, |user| {
+            let now = Utc::now();
+            user.last_login_at = Some(now);
+            user.updated_at = now;
+        })
+        .await
     }
 
     async fn create_api_token(
@@ -448,15 +517,19 @@ where
     }
 
     async fn revoke_api_token(&self, token_id: Uuid, user_id: &str) -> Result<bool, DatabaseError> {
-        let Some(mut stored) = self.read_token(token_id).await? else {
-            return Ok(false);
-        };
-        if stored.record.user_id != user_id || stored.record.revoked_at.is_some() {
-            return Ok(false);
-        }
-        stored.record.revoked_at = Some(Utc::now());
-        self.write_token(&stored).await?;
-        Ok(true)
+        // CAS loop ensures the revoke flag isn't clobbered by a concurrent
+        // `record_token_usage` updating `last_used_at` on the same record.
+        let outcome = self
+            .update_token_with(token_id, |stored| {
+                if stored.record.user_id != user_id || stored.record.revoked_at.is_some() {
+                    None
+                } else {
+                    stored.record.revoked_at = Some(Utc::now());
+                    Some(true)
+                }
+            })
+            .await?;
+        Ok(outcome.unwrap_or(false))
     }
 
     async fn authenticate_token(
@@ -493,11 +566,15 @@ where
     }
 
     async fn record_token_usage(&self, token_id: Uuid) -> Result<(), DatabaseError> {
-        let Some(mut stored) = self.read_token(token_id).await? else {
-            return Ok(());
-        };
-        stored.record.last_used_at = Some(Utc::now());
-        self.write_token(&stored).await
+        // CAS loop avoids losing a concurrent revoke when the same row is
+        // being touched on a hot path.
+        let _ = self
+            .update_token_with(token_id, |stored| {
+                stored.record.last_used_at = Some(Utc::now());
+                Some(())
+            })
+            .await?;
+        Ok(())
     }
 
     async fn has_any_users(&self) -> Result<bool, DatabaseError> {

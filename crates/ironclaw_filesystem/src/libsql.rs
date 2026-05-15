@@ -395,9 +395,36 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 }
                 let fts_key = spec.keys[0].as_str();
                 let path_prefix = path.as_str();
+                // Defense in depth: the FTS5 sync triggers below splice the
+                // mount-prefix path directly into DDL string literals because
+                // SQLite's trigger language has no parameter binding. The
+                // standard `'`-doubling escape is correct, but a path that
+                // legitimately reaches here with any non-identifier character
+                // is suspicious and we refuse to emit DDL for it. Accept only
+                // characters that are unambiguously safe in a string literal
+                // (`[A-Za-z0-9_/.-]`). `VirtualPath` validation rejects NUL,
+                // control chars, backslashes, and `..`, but does not (today)
+                // reject `'`, `"`, `;`, or other punctuation. This check is
+                // narrower than VirtualPath's and keeps the DDL emitter
+                // self-contained.
+                if !path_prefix
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '.' | '-'))
+                {
+                    return Err(FilesystemError::Backend {
+                        path: path.clone(),
+                        operation: FilesystemOperation::EnsureIndex,
+                        reason: "FTS index path contains characters outside \
+                                 [A-Za-z0-9_/.-]; refusing to emit DDL"
+                            .to_string(),
+                    });
+                }
                 let trailing_prefix = format!("{}/", path_prefix.trim_end_matches('/'));
                 let trailing_pattern =
                     escape_like_with_trailing_wildcard(&format!("{trailing_prefix}%"));
+                // After the identifier-safe check above, `'`-doubling is a
+                // belt-and-suspenders safety net; the input cannot contain
+                // `'` so the replace is a no-op on valid inputs.
                 let exact_path_lit = path_prefix.replace('\'', "''");
                 let trailing_pattern_lit = trailing_pattern.replace('\'', "''");
                 // FTS5 vtable: stores (path, text). We mirror per-mount-
@@ -1102,6 +1129,12 @@ impl LibSqlRootFilesystem {
     /// projection has an `IndexValue::Bytes` value at `key` decoded as a
     /// little-endian f32 buffer of any non-zero length matching the query
     /// embedding's length. Returns the top `limit` results.
+    ///
+    /// Two-phase to bound memory on large prefixes (review feedback on
+    /// the unified-FS rework): first SELECT `(path, indexed, version)`
+    /// for every candidate, rank by cosine in Rust, then `get()` the
+    /// top-k entries to materialize bodies. Rows that don't survive
+    /// the cutoff never have their `contents` blob loaded.
     async fn vector_nearest_query(
         &self,
         path: &VirtualPath,
@@ -1112,16 +1145,14 @@ impl LibSqlRootFilesystem {
         let conn = self.connect().await?;
         let prefix_pattern = format!("{}/%", path.as_str());
         let escaped = escape_like_with_trailing_wildcard(&prefix_pattern);
-        // Pull every row in this prefix that has *some* value under the
-        // indexed key. Filter to byte values + matching length in Rust.
-        let sql = "SELECT path, contents, content_type, kind, indexed, version \
+        let sql = "SELECT path, indexed, version \
                    FROM root_filesystem_entries \
                    WHERE is_dir = 0 AND (path = ?1 OR path LIKE ?2 ESCAPE '!')";
         let mut rows = conn
             .query(sql, libsql::params![path.as_str(), escaped.clone()])
             .await
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?;
-        let mut ranked: Vec<(VersionedEntry, f32)> = Vec::new();
+        let mut ranked: Vec<(VirtualPath, RecordVersion, f32)> = Vec::new();
         while let Some(row) = rows
             .next()
             .await
@@ -1131,21 +1162,23 @@ impl LibSqlRootFilesystem {
                 libsql_db_error(path.clone(), FilesystemOperation::Query, error)
             })?;
             let row_path = VirtualPath::new(row_path)?;
-            let body: Vec<u8> = row.get(1).map_err(|error| {
+            let indexed_raw: String = row.get(1).map_err(|error| {
                 libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
             })?;
-            let content_type_raw: String = row.get(2).map_err(|error| {
+            let version_raw: i64 = row.get(2).map_err(|error| {
                 libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
             })?;
-            let kind_raw: Option<String> = row.get(3).ok();
-            let indexed_raw: String = row.get(4).map_err(|error| {
-                libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
-            })?;
-            let version_raw: i64 = row.get(5).map_err(|error| {
-                libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
-            })?;
-            let entry = build_entry(&row_path, body, content_type_raw, kind_raw, indexed_raw)?;
-            let Some(IndexValue::Bytes(bytes)) = entry.indexed.get(key) else {
+            let indexed: BTreeMap<IndexKey, IndexValue> = if indexed_raw.is_empty() {
+                BTreeMap::new()
+            } else {
+                serde_json::from_str(&indexed_raw).map_err(|_| {
+                    FilesystemError::DeserializeIndexed {
+                        path: row_path.clone(),
+                        operation: FilesystemOperation::Query,
+                    }
+                })?
+            };
+            let Some(IndexValue::Bytes(bytes)) = indexed.get(key) else {
                 continue;
             };
             let Some(vec) = decode_embedding_blob(bytes) else {
@@ -1155,11 +1188,26 @@ impl LibSqlRootFilesystem {
                 continue;
             };
             let version = record_version_from_i64(&row_path, version_raw)?;
-            ranked.push((VersionedEntry { entry, version }, score));
+            ranked.push((row_path, version, score));
         }
-        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
         ranked.truncate(limit as usize);
-        Ok(ranked.into_iter().map(|(entry, _)| entry).collect())
+        // Materialize bodies only for the top-k. Drop the streaming
+        // iterator + connection so each `get()` claims its own
+        // connection via the pool helper.
+        drop(rows);
+        drop(conn);
+        let mut out = Vec::with_capacity(ranked.len());
+        for (row_path, _version, _score) in ranked {
+            let Some(versioned) = self.get(&row_path).await? else {
+                // Concurrent delete between the ranking SELECT and
+                // the body fetch — skip rather than error so the
+                // search doesn't blow up on a race.
+                continue;
+            };
+            out.push(versioned);
+        }
+        Ok(out)
     }
 
     async fn current_version(

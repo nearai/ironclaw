@@ -161,6 +161,13 @@ where
         };
         let path = Self::setting_path(user_id, key)?;
         let entry = Self::build_entry(&setting)?;
+        // `set_setting` is a pure overwrite — the caller supplies the
+        // authoritative value, not a transformation of the prior one.
+        // `CasExpectation::Any` matches the legacy SQL semantics of
+        // `INSERT INTO settings ... ON CONFLICT (user_id, key) DO UPDATE`
+        // in `src/history/store.rs::set_setting`: concurrent setters land
+        // in serial order, last writer wins. No read-modify-write happens
+        // here, so there is nothing to retry on `VersionMismatch`.
         self.filesystem
             .put(&path, entry, CasExpectation::Any)
             .await

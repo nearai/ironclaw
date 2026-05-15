@@ -33,8 +33,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    CasExpectation, Entry, FileType, Filter, IndexKind, IndexSpec, Page, RecordKind,
-    RootFilesystem, VersionedEntry,
+    CasExpectation, Entry, FileType, FilesystemError, Filter, IndexKind, IndexSpec, Page,
+    RecordKind, RootFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::VirtualPath;
 use serde::{Serialize, de::DeserializeOwned};
@@ -326,19 +326,37 @@ where
     where
         T: Serialize,
     {
-        let body = serialize_json(value)?;
-        let mut entry = Entry::record(kind, &body).map_err(|error| EngineError::Store {
-            reason: format!("filesystem engine store: failed to encode record: {error}"),
-        })?;
-        for (key, value) in indexed {
-            entry = entry.with_indexed(key, value);
-        }
+        let entry = build_record_entry(kind, value, indexed)?;
         self.filesystem
             .put(path, entry, CasExpectation::Any)
             .await
             .map(|_| ())
             .map_err(fs_to_engine_error)
     }
+}
+
+/// Build an `Entry` from a serializable value plus indexed projections.
+/// Shared by `write_record` and the per-method CAS retry loops below so
+/// the encode shape is identical regardless of the CAS expectation.
+fn build_record_entry<T>(
+    kind: RecordKind,
+    value: &T,
+    indexed: Vec<(
+        ironclaw_filesystem::IndexKey,
+        ironclaw_filesystem::IndexValue,
+    )>,
+) -> Result<Entry, EngineError>
+where
+    T: Serialize,
+{
+    let body = serialize_json(value)?;
+    let mut entry = Entry::record(kind, &body).map_err(|error| EngineError::Store {
+        reason: format!("filesystem engine store: failed to encode record: {error}"),
+    })?;
+    for (key, value) in indexed {
+        entry = entry.with_indexed(key, value);
+    }
+    Ok(entry)
 }
 
 // ── Per-key mutation lock ──────────────────────────────────────
@@ -622,15 +640,31 @@ where
         let path = thread_path(id)?;
         let lock = lock_for_path(&path);
         let _guard = lock.lock().await;
-        let Some(mut thread) = self.read_one::<Thread>(&path).await? else {
-            // No-op when the thread isn't in the store — matches HybridStore's
-            // current behaviour (it silently drops state updates for unknown
-            // ids rather than fail-closed).
-            return Ok(());
-        };
-        thread.state = state;
-        self.write_record(&path, kind_thread(), &thread, thread_indexed(&thread))
-            .await
+        // The process-local mutex above only serializes writers in this
+        // process; multi-process shared roots need CAS as the floor
+        // (`crates/ironclaw_filesystem/CLAUDE.md` invariant 2). Re-read
+        // and retry on `VersionMismatch` so a concurrent state transition
+        // from another process doesn't silently disappear.
+        loop {
+            let Some(versioned) = self.read_versioned(&path).await? else {
+                // No-op when the thread isn't in the store — matches
+                // HybridStore's current behaviour (silently drops state
+                // updates for unknown ids rather than fail-closed).
+                return Ok(());
+            };
+            let mut thread: Thread = deserialize(&versioned.entry.body)?;
+            thread.state = state;
+            let entry = build_record_entry(kind_thread(), &thread, thread_indexed(&thread))?;
+            match self
+                .filesystem
+                .put(&path, entry, CasExpectation::Version(versioned.version))
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(fs_to_engine_error(error)),
+            }
+        }
     }
 
     // ── Step ops ──────────────────────────────────────────────
@@ -871,15 +905,27 @@ where
             let path = lease_path(thread_id, lease_id)?;
             let lock = lock_for_path(&path);
             let _guard = lock.lock().await;
-            let Some(versioned) = self.read_versioned(&path).await? else {
-                continue;
-            };
-            let mut lease: CapabilityLease = deserialize(&versioned.entry.body)?;
-            lease.revoked = true;
-            lease.revoked_reason = Some(reason.to_string());
-            self.write_record(&path, kind_lease(), &lease, lease_indexed(&lease))
-                .await?;
-            return Ok(());
+            // CAS retry: a concurrent grant/consume on the same lease
+            // from another process must not be silently overwritten by
+            // this revoke.
+            loop {
+                let Some(versioned) = self.read_versioned(&path).await? else {
+                    break;
+                };
+                let mut lease: CapabilityLease = deserialize(&versioned.entry.body)?;
+                lease.revoked = true;
+                lease.revoked_reason = Some(reason.to_string());
+                let entry = build_record_entry(kind_lease(), &lease, lease_indexed(&lease))?;
+                match self
+                    .filesystem
+                    .put(&path, entry, CasExpectation::Version(versioned.version))
+                    .await
+                {
+                    Ok(_) => return Ok(()),
+                    Err(FilesystemError::VersionMismatch { .. }) => continue,
+                    Err(error) => return Err(fs_to_engine_error(error)),
+                }
+            }
         }
         // Unknown lease ids are tolerated — the engine's in-memory
         // `LeaseManager` already revokes by id and would never round-trip
@@ -963,13 +1009,27 @@ where
             let path = mission_path(project_id, id)?;
             let lock = lock_for_path(&path);
             let _guard = lock.lock().await;
-            let Some(mut mission) = self.read_one::<Mission>(&path).await? else {
-                continue;
-            };
-            mission.status = status;
-            self.write_record(&path, kind_mission(), &mission, mission_indexed(&mission))
-                .await?;
-            return Ok(());
+            // CAS retry: a concurrent mission edit from another process
+            // (e.g. `save_mission` after a heartbeat tick) must not be
+            // clobbered by this status transition.
+            loop {
+                let Some(versioned) = self.read_versioned(&path).await? else {
+                    break;
+                };
+                let mut mission: Mission = deserialize(&versioned.entry.body)?;
+                mission.status = status;
+                let entry =
+                    build_record_entry(kind_mission(), &mission, mission_indexed(&mission))?;
+                match self
+                    .filesystem
+                    .put(&path, entry, CasExpectation::Version(versioned.version))
+                    .await
+                {
+                    Ok(_) => return Ok(()),
+                    Err(FilesystemError::VersionMismatch { .. }) => continue,
+                    Err(error) => return Err(fs_to_engine_error(error)),
+                }
+            }
         }
         // Unknown mission id: tolerate, matching `update_thread_state`.
         Ok(())

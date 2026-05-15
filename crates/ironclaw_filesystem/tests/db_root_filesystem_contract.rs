@@ -495,6 +495,42 @@ async fn libsql_fts_filter_picks_up_inserts_through_triggers() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_ensure_index_fts_rejects_path_with_sql_metacharacters() {
+    // Regression: the FTS5 sync triggers splice the mount-prefix path
+    // directly into DDL string literals (no parameter binding available in
+    // SQLite trigger bodies). VirtualPath rejects NUL/control/backslash/`..`
+    // but currently allows `'`, `"`, `;`, etc. We refuse to emit DDL when
+    // the path contains anything outside [A-Za-z0-9_/.-] so a path crafted
+    // to escape the literal cannot reach a CREATE TRIGGER statement.
+    let filesystem = libsql_root().await;
+    let injection_path = VirtualPath::new("/memory/'; DROP TABLE root_filesystem_entries; --")
+        .expect("VirtualPath::new accepts single-quote; DDL emitter must reject it");
+    let content = IndexKey::new("content").unwrap();
+    let spec = IndexSpec::new(
+        IndexName::new("by_content_inject").unwrap(),
+        vec![content],
+        IndexKind::Fts,
+    );
+    let err = filesystem
+        .ensure_index(&injection_path, &spec)
+        .await
+        .unwrap_err();
+    match err {
+        FilesystemError::Backend {
+            operation, reason, ..
+        } => {
+            assert_eq!(operation, FilesystemOperation::EnsureIndex);
+            assert!(
+                reason.contains("[A-Za-z0-9_/.-]"),
+                "expected identifier-safe rejection, got: {reason}"
+            );
+        }
+        other => panic!("expected Backend error, got: {other:?}"),
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_vector_index_round_trips_and_ranks_by_cosine() {
     // IndexKind::Vector is accepted at declaration; storage shape is
     // IndexValue::Bytes (LE-encoded f32s) in the indexed projection;
