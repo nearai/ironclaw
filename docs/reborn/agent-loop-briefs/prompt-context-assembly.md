@@ -420,17 +420,13 @@ Without explicit caching, `ThreadBackedLoopContextPort::load_loop_context()`
 re-reads identity files on every iteration. Anthropic prompt caching
 still hits on byte-stable content, but the per-tick disk read is
 wasteful and opens a race window where a file changes mid-run and the
-prefix flips. Required behavior:
+prefix flips. WS-15 implements a process-local cache for the lifetime of
+the constructed context port:
 
 - For **stable** files (per §3.3.5), `ThreadBackedLoopContextPort`
-  MUST pin the raw `Vec<HostIdentityContextCandidate>` for the run on
-  first `load_loop_context()` call and reuse that pinned snapshot on
-  subsequent calls, including resume after process restart. The pin is
-  durable: store either the snapshot bytes or a `StableIdentitySnapshotRef`
-  plus digest in run/checkpoint metadata before any blocking checkpoint
-  can resume through this driver. A process-local
-  `Arc<OnceLock<Vec<HostIdentityContextCandidate>>>` is only a
-  read-through cache for that durable snapshot, not the source of truth.
+  pins the raw `Vec<HostIdentityContextCandidate>` for the context port on
+  first `load_loop_context()` call and reuses that pinned snapshot on
+  subsequent calls in the same process.
   **Per-call filtering MUST happen after snapshot retrieval** —
   `build_identity_messages` re-applies `applies_when` against the
   request's `PromptMode` on every call.
@@ -449,13 +445,10 @@ prefix flips. Required behavior:
 - Implementations MUST NOT install file watchers in v1 — file
   changes mid-run are explicitly out of scope under the master doc §5
   layer-1 immutability rule.
-- On resume, the host reloads the pinned snapshot by ref/digest. If the
-  snapshot is missing or its digest does not match the checkpoint/run
-  metadata, resume fails closed with `LoopExit::Failed {
-  reason_kind: CheckpointUnavailable }` rather than rebuilding identity
-  from current workspace files. If a future migration wants to accept
-  identity drift, it needs an explicit migration policy and audit event;
-  silent drift is forbidden.
+- Durable identity snapshot persistence across process restart/resume is
+  deferred. WS-15 does not add a `StableIdentitySnapshotRef`, checkpoint
+  metadata digest, or resume-time fail-closed path. That behavior belongs
+  in the checkpoint/resume follow-up that owns durable run metadata.
 
 ### 3.5 Mode plumbing note
 
@@ -560,14 +553,6 @@ Unit tests (in `crates/ironclaw_loop_support`):
   invoke `load_loop_context()` twice on the same port; the mock
   identity source is called exactly once and both returned bundles
   are byte-equal. Guards the §3.4.5 per-run caching contract.
-- `lib::tests::context_port_resume_uses_pinned_identity_snapshot` —
-  seed a durable stable-identity snapshot, restart the port with a
-  source that now returns different file bytes, and assert the resumed
-  prompt uses the pinned snapshot.
-- `lib::tests::context_port_resume_rejects_identity_digest_drift` —
-  checkpoint metadata points at a snapshot whose digest no longer
-  matches; assert resume maps to `CheckpointUnavailable` instead of
-  rebuilding from current workspace files.
 
 Unit tests (in `crates/ironclaw_turns`):
 - `prompt::tests::identity_message_with_ref_maps_to_content_ref` —
@@ -582,22 +567,17 @@ Workspace tests (in `src/workspace`):
   secondary scopes returns only the primary content.
 - `workspace_identity_context_uses_protected_path_canon` — source
   iterates the same canonical protected-path list as
-  `ironclaw_memory::safety::DEFAULT_PROMPT_PROTECTED_PATHS`.
-- `workspace_identity_context_routes_heartbeat_as_volatile` —
-  `HEARTBEAT.md` is excluded from stable `identity_messages` and
-  appears only in the volatile instruction path for heartbeat runs.
+  `ironclaw_memory::safety::DEFAULT_PROMPT_PROTECTED_PATHS` and excludes
+  `HEARTBEAT.md` from the stable identity set.
+- `workspace_identity_context_excludes_personal_files_without_policy` —
+  `USER.md` and `context/assistant-directives.md` are excluded until an
+  explicit run-context privacy policy exists.
 
 Integration test (in `crates/ironclaw_reborn`):
-- `text_loop_driver_with_identity` — drives a `TextOnlyModelReplyDriver`
-  with the concrete workspace identity source seeded with two identity
-  files. Asserts:
-  - `prompt_bundle_built` milestone payload includes the identity
-    filenames in its metadata block.
-  - The model port receives a message list whose first two entries
-    have role `"system"` and resolve to the identity refs.
-  - With the source unset, the same test produces a bundle with zero
-    leading identity messages (regression guard for the "stays empty"
-    baseline).
+- `text_only_host_factory_threads_identity_source_to_prompt_and_model` —
+  drives `RebornLoopDriverHostFactory` with an identity source and asserts
+  the prompt bundle carries a leading system identity ref and the model
+  gateway resolves that ref to the trusted identity content.
 
 ## 6. Compatibility & rollout
 
@@ -614,10 +594,11 @@ Integration test (in `crates/ironclaw_reborn`):
   workstream. `identity_source = None` is acceptable for legacy tests
   and explicit non-default profiles, but not for WS-14's live default
   cutover.
-- Stable identity snapshots are part of resume compatibility. Operators
-  may edit `AGENTS.md`/`TOOLS.md` while a run is blocked, but the resumed
-  attempt keeps the checkpoint-pinned snapshot or fails closed if that
-  snapshot cannot be loaded.
+- Stable identity snapshots are not yet part of resume compatibility.
+  WS-15's cache is process-local. Durable checkpoint-pinned identity
+  snapshots, digest validation, and resume fail-closed behavior are
+  deferred to the checkpoint/resume workstream that owns durable run
+  metadata.
 
 ## 7. Out of scope (for this brief)
 
