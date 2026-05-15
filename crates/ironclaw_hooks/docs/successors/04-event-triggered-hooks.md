@@ -46,14 +46,22 @@ has already finished).
 
 ```rust
 // in ironclaw_hooks::points::event_triggered
+//
+// NOTE: this surface sketch uses the full `RuntimeEvent` for narrative
+// brevity; the cross-cutting constraints below recommend a narrowed
+// `HookObservableEvent` projection for Installed-tier hooks, tracked
+// as a Phase 5 follow-up (see "Phase 5 implementation notes" /
+// "Cross-cutting constraints" below).
 pub struct EventHookContext<'a> {
-    pub event: &'a RuntimeEvent,
+    pub event: &'a RuntimeEvent, // or &'a HookObservableEvent post-narrowing
     pub event_cursor: EventCursor,
     pub tenant_id: TenantId,
 }
 
-// Sink mirrors ObserverSink — `note_fact`, `emit_audit`. No `allow`,
-// no `deny`, no `patch`.
+// Sink mirrors `ObserverSink::note(category, summary)` (the only
+// observer-sink primitive that exists today). Reborn's
+// `EventTriggeredObserverSink` is the same shape. No `allow`, no
+// `deny`, no `patch`.
 #[async_trait]
 pub trait EventTriggeredHook: Send + Sync {
     async fn handle(
@@ -91,9 +99,12 @@ emit_audit.summary = "polymarket hook failed"
   event-emit path. The hook dispatcher reads events at its own pace
   (tick-driven or stream-driven, TBD).
 - **Cursor / replay**: subscriptions are cursor-keyed so a restarted
-  host can resume from the last-seen `EventCursor`. Lost events
-  during downtime is acceptable for observer-only semantics;
-  exact-once delivery is a future ratification slice.
+  host can resume from the last-seen `EventCursor`. The Phase 5
+  implementation (below) replays at-least-once from the persisted
+  cursor; exact-once acknowledgement is a future ratification slice.
+  Events emitted *before* a subscription's `start_cursor` are not
+  delivered — operators must persist the cursor before shutdown to
+  avoid gaps.
 
 ### Phase 5 implementation notes
 
@@ -105,20 +116,22 @@ emit_audit.summary = "polymarket hook failed"
   starts from the supplied `EventCursor` and advances its in-memory cursor
   while the host is alive. Restarting from the same cursor intentionally
   gives at-least-once replay; exact-once acknowledgement is deferred.
-- Hook dispatch receives the durable `RuntimeEvent` directly. This uses only
-  the sealed event/cursor vocabulary from `ironclaw_events`; the hook crate
-  still does not depend on host runtime, dispatcher, secrets, network, WASM,
-  or Reborn internals.
+- Hook dispatch receives the durable `RuntimeEvent` directly. `ironclaw_hooks`
+  already depends on `ironclaw_events` (since the milestone projection landed
+  in PR #3573), so the dep direction is established; what Phase 5 adds is the
+  *consumer* side of that vocabulary. The hook crate still does not depend on
+  host runtime, dispatcher, secrets, network, WASM, or Reborn internals.
 
 ## Cross-cutting constraints
 
-- **Cross-crate boundary**: `ironclaw_hooks` already forbids `events`
-  / `host_runtime` / `network` deps. Event-triggered hooks need *some*
-  access to `RuntimeEvent` — either via a re-export from
-  `ironclaw_events` (low risk; types are sealed-vocab) or via a
-  narrowed `HookObservableEvent` projection that strips dispatcher-
-  internal fields. **Pick narrowed projection** unless the full
-  surface is needed.
+- **Cross-crate boundary**: `ironclaw_hooks` already depends on
+  `ironclaw_events` for the milestone projection (PR #3573), and it
+  continues to forbid `host_runtime` / `network`. Event-triggered
+  hooks need *some* access to `RuntimeEvent`. Phase 5 shipped with the
+  full sealed-vocab `RuntimeEvent` for development velocity; the
+  longer-term target is a narrowed `HookObservableEvent` projection
+  that strips dispatcher-internal fields (tracked as a Phase 5
+  follow-up — see issue #3690).
 - **Trust class**: Installed-tier event-triggered hooks default to
   the same `OwnCapabilities` scope filter as inline hooks (the event
   has `provider: Option<ExtensionId>` already, so this is a thin
