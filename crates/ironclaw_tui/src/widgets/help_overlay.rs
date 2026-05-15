@@ -31,17 +31,17 @@ const KEYBINDINGS: &[(&str, &str)] = &[
     ("1-5", "Log level filter (Logs tab)"),
 ];
 
-pub struct HelpOverlayWidget {
+pub(crate) struct HelpOverlayWidget {
     theme: Theme,
 }
 
 impl HelpOverlayWidget {
-    pub fn new(theme: Theme) -> Self {
+    pub(crate) fn new(theme: Theme) -> Self {
         Self { theme }
     }
 
     /// Compute the modal area centered in the terminal.
-    pub fn modal_area(size: Rect) -> Rect {
+    pub(crate) fn modal_area(size: Rect) -> Rect {
         let width = 52u16.min(size.width.saturating_sub(4));
         let height = (KEYBINDINGS.len() as u16 + 4).min(size.height.saturating_sub(4));
         let x = (size.width.saturating_sub(width)) / 2;

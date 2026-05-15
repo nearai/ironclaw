@@ -9,6 +9,7 @@ Owns the thin WASM ProductAdapter host-glue boundary for IronClaw Reborn.
 - Auth evidence is host-minted only. WASM may declare auth requirements and receive sealed evidence; it must never fabricate verified claims.
 - No-op/ignored authenticated events must remain explicit payloads in the parsed DTO contract, not an absent parse result.
 - Runtime-specific WIT/request shapes may live here, but shared product-surface DTOs stay in `ironclaw_product_adapters`.
+- ProductAdapter components may use v1-style minimal WASI p2 for wasm32-wasip2 compatibility: clock/random are allowed; env, args, stdio, preopened directories, inherited network, and DNS lookup must stay disabled. Current slice is parse/render-only: the ProductAdapter WIT `http-egress` import fails closed until host-runtime egress wiring is injected in a follow-up.
 - Keep dependencies minimal. Avoid workflow/runtime crates unless a concrete host-glue call site requires them and architecture tests are updated deliberately.
 
 Tests:

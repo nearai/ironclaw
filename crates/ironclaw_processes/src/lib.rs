@@ -19,13 +19,13 @@
 //! - [`services`] — composition root ([`ProcessServices`]) and the
 //!   production [`BackgroundProcessManager`]
 
-pub mod cancellation;
-pub mod filesystem_store;
-pub mod host;
-pub mod memory_store;
-pub mod services;
-pub mod types;
-pub mod wrappers;
+mod cancellation;
+mod filesystem_store;
+mod host;
+mod memory_store;
+mod services;
+mod types;
+mod wrappers;
 
 pub use cancellation::{ProcessCancellationRegistry, ProcessCancellationToken};
 pub use filesystem_store::{FilesystemProcessResultStore, FilesystemProcessStore};

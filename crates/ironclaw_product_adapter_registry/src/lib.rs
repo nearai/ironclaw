@@ -217,22 +217,22 @@ impl ProductAdapterManifestAuthDocument {
                 header_name,
                 timestamp_header_name,
             } => {
-                validate_http_token("auth.header_name", &header_name)?;
-                if let Some(timestamp_header) = timestamp_header_name.as_deref() {
-                    validate_http_token("auth.timestamp_header_name", timestamp_header)?;
-                }
-                Ok(AuthRequirement::RequestSignature {
+                let requirement = AuthRequirement::RequestSignature {
                     header_name,
                     timestamp_header_name,
-                })
+                };
+                validate_auth_requirement(&requirement)?;
+                Ok(requirement)
             }
             Self::SharedSecretHeader { header_name } => {
-                validate_http_token("auth.header_name", &header_name)?;
-                Ok(AuthRequirement::SharedSecretHeader { header_name })
+                let requirement = AuthRequirement::SharedSecretHeader { header_name };
+                validate_auth_requirement(&requirement)?;
+                Ok(requirement)
             }
             Self::SessionCookie { name } => {
-                validate_cookie_name("auth.name", &name)?;
-                Ok(AuthRequirement::SessionCookie { name })
+                let requirement = AuthRequirement::SessionCookie { name };
+                validate_auth_requirement(&requirement)?;
+                Ok(requirement)
             }
             Self::BearerToken => Ok(AuthRequirement::BearerToken),
         }
@@ -1174,60 +1174,18 @@ fn validate_nonempty_noncontrol(field: &'static str, value: &str) -> Result<(), 
 }
 
 fn validate_auth_requirement(requirement: &AuthRequirement) -> Result<(), RegistryError> {
-    match requirement {
-        AuthRequirement::RequestSignature {
-            header_name,
-            timestamp_header_name,
-        } => {
-            validate_http_token("auth.header_name", header_name)?;
-            if let Some(timestamp_header) = timestamp_header_name.as_deref() {
-                validate_http_token("auth.timestamp_header_name", timestamp_header)?;
+    requirement
+        .validate_metadata()
+        .map_err(|error| match error {
+            ironclaw_product_adapters::ProductAdapterError::InvalidIdentifier { kind, reason } => {
+                RegistryError::InvalidValue {
+                    field: kind,
+                    reason,
+                }
             }
-        }
-        AuthRequirement::SharedSecretHeader { header_name } => {
-            validate_http_token("auth.header_name", header_name)?;
-        }
-        AuthRequirement::SessionCookie { name } => {
-            validate_cookie_name("auth.name", name)?;
-        }
-        AuthRequirement::BearerToken => {}
-    }
-    Ok(())
-}
-
-/// RFC 7230 §3.2.6 `token` = 1*tchar. Used to syntactically guard HTTP header
-/// names against CRLF/whitespace/separator injection when adapter manifests
-/// declare which header to read auth evidence from.
-fn validate_http_token(field: &'static str, value: &str) -> Result<(), RegistryError> {
-    if value.is_empty() {
-        return Err(RegistryError::InvalidValue {
-            field,
-            reason: "must not be empty".to_string(),
-        });
-    }
-    for c in value.chars() {
-        if !is_http_tchar(c) {
-            return Err(RegistryError::InvalidValue {
-                field,
-                reason: format!(
-                    "must be an RFC 7230 token (no CTL, whitespace, or separators); got {value:?}"
-                ),
-            });
-        }
-    }
-    Ok(())
-}
-
-fn is_http_tchar(c: char) -> bool {
-    matches!(
-        c,
-        '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`' | '|' | '~'
-    ) || c.is_ascii_alphanumeric()
-}
-
-/// RFC 6265 `cookie-name` is an HTTP `token`. Reuse the same predicate so a
-/// declared cookie name can't smuggle CRLF, `=`, or `;` into downstream
-/// `Set-Cookie`/`Cookie` interpolation.
-fn validate_cookie_name(field: &'static str, value: &str) -> Result<(), RegistryError> {
-    validate_http_token(field, value)
+            other => RegistryError::InvalidValue {
+                field: "auth",
+                reason: other.to_string(),
+            },
+        })
 }

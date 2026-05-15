@@ -25,7 +25,7 @@ async fn postgres_substrate_builder_wires_production_components_without_local_on
                 url: SecretString::from(database_url),
             },
             secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
-            trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::empty()),
+            trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
             turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
             surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
         })
@@ -51,7 +51,7 @@ async fn postgres_substrate_builder_rejects_missing_secret_master_key() {
                 url: SecretString::from(database_url),
             },
             secret_master_key: None,
-            trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::empty()),
+            trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
             turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
             surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
         })

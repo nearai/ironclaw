@@ -11,7 +11,7 @@ use thiserror::Error;
 /// trusted instruction set.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum UntrustedPromptSource {
+pub(crate) enum UntrustedPromptSource {
     Memory,
     Skill,
     Extension,
@@ -21,7 +21,7 @@ pub enum UntrustedPromptSource {
 }
 
 impl UntrustedPromptSource {
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         match self {
             Self::Memory => "memory",
             Self::Skill => "skill",
@@ -38,7 +38,7 @@ impl UntrustedPromptSource {
 /// This is only model-facing provenance. It is not an authority grant.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum PromptContentTrust {
+pub(crate) enum PromptContentTrust {
     Sandbox,
     Installed,
     Trusted,
@@ -48,7 +48,7 @@ pub enum PromptContentTrust {
 }
 
 impl PromptContentTrust {
-    pub fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Sandbox => "sandbox",
             Self::Installed => "installed",
@@ -66,7 +66,7 @@ impl PromptContentTrust {
 /// must classify source/trust provenance after authorization instead of
 /// accepting model-facing trust labels from wire JSON.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct UntrustedPromptContent {
+pub(crate) struct UntrustedPromptContent {
     source: UntrustedPromptSource,
     trust: PromptContentTrust,
     id: Option<String>,
@@ -75,7 +75,7 @@ pub struct UntrustedPromptContent {
 
 impl UntrustedPromptContent {
     /// Construct content whose trust provenance has not been host-classified.
-    pub fn new_unclassified(
+    pub(crate) fn new_unclassified(
         source: UntrustedPromptSource,
         id: Option<String>,
         body: String,
@@ -94,7 +94,7 @@ impl UntrustedPromptContent {
     /// This constructor does not grant authority. Callers must only pass trust
     /// values derived from an already-authorized host policy or registry row,
     /// never directly from retrieved content or user/provider JSON.
-    pub fn new_host_classified(
+    pub(crate) fn new_host_classified(
         source: UntrustedPromptSource,
         trust: PromptContentTrust,
         id: Option<String>,
@@ -108,19 +108,19 @@ impl UntrustedPromptContent {
         }
     }
 
-    pub fn source(&self) -> &UntrustedPromptSource {
+    pub(crate) fn source(&self) -> &UntrustedPromptSource {
         &self.source
     }
 
-    pub fn trust(&self) -> &PromptContentTrust {
+    pub(crate) fn trust(&self) -> &PromptContentTrust {
         &self.trust
     }
 
-    pub fn id(&self) -> Option<&str> {
+    pub(crate) fn id(&self) -> Option<&str> {
         self.id.as_deref()
     }
 
-    pub fn body(&self) -> &str {
+    pub(crate) fn body(&self) -> &str {
         &self.body
     }
 
@@ -128,7 +128,7 @@ impl UntrustedPromptContent {
     ///
     /// The renderer escapes both attributes and body text so retrieved content
     /// cannot close the envelope or inject sibling prompt tags.
-    pub fn render_envelope(&self) -> String {
+    pub(crate) fn render_envelope(&self) -> String {
         let id_capacity = self.id.as_ref().map_or(0, |id| id.len() + 6);
         let mut rendered = String::with_capacity(
             "<untrusted-content source=\"\" trust=\"\">\n\n</untrusted-content>".len()
@@ -170,7 +170,7 @@ fn push_xmlish_escaped(output: &mut String, value: &str) {
 /// Why a hash is being computed or compared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum HashPurpose {
+pub(crate) enum HashPurpose {
     /// Deterministic keying where collision is not a trust/authenticity claim.
     StableCacheKey,
     /// Stable content or configuration fingerprint.
@@ -187,7 +187,7 @@ pub enum HashPurpose {
 }
 
 impl HashPurpose {
-    pub fn requires_cryptographic_hash(self) -> bool {
+    pub(crate) fn requires_cryptographic_hash(self) -> bool {
         !matches!(self, Self::StableCacheKey)
     }
 }
@@ -195,7 +195,7 @@ impl HashPurpose {
 /// Declared hash algorithm class.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum HashAlgorithm {
+pub(crate) enum HashAlgorithm {
     Fnv,
     DefaultHasher,
     Sha256,
@@ -204,14 +204,14 @@ pub enum HashAlgorithm {
 }
 
 impl HashAlgorithm {
-    pub fn is_allowed_for(&self, purpose: HashPurpose) -> bool {
+    pub(crate) fn is_allowed_for(&self, purpose: HashPurpose) -> bool {
         if !purpose.requires_cryptographic_hash() {
             return true;
         }
         matches!(self, Self::Sha256 | Self::Blake3)
     }
 
-    pub fn is_cryptographic(&self) -> bool {
+    pub(crate) fn is_cryptographic(&self) -> bool {
         matches!(self, Self::Sha256 | Self::Blake3)
     }
 }
@@ -219,7 +219,7 @@ impl HashAlgorithm {
 /// Driver/operator action class for redacted cross-crate errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum OperatorErrorClass {
+pub(crate) enum OperatorErrorClass {
     Transient,
     Permanent,
     Misconfigured,
@@ -227,11 +227,11 @@ pub enum OperatorErrorClass {
 }
 
 impl OperatorErrorClass {
-    pub fn is_retryable(self) -> bool {
+    pub(crate) fn is_retryable(self) -> bool {
         matches!(self, Self::Transient)
     }
 
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Transient => "transient",
             Self::Permanent => "permanent",
@@ -243,27 +243,27 @@ impl OperatorErrorClass {
 
 /// Checked counter for byte/item admission and accumulation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BoundedCounter {
+pub(crate) struct BoundedCounter {
     limit: usize,
     used: usize,
 }
 
 impl BoundedCounter {
-    pub fn new(limit: usize) -> Self {
+    pub(crate) fn new(limit: usize) -> Self {
         Self { limit, used: 0 }
     }
 
-    pub fn limit(&self) -> usize {
+    pub(crate) fn limit(&self) -> usize {
         self.limit
     }
 
-    pub fn used(&self) -> usize {
+    pub(crate) fn used(&self) -> usize {
         self.used
     }
 
     /// Add an amount, failing if arithmetic overflows or if the limit would be
     /// exceeded.
-    pub fn try_add(&mut self, amount: usize) -> Result<usize, LimitExceeded> {
+    pub(crate) fn try_add(&mut self, amount: usize) -> Result<usize, LimitExceeded> {
         let Some(attempted) = self.used.checked_add(amount) else {
             return Err(LimitExceeded {
                 limit: self.limit,
@@ -286,7 +286,7 @@ impl BoundedCounter {
 /// Why an admission counter rejected a new amount.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum LimitExceededReason {
+pub(crate) enum LimitExceededReason {
     LimitExceeded,
     Overflow,
 }
@@ -294,22 +294,22 @@ pub enum LimitExceededReason {
 /// Stable limit-exceeded error for admission/back-pressure helpers.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 #[error("limit exceeded: attempted {attempted} > limit {limit} ({reason:?})")]
-pub struct LimitExceeded {
+pub(crate) struct LimitExceeded {
     limit: usize,
     attempted: usize,
     reason: LimitExceededReason,
 }
 
 impl LimitExceeded {
-    pub fn limit(&self) -> usize {
+    pub(crate) fn limit(&self) -> usize {
         self.limit
     }
 
-    pub fn attempted(&self) -> usize {
+    pub(crate) fn attempted(&self) -> usize {
         self.attempted
     }
 
-    pub fn reason(&self) -> LimitExceededReason {
+    pub(crate) fn reason(&self) -> LimitExceededReason {
         self.reason
     }
 }
@@ -321,10 +321,10 @@ impl LimitExceeded {
 /// untrusted input. The trait itself does not seal values; each security
 /// domain must keep its own seal or witness constructor private to the crate or
 /// module that verifies evidence.
-pub trait TrustedConstructionWitness: private::Sealed {}
+pub(crate) trait TrustedConstructionWitness: private::Sealed {}
 
 mod private {
-    pub trait Sealed {}
+    pub(crate) trait Sealed {}
 }
 
 #[cfg(test)]

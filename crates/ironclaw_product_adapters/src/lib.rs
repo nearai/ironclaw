@@ -2,20 +2,20 @@
 
 #![forbid(unsafe_code)]
 
-pub mod adapter;
+mod adapter;
 pub mod auth;
 pub mod capabilities;
-pub mod egress;
-pub mod error;
+mod egress;
+mod error;
 pub mod external;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fakes;
 pub mod identity;
 pub mod inbound;
-pub mod outbound;
-pub mod projection;
+mod outbound;
+mod projection;
 pub mod redaction;
-pub mod workflow;
+mod workflow;
 
 pub use adapter::{ProductAdapter, ProductAdapterHealth};
 pub use auth::{AuthRequirement, ProtocolAuthEvidence, ProtocolAuthFailure, VerifiedAuthClaim};

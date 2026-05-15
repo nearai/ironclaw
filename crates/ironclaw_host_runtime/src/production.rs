@@ -10,8 +10,8 @@
 //! This layer evaluates the package's manifest-derived trust input immediately
 //! before invoking [`CapabilityHost`] so authorization consumes a host-owned
 //! [`TrustDecision`](ironclaw_trust::TrustDecision) instead of caller-supplied
-//! claims. The default empty policy fails closed until composition supplies a
-//! concrete host policy.
+//! claims. The default fail-closed policy denies authority until composition
+//! supplies a concrete host policy.
 
 use std::sync::Arc;
 
@@ -67,9 +67,9 @@ pub struct DefaultHostRuntime {
 impl DefaultHostRuntime {
     /// Constructs a default host runtime over the supplied kernel services.
     ///
-    /// The runtime starts with an empty host trust policy, so capability
-    /// dispatch fails closed until composition attaches a concrete policy with
-    /// [`Self::with_trust_policy`] or [`Self::with_trust_policy_dyn`].
+    /// The runtime starts with an explicit fail-closed host trust policy, so
+    /// capability dispatch is denied until composition attaches a concrete
+    /// policy with [`Self::with_trust_policy`] or [`Self::with_trust_policy_dyn`].
     ///
     /// Callers must additionally attach either a combined
     /// [`RunStateApprovalStore`] via
@@ -91,7 +91,7 @@ impl DefaultHostRuntime {
             registry,
             dispatcher,
             authorizer,
-            trust_policy: Arc::new(HostTrustPolicy::empty()),
+            trust_policy: Arc::new(HostTrustPolicy::fail_closed()),
             run_state: None,
             approval_requests: None,
             run_state_approval_store: None,
