@@ -1575,7 +1575,7 @@ async fn async_main() -> anyhow::Result<()> {
                         )
                         .await;
                     if changed {
-                        tracing::info!("SIGHUP: channel routing config reloaded");
+                        tracing::debug!("SIGHUP: channel routing config reloaded");
                     } else {
                         tracing::debug!("SIGHUP: channel routing config unchanged");
                     }

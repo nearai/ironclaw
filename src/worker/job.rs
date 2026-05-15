@@ -2829,6 +2829,11 @@ mod tests {
         assert_eq!(telegram[0].1.content, "hello from routine");
     }
 
+    // TODO(postgres-parity): no symmetric test for the postgres backend per
+    // .claude/rules/database.md — dual-backend features need testcontainers
+    // or #[cfg(feature = "integration")] coverage. Tracked as tech debt;
+    // the libsql test below covers the shared filtering logic in
+    // tool_definitions_for_current_context, which is backend-agnostic.
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn routed_jobs_filter_tools_by_originating_channel() {
@@ -2853,6 +2858,12 @@ mod tests {
             }))
             .unwrap();
         routing.save_to_store(&backend, "user-1").await.unwrap();
+
+        // Populate the routing Arc from the store so the filter actually
+        // activates inside tool_definitions_for_current_context.
+        // none_arc() starts as None → the early return would skip filtering.
+        let channel_routing = ChannelRoutingConfig::none_arc();
+        ChannelRoutingConfig::reload_from_store(&backend, "user-1", &channel_routing).await;
 
         let registry = ToolRegistry::new();
         // MCP tools registered dynamically (async — not in builtin_tool_names).
@@ -2910,7 +2921,7 @@ mod tests {
                 approval_context: None,
                 http_interceptor: None,
                 multi_tenant: false,
-                channel_routing: ChannelRoutingConfig::none_arc(),
+                channel_routing,
             },
         );
 
