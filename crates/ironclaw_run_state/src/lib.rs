@@ -21,7 +21,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{FilesystemError, RootFilesystem};
+use ironclaw_filesystem::{CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
     AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, HostApiError, InvocationId,
     MissionId, ProjectId, ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
@@ -553,8 +553,11 @@ where
 
     async fn write_record(&self, record: &RunRecord) -> Result<(), RunStateError> {
         let path = run_record_path(&record.scope, record.invocation_id)?;
-        let bytes = serialize_pretty(record)?;
-        self.filesystem.write_file(&path, &bytes).await?;
+        let body = serialize_pretty(record)?;
+        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        self.filesystem
+            .put(&path, entry, CasExpectation::Any)
+            .await?;
         Ok(())
     }
 }
@@ -670,12 +673,10 @@ where
         invocation_id: InvocationId,
     ) -> Result<Option<RunRecord>, RunStateError> {
         let path = run_record_path(scope, invocation_id)?;
-        let bytes = match self.filesystem.read_file(&path).await {
-            Ok(bytes) => bytes,
-            Err(error) if is_not_found(&error) => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let Some(versioned) = self.filesystem.get(&path).await? else {
+            return Ok(None);
         };
-        let record = deserialize::<RunRecord>(&bytes)?;
+        let record = deserialize::<RunRecord>(&versioned.entry.body)?;
         if same_scope_owner(&record.scope, scope) {
             Ok(Some(record))
         } else {
@@ -696,12 +697,10 @@ where
         let mut records = Vec::new();
         for entry in entries {
             if entry.name.ends_with(".json") {
-                let bytes = match self.filesystem.read_file(&entry.path).await {
-                    Ok(bytes) => bytes,
-                    Err(error) if is_not_found(&error) => continue,
-                    Err(error) => return Err(error.into()),
+                let Some(versioned) = self.filesystem.get(&entry.path).await? else {
+                    continue;
                 };
-                let record = deserialize::<RunRecord>(&bytes)?;
+                let record = deserialize::<RunRecord>(&versioned.entry.body)?;
                 if same_scope_owner(&record.scope, scope) {
                     records.push(record);
                 }
@@ -754,8 +753,11 @@ where
 
     async fn write_record(&self, record: &ApprovalRecord) -> Result<(), RunStateError> {
         let path = approval_record_path(&record.scope, record.request.id)?;
-        let bytes = serialize_pretty(record)?;
-        self.filesystem.write_file(&path, &bytes).await?;
+        let body = serialize_pretty(record)?;
+        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        self.filesystem
+            .put(&path, entry, CasExpectation::Any)
+            .await?;
         Ok(())
     }
 }
@@ -793,12 +795,10 @@ where
         request_id: ApprovalRequestId,
     ) -> Result<Option<ApprovalRecord>, RunStateError> {
         let path = approval_record_path(scope, request_id)?;
-        let bytes = match self.filesystem.read_file(&path).await {
-            Ok(bytes) => bytes,
-            Err(error) if is_not_found(&error) => return Ok(None),
-            Err(error) => return Err(error.into()),
+        let Some(versioned) = self.filesystem.get(&path).await? else {
+            return Ok(None);
         };
-        let record = deserialize::<ApprovalRecord>(&bytes)?;
+        let record = deserialize::<ApprovalRecord>(&versioned.entry.body)?;
         if same_scope_owner(&record.scope, scope) {
             Ok(Some(record))
         } else {
@@ -860,12 +860,10 @@ where
         let mut records = Vec::new();
         for entry in entries {
             if entry.name.ends_with(".json") {
-                let bytes = match self.filesystem.read_file(&entry.path).await {
-                    Ok(bytes) => bytes,
-                    Err(error) if is_not_found(&error) => continue,
-                    Err(error) => return Err(error.into()),
+                let Some(versioned) = self.filesystem.get(&entry.path).await? else {
+                    continue;
                 };
-                let record = deserialize::<ApprovalRecord>(&bytes)?;
+                let record = deserialize::<ApprovalRecord>(&versioned.entry.body)?;
                 if same_scope_owner(&record.scope, scope) {
                     records.push(record);
                 }

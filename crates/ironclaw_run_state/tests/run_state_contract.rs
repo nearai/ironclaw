@@ -843,6 +843,31 @@ impl RootFilesystem for ConcurrentMissingReadFilesystem {
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.create_dir_all(path).await
     }
+
+    // After PR #3659 the consumer's existence-check / read path goes
+    // through `get`, not `read_file`. Mirror the missing-read race
+    // behavior here so the duplicate-start serialization test still
+    // exercises the concurrent-create window it was designed for.
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: ironclaw_filesystem::Entry,
+        cas: ironclaw_filesystem::CasExpectation,
+    ) -> Result<ironclaw_filesystem::RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, FilesystemError> {
+        let result = self.inner.get(path).await;
+        if matches!(result, Ok(None)) && Self::should_race_missing_read(path) {
+            self.missing_reads.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        result
+    }
 }
 
 struct DisappearingApprovalReadFilesystem {
@@ -900,6 +925,31 @@ impl RootFilesystem for DisappearingApprovalReadFilesystem {
 
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.create_dir_all(path).await
+    }
+
+    // After PR #3659 the approval-listing read path goes through `get`,
+    // not `read_file`. Mirror the fault injection so the
+    // disappearing-approval test still exercises its intended path.
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: ironclaw_filesystem::Entry,
+        cas: ironclaw_filesystem::CasExpectation,
+    ) -> Result<ironclaw_filesystem::RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, FilesystemError> {
+        if path.as_str().contains("/approvals/")
+            && path.as_str().ends_with(".json")
+            && self.fail_next_approval_read.swap(false, Ordering::SeqCst)
+        {
+            return Ok(None);
+        }
+        self.inner.get(path).await
     }
 }
 
