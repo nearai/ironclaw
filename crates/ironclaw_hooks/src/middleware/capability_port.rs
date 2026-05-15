@@ -132,7 +132,7 @@ impl HookedLoopCapabilityPort {
         self
     }
 
-    async fn hook_context(
+    pub(crate) async fn hook_context(
         &self,
         invocation: &CapabilityInvocation,
         provider: Option<ironclaw_host_api::ExtensionId>,
@@ -813,6 +813,70 @@ mod tests {
             "invocation_arguments_digest shifted for a fixed input — \
              this is a wire-contract break. See the stability-contract \
              rustdoc on `invocation_arguments_digest`."
+        );
+    }
+
+    /// serrrfirat #3637 regression: pin the digest at the boundary that
+    /// hook authors actually observe — `BeforeCapabilityHookContext.arguments_digest`
+    /// produced by `HookedLoopCapabilityPort::hook_context`. If caller-side
+    /// wiring drifts (wrong field set, transform inserted, default value
+    /// leaked, or an alternate path bypassing the helper), this assertion
+    /// catches it while the helper-only snapshot would stay green.
+    #[tokio::test]
+    async fn hook_context_arguments_digest_is_stable_at_middleware_boundary() {
+        use ironclaw_host_api::TenantId;
+        use std::sync::Arc as StdArc;
+        struct NoopInner;
+        #[async_trait]
+        impl LoopCapabilityPort for NoopInner {
+            async fn visible_capabilities(
+                &self,
+                _request: VisibleCapabilityRequest,
+            ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+                unreachable!("snapshot test never calls visible_capabilities")
+            }
+            async fn invoke_capability(
+                &self,
+                _request: CapabilityInvocation,
+            ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+                unreachable!("snapshot test never invokes through inner port")
+            }
+            async fn invoke_capability_batch(
+                &self,
+                _request: CapabilityBatchInvocation,
+            ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+                unreachable!("snapshot test never invokes through inner port")
+            }
+        }
+
+        let port = HookedLoopCapabilityPort::new(
+            StdArc::new(NoopInner),
+            StdArc::new(HookDispatcher::new(HookRegistry::new())),
+            TenantId::new("alpha").expect("ok"),
+        );
+        let invocation = CapabilityInvocation {
+            surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion::new(
+                "snapshot:v1",
+            )
+            .expect("surface version literal is valid"),
+            capability_id: CapabilityId::new("cap.snapshot.fixture")
+                .expect("capability id literal is valid"),
+            input_ref: ironclaw_turns::run_profile::CapabilityInputRef::new(
+                "input:cap.snapshot.fixture",
+            )
+            .expect("input ref literal is valid"),
+        };
+        let ctx = port.hook_context(&invocation, None).await;
+        let hex: String = ctx
+            .arguments_digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex, "4d0ab78e009b32615c2766bd1c26921bd59ef81b5741a75387707f82f0344315",
+            "BeforeCapabilityHookContext.arguments_digest shifted at the \
+             middleware boundary; this is a hook-visible wire-contract \
+             break, not just a helper-output drift."
         );
     }
 
