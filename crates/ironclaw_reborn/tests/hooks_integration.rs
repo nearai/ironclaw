@@ -976,7 +976,10 @@ async fn pause_approval_hook_surfaces_as_approval_required_with_real_gate_ref() 
     let host = fixture
         .factory()
         .with_hook_dispatcher(pause_approval_dispatcher())
-        .with_hook_gate_ref_factory(Arc::new(factory))
+        .with_hook_gate_ref_factory_builder({
+            let f: Arc<dyn ironclaw_hooks::middleware::HookGateRefFactory> = Arc::new(factory);
+            move |_| Arc::clone(&f)
+        })
         .build_text_only_host_with_capabilities(fixture.request(), inner.clone())
         .await
         .expect("host builds with hook dispatcher installed");
@@ -1048,7 +1051,10 @@ async fn router_backed_pause_approval_gate_ref_rejects_cross_actor_resolution() 
     let host = fixture
         .factory()
         .with_hook_dispatcher(pause_approval_dispatcher())
-        .with_hook_gate_ref_factory(Arc::new(factory))
+        .with_hook_gate_ref_factory_builder({
+            let f: Arc<dyn ironclaw_hooks::middleware::HookGateRefFactory> = Arc::new(factory);
+            move |_| Arc::clone(&f)
+        })
         .build_text_only_host_with_capabilities(fixture.request(), inner.clone())
         .await
         .expect("host builds with hook dispatcher installed");
@@ -1124,7 +1130,11 @@ async fn router_backed_gate_ref_factory_sources_context_per_mint_when_reused() {
     let host_factory = fixture
         .factory()
         .with_hook_dispatcher(pause_approval_dispatcher())
-        .with_hook_gate_ref_factory(Arc::new(gate_ref_factory));
+        .with_hook_gate_ref_factory_builder({
+            let f: Arc<dyn ironclaw_hooks::middleware::HookGateRefFactory> =
+                Arc::new(gate_ref_factory);
+            move |_| Arc::clone(&f)
+        });
 
     let inner_a = Arc::new(RecordingCapabilityPort::new());
     let request_a = fixture.request();
@@ -1239,7 +1249,10 @@ async fn router_backed_pause_approval_gate_ref_expires_after_ttl() {
     let host = fixture
         .factory()
         .with_hook_dispatcher(pause_approval_dispatcher())
-        .with_hook_gate_ref_factory(Arc::new(factory))
+        .with_hook_gate_ref_factory_builder({
+            let f: Arc<dyn ironclaw_hooks::middleware::HookGateRefFactory> = Arc::new(factory);
+            move |_| Arc::clone(&f)
+        })
         .build_text_only_host_with_capabilities(fixture.request(), inner.clone())
         .await
         .expect("host builds with hook dispatcher installed");
@@ -1295,7 +1308,10 @@ async fn router_backed_pause_approval_gate_ref_rejects_backdated_resolution_afte
     let host = fixture
         .factory()
         .with_hook_dispatcher(pause_approval_dispatcher())
-        .with_hook_gate_ref_factory(Arc::new(factory))
+        .with_hook_gate_ref_factory_builder({
+            let f: Arc<dyn ironclaw_hooks::middleware::HookGateRefFactory> = Arc::new(factory);
+            move |_| Arc::clone(&f)
+        })
         .build_text_only_host_with_capabilities(fixture.request(), inner.clone())
         .await
         .expect("host builds with hook dispatcher installed");
