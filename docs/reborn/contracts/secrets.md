@@ -139,6 +139,9 @@ host-runtime composition resolves those requirements against scoped
 `CredentialAccountStore` records before constructing `InjectSecretOnce` staging
 and exact-method-and-URL WASM credential rules. The resolver preserves each
 credential's required/optional semantics for the eventual obligation planner.
+If a store implementation returns an account with a different id than the
+requested account id, callers should fail closed with a store-identity violation
+rather than treating it as an ordinary scope mismatch.
 The secrets crate remains responsible only for account/session storage contracts
 and secret lease/consume mechanics.
 

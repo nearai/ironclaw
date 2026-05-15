@@ -52,6 +52,18 @@ impl ResourceScope {
             invocation_id,
         })
     }
+
+    /// Returns whether a durable credential account scoped to `self` is
+    /// visible to a request running under `request_scope`.
+    ///
+    /// Credential accounts are intentionally bound to the tenant/user/agent/
+    /// project account scope and outlive mission/thread/invocation boundaries.
+    pub fn is_account_visible_to(&self, request_scope: &Self) -> bool {
+        self.tenant_id == request_scope.tenant_id
+            && self.user_id == request_scope.user_id
+            && self.agent_id == request_scope.agent_id
+            && self.project_id == request_scope.project_id
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -403,6 +403,13 @@ pub enum CredentialBrokerError {
     MissingCredential { account_id: CredentialAccountId },
     #[error("credential account {account_id} does not match caller scope")]
     CredentialScopeMismatch { account_id: CredentialAccountId },
+    #[error(
+        "credential store returned {returned_account_id} for requested account {requested_account_id}"
+    )]
+    StoreIdentityViolation {
+        requested_account_id: CredentialAccountId,
+        returned_account_id: CredentialAccountId,
+    },
     #[error("credential session request invocation does not match caller scope for {account_id}")]
     CredentialInvocationMismatch { account_id: CredentialAccountId },
     #[error("credential broker state is unavailable: {reason}")]
@@ -429,6 +436,7 @@ impl CredentialBrokerError {
             Self::InvalidAccountId { .. } => "MissingCredential",
             Self::MissingCredential { .. } => "MissingCredential",
             Self::CredentialScopeMismatch { .. } => "CredentialScopeMismatch",
+            Self::StoreIdentityViolation { .. } => "StoreIdentityViolation",
             Self::CredentialInvocationMismatch { .. } => "CredentialScopeMismatch",
             Self::BrokerUnavailable { .. } => "BackendUnavailable",
             Self::UnknownSession { .. } => "MissingCredential",
@@ -1543,6 +1551,16 @@ mod tests {
         assert_eq!(
             CredentialBrokerError::CredentialExpired { account_id }.stable_reason(),
             "CredentialExpired"
+        );
+        let requested_account_id = CredentialAccountId::new("openai_prod").unwrap();
+        let returned_account_id = CredentialAccountId::new("other_openai_prod").unwrap();
+        assert_eq!(
+            CredentialBrokerError::StoreIdentityViolation {
+                requested_account_id,
+                returned_account_id,
+            }
+            .stable_reason(),
+            "StoreIdentityViolation"
         );
         assert_eq!(
             SecretStoreError::SecretExpired.stable_reason(),

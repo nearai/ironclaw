@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -19,6 +22,9 @@ use ironclaw_wasm::{
     WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest, WasmStagedRuntimeCredentials,
 };
 use serde_json::json;
+
+// Credential accounts are intentionally scoped to durable tenant/user/agent/
+// project ownership and can outlive a single mission, thread, or invocation.
 
 #[tokio::test]
 async fn resolves_projected_host_api_requirement_into_exact_url_wasm_credentials() {
@@ -82,10 +88,9 @@ async fn resolves_account_from_same_account_scope_under_different_invocation() {
     stored_scope.invocation_id = InvocationId::new();
     let account_id = CredentialAccountId::new("telegram_bot").unwrap();
     let handle = SecretHandle::new("telegram_bot_token").unwrap();
-    let store = Arc::new(InMemoryCredentialBroker::new());
-    store
-        .put_account(sample_account(&stored_scope, &account_id, &handle))
-        .unwrap();
+    let store = Arc::new(FixedAccountStore {
+        account: sample_account(&stored_scope, &account_id, &handle),
+    });
     let request = resolver_request(&scope, "https://api.telegram.org/bot123/sendMessage");
 
     let resolver = CredentialAccountResolver::new(
@@ -255,7 +260,7 @@ async fn rejects_store_returning_different_account_id() {
     let requested_account_id = CredentialAccountId::new("telegram_bot").unwrap();
     let returned_account_id = CredentialAccountId::new("other_telegram_bot").unwrap();
     let handle = SecretHandle::new("telegram_bot_token").unwrap();
-    let store = Arc::new(MismatchedAccountStore {
+    let store = Arc::new(FixedAccountStore {
         account: sample_account(&scope, &returned_account_id, &handle),
     });
     let resolver = CredentialAccountResolver::new(
@@ -274,9 +279,78 @@ async fn rejects_store_returning_different_account_id() {
     assert!(matches!(
         error,
         CredentialAccountResolverError::Broker(
+            CredentialBrokerError::StoreIdentityViolation { .. }
+        )
+    ));
+}
+
+#[tokio::test]
+async fn rejects_account_outside_visible_account_scope() {
+    let scope = sample_scope();
+    let mut stored_scope = scope.clone();
+    stored_scope.project_id = Some(ProjectId::new("project-b").unwrap());
+    let account_id = CredentialAccountId::new("telegram_bot").unwrap();
+    let handle = SecretHandle::new("telegram_bot_token").unwrap();
+    let store = Arc::new(FixedAccountStore {
+        account: sample_account(&stored_scope, &account_id, &handle),
+    });
+    let resolver = CredentialAccountResolver::new(
+        Arc::clone(&store),
+        [requirement(&account_id, &handle, None, true)],
+    );
+
+    let error = resolver
+        .resolve_for_wasm(&resolver_request(
+            &scope,
+            "https://api.telegram.org/bot123/sendMessage",
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        CredentialAccountResolverError::Broker(
             CredentialBrokerError::CredentialScopeMismatch { .. }
         )
     ));
+}
+
+#[tokio::test]
+async fn duplicate_matching_requirements_fetch_account_once() {
+    let scope = sample_scope();
+    let account_id = CredentialAccountId::new("telegram_bot").unwrap();
+    let handle = SecretHandle::new("telegram_bot_token").unwrap();
+    let store = Arc::new(CountingAccountStore::new(sample_account(
+        &scope,
+        &account_id,
+        &handle,
+    )));
+    let resolver = CredentialAccountResolver::new(
+        Arc::clone(&store),
+        [
+            requirement(&account_id, &handle, None, false),
+            requirement(&account_id, &handle, None, true),
+        ],
+    );
+
+    let resolved = resolver
+        .resolve_for_wasm(&resolver_request(
+            &scope,
+            "https://api.telegram.org/bot123/sendMessage",
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(store.fetch_count(), 1);
+    assert_eq!(
+        resolved.secret_requirements,
+        vec![CredentialAccountSecretRequirement {
+            handle,
+            required: true,
+        }]
+    );
+    assert_eq!(resolved.wasm_credentials.len(), 1);
+    assert!(resolved.wasm_credentials[0].required);
 }
 
 #[tokio::test]
@@ -437,12 +511,12 @@ fn capability_id() -> CapabilityId {
     CapabilityId::new("telegram.send_message").unwrap()
 }
 
-struct MismatchedAccountStore {
+struct FixedAccountStore {
     account: CredentialAccount,
 }
 
 #[async_trait]
-impl ironclaw_secrets::CredentialAccountStore for MismatchedAccountStore {
+impl ironclaw_secrets::CredentialAccountStore for FixedAccountStore {
     async fn put_account(
         &self,
         account: CredentialAccount,
@@ -455,6 +529,50 @@ impl ironclaw_secrets::CredentialAccountStore for MismatchedAccountStore {
         _scope: &ResourceScope,
         _account_id: &CredentialAccountId,
     ) -> Result<Option<CredentialAccount>, CredentialBrokerError> {
+        Ok(Some(self.account.clone()))
+    }
+
+    async fn accounts_for_scope(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<CredentialAccount>, CredentialBrokerError> {
+        Ok(vec![self.account.clone()])
+    }
+}
+
+struct CountingAccountStore {
+    account: CredentialAccount,
+    fetch_count: AtomicUsize,
+}
+
+impl CountingAccountStore {
+    fn new(account: CredentialAccount) -> Self {
+        Self {
+            account,
+            fetch_count: AtomicUsize::new(0),
+        }
+    }
+
+    fn fetch_count(&self) -> usize {
+        self.fetch_count.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ironclaw_secrets::CredentialAccountStore for CountingAccountStore {
+    async fn put_account(
+        &self,
+        account: CredentialAccount,
+    ) -> Result<CredentialAccount, CredentialBrokerError> {
+        Ok(account)
+    }
+
+    async fn get_account(
+        &self,
+        _scope: &ResourceScope,
+        _account_id: &CredentialAccountId,
+    ) -> Result<Option<CredentialAccount>, CredentialBrokerError> {
+        self.fetch_count.fetch_add(1, Ordering::SeqCst);
         Ok(Some(self.account.clone()))
     }
 

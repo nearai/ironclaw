@@ -436,6 +436,9 @@ Rules:
 - agent/project/mission/thread can be absent for host-system work, but absence must be explicit
 - child invocation resource scope must preserve tenant, user, agent, and project from parent unless a trusted host workflow intentionally changes scope
 - `_none` path partitions represent an intentionally absent optional scope, not the default local tenant/agent/project
+- durable credential accounts use tenant, user, agent, and project as the
+  account-visibility dimensions; mission, thread, and invocation scope can drift
+  across requests that are still allowed to use the same account
 
 #### Local single-user convention
 

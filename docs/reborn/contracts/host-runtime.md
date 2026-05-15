@@ -70,11 +70,19 @@ Host API manifest contracts can project credential requirements into `HostApiCre
 
 - the projected requirement belongs to the invoking extension, host API section, and capability
 - the scoped credential account exists when required
+- the account is visible to the request scope under the durable credential-account
+  dimensions (`tenant_id`, `user_id`, `agent_id`, and `project_id`), while
+  mission/thread/invocation drift remains allowed
+- the credential store did not return a different account id than the one requested
 - the account is active and owned by the same extension
 - the account destination policy matches the request method/URL
 - the projected secret handle is actually bound to that credential account
 
 Successful resolution returns secret staging requirements, including each handle's required/optional semantics, plus exact-method-and-URL `WasmStagedRuntimeCredential` rules. The method/URL narrowing is deliberate: even if a projected requirement is broader, the resolved runtime credential rule must not silently apply to a different WASM HTTP request in the same invocation.
+
+Within a single resolution, matching requirements share account lookups by
+credential account id so duplicate projected requirements cannot multiply
+backend fetches.
 
 This resolver is a planning/projection boundary only. It does not read raw secret material, issue OAuth repairs, mutate credential-account state, or grant authority without the upstream capability/obligation workflow. Final `InjectCredentialOnce` obligation wiring remains the product path that should connect credential account resolution, secret staging, blocked-auth repair, and runtime adapter construction.
 

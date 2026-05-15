@@ -66,7 +66,7 @@ pub enum RuntimeCredentialSource {
     StagedObligation { capability_id: CapabilityId },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum RuntimeCredentialTarget {
     Header {

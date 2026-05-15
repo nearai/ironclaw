@@ -16,7 +16,7 @@ use thiserror::Error;
 /// `ironclaw_extensions` validates only the generic manifest envelope. Domain
 /// host API contracts project their typed credential sections into this cold
 /// read model before runtime planning reaches host-runtime composition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct HostApiCredentialRequirement {
     pub extension_id: ExtensionId,
     pub host_api_id: HostApiId,
@@ -105,6 +105,8 @@ where
     requirements: Vec<HostApiCredentialRequirement>,
 }
 
+pub type DynCredentialAccountResolver = CredentialAccountResolver<dyn CredentialAccountStore>;
+
 impl<S> CredentialAccountResolver<S>
 where
     S: CredentialAccountStore + ?Sized,
@@ -129,17 +131,27 @@ where
     ) -> Result<CredentialAccountResolution, CredentialAccountResolverError> {
         let mut secret_requirements = Vec::new();
         let mut wasm_credentials = Vec::new();
+        let mut account_cache = Vec::<(CredentialAccountId, Option<CredentialAccount>)>::new();
 
         for requirement in self
             .requirements
             .iter()
             .filter(|requirement| requirement.matches_request(request))
         {
-            let Some(account) = self
-                .account_store
-                .get_account(&request.scope, &requirement.account_id)
-                .await?
-            else {
+            let account = if let Some((_, account)) = account_cache
+                .iter()
+                .find(|(account_id, _)| account_id == &requirement.account_id)
+            {
+                account.clone()
+            } else {
+                let account = self
+                    .account_store
+                    .get_account(&request.scope, &requirement.account_id)
+                    .await?;
+                account_cache.push((requirement.account_id.clone(), account.clone()));
+                account
+            };
+            let Some(account) = account else {
                 if requirement.required {
                     return Err(CredentialBrokerError::MissingCredential {
                         account_id: requirement.account_id.clone(),
@@ -150,12 +162,19 @@ where
             };
 
             if account.id != requirement.account_id {
+                return Err(CredentialBrokerError::StoreIdentityViolation {
+                    requested_account_id: requirement.account_id.clone(),
+                    returned_account_id: account.id,
+                }
+                .into());
+            }
+            if !account.scope.is_account_visible_to(&request.scope) {
                 return Err(CredentialBrokerError::CredentialScopeMismatch {
                     account_id: requirement.account_id.clone(),
                 }
                 .into());
             }
-            if !account_matches_request(&account, request) {
+            if account.provider_or_extension_id != request.extension_id {
                 return Err(CredentialBrokerError::CredentialExtensionMismatch {
                     account_id: requirement.account_id.clone(),
                 }
@@ -214,22 +233,19 @@ where
             );
         }
 
+        debug_assert!(
+            wasm_credentials
+                .iter()
+                .all(|credential| credential.exact_method().is_some()
+                    && credential.exact_url().is_some()),
+            "credential account resolver must only emit exact-method-and-URL WASM credentials"
+        );
+
         Ok(CredentialAccountResolution {
             secret_requirements,
             wasm_credentials,
         })
     }
-}
-
-fn account_matches_request(
-    account: &CredentialAccount,
-    request: &CredentialAccountResolverRequest,
-) -> bool {
-    account.scope.tenant_id == request.scope.tenant_id
-        && account.scope.user_id == request.scope.user_id
-        && account.scope.agent_id == request.scope.agent_id
-        && account.scope.project_id == request.scope.project_id
-        && account.provider_or_extension_id == request.extension_id
 }
 
 fn push_secret_requirement(
