@@ -3,6 +3,7 @@
 //! This crate owns the contract-first boundary for canonical Reborn threads and
 //! transcript history. It provides an in-memory service for semantic tests and
 //! feature-gated PostgreSQL/libSQL services for durable Reborn composition.
+#![warn(unreachable_pub)]
 
 mod contract;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -26,6 +27,6 @@ pub use contract::{
     UpdateAssistantDraftRequest,
 };
 pub use error::SessionThreadError;
-pub use identifiers::{SummaryArtifactId, ThreadMessageId};
+pub use identifiers::ThreadMessageId;
 pub use in_memory::InMemorySessionThreadService;
 pub use service::SessionThreadService;

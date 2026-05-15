@@ -21,11 +21,11 @@ const CREDENTIAL_ACCOUNTS_FOR_SCOPE_QUERY_LIMIT: i64 = 1001;
 const SECRET_STORE_KEY_CHECK_ID: &str = "active";
 const SECRET_STORE_KEY_CHECK_PLAINTEXT: &str = "reborn-secret-store-key-check-v1";
 
+use crate::legacy_store::{DecryptedSecret, Secret, SecretRef};
 use crate::{
     CreateSecretParams, CredentialAccount, CredentialAccountId, CredentialAccountStatus,
     CredentialAccountStore, CredentialBrokerError, CredentialSession, CredentialSessionId,
-    CredentialSessionStore, DecryptedSecret, Secret, SecretConsumeResult, SecretError, SecretRef,
-    SecretsCrypto, SecretsStore,
+    CredentialSessionStore, SecretConsumeResult, SecretError, SecretsCrypto, SecretsStore,
 };
 
 #[cfg(feature = "libsql")]

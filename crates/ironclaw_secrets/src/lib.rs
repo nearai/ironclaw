@@ -5,6 +5,7 @@
 //! runtimes, emit audit records, or expose raw values through metadata. Runtime
 //! injection is not enforced until a higher-level obligation-handler/runtime
 //! composition slice consumes these primitives.
+#![warn(unreachable_pub)]
 
 mod crypto;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -27,10 +28,8 @@ use ironclaw_host_api::{
     AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, NetworkMethod, ProjectId,
     ResourceScope, SecretHandle, TenantId, ThreadId, Timestamp, UserId,
 };
-pub use legacy_store::{
-    CreateSecretParams, DecryptedSecret, InMemorySecretsStore, Secret, SecretConsumeResult,
-    SecretError, SecretRef, SecretsStore,
-};
+use legacy_store::InMemorySecretsStore;
+pub use legacy_store::{CreateSecretParams, SecretConsumeResult, SecretError, SecretsStore};
 pub use secrecy::SecretString as SecretMaterial;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1382,13 +1381,13 @@ mod tests {
     use secrecy::ExposeSecret;
     use serde_json::json;
 
+    use crate::legacy_store::InMemorySecretsStore;
     use crate::{
         CREDENTIAL_ID_MAX_LEN, CredentialAccount, CredentialAccountId, CredentialAccountStatus,
         CredentialBrokerError, CredentialPathPolicy, CredentialSessionId, CredentialSessionRequest,
-        CredentialTargetPolicy, InMemoryCredentialBroker, InMemorySecretStore,
-        InMemorySecretsStore, RedactedJson, ScopedSecretsStoreAdapter, SecretLeaseKey,
-        SecretMaterial, SecretStore, SecretStoreError, SecretsCrypto, SecretsStore,
-        scoped_legacy_user_id,
+        CredentialTargetPolicy, InMemoryCredentialBroker, InMemorySecretStore, RedactedJson,
+        ScopedSecretsStoreAdapter, SecretLeaseKey, SecretMaterial, SecretStore, SecretStoreError,
+        SecretsCrypto, SecretsStore, scoped_legacy_user_id,
     };
 
     #[test]

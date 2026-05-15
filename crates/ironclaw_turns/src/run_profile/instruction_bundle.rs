@@ -219,12 +219,22 @@ impl InstructionBundleBuilder {
         if !request.context_bundle.identity_messages.is_empty() {
             requires_materialization_store = true;
         }
-        for message in request.context_bundle.identity_messages {
+        for (ordinal, message) in request
+            .context_bundle
+            .identity_messages
+            .into_iter()
+            .enumerate()
+        {
             push_context_message(
                 &mut messages,
                 &mut materialized_messages,
                 &mut fingerprint,
-                "identity",
+                ContextMessageOptions {
+                    section: "identity",
+                    ordinal,
+                    force_materialize: true,
+                },
+                &mut synthetic_refs,
                 message,
             )?;
         }
@@ -321,12 +331,17 @@ impl InstructionBundleBuilder {
             )?;
         }
 
-        for message in request.context_bundle.messages {
-            push_context_message(
+        for (ordinal, message) in request.context_bundle.messages.into_iter().enumerate() {
+            requires_materialization_store |= push_context_message(
                 &mut messages,
                 &mut materialized_messages,
                 &mut fingerprint,
-                "thread",
+                ContextMessageOptions {
+                    section: "thread",
+                    ordinal,
+                    force_materialize: false,
+                },
+                &mut synthetic_refs,
                 message,
             )?;
         }
@@ -352,30 +367,60 @@ impl InstructionBundleBuilder {
     }
 }
 
+struct ContextMessageOptions {
+    section: &'static str,
+    ordinal: usize,
+    force_materialize: bool,
+}
+
 fn push_context_message(
     messages: &mut Vec<LoopModelMessage>,
     materialized_messages: &mut Vec<InstructionBundleMaterializedMessage>,
     fingerprint: &mut Sha256,
-    section: &'static str,
+    options: ContextMessageOptions,
+    synthetic_refs: &mut SyntheticMessageRefRegistry,
     message: LoopContextMessage,
-) -> Result<(), AgentLoopHostError> {
+) -> Result<bool, AgentLoopHostError> {
     let safe_summary = validate_model_safe_text(message.safe_summary, "context message summary")?;
     validate_model_role(&message.role)?;
-    feed_field(fingerprint, b"section", section.as_bytes());
+    let source_ref = message.message_ref;
+    let (content_ref, summary_only) = match source_ref {
+        Some(content_ref) => {
+            feed_field(fingerprint, b"ref", content_ref.as_str().as_bytes());
+            (content_ref, false)
+        }
+        None => {
+            let summary_section = if options.section == "identity" {
+                "identity-summary"
+            } else {
+                "context-summary"
+            };
+            let content_ref = synthetic_message_ref(
+                summary_section,
+                &message.role,
+                &safe_summary,
+                options.ordinal,
+                synthetic_refs,
+            )?;
+            feed_field(fingerprint, b"ref", content_ref.as_str().as_bytes());
+            feed_field(fingerprint, b"summary", safe_summary.as_bytes());
+            (content_ref, true)
+        }
+    };
+    feed_field(fingerprint, b"section", options.section.as_bytes());
     feed_field(fingerprint, b"role", message.role.as_bytes());
-    feed_field(fingerprint, b"ref", message.message_ref.as_str().as_bytes());
-    if section == "identity" {
+    if options.force_materialize || summary_only {
         materialized_messages.push(InstructionBundleMaterializedMessage {
             role: message.role.clone(),
-            content_ref: message.message_ref.clone(),
+            content_ref: content_ref.clone(),
             safe_content: safe_summary,
         });
     }
     messages.push(LoopModelMessage {
         role: message.role,
-        content_ref: message.message_ref,
+        content_ref,
     });
-    Ok(())
+    Ok(summary_only)
 }
 
 fn push_snippet_message(

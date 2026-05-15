@@ -28,6 +28,7 @@
 //! - [`runtime_policy`]: deployment mode, runtime profile, and effective
 //!   runtime policy vocabulary consumed by the resolver in
 //!   `ironclaw_runtime_policy` and the host runtime planner.
+#![warn(unreachable_pub)]
 
 pub mod action;
 pub mod approval;

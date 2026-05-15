@@ -30,25 +30,28 @@ use ironclaw_threads::{SessionThreadService, ThreadScope};
 use crate::model_routes::{ModelRouteError, ModelRouteResolver, ModelSlot};
 
 use ironclaw_turns::{
-    CheckpointStateStore, GetCheckpointStateRequest, LoopCheckpointStore, LoopGateRef,
-    LoopResultRef, PutLoopCheckpointRequest, RunProfileId, TurnCheckpointId, TurnError, TurnStatus,
+    CheckpointStateStore, GetCheckpointStateRequest, LoopCheckpointStateRef, LoopCheckpointStore,
+    LoopGateRef, LoopResultRef, PutCheckpointStateRequest, PutLoopCheckpointRequest, RunProfileId,
+    TurnCheckpointId, TurnError, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityFailure,
-        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, FinalizeAssistantMessage,
-        HookMilestoneSink, HostManagedLoopModelPort, HostManagedLoopPromptPort,
-        InMemoryInstructionMaterializationStore, InstructionBundleMaterializedMessage,
-        InstructionMaterializationStore, InstructionSafetyContext, LoopCapabilityPort,
-        LoopCheckpointPort, LoopCheckpointRequest, LoopContextBundle, LoopContextPort,
-        LoopContextRequest, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputBatch,
-        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
-        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPolicyGuard, LoopModelPort,
-        LoopModelRequest, LoopModelResponse, LoopProcessRef, LoopProgressEvent, LoopProgressPort,
-        LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort,
-        LoopSafeSummary, LoopTranscriptPort, NoOpBudgetAccountant, NoOpPolicyGuard,
-        ProcessHandleSummary, RunScopedHookMilestoneSink, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, ConcurrencyHint,
+        FinalizeAssistantMessage, HookMilestoneSink, HostManagedLoopModelPort,
+        HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
+        InstructionBundleMaterializedMessage, InstructionMaterializationStore,
+        InstructionSafetyContext, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
+        LoopContextBundle, LoopContextPort, LoopContextRequest, LoopHostMilestoneEmitter,
+        LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,
+        LoopModelGatewayRequest, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest,
+        LoopModelResponse, LoopProcessRef, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+        LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
+        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, NoOpBudgetAccountant,
+        NoOpPolicyGuard, ProcessHandleSummary, RunScopedHookMilestoneSink,
+        StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -734,6 +737,12 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                     runtime: capability.descriptor.runtime,
                     safe_name: capability.descriptor.id.as_str().to_string(),
                     safe_description: capability.descriptor.description,
+                    // WS-9 derives this from the underlying
+                    // `CapabilityDescriptor.effects` Vec. Until that landing,
+                    // default to `Exclusive` (the conservative choice — forces
+                    // serial invocation and never accidentally enables
+                    // parallel side effects).
+                    concurrency_hint: ConcurrencyHint::Exclusive,
                 }
             })
             .collect();
@@ -1436,12 +1445,14 @@ where
             .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
                 reason: error.safe_summary,
             })?;
+        let prompt_authority = LoopPromptBundleAuthority::shared();
         let surface_state_for_prompt = Arc::clone(&surface_state);
         let mut prompt_port = HostManagedLoopPromptPort::new(
             run_context.clone(),
             Arc::clone(&context),
             Arc::clone(&self.milestone_sink),
         )
+        .with_prompt_bundle_authority(prompt_authority.clone())
         .with_default_message_limit(max_messages)
         .with_current_surface_lookup(move || surface_state_for_prompt.current())
         .with_instruction_materialization_store(Arc::clone(&instruction_materialization_store));
@@ -1478,6 +1489,7 @@ where
             max_messages,
             self.skill_context_source.clone(),
             Some(Arc::clone(&instruction_materialization_store)),
+            prompt_authority,
         ));
         let mut model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
             run_context.clone(),
@@ -1586,6 +1598,7 @@ where
     max_messages: usize,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
+    prompt_authority: LoopPromptBundleAuthority,
 }
 
 impl<S, G> ThreadResolvingLoopModelGateway<S, G>
@@ -1600,6 +1613,7 @@ where
         max_messages: usize,
         skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
         instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
+        prompt_authority: LoopPromptBundleAuthority,
     ) -> Self {
         Self {
             thread_service,
@@ -1608,6 +1622,7 @@ where
             max_messages,
             skill_context_source,
             instruction_materialization_store,
+            prompt_authority,
         }
     }
 }
@@ -1628,7 +1643,8 @@ where
             request.context,
             Arc::clone(&self.host_gateway),
             self.max_messages,
-        );
+        )
+        .with_prompt_bundle_authority(self.prompt_authority.clone());
         if let Some(source) = self.skill_context_source.as_ref() {
             model_port = model_port.with_skill_context_source(source.clone());
         }
@@ -1796,6 +1812,13 @@ impl LoopCheckpointPort for RebornLoopDriverHost {
     ) -> Result<TurnCheckpointId, AgentLoopHostError> {
         self.checkpoint.checkpoint(request).await
     }
+
+    async fn stage_checkpoint_payload(
+        &self,
+        request: StageCheckpointPayloadRequest,
+    ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
+        self.checkpoint.stage_checkpoint_payload(request).await
+    }
 }
 
 #[async_trait]
@@ -1888,13 +1911,34 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
         &self,
         request: LoopCheckpointRequest,
     ) -> Result<TurnCheckpointId, AgentLoopHostError> {
+        // `stage_checkpoint_payload` returns a run-scoped ref of the form
+        // `checkpoint:{run_id}:{token}`. The underlying store indexed the payload
+        // under the original `checkpoint:{token}` key (which `new_state_ref()`
+        // generated). Unwrap to the store key so the look-up succeeds, then pass
+        // the caller-supplied (run-scoped) ref through to the loop-checkpoint
+        // record so `is_for_run` validators see the correct form.
+        let run_scoped_prefix = format!("checkpoint:{}:", self.run_context.run_id);
+        let store_ref = if let Some(token) =
+            request.state_ref.as_str().strip_prefix(&run_scoped_prefix)
+        {
+            // Run-scoped ref → rebuild the store's original `checkpoint:{token}`.
+            LoopCheckpointStateRef::new(format!("checkpoint:{token}")).map_err(|reason| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    format!("could not rebuild store key from run-scoped checkpoint ref: {reason}"),
+                )
+            })?
+        } else {
+            request.state_ref.clone()
+        };
+
         let loaded = self
             .checkpoint_state_store
             .get_checkpoint_state(GetCheckpointStateRequest {
                 scope: self.run_context.scope.clone(),
                 turn_id: self.run_context.turn_id,
                 run_id: self.run_context.run_id,
-                state_ref: request.state_ref.clone(),
+                state_ref: store_ref,
                 schema_id: self.run_context.checkpoint_schema_id.clone(),
                 schema_version: self.run_context.checkpoint_schema_version,
                 kind: request.kind,
@@ -1925,6 +1969,54 @@ impl LoopCheckpointPort for HostManagedLoopCheckpointPort {
             .checkpoint_created(checkpoint.checkpoint_id, request.kind)
             .await?;
         Ok(checkpoint.checkpoint_id)
+    }
+
+    async fn stage_checkpoint_payload(
+        &self,
+        request: StageCheckpointPayloadRequest,
+    ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
+        // Reject staged payloads whose schema_id disagrees with the run
+        // profile's resolved checkpoint schema — the read-side
+        // `get_checkpoint_state` checks `(state_ref, schema_id, kind)` as a
+        // unit, so mismatches here would lead to phantom resume rejections.
+        if request.schema_id != self.run_context.checkpoint_schema_id.as_str() {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::CheckpointRejected,
+                "staged checkpoint payload schema_id does not match the run profile's checkpoint schema",
+            ));
+        }
+
+        let record = self
+            .checkpoint_state_store
+            .put_checkpoint_state(PutCheckpointStateRequest::new(
+                self.run_context.scope.clone(),
+                self.run_context.turn_id,
+                self.run_context.run_id,
+                self.run_context.checkpoint_schema_id.clone(),
+                self.run_context.checkpoint_schema_version,
+                request.kind,
+                request.payload,
+            ))
+            .await
+            .map_err(turn_error_to_host_error)?;
+
+        // The store produces `checkpoint:{uuid}` refs. Wrap into the run-scoped
+        // form `checkpoint:{run_id}:{token}` so that `LoopCheckpointStateRef::
+        // is_for_run` validators accept the returned ref without treating it as
+        // a cross-run ref. The token is the opaque UUID the store already minted.
+        let raw = record.state_ref.as_str();
+        let token = raw.strip_prefix("checkpoint:").ok_or_else(|| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                "checkpoint state store returned ref without expected `checkpoint:` prefix",
+            )
+        })?;
+        LoopCheckpointStateRef::for_run(&self.run_context, token).map_err(|reason| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                format!("could not build run-scoped checkpoint state ref: {reason}"),
+            )
+        })
     }
 }
 

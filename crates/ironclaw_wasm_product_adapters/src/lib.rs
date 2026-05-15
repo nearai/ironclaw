@@ -30,6 +30,7 @@
 //!   tooling lands.
 
 #![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
 
 pub mod auth_verifier;
 pub mod egress_policy;

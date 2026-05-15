@@ -244,7 +244,7 @@ impl WebhookAuthVerifier for SharedSecretHeaderAuth {
 mod hex {
     use std::fmt::Write as _;
 
-    pub fn encode(bytes: impl AsRef<[u8]>) -> String {
+    pub(super) fn encode(bytes: impl AsRef<[u8]>) -> String {
         let mut out = String::with_capacity(bytes.as_ref().len() * 2);
         for byte in bytes.as_ref() {
             let _ = write!(&mut out, "{byte:02x}");

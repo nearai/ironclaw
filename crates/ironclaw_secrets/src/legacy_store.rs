@@ -212,13 +212,13 @@ pub trait SecretsStore: Send + Sync {
 }
 
 #[derive(Debug)]
-pub struct InMemorySecretsStore {
+pub(crate) struct InMemorySecretsStore {
     secrets: RwLock<HashMap<(String, String), Secret>>,
     crypto: Arc<SecretsCrypto>,
 }
 
 impl InMemorySecretsStore {
-    pub fn new(crypto: Arc<SecretsCrypto>) -> Self {
+    pub(crate) fn new(crypto: Arc<SecretsCrypto>) -> Self {
         Self {
             secrets: RwLock::new(HashMap::new()),
             crypto,

@@ -29,7 +29,7 @@ use crate::provider::{
 };
 
 /// GitHub Copilot provider with automatic token exchange.
-pub struct GithubCopilotProvider {
+pub(crate) struct GithubCopilotProvider {
     client: Client,
     token_manager: Arc<CopilotTokenManager>,
     model: String,
@@ -41,7 +41,7 @@ pub struct GithubCopilotProvider {
 }
 
 impl GithubCopilotProvider {
-    pub fn new(
+    pub(crate) fn new(
         config: &RegistryProviderConfig,
         request_timeout_secs: u64,
     ) -> Result<Self, LlmError> {

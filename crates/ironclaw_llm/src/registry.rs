@@ -139,7 +139,7 @@ mod unsupported_params_de {
 
     const VALID_PARAMS: &[&str] = &["temperature", "max_tokens", "stop_sequences"];
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
     where
         D: Deserializer<'de>,
     {

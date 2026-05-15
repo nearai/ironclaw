@@ -25,11 +25,14 @@ use crate::fixtures::{
     admin_entry_for_test, admin_entry_with_digest_for_test, bundled_entry_for_test,
     effective_first_party_for_test, effective_system_for_test,
 };
+use crate::invalidation::{
+    TrustChange, TrustChangeListener, authority_changed, grant_retention_eligible, identity_changed,
+};
+use crate::sources::{LocalDevOverride, PolicySource};
 use crate::{
     AdminConfig, AdminEntry, BundledRegistry, EffectiveTrustClass, HostTrustAssignment,
-    HostTrustPolicy, InvalidationBus, LocalDevOverride, PolicySource, TrustChange,
-    TrustChangeListener, TrustDecision, TrustError, TrustPolicy, TrustPolicyInput, TrustProvenance,
-    authority_changed, grant_retention_eligible, identity_changed,
+    HostTrustPolicy, InvalidationBus, TrustDecision, TrustError, TrustPolicy, TrustPolicyInput,
+    TrustProvenance,
 };
 use chrono::Utc;
 use ironclaw_host_api::{
@@ -57,24 +60,25 @@ use self::support::{FakeAuthorizer, FakeGrantStore};
 mod support {
     use std::sync::{Arc, Mutex};
 
-    use crate::{EffectiveTrustClass, TrustChange, TrustChangeListener};
+    use crate::EffectiveTrustClass;
+    use crate::invalidation::{TrustChange, TrustChangeListener};
     use ironclaw_host_api::{CapabilityId, PackageIdentity};
 
     /// Records every invalidation that fires on the bus, in order, with the
     /// timestamp at which it was observed. Used to assert ordering against
     /// subsequent policy evaluations.
-    pub struct FakeGrantStore {
+    pub(super) struct FakeGrantStore {
         invalidations: Mutex<Vec<TrustChange>>,
     }
 
     impl FakeGrantStore {
-        pub fn new() -> Arc<Self> {
+        pub(super) fn new() -> Arc<Self> {
             Arc::new(Self {
                 invalidations: Mutex::new(Vec::new()),
             })
         }
 
-        pub fn invalidations(&self) -> Vec<TrustChange> {
+        pub(super) fn invalidations(&self) -> Vec<TrustChange> {
             self.invalidations
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -94,18 +98,18 @@ mod support {
     /// `EffectiveTrustClass` to decide whether to grant a privileged-effect
     /// capability — this is the surface the issue's suggested test #1 ("AND
     /// privileged capability grant attempts fail") is verified against.
-    pub struct FakeAuthorizer {
+    pub(super) struct FakeAuthorizer {
         grants: Mutex<Vec<(PackageIdentity, CapabilityId)>>,
     }
 
     impl FakeAuthorizer {
-        pub fn new() -> Self {
+        pub(super) fn new() -> Self {
             Self {
                 grants: Mutex::new(Vec::new()),
             }
         }
 
-        pub fn grant(&self, identity: PackageIdentity, capability: CapabilityId) {
+        pub(super) fn grant(&self, identity: PackageIdentity, capability: CapabilityId) {
             self.grants
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
@@ -116,7 +120,7 @@ mod support {
         /// effective trust is privileged. Mimics the PR3 contract: trust
         /// alone grants nothing; grant alone without privileged trust does
         /// not unlock a privileged capability either.
-        pub fn invoke_privileged(
+        pub(super) fn invoke_privileged(
             &self,
             identity: &PackageIdentity,
             capability: &CapabilityId,
@@ -133,7 +137,7 @@ mod support {
 
         /// Equivalent of `invoke_privileged` but for non-privileged effects:
         /// grant must exist; trust class is irrelevant for non-privileged.
-        pub fn invoke(&self, identity: &PackageIdentity, capability: &CapabilityId) -> bool {
+        pub(super) fn invoke(&self, identity: &PackageIdentity, capability: &CapabilityId) -> bool {
             let grants = self.grants.lock().unwrap_or_else(|p| p.into_inner());
             grants
                 .iter()
@@ -1694,7 +1698,7 @@ fn trust_decision_serializes_for_audit() {
 
 #[test]
 fn evaluate_uses_injected_clock_for_evaluated_at() {
-    use crate::FixedClock;
+    use crate::clock::FixedClock;
     use chrono::TimeZone;
 
     let frozen = chrono::Utc.with_ymd_and_hms(2026, 4, 28, 12, 0, 0).unwrap();

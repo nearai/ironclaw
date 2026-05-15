@@ -233,6 +233,7 @@ fn descriptor_with_provider(
         runtime: ironclaw_host_api::RuntimeKind::Wasm,
         safe_name: capability_id.to_string(),
         safe_description: format!("test capability {capability_id}"),
+        concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::Exclusive,
     }
 }
 
@@ -1052,9 +1053,29 @@ async fn after_model_fires_exactly_once_at_durable_boundary() {
         .await
         .expect("host builds with AfterModel observer installed");
 
-    host.stream_model(model_request())
+    // Base now requires `build_prompt_bundle` to pre-authorize each
+    // `stream_model` call ("model request has no host-built prompt
+    // bundle"). Build the bundle first so the authority is registered;
+    // the bundle ref is referenced from `LoopModelRequest::messages`
+    // (empty here is fine because no inline messages are needed).
+    let bundle = host
+        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: vec![],
+        })
         .await
-        .expect("stream_model returns Ok via the wrapped model port");
+        .expect("build_prompt_bundle succeeds before stream_model");
+    host.stream_model(LoopModelRequest {
+        messages: bundle.messages.clone(),
+        surface_version: None,
+        model_preference: None,
+    })
+    .await
+    .expect("stream_model returns Ok via the wrapped model port");
     assert_eq!(
         *seen.lock().expect("observer counter not poisoned"),
         0,
@@ -1748,6 +1769,7 @@ async fn before_prompt_hook_message_is_resolvable_via_factory_wiring() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            inline_messages: vec![],
         })
         .await
         .expect(

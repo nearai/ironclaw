@@ -12,7 +12,8 @@ use hkdf::Hkdf;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
 
-use crate::{DecryptedSecret, SecretError};
+use crate::SecretError;
+use crate::legacy_store::DecryptedSecret;
 
 const KEY_SIZE: usize = 32;
 const NONCE_SIZE: usize = 12;

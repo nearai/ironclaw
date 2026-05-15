@@ -28,6 +28,7 @@
 //! orchestration, built-in tool migration intent), `CLAUDE.md` for the
 //! per-file guardrails, and `docs/reborn/contracts/host-api.md` (in the
 //! staging-track docs) for the broader Reborn vocabulary.
+#![warn(unreachable_pub)]
 
 pub mod clock;
 pub mod decision;
@@ -39,20 +40,13 @@ pub mod sources;
 #[cfg(test)]
 mod fixtures;
 
-pub use clock::{Clock, FixedClock, SystemClock};
 pub use decision::{
     AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment, TrustDecision, TrustProvenance,
 };
 pub use error::TrustError;
-pub use invalidation::{
-    InvalidationBus, TrustChange, TrustChangeListener, authority_changed, grant_retention_eligible,
-    identity_changed,
-};
-pub use policy::{HostTrustPolicy, SourceMatch, SourceMutators, TrustPolicy, TrustPolicyInput};
-pub use sources::{
-    AdminConfig, AdminEntry, BundledEntry, BundledRegistry, LocalDevOverride, PolicySource,
-    SignedRegistry, SignerEntry,
-};
+pub use invalidation::InvalidationBus;
+pub use policy::{HostTrustPolicy, TrustPolicy, TrustPolicyInput};
+pub use sources::{AdminConfig, AdminEntry, BundledEntry, BundledRegistry};
 
 #[cfg(test)]
 mod tests {

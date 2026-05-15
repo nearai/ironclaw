@@ -262,6 +262,11 @@ fn loop_failure_kind(reason_kind: &LoopFailureKind) -> &'static str {
         LoopFailureKind::TranscriptWriteFailed => "transcript_write_failed",
         LoopFailureKind::DriverBug => "driver_bug",
         LoopFailureKind::InterruptedUnexpectedly => "interrupted_unexpectedly",
+        LoopFailureKind::NoProgressDetected => "no_progress_detected",
+        LoopFailureKind::PolicyDenied => "policy_denied",
+        // LoopFailureKind is `#[non_exhaustive]`; fail closed if a new variant
+        // lands in `ironclaw_turns` ahead of this matcher being updated.
+        _ => "driver_bug",
     }
 }
 

@@ -23,6 +23,7 @@ libsql-restart-tests = ["dep:libsql", "ironclaw_threads/libsql", "ironclaw_turns
 async-trait = "0.1"
 chrono = "0.4"
 futures-util = { version = "0.3", default-features = false }
+ironclaw_agent_loop = { path = "../ironclaw_agent_loop", version = "0.1.0" }
 ironclaw_events = { path = "../ironclaw_events", version = "0.1.0" }
 ironclaw_hooks = { path = "../ironclaw_hooks", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }

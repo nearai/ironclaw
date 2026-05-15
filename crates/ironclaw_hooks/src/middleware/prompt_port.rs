@@ -403,6 +403,7 @@ mod tests {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(16),
+            inline_messages: vec![],
         }
     }
 

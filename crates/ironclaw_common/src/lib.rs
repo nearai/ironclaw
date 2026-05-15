@@ -1,4 +1,5 @@
 //! Shared types and utilities used across the IronClaw workspace.
+#![warn(unreachable_pub)]
 
 pub mod attachment;
 pub mod env_helpers;
@@ -12,22 +13,16 @@ mod util;
 
 pub use attachment::{AttachmentKind, IncomingAttachment};
 pub use event::{
-    AppEvent, CodeExecutionFailureCategory, JobResultStatus, JobResultStatusParseError,
-    OnboardingStateDto, PlanStepDto, SelfImprovementPhase, ToolDecisionDto,
+    AppEvent, CodeExecutionFailureCategory, JobResultStatus, OnboardingStateDto, PlanStepDto,
+    SelfImprovementPhase, ToolDecisionDto,
 };
 pub use identity::{
-    CredentialName, ExtensionName, ExternalThreadId, ExternalThreadIdError, IdentityError,
-    MAX_EXTERNAL_THREAD_ID_LEN, MAX_MCP_SERVER_NAME_LEN, MAX_NAME_LEN, McpServerName,
-    McpServerNameError,
+    CredentialName, ExtensionName, ExternalThreadId, ExternalThreadIdError,
+    MAX_MCP_SERVER_NAME_LEN, MAX_NAME_LEN, McpServerName,
 };
-pub use paths::{compute_ironclaw_base_dir, ironclaw_base_dir};
+pub use paths::ironclaw_base_dir;
 pub use platform::PlatformInfo;
 pub use timezone::{ValidTimezone, deserialize_option_lenient};
-pub use trust_boundary::{
-    BoundedCounter, HashAlgorithm, HashPurpose, LimitExceeded, LimitExceededReason,
-    OperatorErrorClass, PromptContentTrust, TrustedConstructionWitness, UntrustedPromptContent,
-    UntrustedPromptSource,
-};
 pub use util::{truncate_for_preview, truncate_preview};
 
 /// Maximum worker agent loop iterations. Used by the orchestrator (server-side

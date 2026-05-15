@@ -33,7 +33,7 @@ use super::provider::{
 };
 
 /// Provider that speaks the Responses API protocol against the ChatGPT backend.
-pub struct CodexChatGptProvider {
+pub(crate) struct CodexChatGptProvider {
     client: Client,
     base_url: String,
     api_key: RwLock<SecretString>,
@@ -79,7 +79,7 @@ impl CodexChatGptProvider {
     ///    warning with available models and fall back to the top model.
     /// 2. If `configured_model` is empty (or a generic placeholder like
     ///    "default"), auto-detect the highest-priority model from the API.
-    pub fn with_lazy_model(
+    pub(crate) fn with_lazy_model(
         base_url: &str,
         api_key: SecretString,
         configured_model: &str,

@@ -514,7 +514,7 @@ impl PostgresStore {
 }
 
 #[derive(Clone)]
-pub struct PostgresDurableEventLog {
+pub(crate) struct PostgresDurableEventLog {
     store: PostgresStore,
 }
 
@@ -551,7 +551,7 @@ impl DurableEventLog for PostgresDurableEventLog {
 }
 
 #[derive(Clone)]
-pub struct PostgresDurableAuditLog {
+pub(crate) struct PostgresDurableAuditLog {
     store: PostgresStore,
 }
 

@@ -9,6 +9,7 @@
 //! schema validation fail. Callers must handle [`ResourceError::Storage`] the
 //! same way as quota denials: do not start costed or quota-limited work until a
 //! reservation operation succeeds.
+#![warn(unreachable_pub)]
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -22,11 +23,12 @@ use std::sync::{OnceLock, mpsc};
 
 use fs2::FileExt;
 
+use ironclaw_host_api::ReservationStatus;
 use ironclaw_host_api::{
     AgentId, MissionId, ProjectId, ResourceEstimate, ResourceReservationId, ResourceScope,
     ResourceUsage, TenantId, ThreadId, UserId,
 };
-pub use ironclaw_host_api::{ReservationStatus, ResourceReceipt, ResourceReservation};
+pub use ironclaw_host_api::{ResourceReceipt, ResourceReservation};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;

@@ -146,7 +146,7 @@ CanonicalAgentLoopExecutor::execute_family(family, host, state)
 Properties:
 
 - **Profiles refer to families by `LoopFamilyId`, never by strategy composition.** A profile carries `loop_family_id: LoopFamilyId` (e.g. `"default"`); resolution maps to `Arc<LoopFamily>` via the registry. Profiles cannot enumerate strategies, override individual slots, or inject custom impls.
-- **`LoopFamilyRegistry` is a Guice-style singleton.** Built once at app startup by `ironclaw_reborn::app_loop_family::build_loop_family_registry()` (the only composition root that knows which families exist), shared via `Arc<LoopFamilyRegistry>`, immutable thereafter. There is no public `register()` method; the registry is "wired by `builtin()` composition" only.
+- **`LoopFamilyRegistry` is a Guice-style singleton.** Built once at app startup by `ironclaw_reborn::app_loop_family::build_loop_family_registry()` (the only composition root that knows which families exist), shared via `Arc<LoopFamilyRegistry>`, immutable thereafter. There is no public `register()` method; production wiring calls framework-provided family factories through the Reborn composition root.
 - **Strategy traits are `pub(crate)` in `ironclaw_agent_loop`.** Extensions (Trusted or Installed) cannot implement strategies. Customization lives at the hooks layer (§9.1) — middleware around host ports, not strategy slots in the executor.
 - **`PlannedDriver` is non-generic.** It holds `Arc<LoopFamily> + Arc<CanonicalAgentLoopExecutor>` and adapts them to `AgentLoopDriver`. The strategy seal means tests use real families from the registry (or `LoopFamilyRegistry::with_families` under `cfg(feature = "test-support")`), not synthetic planners.
 
@@ -239,19 +239,19 @@ pub struct LoopExecutionState {
 - `most_common_count_in(window: usize) -> usize`
 - `same_run_length() -> usize`
 
-`CapabilityCallSignature` is `(CapabilityName, ArgsHash)` — a stable hash over the capability name plus canonicalized JSON args. Lets the executor cheaply detect "same call repeated" without retaining the args themselves (no raw tool input in state, per [`turns-agent-loop.md`](contracts/turns-agent-loop.md) §6).
+`CapabilityCallSignature` is `(CapabilityId, ArgsHash)` — a stable hash over the capability id plus canonicalized JSON args. Lets the executor cheaply detect "same call repeated" without retaining the args themselves (no raw tool input in state, per [`turns-agent-loop.md`](contracts/turns-agent-loop.md) §6).
 
 Strategy outcome shape (example for `RecoveryStrategy`):
 
 ```rust
 pub enum RecoveryOutcome {
-    Retry      { recovery: RecoveryStrategyState, alter: Option<RetryAlteration> },
+    Retry      { recovery: RecoveryStrategyState, scope: RetryScope, alter: Option<RetryAlteration> },
     SkipResult { recovery: RecoveryStrategyState },
     Abort      { recovery: RecoveryStrategyState, failure_kind: LoopFailureKind },
 }
 ```
 
-The strategy returns the new value of *its own slot only*. The executor builds the next whole state by swapping that slot. The compiler enforces that `RecoveryStrategy` cannot rewrite `BudgetStrategyState`.
+`RetryScope` is `Call` or `Iteration`, so the executor does not infer retry breadth from the alteration. Backoff alterations carry a bounded `BackoffDelayMs`, and recovery summaries use `SanitizedStrategySummary` rather than a raw `String`. The strategy returns the new value of *its own slot only*. The executor builds the next whole state by swapping that slot. The compiler enforces that `RecoveryStrategy` cannot rewrite `BudgetStrategyState`.
 
 ## 8. The canonical executor tick
 
@@ -309,7 +309,7 @@ loop:
       Err(err):
         recovery = planner.recovery().on_model_error(&state, &sanitize_model_error(&err))
         match recovery:
-          Retry { recovery, alter }: state.recovery_state = recovery; honor_alteration(alter); continue
+          Retry { recovery, scope, alter }: state.recovery_state = recovery; honor_retry(scope, alter); continue
           SkipResult { .. }: return PlannerContract { "SkipResult on model error" }
           Abort { recovery, fk }: state.recovery_state = recovery
                                    return LoopExit::Failed { reason_kind: fk, ... }
@@ -364,6 +364,8 @@ loop:
             state.append_result(result)
           ApprovalRequired(g) | AuthRequired(g) | ResourceBlocked(g):
             // Gate handling — Block/SkipAndContinue/Abort per planner.gate().
+            // validate_for_gate_kind() rejects approval SkipAndContinue before
+            // the executor honors the strategy outcome.
             // (See WS-6 §3.3 for full match.)
           Denied(reason):
             // EmptyLoopCapabilityPort returns Denied; capability policy can
@@ -430,9 +432,9 @@ Three properties the canonical executor must guarantee, regardless of strategy c
 - **Term: `Strategy`** for sub-components of the planner facade.
 - **`AgentLoopDriver` trait is the boundary** between `ironclaw_reborn` and the framework. The framework crate does not depend on `AgentLoopDriver`.
 - **Strategies are Builtin-only (sealed at the type level).** Strategy traits are `pub(crate)` in `ironclaw_agent_loop`; `AgentLoopPlanner` is `pub` but uses the sealed-trait pattern (only types in `ironclaw_agent_loop` can implement). Extensions plug into the loop via **hooks**, which fire as middleware around host port impls composed in `ironclaw_loop_support`. Strategies decide loop-control policy; hooks intercept side-effecting port calls. They communicate only via existing `Loop*Port` DTOs and never see each other directly. The full design is in §9.1 below.
-- **Loop families are bound through `LoopFamilyRegistry`,** constructed once at app startup by `ironclaw_reborn::app_loop_family::build_loop_family_registry()` and shared via `Arc<LoopFamilyRegistry>` plumbed into `TurnRunner`. There is no public `register()` method — the registry's contents are fixed at the composition root's compile time. See [`agent-loop-briefs/loop-family-registry.md`](agent-loop-briefs/loop-family-registry.md) (WS-3.5).
+- **Loop families are bound through `LoopFamilyRegistry`,** constructed once at app startup by `ironclaw_reborn::app_loop_family::build_loop_family_registry()`. WS-3.5 lands the registry and composition root; TurnRunner selection/plumbing lands with the planned-driver/run-profile workstreams. There is no public `register()` method — the registry's contents are fixed at the composition root's compile time. See [`agent-loop-briefs/loop-family-registry.md`](agent-loop-briefs/loop-family-registry.md) (WS-3.5).
 - **`LoopExit` validation is structurally enforced at the framework→reborn→turns boundary.** `AgentLoopDriver::run` / `resume` returns a raw `LoopExit`. Only `LoopExitApplier::validate(exit, LoopExitValidationPolicy)` — sealed per PR #3460, the policy type cannot be constructed by untrusted code — produces the `LoopExitValidationDecision` that flows into `TurnRunTransitionPort::apply_validated_loop_exit` via `ApplyValidatedLoopExitRequest`. The runner's transition port accepts the validated request, not a raw `LoopExit`. There is no path for an unvalidated exit to reach durable state. This mirrors the #3460 seal pattern for policies, applied at the agent-loop-framework boundary.
-- **`ComponentIdentity` is the one identity primitive across the system.** `ComponentIdentity { id: &'static str, digest: ComponentDigest }` (defined in `ironclaw_agent_loop::family` per WS-3.5) is used consistently across loop families (this PR), checkpoint payload metadata (WS-0), hooks (#3524 future), skill snapshots (#3470 future), and model routes (#3462 future). **Content-addressed only — monotonic counters are insufficient** (they false-drift when bumped without changes and false-agree when changes ship without a bump; both are silent replay-correctness bugs). The existing `LoopModelRouteSnapshot.auth_version: String` and `config_version: String` at `crates/ironclaw_turns/src/run_profile/host.rs:362` are String identities, not content hashes; they migrate to `ComponentIdentity` alongside the model-route work in #3462 — **not in this PR**. Per [`.claude/rules/types.md`](../../.claude/rules/types.md), identity-shaped values use newtypes; `ComponentIdentity` is the canonical one for component-versioning. See [`agent-loop-briefs/loop-family-registry.md`](agent-loop-briefs/loop-family-registry.md) §3.2's "Migration / propagation" subsection for the per-component migration paths.
+- **`ComponentIdentity` is the one identity primitive across the system.** `ComponentIdentity { id: Cow<'static, str>, digest: ComponentDigest }` (defined in `ironclaw_agent_loop::family` per WS-3.5) is used consistently across loop families (this PR), checkpoint payload metadata (WS-0), hooks (#3524 future), skill snapshots (#3470 future), and model routes (#3462 future). **Content-addressed only — monotonic counters are insufficient** (they false-drift when bumped without changes and false-agree when changes ship without a bump; both are silent replay-correctness bugs). The existing `LoopModelRouteSnapshot.auth_version: String` and `config_version: String` at `crates/ironclaw_turns/src/run_profile/host.rs:362` are String identities, not content hashes; they migrate to `ComponentIdentity` alongside the model-route work in #3462 — **not in this PR**. Per [`.claude/rules/types.md`](../../.claude/rules/types.md), identity-shaped values use newtypes; `ComponentIdentity` is the canonical one for component-versioning. See [`agent-loop-briefs/loop-family-registry.md`](agent-loop-briefs/loop-family-registry.md) §3.2's "Migration / propagation" subsection for the per-component migration paths.
 - **JSON canonicalization for hashing follows JCS RFC 8785.** Any digest-over-JSON content in the framework — `CapabilityCallSignature::ArgsHash` is the primary case — uses [JCS RFC 8785](https://datatracker.ietf.org/doc/html/rfc8785) canonicalization. Implementation reference: the `jcs` crate (added to `ironclaw_agent_loop`'s dependencies when WS-0 ships code). Rules: object keys sorted by UTF-16 code-unit order, NaN/Infinity rejected (not valid JSON), number representation preserved (no `1.0 → 1` normalization), minimal whitespace. **Cross-model compatibility:** for typical tool-call args (strings, integers, nested objects without floats), JCS output is byte-identical to the Hermes/Forge sorted-keys-minimal-whitespace convention used in the open-weights tool-calling ecosystem (Llama 3.1+, Qwen, DeepSeek, Mistral via `<tool_call>` ChatML). Replay across model swaps (Claude ↔ Hermes 3 ↔ Llama-tool-call format) hashes identically for typical args; divergence is limited to the float-representation edge case which production tool args essentially never hit. See [`agent-loop-briefs/state-and-checkpoints.md`](agent-loop-briefs/state-and-checkpoints.md) §3.4a for the canonicalization rules in implementation form.
 - **Denial telemetry surfaces through `LoopProgressPort` milestones, not the action log.** Profile-surface denials and hook denials never reach `CapabilityHost`, so they do not produce `ActionRecord` entries. Until WS-12 (`LoopProgressPort` wiring) lands, denials accumulate only in the in-memory `state.recent_failure_kinds` ring as `LoopFailureKind::PolicyDenied`. **WS-12 introduces `CapabilityBatchCompleted { denied_count: u32 }`** ([`agent-loop-briefs/loop-progress-port.md`](agent-loop-briefs/loop-progress-port.md)) which gives durable redacted denial-count telemetry without crossing into action-log territory. Per-call denial evidence (beyond counts) is out of scope for the skeleton — add a dedicated `ProfileDenialObserved` variant in a follow-up only when a real consumer demands it.
 
@@ -686,7 +688,7 @@ Realistic parallelism: WS-0 ships first; then WS-1/2/3 and WS-3.5 land in parall
 - **Run context** — `LoopRunContext`, immutable for the entire claimed run.
 - **Loop family** — `LoopFamily` (Builtin, sealed). Carries `id: LoopFamilyId`, `version: ComponentIdentity`, and an opaque planner. Constructed only by `families::*` factories. Resolved from `LoopFamilyRegistry` by id. Skeleton ships only `families::default()`.
 - **Loop family registry** — `LoopFamilyRegistry`, Guice-style singleton built once at app startup by `ironclaw_reborn::app_loop_family::build_loop_family_registry()`. No public `register()`; contents fixed at composition-root compile time.
-- **Component identity** — `ComponentIdentity { id: &'static str, digest: ComponentDigest }`, content-addressed versioning primitive. One shape used across loop family versioning, checkpoint payload metadata, and future hook / skill-snapshot / model-route component identities.
+- **Component identity** — `ComponentIdentity { id: Cow<'static, str>, digest: ComponentDigest }`, content-addressed versioning primitive. One shape used across loop family versioning, checkpoint payload metadata, and future hook / skill-snapshot / model-route component identities.
 
 ## 15. Credits
 

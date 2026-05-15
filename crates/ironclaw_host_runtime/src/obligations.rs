@@ -28,7 +28,7 @@ use ironclaw_secrets::{
 };
 
 /// Default maximum lifetime for one-shot runtime secret material staged in memory.
-pub const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from_secs(300);
+pub(crate) const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from_secs(300);
 
 /// One-shot runtime secret material staged after `InjectSecretOnce` lease consumption.
 ///

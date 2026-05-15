@@ -35,15 +35,13 @@
 //! exact policy that gated an invocation. [`EffectiveRuntimePolicy::was_reduced`]
 //! flags the case where deployment or tenant/org policy narrowed the requested
 //! profile.
+#![warn(unreachable_pub)]
 
 mod resolver;
 
 pub use resolver::{OrgPolicyConstraints, ResolveError, ResolveRequest, resolve};
 
-// Re-export the host-api vocabulary so downstream callers don't need a
-// separate `use ironclaw_host_api::runtime_policy::*;`. Each item is a stable
-// part of the public contract this crate consumes.
-pub use ironclaw_host_api::runtime_policy::{
-    ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
-    NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
-};
+// `EffectiveRuntimePolicy` appears in `resolve`'s return type, so it must be
+// reachable from the crate root. Other host-api runtime_policy types are not
+// re-exported here — callers consume them directly from `ironclaw_host_api`.
+pub use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;

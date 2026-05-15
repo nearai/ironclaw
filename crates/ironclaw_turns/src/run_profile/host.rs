@@ -1,3 +1,8 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, OnceLock},
+};
+
 use async_trait::async_trait;
 use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind, ThreadId};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -596,7 +601,15 @@ pub struct LoopContextBundle {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopContextMessage {
-    pub message_ref: LoopMessageRef,
+    /// Reference to the persisted message content.
+    ///
+    /// `None` means "summary-only entry; prompt port MUST NOT resolve content —
+    /// use `safe_summary` verbatim instead." Mirrors the
+    /// `SkillTrustLevel::Installed` carrying `prompt_content: None` pattern.
+    /// See `docs/reborn/agent-loop-briefs/prompt-context-assembly.md` §3.2 for
+    /// the upstream invariant this enforces.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_ref: Option<LoopMessageRef>,
     pub role: String,
     pub safe_summary: String,
 }
@@ -783,6 +796,20 @@ impl PromptMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopInlineMessageRole {
+    System,
+    User,
+    Assistant,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopInlineMessage {
+    pub role: LoopInlineMessageRole,
+    pub safe_body: LoopSafeSummary,
+}
+
 /// Request for a host-managed prompt bundle.
 ///
 /// The optional cursor and checkpoint refs are run-scoped and are validated by
@@ -795,6 +822,8 @@ pub struct LoopPromptBundleRequest {
     pub surface_version: Option<CapabilitySurfaceVersion>,
     pub checkpoint_state_ref: Option<LoopCheckpointStateRef>,
     pub max_messages: Option<u32>,
+    #[serde(default)]
+    pub inline_messages: Vec<LoopInlineMessage>,
 }
 
 /// Prompt bundle returned to a driver.
@@ -809,6 +838,105 @@ pub struct LoopPromptBundle {
     pub surface_version: Option<CapabilitySurfaceVersion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopPromptBundleGrant {
+    pub bundle_ref: LoopPromptBundleRef,
+    pub messages: Vec<LoopModelMessage>,
+    pub surface_version: Option<CapabilitySurfaceVersion>,
+    pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
+}
+
+#[derive(Clone, Default)]
+pub struct LoopPromptBundleAuthority {
+    inner: Arc<Mutex<LoopPromptBundleAuthorityState>>,
+}
+
+#[derive(Default)]
+struct LoopPromptBundleAuthorityState {
+    latest_by_run: HashMap<String, LoopPromptBundleGrant>,
+}
+
+impl LoopPromptBundleAuthority {
+    pub fn shared() -> Self {
+        static AUTHORITY: OnceLock<LoopPromptBundleAuthority> = OnceLock::new();
+        AUTHORITY.get_or_init(Self::default).clone()
+    }
+
+    pub fn issue_bundle(
+        &self,
+        context: &LoopRunContext,
+        bundle: &LoopPromptBundle,
+    ) -> Result<(), AgentLoopHostError> {
+        if !bundle.bundle_ref.is_for_run(context) {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::ScopeMismatch,
+                "prompt bundle ref is not scoped to this loop run",
+            ));
+        }
+
+        self.lock_state()?.latest_by_run.insert(
+            context.run_id.to_string(),
+            LoopPromptBundleGrant {
+                bundle_ref: bundle.bundle_ref.clone(),
+                messages: bundle.messages.clone(),
+                surface_version: bundle.surface_version.clone(),
+                instruction_fingerprint: bundle.instruction_fingerprint.clone(),
+            },
+        );
+        Ok(())
+    }
+
+    pub fn authorize_latest_model_request(
+        &self,
+        context: &LoopRunContext,
+        messages: &[LoopModelMessage],
+        surface_version: &Option<CapabilitySurfaceVersion>,
+    ) -> Result<LoopPromptBundleGrant, AgentLoopHostError> {
+        let grant = self
+            .lock_state()?
+            .latest_by_run
+            .remove(&context.run_id.to_string())
+            .ok_or_else(|| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "model request has no host-built prompt bundle",
+                )
+            })?;
+
+        if !grant.bundle_ref.is_for_run(context) {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::ScopeMismatch,
+                "prompt bundle ref is not scoped to this loop run",
+            ));
+        }
+        if grant.messages != messages {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "model request messages do not match the host-built prompt bundle",
+            ));
+        }
+        if &grant.surface_version != surface_version {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::StaleSurface,
+                "model request surface version does not match the host-built prompt bundle",
+            ));
+        }
+
+        Ok(grant)
+    }
+
+    fn lock_state(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, LoopPromptBundleAuthorityState>, AgentLoopHostError> {
+        self.inner.lock().map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Internal,
+                "prompt bundle authority is unavailable",
+            )
+        })
+    }
 }
 
 /// Host boundary for building prompt bundles before model invocation.
@@ -915,6 +1043,24 @@ pub struct VisibleCapabilitySurface {
     pub descriptors: Vec<CapabilityDescriptorView>,
 }
 
+/// Concurrency hint for a capability surfaced to an agent loop driver.
+///
+/// Derived at the adapter boundary in WS-9 (`HostRuntimeLoopCapabilityPort::visible_capabilities`)
+/// from the underlying `CapabilityDescriptor.effects` Vec. The lower-layer
+/// `CapabilityDescriptor` is NOT modified; `effects` remains the source of
+/// truth and the hint is a computed projection. See WS-9 §3.2a for the
+/// per-`EffectKind` mapping table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConcurrencyHint {
+    /// Capability has no exclusive side effects; multiple invocations may run
+    /// in parallel without ordering hazards.
+    SafeForParallel,
+    /// Capability must be invoked serially within a loop run — parallel
+    /// invocation would violate ordering or isolation constraints.
+    Exclusive,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityDescriptorView {
     pub capability_id: CapabilityId,
@@ -922,6 +1068,7 @@ pub struct CapabilityDescriptorView {
     pub runtime: RuntimeKind,
     pub safe_name: String,
     pub safe_description: String,
+    pub concurrency_hint: ConcurrencyHint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1135,6 +1282,34 @@ pub struct LoopCheckpointRequest {
     pub state_ref: LoopCheckpointStateRef,
 }
 
+/// Request to stage a checkpoint payload's raw bytes before calling
+/// [`LoopCheckpointPort::checkpoint`] with the resulting state ref.
+///
+/// The two-step write keeps byte-storage and metadata-write responsibilities
+/// cleanly split. See `docs/reborn/agent-loop-briefs/state-and-checkpoints.md`
+/// §2 for the rationale and WS-10 for the read-side counterpart.
+///
+/// `kind` is required so adapters that bridge to
+/// `CheckpointStateStore::put_checkpoint_state` can persist the correct kind
+/// without having to guess. The subsequent `checkpoint(kind, state_ref)` call
+/// must use the same `kind`; the read-side `get_checkpoint_state` validates
+/// the staged kind against the metadata write's kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageCheckpointPayloadRequest {
+    /// Checkpoint boundary the staged payload belongs to. Must match the
+    /// `kind` passed to the subsequent `LoopCheckpointPort::checkpoint(...)`
+    /// call.
+    pub kind: LoopCheckpointKind,
+    /// Schema id of the payload — usually the framework's
+    /// `CHECKPOINT_SCHEMA_ID` constant. Stored alongside the bytes so the
+    /// read-side can authenticate the boundary on resume.
+    pub schema_id: String,
+    /// Canonical payload bytes (e.g. `serde_json::to_vec(&state)`). The
+    /// implementation does not parse the bytes; it persists them and returns
+    /// an opaque ref.
+    pub payload: Vec<u8>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopCheckpointKind {
@@ -1161,6 +1336,28 @@ pub trait LoopCheckpointPort: Send + Sync {
         &self,
         request: LoopCheckpointRequest,
     ) -> Result<TurnCheckpointId, AgentLoopHostError>;
+
+    /// Stage a checkpoint payload's raw bytes and return an opaque
+    /// [`LoopCheckpointStateRef`] that subsequent `checkpoint(...)` calls
+    /// can reference. The default impl fails closed; concrete impls live in
+    /// `ironclaw_loop_support` and wrap the host's `CheckpointStateStore`.
+    ///
+    /// The executor's `checkpoint(...)` helper (WS-6 §3.4) calls this method
+    /// before invoking `LoopCheckpointPort::checkpoint(...)` so the metadata
+    /// write references a payload that's already durably stored.
+    ///
+    /// Read-side `load_checkpoint_payload(...)` lives in WS-10 and will be
+    /// added to this same port. WS-0 intentionally does not pre-declare it
+    /// so the WS-10 signature can land without churn.
+    async fn stage_checkpoint_payload(
+        &self,
+        _request: StageCheckpointPayloadRequest,
+    ) -> Result<LoopCheckpointStateRef, AgentLoopHostError> {
+        Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            "stage_checkpoint_payload not implemented",
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

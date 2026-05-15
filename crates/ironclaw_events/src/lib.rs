@@ -30,6 +30,7 @@
 //! invocation fingerprints, lease IDs, or lease contents. Runtime
 //! `error_kind` strings are constrained to short classification tokens; any
 //! unsafe value is collapsed to `Unclassified`.
+#![warn(unreachable_pub)]
 
 mod cursor;
 mod error;
