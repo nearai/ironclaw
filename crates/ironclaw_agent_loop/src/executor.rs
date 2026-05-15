@@ -116,12 +116,12 @@ impl CanonicalAgentLoopExecutor {
         loop {
             if state.iteration >= planner.budget().iteration_limit(&state) {
                 let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
-                return Ok(failed_exit(
+                return failed_exit(
                     host,
                     checked.state,
                     LoopFailureKind::IterationLimit,
                     Some(checked.checkpoint_id),
-                ));
+                );
             }
 
             if planner.drain().drain_steering(&state).await {
@@ -209,11 +209,11 @@ impl CanonicalAgentLoopExecutor {
                             }
                             let checked =
                                 self.checkpoint(host, state, CheckpointKind::Final).await?;
-                            return Ok(completed_exit(
+                            return completed_exit(
                                 host,
                                 checked.state,
                                 Some(checked.checkpoint_id),
-                            ));
+                            );
                         }
                     }
                 }
@@ -304,7 +304,7 @@ impl CanonicalAgentLoopExecutor {
                                 checked.state,
                                 failure_kind,
                                 Some(checked.checkpoint_id),
-                            )));
+                            )?));
                         }
                     }
                 }
@@ -317,7 +317,7 @@ impl CanonicalAgentLoopExecutor {
             checked.state,
             LoopFailureKind::DriverBug,
             Some(checked.checkpoint_id),
-        )))
+        )?))
     }
 
     async fn execute_capability_batch(
@@ -509,7 +509,7 @@ impl CanonicalAgentLoopExecutor {
                         checked.state,
                         failure_kind,
                         Some(checked.checkpoint_id),
-                    )));
+                    )?));
                 }
                 RecoveryOutcome::Retry {
                     recovery, alter, ..
@@ -597,7 +597,7 @@ impl CanonicalAgentLoopExecutor {
             checked.state,
             LoopFailureKind::DriverBug,
             Some(checked.checkpoint_id),
-        )))
+        )?))
     }
 
     async fn handle_gate(
@@ -639,7 +639,7 @@ impl CanonicalAgentLoopExecutor {
                     checked.state,
                     failure_kind,
                     Some(checked.checkpoint_id),
-                )))
+                )?))
             }
         }
     }
@@ -653,29 +653,25 @@ impl CanonicalAgentLoopExecutor {
         match kind {
             StopKind::GracefulStop => {
                 let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
-                Ok(completed_exit(
-                    host,
-                    checked.state,
-                    Some(checked.checkpoint_id),
-                ))
+                completed_exit(host, checked.state, Some(checked.checkpoint_id))
             }
             StopKind::NoProgressDetected => {
                 let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
-                Ok(failed_exit(
+                failed_exit(
                     host,
                     checked.state,
                     LoopFailureKind::NoProgressDetected,
                     Some(checked.checkpoint_id),
-                ))
+                )
             }
             StopKind::Aborted(failure_kind) => {
                 let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
-                Ok(failed_exit(
+                failed_exit(
                     host,
                     checked.state,
                     failure_kind,
                     Some(checked.checkpoint_id),
-                ))
+                )
             }
         }
     }
@@ -818,8 +814,8 @@ fn completed_exit(
     host: &(dyn AgentLoopDriverHost + Send + Sync),
     state: LoopExecutionState,
     final_checkpoint_id: Option<ironclaw_turns::TurnCheckpointId>,
-) -> LoopExit {
-    LoopExit::Completed(LoopCompleted {
+) -> Result<LoopExit, AgentLoopExecutorError> {
+    Ok(LoopExit::Completed(LoopCompleted {
         completion_kind: if state.assistant_refs.is_empty() {
             LoopCompletionKind::NoReply
         } else {
@@ -829,10 +825,8 @@ fn completed_exit(
         result_refs: state.result_refs,
         final_checkpoint_id,
         usage_summary_ref: None,
-        exit_id: exit_id(host, "completed").unwrap_or_else(|_| {
-            LoopExitId::new("exit:completed").expect("static exit id is valid")
-        }),
-    })
+        exit_id: exit_id(host, "completed")?,
+    }))
 }
 
 fn failed_exit(
@@ -840,15 +834,14 @@ fn failed_exit(
     _state: LoopExecutionState,
     reason_kind: LoopFailureKind,
     checkpoint_id: Option<ironclaw_turns::TurnCheckpointId>,
-) -> LoopExit {
-    LoopExit::Failed(LoopFailed {
+) -> Result<LoopExit, AgentLoopExecutorError> {
+    Ok(LoopExit::Failed(LoopFailed {
         reason_kind,
         checkpoint_id,
         usage_summary_ref: None,
         diagnostic_ref: None,
-        exit_id: exit_id(host, "failed")
-            .unwrap_or_else(|_| LoopExitId::new("exit:failed").expect("static exit id is valid")),
-    })
+        exit_id: exit_id(host, "failed")?,
+    }))
 }
 
 fn exit_id(
