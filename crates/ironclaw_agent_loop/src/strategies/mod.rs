@@ -5,9 +5,9 @@
 //! into the next whole state. See `docs/reborn/agent-loop-skeleton.md` §6
 //! ("Strategy decomposition") and §8 ("Outcome enums").
 //!
-//! WS-2 lands the trait stubs and outcome enums for the batch / gate /
-//! recovery axis. `Default*` impls land in WS-5; the executor body that
-//! consumes these outcomes lands in WS-6.
+//! WS-1/2/3 land the alpha, beta, and gamma trait stubs and outcome enums.
+//! `Default*` impls land in WS-5; the executor body that consumes these
+//! outcomes lands in WS-6.
 //!
 //! Checkpoint/observability wire enums are `#[non_exhaustive]`; later
 //! workstreams should extend them without forcing consumers to assume the
@@ -18,20 +18,25 @@
 //! state such as grant history, auth flow status, route health, or
 //! circuit-breaker counters.
 
-// WS-1/2 land crate-internal contracts before WS-4/5/6 compose and execute
-// them. Keep the unused lint local to these forward-declared contracts.
+// WS-1/2/3 land crate-private strategy contracts before WS-4/5/6 compose and
+// execute them. Keep the unused lint local to these forward-declared contracts.
 #![allow(dead_code, unused_imports)]
 
 pub(crate) mod batch;
+mod budget;
 mod capability;
 mod context;
+mod drain;
 pub(crate) mod gate;
 mod model;
 pub(crate) mod recovery;
+mod stop;
 
 pub(crate) use batch::{BatchPolicy, BatchPolicyStrategy, CapabilityCallSummary};
+pub(crate) use budget::BudgetStrategy;
 pub(crate) use capability::{CapabilityFilter, CapabilityStrategy};
 pub(crate) use context::ContextStrategy;
+pub(crate) use drain::InputDrainStrategy;
 pub(crate) use gate::{GateHandlingStrategy, GateKind, GateOutcome, GateSummary};
 pub(crate) use ironclaw_turns::run_profile::ConcurrencyHint;
 pub(crate) use model::{ModelPreference, ModelStrategy};
@@ -40,3 +45,4 @@ pub(crate) use recovery::{
     ModelErrorSummary, RecoveryOutcome, RecoveryStrategy, RetryAlteration, RetryScope,
     SanitizedStrategySummary,
 };
+pub(crate) use stop::{StopConditionStrategy, StopKind, StopOutcome, TurnEndKind, TurnSummary};
