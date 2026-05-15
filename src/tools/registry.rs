@@ -861,7 +861,7 @@ impl ToolRegistry {
         api_base_url: String,
         api_key: String,
         gen_model: String,
-        base_dir: Option<std::path::PathBuf>,
+        base_dir: std::path::PathBuf,
     ) {
         use crate::tools::builtin::{ImageEditTool, ImageGenerateTool};
         self.register_sync(Arc::new(ImageGenerateTool::new(
@@ -873,7 +873,7 @@ impl ToolRegistry {
             api_base_url,
             api_key,
             gen_model,
-            base_dir,
+            Some(base_dir),
         )));
         tracing::debug!("Registered 2 image tools (generate, edit)");
     }
@@ -886,14 +886,14 @@ impl ToolRegistry {
         api_base_url: String,
         api_key: String,
         vision_model: String,
-        base_dir: Option<std::path::PathBuf>,
+        base_dir: std::path::PathBuf,
     ) {
         use crate::tools::builtin::ImageAnalyzeTool;
         self.register_sync(Arc::new(ImageAnalyzeTool::new(
             api_base_url,
             api_key,
             vision_model,
-            base_dir,
+            Some(base_dir),
         )));
         tracing::debug!("Registered 1 vision tool (analyze)");
     }
@@ -1150,6 +1150,72 @@ mod tests {
 
         let tools = registry.list().await;
         assert!(tools.contains(&"echo".to_string()));
+    }
+
+    #[tokio::test]
+    async fn register_image_tools_sandboxes_image_edit_paths() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let outside = tempfile::tempdir().expect("outside");
+        let outside_image = outside.path().join("secret.png");
+        std::fs::write(&outside_image, b"not really an image").expect("write outside file");
+
+        let registry = ToolRegistry::new();
+        registry.register_image_tools(
+            "https://api.example.com".to_string(),
+            "test-key".to_string(),
+            "image-model".to_string(),
+            sandbox.path().to_path_buf(),
+        );
+        let tool = registry.get("image_edit").await.expect("image_edit tool");
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "prompt": "make it brighter",
+                    "image_path": outside_image.to_string_lossy()
+                }),
+                &crate::context::JobContext::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(crate::tools::tool::ToolError::NotAuthorized(_))),
+            "image_edit must reject paths outside its sandbox, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_vision_tools_sandboxes_image_analyze_paths() {
+        let sandbox = tempfile::tempdir().expect("sandbox");
+        let outside = tempfile::tempdir().expect("outside");
+        let outside_image = outside.path().join("secret.png");
+        std::fs::write(&outside_image, b"not really an image").expect("write outside file");
+
+        let registry = ToolRegistry::new();
+        registry.register_vision_tools(
+            "https://api.example.com".to_string(),
+            "test-key".to_string(),
+            "vision-model".to_string(),
+            sandbox.path().to_path_buf(),
+        );
+        let tool = registry
+            .get("image_analyze")
+            .await
+            .expect("image_analyze tool");
+
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "image_path": outside_image.to_string_lossy()
+                }),
+                &crate::context::JobContext::default(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(crate::tools::tool::ToolError::NotAuthorized(_))),
+            "image_analyze must reject paths outside its sandbox, got: {result:?}"
+        );
     }
 
     #[tokio::test]

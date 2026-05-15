@@ -72,4 +72,5 @@ pub use session::{
 pub use session_manager::SessionManager;
 pub use submission::{Submission, SubmissionParser, SubmissionResult};
 pub use task::{Task, TaskContext, TaskHandler, TaskOutput};
+pub(crate) use thread_ops::inbound_user_message_rejection_text;
 pub use undo::{Checkpoint, UndoManager};

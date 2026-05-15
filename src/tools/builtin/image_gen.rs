@@ -9,6 +9,13 @@ use crate::context::JobContext;
 use crate::tools::builtin::image_api_endpoint_url;
 use crate::tools::{Tool, ToolError, ToolOutput};
 
+pub(crate) fn image_generated_tool_output(
+    sentinel: serde_json::Value,
+    duration: std::time::Duration,
+) -> ToolOutput {
+    ToolOutput::success(sentinel, duration)
+}
+
 /// Tool for generating images using FLUX or compatible image generation APIs.
 pub struct ImageGenerateTool {
     /// API base URL (e.g., "https://cloud-api.near.ai").
@@ -204,7 +211,7 @@ impl Tool for ImageGenerateTool {
             "size": size
         });
 
-        Ok(ToolOutput::text(sentinel.to_string(), start.elapsed()))
+        Ok(image_generated_tool_output(sentinel, start.elapsed()))
     }
 }
 
@@ -229,6 +236,20 @@ mod tests {
         let schema = tool.parameters_schema();
         assert!(schema["properties"]["prompt"].is_object());
         assert!(schema["properties"]["size"].is_object());
+    }
+
+    #[test]
+    fn image_generated_tool_output_preserves_structured_result() {
+        let output = image_generated_tool_output(
+            serde_json::json!({
+                "type": "image_generated",
+                "data": "data:image/png;base64,abc123",
+                "media_type": "image/png"
+            }),
+            std::time::Duration::default(),
+        );
+        assert_eq!(output.result["type"], "image_generated");
+        assert_eq!(output.result["media_type"], "image/png");
     }
 
     #[tokio::test]

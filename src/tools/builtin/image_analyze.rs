@@ -65,7 +65,7 @@ impl Tool for ImageAnalyzeTool {
     }
 
     fn description(&self) -> &str {
-        "Analyze an image using a vision-capable AI model. Provide a workspace path to the image and an optional analysis question."
+        "Analyze an image using a vision-capable AI model. Provide a saved image artifact path and an optional analysis question."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -74,7 +74,7 @@ impl Tool for ImageAnalyzeTool {
             "properties": {
                 "image_path": {
                     "type": "string",
-                    "description": "Path to the image file in the workspace (e.g., 'images/photo.jpg')"
+                    "description": "Saved image artifact path to analyze, usually from an uploaded image or a previous image_generate/image_edit result"
                 },
                 "question": {
                     "type": "string",

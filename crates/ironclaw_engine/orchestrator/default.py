@@ -191,6 +191,35 @@ def signals_execution_intent(text):
     return False
 
 
+def _is_generated_image_output(output):
+    return isinstance(output, dict) and output.get("type") == "image_generated"
+
+
+def _format_generated_image_output_for_llm(action_name, output):
+    """Summarize image output while keeping local artifact paths out of replies."""
+    parts = ["image generated"]
+
+    path = output.get("path", "")
+    if path:
+        state_path = "state['" + str(action_name) + "']['path']"
+        parts.append("saved image artifact path is available at " + state_path)
+        parts.append("use " + state_path + " as image_path when calling image_edit")
+        parts.append("do not reveal this local path or render it as Markdown in the final response")
+
+    media_type = output.get("media_type", "")
+    if media_type:
+        parts.append("media_type: " + str(media_type))
+
+    event_id = output.get("event_id", "")
+    if event_id:
+        parts.append("event_id: " + str(event_id))
+
+    if output.get("data"):
+        parts.append("image data omitted from LLM context")
+
+    return "; ".join(parts)
+
+
 def format_output(result, max_chars=8000):
     """Format code execution result for the next LLM context message."""
     parts = []
@@ -201,7 +230,11 @@ def format_output(result, max_chars=8000):
 
     for r in result.get("action_results", []):
         name = r.get("action_name", "?")
-        output = str(r.get("output", ""))
+        raw_output = r.get("output", "")
+        if _is_generated_image_output(raw_output):
+            output = _format_generated_image_output_for_llm(name, raw_output)
+        else:
+            output = str(raw_output)
         if r.get("is_error"):
             parts.append("[" + name + " ERROR] " + output)
         else:
@@ -229,6 +262,45 @@ def format_output(result, max_chars=8000):
         text = "[code executed, no output]"
 
     return text
+
+
+def _persistable_action_result(r, max_output_chars=1000):
+    """Compact CodeAct action results for host-side history persistence."""
+    if not isinstance(r, dict):
+        return None
+
+    action_name = r.get("action_name", "unknown")
+    output = r.get("output")
+    if _is_generated_image_output(output):
+        persisted_output = {
+            "type": "image_generated",
+            "data_omitted": True,
+            "omitted_reason": "omitted from engine thread state after image artifact persistence",
+        }
+        media_type = output.get("media_type") or output.get("mime_type")
+        if media_type:
+            persisted_output["media_type"] = media_type
+        event_id = output.get("event_id")
+        if event_id:
+            persisted_output["event_id"] = event_id
+        path = output.get("path")
+        if path:
+            persisted_output["path"] = path
+    else:
+        persisted_output = str(output) if output is not None else "[no output]"
+        if len(persisted_output) > max_output_chars:
+            persisted_output = persisted_output[:max_output_chars] + "..."
+
+    entry = {
+        "action_name": action_name,
+        "output": persisted_output,
+        "is_error": bool(r.get("is_error")),
+    }
+    if r.get("call_id"):
+        entry["call_id"] = r.get("call_id")
+    if r.get("duration_ms") is not None:
+        entry["duration_ms"] = r.get("duration_ms")
+    return entry
 
 
 def format_docs(docs):
@@ -923,6 +995,19 @@ def run_loop(context, goal, actions, state, config):
 
             # Execute code in nested Monty VM
             result = __execute_code_step__(code, state)
+            persisted_step_results = [
+                entry
+                for entry in (
+                    _persistable_action_result(r)
+                    for r in result.get("action_results", [])
+                )
+                if entry is not None
+            ]
+            persisted_results_log = state.get("_persisted_action_results_log")
+            if not isinstance(persisted_results_log, list):
+                persisted_results_log = []
+            persisted_results_log.extend(persisted_step_results)
+            state["_persisted_action_results_log"] = persisted_results_log
 
             # Update persisted state with results
             if result.get("return_value") is not None:

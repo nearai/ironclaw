@@ -81,6 +81,7 @@ pub use gate::{
 
 // ── Re-exports: runtime ───────────────────────────────────────
 
+pub use executor::orchestrator::PERSISTED_ACTION_RESULTS_METADATA_KEY;
 pub use executor::prompt::PlatformInfo;
 pub use runtime::conversation::ConversationManager;
 pub use runtime::manager::{

@@ -1,5 +1,6 @@
 //! Engine v2 router — handles user messages via the engine when enabled.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -11,7 +12,7 @@ use ironclaw_engine::{
     MissionManager, PolicyEngine, Project, Store, ThreadConfig, ThreadManager, ThreadOutcome,
 };
 
-use ironclaw_common::AppEvent;
+use ironclaw_common::{AppEvent, truncate_preview};
 use ironclaw_engine::types::{is_shared_owner, shared_owner_id};
 
 use crate::agent::Agent;
@@ -22,11 +23,13 @@ use crate::bridge::llm_adapter::LlmBridgeAdapter;
 use crate::bridge::store_adapter::HybridStore;
 use crate::channels::web::GATEWAY_CHANNEL_NAME;
 use crate::channels::web::sse::SseManager;
+use crate::channels::web::types::GeneratedImageInfo;
 use crate::channels::{IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::db::Database;
 use crate::error::Error;
 use crate::extensions::naming::legacy_extension_alias;
 use crate::gate::pending::{PendingGate, PendingGateKey};
+use crate::generated_images::{GeneratedImageSentinel, engine_v2_image_result_event_id};
 
 /// Typed outcome from a v2 bridge handler.
 ///
@@ -46,8 +49,6 @@ pub enum BridgeOutcome {
     Pending,
 }
 
-use std::collections::HashSet;
-
 /// Check if the engine v2 is enabled via `ENGINE_V2=true` environment variable.
 pub fn is_engine_v2_enabled() -> bool {
     std::env::var("ENGINE_V2")
@@ -61,6 +62,117 @@ fn engine_err(context: &str, e: impl std::fmt::Display) -> Error {
         id: uuid::Uuid::nil(),
         reason: format!("engine v2 {context}: {e}"),
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImageArtifactContextHint {
+    path: String,
+    media_type: Option<String>,
+}
+
+fn image_artifact_hints_from_tool_calls(content: &str) -> Vec<ImageArtifactContextHint> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Vec::new();
+    };
+    let calls = match &value {
+        serde_json::Value::Array(calls) => Some(calls),
+        serde_json::Value::Object(obj) => obj.get("calls").and_then(|calls| calls.as_array()),
+        _ => None,
+    };
+    let Some(calls) = calls else {
+        return Vec::new();
+    };
+
+    calls
+        .iter()
+        .filter_map(|call| call.get("result"))
+        .filter_map(GeneratedImageSentinel::from_value)
+        .filter_map(|sentinel| {
+            let path = sentinel.path()?.trim();
+            if path.is_empty() {
+                return None;
+            }
+            Some(ImageArtifactContextHint {
+                path: path.to_string(),
+                media_type: sentinel.media_type().map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+async fn recent_image_artifact_context_hints(
+    db: &Arc<dyn Database>,
+    conversation_id: uuid::Uuid,
+    limit: usize,
+) -> Vec<ImageArtifactContextHint> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let messages = match db.list_conversation_messages(conversation_id).await {
+        Ok(messages) => messages,
+        Err(error) => {
+            debug!(
+                conversation_id = %conversation_id,
+                error = %error,
+                "engine v2: failed to load conversation images for context"
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut hints = Vec::new();
+    let mut seen_paths = HashSet::new();
+    for message in messages.iter().rev() {
+        if message.role != "tool_calls" {
+            continue;
+        }
+        for hint in image_artifact_hints_from_tool_calls(&message.content)
+            .into_iter()
+            .rev()
+        {
+            if !seen_paths.insert(hint.path.clone()) {
+                continue;
+            }
+            hints.push(hint);
+            if hints.len() >= limit {
+                return hints;
+            }
+        }
+    }
+
+    hints
+}
+
+fn append_image_artifact_context_for_engine(
+    content: &str,
+    hints: &[ImageArtifactContextHint],
+) -> String {
+    if hints.is_empty() {
+        return content.to_string();
+    }
+
+    let mut image_context = String::from(
+        "<available_image_artifacts>\n\
+         These paths are internal tool inputs only. Do not reveal, quote, link, or render them in the user-facing final response.\n\
+         If the user asks to edit the current or previous image, call image_edit with the matching image_path.\n",
+    );
+    for (index, hint) in hints.iter().enumerate() {
+        let media_type = hint.media_type.as_deref().unwrap_or("image");
+        image_context.push_str(&format!(
+            "{}. media_type=\"{}\" image_path=\"{}\"\n",
+            index + 1,
+            media_type,
+            hint.path
+        ));
+    }
+    image_context.push_str("</available_image_artifacts>");
+
+    if content.trim().is_empty() {
+        image_context
+    } else {
+        format!("{content}\n\n{image_context}")
+    }
 }
 
 /// Build the `BridgeOutcome` for a `ThreadOutcome::Failed`.
@@ -130,6 +242,12 @@ struct AttachmentIndexNote {
     tags: Vec<String>,
 }
 
+struct PersistedProjectAttachments {
+    notes: Vec<AttachmentIndexNote>,
+    project_paths: Vec<PathBuf>,
+    image_artifact_paths: Vec<String>,
+}
+
 fn sanitize_attachment_segment(raw: &str) -> String {
     let sanitized: String = raw
         .chars()
@@ -172,6 +290,35 @@ fn attachment_project_relative_path(
         "{}/{}/{}/{}/{}-{}",
         PROJECT_ATTACHMENT_DIR, owner, project_id, date, message_id, filename
     )
+}
+
+async fn persist_editable_image_attachment(
+    image_artifact_root: Option<&Path>,
+    message: &IncomingMessage,
+    attachment: &crate::channels::IncomingAttachment,
+    index: usize,
+) -> Option<String> {
+    match crate::image_artifacts::persist_incoming_image_attachment_artifact(
+        image_artifact_root,
+        attachment,
+        &message.user_id,
+        message.id,
+        message.id,
+        index,
+    )
+    .await
+    {
+        Ok(path) => path,
+        Err(err) => {
+            tracing::warn!(
+                message_id = %message.id,
+                attachment_id = %attachment.id,
+                error = %err,
+                "engine v2: failed to persist editable image attachment artifact"
+            );
+            None
+        }
+    }
 }
 
 /// Collapse anything that could break a markdown title/backtick span in a
@@ -277,11 +424,14 @@ fn attachment_index_note(
 
 async fn persist_project_attachments(
     project_root: &Path,
+    image_artifact_root: Option<&Path>,
     message: &IncomingMessage,
     project_id: ironclaw_engine::ProjectId,
     attachments: &mut [crate::channels::IncomingAttachment],
-) -> Vec<AttachmentIndexNote> {
+) -> PersistedProjectAttachments {
     let mut notes = Vec::new();
+    let mut project_paths = Vec::new();
+    let mut image_artifact_paths = Vec::new();
 
     for (index, attachment) in attachments.iter_mut().enumerate() {
         if attachment.data.is_empty() || attachment.local_path.is_some() {
@@ -306,11 +456,18 @@ async fn persist_project_attachments(
             continue;
         }
 
-        attachment.local_path = Some(relative_path.clone());
+        let editable_image_path =
+            persist_editable_image_attachment(image_artifact_root, message, attachment, index)
+                .await;
+        if let Some(path) = editable_image_path.as_ref() {
+            image_artifact_paths.push(path.clone());
+        }
+        attachment.local_path = Some(editable_image_path.unwrap_or_else(|| relative_path.clone()));
         // Build the index note while `data` is still populated so the
         // fallback to `data.len()` in `attachment_index_note` reports the
         // real payload size when `size_bytes` wasn't pre-filled.
         notes.push(attachment_index_note(message, attachment, &relative_path));
+        project_paths.push(absolute_path);
         // Intentionally *don't* clear `attachment.data` here. The caller
         // (`handle_with_engine_inner` in this file) immediately feeds the
         // same slice to `augment_with_attachments`, which only emits
@@ -322,7 +479,42 @@ async fn persist_project_attachments(
         // returns, so "storage hygiene" is a no-op anyway.
     }
 
-    notes
+    PersistedProjectAttachments {
+        notes,
+        project_paths,
+        image_artifact_paths,
+    }
+}
+
+async fn cleanup_persisted_project_attachments(
+    image_artifact_root: Option<&Path>,
+    persisted: &PersistedProjectAttachments,
+) {
+    for path in &persisted.project_paths {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %err,
+                    "engine v2: failed to remove rejected project attachment"
+                );
+            }
+        }
+    }
+
+    for path in &persisted.image_artifact_paths {
+        if let Err(err) =
+            crate::image_artifacts::remove_image_artifact_at(image_artifact_root, path).await
+        {
+            tracing::warn!(
+                path = %path,
+                error = %err,
+                "engine v2: failed to remove rejected editable image artifact"
+            );
+        }
+    }
 }
 
 fn resolve_project_root() -> PathBuf {
@@ -351,6 +543,26 @@ async fn save_attachment_index_notes(
         if let Err(e) = store.save_memory_doc(&doc).await {
             tracing::warn!(error = %e, title = %doc.title, "engine v2: failed to save attachment index note");
         }
+    }
+}
+
+async fn persist_v1_assistant_response_for_message(
+    db: &Arc<dyn crate::db::Database>,
+    message: &IncomingMessage,
+    text: &str,
+) {
+    let v1_conv_id = if let Some(tid) = message.conversation_scope()
+        && let Ok(uuid) = uuid::Uuid::parse_str(tid)
+    {
+        Some(uuid)
+    } else {
+        db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
+            .await
+            .ok()
+    };
+
+    if let Some(cid) = v1_conv_id {
+        let _ = db.add_conversation_message(cid, "assistant", text).await;
     }
 }
 
@@ -1613,6 +1825,9 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         )
         .with_global_auto_approve(agent.config().auto_approve_tools),
     );
+    effect_adapter
+        .set_image_artifact_root(crate::image_artifacts::default_image_artifact_root())
+        .await;
     // Propagate the trace HTTP interceptor (live recording or replay) so
     // engine v2 tool dispatch records/replays HTTP exchanges. Without this,
     // recorded traces miss every outbound call made from the engine v2 path
@@ -4342,8 +4557,10 @@ async fn handle_with_engine_inner(
         resolve_user_project(&state.store, &message.user_id, state.default_project_id).await?;
 
     let mut persisted_attachments = message.attachments.clone();
-    let attachment_notes = persist_project_attachments(
+    let image_artifact_root = crate::image_artifacts::default_image_artifact_root();
+    let persisted_attachment_files = persist_project_attachments(
         &state.project_root,
+        Some(image_artifact_root.as_path()),
         message,
         project_id,
         &mut persisted_attachments,
@@ -4360,6 +4577,36 @@ async fn handle_with_engine_inner(
         .as_ref()
         .map(|result| result.text.as_str())
         .unwrap_or(content);
+    if let Some(rejection) = crate::agent::inbound_user_message_rejection_text(
+        agent.safety(),
+        message,
+        effective_content,
+    ) {
+        cleanup_persisted_project_attachments(
+            Some(image_artifact_root.as_path()),
+            &persisted_attachment_files,
+        )
+        .await;
+        return Ok(BridgeOutcome::Respond(rejection));
+    }
+    let scope = message.conversation_scope();
+    let engine_content = if let Some(ref db) = state.db {
+        let v1_conv_id = if let Some(tid) = scope {
+            uuid::Uuid::parse_str(tid).ok()
+        } else {
+            db.get_or_create_assistant_conversation(&message.user_id, &message.channel)
+                .await
+                .ok()
+        };
+        if let Some(v1_conv_id) = v1_conv_id {
+            let hints = recent_image_artifact_context_hints(db, v1_conv_id, 3).await;
+            append_image_artifact_context_for_engine(effective_content, &hints)
+        } else {
+            effective_content.to_string()
+        }
+    } else {
+        effective_content.to_string()
+    };
 
     // Fire any active OnEvent missions whose pattern (and optional channel
     // filter) match this inbound message. Mission firings here are side
@@ -4391,7 +4638,6 @@ async fn handle_with_engine_inner(
     // use it as part of the channel key so each v1 thread maps to a distinct
     // engine conversation. Without this, all threads share one conversation
     // and messages appear in the wrong place.
-    let scope = message.conversation_scope();
     let channel_key = match scope {
         Some(tid) => format!("{}:{}", message.channel, tid),
         None => message.channel.clone(),
@@ -4456,7 +4702,7 @@ async fn handle_with_engine_inner(
         .conversation_manager
         .handle_user_message(
             conv_id,
-            effective_content,
+            &engine_content,
             project_id,
             &message.user_id,
             thread_config,
@@ -4466,6 +4712,11 @@ async fn handle_with_engine_inner(
     {
         Ok(tid) => tid,
         Err(e) => {
+            cleanup_persisted_project_attachments(
+                Some(image_artifact_root.as_path()),
+                &persisted_attachment_files,
+            )
+            .await;
             state
                 .gate_controller
                 .clear_pre_execution_context(&message.user_id, conv_id)
@@ -4483,13 +4734,13 @@ async fn handle_with_engine_inner(
         .set_execution_context(message.user_id.clone(), thread_id, per_exec_context)
         .await;
 
-    if !attachment_notes.is_empty() {
+    if !persisted_attachment_files.notes.is_empty() {
         save_attachment_index_notes(
             &state.store,
             project_id,
             &message.user_id,
             thread_id,
-            attachment_notes,
+            persisted_attachment_files.notes,
         )
         .await;
     }
@@ -4660,7 +4911,7 @@ fn spawn_post_park_continuation(
     let user_id = message.user_id.clone();
     let channel_name = message.channel.clone();
     let metadata = message.metadata.clone();
-    let tid_str = thread_id.to_string();
+    let visible_thread_id = channel_visible_thread_id(&message, thread_id);
 
     tokio::spawn(async move {
         let mut event_rx = thread_manager.subscribe_events();
@@ -4677,7 +4928,10 @@ fn spawn_post_park_continuation(
                             if let Some(ref sse) = sse {
                                 let skip_verbose = !sse.has_verbose_receivers();
                                 let leak_detector = effect_adapter.safety().leak_detector();
-                                for mut app_event in thread_event_to_app_events(evt, &tid_str) {
+                                for mut app_event in thread_event_to_app_events(evt, &visible_thread_id) {
+                                    if app_event_is_already_forwarded_by_gateway_channel(&channel_name, &app_event) {
+                                        continue;
+                                    }
                                     if skip_verbose && app_event.is_verbose_only() {
                                         continue;
                                     }
@@ -4739,9 +4993,21 @@ fn spawn_post_park_continuation(
 
         let response_text: Option<String> = match &outcome {
             ThreadOutcome::Completed { response } => {
-                if let Some(ref db) = db {
-                    persist_v2_tool_calls(&store, db, thread_id, &message).await;
-                }
+                let generated_images = if let Some(ref db) = db {
+                    persist_v2_tool_calls(&store, db, thread_id, &message).await
+                } else {
+                    Vec::new()
+                };
+                emit_generated_images_for_completed_v2_thread(
+                    &channels,
+                    sse.as_ref(),
+                    &channel_name,
+                    &user_id,
+                    &visible_thread_id,
+                    &metadata,
+                    &generated_images,
+                )
+                .await;
                 response.clone()
             }
             ThreadOutcome::Stopped => Some("Thread was stopped.".into()),
@@ -4762,7 +5028,7 @@ fn spawn_post_park_continuation(
                         &user_id,
                         AppEvent::Error {
                             message: sanitized.clone(),
-                            thread_id: Some(tid_str.clone()),
+                            thread_id: Some(visible_thread_id.clone()),
                         },
                     );
                 }
@@ -4901,7 +5167,7 @@ fn spawn_post_park_continuation(
                     &user_id,
                     AppEvent::Response {
                         content: text.clone(),
-                        thread_id: tid_str.clone(),
+                        thread_id: visible_thread_id.clone(),
                     },
                 );
             }
@@ -5081,6 +5347,12 @@ async fn await_thread_outcome(
                             let skip_verbose = !sse.has_verbose_receivers();
                             let leak_detector = state.effect_adapter.safety().leak_detector();
                             for mut app_event in thread_event_to_app_events(evt, &tid_str) {
+                                if app_event_is_already_forwarded_by_gateway_channel(
+                                    channel_name,
+                                    &app_event,
+                                ) {
+                                    continue;
+                                }
                                 if skip_verbose && app_event.is_verbose_only() {
                                     continue;
                                 }
@@ -5159,7 +5431,50 @@ async fn await_thread_outcome(
     // can still resolve it, and the resolver path will deliver the
     // resolution into the parked oneshot.
     if timed_out && state.thread_manager.is_running(thread_id).await {
-        return Ok(BridgeOutcome::Pending);
+        if state.pending_gates.peek(&pending_key).await.is_some() {
+            return Ok(BridgeOutcome::Pending);
+        }
+
+        tracing::warn!(
+            thread_id = %thread_id,
+            conversation_id = %conv_id,
+            user_id = %message.user_id,
+            "await_thread_outcome deadline elapsed without a pending gate; stopping stalled thread"
+        );
+
+        if let Err(e) = state
+            .thread_manager
+            .stop_thread(thread_id, &message.user_id)
+            .await
+        {
+            tracing::warn!(
+                thread_id = %thread_id,
+                user_id = %message.user_id,
+                error = %e,
+                "failed to stop stalled thread after await_thread_outcome timeout"
+            );
+        }
+
+        let timeout_error =
+            "This request timed out while waiting for a response. Please resend it.".to_string();
+        let timeout_outcome = ThreadOutcome::Failed {
+            error: timeout_error.clone(),
+            debug_detail: Some(
+                "await_thread_outcome deadline elapsed without a pending gate".to_string(),
+            ),
+        };
+
+        state
+            .conversation_manager
+            .record_thread_outcome(conv_id, thread_id, &timeout_outcome)
+            .await
+            .map_err(|e| engine_err("conversation error", e))?;
+
+        if let Some(ref db) = state.db {
+            persist_v1_assistant_response_for_message(db, message, &timeout_error).await;
+        }
+
+        return Ok(BridgeOutcome::Respond(timeout_error));
     }
 
     let outcome = state
@@ -5173,30 +5488,6 @@ async fn await_thread_outcome(
         .record_thread_outcome(conv_id, thread_id, &outcome)
         .await
         .map_err(|e| engine_err("conversation error", e))?;
-
-    // Helper: write the outcome response to the v1 DB so the history API
-    // shows it correctly for all outcomes that produce a response.
-    let write_v1_response = |db: &Arc<dyn crate::db::Database>, text: &str| {
-        let db = Arc::clone(db);
-        let scope = message.conversation_scope().map(String::from);
-        let user_id = message.user_id.clone();
-        let channel = message.channel.clone();
-        let text = text.to_string();
-        async move {
-            let v1_conv_id = if let Some(tid) = scope
-                && let Ok(uuid) = uuid::Uuid::parse_str(&tid)
-            {
-                Some(uuid)
-            } else {
-                db.get_or_create_assistant_conversation(&user_id, &channel)
-                    .await
-                    .ok()
-            };
-            if let Some(cid) = v1_conv_id {
-                let _ = db.add_conversation_message(cid, "assistant", &text).await;
-            }
-        }
-    };
 
     if let Some(ref sse) = state.sse
         && let ThreadOutcome::Completed {
@@ -5329,9 +5620,21 @@ async fn await_thread_outcome(
 
             // Persist tool_calls only for completed threads — not for
             // GatePaused (partial tools, would orphan rows on resume).
-            if let Some(ref db) = state.db {
-                persist_v2_tool_calls(&state.store, db, thread_id, message).await;
-            }
+            let generated_images = if let Some(ref db) = state.db {
+                persist_v2_tool_calls(&state.store, db, thread_id, message).await
+            } else {
+                Vec::new()
+            };
+            emit_generated_images_for_completed_v2_thread(
+                &agent.channels,
+                state.sse.as_ref(),
+                &message.channel,
+                &message.user_id,
+                &channel_visible_thread_id(message, thread_id),
+                &message.metadata,
+                &generated_images,
+            )
+            .await;
 
             match response {
                 Some(text) => Ok(BridgeOutcome::Respond(text)),
@@ -5475,7 +5778,7 @@ async fn await_thread_outcome(
     if let Ok(BridgeOutcome::Respond(ref text)) = result
         && let Some(ref db) = state.db
     {
-        write_v1_response(db, text).await;
+        persist_v1_assistant_response_for_message(db, message, text).await;
     }
 
     result
@@ -5720,6 +6023,182 @@ pub(crate) async fn handle_mission_notification(
     }
 }
 
+fn tool_result_preview_for_v2_persistence(result: &serde_json::Value) -> String {
+    if GeneratedImageSentinel::from_value(result).is_some() {
+        return "Generated image".to_string();
+    }
+
+    match result {
+        serde_json::Value::String(s) => truncate_preview(s, 500),
+        other => truncate_preview(&other.to_string(), 500),
+    }
+}
+
+fn generated_image_info_from_result(
+    sentinel: &GeneratedImageSentinel,
+    event_id: String,
+) -> GeneratedImageInfo {
+    GeneratedImageInfo {
+        event_id,
+        data_url: sentinel
+            .data_url()
+            .filter(|data_url| !data_url.is_empty())
+            .map(str::to_string),
+        path: sentinel.path().map(str::to_string),
+    }
+}
+
+fn compact_image_data_in_persisted_action_results(thread: &mut ironclaw_engine::Thread) -> bool {
+    let Some(results) = thread
+        .metadata
+        .get_mut(ironclaw_engine::PERSISTED_ACTION_RESULTS_METADATA_KEY)
+        .and_then(|value| value.as_array_mut())
+    else {
+        return false;
+    };
+
+    let mut changed = false;
+    for result in results {
+        let Some(output) = result.get_mut("output") else {
+            continue;
+        };
+        let Some(sentinel) = GeneratedImageSentinel::from_value(output) else {
+            continue;
+        };
+        let compact = sentinel.compact_value_without_data_url_with_reason(
+            "omitted from engine thread metadata after image artifact persistence",
+        );
+        if *output != compact {
+            *output = compact;
+            changed = true;
+        }
+    }
+
+    changed
+}
+
+fn v2_tool_call_dedupe_key(
+    action_name: &str,
+    call_id: Option<&str>,
+    result: &serde_json::Value,
+) -> String {
+    if let Some(call_id) = call_id.filter(|call_id| !call_id.is_empty()) {
+        return format!("{action_name}\u{1f}{call_id}");
+    }
+    format!(
+        "{action_name}\u{1f}{}",
+        tool_result_preview_for_v2_persistence(result)
+    )
+}
+
+fn append_persisted_v2_tool_call(
+    calls: &mut Vec<serde_json::Value>,
+    generated_images: &mut Vec<GeneratedImageInfo>,
+    seen: &mut HashSet<String>,
+    action_name: &str,
+    call_id: Option<&str>,
+    result: &serde_json::Value,
+    fallback_event_id: String,
+) {
+    let dedupe_key = v2_tool_call_dedupe_key(action_name, call_id, result);
+    if !seen.insert(dedupe_key) {
+        return;
+    }
+
+    let preview = tool_result_preview_for_v2_persistence(result);
+    let mut obj = serde_json::json!({
+        "name": action_name,
+        "result_preview": preview,
+    });
+    if let Some(call_id) = call_id.filter(|call_id| !call_id.is_empty()) {
+        obj["tool_call_id"] = serde_json::Value::String(call_id.to_string());
+    }
+    if let Some(sentinel) = GeneratedImageSentinel::from_value(result) {
+        let event_id = sentinel
+            .event_id()
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or(fallback_event_id);
+        let sentinel = if sentinel.event_id().is_some_and(|value| !value.is_empty()) {
+            sentinel
+        } else {
+            sentinel.with_event_id(event_id.clone())
+        };
+        obj["result"] = serde_json::Value::String(sentinel.record_content_for_persistence());
+        generated_images.push(generated_image_info_from_result(&sentinel, event_id));
+    }
+    calls.push(obj);
+}
+
+fn channel_visible_thread_id(
+    message: &IncomingMessage,
+    engine_thread_id: ironclaw_engine::ThreadId,
+) -> String {
+    message
+        .thread_id
+        .as_ref()
+        .map(|thread_id| thread_id.to_string())
+        .or_else(|| {
+            message
+                .metadata
+                .get("thread_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| engine_thread_id.to_string())
+}
+
+async fn emit_generated_images_for_completed_v2_thread(
+    channels: &Arc<crate::channels::ChannelManager>,
+    sse: Option<&Arc<SseManager>>,
+    channel_name: &str,
+    user_id: &str,
+    thread_id: &str,
+    metadata: &serde_json::Value,
+    generated_images: &[GeneratedImageInfo],
+) {
+    if generated_images.is_empty() {
+        return;
+    }
+
+    if channel_name == GATEWAY_CHANNEL_NAME
+        && let Some(sse) = sse
+    {
+        for image in generated_images {
+            let Some(data_url) = image.data_url.clone() else {
+                continue;
+            };
+            sse.broadcast_for_user(
+                user_id,
+                AppEvent::ImageGenerated {
+                    event_id: image.event_id.clone(),
+                    data_url,
+                    path: image.path.clone(),
+                    thread_id: Some(thread_id.to_string()),
+                },
+            ); // projection-exempt: bridge dispatcher, persisted generated-image replay for live gateway thread
+        }
+        return;
+    }
+
+    for image in generated_images {
+        let Some(data_url) = image.data_url.clone() else {
+            continue;
+        };
+        let _ = channels
+            .send_status(
+                channel_name,
+                StatusUpdate::ImageGenerated {
+                    event_id: image.event_id.clone(),
+                    data_url,
+                    path: image.path.clone(),
+                },
+                metadata,
+            )
+            .await;
+    }
+}
+
 /// Persist v2 engine tool call metadata to the v1 conversation DB.
 ///
 /// Loads the completed thread from the v2 store, extracts ActionResult
@@ -5731,7 +6210,7 @@ async fn persist_v2_tool_calls(
     db: &std::sync::Arc<dyn Database>,
     thread_id: ironclaw_engine::ThreadId,
     message: &IncomingMessage,
-) {
+) -> Vec<GeneratedImageInfo> {
     // Load the thread -- it's still in the store after join_thread
     // (join only removes from the runtime running map, not the store).
     //
@@ -5740,51 +6219,89 @@ async fn persist_v2_tool_calls(
     // a user-visible gap, so emit at `warn!` — this path is an HTTP
     // handler, not a TUI-corrupting background task, so CLAUDE.md's
     // "background tasks must not use info!/warn!" rule does not apply.
-    let thread = match store.load_thread(thread_id).await {
+    let mut thread = match store.load_thread(thread_id).await {
         Ok(Some(t)) => t,
         Ok(None) => {
             tracing::warn!(thread_id = %thread_id, "thread not found in store for tool_calls persist");
-            return;
+            return Vec::new();
         }
         Err(e) => {
             tracing::warn!(thread_id = %thread_id, "failed to load thread for tool_calls persist: {e}");
-            return;
+            return Vec::new();
         }
     };
 
     // Extract ActionResult messages from the thread's internal transcript.
     // `internal_messages` has the full execution chain including action
-    // results with actual tool output. `messages` only has user/assistant.
+    // results with actual tool output when the orchestrator records
+    // ActionResult messages directly. CodeAct tool executions are also
+    // mirrored into thread metadata so history persistence can recover the
+    // exact outputs without pushing extra tool messages back into the
+    // LLM-facing transcript on resume.
     let mut calls = Vec::new();
-    for msg in &thread.internal_messages {
+    let mut generated_images = Vec::new();
+    let mut seen_calls = HashSet::new();
+    for (result_index, msg) in thread.internal_messages.iter().enumerate() {
         if msg.role != ironclaw_engine::MessageRole::ActionResult {
             continue;
         }
         let action_name = msg.action_name.as_deref().unwrap_or("unknown");
-        let preview = if msg.content.len() > 500 {
-            let end = msg
-                .content
-                .char_indices()
-                .take_while(|(i, _)| *i < 500)
-                .last()
-                .map(|(i, c)| i + c.len_utf8())
-                .unwrap_or(0);
-            format!("{}...", &msg.content[..end]) // safety: end is char-boundary via char_indices
-        } else {
-            msg.content.clone()
-        };
-        let mut obj = serde_json::json!({
-            "name": action_name,
-            "result_preview": preview,
-        });
-        if let Some(ref call_id) = msg.action_call_id {
-            obj["tool_call_id"] = serde_json::Value::String(call_id.clone());
+        let result = serde_json::from_str::<serde_json::Value>(&msg.content)
+            .unwrap_or_else(|_| serde_json::Value::String(msg.content.clone()));
+        append_persisted_v2_tool_call(
+            &mut calls,
+            &mut generated_images,
+            &mut seen_calls,
+            action_name,
+            msg.action_call_id.as_deref(),
+            &result,
+            engine_v2_image_result_event_id(
+                thread_id.0,
+                result_index,
+                msg.action_call_id.as_deref(),
+            ),
+        );
+    }
+    if let Some(persisted_results) = thread
+        .metadata
+        .get(ironclaw_engine::PERSISTED_ACTION_RESULTS_METADATA_KEY)
+        .and_then(|value| value.as_array())
+    {
+        for (result_index, result_entry) in persisted_results.iter().enumerate() {
+            let action_name = result_entry
+                .get("action_name")
+                .and_then(|value| value.as_str())
+                .unwrap_or("unknown");
+            append_persisted_v2_tool_call(
+                &mut calls,
+                &mut generated_images,
+                &mut seen_calls,
+                action_name,
+                result_entry.get("call_id").and_then(|value| value.as_str()),
+                result_entry
+                    .get("output")
+                    .unwrap_or(&serde_json::Value::Null),
+                engine_v2_image_result_event_id(
+                    thread_id.0,
+                    result_index,
+                    result_entry.get("call_id").and_then(|value| value.as_str()),
+                ),
+            );
         }
-        calls.push(obj);
     }
 
     if calls.is_empty() {
-        return;
+        return generated_images;
+    }
+
+    if compact_image_data_in_persisted_action_results(&mut thread)
+        && let Err(error) = store.save_thread(&thread).await
+    {
+        tracing::warn!(
+            thread_id = %thread_id,
+            error = %error,
+            "failed to compact image data in v2 thread metadata"
+        );
     }
 
     let wrapper = serde_json::json!({ "calls": calls });
@@ -5792,7 +6309,7 @@ async fn persist_v2_tool_calls(
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(thread_id = %thread_id, "failed to serialize v2 tool_calls: {e}");
-            return;
+            return generated_images;
         }
     };
 
@@ -5812,7 +6329,7 @@ async fn persist_v2_tool_calls(
                     thread_id = %thread_id,
                     "failed to resolve v1 conversation for tool_calls persist: {e}"
                 );
-                return;
+                return generated_images;
             }
         }
     };
@@ -5823,6 +6340,8 @@ async fn persist_v2_tool_calls(
     {
         tracing::warn!(thread_id = %thread_id, "failed to persist v2 tool_calls to v1 DB: {e}");
     }
+
+    generated_images
 }
 
 /// Forward an engine ThreadEvent to the channel as a StatusUpdate.
@@ -6096,6 +6615,21 @@ fn redact_secrets_in_json(
         }
         _ => {}
     }
+}
+
+fn app_event_is_already_forwarded_by_gateway_channel(
+    channel_name: &str,
+    app_event: &AppEvent,
+) -> bool {
+    channel_name == GATEWAY_CHANNEL_NAME
+        && matches!(
+            app_event,
+            AppEvent::Thinking { .. }
+                | AppEvent::ToolStarted { .. }
+                | AppEvent::ToolCompleted { .. }
+                | AppEvent::Status { .. }
+                | AppEvent::SkillActivated { .. }
+        )
 }
 
 /// Convert a `ThreadEvent` to `AppEvent`s for the web gateway SSE stream.
@@ -7759,6 +8293,49 @@ mod tests {
     use super::test_support::ENGINE_STATE_TEST_LOCK;
     static CWD_TEST_LOCK: LazyLock<TokioMutex<()>> = LazyLock::new(|| TokioMutex::new(()));
 
+    #[test]
+    fn image_artifact_hints_parse_wrapped_tool_calls() {
+        let content = serde_json::json!({
+            "calls": [{
+                "name": "image_generate",
+                "result": serde_json::json!({
+                    "type": "image_generated",
+                    "data_omitted": true,
+                    "media_type": "image/png",
+                    "path": "default/thread/cat.png"
+                }).to_string()
+            }]
+        })
+        .to_string();
+
+        let hints = image_artifact_hints_from_tool_calls(&content);
+
+        assert_eq!(
+            hints,
+            vec![ImageArtifactContextHint {
+                path: "default/thread/cat.png".into(),
+                media_type: Some("image/png".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn image_artifact_context_is_engine_only_tool_guidance() {
+        let content = append_image_artifact_context_for_engine(
+            "make it black and white",
+            &[ImageArtifactContextHint {
+                path: "default/thread/cat.png".into(),
+                media_type: Some("image/png".into()),
+            }],
+        );
+
+        assert!(content.starts_with("make it black and white\n\n"));
+        assert!(content.contains("<available_image_artifacts>"));
+        assert!(content.contains("image_path=\"default/thread/cat.png\""));
+        assert!(content.contains("Do not reveal"));
+        assert!(content.contains("call image_edit"));
+    }
+
     // ──────────────────────────────────────────────────────────────────
     // `bridge_outcome_for_failed_thread` — caller-level coverage.
     //
@@ -8905,6 +9482,39 @@ mod tests {
                 && !success
                 && duration_ms == &Some(17)
                 && thread_id.as_deref() == Some("thread-123")
+        ));
+    }
+
+    #[test]
+    fn gateway_channel_skips_direct_sse_for_channel_forwarded_tool_events() {
+        let tool_event = AppEvent::ToolCompleted {
+            name: "image_generate".to_string(),
+            success: true,
+            error: None,
+            parameters: None,
+            call_id: Some("call-image-1".to_string()),
+            duration_ms: Some(42),
+            thread_id: Some("thread-123".to_string()),
+        };
+        assert!(app_event_is_already_forwarded_by_gateway_channel(
+            GATEWAY_CHANNEL_NAME,
+            &tool_event
+        ));
+        assert!(!app_event_is_already_forwarded_by_gateway_channel(
+            "telegram",
+            &tool_event
+        ));
+
+        let code_event = AppEvent::CodeExecuted {
+            code: "print('hello')".to_string(),
+            stdout: String::new(),
+            return_value: None,
+            duration_ms: 1,
+            thread_id: Some("thread-123".to_string()),
+        };
+        assert!(!app_event_is_already_forwarded_by_gateway_channel(
+            GATEWAY_CHANNEL_NAME,
+            &code_event
         ));
     }
 
@@ -10280,7 +10890,7 @@ mod tests {
             assert!(
                 user_msg
                     .content
-                    .contains("Saved to project file: .ironclaw/attachments/alice/"),
+                    .contains("Saved file path: .ironclaw/attachments/alice/"),
                 "expected saved path hint in user content, got: {}",
                 user_msg.content
             );
@@ -10325,6 +10935,62 @@ mod tests {
 
         *lock.write().await = None;
         outcome.expect("router attachment persistence test");
+    }
+
+    #[tokio::test]
+    async fn persist_project_attachments_uses_editable_artifact_path_for_images() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let project_root = temp_dir.path().join("projects");
+        let image_root = temp_dir.path().join("image-artifacts");
+        let message = IncomingMessage::new("gateway", "alice", "edit this image");
+        let project_id = ironclaw_engine::ProjectId::new();
+        let mut attachments = vec![crate::channels::IncomingAttachment {
+            id: "img-1".to_string(),
+            kind: crate::channels::AttachmentKind::Image,
+            mime_type: "image/png".to_string(),
+            filename: Some("cat.png".to_string()),
+            size_bytes: Some(3),
+            source_url: None,
+            storage_key: None,
+            local_path: None,
+            extracted_text: None,
+            data: b"png".to_vec(),
+            duration_secs: None,
+        }];
+
+        let persisted = persist_project_attachments(
+            &project_root,
+            Some(image_root.as_path()),
+            &message,
+            project_id,
+            &mut attachments,
+        )
+        .await;
+
+        assert_eq!(persisted.notes.len(), 1);
+        let editable_path = attachments[0].local_path.as_deref().expect("local path");
+        assert!(
+            !Path::new(editable_path).is_absolute(),
+            "expected editable artifact path to stay relative, got {editable_path}"
+        );
+        let resolved_editable = crate::image_artifacts::resolve_image_artifact_path_at(
+            Some(image_root.as_path()),
+            editable_path,
+        )
+        .expect("resolve editable artifact");
+        assert_eq!(
+            tokio::fs::read(resolved_editable)
+                .await
+                .expect("read artifact"),
+            b"png"
+        );
+        let project_path = persisted.notes[0]
+            .metadata
+            .get("project_path")
+            .and_then(|value| value.as_str())
+            .expect("project path");
+        assert!(project_path.starts_with(PROJECT_ATTACHMENT_DIR));
+        assert!(project_root.join(project_path).exists());
     }
 
     #[tokio::test]
@@ -11477,6 +12143,77 @@ mod tests {
         outcome.expect("engine v2 secret scan regression test");
     }
 
+    #[tokio::test]
+    async fn handle_with_engine_rejects_attachment_derived_secret_and_cleans_up_files() {
+        let _guard = ENGINE_STATE_TEST_LOCK.lock().await;
+        let lock = ENGINE_STATE.get_or_init(|| RwLock::new(None));
+        *lock.write().await = None;
+
+        let outcome = async {
+            let store = Arc::new(TestStore::new());
+            let temp_dir = tempfile::tempdir().expect("temp dir");
+            let mut state = make_expected_test_state(store.clone());
+            state.project_root = temp_dir.path().join("projects");
+            *lock.write().await = Some(state);
+
+            let (agent, _statuses) = make_test_agent_with_status_channel("web").await;
+            let message = IncomingMessage::new("web", "alice", "Please review the upload.")
+                .with_attachments(vec![crate::channels::IncomingAttachment {
+                    id: "att-secret".to_string(),
+                    kind: crate::channels::AttachmentKind::Document,
+                    mime_type: "text/plain".to_string(),
+                    filename: Some("notes.txt".to_string()),
+                    size_bytes: Some(34),
+                    source_url: None,
+                    storage_key: None,
+                    local_path: None,
+                    extracted_text: Some("API key: sk-abc123def456ghi789jk".to_string()),
+                    data: b"API key: sk-abc123def456ghi789jk\n".to_vec(),
+                    duration_secs: None,
+                }]);
+
+            let result = handle_with_engine_inner(&agent, &message, &message.content, 0)
+                .await
+                .expect("should not error");
+            let warning = match result {
+                BridgeOutcome::Respond(text) => text,
+                other => panic!(
+                    "expected Respond with warning for attachment-derived secret, got: {other:?}"
+                ),
+            };
+            assert!(
+                warning.contains("secret") || warning.contains("credential"),
+                "expected secret-detection warning, got: {warning}"
+            );
+            assert!(
+                store.threads.read().await.is_empty(),
+                "rejected attachment content must not spawn an engine thread"
+            );
+            assert!(
+                store.docs.read().await.is_empty(),
+                "rejected attachment content must not save attachment index notes"
+            );
+
+            let projects = store.projects.read().await;
+            let project = projects.first().cloned().expect("project created");
+            drop(projects);
+            let expected_relative =
+                attachment_project_relative_path(&message, project.id, &message.attachments[0], 0);
+            let expected_absolute = temp_dir.path().join("projects").join(expected_relative);
+            assert!(
+                tokio::fs::metadata(&expected_absolute).await.is_err(),
+                "rejected attachment file should be cleaned up: {}",
+                expected_absolute.display()
+            );
+
+            Ok::<(), crate::error::Error>(())
+        }
+        .await;
+
+        *lock.write().await = None;
+        outcome.expect("engine v2 attachment secret regression test");
+    }
+
     /// Regression test for issue #2084 upgrade path.
     ///
     /// Simulates the scenario where pre-PR on-disk docs are loaded with
@@ -12259,6 +12996,553 @@ mod tests {
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
+    async fn persist_v2_tool_calls_preserves_generated_image_results_for_history_rehydration() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(TestStore::new());
+        let db: Arc<dyn crate::db::Database> = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("test.db"))
+                .await
+                .expect("local libsql"),
+        );
+        db.run_migrations().await.expect("migrations");
+
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "test-user",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::action_result(
+            "call-img",
+            "image_generate",
+            r#"{"type":"image_generated","data":"data:image/png;base64,abc123","media_type":"image/png","path":"workspace/out.png"}"#,
+        ));
+        let thread_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        let conv_id = db
+            .create_conversation("web", "test-user", None)
+            .await
+            .expect("create conversation");
+        let message =
+            IncomingMessage::new("web", "test-user", "draw").with_thread(conv_id.to_string());
+
+        let store_arc: Arc<dyn Store> = store;
+        let generated_images = persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
+        assert_eq!(generated_images.len(), 1);
+        assert_eq!(
+            generated_images[0].event_id,
+            format!("v2-{}-call-img", thread_id.0)
+        );
+        assert_eq!(
+            generated_images[0].data_url.as_deref(),
+            Some("data:image/png;base64,abc123")
+        );
+
+        let messages = db
+            .list_conversation_messages(conv_id)
+            .await
+            .expect("list messages");
+        let tool_calls_msg = messages
+            .iter()
+            .find(|m| m.role == "tool_calls")
+            .expect("tool_calls row must be written");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tool_calls_msg.content).expect("valid JSON");
+        let calls = parsed["calls"].as_array().expect("calls array");
+        assert_eq!(calls[0]["result_preview"], "Generated image");
+        let persisted_result = calls[0]["result"]
+            .as_str()
+            .expect("image result should be persisted");
+        assert!(persisted_result.contains("\"type\":\"image_generated\""));
+        assert!(persisted_result.contains(&format!("v2-{}-call-img", thread_id.0)));
+        assert!(persisted_result.contains("\"path\":\"workspace/out.png\""));
+        assert!(persisted_result.contains("\"data_omitted\":true"));
+        assert!(!persisted_result.contains("data:image/png;base64,abc123"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn persist_v2_tool_calls_preserves_non_ascii_python_repr_image_results() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(TestStore::new());
+        let db: Arc<dyn crate::db::Database> = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("test.db"))
+                .await
+                .expect("local libsql"),
+        );
+        db.run_migrations().await.expect("migrations");
+
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "test-user",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::action_result(
+            "call-img",
+            "image_generate",
+            "{'data': 'data:image/png;base64,abc123', 'media_type': 'image/png', 'prompt': '生成小猫图片，狸花猫', 'type': 'image_generated'}",
+        ));
+        let thread_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        let conv_id = db
+            .create_conversation("web", "test-user", None)
+            .await
+            .expect("create conversation");
+        let message =
+            IncomingMessage::new("web", "test-user", "draw").with_thread(conv_id.to_string());
+
+        let store_arc: Arc<dyn Store> = store;
+        let generated_images = persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
+        assert_eq!(generated_images.len(), 1);
+        assert_eq!(
+            generated_images[0].event_id,
+            format!("v2-{}-call-img", thread_id.0)
+        );
+        assert_eq!(
+            generated_images[0].data_url.as_deref(),
+            Some("data:image/png;base64,abc123")
+        );
+
+        let messages = db
+            .list_conversation_messages(conv_id)
+            .await
+            .expect("list messages");
+        let tool_calls_msg = messages
+            .iter()
+            .find(|m| m.role == "tool_calls")
+            .expect("tool_calls row must be written");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tool_calls_msg.content).expect("valid JSON");
+        let calls = parsed["calls"].as_array().expect("calls array");
+        assert_eq!(calls[0]["result_preview"], "Generated image");
+        let persisted_result = calls[0]["result"]
+            .as_str()
+            .expect("image result should be persisted");
+        assert!(persisted_result.contains("\"type\":\"image_generated\""));
+        assert!(persisted_result.contains("\"data_omitted\":true"));
+        assert!(!persisted_result.contains("data:image/png;base64,abc123"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn persist_v2_tool_calls_preserves_image_edit_results_for_history_rehydration() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(TestStore::new());
+        let db: Arc<dyn crate::db::Database> = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("test.db"))
+                .await
+                .expect("local libsql"),
+        );
+        db.run_migrations().await.expect("migrations");
+
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "test-user",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::action_result(
+            "call-edit",
+            "image_edit",
+            r#"{"type":"image_generated","data":"data:image/jpeg;base64,edited123","media_type":"image/jpeg","path":"workspace/edited.jpg"}"#,
+        ));
+        let thread_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        let conv_id = db
+            .create_conversation("web", "test-user", None)
+            .await
+            .expect("create conversation");
+        let message =
+            IncomingMessage::new("web", "test-user", "edit").with_thread(conv_id.to_string());
+
+        let store_arc: Arc<dyn Store> = store;
+        let generated_images = persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
+        assert_eq!(generated_images.len(), 1);
+        assert_eq!(
+            generated_images[0].event_id,
+            format!("v2-{}-call-edit", thread_id.0)
+        );
+        assert_eq!(
+            generated_images[0].data_url.as_deref(),
+            Some("data:image/jpeg;base64,edited123")
+        );
+        assert_eq!(
+            generated_images[0].path.as_deref(),
+            Some("workspace/edited.jpg")
+        );
+
+        let messages = db
+            .list_conversation_messages(conv_id)
+            .await
+            .expect("list messages");
+        let tool_calls_msg = messages
+            .iter()
+            .find(|m| m.role == "tool_calls")
+            .expect("tool_calls row must be written");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tool_calls_msg.content).expect("valid JSON");
+        let calls = parsed["calls"].as_array().expect("calls array");
+        assert_eq!(calls[0]["name"], "image_edit");
+        assert_eq!(calls[0]["result_preview"], "Generated image");
+        let persisted_result = calls[0]["result"]
+            .as_str()
+            .expect("image_edit result should be persisted");
+        assert!(persisted_result.contains("\"type\":\"image_generated\""));
+        assert!(persisted_result.contains("\"path\":\"workspace/edited.jpg\""));
+        assert!(persisted_result.contains("\"data_omitted\":true"));
+        assert!(!persisted_result.contains("data:image/jpeg;base64,edited123"));
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn persist_v2_tool_calls_reads_codeact_results_from_thread_metadata() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(TestStore::new());
+        let db: Arc<dyn crate::db::Database> = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("test.db"))
+                .await
+                .expect("local libsql"),
+        );
+        db.run_migrations().await.expect("migrations");
+
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "test-user",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.metadata = serde_json::json!({
+            (ironclaw_engine::PERSISTED_ACTION_RESULTS_METADATA_KEY): [{
+                "call_id": "code_call_1",
+                "action_name": "image_generate",
+                "output": {
+                    "type": "image_generated",
+                    "media_type": "image/png",
+                    "path": "workspace/code.png",
+                    "data_omitted": true,
+                    "omitted_reason": "omitted from engine thread state after image artifact persistence"
+                },
+                "is_error": false,
+                "duration": 10
+            }]
+        });
+        let thread_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        let conv_id = db
+            .create_conversation("web", "test-user", None)
+            .await
+            .expect("create conversation");
+        let message =
+            IncomingMessage::new("web", "test-user", "draw").with_thread(conv_id.to_string());
+
+        let store_arc: Arc<dyn Store> = store;
+        let generated_images = persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
+        assert_eq!(generated_images.len(), 1);
+        assert_eq!(
+            generated_images[0].event_id,
+            format!("v2-{}-code_call_1", thread_id.0)
+        );
+        assert!(generated_images[0].data_url.is_none());
+        assert_eq!(
+            generated_images[0].path.as_deref(),
+            Some("workspace/code.png")
+        );
+
+        let messages = db
+            .list_conversation_messages(conv_id)
+            .await
+            .expect("list messages");
+        let tool_calls_msg = messages
+            .iter()
+            .find(|m| m.role == "tool_calls")
+            .expect("tool_calls row must be written");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tool_calls_msg.content).expect("valid JSON");
+        let calls = parsed["calls"].as_array().expect("calls array");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["name"], "image_generate");
+        assert_eq!(calls[0]["tool_call_id"], "code_call_1");
+        assert_eq!(calls[0]["result_preview"], "Generated image");
+        let persisted_result = calls[0]["result"]
+            .as_str()
+            .expect("image result should be persisted");
+        assert!(persisted_result.contains("\"type\":\"image_generated\""));
+        assert!(persisted_result.contains("\"path\":\"workspace/code.png\""));
+        assert!(persisted_result.contains("\"data_omitted\":true"));
+        assert!(!persisted_result.contains("data:image/png;base64,code123"));
+
+        let compacted_thread = store_arc
+            .load_thread(thread_id)
+            .await
+            .expect("load compacted thread")
+            .expect("thread still exists");
+        let metadata_output = &compacted_thread.metadata
+            [ironclaw_engine::PERSISTED_ACTION_RESULTS_METADATA_KEY][0]["output"];
+        assert!(metadata_output.get("data").is_none());
+        assert_eq!(metadata_output["data_omitted"], true);
+        assert_eq!(metadata_output["path"], "workspace/code.png");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn persist_v2_tool_calls_compacts_oversized_codeact_image_results_from_thread_metadata() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(TestStore::new());
+        let db: Arc<dyn crate::db::Database> = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("test.db"))
+                .await
+                .expect("local libsql"),
+        );
+        db.run_migrations().await.expect("migrations");
+
+        let oversized = "A".repeat(600_000);
+        let data_url = format!("data:image/png;base64,{oversized}");
+
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "test-user",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.metadata = serde_json::json!({
+            (ironclaw_engine::PERSISTED_ACTION_RESULTS_METADATA_KEY): [{
+                "call_id": "code_call_oversized",
+                "action_name": "image_generate",
+                "output": {
+                    "type": "image_generated",
+                    "media_type": "image/png",
+                    "path": "workspace/oversized.png",
+                    "event_id": "turn-9-code_call_oversized",
+                    "data": data_url
+                },
+                "is_error": false,
+                "duration": 10
+            }]
+        });
+        let thread_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        let conv_id = db
+            .create_conversation("web", "test-user", None)
+            .await
+            .expect("create conversation");
+        let message =
+            IncomingMessage::new("web", "test-user", "draw").with_thread(conv_id.to_string());
+
+        let store_arc: Arc<dyn Store> = store;
+        let generated_images = persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
+        assert_eq!(generated_images.len(), 1);
+        assert_eq!(generated_images[0].event_id, "turn-9-code_call_oversized");
+        assert!(
+            generated_images[0]
+                .data_url
+                .as_deref()
+                .is_some_and(|value| value.starts_with("data:image/png;base64,")),
+            "live replay should still retain the generated image payload"
+        );
+
+        let messages = db
+            .list_conversation_messages(conv_id)
+            .await
+            .expect("list messages");
+        let tool_calls_msg = messages
+            .iter()
+            .find(|m| m.role == "tool_calls")
+            .expect("tool_calls row must be written");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tool_calls_msg.content).expect("valid JSON");
+        let calls = parsed["calls"].as_array().expect("calls array");
+        let persisted_result = calls[0]["result"]
+            .as_str()
+            .expect("image result should be persisted");
+        assert!(persisted_result.contains("\"type\":\"image_generated\""));
+        assert!(persisted_result.contains("\"path\":\"workspace/oversized.png\""));
+        assert!(persisted_result.contains("\"data_omitted\":true"));
+        assert!(!persisted_result.contains("data:image/png;base64,"));
+
+        let compacted_thread = store_arc
+            .load_thread(thread_id)
+            .await
+            .expect("load compacted thread")
+            .expect("thread still exists");
+        let metadata_output = &compacted_thread.metadata
+            [ironclaw_engine::PERSISTED_ACTION_RESULTS_METADATA_KEY][0]["output"];
+        assert!(metadata_output.get("data").is_none());
+        assert_eq!(metadata_output["data_omitted"], true);
+        assert_eq!(metadata_output["path"], "workspace/oversized.png");
+        assert_eq!(metadata_output["event_id"], "turn-9-code_call_oversized");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn persist_v2_tool_calls_deduplicates_internal_and_metadata_results() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(TestStore::new());
+        let db: Arc<dyn crate::db::Database> = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("test.db"))
+                .await
+                .expect("local libsql"),
+        );
+        db.run_migrations().await.expect("migrations");
+
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "test-user",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.add_internal_message(ironclaw_engine::ThreadMessage::action_result(
+            "code_call_1",
+            "image_generate",
+            r#"{"type":"image_generated","data":"data:image/png;base64,code123","media_type":"image/png","path":"workspace/code.png"}"#,
+        ));
+        thread.metadata = serde_json::json!({
+            (ironclaw_engine::PERSISTED_ACTION_RESULTS_METADATA_KEY): [{
+                "call_id": "code_call_1",
+                "action_name": "image_generate",
+                "output": {
+                    "type": "image_generated",
+                    "data": "data:image/png;base64,code123",
+                    "media_type": "image/png",
+                    "path": "workspace/code.png"
+                },
+                "is_error": false,
+                "duration": 10
+            }]
+        });
+        let thread_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        let conv_id = db
+            .create_conversation("web", "test-user", None)
+            .await
+            .expect("create conversation");
+        let message =
+            IncomingMessage::new("web", "test-user", "draw").with_thread(conv_id.to_string());
+
+        let store_arc: Arc<dyn Store> = store;
+        let generated_images = persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
+        assert_eq!(generated_images.len(), 1);
+
+        let messages = db
+            .list_conversation_messages(conv_id)
+            .await
+            .expect("list messages");
+        let tool_calls_msg = messages
+            .iter()
+            .find(|m| m.role == "tool_calls")
+            .expect("tool_calls row must be written");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tool_calls_msg.content).expect("valid JSON");
+        let calls = parsed["calls"].as_array().expect("calls array");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["name"], "image_generate");
+        assert_eq!(calls[0]["tool_call_id"], "code_call_1");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn persist_v2_tool_calls_reads_python_repr_codeact_results_from_thread_metadata() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = Arc::new(TestStore::new());
+        let db: Arc<dyn crate::db::Database> = Arc::new(
+            crate::db::libsql::LibSqlBackend::new_local(&tmp.path().join("test.db"))
+                .await
+                .expect("local libsql"),
+        );
+        db.run_migrations().await.expect("migrations");
+
+        let mut thread = ironclaw_engine::Thread::new(
+            "goal",
+            ironclaw_engine::ThreadType::Foreground,
+            ironclaw_engine::ProjectId::new(),
+            "test-user",
+            ironclaw_engine::ThreadConfig::default(),
+        );
+        thread.metadata = serde_json::json!({
+            (ironclaw_engine::PERSISTED_ACTION_RESULTS_METADATA_KEY): [{
+                "call_id": "code_call_py_1",
+                "action_name": "image_generate",
+                "output": "{'type': 'image_generated', 'data': 'data:image/png;base64,codepy123', 'media_type': 'image/png', 'path': 'workspace/codepy.png'}",
+                "is_error": false,
+                "duration": 10
+            }]
+        });
+        let thread_id = thread.id;
+        store.save_thread(&thread).await.unwrap();
+
+        let conv_id = db
+            .create_conversation("web", "test-user", None)
+            .await
+            .expect("create conversation");
+        let message =
+            IncomingMessage::new("web", "test-user", "draw").with_thread(conv_id.to_string());
+
+        let store_arc: Arc<dyn Store> = store;
+        let generated_images = persist_v2_tool_calls(&store_arc, &db, thread_id, &message).await;
+        assert_eq!(generated_images.len(), 1);
+        assert_eq!(
+            generated_images[0].event_id,
+            format!("v2-{}-code_call_py_1", thread_id.0)
+        );
+        assert_eq!(
+            generated_images[0].data_url.as_deref(),
+            Some("data:image/png;base64,codepy123")
+        );
+        assert_eq!(
+            generated_images[0].path.as_deref(),
+            Some("workspace/codepy.png")
+        );
+
+        let messages = db
+            .list_conversation_messages(conv_id)
+            .await
+            .expect("list messages");
+        let tool_calls_msg = messages
+            .iter()
+            .find(|m| m.role == "tool_calls")
+            .expect("tool_calls row must be written");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&tool_calls_msg.content).expect("valid JSON");
+        let calls = parsed["calls"].as_array().expect("calls array");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["name"], "image_generate");
+        assert_eq!(calls[0]["tool_call_id"], "code_call_py_1");
+        assert_eq!(calls[0]["result_preview"], "Generated image");
+        let persisted_result = calls[0]["result"]
+            .as_str()
+            .expect("image result should be persisted");
+        assert!(persisted_result.contains("\"type\":\"image_generated\""));
+        assert!(persisted_result.contains("\"path\":\"workspace/codepy.png\""));
+        assert!(persisted_result.contains("\"data_omitted\":true"));
+        assert!(!persisted_result.contains("data:image/png;base64,codepy123"));
+    }
+
+    #[test]
+    fn channel_visible_thread_id_prefers_incoming_message_scope() {
+        let engine_thread_id = ironclaw_engine::ThreadId::new();
+        let message =
+            IncomingMessage::new("web", "test-user", "draw").with_thread("gateway-thread");
+
+        assert_eq!(
+            channel_visible_thread_id(&message, engine_thread_id),
+            "gateway-thread"
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
     async fn persist_v2_tool_calls_skips_when_no_action_results() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(TestStore::new());
@@ -12305,11 +13589,9 @@ mod tests {
         );
     }
 
-    /// Regression: the truncation logic in `persist_v2_tool_calls` uses
-    /// `char_indices()` + `len_utf8()` to avoid slicing in the middle of a
-    /// multi-byte UTF-8 sequence. Exercise the path with a content string
-    /// that is well over 500 bytes and composed entirely of 3-byte chars,
-    /// where a naive `&s[..500]` would panic on a char boundary.
+    /// Regression: the preview truncation in `persist_v2_tool_calls` must
+    /// preserve UTF-8 boundaries even when the raw tool output exceeds the
+    /// 500-byte display cap.
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn persist_v2_tool_calls_truncates_multibyte_content_on_char_boundary() {
@@ -12457,6 +13739,35 @@ mod tests {
                  the Completed marker and the call"
             );
         }
+    }
+
+    #[test]
+    fn timed_out_running_thread_without_gate_is_not_left_pending() {
+        let source = include_str!("router.rs");
+        let start = source
+            .find("if timed_out && state.thread_manager.is_running(thread_id).await {")
+            .expect("timed_out branch must exist");
+        let tail = &source[start..];
+        let (timeout_branch, _) = tail
+            .split_once("let outcome = state")
+            .expect("timed_out branch should precede join_thread");
+
+        assert!(
+            timeout_branch.contains("state.pending_gates.peek(&pending_key).await.is_some()"),
+            "timed_out branch must keep true pending gates resumable"
+        );
+        assert!(
+            timeout_branch.contains(".stop_thread(thread_id, &message.user_id)"),
+            "timed_out branch must stop a stalled running thread when no gate exists"
+        );
+        assert!(
+            timeout_branch.contains(".record_thread_outcome(conv_id, thread_id, &timeout_outcome)"),
+            "timed_out branch must untrack stalled threads from the conversation"
+        );
+        assert!(
+            timeout_branch.contains("BridgeOutcome::Respond(timeout_error)"),
+            "timed_out branch must surface a terminal response instead of staying pending"
+        );
     }
 
     // ── resume_lease_for_pending_gate tests ────────────────────

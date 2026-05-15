@@ -292,6 +292,20 @@ fn step_hint(step: &TraceStep) -> Option<&str> {
         .and_then(|h| h.last_user_message_contains.as_deref())
 }
 
+fn semantic_last_user_content(messages: &[ChatMessage]) -> Option<String> {
+    let mut users = messages
+        .iter()
+        .rev()
+        .filter(|m| matches!(m.role, Role::User));
+    let last = users.next()?;
+    if last.content.trim() == "Continue."
+        && let Some(previous) = users.next()
+    {
+        return Some(previous.content.clone());
+    }
+    Some(last.content.clone())
+}
+
 /// Best-effort coercion of a Python `repr(dict)` string into valid JSON.
 /// Mirrors `coerce_python_repr_to_json` in `src/llm/recording.rs` so the
 /// recorder and replay engine treat the same shapes consistently. The
@@ -467,11 +481,7 @@ impl TraceLlm {
             .unwrap()
             .push(messages.to_vec());
 
-        let last_user_content: Option<String> = messages
-            .iter()
-            .rev()
-            .find(|m| matches!(m.role, Role::User))
-            .map(|m| m.content.clone());
+        let last_user_content = semantic_last_user_content(messages);
 
         let mut step = {
             let mut steps = self.steps.lock().unwrap();

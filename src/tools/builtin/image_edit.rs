@@ -69,7 +69,7 @@ impl Tool for ImageEditTool {
     }
 
     fn description(&self) -> &str {
-        "Edit an existing image using an AI model. Provide the workspace path to the source image and a text prompt describing the desired edits."
+        "Edit an existing image using an AI model. Provide the saved image artifact path to the source image and a text prompt describing the desired edits."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -83,7 +83,7 @@ impl Tool for ImageEditTool {
                 },
                 "image_path": {
                     "type": "string",
-                    "description": "Path to the source image in the workspace (e.g., 'images/photo.jpg')"
+                    "description": "Saved image artifact path to the source image, usually from an uploaded image or a previous image_generate/image_edit result"
                 }
             },
             "required": ["prompt", "image_path"]
@@ -193,7 +193,10 @@ impl Tool for ImageEditTool {
             "source_path": image_path
         });
 
-        Ok(ToolOutput::text(sentinel.to_string(), start.elapsed()))
+        Ok(super::image_gen::image_generated_tool_output(
+            sentinel,
+            start.elapsed(),
+        ))
     }
 }
 
@@ -256,13 +259,17 @@ impl ImageEditTool {
             "note": "Generated new image (edit endpoint unavailable — source image was NOT used)"
         });
 
-        Ok(ToolOutput::text(sentinel.to_string(), start.elapsed()))
+        Ok(super::image_gen::image_generated_tool_output(
+            sentinel,
+            start.elapsed(),
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::builtin::image_gen;
     use crate::tools::tool::ApprovalRequirement;
     use tempfile::TempDir;
 
@@ -280,6 +287,20 @@ mod tests {
             tool.requires_approval(&serde_json::json!({})),
             ApprovalRequirement::Never
         );
+    }
+
+    #[test]
+    fn image_edit_generated_output_is_structured_result() {
+        let output = image_gen::image_generated_tool_output(
+            serde_json::json!({
+                "type": "image_generated",
+                "data": "data:image/jpeg;base64,edited123",
+                "media_type": "image/jpeg"
+            }),
+            std::time::Duration::default(),
+        );
+        assert_eq!(output.result["type"], "image_generated");
+        assert_eq!(output.result["media_type"], "image/jpeg");
     }
 
     #[tokio::test]

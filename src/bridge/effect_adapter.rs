@@ -9,6 +9,7 @@
 //! - Rate limiting (per-user, per-tool)
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -33,6 +34,9 @@ use crate::bridge::sandbox::{InterceptOutcome, maybe_intercept};
 use crate::bridge::tool_permissions::{ToolPermissionResolution, ToolPermissionSnapshot};
 use crate::context::JobContext;
 use crate::extensions::InstalledExtension;
+use crate::generated_images::{
+    GeneratedImageSentinel, engine_v2_image_tool_event_id, persist_sentinel_image_artifact,
+};
 use crate::hooks::{HookEvent, HookOutcome, HookRegistry};
 use crate::tools::ToolRegistry;
 use crate::tools::permissions::PermissionState;
@@ -83,6 +87,9 @@ pub struct EffectBridgeAdapter {
     /// capabilities like `missions` are registered here in `router.rs` and
     /// would otherwise be invisible to the LLM despite having active leases.
     capability_registry: RwLock<Option<Arc<CapabilityRegistry>>>,
+    /// Root used to persist image tool outputs before they are returned to the
+    /// engine. This keeps generated images reusable by follow-up image_edit calls.
+    image_artifact_root: RwLock<Option<PathBuf>>,
 }
 
 struct ToolApprovalContext<'a> {
@@ -126,6 +133,7 @@ impl EffectBridgeAdapter {
             skill_registry: RwLock::new(None),
             workspace_mounts: RwLock::new(None),
             capability_registry: RwLock::new(None),
+            image_artifact_root: RwLock::new(None),
         }
     }
 
@@ -146,6 +154,11 @@ impl EffectBridgeAdapter {
     /// registering all capabilities.
     pub async fn set_capability_registry(&self, registry: Arc<CapabilityRegistry>) {
         *self.capability_registry.write().await = Some(registry);
+    }
+
+    /// Install the local artifact root used for generated image files.
+    pub async fn set_image_artifact_root(&self, root: PathBuf) {
+        *self.image_artifact_root.write().await = Some(root);
     }
 
     /// Install the trace HTTP interceptor on this adapter. Every JobContext
@@ -218,6 +231,49 @@ impl EffectBridgeAdapter {
     /// Get the mission manager if available.
     pub async fn mission_manager(&self) -> Option<Arc<ironclaw_engine::MissionManager>> {
         self.mission_manager.read().await.clone()
+    }
+
+    async fn enrich_generated_image_action_output(
+        &self,
+        lookup_name: &str,
+        action_name: &str,
+        output_value: serde_json::Value,
+        context: &ThreadExecutionContext,
+    ) -> serde_json::Value {
+        if !matches!(lookup_name, "image_generate" | "image_edit") {
+            return output_value;
+        }
+
+        let Some(sentinel) = GeneratedImageSentinel::from_value(&output_value) else {
+            return output_value;
+        };
+        let tool_call_id = context.current_call_id.as_deref().unwrap_or(action_name);
+        let event_id =
+            engine_v2_image_tool_event_id(context.thread_id.0, context.step_id.0, tool_call_id);
+        let sentinel = sentinel.with_event_id(event_id.clone());
+        let artifact_root = self.image_artifact_root.read().await.clone();
+
+        match persist_sentinel_image_artifact(
+            artifact_root.as_deref(),
+            &sentinel,
+            &context.user_id,
+            context.thread_id.0,
+            &event_id,
+        )
+        .await
+        {
+            Ok(enriched) => enriched.value,
+            Err(err) => {
+                tracing::warn!(
+                    tool = %lookup_name,
+                    tool_call_id,
+                    thread_id = %context.thread_id.0,
+                    error = %err,
+                    "engine v2: failed to persist generated image artifact"
+                );
+                sentinel.value
+            }
+        }
     }
 
     /// Fetch the extension list as a `Vec`, using the short-lived cache when
@@ -1700,6 +1756,15 @@ impl EffectBridgeAdapter {
                     );
                 }
 
+                let output_value = self
+                    .enrich_generated_image_action_output(
+                        &lookup_name,
+                        action_name,
+                        output_value,
+                        context,
+                    )
+                    .await;
+
                 Ok(ActionResult {
                     call_id: context
                         .current_call_id
@@ -2779,6 +2844,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn image_actions_persist_artifact_path_before_returning_to_engine() {
+        use ironclaw_safety::SafetyConfig;
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(GeneratedImageTestTool)).await;
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+        .with_global_auto_approve(true);
+        let dir = tempfile::tempdir().expect("tempdir");
+        adapter
+            .set_image_artifact_root(dir.path().to_path_buf())
+            .await;
+        let thread_id = ironclaw_engine::ThreadId::new();
+        let ctx = exec_ctx(thread_id, Some("call_img_0"));
+
+        let result = adapter
+            .execute_action("image_generate", serde_json::json!({}), &lease(), &ctx)
+            .await
+            .expect("image action");
+
+        assert!(!result.is_error);
+        let event_id = crate::generated_images::engine_v2_image_tool_event_id(
+            thread_id.0,
+            ctx.step_id.0,
+            "call_img_0",
+        );
+        assert_eq!(result.output["event_id"], event_id);
+        let path = result.output["path"].as_str().expect("artifact path");
+        let resolved =
+            crate::image_artifacts::resolve_image_artifact_path_at(Some(dir.path()), path)
+                .expect("resolve image artifact");
+        assert_eq!(tokio::fs::read(resolved).await.expect("read image"), b"png");
+    }
+
+    #[tokio::test]
     async fn global_auto_approve_skips_unless_auto_approved_gates() {
         use ironclaw_safety::SafetyConfig;
 
@@ -2869,6 +2975,8 @@ mod tests {
 
     struct DefaultAllowNamedApprovalTestTool;
 
+    struct GeneratedImageTestTool;
+
     /// Stand-in for `tool_install`. Its `name()` matches the canonical
     /// seeded-`AskEachTime` baseline so the explicit-equals-seeded
     /// regression in `explicit_ask_each_time_for_seeded_default_tool_still_gates`
@@ -2910,6 +3018,40 @@ mod tests {
 
         fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
             ApprovalRequirement::UnlessAutoApproved
+        }
+    }
+
+    #[async_trait]
+    impl Tool for GeneratedImageTestTool {
+        fn name(&self) -> &str {
+            "image_generate"
+        }
+
+        fn description(&self) -> &str {
+            "Returns a generated image sentinel"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({
+                    "type": "image_generated",
+                    "data": "data:image/png;base64,cG5n",
+                    "media_type": "image/png"
+                }),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::Never
         }
     }
 

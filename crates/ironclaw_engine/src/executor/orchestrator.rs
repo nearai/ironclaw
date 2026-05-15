@@ -56,6 +56,9 @@ pub const ORCHESTRATOR_TITLE: &str = "orchestrator:main";
 
 /// Well-known tag for orchestrator code docs.
 pub const ORCHESTRATOR_TAG: &str = "orchestrator_code";
+/// Thread metadata key for CodeAct action results that must survive into
+/// host-side history persistence without polluting the LLM-facing transcript.
+pub const PERSISTED_ACTION_RESULTS_METADATA_KEY: &str = "persisted_action_results_log";
 
 /// Result of running the orchestrator.
 pub struct OrchestratorResult {
@@ -1044,6 +1047,7 @@ async fn handle_execute_code_step(
                 .iter()
                 .map(|r| {
                     serde_json::json!({
+                        "call_id": r.call_id,
                         "action_name": r.action_name,
                         "output": r.output,
                         "is_error": r.is_error,
@@ -3084,6 +3088,22 @@ fn sync_runtime_state(thread: &mut Thread, state: Option<&serde_json::Value>) {
         thread.internal_messages = messages;
         thread.updated_at = chrono::Utc::now();
     }
+    if let Some(action_results) = state
+        .get("_persisted_action_results_log")
+        .filter(|value| value.is_array())
+        .cloned()
+    {
+        if !thread.metadata.is_object() {
+            thread.metadata = serde_json::json!({});
+        }
+        if let Some(metadata) = thread.metadata.as_object_mut() {
+            metadata.insert(
+                PERSISTED_ACTION_RESULTS_METADATA_KEY.to_string(),
+                action_results,
+            );
+        }
+        thread.updated_at = chrono::Utc::now();
+    }
 }
 
 fn sync_visible_outcome(thread: &mut Thread, outcome: &ThreadOutcome) {
@@ -3541,6 +3561,19 @@ mod tests {
         }
     }
 
+    fn eval_python_string(program: &str) -> String {
+        let helpers_end = DEFAULT_ORCHESTRATOR
+            .find("\ndef run_loop(")
+            .unwrap_or(DEFAULT_ORCHESTRATOR.len());
+        let helpers = &DEFAULT_ORCHESTRATOR[..helpers_end];
+
+        let code = format!("{helpers}\n{program}");
+        match run_python_final(code) {
+            MontyObject::String(v) => v,
+            other => panic!("Expected string, got: {other:?}"),
+        }
+    }
+
     // ── __regex_match__ host function reachability ───────────────
 
     #[test]
@@ -3559,6 +3592,42 @@ mod tests {
         // Invalid pattern should return false silently (the host function
         // swallows the compile error).
         assert!(!eval_python_bool(r#"bool(__regex_match__("[", "abc"))"#));
+    }
+
+    #[test]
+    fn format_output_summarizes_generated_image_path_for_llm() {
+        let output = eval_python_string(
+            r#"
+result = {
+    "action_results": [{
+        "action_name": "image_generate",
+        "output": {
+            "type": "image_generated",
+            "data": "data:image/jpeg;base64,abc123",
+            "media_type": "image/jpeg",
+            "path": "/Users/sakura/.ironclaw/image-artifacts/default/thread/image.jpg",
+            "event_id": "event-1",
+        },
+        "is_error": False,
+    }]
+}
+FINAL(format_output(result))
+"#,
+        );
+        assert!(
+            output.contains(
+                "saved image artifact path is available at state['image_generate']['path']"
+            )
+        );
+        assert!(
+            output.contains(
+                "use state['image_generate']['path'] as image_path when calling image_edit"
+            )
+        );
+        assert!(output.contains("do not reveal this local path"));
+        assert!(output.contains("image data omitted from LLM context"));
+        assert!(!output.contains("data:image/jpeg;base64"));
+        assert!(!output.contains("/Users/sakura/.ironclaw/image-artifacts"));
     }
 
     // ── True positives (should trigger nudge) ───────────────────
@@ -5421,6 +5490,53 @@ FINAL(batch_error_count)
                  this would cause 'No tool output found' from the LLM API"
             );
         }
+    }
+
+    #[test]
+    fn sync_runtime_state_copies_codeact_action_results_into_thread_metadata() {
+        let mut thread = Thread::new(
+            "goal",
+            crate::types::thread::ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            crate::types::thread::ThreadConfig::default(),
+        );
+        let state = serde_json::json!({
+            "working_messages": [
+                {"role": "User", "content": "draw a cat"},
+                {"role": "Assistant", "content": "```repl\nimage_generate(prompt='cat')\n```"}
+            ],
+            "_persisted_action_results_log": [
+                {
+                    "call_id": "code_call_1",
+                    "action_name": "image_generate",
+                    "output": {
+                        "type": "image_generated",
+                        "data_omitted": true,
+                        "omitted_reason": "omitted from engine thread state after image artifact persistence"
+                    },
+                    "is_error": false,
+                    "duration": 12
+                }
+            ]
+        });
+
+        sync_runtime_state(&mut thread, Some(&state));
+
+        let persisted = thread
+            .metadata
+            .get(PERSISTED_ACTION_RESULTS_METADATA_KEY)
+            .and_then(|value| value.as_array())
+            .expect("persisted action results metadata must be populated");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0]["call_id"], "code_call_1");
+        assert_eq!(persisted[0]["action_name"], "image_generate");
+        assert_eq!(persisted[0]["output"]["type"], "image_generated");
+        assert_eq!(persisted[0]["output"]["data_omitted"], true);
+        assert!(
+            persisted[0]["output"].get("data").is_none(),
+            "runtime state metadata must omit raw base64 image payloads"
+        );
     }
 
     // ── CodeExecutionFailed event emission (caller test) ────────

@@ -77,6 +77,42 @@ use crate::channels::web::util::{
     web_incoming_message,
 };
 
+async fn hydrate_generated_image_history(turns: &mut [TurnInfo]) {
+    hydrate_generated_image_history_at_root(turns, None).await;
+}
+
+async fn hydrate_generated_image_history_at_root(
+    turns: &mut [TurnInfo],
+    artifact_root: Option<&std::path::Path>,
+) {
+    for turn in turns {
+        for image in &mut turn.generated_images {
+            if image.data_url.is_some() {
+                continue;
+            }
+            let Some(path) = image.path.as_deref() else {
+                continue;
+            };
+            let result = match artifact_root {
+                Some(root) => {
+                    crate::image_artifacts::load_image_artifact_data_url_at(Some(root), path).await
+                }
+                None => crate::image_artifacts::load_image_artifact_data_url(path).await,
+            };
+            match result {
+                Ok(data_url) => image.data_url = Some(data_url),
+                Err(error) => {
+                    tracing::debug!(
+                        path = %path,
+                        error = %error,
+                        "failed to hydrate generated image from artifact path"
+                    );
+                }
+            }
+        }
+    }
+}
+
 // ── Handlers ──────────────────────────────────────────────────────────
 
 pub(crate) async fn chat_send_handler(
@@ -638,6 +674,7 @@ pub(crate) async fn chat_history_handler(
 
         let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
         let mut turns = build_turns_from_db_messages(&messages);
+        hydrate_generated_image_history(&mut turns).await;
         enforce_generated_image_history_budget(&mut turns);
         return Ok(Json(HistoryResponse {
             thread_id,
@@ -659,6 +696,7 @@ pub(crate) async fn chat_history_handler(
             .iter()
             .map(turn_info_from_in_memory_turn)
             .collect();
+        hydrate_generated_image_history(&mut turns).await;
         enforce_generated_image_history_budget(&mut turns);
 
         let pending_gate = history_pending_gate_info(&state, &user.user_id, thread_scope)
@@ -705,6 +743,7 @@ pub(crate) async fn chat_history_handler(
                 &mut turns,
                 in_progress_from_metadata(metadata.as_ref()),
             );
+            hydrate_generated_image_history(&mut turns).await;
             enforce_generated_image_history_budget(&mut turns);
             return Ok(Json(HistoryResponse {
                 thread_id,
@@ -734,6 +773,7 @@ pub(crate) async fn chat_history_handler(
             .collect();
         let oldest_timestamp = synthetic.first().map(|m| m.created_at.to_rfc3339());
         let mut turns = build_turns_from_db_messages(&synthetic);
+        hydrate_generated_image_history(&mut turns).await;
         enforce_generated_image_history_budget(&mut turns);
         return Ok(Json(HistoryResponse {
             thread_id,
@@ -2340,6 +2380,61 @@ mod tests {
         assert_eq!(turns[0]["state"], "Completed");
         assert_eq!(turns[0]["user_input"], "What is 2+2?");
         assert_eq!(turns[0]["response"], "4");
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_hydrate_generated_image_history_rehydrates_compact_generated_images_from_artifacts()
+     {
+        use base64::Engine as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let artifact_root = dir.path().join("image-artifacts");
+        let thread_id = Uuid::new_v4();
+        let artifact_bytes = b"png-bytes";
+        let artifact_path = crate::image_artifacts::persist_image_artifact(
+            Some(artifact_root.as_path()),
+            artifact_bytes,
+            "image/png",
+            "test-user",
+            thread_id,
+            "history-hydrate",
+        )
+        .await
+        .expect("persist artifact");
+
+        let mut turns = vec![TurnInfo {
+            turn_number: 0,
+            user_message_id: None,
+            user_input: "draw".to_string(),
+            response: Some("done".to_string()),
+            state: "Completed".to_string(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            completed_at: None,
+            tool_calls: Vec::new(),
+            generated_images: vec![crate::channels::web::types::GeneratedImageInfo {
+                event_id: "turn-0-call-img".to_string(),
+                data_url: None,
+                path: Some(artifact_path.clone()),
+            }],
+            narrative: None,
+        }];
+
+        hydrate_generated_image_history_at_root(&mut turns, Some(artifact_root.as_path())).await;
+
+        assert_eq!(turns[0].generated_images.len(), 1);
+        assert_eq!(
+            turns[0].generated_images[0].path.as_deref(),
+            Some(artifact_path.as_str())
+        );
+        let expected_data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(artifact_bytes)
+        );
+        assert_eq!(
+            turns[0].generated_images[0].data_url.as_deref(),
+            Some(expected_data_url.as_str())
+        );
     }
 
     #[cfg(feature = "libsql")]
