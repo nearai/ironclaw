@@ -650,7 +650,7 @@ where
 // ---------------------------------------------------------------------------
 
 fn stored_to_context(stored: StoredJob) -> Result<JobContext, DatabaseError> {
-    let state = parse_state(&stored.status);
+    let state = parse_state(&stored.status)?;
     let budget = parse_decimal(stored.budget_amount.as_deref())?;
     let bid_amount = parse_decimal(stored.bid_amount.as_deref())?;
     let estimated_cost = parse_decimal(stored.estimated_cost.as_deref())?;
@@ -689,17 +689,23 @@ fn stored_to_context(stored: StoredJob) -> Result<JobContext, DatabaseError> {
     })
 }
 
-fn parse_state(s: &str) -> JobState {
+fn parse_state(s: &str) -> Result<JobState, DatabaseError> {
     match s {
-        "pending" => JobState::Pending,
-        "in_progress" => JobState::InProgress,
-        "completed" => JobState::Completed,
-        "submitted" => JobState::Submitted,
-        "accepted" => JobState::Accepted,
-        "failed" => JobState::Failed,
-        "stuck" => JobState::Stuck,
-        "cancelled" => JobState::Cancelled,
-        _ => JobState::Pending,
+        "pending" => Ok(JobState::Pending),
+        "in_progress" => Ok(JobState::InProgress),
+        "completed" => Ok(JobState::Completed),
+        "submitted" => Ok(JobState::Submitted),
+        "accepted" => Ok(JobState::Accepted),
+        "failed" => Ok(JobState::Failed),
+        "stuck" => Ok(JobState::Stuck),
+        "cancelled" => Ok(JobState::Cancelled),
+        // PR #3679 review fix: previously silently fell back to `Pending` on
+        // unknown values, which would have masked schema drift across a
+        // rollout (a new state appearing in stored rows would silently lose
+        // its true value). Fail loud — `types.md` wire-stable-enums rule.
+        other => Err(DatabaseError::Serialization(format!(
+            "unknown agent_job status `{other}` in filesystem store"
+        ))),
     }
 }
 

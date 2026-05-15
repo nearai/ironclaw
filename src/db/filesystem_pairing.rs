@@ -306,9 +306,14 @@ where
             else {
                 continue;
             };
-            if let Ok(req) = serde_json::from_slice::<StoredPairingRequest>(&versioned.entry.body) {
-                out.push(req);
-            }
+            let req = serde_json::from_slice::<StoredPairingRequest>(&versioned.entry.body)
+                .map_err(|error| {
+                    DatabaseError::Serialization(format!(
+                        "stored pairing request at {} could not be deserialized: {error}",
+                        entry.path.as_str()
+                    ))
+                })?;
+            out.push(req);
         }
         Ok(out)
     }

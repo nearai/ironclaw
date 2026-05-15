@@ -411,14 +411,32 @@ where
 }
 
 fn fs_to_engine_error(error: ironclaw_filesystem::FilesystemError) -> EngineError {
+    // Tag the typed `Unsupported` variant so `is_engine_unsupported` can
+    // recognize it discriminator-wise rather than by free-text matching.
+    let tag = if matches!(
+        error,
+        ironclaw_filesystem::FilesystemError::Unsupported { .. }
+    ) {
+        FS_UNSUPPORTED_TAG
+    } else {
+        ""
+    };
     EngineError::Store {
-        reason: format!("filesystem engine store: {error}"),
+        reason: format!("filesystem engine store: {tag}{error}"),
     }
 }
 
 fn is_not_found(error: &ironclaw_filesystem::FilesystemError) -> bool {
     matches!(error, ironclaw_filesystem::FilesystemError::NotFound { .. })
 }
+
+// Discriminator-preserving check: the typed `FilesystemError::Unsupported`
+// variant gets stringified into `EngineError::Store { reason }` at the
+// boundary, so the reason carries a stable `[fs:unsupported]` tag we can
+// match on without scanning the human-readable text. Substring-on-message
+// would false-positive on any unrelated store error that happens to mention
+// "unsupported" (see code review feedback on PR #3679).
+const FS_UNSUPPORTED_TAG: &str = "[fs:unsupported]";
 
 fn serialize_json<T: Serialize>(value: &T) -> Result<serde_json::Value, EngineError> {
     serde_json::to_value(value).map_err(|error| EngineError::Store {
@@ -646,10 +664,9 @@ where
         // and retry on `VersionMismatch` so a concurrent state transition
         // from another process doesn't silently disappear.
         loop {
+            // silent-ok: HybridStore parity — update on unknown thread is a
+            // tolerated no-op; the legacy store has the same behaviour.
             let Some(versioned) = self.read_versioned(&path).await? else {
-                // No-op when the thread isn't in the store — matches
-                // HybridStore's current behaviour (silently drops state
-                // updates for unknown ids rather than fail-closed).
                 return Ok(());
             };
             let mut thread: Thread = deserialize(&versioned.entry.body)?;
@@ -909,6 +926,10 @@ where
             // from another process must not be silently overwritten by
             // this revoke.
             loop {
+                // silent-ok: scanning thread directories for the lease's
+                // owner — a directory that no longer contains this lease id
+                // is a normal cold miss, not a failure (legacy LeaseManager
+                // tolerates revoke on unknown lease ids the same way).
                 let Some(versioned) = self.read_versioned(&path).await? else {
                     break;
                 };
@@ -1013,6 +1034,9 @@ where
             // (e.g. `save_mission` after a heartbeat tick) must not be
             // clobbered by this status transition.
             loop {
+                // silent-ok: scanning project directories — a project
+                // directory that doesn't contain this mission is a normal
+                // miss; tolerate it the same way `update_thread_state` does.
                 let Some(versioned) = self.read_versioned(&path).await? else {
                     break;
                 };
@@ -1059,12 +1083,13 @@ where
 }
 
 fn is_engine_unsupported(error: &EngineError) -> bool {
+    // The typed `FilesystemError::Unsupported` discriminator is preserved
+    // through `fs_to_engine_error` as a stable `[fs:unsupported]` tag in the
+    // reason string. Match on that tag rather than free-text "Unsupported"
+    // substrings, which would false-positive on unrelated errors that happen
+    // to mention the word.
     match error {
-        EngineError::Store { reason } => {
-            reason.contains("Unsupported")
-                || reason.contains("unsupported")
-                || reason.contains("not supported")
-        }
+        EngineError::Store { reason } => reason.contains(FS_UNSUPPORTED_TAG),
         _ => false,
     }
 }
