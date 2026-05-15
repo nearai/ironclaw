@@ -73,6 +73,9 @@ const VIRTUAL_ROOTS: &[&str] = &[
     "/tmp",
     "/secrets",
     "/events",
+    "/sandbox",
+    "/routines",
+    "/tool_failures",
 ];
 
 /// Common raw host-path prefixes rejected before scoped-path normalization.

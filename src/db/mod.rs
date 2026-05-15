@@ -28,6 +28,10 @@ pub mod cached_settings;
 pub mod filesystem_conversations;
 pub mod filesystem_jobs;
 
+pub mod filesystem_routines;
+pub mod filesystem_sandbox;
+pub mod filesystem_tool_failures;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
