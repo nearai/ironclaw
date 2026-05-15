@@ -10,12 +10,14 @@
 mod crypto;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod db;
+mod filesystem_store;
 mod legacy_store;
 
 #[cfg(feature = "libsql")]
 pub use db::{LibSqlCredentialStore, LibSqlSecretsStore};
 #[cfg(feature = "postgres")]
 pub use db::{PostgresCredentialStore, PostgresSecretsStore};
+pub use filesystem_store::{FilesystemCredentialBroker, FilesystemSecretStore};
 
 use std::collections::HashMap;
 use std::fmt;
@@ -40,7 +42,8 @@ const CREDENTIAL_ID_MAX_LEN: usize = 128;
 const DEFAULT_SECRET_LEASE_TTL_SECONDS: i64 = 300;
 
 /// Opaque identifier for a one-shot secret lease.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct SecretLeaseId(Uuid);
 
 impl SecretLeaseId {
@@ -69,7 +72,8 @@ pub struct SecretMetadata {
 }
 
 /// Lease lifecycle for one secret access.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SecretLeaseStatus {
     Active,
     Consumed,
@@ -359,6 +363,45 @@ pub struct CredentialSession {
     expires_at: Option<Timestamp>,
     max_uses: Option<u64>,
     correlation_id: CredentialSessionId,
+}
+
+/// Crate-private constructor for [`CredentialSession`] used by durable
+/// storage backends to rehydrate sessions read from disk.
+///
+/// This is **not** part of the public API; the fields stay private so callers
+/// outside the crate cannot mint trust-bearing sessions. The libSQL/Postgres
+/// stores already use the equivalent `pub(crate)` pattern inline; the
+/// filesystem backend lives in a sibling module and uses this explicit helper
+/// to avoid duplicating that constructor for every backend.
+#[allow(clippy::too_many_arguments)]
+// arch-exempt: too_many_args, all fields are required to reconstruct a
+// CredentialSession; the alternative is to add another helper struct that
+// duplicates the existing struct shape, which is exactly the kind of
+// parallel surface the architecture rule warns against.
+pub(crate) fn __internal_session_for_filesystem_store(
+    scope: ResourceScope,
+    invocation_id: InvocationId,
+    capability_id: CapabilityId,
+    extension_id: ExtensionId,
+    account_id: CredentialAccountId,
+    secret_handles: Vec<SecretHandle>,
+    allowed_targets: Vec<CredentialTargetPolicy>,
+    expires_at: Option<Timestamp>,
+    max_uses: Option<u64>,
+    correlation_id: CredentialSessionId,
+) -> CredentialSession {
+    CredentialSession {
+        scope,
+        invocation_id,
+        capability_id,
+        extension_id,
+        account_id,
+        secret_handles,
+        allowed_targets,
+        expires_at,
+        max_uses,
+        correlation_id,
+    }
 }
 
 impl CredentialSession {
