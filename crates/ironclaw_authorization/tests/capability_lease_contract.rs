@@ -1008,6 +1008,27 @@ impl RootFilesystem for CountingFilesystem {
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.create_dir_all(path).await
     }
+
+    // After PR #3659 the trait default `get`/`put` are `Unsupported`.
+    // Forward to the inner LocalFilesystem (which implements them
+    // natively) so this counting wrapper keeps participating in the
+    // unified surface used by FilesystemCapabilityLeaseStore's read_lease
+    // / write_lease / read_lease_index / write_lease_index ops.
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: ironclaw_filesystem::Entry,
+        cas: ironclaw_filesystem::CasExpectation,
+    ) -> Result<ironclaw_filesystem::RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
 }
 
 fn trust_decision(

@@ -20,7 +20,9 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
+use ironclaw_filesystem::{
+    CasExpectation, ContentType, Entry, FileType, FilesystemError, RootFilesystem,
+};
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason,
     EffectKind, ExecutionContext, HostApiError, InvocationFingerprint, InvocationId, MissionId,
@@ -415,20 +417,29 @@ where
         lease_id: CapabilityGrantId,
     ) -> Result<Option<CapabilityLease>, CapabilityLeaseError> {
         let path = lease_path(scope, lease_id)?;
-        let bytes = match self.filesystem.read_file(&path).await {
-            Ok(bytes) => bytes,
-            Err(error) if is_not_found(&error) => return Ok(None),
-            Err(error) => return Err(lease_persistence_error(error)),
+        let Some(versioned) = self
+            .filesystem
+            .get(&path)
+            .await
+            .map_err(lease_persistence_error)?
+        else {
+            return Ok(None);
         };
-        deserialize(&bytes).map(Some)
+        deserialize(&versioned.entry.body).map(Some)
     }
 
     async fn write_lease(&self, lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
         let path = lease_path(&lease.scope, lease.grant.id)?;
-        let bytes = serialize_pretty(lease)?;
+        let body = serialize_pretty(lease)?;
+        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        // `Any` matches the existing semantics — the per-owner `mutation_lock`
+        // serializes claim/consume/revoke within a single instance, so we do
+        // not need backend-side CAS here. Production shared roots still need
+        // a transactional backend or explicit CAS per the crate guardrail.
         self.filesystem
-            .write_file(&path, &bytes)
+            .put(&path, entry, CasExpectation::Any)
             .await
+            .map(|_| ())
             .map_err(lease_persistence_error)
     }
 
@@ -437,12 +448,15 @@ where
         scope: &ResourceScope,
     ) -> Result<Option<Vec<VirtualPath>>, CapabilityLeaseError> {
         let path = lease_index_path(scope)?;
-        let bytes = match self.filesystem.read_file(&path).await {
-            Ok(bytes) => bytes,
-            Err(error) if is_not_found(&error) => return Ok(None),
-            Err(error) => return Err(lease_persistence_error(error)),
+        let Some(versioned) = self
+            .filesystem
+            .get(&path)
+            .await
+            .map_err(lease_persistence_error)?
+        else {
+            return Ok(None);
         };
-        let index: CapabilityLeaseIndex = deserialize(&bytes)?;
+        let index: CapabilityLeaseIndex = deserialize(&versioned.entry.body)?;
         Ok(Some(index.paths))
     }
 
@@ -454,10 +468,12 @@ where
         paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         paths.dedup_by(|left, right| left.as_str() == right.as_str());
         let path = lease_index_path(scope)?;
-        let bytes = serialize_pretty(&CapabilityLeaseIndex { paths })?;
+        let body = serialize_pretty(&CapabilityLeaseIndex { paths })?;
+        let entry = Entry::bytes(body).with_content_type(ContentType::json());
         self.filesystem
-            .write_file(&path, &bytes)
+            .put(&path, entry, CasExpectation::Any)
             .await
+            .map(|_| ())
             .map_err(lease_persistence_error)
     }
 
@@ -532,12 +548,18 @@ where
         &self,
         path: &VirtualPath,
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        let bytes = self
+        let versioned = self
             .filesystem
-            .read_file(path)
+            .get(path)
             .await
-            .map_err(lease_persistence_error)?;
-        deserialize(&bytes)
+            .map_err(lease_persistence_error)?
+            .ok_or_else(|| {
+                lease_persistence_error(FilesystemError::NotFound {
+                    path: path.clone(),
+                    operation: ironclaw_filesystem::FilesystemOperation::ReadFile,
+                })
+            })?;
+        deserialize(&versioned.entry.body)
     }
 }
 
