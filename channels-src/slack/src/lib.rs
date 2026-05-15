@@ -982,6 +982,15 @@ fn markdown_to_mrkdwn(input: &str) -> String {
     const PROTECT_START: char = '\u{E000}';
     const PROTECT_END: char = '\u{E001}';
 
+    // Strip our internal sentinel chars from untrusted input so a message
+    // containing literal `\u{E000}N\u{E001}` cannot interfere with the
+    // protect/restore mechanism below.
+    let sanitized: String = input
+        .chars()
+        .filter(|c| *c != PROTECT_START && *c != PROTECT_END)
+        .collect();
+    let input = sanitized.as_str();
+
     let mut protected: Vec<String> = Vec::new();
     let mut tmp = String::with_capacity(input.len());
 
@@ -1074,11 +1083,13 @@ fn markdown_to_mrkdwn(input: &str) -> String {
         };
         let url = &after_bracket[1..close_paren];
 
-        link_out.push('<');
-        link_out.push_str(url);
-        link_out.push('|');
-        link_out.push_str(text);
-        link_out.push('>');
+        // Push the generated `<url|text>` into the protected arena so the
+        // global `**`/`~~` replacement below can't rewrite anything inside it.
+        let idx = protected.len();
+        protected.push(format!("<{}|{}>", url, text));
+        link_out.push(PROTECT_START);
+        link_out.push_str(&idx.to_string());
+        link_out.push(PROTECT_END);
 
         s = &after_bracket[close_paren + 1..];
     }
@@ -1775,5 +1786,25 @@ mod tests {
     fn test_markdown_to_mrkdwn_preserves_slack_native_formatting() {
         let input = "<@U123> <https://e.com|e> <#C123|chan>";
         assert_eq!(markdown_to_mrkdwn(input), input);
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_preserves_emphasis_inside_generated_link() {
+        // After `[text](url)` becomes `<url|text>`, the global `**`/`~~`
+        // rewrite must not reach inside the generated span. Bold around the
+        // link is still converted; bold inside the link text stays literal.
+        assert_eq!(
+            markdown_to_mrkdwn("see [**bold**](https://e.com) **after**"),
+            "see <https://e.com|**bold**> *after*",
+        );
+    }
+
+    #[test]
+    fn test_markdown_to_mrkdwn_strips_internal_sentinel_chars() {
+        // Untrusted input containing the private-use sentinels must not be
+        // able to forge a protected-span reference or split surrounding
+        // formatting markers. The chars are stripped at the boundary.
+        let input = "a\u{E000}0\u{E001}b **c**";
+        assert_eq!(markdown_to_mrkdwn(input), "a0b *c*");
     }
 }
