@@ -1072,10 +1072,7 @@ impl CanonicalAgentLoopExecutor {
                     cancelled_reason_from_signal(&signal),
                 )?))
             }
-            Err(_) => Ok(CancelCheck::Exit(LoopExit::failed(
-                LoopFailureKind::CheckpointRejected,
-                exit_id(host, "failed")?,
-            ))),
+            Err(error) => Err(error),
         }
     }
 
@@ -2891,7 +2888,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_checkpoint_failure_maps_to_failed_for_strict_profile() {
+    async fn cancellation_checkpoint_failure_propagates_executor_error_for_strict_profile() {
+        // Strict profiles require a verified final checkpoint. When the final checkpoint
+        // write itself fails during cooperative cancellation, the executor cannot produce
+        // a trustworthy LoopExit — it must surface CheckpointFailed rather than returning
+        // a LoopExit::Failed with no checkpoint_id, which would fail strict-profile validation.
         let host = MockHost::new(vec![reply_response()])
             .with_require_final_checkpoint(true)
             .fail_checkpoint(LoopCheckpointKind::Final);
@@ -2899,18 +2900,17 @@ mod tests {
         let executor = CanonicalAgentLoopExecutor;
         let state = LoopExecutionState::initial_for_run(host.run_context());
 
-        let exit = executor
+        let err = executor
             .execute_family(&crate::families::default(), &host, state)
             .await
-            .expect("execute");
+            .expect_err("expected executor error on strict-profile checkpoint failure");
 
-        match exit {
-            LoopExit::Failed(failed) => {
-                assert_eq!(failed.reason_kind, LoopFailureKind::CheckpointRejected);
-                assert!(failed.checkpoint_id.is_none());
+        assert_eq!(
+            err,
+            AgentLoopExecutorError::CheckpointFailed {
+                stage: CheckpointKind::Final
             }
-            other => panic!("expected failed, got {other:?}"),
-        }
+        );
         assert_eq!(host.checkpoint_kinds(), vec![LoopCheckpointKind::Final]);
     }
 

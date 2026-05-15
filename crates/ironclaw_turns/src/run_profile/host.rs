@@ -1619,8 +1619,15 @@ pub trait LoopProgressPort: Send + Sync {
 /// The canonical executor consults this between strategy calls. The method is
 /// intentionally synchronous and non-blocking: implementations should expose a
 /// cheap snapshot, usually backed by an atomic flag plus immutable signal data.
-/// This is cooperative boundary observation, not preemption: host calls that
-/// are already in flight must opt into their own abort/cancellation mechanism.
+///
+/// **Cancellation is cooperative and boundary-observation only — it is not
+/// preempted across in-flight host calls.** `build_prompt_bundle`,
+/// `stream_model`, and `invoke_capability` are awaited to completion before
+/// the next observation point is reached. A stuck model stream or long-running
+/// capability call will not observe cancellation until control returns to the
+/// executor. Implementations of those host methods that need finer-grained
+/// cancellation must integrate their own abort signal internally; this port
+/// only covers the between-call boundaries that the executor controls.
 pub trait LoopCancellationPort: Send + Sync {
     /// Returns `Some(signal)` once cancellation has been requested for this run.
     ///
