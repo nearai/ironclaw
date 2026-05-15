@@ -91,6 +91,21 @@ impl HookGateReservationContext {
 type HookGateReservationContextSource =
     Arc<dyn Fn() -> HookGateReservationContext + Send + Sync + 'static>;
 
+/// Upper bound on a configured reservation TTL. Reservations that never
+/// resolve accumulate in router state for the full TTL; an operator
+/// misconfiguring a year-long TTL would create a long-tail memory leak
+/// in `InMemoryHookGateRouter` and an unbounded grant window in durable
+/// backends. 24 hours is plenty for human-in-the-loop approval flows.
+/// henrypark133 must-fix #1 on PR #3633.
+const MAX_RESERVATION_TTL_HOURS: i64 = 24;
+
+/// Upper bound on the free-form reason text accompanying a gate-ref
+/// reservation. Without a cap, a buggy or malicious caller could push
+/// arbitrarily large strings through the approval store. 4 KiB is
+/// generous for human-facing approval reasons. henrypark133 must-fix #2
+/// on PR #3633.
+const MAX_REASON_BYTES: usize = 4096;
+
 /// Per-invocation metadata captured outside `ironclaw_hooks` and consumed by
 /// [`RouterBackedHookGateRefFactory`] when the hook middleware asks for a ref.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,6 +284,12 @@ impl RouterBackedHookGateRefFactory {
         if reservation_ttl <= Duration::zero() {
             return Err(HookGateError::InvalidTtl);
         }
+        // henrypark133 must-fix #1: cap to keep unresolved reservations
+        // from accumulating in router state for impractical durations.
+        let max_ttl = Duration::hours(MAX_RESERVATION_TTL_HOURS);
+        if reservation_ttl > max_ttl {
+            return Err(HookGateError::InvalidTtl);
+        }
         Ok(Self {
             context_source: Arc::new(context_source),
             router,
@@ -281,6 +302,19 @@ impl RouterBackedHookGateRefFactory {
         kind: HookGateKind,
         reason: &str,
     ) -> Result<LoopGateRef, AgentLoopHostError> {
+        // henrypark133 must-fix #2: cap reason text before it crosses
+        // into router state. The reason is operator-facing and may be
+        // persisted; an unbounded string is a memory + display surface
+        // problem.
+        if reason.len() > MAX_REASON_BYTES {
+            return Err(AgentLoopHostError::from(HookGateError::InvalidToken {
+                field: "reason",
+                reason: format!(
+                    "must be at most {MAX_REASON_BYTES} bytes; got {}",
+                    reason.len()
+                ),
+            }));
+        }
         let metadata =
             current_hook_gate_invocation().ok_or(HookGateError::MissingInvocationMetadata)?;
         let now = Utc::now();
@@ -528,7 +562,17 @@ struct InMemoryReservation {
 pub enum HookGateError {
     InvalidTtl,
     MissingInvocationMetadata,
+    /// Argument digest didn't satisfy the `sha256:<64-hex>` shape. Distinct
+    /// from [`Self::InvalidToken`] (which covers non-digest opaque tokens
+    /// like actor/session ids) — henrypark133 must-fix #3 on PR #3633.
     InvalidDigest(String),
+    /// A non-digest opaque token (actor id, session id, etc.) failed
+    /// validation. `field` names the rejected token type; `reason`
+    /// describes the failure (empty, over-limit, control characters).
+    InvalidToken {
+        field: &'static str,
+        reason: String,
+    },
     InvalidGateRef(String),
     UnknownGate {
         gate_ref: LoopGateRef,
@@ -585,6 +629,9 @@ impl fmt::Display for HookGateError {
                 formatter.write_str("hook gate reservation missing invocation metadata")
             }
             Self::InvalidDigest(reason) => write!(formatter, "invalid hook gate digest: {reason}"),
+            Self::InvalidToken { field, reason } => {
+                write!(formatter, "invalid hook gate {field}: {reason}")
+            }
             Self::InvalidGateRef(reason) => {
                 write!(formatter, "invalid router-issued hook gate ref: {reason}")
             }
@@ -654,10 +701,41 @@ impl Error for HookGateError {}
 
 impl From<HookGateError> for AgentLoopHostError {
     fn from(error: HookGateError) -> Self {
-        AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Unavailable,
-            format!("hook gate router unavailable: {error}"),
-        )
+        // henrypark133 must-fix #5 on PR #3633: collapse consumption-
+        // failure variants to an opaque public surface. Distinguishing
+        // "this gate ref doesn't exist" from "this gate ref belongs to
+        // another run/actor/capability" is an oracle that lets a probing
+        // caller learn which gate refs are live. Internally the variants
+        // are still distinct (for routing + assertion ergonomics in tests
+        // + operator-visible logs); the public `AgentLoopHostError` says
+        // only "consumption denied".
+        //
+        // Also: a `tracing::warn!` here gives operators an observable
+        // signal that distinguishes security rejections (consumption
+        // failures) from availability failures (router unreachable).
+        // henrypark133 non-blocking #9.
+        tracing::warn!(
+            error = %error,
+            "hook gate router rejected request; mapping to opaque AgentLoopHostError"
+        );
+        let safe_summary: String = match &error {
+            // Consumption-failure family: collapse oracle.
+            HookGateError::UnknownGate { .. }
+            | HookGateError::AlreadyConsumed { .. }
+            | HookGateError::Expired { .. }
+            | HookGateError::KindMismatch { .. }
+            | HookGateError::RunMismatch { .. }
+            | HookGateError::ActorMismatch { .. }
+            | HookGateError::CapabilityMismatch { .. }
+            | HookGateError::ArgumentsDigestMismatch { .. } => {
+                "hook gate consumption denied".to_string()
+            }
+            // Misuse / availability failures: surface the variant detail
+            // (these are not oracles — they signal configuration / wiring
+            // bugs and need to be operator-visible).
+            _ => format!("hook gate router unavailable: {error}"),
+        };
+        AgentLoopHostError::new(AgentLoopHostErrorKind::Unavailable, safe_summary)
     }
 }
 
@@ -681,20 +759,26 @@ fn validate_token(
     label: &'static str,
     max_bytes: usize,
 ) -> Result<String, HookGateError> {
+    // henrypark133 must-fix #3 on PR #3633: route through `InvalidToken`
+    // rather than `InvalidDigest` so the error name matches what's being
+    // validated (actor / session id, not a sha256 digest).
     if value.is_empty() {
-        return Err(HookGateError::InvalidDigest(format!(
-            "{label} must not be empty"
-        )));
+        return Err(HookGateError::InvalidToken {
+            field: label,
+            reason: "must not be empty".to_string(),
+        });
     }
     if value.len() > max_bytes {
-        return Err(HookGateError::InvalidDigest(format!(
-            "{label} must be at most {max_bytes} bytes"
-        )));
+        return Err(HookGateError::InvalidToken {
+            field: label,
+            reason: format!("must be at most {max_bytes} bytes"),
+        });
     }
     if value.chars().any(|character| character.is_control()) {
-        return Err(HookGateError::InvalidDigest(format!(
-            "{label} must not contain control characters"
-        )));
+        return Err(HookGateError::InvalidToken {
+            field: label,
+            reason: "must not contain control characters".to_string(),
+        });
     }
     Ok(value)
 }
