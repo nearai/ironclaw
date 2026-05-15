@@ -951,7 +951,6 @@ impl CanonicalAgentLoopExecutor {
             host,
             checked.state,
             Some(checked.checkpoint_id),
-            LoopCancelledReasonKind::HostCancellation,
         )?))
     }
 
@@ -1052,11 +1051,11 @@ impl CanonicalAgentLoopExecutor {
 
         let fallback_state = state.clone();
         match self.checkpoint(host, state, CheckpointKind::Final).await {
-            Ok(checked) => Ok(CancelCheck::Exit(cancelled_exit(
+            Ok(checked) => Ok(CancelCheck::Exit(cancelled_exit_with_reason(
                 host,
                 checked.state,
-                Some(checked.checkpoint_id),
                 cancelled_reason_from_signal(&signal),
+                Some(checked.checkpoint_id),
             )?)),
             Err(_)
                 if !host
@@ -1065,11 +1064,11 @@ impl CanonicalAgentLoopExecutor {
                     .checkpoint_policy
                     .require_final_checkpoint =>
             {
-                Ok(CancelCheck::Exit(cancelled_exit(
+                Ok(CancelCheck::Exit(cancelled_exit_with_reason(
                     host,
                     fallback_state,
-                    None,
                     cancelled_reason_from_signal(&signal),
+                    None,
                 )?))
             }
             Err(error) => Err(error),
@@ -1275,7 +1274,6 @@ fn cancelled_exit_with_reason(
     state: LoopExecutionState,
     reason_kind: LoopCancelledReasonKind,
     checkpoint_id: Option<ironclaw_turns::TurnCheckpointId>,
-    reason_kind: LoopCancelledReasonKind,
 ) -> Result<LoopExit, AgentLoopExecutorError> {
     Ok(LoopExit::Cancelled(LoopCancelled {
         reason_kind,
