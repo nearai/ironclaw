@@ -277,14 +277,22 @@ where
 /// other separators out of user-supplied IDs and keys so a malicious value
 /// can't traverse the namespace.
 fn encode_segment(value: &str) -> String {
-    value
-        .chars()
-        .map(|c| match c {
-            '/' | '\\' | '\0' | '\n' | '\r' | '\t' | ' ' => '_',
-            c if c.is_control() => '_',
-            c => c,
-        })
-        .collect()
+    // PR #3679 review fix: percent-encode every byte outside the unreserved
+    // set so distinct inputs map to distinct outputs. The prior lossy `_`
+    // substitution let keys like `a/b` and `a_b` collide and silently
+    // overwrite each other.
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        let is_unreserved =
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~');
+        if is_unreserved {
+            out.push(byte as char);
+        } else {
+            use std::fmt::Write as _;
+            let _ = write!(out, "%{byte:02X}");
+        }
+    }
+    out
 }
 
 fn fs_to_db_error(error: FilesystemError) -> DatabaseError {

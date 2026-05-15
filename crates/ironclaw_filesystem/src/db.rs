@@ -151,16 +151,24 @@ pub(crate) fn sql_index_name(prefix: &str, name: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     let raw = format!("idx_rfs_{prefix_clean}_{name}");
-    if raw.len() > 62 {
-        let cutoff = raw
-            .char_indices()
-            .nth(62)
-            .map(|(i, _)| i)
-            .unwrap_or(raw.len());
-        raw[..cutoff].to_string()
-    } else {
-        raw
+    if raw.len() <= 62 {
+        return raw;
     }
+    // PR #3679 review fix: distinct long inputs must map to distinct
+    // identifiers. Append a stable blake3 suffix before truncating so
+    // `CREATE ... IF NOT EXISTS` cannot silently reuse the wrong index.
+    let hash = blake3::hash(raw.as_bytes());
+    let hash_hex = hash.to_hex();
+    let suffix = format!("_{}", &hash_hex.as_str()[..8]);
+    let keep = 62usize.saturating_sub(suffix.len());
+    let cutoff = raw
+        .char_indices()
+        .nth(keep)
+        .map(|(i, _)| i)
+        .unwrap_or(raw.len());
+    let mut out = raw[..cutoff].to_string();
+    out.push_str(&suffix);
+    out
 }
 
 /// Escape a LIKE pattern that already contains a trailing `%` wildcard

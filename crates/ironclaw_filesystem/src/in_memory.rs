@@ -82,6 +82,17 @@ impl RootFilesystem for InMemoryBackend {
     ) -> Result<RecordVersion, FilesystemError> {
         let mut state = self.state.lock().await;
         let key = path.as_str().to_string();
+        // PR #3679 review fix: the SQL backends reject `put(/a)` when `/a/b`
+        // already exists. Mirror the SQL contract so cross-backend tests
+        // can't pass against impossible production state.
+        let prefix = with_trailing_slash(path.as_str());
+        if state.entries.keys().any(|k| k.starts_with(&prefix)) {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+                reason: "cannot overwrite a directory".to_string(),
+            });
+        }
         let current_version = state.entries.get(&key).map(|stored| stored.version);
         check_cas(path, cas, current_version)?;
 
@@ -242,7 +253,9 @@ impl RootFilesystem for InMemoryBackend {
             ranked.truncate(limit as usize);
             return Ok(ranked
                 .into_iter()
-                .map(|(_, stored, _)| VersionedEntry {
+                .map(|(matched_path, stored, _)| VersionedEntry {
+                    path: VirtualPath::new(matched_path.clone())
+                        .unwrap_or_else(|_| unreachable!("stored paths originated as VirtualPath")),
                     entry: stored.entry.clone(),
                     version: stored.version,
                 })

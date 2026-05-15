@@ -125,15 +125,19 @@ where
             // `tail(path, 0)` is on the cold path here — only reached when
             // tail-after-cursor already came back empty — so the extra
             // round trip is acceptable.
-            let head = self
+            // PR #3679 review fix: bounded probe instead of `tail(0)` (which
+            // loaded the entire log to read its last seq — O(N) per cold
+            // call). `tail(after - 1)` returns events with seq > after - 1,
+            // i.e. seq >= after. Combined with the prior empty
+            // `tail(after)`, a non-empty probe means head == after exactly,
+            // so the consumer is caught up. An empty probe means head <
+            // after, i.e. a foreign-future cursor.
+            let probe = self
                 .fs
-                .tail(&path, SeqNo::from_backend(0))
+                .tail(&path, SeqNo::from_backend(after.as_u64().saturating_sub(1)))
                 .await
-                .map_err(map_filesystem_tail_error)?
-                .last()
-                .map(|record| record.seq.get())
-                .unwrap_or(0);
-            if after.as_u64() > head {
+                .map_err(map_filesystem_tail_error)?;
+            if probe.is_empty() {
                 return Err(EventError::ReplayGap {
                     requested: after,
                     earliest: EventCursor::origin(),
@@ -262,15 +266,19 @@ where
         if records.is_empty() && after.as_u64() > 0 {
             // Same head-probe pattern as the runtime log: distinguish
             // caught-up-to-head from foreign-future-cursor.
-            let head = self
+            // PR #3679 review fix: bounded probe instead of `tail(0)` (which
+            // loaded the entire log to read its last seq — O(N) per cold
+            // call). `tail(after - 1)` returns events with seq > after - 1,
+            // i.e. seq >= after. Combined with the prior empty
+            // `tail(after)`, a non-empty probe means head == after exactly,
+            // so the consumer is caught up. An empty probe means head <
+            // after, i.e. a foreign-future cursor.
+            let probe = self
                 .fs
-                .tail(&path, SeqNo::from_backend(0))
+                .tail(&path, SeqNo::from_backend(after.as_u64().saturating_sub(1)))
                 .await
-                .map_err(map_filesystem_tail_error)?
-                .last()
-                .map(|record| record.seq.get())
-                .unwrap_or(0);
-            if after.as_u64() > head {
+                .map_err(map_filesystem_tail_error)?;
+            if probe.is_empty() {
                 return Err(EventError::ReplayGap {
                     requested: after,
                     earliest: EventCursor::origin(),

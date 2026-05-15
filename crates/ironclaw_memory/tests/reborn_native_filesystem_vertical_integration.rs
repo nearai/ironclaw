@@ -56,7 +56,7 @@ fn memory_mount_descriptor() -> MountDescriptor {
         storage_class: StorageClass::FileContent,
         content_kind: ContentKind::MemoryDocument,
         index_policy: IndexPolicy::FullTextAndVector,
-// `BackendCapabilities` migrated from a struct-of-bools to a
+        // `BackendCapabilities` migrated from a struct-of-bools to a
         // bitmask + txn tier. The `MemoryBackendFilesystemAdapter` does
         // not override the default `capabilities()` (which is empty), so
         // the descriptor must also claim nothing to avoid

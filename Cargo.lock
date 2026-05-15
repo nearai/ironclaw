@@ -4284,6 +4284,7 @@ name = "ironclaw_filesystem"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "deadpool-postgres",
  "ironclaw_host_api",
  "ironclaw_safety",
