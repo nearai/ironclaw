@@ -1,0 +1,135 @@
+---
+title: "WeChat"
+description: "Interact with your agent through WeChat"
+---
+
+Connect IronClaw to WeChat through a WeChat iLink bot account. The channel uses QR-code login and long polling, so it does not require a public webhook URL or tunnel.
+
+<Note>
+If you haven't set up your agent yet, follow our [Quickstart guide](../quickstart)
+</Note>
+
+<Warning>
+The WeChat channel currently supports a single connected account and direct-message conversations. Group chats and multi-account management are not available yet.
+</Warning>
+
+---
+
+## Set up the WeChat channel
+
+<Steps>
+
+<Step title="Install the WeChat channel">
+
+WeChat is distributed as a WASM channel. You can install it from the Web Gateway's Extensions view, or from the terminal:
+
+```bash
+ironclaw registry install wechat
+```
+
+The `ironclaw onboard --channels-only` wizard can also install the channel, but the QR login flow is designed for the Web Gateway.
+
+</Step>
+
+<Step title="Start IronClaw">
+
+Start the agent if it is not already running:
+
+```bash
+ironclaw
+```
+
+Open the Web Gateway, then go to **Settings** -> **Extensions**.
+
+</Step>
+
+<Step title="Open the QR login flow">
+
+Find **WeChat Channel**, click **Configure**, then click **Open QR Page**.
+
+IronClaw opens the WeChat QR page in a new browser tab. Scan the QR code with WeChat and confirm the login on your phone. Keep the gateway tab open until the setup modal reports that WeChat is connected.
+
+</Step>
+
+<Step title="Send a test message">
+
+Send a direct message to the connected WeChat iLink bot account. IronClaw receives messages by polling WeChat and replies in the same direct-message conversation.
+
+</Step>
+
+</Steps>
+
+---
+
+## What the channel supports
+
+| Capability | Status |
+|------------|--------|
+| Direct-message text chat | Supported |
+| QR-code login | Supported |
+| Inbound images | Supported |
+| Outbound images | Supported |
+| Inbound files, voice notes, and videos | Supported |
+| Outbound files and videos | Supported |
+| Typing indicators | Supported |
+| Group chats | Not supported yet |
+| Multiple WeChat accounts | Not supported yet |
+
+<Info>
+Voice notes use WeChat's `audio/silk` format. IronClaw can still receive the raw attachment without extra setup. To transcribe voice notes into WAV, build and install the optional `ironclaw-silk-decoder` helper, or set `IRONCLAW_SILK_DECODER` to its path.
+</Info>
+
+---
+
+## Configuration Options
+
+You can configure the WeChat channel through `~/.ironclaw/channels/wechat.capabilities.json`, which is created when the channel is installed.
+
+<Accordion title="Options Overview">
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `base_url` | `https://ilinkai.weixin.qq.com` | WeChat iLink API base URL |
+| `cdn_base_url` | `https://novac2c.cdn.weixin.qq.com/c2c` | WeChat CDN base URL for media download and upload |
+| `bot_type` | `3` | WeChat iLink bot type used when starting QR login |
+| `poll_interval_ms` | `30000` | Polling interval in milliseconds |
+| `long_poll_timeout_ms` | `35000` | Timeout for each WeChat long-poll request |
+| `inbound_merge_window_ms` | `5000` | Window for merging closely related inbound message parts before emitting them to the agent |
+
+</Accordion>
+
+<Note>
+Restart IronClaw after changing the channel configuration file.
+</Note>
+
+### Authentication
+
+The QR login flow stores the `wechat_bot_token` secret for you. You do not need to copy or paste the token manually.
+
+If the login expires or WeChat reports that the token is no longer valid, open the WeChat channel configuration again and run the QR flow once more.
+
+---
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="I don't see the WeChat channel">
+    Install it with `ironclaw registry install wechat`, then restart IronClaw and refresh the Web Gateway.
+  </Accordion>
+
+  <Accordion title="The QR page did not open">
+    Browser popup blocking may prevent the QR tab from opening automatically. Click **Open QR Page** in the setup modal.
+  </Accordion>
+
+  <Accordion title="The QR code expired">
+    The setup flow refreshes expired QR codes a few times. If the modal reports that the QR code expired too many times, close the modal and start the WeChat configuration again.
+  </Accordion>
+
+  <Accordion title="Messages are not arriving">
+    Confirm that IronClaw is running, the WeChat channel is connected, and at least one polling interval has passed. If logs mention an invalid or expired WeChat token, reconnect the channel with the QR flow.
+  </Accordion>
+
+  <Accordion title="Voice notes are not transcribed">
+    Build `ironclaw-silk-decoder` with `./crates/ironclaw_silk_decoder/build.sh`, put the binary on your `PATH`, or point `IRONCLAW_SILK_DECODER` at it. Without the helper, voice notes are still delivered as raw `audio/silk` attachments.
+  </Accordion>
+</AccordionGroup>
