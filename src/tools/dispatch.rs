@@ -909,7 +909,10 @@ mod integration_tests {
         *routing_arc.write().await = Some(routing_config);
 
         let (dispatcher, _backend, _db, registry, _dir) = test_dispatcher().await;
-        registry.register_sync(Arc::new(RestrictedMcpTool));
+        // Use async register (not register_sync) to simulate an MCP tool.
+        // register_sync adds to builtin_tool_names; builtins default-allow when no
+        // whitelist is configured for the group, which would make the assertion fail.
+        registry.register(Arc::new(RestrictedMcpTool)).await;
 
         let dispatcher = ToolDispatcher::new(
             Arc::clone(dispatcher.registry()),
@@ -948,7 +951,7 @@ mod integration_tests {
             }))
             .unwrap(),
         );
-        registry2.register_sync(Arc::new(RestrictedMcpTool));
+        registry2.register(Arc::new(RestrictedMcpTool)).await;
         let dispatcher2 = ToolDispatcher::new(
             Arc::clone(dispatcher2.registry()),
             Arc::new(SafetyLayer::new(&SafetyConfig {
