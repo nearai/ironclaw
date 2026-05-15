@@ -20,24 +20,27 @@ struct DeliveryIdentity<'a> {
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn to_json<T: Serialize>(value: &T) -> Result<String, OutboundError> {
-    ironclaw_storage::encode_json(value).map_err(|_| OutboundError::Serialization)
+    serde_json::to_string(value).map_err(|_| OutboundError::Serialization)
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn from_json<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, OutboundError> {
-    ironclaw_storage::decode_json(value).map_err(|_| OutboundError::Serialization)
+    serde_json::from_str(value).map_err(|_| OutboundError::Serialization)
 }
 
+// Backend errors are logged with raw detail for operator diagnostics, then
+// collapsed into a payload-free variant — outbound CLAUDE.md forbids
+// returning raw backend error details to callers.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn db_error(error: impl std::fmt::Display) -> OutboundError {
-    tracing::debug!(error = %&error, "outbound storage backend error");
-    let redacted = ironclaw_storage::redacted_backend_error(error);
-    debug_assert_eq!(redacted, ironclaw_storage::StorageError::Backend);
+    tracing::error!(%error, "outbound storage backend error");
     OutboundError::Backend
 }
 
+// Sentinel value for optional composite-key components stored as columns.
+// Inlined from the dissolved ironclaw_storage crate (only consumer).
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-const ABSENT_SCOPE_ID: &str = ironclaw_storage::ABSENT_SCOPE_COMPONENT;
+const ABSENT_SCOPE_ID: &str = "";
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn scope_agent_db_value(scope: &TurnScope) -> &str {
