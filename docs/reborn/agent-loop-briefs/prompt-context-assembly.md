@@ -16,9 +16,11 @@ the existing workspace identity prompt behavior.
 `LoopContextBundle.identity_messages: Vec<LoopContextMessage>`
 ([`crates/ironclaw_turns/src/run_profile/host.rs`](../../../crates/ironclaw_turns/src/run_profile/host.rs)
 near line 583) is the slot for identity-style content — `AGENTS.md`,
-`SOUL.md`, `USER.md`, `IDENTITY.md`, `HEARTBEAT.md`, `TOOLS.md`,
-`BOOTSTRAP.md`, `context/assistant-directives.md`. Today it is
-populated with `Vec::new()` unconditionally by
+`SOUL.md`, `IDENTITY.md`, `HEARTBEAT.md`, `TOOLS.md`, and
+`BOOTSTRAP.md`. Personal/profile-derived files such as `USER.md` and
+`context/assistant-directives.md` stay out of this WS-15 surface until
+explicit run-context privacy policy exists. Today the slot is populated
+with `Vec::new()` unconditionally by
 `ThreadBackedLoopContextPort::load_loop_context()` in
 [`crates/ironclaw_loop_support/src/lib.rs`](../../../crates/ironclaw_loop_support/src/lib.rs).
 
@@ -115,12 +117,13 @@ use thiserror::Error;
 /// Host-owned source for identity-style context that the model receives
 /// as system messages before the conversation transcript.
 ///
-/// Identity files canonically include: `AGENTS.md`, `SOUL.md`, `USER.md`,
-/// `IDENTITY.md`, `HEARTBEAT.md`, `TOOLS.md`, `BOOTSTRAP.md`,
-/// `context/assistant-directives.md`. The canonical filename list is
-/// owned by `ironclaw_memory::safety::DEFAULT_PROMPT_PROTECTED_PATHS`
-/// (kept singular so the write-protection policy and the prompt-loader
-/// agree on what counts as identity content).
+/// Identity files canonically include: `AGENTS.md`, `SOUL.md`,
+/// `IDENTITY.md`, `HEARTBEAT.md`, `TOOLS.md`, and `BOOTSTRAP.md`.
+/// The broader prompt-protected filename list is owned by
+/// `ironclaw_memory::safety::DEFAULT_PROMPT_PROTECTED_PATHS`; WS-15
+/// intentionally excludes personal/profile-derived files such as
+/// `USER.md` and `context/assistant-directives.md` until run-context
+/// privacy policy exists.
 ///
 /// Implementations own storage lookups, trust resolution, and content
 /// safety filtering. This trait returns host-approved candidates — raw
@@ -182,10 +185,11 @@ pub struct HostIdentityContextCandidate {
     /// is summary-only; Trusted content carries through verbatim.
     pub trust_level: IdentityTrustLevel,
 
-    /// Mode gate — `Always`, `OnTextOnly`, or `OnCodeAct`. A
+    /// Mode gate — `Always` or `OnCodeAct`. A
     /// `OnCodeAct` candidate is filtered out before assembly when the
-    /// request mode is `TextOnly`. The three variants cover the
-    /// skeleton's `PromptMode` enum exactly.
+    /// request mode is `TextOnly`. The two variants cover the currently
+    /// supported identity-file routing rules; add another variant only
+    /// when a concrete source emits it.
     pub applies_when: IdentityApplicability,
 }
 
@@ -195,7 +199,6 @@ pub enum IdentityTrustLevel { Installed, Trusted }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityApplicability {
     Always,
-    OnTextOnly,
     OnCodeAct,
 }
 
@@ -310,9 +313,10 @@ load-bearing contributor:
   [`crates/ironclaw_memory/src/safety.rs`](../../../crates/ironclaw_memory/src/safety.rs)
   near line 153 (`SOUL.md, AGENTS.md, USER.md, IDENTITY.md, SYSTEM.md,
   MEMORY.md, TOOLS.md, HEARTBEAT.md, BOOTSTRAP.md,
-  context/assistant-directives.md`). Alphabetical-by-`IdentityFileName.as_str()`
-  is an acceptable alternative as long as the impl picks one and is
-  consistent across calls.
+  context/assistant-directives.md`), filtered to the WS-15 stable
+  identity set. Alphabetical-by-`IdentityFileName.as_str()` is an
+  acceptable alternative as long as the impl picks one and is consistent
+  across calls.
 - `build_identity_messages` MUST preserve the source-provided order
   and MUST NOT re-sort by name inside the helper — re-sorting would
   mask source-side ordering bugs and decouple the helper from the
@@ -331,19 +335,19 @@ The canonical identity files
 near line 153) split into two buckets:
 
 - **Stable** (byte-stable across the run): `AGENTS.md`, `SOUL.md`,
-  `USER.md`, `IDENTITY.md`, `TOOLS.md`, `BOOTSTRAP.md`,
-  `context/assistant-directives.md`. These land in `identity_messages`.
+  `IDENTITY.md`, `TOOLS.md`, `BOOTSTRAP.md`. These land in
+  `identity_messages`.
+- **Personal/profile-derived**: `USER.md` and
+  `context/assistant-directives.md`. WS-15 excludes these from
+  `identity_messages` until `LoopRunContext` carries explicit privacy
+  policy for shared/group runs.
 - **Volatile** (may change mid-run): `HEARTBEAT.md`. This holds
   timestamped, frequently-changing proactive findings and must NOT
   land in `identity_messages` — every turn's prefix would otherwise
-  differ and the prompt cache would miss every turn. Volatile content
-  is appended to `instruction_snippets` (after SKILL.md content)
-  instead, which sits *after* the cache-sealed identity prefix in the
-  `identity → instruction → messages` assembly order.
-
-`HEARTBEAT.md` injection remains gated by `LoopRunContext` to
-heartbeat-initiated runs only — see §4 for the run-kind gating in the
-concrete `WorkspaceIdentityContextSource` impl.
+  differ and the prompt cache would miss every turn. WS-15 excludes it
+  from the stable identity bundle; a later heartbeat-specific context
+  path can route it after the cache-sealed identity prefix once
+  `LoopRunContext` carries an explicit heartbeat/run-kind signal.
 
 ### 3.3.6 Prompt assembly for summary-only identity entries
 
@@ -507,16 +511,14 @@ belong:
   primary-scope only.
 - Filenames pulled from
   `ironclaw_memory::safety::DEFAULT_PROMPT_PROTECTED_PATHS`.
-- Trust: identity files placed by the user (workspace root) →
-  `Trusted`; files seeded from a registry extension → `Installed`.
+- Trust: host-owned stable identity files → `Trusted`; personal/profile-derived
+  files such as `USER.md` and `context/assistant-directives.md` are excluded
+  until an explicit run-context privacy policy can authorize them.
 - `HEARTBEAT.md` is a **volatile** identity file (see §3.3.5) and
-  MUST NOT be returned in the stable identity bundle. The concrete
-  impl emits it into `instruction_snippets` (appended after SKILL.md
-  content), gated by `LoopRunContext.scope` / `run_kind` so it only
-  surfaces on heartbeat-initiated runs. This aligns with the per-run
-  caching contract in §3.4.5: the stable identity bundle is cached
-  once per run, and HEARTBEAT.md flows through a separate
-  re-evaluated-per-call path.
+  MUST NOT be returned in the stable identity bundle. WS-15 does not
+  add the separate volatile instruction source because the current
+  `LoopRunContext` contract has no heartbeat/run-kind signal to gate
+  that content safely.
 - `applies_when`: most files use `Always`; `TOOLS.md` should use
   `OnCodeAct` (it's irrelevant in `TextOnly` mode where no tools are
   visible).
@@ -632,16 +634,20 @@ Integration test (in `crates/ironclaw_reborn`):
 **Finding #2 (serrrfirat): Group-run policy gating for personal identity files.**
 
 `WorkspaceIdentityContextSource::load_identity_candidates` currently ignores
-`run_context` entirely. `summary_only_path()` provides structural protection
-— `USER.md` and `context/assistant-directives.md` expose only a one-line
-summary rather than raw content — but that summary is still visible in
-group-run or shared-thread prompts where personal-profile context may not
-be appropriate.
+`run_context` entirely. To stay fail-closed without broadening WS-15's
+contract, the concrete workspace source excludes `USER.md` and
+`context/assistant-directives.md` from identity candidates entirely.
 
 Deferred to WS17 when `LoopRunContext` gains an explicit
 group-chat/shared-thread policy bit (`is_shared_context()`). At that point,
-`load_identity_candidates` should exclude summary-only candidates whose
-applicability would be `PersonalOnly` when the policy bit is set. A required
-regression test (`group_run_excludes_personal_file_summaries_without_policy_grant`)
-is also deferred. The code-side TODO is in
-`src/workspace/reborn_identity_context.rs`.
+`load_identity_candidates` can add policy-authorized personal/profile-derived
+candidates with caller-level regression coverage for both allowed and denied
+group/shared contexts.
+
+**Heartbeat context injection.**
+
+`HEARTBEAT.md` is intentionally excluded from WS-15 stable
+`identity_messages` because it is volatile and would break prompt-cache
+stability. Restoring heartbeat-specific prompt context for Reborn should be a
+separate follow-up that introduces an explicit run-kind/heartbeat signal on
+`LoopRunContext` plus a volatile instruction source evaluated per context load.

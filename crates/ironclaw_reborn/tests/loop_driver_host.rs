@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex},
 };
 
@@ -25,10 +25,12 @@ use ironclaw_host_runtime::{
     VisibleCapability, VisibleCapabilityAccess,
 };
 use ironclaw_loop_support::{
-    HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError, HostManagedModelError,
-    HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse, HostSkillContextBuildError, HostSkillContextCandidate,
-    HostSkillContextSource,
+    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
+    HostIdentityMessageContent, HostInputBatch, HostInputEnvelope, HostInputQueue,
+    HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse, HostSkillContextBuildError,
+    HostSkillContextCandidate, HostSkillContextSource, IdentityApplicability, IdentityFileName,
+    identity_message_ref,
 };
 use ironclaw_processes::ProcessServices;
 use ironclaw_reborn::{
@@ -2329,6 +2331,62 @@ async fn text_only_host_factory_rejects_non_running_claimed_run() {
 }
 
 #[tokio::test]
+async fn text_only_host_factory_threads_identity_source_to_prompt_and_model() {
+    let fixture = HostFixture::new("thread-host-identity", "hello reborn").await;
+    let source = Arc::new(StaticIdentityContextSource::new(vec![trusted_identity(
+        "AGENTS.md",
+        "factory identity content",
+        IdentityApplicability::Always,
+    )]));
+    let host = fixture
+        .factory()
+        .with_identity_context_source(source)
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+
+    let surface = host_dyn
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .unwrap();
+    let prompt_bundle = host_dyn
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: Some(surface.version.clone()),
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(prompt_bundle.messages[0].role, "system");
+    assert!(
+        prompt_bundle.messages[0]
+            .content_ref
+            .as_str()
+            .starts_with("msg:identity.agents.md.")
+    );
+
+    host_dyn
+        .stream_model(LoopModelRequest {
+            messages: prompt_bundle.messages,
+            surface_version: Some(surface.version),
+            model_preference: None,
+        })
+        .await
+        .unwrap();
+
+    let requests = fixture.gateway.requests();
+    assert_eq!(requests[0].messages[0].content, "factory identity content");
+}
+
+#[tokio::test]
 async fn text_only_host_factory_rejects_thread_scope_mismatch() {
     let fixture = HostFixture::new("thread-host-thread-scope-mismatch", "hello").await;
     let wrong_scope = ThreadScope {
@@ -4388,6 +4446,73 @@ impl HostSkillContextSource for StaticSkillContextSource {
     ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
         Ok(self.candidates.clone())
     }
+}
+
+#[derive(Clone)]
+struct StaticIdentityContextSource {
+    candidates: Vec<HostIdentityContextCandidate>,
+    content_by_ref: HashMap<String, HostIdentityMessageContent>,
+}
+
+impl StaticIdentityContextSource {
+    fn new(candidates: Vec<(HostIdentityContextCandidate, String)>) -> Self {
+        let mut context_candidates = Vec::with_capacity(candidates.len());
+        let mut content_by_ref = HashMap::new();
+        for (candidate, content) in candidates {
+            if let Some(message_ref) = candidate.message_ref.as_ref() {
+                content_by_ref.insert(
+                    message_ref.as_str().to_string(),
+                    HostIdentityMessageContent {
+                        name: candidate.name.clone(),
+                        content,
+                    },
+                );
+            }
+            context_candidates.push(candidate);
+        }
+        Self {
+            candidates: context_candidates,
+            content_by_ref,
+        }
+    }
+}
+
+#[async_trait]
+impl HostIdentityContextSource for StaticIdentityContextSource {
+    async fn load_identity_candidates(
+        &self,
+        _run_context: &LoopRunContext,
+        _mode: PromptMode,
+    ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
+        Ok(self.candidates.clone())
+    }
+
+    async fn resolve_identity_message_content(
+        &self,
+        _run_context: &LoopRunContext,
+        message_ref: &ironclaw_turns::LoopMessageRef,
+    ) -> Result<Option<HostIdentityMessageContent>, HostIdentityContextBuildError> {
+        Ok(self.content_by_ref.get(message_ref.as_str()).cloned())
+    }
+}
+
+fn trusted_identity(
+    name: &str,
+    content: &str,
+    applies_when: IdentityApplicability,
+) -> (HostIdentityContextCandidate, String) {
+    let name = IdentityFileName::new(name).unwrap();
+    let message_ref = identity_message_ref(&name, content).unwrap();
+    (
+        HostIdentityContextCandidate::new_trusted(
+            name.clone(),
+            message_ref,
+            format!("identity file {} available", name.as_str()),
+            applies_when,
+            content.len(),
+        ),
+        content.to_string(),
+    )
 }
 
 struct StaticCapabilitySurfaceProfileResolver {

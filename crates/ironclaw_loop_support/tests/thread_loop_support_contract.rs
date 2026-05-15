@@ -10,9 +10,9 @@ use ironclaw_loop_support::{
     HostIdentityContextSource, HostIdentityMessageContent, HostManagedModelError,
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
     HostManagedModelRequest, HostManagedModelResponse, HostSkillContextBuildError,
-    HostSkillContextCandidate, HostSkillContextSource, IdentityApplicability, IdentityFileName,
-    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort,
-    build_skill_run_snapshot, identity_message_ref,
+    HostSkillContextCandidate, HostSkillContextSource, IdentityApplicability, IdentityBudget,
+    IdentityFileName, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
+    ThreadBackedLoopTranscriptPort, build_skill_run_snapshot, identity_message_ref,
 };
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
@@ -204,6 +204,35 @@ async fn context_port_populates_identity_when_source_set() {
         "identity file AGENTS.md available"
     );
     assert!(bundle.identity_messages[0].message_ref.is_some());
+}
+
+#[tokio::test]
+async fn context_port_applies_identity_budget_to_trusted_content() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticIdentityContextSource::new(vec![trusted_identity(
+        "AGENTS.md",
+        "trusted identity content that exceeds the tiny budget",
+        IdentityApplicability::Always,
+    )]));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_identity_context_source(source)
+    .with_identity_budget(IdentityBudget::new(4).unwrap());
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert!(bundle.identity_messages.is_empty());
 }
 
 #[tokio::test]

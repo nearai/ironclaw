@@ -18,11 +18,9 @@ use super::Workspace;
 const STABLE_IDENTITY_PATHS: &[&str] = &[
     paths::SOUL,
     paths::AGENTS,
-    paths::USER,
     paths::IDENTITY,
     paths::TOOLS,
     paths::BOOTSTRAP,
-    paths::ASSISTANT_DIRECTIVES,
 ];
 
 #[derive(Clone)]
@@ -68,15 +66,6 @@ impl WorkspaceIdentityContextSource {
             return Ok(None);
         };
         let name = IdentityFileName::new(path)?;
-        if summary_only_path(path) {
-            return Ok(Some(
-                HostIdentityContextCandidate::new_installed_summary_only(
-                    name,
-                    format!("personal identity file {path} available; raw content withheld"),
-                    applicability_for_path(path),
-                ),
-            ));
-        }
 
         let message_ref = identity_message_ref(&name, &content)
             .map_err(|_| HostIdentityContextBuildError::Internal)?;
@@ -105,13 +94,6 @@ impl WorkspaceIdentityContextSource {
 impl HostIdentityContextSource for WorkspaceIdentityContextSource {
     async fn load_identity_candidates(
         &self,
-        // TODO: run_context policy gating for personal files in group/shared runs.
-        // Currently summary_only_path() provides structural protection (no raw content),
-        // but USER.md and assistant directives summaries are still visible in group-run
-        // prompts. When LoopRunContext gains an explicit group-chat/shared-thread policy bit
-        // (planned for WS17), gate these paths: exclude summary-only candidates whose
-        // applicability is PersonalOnly when run_context.is_shared_context() is true.
-        // Required test: group_run_excludes_personal_file_summaries_without_policy_grant
         _run_context: &LoopRunContext,
         _mode: PromptMode,
     ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
@@ -144,14 +126,6 @@ fn applicability_for_path(path: &str) -> IdentityApplicability {
     }
 }
 
-fn summary_only_path(path: &str) -> bool {
-    // LoopRunContext does not yet carry an explicit group-chat/profile-privacy
-    // policy bit. Until that lands, keep personal/profile-derived identity
-    // files structurally summary-only so raw bytes cannot be promoted into the
-    // trusted system prefix by this workspace source.
-    matches!(path, paths::USER | paths::ASSISTANT_DIRECTIVES)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,11 +138,9 @@ mod tests {
             vec![
                 paths::SOUL,
                 paths::AGENTS,
-                paths::USER,
                 paths::IDENTITY,
                 paths::TOOLS,
                 paths::BOOTSTRAP,
-                paths::ASSISTANT_DIRECTIVES,
             ]
         );
         assert!(
@@ -251,7 +223,7 @@ mod tests {
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
-    async fn workspace_identity_context_keeps_personal_files_summary_only() {
+    async fn workspace_identity_context_excludes_personal_files_without_policy() {
         let test_db = test_db().await;
         let workspace = Arc::new(Workspace::new_with_db("primary", test_db.db.clone()));
         workspace
@@ -270,19 +242,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(candidates.len(), 2);
-        for candidate in candidates {
-            assert!(matches!(
-                candidate.name.as_str(),
-                paths::USER | paths::ASSISTANT_DIRECTIVES
-            ));
-            assert!(
-                candidate.message_ref.is_none(),
-                "{} must not expose raw prompt content without an explicit privacy policy bit",
-                candidate.name
-            );
-            assert!(!candidate.safe_summary.contains("private"));
-        }
+        assert!(candidates.is_empty());
     }
 
     #[cfg(feature = "libsql")]
