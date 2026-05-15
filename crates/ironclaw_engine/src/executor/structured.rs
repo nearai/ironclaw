@@ -680,13 +680,15 @@ async fn execute_with_inline_gate_retry(
             }
             _ => None,
         };
-        let (gate_name, action_name, call_id, parameters, resume_kind) = match result {
+        let (gate_name, action_name, call_id, parameters, resume_kind, resume_output) = match result
+        {
             Err(EngineError::GatePaused {
                 gate_name,
                 action_name,
                 call_id,
                 parameters,
                 resume_kind,
+                resume_output,
                 ..
             }) if matches!(
                 *resume_kind,
@@ -694,7 +696,14 @@ async fn execute_with_inline_gate_retry(
                     | crate::gate::ResumeKind::Authentication { .. }
             ) =>
             {
-                (gate_name, action_name, call_id, *parameters, *resume_kind)
+                (
+                    gate_name,
+                    action_name,
+                    call_id,
+                    *parameters,
+                    *resume_kind,
+                    resume_output.map(|b| *b),
+                )
             }
             other => return (other, emitted_events),
         };
@@ -718,8 +727,18 @@ async fn execute_with_inline_gate_retry(
         });
 
         // Refund the lease use this attempt consumed; we'll re-consume
-        // on retry if the user approves.
-        let _ = leases.refund_use(current_lease.id).await;
+        // on retry if the user approves. EXCEPTION: when `resume_output`
+        // is set, the action has already executed successfully (the
+        // gate is a post-execution Authentication gate carrying cached
+        // output) — the cached-output branch below will return without
+        // re-consuming. Refunding now would net the successful action
+        // to zero lease uses, letting a side-effecting tool drain
+        // `max_uses=∞` for free. See `drive_inline_gate` in scripting.rs
+        // and `execute_action_with_inline_gate` in orchestrator.rs for
+        // the matching guards. Tracked by the #3559 security review.
+        if resume_output.is_none() {
+            let _ = leases.refund_use(current_lease.id).await;
+        }
 
         let resolution = exec_ctx
             .gate_controller
@@ -761,9 +780,38 @@ async fn execute_with_inline_gate_retry(
             );
         }
 
-        // Approved: re-consume a lease use and mark the next call as
-        // pre-approved so the host's `EffectExecutor` skips its
-        // approval check.
+        // Approved. If the bridge cached the action's output before raising
+        // this gate (post-execution Authentication gate path — see
+        // `effect_adapter::auth_gate_from_extension_result`), the action has
+        // already run and we just needed user-side resolution. Skip
+        // re-execution and synthesize a successful ActionResult from the
+        // cached output. Mirrors the Tier 1 shortcut in
+        // `scripting::drive_inline_gate`. Tracked by #3533.
+        //
+        // Do NOT emit `ActionExecuted` here. The caller wraps the
+        // `Ok(ActionResult)` we return in `classify_exec_result`, which
+        // emits the terminal `ActionExecuted` for the Ok branch. Emitting
+        // here would produce two `ActionExecuted` events for one action,
+        // confusing audit observers. (Tier 1's `scripting::drive_inline_gate`
+        // and Tier 1 alt's `orchestrator::execute_action_with_inline_gate`
+        // emit themselves because their callers don't run an Ok-branch
+        // classifier — see the #3559 review for why structured is the
+        // outlier here.)
+        if let Some(cached_output) = resume_output {
+            return (
+                Ok(ActionResult {
+                    call_id,
+                    action_name,
+                    output: cached_output,
+                    is_error: false,
+                    duration: std::time::Duration::ZERO,
+                }),
+                emitted_events,
+            );
+        }
+
+        // Re-consume a lease use and mark the next call as pre-approved so
+        // the host's `EffectExecutor` skips its approval check.
         match leases.find_and_consume(thread_id, &call.action_name).await {
             Ok(new_lease) => {
                 current_lease = new_lease;
@@ -1424,6 +1472,158 @@ mod tests {
                 }
             }
             other => panic!("expected GatePaused, got {:?}", other),
+        }
+    }
+
+    /// #3559 security review (finding 2): when a post-execution
+    /// Authentication gate carries cached `resume_output`, the inline
+    /// retry path must NOT refund the lease use the action already
+    /// consumed. The cached-output branch returns without re-consuming,
+    /// so refunding would net a successful side-effecting action to
+    /// zero lease uses — letting a `max_uses=N` budget execute N+ times
+    /// for free.
+    ///
+    /// Wires `MockEffects` to return `GatePaused { resume_output: Some(...) }`
+    /// on the first call, drives it through `execute_action_calls` with an
+    /// always-approve test gate controller, and asserts:
+    /// 1. The cached output is returned (Ok result, no re-execution).
+    /// 2. Exactly one `ActionExecuted` event is emitted.
+    /// 3. The lease's `uses_remaining` ends at `Some(0)` — the original
+    ///    consumption stands; the refund was correctly skipped.
+    ///
+    /// Pre-fix (`refund_use` ran unconditionally), `uses_remaining` would
+    /// end at `Some(1)` and a subsequent call would still succeed,
+    /// breaking the `max_uses=1` contract.
+    #[tokio::test]
+    async fn resume_output_replay_consumes_exactly_one_lease_use() {
+        use crate::gate::{GateController, GatePauseRequest, GateResolution};
+
+        struct ApprovingGateController;
+
+        #[async_trait::async_trait]
+        impl GateController for ApprovingGateController {
+            async fn pause(&self, _request: GatePauseRequest) -> GateResolution {
+                GateResolution::Approved { always: false }
+            }
+        }
+
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+
+        let cached_output = serde_json::json!({"installed": "gmail", "ok": true});
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(
+            vec![test_action("tool_install")],
+            vec![Err(EngineError::GatePaused {
+                gate_name: "authentication".into(),
+                action_name: "tool_install".into(),
+                call_id: "call_install_1".into(),
+                parameters: Box::new(serde_json::json!({"name": "gmail"})),
+                resume_kind: Box::new(crate::gate::ResumeKind::Authentication {
+                    credential_name: ironclaw_common::CredentialName::new("google_oauth_token")
+                        .unwrap(),
+                    instructions: "Connect Google".into(),
+                    auth_url: None,
+                }),
+                // The bridge cached the action's output before raising
+                // the post-execution Authentication gate — this is the
+                // exact shape `effect_adapter::auth_gate_from_extension_result`
+                // produces for a successful `tool_install` that needs
+                // user-side OAuth completion.
+                resume_output: Some(Box::new(cached_output.clone())),
+                paused_lease: None,
+            })],
+        ));
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+
+        // Grant a lease with `max_uses: Some(1)` — the budget this test
+        // asserts the engine honors.
+        let lease = leases
+            .grant(thread.id, "tools", GrantedActions::All, None, Some(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            lease.uses_remaining,
+            Some(1),
+            "freshly granted lease should start with full budget"
+        );
+
+        let mut ctx = make_exec_context(&thread);
+        ctx.gate_controller = Arc::new(ApprovingGateController);
+
+        let calls = vec![ActionCall {
+            id: "call_install_1".into(),
+            action_name: "tool_install".into(),
+            parameters: serde_json::json!({"name": "gmail"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        // 1. The cached output reached the caller via an Ok result.
+        assert_eq!(result.results.len(), 1);
+        assert!(
+            !result.results[0].is_error,
+            "cached-output replay must surface as a successful ActionResult"
+        );
+        assert_eq!(
+            result.results[0].output, cached_output,
+            "ActionResult.output must be the gate's cached resume_output verbatim"
+        );
+        assert!(
+            result.need_approval.is_none(),
+            "inline-approved gate must NOT propagate as a top-level need_approval"
+        );
+
+        // 2. Exactly one terminal `ActionExecuted` for the call. The
+        //    pre-gate emission is `ApprovalRequested`, not
+        //    `ActionExecuted`, so the count check catches a future
+        //    regression that re-introduces a double-emit through the
+        //    classifier path.
+        let action_executed_count = result
+            .events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    EventKind::ActionExecuted { call_id, .. } if call_id == "call_install_1"
+                )
+            })
+            .count();
+        assert_eq!(
+            action_executed_count, 1,
+            "expected exactly one ActionExecuted for the cached-output replay; got events={:?}",
+            result.events
+        );
+
+        // 3. The lease use the action consumed before pausing was NOT
+        //    refunded — the original consumption is the correct
+        //    accounting for the already-executed action. The
+        //    `max_uses=1` budget is now exhausted, which surfaces as
+        //    `Err(LeaseExpired)` from both `check` (exhausted leases
+        //    fail `is_valid()`) and from a second `find_and_consume`
+        //    attempt. Pre-fix the refund would have ran, leaving
+        //    `uses_remaining: Some(1)` and both checks would succeed.
+        match leases.check(lease.id).await {
+            Err(EngineError::LeaseExpired { .. }) => {}
+            other => panic!(
+                "expected LeaseExpired after cached-output replay (budget should be \
+                 exhausted); got {other:?}"
+            ),
+        }
+        match leases.find_and_consume(thread.id, "tool_install").await {
+            Err(_) => {}
+            Ok(extra_lease) => panic!(
+                "max_uses=1 contract violated: a second `find_and_consume` succeeded \
+                 with uses_remaining={:?} — the refund-skip must keep the budget at zero",
+                extra_lease.uses_remaining
+            ),
         }
     }
 

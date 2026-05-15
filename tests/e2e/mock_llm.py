@@ -1239,18 +1239,57 @@ def match_tool_call(messages: list[dict], has_tools: bool) -> list[dict] | None:
         return None
     lower = content.lower()
     recent_tool_results = _find_tool_results(messages)
-    if (
-        ("check gmail unread" in lower or "gmail unread" in lower)
-        and any(
-            tr["name"] == "gmail"
-            and "Extension not installed:" in tr["content"]
+    # #3533: gmail-install-then-retry sequence.
+    #
+    # Turn 1: user says "check gmail unread" → match_tool_call below dispatches
+    #         a direct `gmail` call. Engine rejects with either "Extension not
+    #         installed:" (pre-#3533 wording, from the bridge-side
+    #         not-installed reject — the chat-driven install path was wired up
+    #         here in mock_llm but non-functional because `tool_install` was
+    #         hidden from the agent surface) or "is not callable in this
+    #         execution context" (post-#3533, engine-side preflight rejection,
+    #         tool_install restored on the agent surface).
+    # Turn 2: this branch fires — call `tool_install("gmail")`.
+    # Turn 3: install succeeded → call `gmail` again, this time the engine's
+    #         auth preflight raises an Authentication gate.
+    # Turn 4 (after OAuth completes): mock LLM falls through to the
+    #         tool-result-summary path returning the "Quarterly update" text.
+    if "check gmail unread" in lower or "gmail unread" in lower:
+        gmail_error = next(
+            (
+                tr
+                for tr in recent_tool_results
+                if tr["name"] == "gmail"
+                and (
+                    "Extension not installed:" in tr["content"]
+                    or "is not callable in this execution context" in tr["content"]
+                )
+            ),
+            None,
+        )
+        install_done = any(
+            tr["name"] == "tool_install"
+            and "error" not in tr["content"].lower()
             for tr in recent_tool_results
         )
-    ):
-        return [{
-            "tool_name": "tool_install",
-            "arguments": {"name": "gmail"},
-        }]
+        if gmail_error and not install_done:
+            return [{
+                "tool_name": "tool_install",
+                "arguments": {"name": "gmail"},
+            }]
+        if install_done and not any(
+            tr["name"] == "gmail" and "is not callable" not in tr["content"]
+            and "Extension not installed" not in tr["content"]
+            for tr in recent_tool_results
+        ):
+            # Retry gmail after install — the engine's auth preflight will
+            # raise an Authentication gate, which surfaces the auth card.
+            # After OAuth completes, this re-fires and reaches the actual
+            # gmail tool with the correct `list_messages` action.
+            return [{
+                "tool_name": "gmail",
+                "arguments": {"action": "list_messages"},
+            }]
     if _conversation_has_active_skill(messages, "pikastream-video-meeting"):
         bundle_path = _active_skill_bundle_path(messages, "pikastream-video-meeting")
         if (
@@ -1840,6 +1879,17 @@ async def chat_completions(request: web.Request) -> web.StreamResponse:
             return await _dispatch_special_response(request, cid, stream, special)
 
     tool_results = _find_tool_results(messages)
+    # #3533: when a multi-step recovery is in progress (e.g. gmail not
+    # installed → `tool_install` → retry gmail), the next move is another
+    # tool call, not a text summary of the failure. Let `match_tool_call`
+    # take precedence over the tool-result-summary fallback whenever it
+    # has a follow-up call to emit.
+    if tool_results:
+        followup = match_tool_call(messages, has_tools)
+        if followup:
+            if not stream:
+                return _tool_call_response(cid, followup)
+            return await _stream_tool_call(request, cid, followup)
     if (
         not tool_results
         and _conversation_uses_codeact(messages)

@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.2](https://github.com/nearai/ironclaw/compare/ironclaw-v0.28.1...ironclaw-v0.28.2) - 2026-05-14
+
+### Fixed
+
+- *(extensions)* restore chat-driven `tool_install` + fix double-invoke + auto-approve footgun ([#3559](https://github.com/nearai/ironclaw/pull/3559))
+
+### Changed
+
+- *(llm)* hide provider-specific auth, model fetch, and embeddings config behind facades ([#3416](https://github.com/nearai/ironclaw/pull/3416))
+
+### Tests
+
+- *(e2e)* unxfail two auth-matrix tests now that contracts match ([#3589](https://github.com/nearai/ironclaw/pull/3589))
+- *(e2e)* make Skills lifecycle deterministic ([#3309](https://github.com/nearai/ironclaw/pull/3309))
+
+## [0.28.1](https://github.com/nearai/ironclaw/compare/ironclaw-v0.28.0...ironclaw-v0.28.1) - 2026-05-11
+
+### Added
+
+- *(channels)* add `pairing_approve` tool for Slack binding via chat ([#3396](https://github.com/nearai/ironclaw/pull/3396))
+- *(channels)* add WeChat registry artifact metadata ([#3386](https://github.com/nearai/ironclaw/pull/3386))
+- *(common)* describe paths and platform helpers in crate description ([#3498](https://github.com/nearai/ironclaw/pull/3498))
+
+### Fixed
+
+- *(web)* bug bash — restart modal recovery, approval clarity, http defaults ([#3364](https://github.com/nearai/ironclaw/pull/3364))
+- *(bridge)* bypass agent-loop mpsc for inline-await Approval gates ([#3365](https://github.com/nearai/ironclaw/pull/3365))
+- *(missions)* auto-resume paused missions after gate resolution ([#3366](https://github.com/nearai/ironclaw/pull/3366))
+- *(workspace)* multi-tenant memory isolation ([#3374](https://github.com/nearai/ironclaw/pull/3374))
+- *(auth)* tighten Telegram pairing UX and OAuth-failure recovery ([#3381](https://github.com/nearai/ironclaw/pull/3381))
+- *(web)* isolate cross-tenant SSE/WS status events and thread access ([#3390](https://github.com/nearai/ironclaw/pull/3390))
+- *(channels)* activate WASM channels on headless servers ([#3233](https://github.com/nearai/ironclaw/pull/3233))
+
+### Changed
+
+- *(llm)* extract multi-provider integration into ironclaw_llm crate ([#3387](https://github.com/nearai/ironclaw/pull/3387))
+
+### CI / Release
+
+- *(canary)* seed github_token_scopes companion in auth-live-seeded ([#3384](https://github.com/nearai/ironclaw/pull/3384))
+
+### Tests
+
+- *(e2e)* restore auth and approval coverage ([#3430](https://github.com/nearai/ironclaw/pull/3430))
+- *(e2e)* avoid REPL auth retry race ([#3437](https://github.com/nearai/ironclaw/pull/3437))
+
 ## [0.28.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.27.0...ironclaw-v0.28.0) - 2026-05-07
 
 ### Added

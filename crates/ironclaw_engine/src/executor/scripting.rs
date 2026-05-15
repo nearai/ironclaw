@@ -2131,6 +2131,14 @@ struct InlineGate {
     call_id: String,
     parameters: serde_json::Value,
     resume_kind: crate::gate::ResumeKind,
+    /// Pre-computed action output cached at gate-raise time. When the action
+    /// has *already executed* and only a follow-up resolution (e.g. OAuth) is
+    /// pending — `effect_adapter` raising an Authentication gate after a
+    /// successful `tool_install` is the canonical case — the bridge attaches
+    /// the install's output here. On resolution we return that cached output
+    /// instead of re-executing the action, which would otherwise re-download
+    /// the WASM bundle and re-raise a fresh approval gate (#3533 follow-up).
+    resume_output: Option<serde_json::Value>,
 }
 
 /// Drive an `Approval` gate to terminal resolution, retrying the
@@ -2220,9 +2228,38 @@ async fn drive_inline_gate(
             ));
         }
 
-        // Approved. Re-acquire a lease use and retry the action. The
-        // bridge installed any auto-approve preference before
-        // delivering the resolution, so policy now returns Allow.
+        // Approved. If the bridge cached the action's output before raising
+        // this gate (post-execution Authentication gate path — see
+        // `effect_adapter::auth_gate_from_extension_result` and the
+        // `check_tool_readiness` path), the action has already run and we
+        // just needed user-side resolution. Skip re-execution and return
+        // the cached output directly. Without this short-circuit, the
+        // retry re-runs `tool_install` (re-downloading the WASM) and the
+        // second pass through `effect_adapter::enforce_tool_permission`
+        // raises a brand-new approval gate that the user has no way to
+        // resolve. Tracked by #3533.
+        if let Some(cached_output) = gate.resume_output.take() {
+            events.push(EventKind::ActionExecuted {
+                step_id: context.step_id,
+                action_name: gate.action_name.clone(),
+                call_id: gate.call_id.clone(),
+                duration_ms: 0,
+                params_summary,
+            });
+            let monty_val = json_to_monty(&cached_output);
+            action_results.push(ActionResult {
+                call_id: gate.call_id.clone(),
+                action_name: gate.action_name.clone(),
+                output: cached_output,
+                is_error: false,
+                duration: std::time::Duration::ZERO,
+            });
+            return ExtFunctionResult::Return(monty_val);
+        }
+
+        // Re-acquire a lease use and retry the action. The bridge installed
+        // any auto-approve preference before delivering the resolution, so
+        // policy now returns Allow.
         //
         // Note: `find_and_consume` may select a different lease than
         // the originally-refunded one if multiple grants cover this
@@ -2302,6 +2339,7 @@ async fn drive_inline_gate(
                 call_id,
                 parameters,
                 resume_kind,
+                resume_output,
                 ..
             }) if matches!(
                 *resume_kind,
@@ -2311,7 +2349,13 @@ async fn drive_inline_gate(
             {
                 // Refund the use we just consumed — the next loop
                 // iteration will pause and re-consume on resolution.
-                let _ = leases.refund_use(lease.id).await;
+                // EXCEPTION: when the retry's gate carries a cached
+                // `resume_output`, the next iteration will return that
+                // cached output without re-consuming; refunding here
+                // would zero out the lease use the retry already spent.
+                if resume_output.is_none() {
+                    let _ = leases.refund_use(lease.id).await;
+                }
                 events.push(EventKind::ApprovalRequested {
                     action_name: action_name.clone(),
                     call_id: call_id.clone(),
@@ -2330,6 +2374,7 @@ async fn drive_inline_gate(
                     call_id,
                     parameters: *parameters,
                     resume_kind: *resume_kind,
+                    resume_output: resume_output.map(|b| *b),
                 };
                 continue;
             }
@@ -2440,11 +2485,22 @@ async fn resolve_tool_future(
                 call_id: gate_call_id,
                 parameters: gate_parameters,
                 resume_kind,
+                resume_output,
                 ..
             }),
             _,
         )) => {
-            let _ = leases.refund_use(lease_id).await;
+            // Skip the refund when the gate carries cached `resume_output`:
+            // the action has already executed (post-execution Authentication
+            // gate), and `drive_inline_gate` will return the cached output
+            // on approval without re-consuming a lease. Refunding here would
+            // let a successful side-effecting action consume zero uses.
+            // Matching guards live in `structured::execute_with_inline_gate_retry`
+            // and `orchestrator::execute_action_with_inline_gate`. Tracked by
+            // the #3559 security review.
+            if resume_output.is_none() {
+                let _ = leases.refund_use(lease_id).await;
+            }
             events.push(EventKind::ApprovalRequested {
                 action_name: gate_action_name.clone(),
                 call_id: gate_call_id.clone(),
@@ -2490,6 +2546,7 @@ async fn resolve_tool_future(
                     call_id: gate_call_id,
                     parameters: *gate_parameters,
                     resume_kind: *resume_kind,
+                    resume_output: resume_output.map(|b| *b),
                 },
                 leases,
                 effects,

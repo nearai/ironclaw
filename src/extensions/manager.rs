@@ -2382,6 +2382,14 @@ impl ExtensionManager {
                 if installed_names.contains(&(entry.name.clone(), entry.kind)) {
                     continue;
                 }
+                // Hidden registry entries (e.g. `telegram_mtproto` alongside the
+                // canonical `telegram` channel) are omitted from default-discovery
+                // surfaces so the agent doesn't enumerate them as competing
+                // options for "connect my X". They remain installable by explicit
+                // name via `tool_install`. Issue #3533.
+                if entry.hidden {
+                    continue;
+                }
                 extensions.push(InstalledExtension {
                     name: entry.name,
                     kind: entry.kind,
@@ -8507,6 +8515,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
             version: None,
+            hidden: false,
         }
     }
 
@@ -9464,6 +9473,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::CapabilitiesAuth,
             version: None,
+            hidden: false,
         };
         let manager = make_test_manager_with_catalog(
             None,
@@ -9488,6 +9498,81 @@ mod tests {
             web_search.description.contains("Search the web"),
             "latent action description should carry the registry entry's description, got: {}",
             web_search.description
+        );
+    }
+
+    /// Issue #3533 regression. Two telegram registry entries used to surface
+    /// to the agent as "Activatable Integrations" — the canonical `telegram`
+    /// channel and `telegram_mtproto` — and the model would correctly
+    /// enumerate them as competing options for "connect my telegram". Hidden
+    /// entries must be dropped from the available-but-not-installed appendix
+    /// of `list()`, so only the canonical channel reaches the prompt.
+    /// Hidden entries remain installable by explicit name via `tool_install`.
+    #[tokio::test]
+    async fn list_filters_hidden_registry_entries_from_available_set() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let telegram = RegistryEntry {
+            name: "telegram".to_string(),
+            display_name: "Telegram Channel".to_string(),
+            kind: ExtensionKind::WasmChannel,
+            description: "Talk to your agent through a Telegram bot".to_string(),
+            keywords: vec!["telegram".into(), "messaging".into()],
+            source: ExtensionSource::WasmDownload {
+                wasm_url: "https://example.com/telegram.wasm".to_string(),
+                capabilities_url: None,
+            },
+            fallback_source: None,
+            auth_hint: AuthHint::CapabilitiesAuth,
+            version: None,
+            hidden: false,
+        };
+        let mtproto = RegistryEntry {
+            name: "telegram_mtproto".to_string(),
+            display_name: "Telegram Tool".to_string(),
+            kind: ExtensionKind::WasmTool,
+            description: "Direct MTProto integration".to_string(),
+            keywords: vec!["telegram".into(), "mtproto".into()],
+            source: ExtensionSource::WasmDownload {
+                wasm_url: "https://example.com/telegram_mtproto.wasm".to_string(),
+                capabilities_url: None,
+            },
+            fallback_source: None,
+            auth_hint: AuthHint::CapabilitiesAuth,
+            version: None,
+            hidden: true,
+        };
+        let manager = make_test_manager_with_catalog(
+            None,
+            dir.path().join("tools"),
+            dir.path().join("channels"),
+            None,
+            vec![telegram, mtproto],
+        );
+
+        let listed = manager.list(None, true, "test").await.expect("list");
+        let entries: Vec<(&str, bool)> = listed
+            .iter()
+            .map(|e| (e.name.as_str(), e.installed))
+            .collect();
+        let names: Vec<&str> = entries.iter().map(|(name, _)| *name).collect();
+        assert!(
+            names.contains(&"telegram"),
+            "canonical telegram channel must still surface: {entries:?}"
+        );
+        assert!(
+            !names.contains(&"telegram_mtproto"),
+            "hidden registry entry must be filtered out of include_available list: {entries:?}"
+        );
+        // Confirm the only telegram entry that surfaces is uninstalled —
+        // i.e. it came from the registry append path that the hidden filter
+        // governs, not from a real install discovered on disk.
+        let telegram_entry = entries
+            .iter()
+            .find(|(name, _)| *name == "telegram")
+            .expect("telegram entry");
+        assert!(
+            !telegram_entry.1,
+            "test fixture: telegram must be uninstalled"
         );
     }
 
@@ -9761,6 +9846,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::CapabilitiesAuth,
             version: None,
+            hidden: false,
         };
 
         let manager = make_test_manager_with_catalog(
@@ -9844,6 +9930,7 @@ mod tests {
             fallback_source: None,
             auth_hint: AuthHint::CapabilitiesAuth,
             version: None,
+            hidden: false,
         };
 
         let manager = make_test_manager_with_catalog(

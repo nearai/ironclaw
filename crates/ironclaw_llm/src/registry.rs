@@ -26,7 +26,11 @@ use serde::{Deserialize, Serialize};
 
 /// API protocol a provider speaks.
 ///
-/// Determines which rig-core client constructor to use.
+/// Determines which provider constructor to use. Most variants identify
+/// a rig-core client; the trailing four (`Bedrock`, `OpenAiCodex`,
+/// `GeminiOauth`, `NearAi`) identify dedicated provider implementations
+/// that don't fit the OpenAI-compat shape and have their own typed
+/// config struct on [`crate::config::LlmConfig`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderProtocol {
@@ -54,6 +58,47 @@ pub enum ProviderProtocol {
     /// tool calling on every reasoning model OpenRouter exposes (Claude with
     /// thinking, OpenAI o-series, DeepSeek-R1, Gemini 2.5+, Qwen QwQ, …).
     OpenRouter,
+    /// AWS Bedrock native Converse API (via `aws-sdk-bedrockruntime`).
+    /// Reads its config from [`crate::config::LlmConfig::bedrock`].
+    /// Feature-gated behind `--features bedrock`.
+    Bedrock,
+    /// OpenAI Codex Responses API (ChatGPT subscription OAuth).
+    /// Reads its config from [`crate::config::LlmConfig::openai_codex`].
+    ///
+    /// Wire name is `"openai_codex"` (matches the backend identifier
+    /// used by `LlmConfig::backend` and the gateway adapter field) —
+    /// the snake_case derivation `"open_ai_codex"` is also accepted as
+    /// an alias for forward compatibility.
+    #[serde(rename = "openai_codex", alias = "open_ai_codex")]
+    OpenAiCodex,
+    /// Gemini OAuth via Cloud Code API (`generativelanguage.googleapis.com`
+    /// or `cloudcode-pa.googleapis.com` depending on model).
+    /// Reads its config from [`crate::config::LlmConfig::gemini_oauth`].
+    GeminiOauth,
+    /// NEAR AI Chat Completions with session-token or API-key auth.
+    /// Reads its config from [`crate::config::LlmConfig::nearai`].
+    ///
+    /// Wire name is `"nearai"` (matches the historical backend
+    /// identifier and gateway adapter string) — the snake_case
+    /// derivation `"near_ai"` is also accepted as an alias.
+    #[serde(rename = "nearai", alias = "near_ai")]
+    NearAi,
+}
+
+impl ProviderProtocol {
+    /// Returns true for protocols whose runtime configuration lives in a
+    /// dedicated `LlmConfig` field rather than `LlmConfig::provider`
+    /// (`RegistryProviderConfig`).
+    ///
+    /// Used by the resolver to decide which sub-config to populate, and by
+    /// the wizard to recognise non-OpenAI-shape backends without matching
+    /// on backend strings.
+    pub fn has_dedicated_config(self) -> bool {
+        matches!(
+            self,
+            Self::Bedrock | Self::OpenAiCodex | Self::GeminiOauth | Self::NearAi
+        )
+    }
 }
 
 /// How the setup wizard should collect credentials for this provider.
@@ -89,6 +134,42 @@ pub enum SetupHint {
         #[serde(default)]
         can_list_models: bool,
     },
+    /// AWS Bedrock setup: prompt for region (default us-east-1), optional
+    /// cross-region prefix (us/eu/apac/global), and AWS named profile.
+    /// Authentication delegates to the standard AWS credential chain
+    /// (env, profile, instance role) — no API key collected.
+    AwsCredentials {
+        display_name: String,
+        /// Whether the wizard should offer the cross-region inference prompt.
+        #[serde(default)]
+        supports_cross_region: bool,
+        /// Whether the wizard should offer the AWS_PROFILE prompt.
+        #[serde(default)]
+        supports_profile: bool,
+    },
+    /// OAuth device-code or PKCE flow handled by [`crate::auth::start_login`].
+    /// The wizard renders a `WizardAuthPrompt` and resumes after token return.
+    OAuthDeviceCode {
+        display_name: String,
+        /// Identifier for [`crate::auth::AuthBackend`] in the auth facade.
+        backend: String,
+    },
+    /// Read credentials from a JSON / token file on disk (e.g. Gemini Cloud
+    /// OAuth, where the user logs in once via `gemini auth` and we pick up
+    /// `~/.gemini/oauth_creds.json`).
+    FileBasedCredentials {
+        display_name: String,
+        #[serde(default)]
+        default_path_hint: Option<String>,
+    },
+    /// Interactive session-token login (NEAR AI). The wizard delegates to
+    /// the auth facade for the OAuth-style session flow.
+    SessionToken {
+        display_name: String,
+        /// URL where the user can manually obtain a session token.
+        #[serde(default)]
+        key_url: Option<String>,
+    },
 }
 
 impl SetupHint {
@@ -97,6 +178,10 @@ impl SetupHint {
             Self::ApiKey { display_name, .. } => display_name,
             Self::Ollama { display_name, .. } => display_name,
             Self::OpenAiCompatible { display_name, .. } => display_name,
+            Self::AwsCredentials { display_name, .. } => display_name,
+            Self::OAuthDeviceCode { display_name, .. } => display_name,
+            Self::FileBasedCredentials { display_name, .. } => display_name,
+            Self::SessionToken { display_name, .. } => display_name,
         }
     }
 
@@ -111,6 +196,10 @@ impl SetupHint {
             Self::OpenAiCompatible {
                 can_list_models, ..
             } => *can_list_models,
+            Self::AwsCredentials { .. }
+            | Self::OAuthDeviceCode { .. }
+            | Self::FileBasedCredentials { .. }
+            | Self::SessionToken { .. } => false,
         }
     }
 
@@ -118,13 +207,50 @@ impl SetupHint {
         match self {
             Self::ApiKey { secret_name, .. } => Some(secret_name),
             Self::OpenAiCompatible { secret_name, .. } => Some(secret_name),
-            Self::Ollama { .. } => None,
+            Self::Ollama { .. }
+            | Self::AwsCredentials { .. }
+            | Self::OAuthDeviceCode { .. }
+            | Self::FileBasedCredentials { .. }
+            | Self::SessionToken { .. } => None,
         }
     }
 
     pub fn models_filter(&self) -> Option<&str> {
         match self {
             Self::ApiKey { models_filter, .. } => models_filter.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Wire-stable snake_case discriminator for this setup hint.
+    ///
+    /// Matches the `#[serde(tag = "kind", rename_all = "snake_case")]`
+    /// representation, so the same string can be used as a typed
+    /// identifier in JSON payloads (e.g. the web LLM providers payload's
+    /// `credential_kind` field) without going through
+    /// `serde_json::to_value`. Useful for callers that need to branch
+    /// on which credential flow a backend uses (api_key, session_token,
+    /// file_based_credentials, …) so the answer doesn't drift from
+    /// what the wizard dispatches on.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::ApiKey { .. } => "api_key",
+            Self::Ollama { .. } => "ollama",
+            Self::OpenAiCompatible { .. } => "open_ai_compatible",
+            Self::AwsCredentials { .. } => "aws_credentials",
+            Self::OAuthDeviceCode { .. } => "o_auth_device_code",
+            Self::FileBasedCredentials { .. } => "file_based_credentials",
+            Self::SessionToken { .. } => "session_token",
+        }
+    }
+
+    /// For [`SetupHint::FileBasedCredentials`], the default path hint
+    /// the wizard offers (may contain `~`); `None` for other variants.
+    pub fn default_path_hint(&self) -> Option<&str> {
+        match self {
+            Self::FileBasedCredentials {
+                default_path_hint, ..
+            } => default_path_hint.as_deref(),
             _ => None,
         }
     }
@@ -312,22 +438,20 @@ impl ProviderRegistry {
         result
     }
 
-    /// Check whether a backend string is a known provider (NearAI or registry).
+    /// Check whether a backend string is a known provider.
+    ///
+    /// Includes both OpenAI-shape registry providers and the dedicated
+    /// backends (NearAI, Bedrock, OpenAI Codex, Gemini OAuth) whose
+    /// protocol returns `has_dedicated_config() == true`.
     pub fn is_known(&self, backend: &str) -> bool {
-        backend == "nearai"
-            || backend == "near_ai"
-            || backend == "near"
-            || self.find(backend).is_some()
+        self.find(backend).is_some()
     }
 
     /// Get the model env var for a backend string.
     ///
-    /// Returns the registry provider's `model_env` if found,
-    /// or `"NEARAI_MODEL"` for the NearAI backend.
+    /// Returns the registry provider's `model_env`, or `"LLM_MODEL"` for
+    /// unknown backends (the generic openai-compatible fallback path).
     pub fn model_env_var(&self, backend: &str) -> &str {
-        if backend == "nearai" || backend == "near_ai" || backend == "near" {
-            return "NEARAI_MODEL";
-        }
         self.find(backend)
             .map(|def| def.model_env.as_str())
             .unwrap_or("LLM_MODEL")
@@ -858,6 +982,99 @@ mod tests {
                     param
                 );
             }
+        }
+    }
+
+    /// The dedicated-config backends (nearai/bedrock/codex/gemini_oauth)
+    /// must be in the registry so:
+    ///   - `is_known()` returns true (no string-list duplication elsewhere),
+    ///   - `find()` resolves their aliases,
+    ///   - `model_env_var()` returns the right env var,
+    ///   - their protocol's `has_dedicated_config()` returns true (so the
+    ///     OpenAI-shape resolver skips them),
+    ///   - they appear in `selectable()` with the `SetupHint` variant the
+    ///     wizard dispatches on (Layer C).
+    #[test]
+    fn dedicated_config_backends_are_in_registry_and_selectable() {
+        let registry = ProviderRegistry::new(
+            serde_json::from_str(include_str!("../../../providers.json")).unwrap(),
+        );
+
+        for (id, expected_protocol, alias_to_check, model_env, expected_hint) in [
+            (
+                "nearai",
+                ProviderProtocol::NearAi,
+                "near",
+                "NEARAI_MODEL",
+                "session_token",
+            ),
+            (
+                "bedrock",
+                ProviderProtocol::Bedrock,
+                "aws_bedrock",
+                "BEDROCK_MODEL",
+                "aws_credentials",
+            ),
+            (
+                "openai_codex",
+                ProviderProtocol::OpenAiCodex,
+                "codex",
+                "OPENAI_CODEX_MODEL",
+                "o_auth_device_code", // SetupHint kind, not protocol name
+            ),
+            (
+                "gemini_oauth",
+                ProviderProtocol::GeminiOauth,
+                "gemini-oauth",
+                "GEMINI_MODEL",
+                "file_based_credentials",
+            ),
+        ] {
+            assert!(registry.is_known(id), "{id} should be is_known");
+            assert!(
+                registry.is_known(alias_to_check),
+                "alias '{alias_to_check}' should resolve to {id}",
+            );
+            let def = registry
+                .find(id)
+                .unwrap_or_else(|| panic!("{id} not found"));
+            assert_eq!(def.protocol, expected_protocol);
+            assert!(
+                def.protocol.has_dedicated_config(),
+                "{id} protocol must report has_dedicated_config()"
+            );
+            assert_eq!(registry.model_env_var(id), model_env);
+            let setup = def
+                .setup
+                .as_ref()
+                .unwrap_or_else(|| panic!("{id} must carry a SetupHint after Layer C"));
+            let actual_hint = match setup {
+                SetupHint::ApiKey { .. } => "api_key",
+                SetupHint::Ollama { .. } => "ollama",
+                SetupHint::OpenAiCompatible { .. } => "open_ai_compatible",
+                SetupHint::AwsCredentials { .. } => "aws_credentials",
+                SetupHint::OAuthDeviceCode { .. } => "o_auth_device_code",
+                SetupHint::FileBasedCredentials { .. } => "file_based_credentials",
+                SetupHint::SessionToken { .. } => "session_token",
+            };
+            assert_eq!(
+                actual_hint, expected_hint,
+                "{id} must use the {expected_hint} setup hint"
+            );
+        }
+
+        // The four dedicated-config backends now appear in `selectable()`
+        // and the wizard menu can iterate it without manual additions.
+        let selectable_ids: Vec<&str> = registry
+            .selectable()
+            .iter()
+            .map(|d| d.id.as_str())
+            .collect();
+        for id in ["nearai", "bedrock", "openai_codex", "gemini_oauth"] {
+            assert!(
+                selectable_ids.contains(&id),
+                "{id} must appear in selectable() after Layer C"
+            );
         }
     }
 

@@ -151,9 +151,11 @@ fn build_codeact_system_prompt_inner(
         prompt.push('\n');
         prompt.push_str(
             "These integrations need user setup before their tools become callable. \
-             You cannot enable them yourself — tell the user to install or activate them \
-             through the IronClaw UI (or wait for them to do so). \
-             If you need parameter details before suggesting one, call \
+             When the user asks to connect/install/enable one of them, call \
+             `tool_install(name=\"<name>\")` directly — don't enumerate alternatives or \
+             describe manual UI steps. If credentials are missing the engine raises an \
+             auth gate at execute time and the user is prompted in chat. \
+             For parameter details before installing, call \
              `tool_info(name=\"<tool>\", detail=\"summary\")` on a preview tool.\n\n",
         );
         for capability in activatable_integrations {
@@ -553,6 +555,11 @@ mod tests {
         assert!(prompt.contains("need user setup before their tools become callable"));
         assert!(prompt.contains("tool_info(name=\"<tool>\", detail=\"summary\")"));
         assert!(prompt.contains("Unlocks: `slack_send`, `slack_history`"));
+        // Regression for #3533: the prompt must direct the model to call
+        // tool_install for activatable integrations instead of narrating
+        // manual UI steps or enumerating alternatives.
+        assert!(prompt.contains("tool_install(name=\"<name>\")"));
+        assert!(prompt.contains("don't enumerate alternatives"));
     }
 
     #[test]

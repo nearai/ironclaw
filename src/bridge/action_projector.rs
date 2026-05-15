@@ -204,9 +204,6 @@ fn classify_registered_tool(
     if crate::bridge::effect_adapter::is_v1_auth_tool(tool.name()) {
         return ProjectedAction::Hidden;
     }
-    if hidden_from_model_callable_surface(tool.name()) {
-        return ProjectedAction::Hidden;
-    }
     if tool_permissions.resolve_permission(tool.name()).effective == PermissionState::Disabled {
         return ProjectedAction::Hidden;
     }
@@ -238,10 +235,6 @@ fn classify_registered_tool(
     } else {
         ProjectedAction::Inline(project_tool_action(tool))
     }
-}
-
-fn hidden_from_model_callable_surface(tool_name: &str) -> bool {
-    matches!(tool_name, "tool_install" | "tool-install")
 }
 
 fn supports_pre_activation_discovery(
@@ -940,7 +933,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_install_hidden_from_model_callable_surface() {
+    async fn tool_install_is_callable_by_agent() {
+        // Regression for #3533: the agent must be able to call tool_install
+        // so "connect my telegram" runs an actual install + auth gate, rather
+        // than narrating manual UI steps. The hidden gate added in #2868 is
+        // gone; approval gating in tool_install::requires_approval() is what
+        // mediates user consent now.
         let tools = std::sync::Arc::new(ToolRegistry::new());
         tools
             .register(std::sync::Arc::new(BuiltinTool {
@@ -969,8 +967,7 @@ mod tests {
             .map(|action| action.name)
             .collect::<Vec<_>>();
 
-        assert!(!action_names.iter().any(|name| name == "tool_install"));
-        // tool_search is NOT in the hidden list, so it remains callable.
+        assert!(action_names.iter().any(|name| name == "tool_install"));
         assert!(action_names.iter().any(|name| name == "tool_search"));
     }
 

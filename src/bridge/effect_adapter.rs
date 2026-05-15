@@ -612,7 +612,12 @@ impl EffectBridgeAdapter {
                         output_value.get("auth_url").and_then(|v| v.as_str()),
                     ),
                 },
-                None,
+                // Carry the install/auth tool's already-computed output
+                // through the gate so the inline-await retry can return
+                // it directly instead of re-running `tool_install` (which
+                // would re-download the WASM and re-raise approval).
+                // Tracked by #3533.
+                Some(output_value.clone()),
                 Some(lease.clone()),
             )),
             _ => None,
@@ -2864,6 +2869,15 @@ mod tests {
 
     struct DefaultAllowNamedApprovalTestTool;
 
+    /// Stand-in for `tool_install`. Its `name()` matches the canonical
+    /// seeded-`AskEachTime` baseline so the explicit-equals-seeded
+    /// regression in `explicit_ask_each_time_for_seeded_default_tool_still_gates`
+    /// actually exercises the value-equality codepath. Mirrors the real
+    /// `tool_install`'s `UnlessAutoApproved` approval requirement so the
+    /// `enforce_tool_permission` branch under test (AskEachTime →
+    /// is_explicit_ask check) is reached.
+    struct SeededAskEachTimeTestTool;
+
     #[async_trait]
     impl Tool for ApprovalTestTool {
         fn name(&self) -> &str {
@@ -2960,6 +2974,41 @@ mod tests {
         ) -> Result<ToolOutput, ToolError> {
             Ok(ToolOutput::success(
                 serde_json::json!({ "echo": params }),
+                std::time::Duration::from_millis(1),
+            ))
+        }
+
+        fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+            ApprovalRequirement::UnlessAutoApproved
+        }
+    }
+
+    #[async_trait]
+    impl Tool for SeededAskEachTimeTestTool {
+        fn name(&self) -> &str {
+            "tool_install"
+        }
+
+        fn description(&self) -> &str {
+            "Test stand-in for tool_install; name matches a seeded-AskEachTime baseline"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" }
+                }
+            })
+        }
+
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::success(
+                serde_json::json!({ "installed": params }),
                 std::time::Duration::from_millis(1),
             ))
         }
@@ -3824,6 +3873,92 @@ mod tests {
         match err {
             EngineError::GatePaused { gate_name, .. } => {
                 assert_eq!(gate_name, "approval");
+            }
+            other => panic!("expected GatePaused, got {other:?}"),
+        }
+    }
+
+    /// #3559 security review (finding 1): when a user explicitly sets a
+    /// tool's permission to a value that happens to match the code-level
+    /// seeded default (e.g. `tool_install` → `AskEachTime`, which is also
+    /// the seeded baseline), pre-#3559's `ToolPermissionSnapshot::resolve_permission`
+    /// collapsed the DB row to `explicit = None`, then this function's
+    /// `is_explicit_ask` check failed, and `auto_approve_tools` bypassed
+    /// the gate — silently dropping the user's explicit choice.
+    ///
+    /// The companion regression at `bridge::tool_permissions::tests::user_explicit_value_matching_seeded_default_stays_explicit`
+    /// covers the resolver in isolation. Per `.claude/rules/testing.md`
+    /// "Test Through the Caller", this test additionally drives the
+    /// side-effecting call site (`execute_action` → `enforce_tool_permission`)
+    /// with a tool whose name matches a seeded default in `seeded_default_permission`,
+    /// so the value-equality bug would surface here if it were ever
+    /// reintroduced in the resolver.
+    #[tokio::test]
+    async fn explicit_ask_each_time_for_seeded_default_tool_still_gates() {
+        let db_path = std::env::temp_dir().join(format!(
+            "ironclaw-seeded-ask-each-time-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let db = crate::db::connect_from_config(&crate::config::DatabaseConfig::from_libsql_path(
+            db_path.to_str().expect("db path"),
+            None,
+            None,
+        ))
+        .await
+        .expect("db");
+        // Write a user-explicit `AskEachTime` for `tool_install`. Confirm
+        // that `seeded_default_permission("tool_install") == AskEachTime`
+        // — if the seeded baseline ever changes, this test must be
+        // updated to keep its value-equality coverage meaningful.
+        assert_eq!(
+            crate::tools::permissions::seeded_default_permission("tool_install"),
+            Some(crate::tools::permissions::PermissionState::AskEachTime),
+            "this regression test assumes tool_install's seeded baseline is AskEachTime; \
+             if you changed it, point this test at a different seeded-AskEachTime tool"
+        );
+        db.set_setting(
+            "test_user",
+            "tool_permissions.tool_install",
+            &serde_json::to_value(crate::tools::permissions::PermissionState::AskEachTime)
+                .expect("serialize permission"),
+        )
+        .await
+        .expect("save tool permission");
+
+        let tools = Arc::new(ToolRegistry::new().with_database(db));
+        tools.register(Arc::new(SeededAskEachTimeTestTool)).await;
+        let adapter = EffectBridgeAdapter::new(
+            tools,
+            Arc::new(SafetyLayer::new(&ironclaw_safety::SafetyConfig {
+                max_output_length: 10_000,
+                injection_check_enabled: false,
+            })),
+            Arc::new(HookRegistry::default()),
+        )
+        .with_global_auto_approve(true);
+
+        let err = adapter
+            .execute_action(
+                "tool_install",
+                serde_json::json!({"name": "gmail"}),
+                &lease(),
+                &exec_ctx(
+                    ironclaw_engine::ThreadId::new(),
+                    Some("call_seeded_ask_each_time"),
+                ),
+            )
+            .await
+            .expect_err(
+                "user-explicit AskEachTime must gate even when value matches seeded default \
+                 and AGENT_AUTO_APPROVE_TOOLS=true",
+            );
+
+        match err {
+            EngineError::GatePaused { gate_name, .. } => {
+                assert_eq!(
+                    gate_name, "approval",
+                    "explicit user choice must surface as approval gate, not bypass"
+                );
             }
             other => panic!("expected GatePaused, got {other:?}"),
         }

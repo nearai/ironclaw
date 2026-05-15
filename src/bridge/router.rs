@@ -2234,6 +2234,35 @@ pub async fn resolve_inline_gates_for_credential(user_id: &str, credential_name:
             woken,
             "delivered Approved to parked inline-await waiter(s) on credential write"
         );
+        // #3533: also drop the matching Authentication pending-gate
+        // rows from the store. The inline-await retry will run with
+        // the credential now present and either succeed or raise its
+        // own follow-up gate; the original Authentication row no
+        // longer represents live state and would otherwise linger
+        // until expiry (and surface in `HistoryResponse.pending_gate`
+        // for users who had no follow-up gate). Without this discard,
+        // the external-callback path (`resolve_engine_auth_callback`)
+        // is the only thing that cleans up — and skipping that path
+        // to avoid the "thread already running" race left the row
+        // orphaned.
+        let matching: Vec<_> = state
+            .pending_gates
+            .list_for_user(user_id)
+            .await
+            .into_iter()
+            .filter(|gate| {
+                matches!(
+                    &gate.resume_kind,
+                    ironclaw_engine::ResumeKind::Authentication {
+                        credential_name: gate_credential,
+                        ..
+                    } if gate_credential.as_str() == credential_name
+                )
+            })
+            .collect();
+        for gate in matching {
+            let _ = state.pending_gates.discard(&gate.key()).await;
+        }
     }
     woken
 }

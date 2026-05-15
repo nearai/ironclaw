@@ -317,14 +317,10 @@ async fn check_nearai_session(settings: &Settings) -> CheckResult {
 fn check_llm_config(settings: &Settings) -> CheckResult {
     match crate::config::llm::resolve(settings) {
         Ok(config) => {
-            // Show the model for the active backend, not always nearai.model.
-            let model = if let Some(ref bedrock) = config.bedrock {
-                &bedrock.model
-            } else if let Some(ref provider) = config.provider {
-                &provider.model
-            } else {
-                &config.nearai.model
-            };
+            // `active_model_name` is the crate-side dispatch that handles
+            // all backends (nearai/bedrock/codex/gemini_oauth + registry)
+            // — the doctor doesn't need to know which sub-config to read.
+            let model = config.active_model_name();
             CheckResult::Pass(format!("backend={}, model={}", config.backend, model))
         }
         Err(e) => CheckResult::Fail(format!("LLM config error: {e}")),
