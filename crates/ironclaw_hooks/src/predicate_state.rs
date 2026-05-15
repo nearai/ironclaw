@@ -52,7 +52,7 @@
 //! adapter (tracked in the scope doc) since `Instant` cannot be
 //! serialized across processes.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
@@ -88,7 +88,22 @@ pub(crate) struct ValueKey {
 /// originating event (e.g. a `RuntimeEventId` hex, an arguments digest
 /// + timestamp tuple, a synthetic UUID for tests).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PredicateEventId(pub String);
+pub struct PredicateEventId(String);
+
+impl PredicateEventId {
+    /// Construct from any string-like value. Callers should pass a
+    /// stable, host-assigned identity (e.g. a `RuntimeEventId` hex). The
+    /// hook context enforces a non-empty / NUL-free invariant at
+    /// `with_caller_event_id`; this constructor itself stays permissive
+    /// so internal synth paths can mint ids freely.
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 /// Error surface for the backend. Durable backends use this to signal
 /// transient failures (connection lost, DB unavailable); the in-memory
@@ -150,6 +165,20 @@ pub(crate) trait PredicateStateBackend: Send + Sync {
     /// Total LRU evictions observed since construction. Operators
     /// should alert when this counter advances. Threat-model finding D5.
     fn evictions_observed(&self) -> u64;
+
+    /// Garbage-collect entries older than `cutoff`. Default implementation
+    /// is a no-op — the in-memory backend already trims per-key on every
+    /// `record_*` call, so a separate reaper would be redundant. Durable
+    /// backends override this with a `DELETE WHERE occurred_at < cutoff`
+    /// equivalent, run periodically by an operator reaper task.
+    ///
+    /// Lockable into the trait signature now (rather than at the durable
+    /// backend PR) so trait-object callers don't break when the durable
+    /// impl lands — henrypark133 important #5 on PR #3635.
+    #[allow(dead_code)] // operator reaper hook for future durable backends
+    fn evict_older_than(&self, _cutoff: Instant) -> Result<u64, PredicateBackendError> {
+        Ok(0)
+    }
 }
 
 /// In-process backend. Preserves the original [`PredicateEvaluator`]
@@ -171,14 +200,48 @@ pub(crate) trait PredicateStateBackend: Send + Sync {
 /// 2. **Empty buckets get removed** (codex P1 #2): when `entries` is
 ///    trimmed to empty, the bucket is dropped from the outer map so
 ///    it can't become a zombie LRU-skip.
+/// Per-key history bucket. Maintains `entries` (the FIFO window) AND a
+/// companion `dedup_ids` set so duplicate-id checks are O(1) instead of
+/// O(n) — the previous linear scan serialized every evaluator call under
+/// the outer mutex at high in-window entry counts (henrypark133 must-fix
+/// #1 on PR #3635). Invariant: `dedup_ids` is exactly the set of
+/// `event_id` values currently in `entries`; every push/pop updates both.
 #[derive(Debug, Default)]
 struct InvocationBucket {
     entries: VecDeque<(Instant, PredicateEventId)>,
+    dedup_ids: HashSet<PredicateEventId>,
+}
+
+impl InvocationBucket {
+    fn pop_front(&mut self) {
+        if let Some((_, id)) = self.entries.pop_front() {
+            self.dedup_ids.remove(&id);
+        }
+    }
+
+    fn push_back(&mut self, ts: Instant, event_id: PredicateEventId) {
+        self.dedup_ids.insert(event_id.clone());
+        self.entries.push_back((ts, event_id));
+    }
 }
 
 #[derive(Debug, Default)]
 struct ValueBucket {
     entries: VecDeque<(Instant, Decimal, PredicateEventId)>,
+    dedup_ids: HashSet<PredicateEventId>,
+}
+
+impl ValueBucket {
+    fn pop_front(&mut self) {
+        if let Some((_, _, id)) = self.entries.pop_front() {
+            self.dedup_ids.remove(&id);
+        }
+    }
+
+    fn push_back(&mut self, ts: Instant, value: Decimal, event_id: PredicateEventId) {
+        self.dedup_ids.insert(event_id.clone());
+        self.entries.push_back((ts, value, event_id));
+    }
 }
 
 pub(crate) struct InMemoryPredicateStateBackend {
@@ -217,34 +280,36 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
     ) -> Result<u32, PredicateBackendError> {
         // Single-lock atomic record-and-read (codex Critical: must not
         // split write + read across concurrent writers).
-        let mut history = self
-            .invocation_history
-            .lock()
-            .expect("predicate history mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
+        //
+        // Recover from a poisoned mutex by reading the inner value rather
+        // than cascading the panic to every subsequent caller
+        // (henrypark133 must-fix #2 on PR #3635). A poisoning thread has
+        // already aborted; refusing service indefinitely is worse than
+        // proceeding with possibly-incomplete state.
+        let mut history = match self.invocation_history.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         if !history.contains_key(key) && history.len() >= MAX_HISTORY_KEYS {
             evict_lru_invocation(&mut history, &self.evictions);
         }
         let bucket = history.entry(key.clone()).or_default();
         let cutoff = now.checked_sub(window).unwrap_or(now);
-        // Trim entries outside the window. The (timestamp, event_id) pair
-        // ages together, so a re-emitted event whose original timestamp
-        // is older than `window` is correctly treated as a fresh record.
+        // Trim entries outside the window via the bucket helper so the
+        // `dedup_ids` set stays in sync.
         while let Some((front_ts, _)) = bucket.entries.front() {
             if *front_ts < cutoff {
-                bucket.entries.pop_front();
+                bucket.pop_front();
             } else {
                 break;
             }
         }
-        // Dedup against any in-window entry's event_id (codex P1 #1: no
-        // fixed-size dedup ring; the dedup memory is exactly the
-        // in-window entry set).
-        let duplicate = bucket
-            .entries
-            .iter()
-            .any(|(_, prior_id)| prior_id == event_id);
-        if !duplicate {
-            bucket.entries.push_back((now, event_id.clone()));
+        // O(1) dedup against any in-window entry's event_id (henrypark133
+        // must-fix #1 on PR #3635: the previous linear scan held the
+        // outer mutex while scanning thousands of entries on the hot
+        // path).
+        if !bucket.dedup_ids.contains(event_id) {
+            bucket.push_back(now, event_id.clone());
         }
         let count = bucket.entries.len() as u32;
         // Drop empty buckets so they can't become zombie LRU-skip keys
@@ -265,10 +330,10 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
         value: Decimal,
         window: Duration,
     ) -> Result<Decimal, PredicateBackendError> {
-        let mut history = self
-            .value_history
-            .lock()
-            .expect("predicate value history mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
+        let mut history = match self.value_history.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         if !history.contains_key(key) && history.len() >= MAX_HISTORY_KEYS {
             evict_lru_value(&mut history, &self.evictions);
         }
@@ -276,17 +341,13 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
         let cutoff = now.checked_sub(window).unwrap_or(now);
         while let Some((ts, _, _)) = bucket.entries.front() {
             if *ts < cutoff {
-                bucket.entries.pop_front();
+                bucket.pop_front();
             } else {
                 break;
             }
         }
-        let duplicate = bucket
-            .entries
-            .iter()
-            .any(|(_, _, prior_id)| prior_id == event_id);
-        if !duplicate {
-            bucket.entries.push_back((now, value, event_id.clone()));
+        if !bucket.dedup_ids.contains(event_id) {
+            bucket.push_back(now, value, event_id.clone());
         }
         let sum: Decimal = bucket.entries.iter().map(|(_, v, _)| *v).sum();
         if bucket.entries.is_empty() {
@@ -370,7 +431,7 @@ mod tests {
     }
 
     fn ev(s: &str) -> PredicateEventId {
-        PredicateEventId(s.to_string())
+        PredicateEventId::new(s)
     }
 
     #[test]
@@ -670,5 +731,48 @@ mod tests {
             "live bucket should be retained"
         );
         assert_eq!(backend.evictions_observed(), 1);
+    }
+
+    /// henrypark133 missing-coverage #1 on PR #3635: prove the atomic
+    /// record-and-read contract holds under concurrent writers. N threads
+    /// each call `record_invocation` once with a distinct `event_id`; the
+    /// final observed count must equal N (no lost-update race).
+    #[test]
+    fn in_memory_record_invocation_is_atomic_under_concurrent_writers() {
+        use std::sync::Arc as StdArc;
+        use std::thread;
+        let backend = StdArc::new(InMemoryPredicateStateBackend::new());
+        let key = InvocationKey {
+            hook_id: hook_id(),
+            tenant_id: tenant(),
+            capability: "cap.concurrent".to_string(),
+        };
+        let now = Instant::now();
+        const N: usize = 32;
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let backend = StdArc::clone(&backend);
+                let key = key.clone();
+                let ev = ev(&format!("event-{i}"));
+                thread::spawn(move || {
+                    backend
+                        .record_invocation(&key, &ev, now, Duration::from_secs(60))
+                        .expect("ok")
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread joined");
+        }
+        // Re-read via a no-op record with a duplicate id to observe the
+        // final count without inserting a new entry.
+        let final_count = backend
+            .record_invocation(&key, &ev("event-0"), now, Duration::from_secs(60))
+            .expect("ok");
+        assert_eq!(
+            final_count as usize, N,
+            "N concurrent distinct-id writes must each be counted exactly once \
+             (atomic record-and-read contract)"
+        );
     }
 }

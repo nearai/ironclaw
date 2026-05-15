@@ -77,12 +77,15 @@ impl PredicateEvaluator {
         }
     }
 
-    /// Construct an evaluator with an explicit backend. Tests in this
-    /// crate use this to inject deterministic backends; external callers
-    /// should use [`Self::new`] until the durable backend trait is
-    /// finalized (serrrfirat MED on PR #3635 — the trait still takes
-    /// `Instant` which can't serialize across processes).
-    #[allow(dead_code)] // reserved for future durable-backend test injection
+    /// Test-only constructor with an explicit backend. The durable
+    /// backend trait isn't finalized (it still takes `Instant`, which
+    /// doesn't serialize across processes — see serrrfirat MED on PR
+    /// #3635 and the predicate_state module docs), so production code
+    /// must not inject backends through this seam. Gated to
+    /// `#[cfg(test)]` per henrypark133 must-fix #4 on PR #3635: the
+    /// previous `#[allow(dead_code)]` gating left it reachable from
+    /// release builds and invited future callers to use an unstable API.
+    #[cfg(test)]
     pub(crate) fn with_backend(backend: Arc<dyn PredicateStateBackend>) -> Self {
         Self { backend }
     }
@@ -293,7 +296,7 @@ fn synth_event_id(hook_id: HookId, ctx: &BeforeCapabilityHookContext) -> Predica
     for byte in digest.as_bytes() {
         write!(s, "{byte:02x}").expect("writing to String never fails"); // safety: std::fmt::Write for String is infallible
     }
-    PredicateEventId(s)
+    PredicateEventId::new(s)
 }
 
 impl Default for PredicateEvaluator {
@@ -515,8 +518,8 @@ mod tests {
                 reason: "rate cap".to_string(),
             },
         };
-        let stable_id = crate::predicate_state::PredicateEventId(
-            "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234".to_string(),
+        let stable_id = crate::predicate_state::PredicateEventId::new(
+            "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
         );
         let ctx_with_id = ctx("cap.x").with_caller_event_id(stable_id);
         let now = Instant::now();
@@ -534,8 +537,8 @@ mod tests {
         );
         // A second logical invocation gets a different stable id and counts
         // — bringing total to 2, still under the cap.
-        let second_id = crate::predicate_state::PredicateEventId(
-            "ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555".to_string(),
+        let second_id = crate::predicate_state::PredicateEventId::new(
+            "ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555ffff5555",
         );
         let ctx_second = ctx("cap.x").with_caller_event_id(second_id);
         assert_eq!(
@@ -543,8 +546,9 @@ mod tests {
             EvaluatorDecision::Allow
         );
         // A third logical invocation crosses the cap.
-        let third_id = crate::predicate_state::PredicateEventId(
-            "11112222111122221111222211112222111122221111222211112222111122".to_string(),
+        let third_id = crate::predicate_state::PredicateEventId::new(
+            // henrypark133 nit #10: pin a 64-char hex like the synth output.
+            "1111222211112222111122221111222211112222111122221111222211112222",
         );
         let ctx_third = ctx("cap.x").with_caller_event_id(third_id);
         assert!(matches!(
