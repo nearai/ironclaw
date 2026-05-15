@@ -17,11 +17,17 @@ hmac = "0.12"
 hex = "0.4"
 http = "1"
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0", features = ["host-auth-mint"] }
+ironclaw_wasm_sandbox_core = { path = "../ironclaw_wasm_sandbox_core", version = "0.1.0" }
+serde_json = "1"
 sha2 = "0.10"
 subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 tracing = "0.1"
+wasmtime = { version = "43.0.2", features = ["component-model"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
+wat = "1.245.1"
+wit-component = "0.245.1"
+wit-parser = "0.245.1"

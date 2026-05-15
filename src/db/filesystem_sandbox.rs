@@ -180,7 +180,7 @@ where
             jobs.push(stored);
         }
         // Most-recent-first to match the legacy ORDER BY created_at DESC.
-        jobs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        jobs.sort_by_key(|right| std::cmp::Reverse(right.created_at));
         Ok(jobs)
     }
 }

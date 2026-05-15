@@ -23,6 +23,7 @@ ignore = [
 
 [licenses]
 version = 2
+private = { ignore = true }
 allow = [
     "MIT",
     # MIT-0 (MIT No Attribution) is strictly more permissive than MIT —

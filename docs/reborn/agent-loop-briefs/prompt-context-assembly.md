@@ -16,9 +16,11 @@ the existing workspace identity prompt behavior.
 `LoopContextBundle.identity_messages: Vec<LoopContextMessage>`
 ([`crates/ironclaw_turns/src/run_profile/host.rs`](../../../crates/ironclaw_turns/src/run_profile/host.rs)
 near line 583) is the slot for identity-style content — `AGENTS.md`,
-`SOUL.md`, `USER.md`, `IDENTITY.md`, `HEARTBEAT.md`, `TOOLS.md`,
-`BOOTSTRAP.md`, `context/assistant-directives.md`. Today it is
-populated with `Vec::new()` unconditionally by
+`SOUL.md`, `IDENTITY.md`, `HEARTBEAT.md`, `TOOLS.md`, and
+`BOOTSTRAP.md`. Personal/profile-derived files such as `USER.md` and
+`context/assistant-directives.md` stay out of this WS-15 surface until
+explicit run-context privacy policy exists. Today the slot is populated
+with `Vec::new()` unconditionally by
 `ThreadBackedLoopContextPort::load_loop_context()` in
 [`crates/ironclaw_loop_support/src/lib.rs`](../../../crates/ironclaw_loop_support/src/lib.rs).
 
@@ -115,12 +117,13 @@ use thiserror::Error;
 /// Host-owned source for identity-style context that the model receives
 /// as system messages before the conversation transcript.
 ///
-/// Identity files canonically include: `AGENTS.md`, `SOUL.md`, `USER.md`,
-/// `IDENTITY.md`, `HEARTBEAT.md`, `TOOLS.md`, `BOOTSTRAP.md`,
-/// `context/assistant-directives.md`. The canonical filename list is
-/// owned by `ironclaw_memory::safety::DEFAULT_PROMPT_PROTECTED_PATHS`
-/// (kept singular so the write-protection policy and the prompt-loader
-/// agree on what counts as identity content).
+/// Identity files canonically include: `AGENTS.md`, `SOUL.md`,
+/// `IDENTITY.md`, `HEARTBEAT.md`, `TOOLS.md`, and `BOOTSTRAP.md`.
+/// The broader prompt-protected filename list is owned by
+/// `ironclaw_memory::safety::DEFAULT_PROMPT_PROTECTED_PATHS`; WS-15
+/// intentionally excludes personal/profile-derived files such as
+/// `USER.md` and `context/assistant-directives.md` until run-context
+/// privacy policy exists.
 ///
 /// Implementations own storage lookups, trust resolution, and content
 /// safety filtering. This trait returns host-approved candidates — raw
@@ -182,10 +185,11 @@ pub struct HostIdentityContextCandidate {
     /// is summary-only; Trusted content carries through verbatim.
     pub trust_level: IdentityTrustLevel,
 
-    /// Mode gate — `Always`, `OnTextOnly`, or `OnCodeAct`. A
+    /// Mode gate — `Always` or `OnCodeAct`. A
     /// `OnCodeAct` candidate is filtered out before assembly when the
-    /// request mode is `TextOnly`. The three variants cover the
-    /// skeleton's `PromptMode` enum exactly.
+    /// request mode is `TextOnly`. The two variants cover the currently
+    /// supported identity-file routing rules; add another variant only
+    /// when a concrete source emits it.
     pub applies_when: IdentityApplicability,
 }
 
@@ -195,7 +199,6 @@ pub enum IdentityTrustLevel { Installed, Trusted }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdentityApplicability {
     Always,
-    OnTextOnly,
     OnCodeAct,
 }
 
@@ -310,9 +313,10 @@ load-bearing contributor:
   [`crates/ironclaw_memory/src/safety.rs`](../../../crates/ironclaw_memory/src/safety.rs)
   near line 153 (`SOUL.md, AGENTS.md, USER.md, IDENTITY.md, SYSTEM.md,
   MEMORY.md, TOOLS.md, HEARTBEAT.md, BOOTSTRAP.md,
-  context/assistant-directives.md`). Alphabetical-by-`IdentityFileName.as_str()`
-  is an acceptable alternative as long as the impl picks one and is
-  consistent across calls.
+  context/assistant-directives.md`), filtered to the WS-15 stable
+  identity set. Alphabetical-by-`IdentityFileName.as_str()` is an
+  acceptable alternative as long as the impl picks one and is consistent
+  across calls.
 - `build_identity_messages` MUST preserve the source-provided order
   and MUST NOT re-sort by name inside the helper — re-sorting would
   mask source-side ordering bugs and decouple the helper from the
@@ -331,19 +335,19 @@ The canonical identity files
 near line 153) split into two buckets:
 
 - **Stable** (byte-stable across the run): `AGENTS.md`, `SOUL.md`,
-  `USER.md`, `IDENTITY.md`, `TOOLS.md`, `BOOTSTRAP.md`,
-  `context/assistant-directives.md`. These land in `identity_messages`.
+  `IDENTITY.md`, `TOOLS.md`, `BOOTSTRAP.md`. These land in
+  `identity_messages`.
+- **Personal/profile-derived**: `USER.md` and
+  `context/assistant-directives.md`. WS-15 excludes these from
+  `identity_messages` until `LoopRunContext` carries explicit privacy
+  policy for shared/group runs.
 - **Volatile** (may change mid-run): `HEARTBEAT.md`. This holds
   timestamped, frequently-changing proactive findings and must NOT
   land in `identity_messages` — every turn's prefix would otherwise
-  differ and the prompt cache would miss every turn. Volatile content
-  is appended to `instruction_snippets` (after SKILL.md content)
-  instead, which sits *after* the cache-sealed identity prefix in the
-  `identity → instruction → messages` assembly order.
-
-`HEARTBEAT.md` injection remains gated by `LoopRunContext` to
-heartbeat-initiated runs only — see §4 for the run-kind gating in the
-concrete `WorkspaceIdentityContextSource` impl.
+  differ and the prompt cache would miss every turn. WS-15 excludes it
+  from the stable identity bundle; a later heartbeat-specific context
+  path can route it after the cache-sealed identity prefix once
+  `LoopRunContext` carries an explicit heartbeat/run-kind signal.
 
 ### 3.3.6 Prompt assembly for summary-only identity entries
 
@@ -416,17 +420,13 @@ Without explicit caching, `ThreadBackedLoopContextPort::load_loop_context()`
 re-reads identity files on every iteration. Anthropic prompt caching
 still hits on byte-stable content, but the per-tick disk read is
 wasteful and opens a race window where a file changes mid-run and the
-prefix flips. Required behavior:
+prefix flips. WS-15 implements a process-local cache for the lifetime of
+the constructed context port:
 
 - For **stable** files (per §3.3.5), `ThreadBackedLoopContextPort`
-  MUST pin the raw `Vec<HostIdentityContextCandidate>` for the run on
-  first `load_loop_context()` call and reuse that pinned snapshot on
-  subsequent calls, including resume after process restart. The pin is
-  durable: store either the snapshot bytes or a `StableIdentitySnapshotRef`
-  plus digest in run/checkpoint metadata before any blocking checkpoint
-  can resume through this driver. A process-local
-  `Arc<OnceLock<Vec<HostIdentityContextCandidate>>>` is only a
-  read-through cache for that durable snapshot, not the source of truth.
+  pins the raw `Vec<HostIdentityContextCandidate>` for the context port on
+  first `load_loop_context()` call and reuses that pinned snapshot on
+  subsequent calls in the same process.
   **Per-call filtering MUST happen after snapshot retrieval** —
   `build_identity_messages` re-applies `applies_when` against the
   request's `PromptMode` on every call.
@@ -445,13 +445,10 @@ prefix flips. Required behavior:
 - Implementations MUST NOT install file watchers in v1 — file
   changes mid-run are explicitly out of scope under the master doc §5
   layer-1 immutability rule.
-- On resume, the host reloads the pinned snapshot by ref/digest. If the
-  snapshot is missing or its digest does not match the checkpoint/run
-  metadata, resume fails closed with `LoopExit::Failed {
-  reason_kind: CheckpointUnavailable }` rather than rebuilding identity
-  from current workspace files. If a future migration wants to accept
-  identity drift, it needs an explicit migration policy and audit event;
-  silent drift is forbidden.
+- Durable identity snapshot persistence across process restart/resume is
+  deferred. WS-15 does not add a `StableIdentitySnapshotRef`, checkpoint
+  metadata digest, or resume-time fail-closed path. That behavior belongs
+  in the checkpoint/resume follow-up that owns durable run metadata.
 
 ### 3.5 Mode plumbing note
 
@@ -507,16 +504,14 @@ belong:
   primary-scope only.
 - Filenames pulled from
   `ironclaw_memory::safety::DEFAULT_PROMPT_PROTECTED_PATHS`.
-- Trust: identity files placed by the user (workspace root) →
-  `Trusted`; files seeded from a registry extension → `Installed`.
+- Trust: host-owned stable identity files → `Trusted`; personal/profile-derived
+  files such as `USER.md` and `context/assistant-directives.md` are excluded
+  until an explicit run-context privacy policy can authorize them.
 - `HEARTBEAT.md` is a **volatile** identity file (see §3.3.5) and
-  MUST NOT be returned in the stable identity bundle. The concrete
-  impl emits it into `instruction_snippets` (appended after SKILL.md
-  content), gated by `LoopRunContext.scope` / `run_kind` so it only
-  surfaces on heartbeat-initiated runs. This aligns with the per-run
-  caching contract in §3.4.5: the stable identity bundle is cached
-  once per run, and HEARTBEAT.md flows through a separate
-  re-evaluated-per-call path.
+  MUST NOT be returned in the stable identity bundle. WS-15 does not
+  add the separate volatile instruction source because the current
+  `LoopRunContext` contract has no heartbeat/run-kind signal to gate
+  that content safely.
 - `applies_when`: most files use `Always`; `TOOLS.md` should use
   `OnCodeAct` (it's irrelevant in `TextOnly` mode where no tools are
   visible).
@@ -558,14 +553,6 @@ Unit tests (in `crates/ironclaw_loop_support`):
   invoke `load_loop_context()` twice on the same port; the mock
   identity source is called exactly once and both returned bundles
   are byte-equal. Guards the §3.4.5 per-run caching contract.
-- `lib::tests::context_port_resume_uses_pinned_identity_snapshot` —
-  seed a durable stable-identity snapshot, restart the port with a
-  source that now returns different file bytes, and assert the resumed
-  prompt uses the pinned snapshot.
-- `lib::tests::context_port_resume_rejects_identity_digest_drift` —
-  checkpoint metadata points at a snapshot whose digest no longer
-  matches; assert resume maps to `CheckpointUnavailable` instead of
-  rebuilding from current workspace files.
 
 Unit tests (in `crates/ironclaw_turns`):
 - `prompt::tests::identity_message_with_ref_maps_to_content_ref` —
@@ -580,22 +567,17 @@ Workspace tests (in `src/workspace`):
   secondary scopes returns only the primary content.
 - `workspace_identity_context_uses_protected_path_canon` — source
   iterates the same canonical protected-path list as
-  `ironclaw_memory::safety::DEFAULT_PROMPT_PROTECTED_PATHS`.
-- `workspace_identity_context_routes_heartbeat_as_volatile` —
-  `HEARTBEAT.md` is excluded from stable `identity_messages` and
-  appears only in the volatile instruction path for heartbeat runs.
+  `ironclaw_memory::safety::DEFAULT_PROMPT_PROTECTED_PATHS` and excludes
+  `HEARTBEAT.md` from the stable identity set.
+- `workspace_identity_context_excludes_personal_files_without_policy` —
+  `USER.md` and `context/assistant-directives.md` are excluded until an
+  explicit run-context privacy policy exists.
 
 Integration test (in `crates/ironclaw_reborn`):
-- `text_loop_driver_with_identity` — drives a `TextOnlyModelReplyDriver`
-  with the concrete workspace identity source seeded with two identity
-  files. Asserts:
-  - `prompt_bundle_built` milestone payload includes the identity
-    filenames in its metadata block.
-  - The model port receives a message list whose first two entries
-    have role `"system"` and resolve to the identity refs.
-  - With the source unset, the same test produces a bundle with zero
-    leading identity messages (regression guard for the "stays empty"
-    baseline).
+- `text_only_host_factory_threads_identity_source_to_prompt_and_model` —
+  drives `RebornLoopDriverHostFactory` with an identity source and asserts
+  the prompt bundle carries a leading system identity ref and the model
+  gateway resolves that ref to the trusted identity content.
 
 ## 6. Compatibility & rollout
 
@@ -612,10 +594,11 @@ Integration test (in `crates/ironclaw_reborn`):
   workstream. `identity_source = None` is acceptable for legacy tests
   and explicit non-default profiles, but not for WS-14's live default
   cutover.
-- Stable identity snapshots are part of resume compatibility. Operators
-  may edit `AGENTS.md`/`TOOLS.md` while a run is blocked, but the resumed
-  attempt keeps the checkpoint-pinned snapshot or fails closed if that
-  snapshot cannot be loaded.
+- Stable identity snapshots are not yet part of resume compatibility.
+  WS-15's cache is process-local. Durable checkpoint-pinned identity
+  snapshots, digest validation, and resume fail-closed behavior are
+  deferred to the checkpoint/resume workstream that owns durable run
+  metadata.
 
 ## 7. Out of scope (for this brief)
 
@@ -626,3 +609,26 @@ Integration test (in `crates/ironclaw_reborn`):
 - Identity-file authoring tools, CLI commands to seed `SOUL.md`, etc.
 - Per-thread / per-run identity overrides — the first cut treats
   identity as workspace-scoped, not run-scoped.
+
+## 8. Deferred
+
+**Finding #2 (serrrfirat): Group-run policy gating for personal identity files.**
+
+`WorkspaceIdentityContextSource::load_identity_candidates` currently ignores
+`run_context` entirely. To stay fail-closed without broadening WS-15's
+contract, the concrete workspace source excludes `USER.md` and
+`context/assistant-directives.md` from identity candidates entirely.
+
+Deferred to WS17 when `LoopRunContext` gains an explicit
+group-chat/shared-thread policy bit (`is_shared_context()`). At that point,
+`load_identity_candidates` can add policy-authorized personal/profile-derived
+candidates with caller-level regression coverage for both allowed and denied
+group/shared contexts.
+
+**Heartbeat context injection.**
+
+`HEARTBEAT.md` is intentionally excluded from WS-15 stable
+`identity_messages` because it is volatile and would break prompt-cache
+stability. Restoring heartbeat-specific prompt context for Reborn should be a
+separate follow-up that introduces an explicit run-kind/heartbeat signal on
+`LoopRunContext` plus a volatile instruction source evaluated per context load.

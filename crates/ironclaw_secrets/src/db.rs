@@ -26,6 +26,10 @@ use crate::{
     CreateSecretParams, CredentialAccount, CredentialAccountId, CredentialAccountStatus,
     CredentialAccountStore, CredentialBrokerError, CredentialSession, CredentialSessionId,
     CredentialSessionStore, SecretConsumeResult, SecretError, SecretsCrypto, SecretsStore,
+    crypto::{
+        ScopeKey, credential_account_aad, credential_session_aad, secret_record_aad,
+        secret_store_key_check_aad,
+    },
 };
 
 #[cfg(feature = "libsql")]
@@ -474,8 +478,8 @@ async fn libsql_upsert_account(
     crypto: &SecretsCrypto,
     account: &CredentialAccount,
 ) -> Result<(), CredentialBrokerError> {
-    let key = DbScopeKey::from_account_scope(&account.scope);
-    let payload = encrypt_json_payload(crypto, account)?;
+    let key = ScopeKey::from_account_scope(&account.scope);
+    let payload = encrypt_credential_account_payload(crypto, account)?;
     conn.execute(
         "INSERT INTO reborn_credential_accounts (tenant_id, user_id, agent_id, project_id, account_id, status, provider_or_extension_id, updated_at, payload, encrypted_payload, payload_key_salt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, '{}', ?9, ?10) ON CONFLICT(tenant_id, user_id, agent_id, project_id, account_id) DO UPDATE SET status = EXCLUDED.status, provider_or_extension_id = EXCLUDED.provider_or_extension_id, updated_at = EXCLUDED.updated_at, payload = '{}', encrypted_payload = EXCLUDED.encrypted_payload, payload_key_salt = EXCLUDED.payload_key_salt",
         libsql::params![
@@ -503,7 +507,7 @@ async fn libsql_get_account(
     scope: &ResourceScope,
     account_id: &CredentialAccountId,
 ) -> Result<Option<CredentialAccount>, CredentialBrokerError> {
-    let key = DbScopeKey::from_account_scope(scope);
+    let key = ScopeKey::from_account_scope(scope);
     let mut rows = conn
         .query(
             "SELECT status, provider_or_extension_id, updated_at, encrypted_payload, payload_key_salt FROM reborn_credential_accounts WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 AND project_id = ?4 AND account_id = ?5",
@@ -520,7 +524,13 @@ async fn libsql_get_account(
     let encrypted_payload: Vec<u8> = row.get(3).map_err(db_error)?;
     let payload_key_salt: Vec<u8> = row.get(4).map_err(db_error)?;
     validate_account_row(
-        decrypt_json_payload(crypto, &encrypted_payload, &payload_key_salt)?,
+        decrypt_credential_account_payload(
+            crypto,
+            &encrypted_payload,
+            &payload_key_salt,
+            scope,
+            account_id,
+        )?,
         scope,
         account_id,
         &status,
@@ -536,7 +546,7 @@ async fn libsql_accounts_for_scope(
     crypto: &SecretsCrypto,
     scope: &ResourceScope,
 ) -> Result<Vec<CredentialAccount>, CredentialBrokerError> {
-    let key = DbScopeKey::from_account_scope(scope);
+    let key = ScopeKey::from_account_scope(scope);
     let mut rows = conn
         .query(
             "SELECT account_id, status, provider_or_extension_id, updated_at, encrypted_payload, payload_key_salt FROM reborn_credential_accounts WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 AND project_id = ?4 ORDER BY account_id LIMIT ?5",
@@ -560,7 +570,13 @@ async fn libsql_accounts_for_scope(
         let encrypted_payload: Vec<u8> = row.get(4).map_err(db_error)?;
         let payload_key_salt: Vec<u8> = row.get(5).map_err(db_error)?;
         accounts.push(validate_account_row(
-            decrypt_json_payload(crypto, &encrypted_payload, &payload_key_salt)?,
+            decrypt_credential_account_payload(
+                crypto,
+                &encrypted_payload,
+                &payload_key_salt,
+                scope,
+                &account_id,
+            )?,
             scope,
             &account_id,
             &status,
@@ -579,7 +595,7 @@ async fn libsql_upsert_session(
     session: &CredentialSession,
     uses: u64,
 ) -> Result<(), CredentialBrokerError> {
-    let key = DbScopeKey::from_full_scope(session.scope());
+    let key = ScopeKey::from_full_scope(session.scope());
     let payload = encrypt_session_payload(crypto, session)?;
     conn.execute(
         "INSERT INTO reborn_credential_sessions (tenant_id, user_id, agent_id, project_id, mission_id, thread_id, invocation_id, session_id, account_id, expires_at, max_uses, uses, payload, encrypted_payload, payload_key_salt) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, '{}', ?13, ?14) ON CONFLICT(tenant_id, user_id, agent_id, project_id, mission_id, thread_id, invocation_id, session_id) DO UPDATE SET account_id = EXCLUDED.account_id, expires_at = EXCLUDED.expires_at, max_uses = EXCLUDED.max_uses, uses = EXCLUDED.uses, payload = '{}', encrypted_payload = EXCLUDED.encrypted_payload, payload_key_salt = EXCLUDED.payload_key_salt",
@@ -612,7 +628,7 @@ async fn libsql_get_session_record(
     scope: &ResourceScope,
     session_id: CredentialSessionId,
 ) -> Result<Option<SessionRecord>, CredentialBrokerError> {
-    let key = DbScopeKey::from_full_scope(scope);
+    let key = ScopeKey::from_full_scope(scope);
     let mut rows = conn
         .query(
             "SELECT account_id, expires_at, max_uses, uses, encrypted_payload, payload_key_salt FROM reborn_credential_sessions WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 AND project_id = ?4 AND mission_id = ?5 AND thread_id = ?6 AND invocation_id = ?7 AND session_id = ?8",
@@ -630,7 +646,13 @@ async fn libsql_get_session_record(
     let encrypted_payload: Vec<u8> = row.get(4).map_err(db_error)?;
     let payload_key_salt: Vec<u8> = row.get(5).map_err(db_error)?;
     validate_session_row(
-        decrypt_session_payload(crypto, &encrypted_payload, &payload_key_salt)?,
+        decrypt_session_payload(
+            crypto,
+            &encrypted_payload,
+            &payload_key_salt,
+            scope,
+            session_id,
+        )?,
         scope,
         session_id,
         &account_id,
@@ -649,7 +671,7 @@ async fn libsql_consume_session_record(
     session_id: CredentialSessionId,
     now: ironclaw_host_api::Timestamp,
 ) -> Result<Option<SessionRecord>, CredentialBrokerError> {
-    let key = DbScopeKey::from_full_scope(scope);
+    let key = ScopeKey::from_full_scope(scope);
     let mut rows = conn
         .query(
             "UPDATE reborn_credential_sessions SET uses = uses + 1 WHERE tenant_id = ?1 AND user_id = ?2 AND agent_id = ?3 AND project_id = ?4 AND mission_id = ?5 AND thread_id = ?6 AND invocation_id = ?7 AND session_id = ?8 AND (expires_at IS NULL OR expires_at > ?9) AND (max_uses IS NULL OR uses < max_uses) RETURNING account_id, expires_at, max_uses, uses, encrypted_payload, payload_key_salt",
@@ -677,7 +699,13 @@ async fn libsql_consume_session_record(
     let encrypted_payload: Vec<u8> = row.get(4).map_err(db_error)?;
     let payload_key_salt: Vec<u8> = row.get(5).map_err(db_error)?;
     validate_session_row(
-        decrypt_session_payload(crypto, &encrypted_payload, &payload_key_salt)?,
+        decrypt_session_payload(
+            crypto,
+            &encrypted_payload,
+            &payload_key_salt,
+            scope,
+            session_id,
+        )?,
         scope,
         session_id,
         &account_id,
@@ -694,8 +722,8 @@ async fn postgres_upsert_account(
     crypto: &SecretsCrypto,
     account: &CredentialAccount,
 ) -> Result<(), CredentialBrokerError> {
-    let key = DbScopeKey::from_account_scope(&account.scope);
-    let payload = encrypt_json_payload(crypto, account)?;
+    let key = ScopeKey::from_account_scope(&account.scope);
+    let payload = encrypt_credential_account_payload(crypto, account)?;
     client.execute("INSERT INTO reborn_credential_accounts (tenant_id, user_id, agent_id, project_id, account_id, status, provider_or_extension_id, updated_at, payload, encrypted_payload, payload_key_salt) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}'::jsonb, $9, $10) ON CONFLICT(tenant_id, user_id, agent_id, project_id, account_id) DO UPDATE SET status = EXCLUDED.status, provider_or_extension_id = EXCLUDED.provider_or_extension_id, updated_at = EXCLUDED.updated_at, payload = '{}'::jsonb, encrypted_payload = EXCLUDED.encrypted_payload, payload_key_salt = EXCLUDED.payload_key_salt", &[&key.tenant_id, &key.user_id, &key.agent_id, &key.project_id, &account.id.as_str(), &account_status_key(account.status), &account.provider_or_extension_id.as_str(), &account.updated_at.to_rfc3339(), &payload.encrypted_value, &payload.key_salt]).await.map_err(db_error)?;
     Ok(())
 }
@@ -707,7 +735,7 @@ async fn postgres_get_account(
     scope: &ResourceScope,
     account_id: &CredentialAccountId,
 ) -> Result<Option<CredentialAccount>, CredentialBrokerError> {
-    let key = DbScopeKey::from_account_scope(scope);
+    let key = ScopeKey::from_account_scope(scope);
     let row = client.query_opt("SELECT status, provider_or_extension_id, updated_at, encrypted_payload, payload_key_salt FROM reborn_credential_accounts WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 AND project_id = $4 AND account_id = $5", &[&key.tenant_id, &key.user_id, &key.agent_id, &key.project_id, &account_id.as_str()]).await.map_err(db_error)?;
     let Some(row) = row else {
         return Ok(None);
@@ -718,7 +746,13 @@ async fn postgres_get_account(
     let encrypted_payload: Vec<u8> = row.get(3);
     let payload_key_salt: Vec<u8> = row.get(4);
     validate_account_row(
-        decrypt_json_payload(crypto, &encrypted_payload, &payload_key_salt)?,
+        decrypt_credential_account_payload(
+            crypto,
+            &encrypted_payload,
+            &payload_key_salt,
+            scope,
+            account_id,
+        )?,
         scope,
         account_id,
         &status,
@@ -734,7 +768,7 @@ async fn postgres_accounts_for_scope(
     crypto: &SecretsCrypto,
     scope: &ResourceScope,
 ) -> Result<Vec<CredentialAccount>, CredentialBrokerError> {
-    let key = DbScopeKey::from_account_scope(scope);
+    let key = ScopeKey::from_account_scope(scope);
     let rows = client.query("SELECT account_id, status, provider_or_extension_id, updated_at, encrypted_payload, payload_key_salt FROM reborn_credential_accounts WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 AND project_id = $4 ORDER BY account_id LIMIT $5", &[&key.tenant_id, &key.user_id, &key.agent_id, &key.project_id, &CREDENTIAL_ACCOUNTS_FOR_SCOPE_QUERY_LIMIT]).await.map_err(db_error)?;
     let mut accounts = Vec::new();
     for row in rows {
@@ -746,7 +780,13 @@ async fn postgres_accounts_for_scope(
         let encrypted_payload: Vec<u8> = row.get(4);
         let payload_key_salt: Vec<u8> = row.get(5);
         accounts.push(validate_account_row(
-            decrypt_json_payload(crypto, &encrypted_payload, &payload_key_salt)?,
+            decrypt_credential_account_payload(
+                crypto,
+                &encrypted_payload,
+                &payload_key_salt,
+                scope,
+                &account_id,
+            )?,
             scope,
             &account_id,
             &status,
@@ -765,7 +805,7 @@ async fn postgres_upsert_session(
     session: &CredentialSession,
     uses: u64,
 ) -> Result<(), CredentialBrokerError> {
-    let key = DbScopeKey::from_full_scope(session.scope());
+    let key = ScopeKey::from_full_scope(session.scope());
     let max_uses = session.max_uses().map(|value| value as i64);
     let payload = encrypt_session_payload(crypto, session)?;
     client.execute("INSERT INTO reborn_credential_sessions (tenant_id, user_id, agent_id, project_id, mission_id, thread_id, invocation_id, session_id, account_id, expires_at, max_uses, uses, payload, encrypted_payload, payload_key_salt) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, '{}'::jsonb, $13, $14) ON CONFLICT(tenant_id, user_id, agent_id, project_id, mission_id, thread_id, invocation_id, session_id) DO UPDATE SET account_id = EXCLUDED.account_id, expires_at = EXCLUDED.expires_at, max_uses = EXCLUDED.max_uses, uses = EXCLUDED.uses, payload = '{}'::jsonb, encrypted_payload = EXCLUDED.encrypted_payload, payload_key_salt = EXCLUDED.payload_key_salt", &[&key.tenant_id, &key.user_id, &key.agent_id, &key.project_id, &key.mission_id, &key.thread_id, &key.invocation_id, &session.correlation_id().to_private_storage_string(), &session.account_id().as_str(), &session.expires_at().map(|value| value.to_rfc3339()), &max_uses, &(uses as i64), &payload.encrypted_value, &payload.key_salt]).await.map_err(db_error)?;
@@ -779,7 +819,7 @@ async fn postgres_get_session_record(
     scope: &ResourceScope,
     session_id: CredentialSessionId,
 ) -> Result<Option<SessionRecord>, CredentialBrokerError> {
-    let key = DbScopeKey::from_full_scope(scope);
+    let key = ScopeKey::from_full_scope(scope);
     let row = client
         .query_opt(
             "SELECT account_id, expires_at, max_uses, uses, encrypted_payload, payload_key_salt FROM reborn_credential_sessions WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 AND project_id = $4 AND mission_id = $5 AND thread_id = $6 AND invocation_id = $7 AND session_id = $8",
@@ -806,7 +846,13 @@ async fn postgres_get_session_record(
     let encrypted_payload: Vec<u8> = row.get(4);
     let payload_key_salt: Vec<u8> = row.get(5);
     validate_session_row(
-        decrypt_session_payload(crypto, &encrypted_payload, &payload_key_salt)?,
+        decrypt_session_payload(
+            crypto,
+            &encrypted_payload,
+            &payload_key_salt,
+            scope,
+            session_id,
+        )?,
         scope,
         session_id,
         &account_id,
@@ -825,7 +871,7 @@ async fn postgres_consume_session_record(
     session_id: CredentialSessionId,
     now: ironclaw_host_api::Timestamp,
 ) -> Result<Option<SessionRecord>, CredentialBrokerError> {
-    let key = DbScopeKey::from_full_scope(scope);
+    let key = ScopeKey::from_full_scope(scope);
     let row = client
         .query_opt(
             "UPDATE reborn_credential_sessions SET uses = uses + 1 WHERE tenant_id = $1 AND user_id = $2 AND agent_id = $3 AND project_id = $4 AND mission_id = $5 AND thread_id = $6 AND invocation_id = $7 AND session_id = $8 AND (expires_at IS NULL OR expires_at > $9) AND (max_uses IS NULL OR uses < max_uses) RETURNING account_id, expires_at, max_uses, uses, encrypted_payload, payload_key_salt",
@@ -853,7 +899,13 @@ async fn postgres_consume_session_record(
     let encrypted_payload: Vec<u8> = row.get(4);
     let payload_key_salt: Vec<u8> = row.get(5);
     validate_session_row(
-        decrypt_session_payload(crypto, &encrypted_payload, &payload_key_salt)?,
+        decrypt_session_payload(
+            crypto,
+            &encrypted_payload,
+            &payload_key_salt,
+            scope,
+            session_id,
+        )?,
         scope,
         session_id,
         &account_id,
@@ -1196,8 +1248,9 @@ impl SecretsStore for LibSqlSecretsStore {
         name: &str,
     ) -> Result<DecryptedSecret, SecretError> {
         let secret = self.get(user_id, name).await?;
+        let aad = secret_record_aad(user_id, &secret.name);
         self.crypto
-            .decrypt(&secret.encrypted_value, &secret.key_salt)
+            .decrypt(&secret.encrypted_value, &secret.key_salt, &aad)
     }
 
     async fn consume_if_matches(
@@ -1213,9 +1266,10 @@ impl SecretsStore for LibSqlSecretsStore {
                 return Ok(SecretConsumeResult::NotFound);
             };
             ensure_secret_not_expired(&secret)?;
+            let aad = secret_record_aad(user_id, &secret.name);
             let decrypted = self
                 .crypto
-                .decrypt(&secret.encrypted_value, &secret.key_salt)?;
+                .decrypt(&secret.encrypted_value, &secret.key_salt, &aad)?;
             if decrypted.expose() != expected_value {
                 return Ok(SecretConsumeResult::Mismatched);
             }
@@ -1350,8 +1404,9 @@ impl SecretsStore for PostgresSecretsStore {
         name: &str,
     ) -> Result<DecryptedSecret, SecretError> {
         let secret = self.get(user_id, name).await?;
+        let aad = secret_record_aad(user_id, &secret.name);
         self.crypto
-            .decrypt(&secret.encrypted_value, &secret.key_salt)
+            .decrypt(&secret.encrypted_value, &secret.key_salt, &aad)
     }
 
     async fn consume_if_matches(
@@ -1369,9 +1424,10 @@ impl SecretsStore for PostgresSecretsStore {
                 return Ok(SecretConsumeResult::NotFound);
             };
             ensure_secret_not_expired(&secret)?;
+            let aad = secret_record_aad(user_id, &secret.name);
             let decrypted = self
                 .crypto
-                .decrypt(&secret.encrypted_value, &secret.key_salt)?;
+                .decrypt(&secret.encrypted_value, &secret.key_salt, &aad)?;
             if decrypted.expose() != expected_value {
                 return Ok(SecretConsumeResult::Mismatched);
             }
@@ -1542,15 +1598,19 @@ async fn libsql_verify_all_secret_payloads(
 ) -> Result<(), SecretError> {
     let mut rows = conn
         .query(
-            "SELECT encrypted_value, key_salt FROM reborn_secret_records ORDER BY user_id, name",
+            "SELECT user_id, name, encrypted_value, key_salt FROM reborn_secret_records \
+             ORDER BY user_id, name",
             (),
         )
         .await
         .map_err(secret_db_error)?;
     while let Some(row) = rows.next().await.map_err(secret_db_error)? {
-        let encrypted_value: Vec<u8> = row.get(0).map_err(secret_db_error)?;
-        let key_salt: Vec<u8> = row.get(1).map_err(secret_db_error)?;
-        crypto.decrypt(&encrypted_value, &key_salt)?;
+        let user_id: String = row.get(0).map_err(secret_db_error)?;
+        let name: String = row.get(1).map_err(secret_db_error)?;
+        let encrypted_value: Vec<u8> = row.get(2).map_err(secret_db_error)?;
+        let key_salt: Vec<u8> = row.get(3).map_err(secret_db_error)?;
+        let aad = secret_record_aad(&user_id, &name);
+        crypto.decrypt(&encrypted_value, &key_salt, &aad)?;
     }
     Ok(())
 }
@@ -1560,8 +1620,9 @@ async fn libsql_insert_secret_store_key_check(
     conn: &libsql::Connection,
     crypto: &SecretsCrypto,
 ) -> Result<(), SecretError> {
+    let aad = secret_store_key_check_aad();
     let (encrypted_value, key_salt) =
-        crypto.encrypt(SECRET_STORE_KEY_CHECK_PLAINTEXT.as_bytes())?;
+        crypto.encrypt(SECRET_STORE_KEY_CHECK_PLAINTEXT.as_bytes(), &aad)?;
     let now = Utc::now().to_rfc3339();
     conn.execute(
         "INSERT OR IGNORE INTO reborn_secret_store_key_check (id, encrypted_value, key_salt, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
@@ -1699,15 +1760,19 @@ async fn postgres_verify_all_secret_payloads(
 ) -> Result<(), SecretError> {
     let rows = client
         .query(
-            "SELECT encrypted_value, key_salt FROM reborn_secret_records ORDER BY user_id, name",
+            "SELECT user_id, name, encrypted_value, key_salt FROM reborn_secret_records \
+             ORDER BY user_id, name",
             &[],
         )
         .await
         .map_err(secret_db_error)?;
     for row in rows {
-        let encrypted_value: Vec<u8> = row.get(0);
-        let key_salt: Vec<u8> = row.get(1);
-        crypto.decrypt(&encrypted_value, &key_salt)?;
+        let user_id: String = row.get(0);
+        let name: String = row.get(1);
+        let encrypted_value: Vec<u8> = row.get(2);
+        let key_salt: Vec<u8> = row.get(3);
+        let aad = secret_record_aad(&user_id, &name);
+        crypto.decrypt(&encrypted_value, &key_salt, &aad)?;
     }
     Ok(())
 }
@@ -1717,8 +1782,9 @@ async fn postgres_insert_secret_store_key_check(
     client: &impl deadpool_postgres::GenericClient,
     crypto: &SecretsCrypto,
 ) -> Result<(), SecretError> {
+    let aad = secret_store_key_check_aad();
     let (encrypted_value, key_salt) =
-        crypto.encrypt(SECRET_STORE_KEY_CHECK_PLAINTEXT.as_bytes())?;
+        crypto.encrypt(SECRET_STORE_KEY_CHECK_PLAINTEXT.as_bytes(), &aad)?;
     let now = Utc::now().to_rfc3339();
     client
         .execute(
@@ -1816,7 +1882,8 @@ fn verify_secret_store_key_check(
     encrypted_value: &[u8],
     key_salt: &[u8],
 ) -> Result<(), SecretError> {
-    let decrypted = crypto.decrypt(encrypted_value, key_salt)?;
+    let aad = secret_store_key_check_aad();
+    let decrypted = crypto.decrypt(encrypted_value, key_salt, &aad)?;
     if decrypted.expose() != SECRET_STORE_KEY_CHECK_PLAINTEXT {
         return Err(SecretError::DecryptionFailed(
             "secret store key check mismatch".to_string(),
@@ -1831,12 +1898,14 @@ fn build_encrypted_secret(
     crypto: &SecretsCrypto,
 ) -> Result<Secret, SecretError> {
     let plaintext = params.value.expose_secret().as_bytes();
-    let (encrypted_value, key_salt) = crypto.encrypt(plaintext)?;
+    let name = normalize_secret_name(&params.name);
+    let aad = secret_record_aad(user_id, &name);
+    let (encrypted_value, key_salt) = crypto.encrypt(plaintext, &aad)?;
     let now = Utc::now();
     Ok(Secret {
         id: Uuid::new_v4(),
         user_id: user_id.to_string(),
-        name: normalize_secret_name(&params.name),
+        name,
         encrypted_value,
         key_salt,
         provider: params.provider,
@@ -1959,36 +2028,63 @@ impl TryFrom<PersistedCredentialSession> for CredentialSession {
     }
 }
 
+fn encrypt_credential_account_payload(
+    crypto: &SecretsCrypto,
+    account: &CredentialAccount,
+) -> Result<EncryptedPayload, CredentialBrokerError> {
+    let aad = credential_account_aad(&account.scope, &account.id);
+    encrypt_json_payload(crypto, account, &aad)
+}
+
+fn decrypt_credential_account_payload(
+    crypto: &SecretsCrypto,
+    encrypted_value: &[u8],
+    key_salt: &[u8],
+    scope: &ResourceScope,
+    account_id: &CredentialAccountId,
+) -> Result<CredentialAccount, CredentialBrokerError> {
+    let aad = credential_account_aad(scope, account_id);
+    decrypt_json_payload(crypto, encrypted_value, key_salt, &aad)
+}
+
 fn encrypt_session_payload(
     crypto: &SecretsCrypto,
     session: &CredentialSession,
 ) -> Result<EncryptedPayload, CredentialBrokerError> {
-    encrypt_json_payload(crypto, &PersistedCredentialSession::from(session))
+    let aad = credential_session_aad(session.scope(), session.correlation_id());
+    encrypt_json_payload(crypto, &PersistedCredentialSession::from(session), &aad)
 }
 
 fn decrypt_session_payload(
     crypto: &SecretsCrypto,
     encrypted_value: &[u8],
     key_salt: &[u8],
+    scope: &ResourceScope,
+    session_id: CredentialSessionId,
 ) -> Result<CredentialSession, CredentialBrokerError> {
+    let aad = credential_session_aad(scope, session_id);
     let persisted: PersistedCredentialSession =
-        decrypt_json_payload(crypto, encrypted_value, key_salt)?;
+        decrypt_json_payload(crypto, encrypted_value, key_salt, &aad)?;
     persisted.try_into()
 }
 
 fn encrypt_json_payload<T: serde::Serialize>(
     crypto: &SecretsCrypto,
     value: &T,
+    aad: &[u8],
 ) -> Result<EncryptedPayload, CredentialBrokerError> {
     let json = serde_json::to_vec(value).map_err(|error| persistence_error(error.to_string()))?;
-    encrypt_payload_bytes(crypto, &json)
+    encrypt_payload_bytes(crypto, &json, aad)
 }
 
 fn encrypt_payload_bytes(
     crypto: &SecretsCrypto,
     bytes: &[u8],
+    aad: &[u8],
 ) -> Result<EncryptedPayload, CredentialBrokerError> {
-    let (encrypted_value, key_salt) = crypto.encrypt(bytes).map_err(credential_crypto_error)?;
+    let (encrypted_value, key_salt) = crypto
+        .encrypt(bytes, aad)
+        .map_err(credential_crypto_error)?;
     Ok(EncryptedPayload {
         encrypted_value,
         key_salt,
@@ -1999,9 +2095,10 @@ fn decrypt_json_payload<T: serde::de::DeserializeOwned>(
     crypto: &SecretsCrypto,
     encrypted_value: &[u8],
     key_salt: &[u8],
+    aad: &[u8],
 ) -> Result<T, CredentialBrokerError> {
     let decrypted = crypto
-        .decrypt(encrypted_value, key_salt)
+        .decrypt(encrypted_value, key_salt, aad)
         .map_err(credential_crypto_error)?;
     from_json(decrypted.expose())
 }
@@ -2065,67 +2162,6 @@ fn validate_session_row(
         session,
         uses: row_uses as u64,
     })
-}
-
-#[derive(Debug)]
-struct DbScopeKey {
-    tenant_id: String,
-    user_id: String,
-    agent_id: String,
-    project_id: String,
-    mission_id: String,
-    thread_id: String,
-    invocation_id: String,
-}
-
-impl DbScopeKey {
-    fn from_account_scope(scope: &ResourceScope) -> Self {
-        Self {
-            tenant_id: scope.tenant_id.to_string(),
-            user_id: scope.user_id.to_string(),
-            agent_id: scope
-                .agent_id
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-            project_id: scope
-                .project_id
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-            mission_id: String::new(),
-            thread_id: String::new(),
-            invocation_id: String::new(),
-        }
-    }
-
-    fn from_full_scope(scope: &ResourceScope) -> Self {
-        Self {
-            tenant_id: scope.tenant_id.to_string(),
-            user_id: scope.user_id.to_string(),
-            agent_id: scope
-                .agent_id
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-            project_id: scope
-                .project_id
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-            mission_id: scope
-                .mission_id
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-            thread_id: scope
-                .thread_id
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_default(),
-            invocation_id: scope.invocation_id.to_string(),
-        }
-    }
 }
 
 fn account_status_key(status: CredentialAccountStatus) -> &'static str {

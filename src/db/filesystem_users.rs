@@ -422,7 +422,7 @@ where
         if let Some(filter) = status {
             users.retain(|u| u.status == filter);
         }
-        users.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        users.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         Ok(users)
     }
 
@@ -512,7 +512,7 @@ where
             .filter(|t| t.record.user_id == user_id)
             .map(|t| t.record.into_record())
             .collect();
-        out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        out.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         Ok(out)
     }
 

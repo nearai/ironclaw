@@ -31,7 +31,7 @@ async fn libsql_substrate_builder_wires_production_components_without_local_only
             auth_token: None,
         },
         secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
-        trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::empty()),
+        trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
         turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
         surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
     })
@@ -63,7 +63,7 @@ async fn libsql_substrate_builder_rejects_missing_secret_master_key() {
             auth_token: None,
         },
         secret_master_key: None,
-        trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::empty()),
+        trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
         turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
         surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
     })

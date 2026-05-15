@@ -10,6 +10,7 @@ use ironclaw_secrets::LibSqlSecretsStore;
 use ironclaw_secrets::PostgresSecretsStore;
 use ironclaw_secrets::{
     CreateSecretParams, SecretError, SecretMaterial, SecretsCrypto, SecretsStore,
+    secret_record_aad, secret_store_key_check_aad,
 };
 
 #[cfg(feature = "libsql")]
@@ -622,7 +623,12 @@ async fn insert_libsql_secret_store_key_check(
     conn: &libsql::Connection,
     crypto: Arc<SecretsCrypto>,
 ) {
-    let (encrypted_value, key_salt) = crypto.encrypt(b"reborn-secret-store-key-check-v1").unwrap();
+    let (encrypted_value, key_salt) = crypto
+        .encrypt(
+            b"reborn-secret-store-key-check-v1",
+            &secret_store_key_check_aad(),
+        )
+        .unwrap();
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO reborn_secret_store_key_check (id, encrypted_value, key_salt, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?4)",
@@ -640,7 +646,9 @@ async fn insert_libsql_secret_record(
     crypto: Arc<SecretsCrypto>,
     plaintext: &str,
 ) {
-    let (encrypted_value, key_salt) = crypto.encrypt(plaintext.as_bytes()).unwrap();
+    let (encrypted_value, key_salt) = crypto
+        .encrypt(plaintext.as_bytes(), &secret_record_aad(user_id, name))
+        .unwrap();
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO reborn_secret_records (user_id, name, id, encrypted_value, key_salt, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
@@ -689,7 +697,12 @@ async fn insert_postgres_secret_store_key_check(
     client: &impl deadpool_postgres::GenericClient,
     crypto: Arc<SecretsCrypto>,
 ) {
-    let (encrypted_value, key_salt) = crypto.encrypt(b"reborn-secret-store-key-check-v1").unwrap();
+    let (encrypted_value, key_salt) = crypto
+        .encrypt(
+            b"reborn-secret-store-key-check-v1",
+            &secret_store_key_check_aad(),
+        )
+        .unwrap();
     let now = chrono::Utc::now().to_rfc3339();
     client
         .execute(
@@ -708,7 +721,9 @@ async fn insert_postgres_secret_record(
     crypto: Arc<SecretsCrypto>,
     plaintext: &str,
 ) {
-    let (encrypted_value, key_salt) = crypto.encrypt(plaintext.as_bytes()).unwrap();
+    let (encrypted_value, key_salt) = crypto
+        .encrypt(plaintext.as_bytes(), &secret_record_aad(user_id, name))
+        .unwrap();
     let now = chrono::Utc::now().to_rfc3339();
     client
         .execute(

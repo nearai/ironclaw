@@ -809,6 +809,45 @@ async fn resume_turn_wakes_runner_for_same_run_after_requeue() {
 }
 
 #[tokio::test]
+async fn cancel_run_wakes_runner_for_active_cancel_requested_run() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let notifier = Arc::new(RecordingWakeNotifier::default());
+    let coordinator =
+        DefaultTurnCoordinator::new(store.clone()).with_wake_notifier(notifier.clone());
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    notifier.clear();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let cancelled = coordinator
+        .cancel_run(cancel_request("thread-a", run_id, "idem-cancel-a"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        notifier.wakes(),
+        vec![TurnRunWake {
+            scope: scope("thread-a"),
+            run_id,
+            status: TurnStatus::CancelRequested,
+            event_cursor: cancelled.event_cursor,
+        }]
+    );
+}
+
+#[tokio::test]
 async fn submit_turn_ignores_wake_notification_failure_after_persisting_run() {
     let store = Arc::new(InMemoryTurnStateStore::default());
     let coordinator = DefaultTurnCoordinator::new(store.clone())
@@ -3379,6 +3418,77 @@ async fn blocked_run_persists_checkpoint_and_keeps_same_thread_lock_until_resume
     assert_eq!(duplicate, resumed);
     assert_eq!(store.events().len(), event_count_after_resume);
     assert_eq!(resumed.status, TurnStatus::Queued);
+}
+
+#[tokio::test]
+async fn resume_turn_from_foreign_actor_is_denied_without_requeueing_run() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("approval-gate").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let err = coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-a"),
+            actor: TurnActor::new(UserId::new("user2").unwrap()),
+            run_id,
+            gate_resolution_ref: gate_ref.clone(),
+            source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-resume-foreign-actor").unwrap(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(err, TurnError::Unauthorized);
+    assert_eq!(err.adapter_status_code(), 403);
+    let snapshot = store.persistence_snapshot();
+    let run = snapshot
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap();
+    assert_eq!(run.status, TurnStatus::BlockedApproval);
+    assert_eq!(run.gate_ref, Some(gate_ref));
+    assert!(
+        store
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter: Some(scope("thread-a")),
+            })
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

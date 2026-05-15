@@ -172,7 +172,7 @@ where
             });
         }
         // Match SQL ORDER BY error_count DESC.
-        broken.sort_by(|left, right| right.failure_count.cmp(&left.failure_count));
+        broken.sort_by_key(|right| std::cmp::Reverse(right.failure_count));
         Ok(broken)
     }
 

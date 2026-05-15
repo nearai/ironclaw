@@ -31,15 +31,19 @@ use ironclaw_threads::{
     SessionThreadService, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, EventCursor, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    InMemoryRunProfileResolver, LoopCompletionKind, LoopExitId, LoopFailureKind,
-    ReplyTargetBindingRef, RunProfileId, RunProfileResolutionRequest, RunProfileResolver,
-    RunProfileVersion, SourceBindingRef, TurnId, TurnLeaseToken, TurnRunId, TurnRunState,
-    TurnRunnerId, TurnScope, TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
+    InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
+    LoopCompletionKind, LoopExitId, LoopFailureKind, ReplyTargetBindingRef, ResumeTurnRequest,
+    RunProfileId, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionPolicy, TurnCheckpointId,
+    TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
+    TurnStateStore, TurnStatus,
     run_profile::{
-        AgentLoopHostErrorKind, FinalizeAssistantMessage, LoopDriverId, LoopHostMilestone,
-        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopModelPort,
-        LoopModelRequest, LoopRunContext, LoopTranscriptPort, ParentLoopOutput,
+        AgentLoopHostErrorKind, BatchPolicyKind, FinalizeAssistantMessage, LoopCheckpointKind,
+        LoopDriverId, LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter,
+        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopModelPort, LoopModelRequest,
+        LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopTranscriptPort,
+        ParentLoopOutput, PromptMode,
     },
     runner::ClaimedTurnRun,
 };
@@ -205,6 +209,99 @@ async fn durable_milestone_sink_rejects_mismatched_thread_or_run_binding() {
     assert!(snapshot.timeline.entries.is_empty());
 }
 
+#[tokio::test]
+async fn durable_milestone_sink_does_not_project_lossy_loop_progress_milestones() {
+    let events: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
+    let thread_scope = ThreadScope {
+        tenant_id: tenant_id(),
+        agent_id: agent_id(),
+        project_id: Some(project_id()),
+        owner_user_id: Some(user_id()),
+        mission_id: Some(mission_id()),
+    };
+    let thread_id = ThreadId::new("thread-loop-events-progress").unwrap();
+    let run_id = TurnRunId::new();
+    let sink = DurableLoopHostMilestoneSink::new(
+        Arc::clone(&events),
+        DurableLoopHostMilestoneScope::from_thread_scope_for_run(
+            &thread_scope,
+            thread_id.clone(),
+            run_id,
+        )
+        .unwrap(),
+    );
+    let scope = TurnScope::new(
+        tenant_id(),
+        Some(agent_id()),
+        Some(project_id()),
+        thread_id.clone(),
+    );
+
+    for kind in [
+        LoopHostMilestoneKind::IterationStarted { iteration: 1 },
+        LoopHostMilestoneKind::CapabilityBatchStarted {
+            iteration: 1,
+            call_count: 2,
+            policy: BatchPolicyKind::Parallel,
+        },
+        LoopHostMilestoneKind::CapabilityBatchCompleted {
+            iteration: 1,
+            result_count: 1,
+            denied_count: 0,
+            gated_count: 1,
+            failed_count: 0,
+        },
+        LoopHostMilestoneKind::GateBlocked {
+            iteration: 1,
+            gate_kind: LoopGateKind::Approval,
+        },
+        LoopHostMilestoneKind::CheckpointCreated {
+            checkpoint_id: TurnCheckpointId::new(),
+            checkpoint_kind: LoopCheckpointKind::BeforeBlock,
+        },
+    ] {
+        sink.publish_loop_milestone(LoopHostMilestone {
+            scope: scope.clone(),
+            turn_id: TurnId::new(),
+            run_id,
+            loop_driver_id: LoopDriverId::new("test-driver").unwrap(),
+            kind,
+        })
+        .await
+        .unwrap();
+    }
+
+    let manager = event_stream_manager(events, Arc::new(InMemoryDurableAuditLog::new()));
+    let snapshot = manager
+        .runtime_snapshot(ProjectionRequest {
+            scope: projection_scope_for_thread(thread_id),
+            after: None,
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert!(
+        snapshot.timeline.entries.is_empty(),
+        "progress milestones carry counters/checkpoint kinds that would be lost in RuntimeEvent"
+    );
+    assert!(
+        snapshot.runs.is_empty(),
+        "progress milestones should not synthesize partial run records"
+    );
+
+    let replay_scope = projection_scope_for_thread(scope.thread_id.clone());
+    let replay = manager
+        .runtime_updates(ProjectionRequest {
+            scope: replay_scope.clone(),
+            after: Some(ProjectionCursor::origin_for_scope(replay_scope)),
+            limit: 16,
+        })
+        .await
+        .unwrap();
+    assert!(replay.updates.is_empty());
+    assert!(replay.runs.is_empty());
+}
+
 async fn drive_model_reply_milestones_and_assert_projection(
     events: Arc<dyn DurableEventLog>,
     audit: Arc<dyn DurableAuditLog>,
@@ -219,9 +316,20 @@ async fn drive_model_reply_milestones_and_assert_projection(
     )
     .await;
     let success_host = success.build_host().await;
+    let success_prompt = success_host
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+        })
+        .await
+        .unwrap();
     let model_response = success_host
         .stream_model(LoopModelRequest {
-            messages: Vec::new(),
+            messages: success_prompt.messages,
             surface_version: None,
             model_preference: None,
         })
@@ -281,9 +389,20 @@ async fn drive_model_reply_milestones_and_assert_projection(
     )
     .await;
     let failure_host = failure.build_host().await;
+    let failure_prompt = failure_host
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+        })
+        .await
+        .unwrap();
     let error = failure_host
         .stream_model(LoopModelRequest {
-            messages: Vec::new(),
+            messages: failure_prompt.messages,
             surface_version: None,
             model_preference: None,
         })
@@ -538,12 +657,55 @@ fn read_all_file_bytes_lossy(root: &Path) -> String {
 struct HostFixture {
     thread_service: Arc<InMemorySessionThreadService>,
     checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
+    turn_state_store: Arc<StaticTurnStateStore>,
     loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
     gateway: Arc<ControlledGateway>,
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     thread_scope: ThreadScope,
     claimed: ClaimedTurnRun,
     context: LoopRunContext,
+}
+
+struct StaticTurnStateStore {
+    state: Mutex<TurnRunState>,
+}
+
+impl StaticTurnStateStore {
+    fn new(state: TurnRunState) -> Self {
+        Self {
+            state: Mutex::new(state),
+        }
+    }
+}
+
+#[async_trait]
+impl TurnStateStore for StaticTurnStateStore {
+    async fn submit_turn(
+        &self,
+        _request: SubmitTurnRequest,
+        _admission_policy: &dyn TurnAdmissionPolicy,
+        _run_profile_resolver: &dyn RunProfileResolver,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        panic!("submit_turn should not be called by static test turn state store")
+    }
+
+    async fn resume_turn(
+        &self,
+        _request: ResumeTurnRequest,
+    ) -> Result<ironclaw_turns::ResumeTurnResponse, TurnError> {
+        panic!("resume_turn should not be called by static test turn state store")
+    }
+
+    async fn request_cancel(
+        &self,
+        _request: CancelRunRequest,
+    ) -> Result<CancelRunResponse, TurnError> {
+        panic!("request_cancel should not be called by static test turn state store")
+    }
+
+    async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        Ok(self.state.lock().unwrap().clone())
+    }
 }
 
 impl HostFixture {
@@ -622,6 +784,7 @@ impl HostFixture {
             runner_id: TurnRunnerId::new(),
             lease_token: TurnLeaseToken::new(),
         };
+        let turn_state_store = Arc::new(StaticTurnStateStore::new(claimed.state.clone()));
         let context = LoopRunContext::new(turn_scope, turn_id, run_id, resolved);
         thread_service
             .mark_message_submitted(
@@ -645,6 +808,7 @@ impl HostFixture {
         Self {
             thread_service,
             checkpoint_state_store,
+            turn_state_store,
             loop_checkpoint_store,
             gateway,
             milestone_sink,
@@ -660,6 +824,7 @@ impl HostFixture {
             self.thread_scope.clone(),
             Arc::clone(&self.gateway),
             self.checkpoint_state_store.clone(),
+            self.turn_state_store.clone(),
             self.loop_checkpoint_store.clone(),
             Arc::clone(&self.milestone_sink),
             TextOnlyLoopHostConfig {

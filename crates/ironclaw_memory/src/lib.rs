@@ -46,11 +46,11 @@ pub use repo::{
     MemoryDocumentRepository,
 };
 pub use safety::{
-    DefaultPromptWriteSafetyPolicy, PromptProtectedPathClass, PromptProtectedPathRegistry,
-    PromptSafetyAllowanceId, PromptSafetyPolicyVersion, PromptSafetyReason, PromptSafetyReasonCode,
-    PromptSafetySeverity, PromptSafetySummary, PromptWriteOperation, PromptWriteSafetyDecision,
-    PromptWriteSafetyError, PromptWriteSafetyEvent, PromptWriteSafetyEventKind,
-    PromptWriteSafetyEventSink, PromptWriteSafetyPolicy, PromptWriteSafetyRequest,
-    PromptWriteSource,
+    DEFAULT_PROMPT_PROTECTED_PATHS, DefaultPromptWriteSafetyPolicy, PromptProtectedPathClass,
+    PromptProtectedPathRegistry, PromptSafetyAllowanceId, PromptSafetyPolicyVersion,
+    PromptSafetyReason, PromptSafetyReasonCode, PromptSafetySeverity, PromptSafetySummary,
+    PromptWriteOperation, PromptWriteSafetyDecision, PromptWriteSafetyError,
+    PromptWriteSafetyEvent, PromptWriteSafetyEventKind, PromptWriteSafetyEventSink,
+    PromptWriteSafetyPolicy, PromptWriteSafetyRequest, PromptWriteSource,
 };
 pub use search::{FusionStrategy, MemorySearchRequest, MemorySearchResult};

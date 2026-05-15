@@ -409,6 +409,35 @@ fn reborn_turns_public_surface_uses_turn_ids_not_runtime_or_process_ids() {
 }
 
 #[test]
+fn wasm_sandbox_core_is_standalone_v1_parity_kernel() {
+    let root = workspace_root().join("crates/ironclaw_wasm_sandbox_core");
+    assert!(
+        root.join("Cargo.toml").exists(),
+        "shared WASM sandbox core should exist before ProductAdapters duplicate v1 sandbox setup"
+    );
+    assert!(
+        root.join("CLAUDE.md").exists(),
+        "shared WASM sandbox core needs local guardrails"
+    );
+
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+    let package = packages
+        .iter()
+        .find(|package| package["name"] == "ironclaw_wasm_sandbox_core")
+        .expect("ironclaw_wasm_sandbox_core must be a workspace package");
+    let workspace_deps = workspace_dependency_names(package)
+        .filter_map(|dependency| dependency["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        workspace_deps.is_empty(),
+        "WASM sandbox core should stay independent of IronClaw domain crates; got {workspace_deps:?}"
+    );
+}
+
+#[test]
 fn wasm_product_adapter_crate_has_local_guardrails() {
     let guardrails = workspace_root().join("crates/ironclaw_wasm_product_adapters/CLAUDE.md");
     assert!(
@@ -443,6 +472,9 @@ fn wasm_product_adapter_crate_keeps_minimal_host_glue_dependencies() {
     //   * hex                 — HMAC signature encoding in the auth verifier.
     //   * tracing             — structured logging for hardened error paths
     //                           added in the zmanian review.
+    //   * serde_json          — validates temporary JSON-shim WIT payloads.
+    //   * ironclaw_wasm_sandbox_core — shared v1-style minimal WASI sandbox kernel.
+    //   * wasmtime            — component type and generated binding instantiation.
     // Every addition is justified by a concrete call site in src/. Adding a
     // dep here without a matching call site is a contract violation — and
     // adding workflow/runtime crates beyond this list still requires
@@ -454,16 +486,62 @@ fn wasm_product_adapter_crate_keeps_minimal_host_glue_dependencies() {
         "hmac",
         "http",
         "ironclaw_product_adapters",
+        "ironclaw_wasm_sandbox_core",
+        "serde_json",
         "sha2",
         "subtle",
         "thiserror",
         "tokio",
         "tracing",
+        "wasmtime",
     ];
     assert_eq!(
         deps, expected,
         "ironclaw_wasm_product_adapters should stay thin host glue; add runtime/workflow dependencies only when a call-site proves they are required"
     );
+}
+
+#[test]
+fn wasm_product_adapter_runtime_uses_v1_style_minimal_wasi() {
+    let root = workspace_root();
+    let core = std::fs::read_to_string(root.join("crates/ironclaw_wasm_sandbox_core/src/lib.rs"))
+        .expect("WASM sandbox core must be readable");
+    let adapter_store =
+        std::fs::read_to_string(root.join("crates/ironclaw_wasm_product_adapters/src/store.rs"))
+            .expect("ProductAdapter WASM store must be readable");
+    let adapter_runtime = std::fs::read_to_string(
+        root.join("crates/ironclaw_wasm_product_adapters/src/component_runtime.rs"),
+    )
+    .expect("ProductAdapter WASM runtime must be readable");
+
+    assert!(
+        adapter_store.contains("SandboxStoreCore")
+            && adapter_runtime.contains("add_minimal_wasi_to_linker"),
+        "ProductAdapter components should use the shared v1-style WASM sandbox core instead of duplicating WASI setup"
+    );
+    assert!(
+        core.contains("wasmtime_wasi::p2::add_to_linker_sync"),
+        "shared sandbox core should register WASI p2 like v1 tools/channels"
+    );
+    assert!(
+        core.contains("WasiCtxBuilder::new().build()"),
+        "shared sandbox core should use the v1 minimal default: no env, args, preopens, or inherited network"
+    );
+    for forbidden in [
+        "inherit_env",
+        "inherit_stdio",
+        "preopened_dir",
+        "inherit_network",
+        "allow_ip_name_lookup(true)",
+        "socket_addr_check(|_, _| Box::pin(async { true }))",
+    ] {
+        assert!(
+            !core.contains(forbidden)
+                && !adapter_store.contains(forbidden)
+                && !adapter_runtime.contains(forbidden),
+            "ProductAdapter minimal WASI must not enable `{forbidden}`; HTTP egress stays host-mediated"
+        );
+    }
 }
 
 #[test]

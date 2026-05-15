@@ -3,6 +3,7 @@
 //! All external inputs (keyboard, terminal resize, engine status updates,
 //! agent responses) are funnelled into a single `TuiEvent` enum so the
 //! main loop can `select!` on one receiver.
+#![allow(dead_code)] // Scaffolding; some items kept for future use.
 
 use std::collections::VecDeque;
 
@@ -14,7 +15,7 @@ use ratatui::crossterm::event::KeyEvent;
 /// This mirrors `LogEntry` from the main crate but is self-contained
 /// so `ironclaw_tui` has no dependency on the main crate.
 #[derive(Debug, Clone)]
-pub struct TuiLogEntry {
+pub(crate) struct TuiLogEntry {
     pub level: String,
     pub target: String,
     pub message: String,
@@ -23,35 +24,35 @@ pub struct TuiLogEntry {
 
 /// Ring buffer of log entries with a fixed capacity.
 #[derive(Debug, Clone)]
-pub struct LogRingBuffer {
+pub(crate) struct LogRingBuffer {
     entries: VecDeque<TuiLogEntry>,
     capacity: usize,
 }
 
 impl LogRingBuffer {
-    pub fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         Self {
             entries: VecDeque::with_capacity(capacity),
             capacity,
         }
     }
 
-    pub fn push(&mut self, entry: TuiLogEntry) {
+    pub(crate) fn push(&mut self, entry: TuiLogEntry) {
         if self.entries.len() >= self.capacity {
             self.entries.pop_front();
         }
         self.entries.push_back(entry);
     }
 
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &TuiLogEntry> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &TuiLogEntry> {
         self.entries.iter()
     }
 }

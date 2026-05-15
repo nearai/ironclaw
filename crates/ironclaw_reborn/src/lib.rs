@@ -4,26 +4,31 @@
 //! to existing root IronClaw services while keeping the normal `/src` app graph
 //! free of Reborn loop-support wiring.
 
-pub mod app_loop_family;
+mod app_loop_family;
 pub mod driver_registry;
-pub mod loop_driver_host;
+mod loop_driver_host;
 pub mod loop_exit_applier;
-pub mod milestone_events;
-pub mod model_routes;
-pub mod planned_driver;
+mod milestone_events;
+mod model_routes;
+mod planned_driver;
+mod planned_driver_factory;
 pub mod production_readiness;
-pub mod text_loop_driver;
+mod text_loop_driver;
 pub mod turn_runner;
 
 #[cfg(feature = "root-llm-provider")]
-pub mod model_gateway;
+mod model_gateway;
 #[cfg(feature = "libsql-secrets")]
 pub mod secrets;
 
 pub use app_loop_family::build_loop_family_registry;
+pub use ironclaw_loop_support::{
+    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileFilter,
+    CapabilitySurfaceProfileResolver, HostRuntimeLoopCapabilityPort, LoopCapabilityInputResolver,
+    LoopCapabilityResultWriter,
+};
 pub use loop_driver_host::{
-    HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, HostRuntimeLoopCapabilityPort,
-    LoopCapabilityInputResolver, LoopCapabilityResultWriter, NoExtraLoopInputPort,
+    HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, NoExtraLoopInputPort,
     RebornLoopDriverHost, RebornLoopDriverHostError, RebornLoopDriverHostFactory,
     RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
 };
@@ -39,4 +44,14 @@ pub use model_routes::{
     ResolvedModelRouteSnapshot, StaticModelRouteResolver,
 };
 pub use planned_driver::PlannedDriver;
+pub use planned_driver_factory::{
+    DefaultPlannedDriverBuild, DefaultPlannedDriverRegistrationError, PLANNED_DEFAULT_PROFILE_ID,
+    PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID, PLANNED_DRIVER_CHECKPOINT_SCHEMA_VERSION,
+    PLANNED_DRIVER_DEFAULT_ID, PLANNED_DRIVER_DEFAULT_VERSION, default_planned_driver,
+    default_planned_run_profile_resolver, planned_default_profile_id,
+    planned_driver_checkpoint_schema_id, planned_driver_checkpoint_schema_version,
+    planned_driver_default_id, planned_driver_default_version, planned_driver_descriptor,
+    register_default_planned_driver, register_default_planned_profile,
+    register_default_text_only_driver,
+};
 pub use text_loop_driver::{TextOnlyModelReplyDriver, TextOnlyModelReplyDriverConfig};

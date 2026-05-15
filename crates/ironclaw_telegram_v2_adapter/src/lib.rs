@@ -18,9 +18,9 @@
 
 #![forbid(unsafe_code)]
 
-pub mod adapter;
-pub mod payload;
-pub mod render;
+mod adapter;
+mod payload;
+mod render;
 
 pub use adapter::{
     TelegramV2Adapter, TelegramV2AdapterConfig, telegram_declared_egress_hosts,

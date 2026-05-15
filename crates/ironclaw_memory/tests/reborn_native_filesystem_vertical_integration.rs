@@ -25,8 +25,8 @@ use async_trait::async_trait;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::FilesystemError;
 use ironclaw_filesystem::{
-    BackendCapabilities, BackendId, BackendKind, Capability, CompositeRootFilesystem, ContentKind,
-    IndexPolicy, MountDescriptor, RootFilesystem, StorageClass,
+    BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind, IndexPolicy,
+    MountDescriptor, RootFilesystem, StorageClass,
 };
 use ironclaw_host_api::VirtualPath;
 use ironclaw_memory::{

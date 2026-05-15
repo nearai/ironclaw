@@ -28,16 +28,18 @@ pub use driver::{
 };
 pub use host::{
     AgentLoopDriverHost, AgentLoopHost, AgentLoopHostError, AgentLoopHostErrorKind,
-    AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
-    CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind,
-    CapabilityDeniedReasonKindValue, CapabilityDescriptorView, CapabilityFailure,
-    CapabilityFailureKind, CapabilityFailureKindValue, CapabilityInputRef, CapabilityInvocation,
-    CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion, ConcurrencyHint,
-    FinalizeAssistantMessage, LoopCancelReasonKind, LoopCapabilityPort, LoopCheckpointKind,
-    LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle,
-    LoopContextMessage, LoopContextPort, LoopContextRequest, LoopContextSnippet,
-    LoopContextSnippetMetadata, LoopDriverNoteKind, LoopInlineMessage, LoopInlineMessageRole,
-    LoopInput, LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
+    AppendCapabilityResultRef, AssistantReply, BatchPolicyKind, BeginAssistantDraft,
+    CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied,
+    CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue, CapabilityDescriptorView,
+    CapabilityFailure, CapabilityFailureKind, CapabilityFailureKindValue, CapabilityInputRef,
+    CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
+    ConcurrencyHint, FinalizeAssistantMessage, LoadCheckpointPayloadRequest,
+    LoadedCheckpointPayload, LoopCancelReasonKind, LoopCancellationPort, LoopCancellationSignal,
+    LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
+    LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage, LoopContextPort,
+    LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverNoteKind,
+    LoopGateKind, LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAck,
+    LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
     LoopInterruptKind, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
     LoopModelRouteSnapshot, LoopProcessRef, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
     LoopPromptBundleAuthority, LoopPromptBundleGrant, LoopPromptBundleRef, LoopPromptBundleRequest,
@@ -77,7 +79,7 @@ pub use refs::{
 };
 pub use resolver::{
     InMemoryRunProfileRegistry, InMemoryRunProfileResolver, RunProfileDefinition,
-    RunProfileResolutionRequest, RunProfileResolver,
+    RunProfileRegistryError, RunProfileResolutionRequest, RunProfileResolver,
 };
 pub use skill_context::{
     InstalledSkillSnapshot, NoopSkillContextSource, SkillContextBudget, SkillContextError,

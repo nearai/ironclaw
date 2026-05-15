@@ -21,8 +21,9 @@ use ironclaw_turns::{
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
         CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
         ConcurrencyClass, ConcurrencyHint, ContextProfileId, FinalizeAssistantMessage,
-        LoopCheckpointKind, LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle,
-        LoopContextRequest, LoopDriverId, LoopInput, LoopInputBatch, LoopInputCursor,
+        LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
+        LoopCheckpointStateRef, LoopContextBundle, LoopContextRequest, LoopDriverId, LoopInput,
+        LoopInputAck, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken,
         LoopModelMessage, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopPromptBundle,
         LoopPromptBundleRef, LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort,
         ModelProfileId, ModelStreamChunk, ParentLoopOutput, RedactedRunProfileProvenance,
@@ -52,6 +53,8 @@ pub struct MockAgentLoopDriverHost {
     staged_iterations: Mutex<VecDeque<u32>>,
     fail_prompt_with: Mutex<Option<AgentLoopHostErrorKind>>,
     fail_model_with: Mutex<Option<AgentLoopHostErrorKind>>,
+    acked_tokens: Mutex<Vec<LoopInputAckToken>>,
+    cancellation: Mutex<Option<LoopCancellationSignal>>,
 }
 
 impl MockAgentLoopDriverHost {
@@ -73,6 +76,11 @@ impl MockAgentLoopDriverHost {
             .count()
     }
 
+    /// Returns all ack tokens passed to [`ack_inputs`] so far, in call order.
+    pub fn acked_tokens(&self) -> Vec<LoopInputAckToken> {
+        lock_or_panic(&self.acked_tokens).clone()
+    }
+
     fn record_call(&self, call: MockHostCall) {
         lock_or_panic(&self.call_log).push(call);
     }
@@ -85,6 +93,7 @@ pub struct MockAgentLoopDriverHostBuilder {
     visible_capabilities: Vec<CapabilityDescriptorView>,
     fail_prompt_with: Option<AgentLoopHostErrorKind>,
     fail_model_with: Option<AgentLoopHostErrorKind>,
+    cancellation: Option<LoopCancellationSignal>,
 }
 
 impl MockAgentLoopDriverHostBuilder {
@@ -99,6 +108,7 @@ impl MockAgentLoopDriverHostBuilder {
             )],
             fail_prompt_with: None,
             fail_model_with: None,
+            cancellation: None,
         }
     }
 
@@ -132,6 +142,12 @@ impl MockAgentLoopDriverHostBuilder {
         self
     }
 
+    /// Sets the cancellation signal returned by the host accessor.
+    pub fn cancellation_signal(mut self, signal: LoopCancellationSignal) -> Self {
+        self.cancellation = Some(signal);
+        self
+    }
+
     /// Builds the host and its shared checkpoint recorder.
     pub fn build(self) -> (MockAgentLoopDriverHost, Arc<CheckpointRecorder>) {
         let checkpoints = Arc::new(CheckpointRecorder::default());
@@ -145,6 +161,8 @@ impl MockAgentLoopDriverHostBuilder {
                 staged_iterations: Mutex::new(VecDeque::new()),
                 fail_prompt_with: Mutex::new(self.fail_prompt_with),
                 fail_model_with: Mutex::new(self.fail_model_with),
+                acked_tokens: Mutex::new(Vec::new()),
+                cancellation: Mutex::new(self.cancellation),
             },
             checkpoints,
         )
@@ -532,6 +550,8 @@ impl ironclaw_turns::run_profile::LoopPromptPort for MockAgentLoopDriverHost {
             }],
             surface_version: Some(surface_version()),
             instruction_fingerprint: None,
+            identity_message_count: 0,
+            instruction_snippet_count: 0,
         })
     }
 }
@@ -548,14 +568,35 @@ impl ironclaw_turns::run_profile::LoopInputPort for MockAgentLoopDriverHost {
             .pending_inputs
             .pop_front()
             .unwrap_or_default();
+        let mut input_acks = Vec::with_capacity(inputs.len());
+        for (index, _) in inputs.iter().enumerate() {
+            let sequence = index + 1;
+            let cursor_token = LoopInputCursorToken::new(format!("input-cursor:script-{sequence}"))
+                .map_err(|reason| {
+                    AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, reason)
+                })?;
+            let token = LoopInputAckToken::new(format!("input-ack:script-{sequence}")).map_err(
+                |reason| AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, reason),
+            )?;
+            input_acks.push(LoopInputAck {
+                cursor: LoopInputCursor::from_host_token(&self.run_context, cursor_token),
+                token,
+            });
+        }
+        let next_cursor = input_acks
+            .last()
+            .map(|ack| ack.cursor.clone())
+            .unwrap_or(after);
         Ok(LoopInputBatch {
             inputs,
-            next_cursor: after,
+            input_acks,
+            next_cursor,
         })
     }
 
-    async fn ack_inputs(&self, _cursor: LoopInputCursor) -> Result<(), AgentLoopHostError> {
+    async fn ack_inputs(&self, tokens: Vec<LoopInputAckToken>) -> Result<(), AgentLoopHostError> {
         self.record_call(MockHostCall::AckInputs);
+        lock_or_panic(&self.acked_tokens).extend(tokens);
         Ok(())
     }
 }
@@ -685,6 +726,12 @@ impl ironclaw_turns::run_profile::LoopProgressPort for MockAgentLoopDriverHost {
         _event: LoopProgressEvent,
     ) -> Result<(), AgentLoopHostError> {
         Ok(())
+    }
+}
+
+impl LoopCancellationPort for MockAgentLoopDriverHost {
+    fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
+        lock_or_panic(&self.cancellation).clone()
     }
 }
 

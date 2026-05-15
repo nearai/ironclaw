@@ -159,7 +159,7 @@ where
             }
             out.push(stored);
         }
-        out.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        out.sort_by_key(|a| a.created_at);
         Ok(out)
     }
 }
@@ -547,7 +547,7 @@ where
         }
         // Page semantics: newest-first window of `limit` rows, oldest-first in
         // the returned slice. Mirrors the SQL impl.
-        messages.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        messages.sort_by_key(|b| std::cmp::Reverse(b.created_at));
         let has_more = messages.len() > limit_clamped;
         messages.truncate(limit_clamped);
         messages.reverse();
@@ -649,7 +649,7 @@ where
             convs.push(stored);
         }
         // Sort newest-first by last_activity to match the SQL ORDER BY.
-        convs.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        convs.sort_by_key(|b| std::cmp::Reverse(b.last_activity));
         let take = if limit < 0 {
             convs.len()
         } else {

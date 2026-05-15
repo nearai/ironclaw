@@ -11,12 +11,12 @@ use crate::theme::Theme;
 
 use super::{ActiveTab, AppState, TuiWidget};
 
-pub struct StatusBarWidget {
+pub(crate) struct StatusBarWidget {
     theme: Theme,
 }
 
 impl StatusBarWidget {
-    pub fn new(theme: Theme) -> Self {
+    pub(crate) fn new(theme: Theme) -> Self {
         Self { theme }
     }
 }

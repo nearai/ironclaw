@@ -25,6 +25,7 @@ ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
@@ -32,5 +33,4 @@ uuid = { version = "1", features = ["v4", "v5", "serde"] }
 [dev-dependencies]
 ironclaw_product_workflow = { path = ".", features = ["test-support"] }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support", "host-auth-mint"] }
-serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt", "sync"] }

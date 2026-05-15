@@ -4,13 +4,14 @@ use std::{
 };
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind, ThreadId};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 use crate::{
-    LoopDiagnosticRef, LoopGateRef, LoopMessageRef, LoopResultRef, RunProfileVersion,
-    TurnCheckpointId, TurnId, TurnRunId, TurnScope,
+    LoopDiagnosticRef, LoopGateRef, LoopMessageRef, LoopResultRef, RedactedCheckpointPayload,
+    RunProfileVersion, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
 };
 
 use super::{
@@ -224,6 +225,7 @@ bounded_loop_ref!(
     "input-cursor:",
     256
 );
+bounded_loop_ref!(LoopInputAckToken, "loop input ack token", "input-ack:", 256);
 bounded_loop_ref!(LoopProcessRef, "loop process ref", "process:", 256);
 
 impl LoopCheckpointStateRef {
@@ -529,6 +531,9 @@ pub enum AgentLoopHostErrorKind {
     ScopeMismatch,
     StaleSurface,
     InvalidInvocation,
+    /// The request payload itself is well-formed but its content is invalid in
+    /// the current host state (e.g. schema id/version mismatch on checkpoint load).
+    Invalid,
     PolicyDenied,
     BudgetExceeded,
     Unavailable,
@@ -546,6 +551,7 @@ impl AgentLoopHostErrorKind {
             Self::ScopeMismatch => "scope_mismatch",
             Self::StaleSurface => "stale_surface",
             Self::InvalidInvocation => "invalid_invocation",
+            Self::Invalid => "invalid",
             Self::PolicyDenied => "policy_denied",
             Self::BudgetExceeded => "budget_exceeded",
             Self::Unavailable => "unavailable",
@@ -588,6 +594,12 @@ pub trait LoopRunInfoPort: Send + Sync {
 pub struct LoopContextRequest {
     pub after: Option<LoopInputCursor>,
     pub limit: usize,
+    #[serde(default = "default_prompt_mode")]
+    pub mode: PromptMode,
+}
+
+fn default_prompt_mode() -> PromptMode {
+    PromptMode::TextOnly
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -683,7 +695,15 @@ impl LoopInputCursor {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopInputBatch {
     pub inputs: Vec<LoopInput>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_acks: Vec<LoopInputAck>,
     pub next_cursor: LoopInputCursor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopInputAck {
+    pub cursor: LoopInputCursor,
+    pub token: LoopInputAckToken,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -721,7 +741,7 @@ pub trait LoopInputPort: Send + Sync {
         limit: usize,
     ) -> Result<LoopInputBatch, AgentLoopHostError>;
 
-    async fn ack_inputs(&self, cursor: LoopInputCursor) -> Result<(), AgentLoopHostError>;
+    async fn ack_inputs(&self, tokens: Vec<LoopInputAckToken>) -> Result<(), AgentLoopHostError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
@@ -838,6 +858,10 @@ pub struct LoopPromptBundle {
     pub surface_version: Option<CapabilitySurfaceVersion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_fingerprint: Option<InstructionBundleFingerprint>,
+    #[serde(default)]
+    pub identity_message_count: u32,
+    #[serde(default)]
+    pub instruction_snippet_count: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1146,6 +1170,7 @@ pub struct CapabilityDenied {
     pub safe_summary: String,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CapabilityDeniedReasonKind {
     EmptySurface,
@@ -1212,6 +1237,7 @@ pub struct CapabilityFailure {
     pub safe_summary: String,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CapabilityFailureKind {
     Authorization,
@@ -1389,6 +1415,21 @@ pub struct LoopCheckpointRequest {
     pub state_ref: LoopCheckpointStateRef,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoadCheckpointPayloadRequest {
+    pub checkpoint_id: TurnCheckpointId,
+    pub expected_schema_id: CheckpointSchemaId,
+    pub expected_schema_version: RunProfileVersion,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedCheckpointPayload {
+    pub kind: LoopCheckpointKind,
+    pub schema_id: CheckpointSchemaId,
+    pub schema_version: RunProfileVersion,
+    pub payload: RedactedCheckpointPayload,
+}
+
 /// Request to stage a checkpoint payload's raw bytes before calling
 /// [`LoopCheckpointPort::checkpoint`] with the resulting state ref.
 ///
@@ -1452,10 +1493,6 @@ pub trait LoopCheckpointPort: Send + Sync {
     /// The executor's `checkpoint(...)` helper (WS-6 §3.4) calls this method
     /// before invoking `LoopCheckpointPort::checkpoint(...)` so the metadata
     /// write references a payload that's already durably stored.
-    ///
-    /// Read-side `load_checkpoint_payload(...)` lives in WS-10 and will be
-    /// added to this same port. WS-0 intentionally does not pre-declare it
-    /// so the WS-10 signature can land without churn.
     async fn stage_checkpoint_payload(
         &self,
         _request: StageCheckpointPayloadRequest,
@@ -1465,6 +1502,16 @@ pub trait LoopCheckpointPort: Send + Sync {
             "stage_checkpoint_payload not implemented",
         ))
     }
+
+    /// Load the redacted state payload behind a previously-written
+    /// checkpoint. Resume callers go through this host port so metadata
+    /// validation stays with the backend that owns checkpoint storage.
+    async fn load_checkpoint_payload(
+        &self,
+        _request: LoadCheckpointPayloadRequest,
+    ) -> Result<LoadedCheckpointPayload, AgentLoopHostError> {
+        Err(unsupported_host_method("load_checkpoint_payload"))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1473,6 +1520,38 @@ pub enum LoopProgressEvent {
     DriverNote {
         kind: LoopDriverNoteKind,
         safe_summary: LoopSafeSummary,
+    },
+    IterationStarted {
+        iteration: u32,
+    },
+    PromptBundleBuilt {
+        iteration: u32,
+        bundle_ref: LoopPromptBundleRef,
+        mode: PromptMode,
+        surface_version: Option<CapabilitySurfaceVersion>,
+        message_count: u32,
+        identity_message_count: u32,
+        instruction_snippet_count: u32,
+    },
+    CapabilityBatchStarted {
+        iteration: u32,
+        call_count: u32,
+        policy: BatchPolicyKind,
+    },
+    CapabilityBatchCompleted {
+        iteration: u32,
+        result_count: u32,
+        denied_count: u32,
+        gated_count: u32,
+        failed_count: u32,
+    },
+    GateBlocked {
+        iteration: u32,
+        gate_kind: LoopGateKind,
+    },
+    CheckpointWritten {
+        iteration: u32,
+        kind: LoopCheckpointKind,
     },
 }
 
@@ -1490,8 +1569,29 @@ impl LoopProgressEvent {
     pub fn kind_name(&self) -> &'static str {
         match self {
             Self::DriverNote { .. } => "driver_note",
+            Self::IterationStarted { .. } => "iteration_started",
+            Self::PromptBundleBuilt { .. } => "prompt_bundle_built",
+            Self::CapabilityBatchStarted { .. } => "capability_batch_started",
+            Self::CapabilityBatchCompleted { .. } => "capability_batch_completed",
+            Self::GateBlocked { .. } => "gate_blocked",
+            Self::CheckpointWritten { .. } => "checkpoint_written",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchPolicyKind {
+    Sequential,
+    Parallel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopGateKind {
+    Approval,
+    Auth,
+    ResourceWait,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1504,7 +1604,42 @@ pub enum LoopDriverNoteKind {
 
 #[async_trait]
 pub trait LoopProgressPort: Send + Sync {
+    /// Emit observational progress for UI/status consumers.
+    ///
+    /// Progress events are best-effort and must not be used as
+    /// recoverability-critical durability markers. A failed progress emission
+    /// must not invalidate already-completed durable work; callers should treat
+    /// this like host model milestone projection, where sink failures are
+    /// logged/observed without changing the provider or checkpoint outcome.
     async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError>;
+}
+
+/// Per-run cancellation observation point.
+///
+/// The canonical executor consults this between strategy calls. The method is
+/// intentionally synchronous and non-blocking: implementations should expose a
+/// cheap snapshot, usually backed by an atomic flag plus immutable signal data.
+///
+/// **Cancellation is cooperative and boundary-observation only — it is not
+/// preempted across in-flight host calls.** `build_prompt_bundle`,
+/// `stream_model`, and `invoke_capability` are awaited to completion before
+/// the next observation point is reached. A stuck model stream or long-running
+/// capability call will not observe cancellation until control returns to the
+/// executor. Implementations of those host methods that need finer-grained
+/// cancellation must integrate their own abort signal internally; this port
+/// only covers the between-call boundaries that the executor controls.
+pub trait LoopCancellationPort: Send + Sync {
+    /// Returns `Some(signal)` once cancellation has been requested for this run.
+    ///
+    /// Implementations must be idempotent across reads. After the request fires,
+    /// repeated calls must keep returning the same signal.
+    fn observe_cancellation(&self) -> Option<LoopCancellationSignal>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopCancellationSignal {
+    pub reason_kind: LoopCancelReasonKind,
+    pub requested_at: DateTime<Utc>,
 }
 
 pub trait AgentLoopDriverHost:
@@ -1517,6 +1652,7 @@ pub trait AgentLoopDriverHost:
     + LoopTranscriptPort
     + LoopCheckpointPort
     + LoopProgressPort
+    + LoopCancellationPort
     + Send
     + Sync
 {
@@ -1532,6 +1668,7 @@ impl<T> AgentLoopDriverHost for T where
         + LoopTranscriptPort
         + LoopCheckpointPort
         + LoopProgressPort
+        + LoopCancellationPort
         + Send
         + Sync
 {

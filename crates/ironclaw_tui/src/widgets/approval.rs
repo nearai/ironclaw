@@ -13,14 +13,14 @@ use super::{AppState, TuiWidget};
 
 /// Approval action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApprovalAction {
+pub(crate) enum ApprovalAction {
     Approve,
     Always,
     Deny,
 }
 
 impl ApprovalAction {
-    pub fn as_response(&self) -> &'static str {
+    pub(crate) fn as_response(&self) -> &'static str {
         match self {
             Self::Approve => "y",
             Self::Always => "a",
@@ -37,17 +37,17 @@ impl ApprovalAction {
     }
 }
 
-pub struct ApprovalWidget {
+pub(crate) struct ApprovalWidget {
     theme: Theme,
 }
 
 impl ApprovalWidget {
-    pub fn new(theme: Theme) -> Self {
+    pub(crate) fn new(theme: Theme) -> Self {
         Self { theme }
     }
 
     /// Get the list of options for the current approval request.
-    pub fn options(allow_always: bool) -> Vec<ApprovalAction> {
+    pub(crate) fn options(allow_always: bool) -> Vec<ApprovalAction> {
         if allow_always {
             vec![
                 ApprovalAction::Approve,
@@ -60,7 +60,7 @@ impl ApprovalWidget {
     }
 
     /// Compute the centered modal area within the terminal.
-    pub fn modal_area(terminal: Rect) -> Rect {
+    pub(crate) fn modal_area(terminal: Rect) -> Rect {
         let width = terminal.width.clamp(30, 60);
         let height = terminal.height.clamp(8, 16);
         let x = terminal.x + (terminal.width.saturating_sub(width)) / 2;

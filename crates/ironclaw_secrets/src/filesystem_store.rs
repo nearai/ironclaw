@@ -47,6 +47,7 @@ use crate::{
     CredentialBrokerError, CredentialSession, CredentialSessionId, CredentialSessionStore,
     DEFAULT_SECRET_LEASE_TTL_SECONDS, SecretError, SecretLease, SecretLeaseId, SecretLeaseStatus,
     SecretMaterial, SecretMetadata, SecretStore, SecretStoreError, SecretsCrypto,
+    credential_account_aad, credential_session_aad, filesystem_secret_aad,
 };
 
 /// Maximum number of CAS retries before a multi-process write loop gives up
@@ -309,9 +310,10 @@ where
         material: SecretMaterial,
     ) -> Result<SecretMetadata, SecretStoreError> {
         let plaintext = material.expose_secret().as_bytes();
+        let aad = filesystem_secret_aad(&scope, &handle);
         let (encrypted_value, key_salt) = self
             .crypto
-            .encrypt(plaintext)
+            .encrypt(plaintext, &aad)
             .map_err(secret_error_to_store_error)?;
         let now = Utc::now();
         let stored = StoredSecret {
@@ -442,9 +444,10 @@ where
                     scope: Box::new(scope.clone()),
                     handle: lease.handle.clone(),
                 })?;
+            let aad = filesystem_secret_aad(scope, &lease.handle);
             let decrypted = self
                 .crypto
-                .decrypt(&stored.encrypted_value, &stored.key_salt)
+                .decrypt(&stored.encrypted_value, &stored.key_salt, &aad)
                 .map_err(secret_error_to_store_error)?;
             let material = SecretMaterial::from(decrypted.expose().to_string());
 
@@ -568,6 +571,7 @@ where
     fn encrypt_payload(
         &self,
         value: &impl Serialize,
+        aad: &[u8],
     ) -> Result<(Vec<u8>, Vec<u8>), CredentialBrokerError> {
         let bytes = serde_json::to_vec(value).map_err(|error| {
             CredentialBrokerError::BrokerUnavailable {
@@ -575,17 +579,22 @@ where
             }
         })?;
         self.crypto
-            .encrypt(&bytes)
+            .encrypt(&bytes, aad)
             .map_err(secret_error_to_broker_error)
     }
 
-    fn decrypt_payload<T>(&self, payload: &[u8], salt: &[u8]) -> Result<T, CredentialBrokerError>
+    fn decrypt_payload<T>(
+        &self,
+        payload: &[u8],
+        salt: &[u8],
+        aad: &[u8],
+    ) -> Result<T, CredentialBrokerError>
     where
         T: for<'de> Deserialize<'de>,
     {
         let decrypted = self
             .crypto
-            .decrypt(payload, salt)
+            .decrypt(payload, salt, aad)
             .map_err(secret_error_to_broker_error)?;
         serde_json::from_str(decrypted.expose()).map_err(|error| {
             CredentialBrokerError::BrokerUnavailable {
@@ -604,7 +613,8 @@ where
         &self,
         account: CredentialAccount,
     ) -> Result<CredentialAccount, CredentialBrokerError> {
-        let (encrypted_payload, key_salt) = self.encrypt_payload(&account)?;
+        let aad = credential_account_aad(&account.scope, &account.id);
+        let (encrypted_payload, key_salt) = self.encrypt_payload(&account, &aad)?;
         let stored = StoredAccount {
             scope: account.scope.clone(),
             id: account.id.clone(),
@@ -642,8 +652,12 @@ where
         if !same_scope_owner(&stored.scope, scope) || &stored.id != account_id {
             return Ok(None);
         }
-        let account =
-            self.decrypt_payload::<CredentialAccount>(&stored.encrypted_payload, &stored.key_salt)?;
+        let aad = credential_account_aad(scope, account_id);
+        let account = self.decrypt_payload::<CredentialAccount>(
+            &stored.encrypted_payload,
+            &stored.key_salt,
+            &aad,
+        )?;
         Ok(Some(account))
     }
 
@@ -674,9 +688,11 @@ where
             if !same_scope_owner(&stored.scope, scope) {
                 continue;
             }
+            let aad = credential_account_aad(&stored.scope, &stored.id);
             let account = self.decrypt_payload::<CredentialAccount>(
                 &stored.encrypted_payload,
                 &stored.key_salt,
+                &aad,
             )?;
             accounts.push(account);
         }
@@ -694,7 +710,8 @@ where
         session: CredentialSession,
     ) -> Result<CredentialSession, CredentialBrokerError> {
         let wire = SerializableCredentialSession::from_session(&session);
-        let (encrypted_payload, key_salt) = self.encrypt_payload(&wire)?;
+        let aad = credential_session_aad(session.scope(), session.correlation_id());
+        let (encrypted_payload, key_salt) = self.encrypt_payload(&wire, &aad)?;
         let stored = StoredSession {
             encrypted_payload,
             key_salt,
@@ -726,8 +743,9 @@ where
             return Ok(None);
         };
         let stored: StoredSession = deserialize_credential(&versioned.entry.body)?;
+        let aad = credential_session_aad(scope, session_id);
         let wire: SerializableCredentialSession =
-            self.decrypt_payload(&stored.encrypted_payload, &stored.key_salt)?;
+            self.decrypt_payload(&stored.encrypted_payload, &stored.key_salt, &aad)?;
         if wire.scope != *scope {
             return Ok(None);
         }
@@ -752,8 +770,9 @@ where
             return Err(CredentialBrokerError::UnknownSession { session_id });
         };
         let stored: StoredSession = deserialize_credential(&versioned.entry.body)?;
+        let aad = credential_session_aad(scope, session_id);
         let wire: SerializableCredentialSession =
-            self.decrypt_payload(&stored.encrypted_payload, &stored.key_salt)?;
+            self.decrypt_payload(&stored.encrypted_payload, &stored.key_salt, &aad)?;
         if wire.scope != *scope {
             return Err(CredentialBrokerError::UnknownSession { session_id });
         }
@@ -786,8 +805,9 @@ where
                 return Err(CredentialBrokerError::UnknownSession { session_id });
             };
             let mut stored: StoredSession = deserialize_credential(&versioned.entry.body)?;
+            let aad = credential_session_aad(scope, session_id);
             let wire: SerializableCredentialSession =
-                self.decrypt_payload(&stored.encrypted_payload, &stored.key_salt)?;
+                self.decrypt_payload(&stored.encrypted_payload, &stored.key_salt, &aad)?;
             if wire.scope != *scope {
                 return Err(CredentialBrokerError::UnknownSession { session_id });
             }

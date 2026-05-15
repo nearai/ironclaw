@@ -351,7 +351,7 @@ where
         limit: i64,
     ) -> Result<Vec<RoutineRun>, DatabaseError> {
         let mut runs = self.list_runs_for_routine(routine_id).await?;
-        runs.sort_by(|left, right| right.started_at.cmp(&left.started_at));
+        runs.sort_by_key(|right| std::cmp::Reverse(right.started_at));
         if limit >= 0 {
             runs.truncate(limit as usize);
         }

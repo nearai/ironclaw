@@ -245,8 +245,11 @@ where
             .load_loop_context(LoopContextRequest {
                 after: request.context_cursor.clone(),
                 limit: self.message_limit(&request),
+                mode: request.mode,
             })
             .await?;
+        let identity_message_count = context.identity_messages.len() as u32;
+        let instruction_snippet_count = context.instruction_snippets.len() as u32;
         let visible_surface = if request.surface_version.is_some() {
             match self.current_surface.as_ref() {
                 Some(current_surface) => current_surface()?,
@@ -276,6 +279,8 @@ where
             messages: instruction_bundle.messages,
             surface_version: request.surface_version.clone(),
             instruction_fingerprint: Some(instruction_bundle.fingerprint),
+            identity_message_count,
+            instruction_snippet_count,
         };
         self.prompt_authority.issue_bundle(&self.context, &bundle)?;
         self.milestones

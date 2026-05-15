@@ -191,7 +191,7 @@ where
     F: RootFilesystem,
 {
     let mut versions = read_versions(store, document_id).await?;
-    versions.sort_by(|a, b| b.version.cmp(&a.version));
+    versions.sort_by_key(|b| std::cmp::Reverse(b.version));
     if limit > 0 {
         versions.truncate(limit as usize);
     }

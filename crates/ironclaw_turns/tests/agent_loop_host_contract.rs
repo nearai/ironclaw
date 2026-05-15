@@ -16,17 +16,18 @@ use ironclaw_turns::{
     events::EventCursor,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
-        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
+        BatchPolicyKind, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityDescriptorView, CapabilityInputRef,
         CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion, ConcurrencyHint,
         FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
-        InstructionSafetyContext, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
-        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage,
-        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata,
-        LoopDriverId, LoopDriverNoteKind, LoopHostMilestone, LoopHostMilestoneEmitter,
-        LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputBatch, LoopInputCursor,
+        InstructionSafetyContext, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
+        LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
+        LoopContextBundle, LoopContextMessage, LoopContextPort, LoopContextRequest,
+        LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverId, LoopDriverNoteKind,
+        LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind,
+        LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
         LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
         LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
         LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
@@ -620,6 +621,8 @@ async fn loop_prompt_port_builds_text_only_bundle_from_context_refs() {
 
     assert!(bundle.bundle_ref.is_for_run(&host.context));
     assert_eq!(bundle.surface_version, Some(surface_version));
+    assert_eq!(bundle.identity_message_count, 0);
+    assert_eq!(bundle.instruction_snippet_count, 0);
     assert_eq!(
         bundle.messages,
         vec![LoopModelMessage {
@@ -644,6 +647,8 @@ async fn prompt_bundle_authority_consumes_grant_after_successful_model_authoriza
         messages: messages.clone(),
         surface_version: None,
         instruction_fingerprint: None,
+        identity_message_count: 0,
+        instruction_snippet_count: 0,
     };
     authority.issue_bundle(&context, &bundle).unwrap();
 
@@ -713,6 +718,54 @@ async fn loop_prompt_port_uses_current_surface_version_lookup_each_build() {
 }
 
 #[tokio::test]
+async fn loop_milestone_emitter_publishes_loop_progress_kinds() {
+    let host = RecordingAgentLoopHost::new(claimed_run_context().await);
+    let emitter = host.milestone_emitter();
+
+    emitter.iteration_started(3).await.unwrap();
+    emitter
+        .capability_batch_started(3, 2, BatchPolicyKind::Parallel)
+        .await
+        .unwrap();
+    emitter
+        .capability_batch_completed(3, 1, 0, 1, 0)
+        .await
+        .unwrap();
+    emitter.gate_blocked(3, LoopGateKind::Auth).await.unwrap();
+
+    let milestones = host.milestones();
+    assert!(matches!(
+        milestones[0].kind,
+        LoopHostMilestoneKind::IterationStarted { iteration: 3 }
+    ));
+    assert!(matches!(
+        milestones[1].kind,
+        LoopHostMilestoneKind::CapabilityBatchStarted {
+            iteration: 3,
+            call_count: 2,
+            policy: BatchPolicyKind::Parallel,
+        }
+    ));
+    assert!(matches!(
+        milestones[2].kind,
+        LoopHostMilestoneKind::CapabilityBatchCompleted {
+            iteration: 3,
+            result_count: 1,
+            denied_count: 0,
+            gated_count: 1,
+            failed_count: 0,
+        }
+    ));
+    assert!(matches!(
+        milestones[3].kind,
+        LoopHostMilestoneKind::GateBlocked {
+            iteration: 3,
+            gate_kind: LoopGateKind::Auth,
+        }
+    ));
+}
+
+#[tokio::test]
 async fn loop_prompt_port_materializes_instruction_snippets_as_system_refs() {
     let host = Arc::new(
         RecordingAgentLoopHost::new(claimed_run_context().await)
@@ -737,6 +790,8 @@ async fn loop_prompt_port_materializes_instruction_snippets_as_system_refs() {
         .unwrap();
 
     assert_eq!(bundle.messages.len(), 2);
+    assert_eq!(bundle.identity_message_count, 0);
+    assert_eq!(bundle.instruction_snippet_count, 1);
     assert_eq!(bundle.messages[0].role, "system");
     assert_eq!(
         bundle.messages[0].content_ref,
@@ -1939,6 +1994,7 @@ impl LoopInputPort for RecordingAgentLoopHost {
     ) -> Result<LoopInputBatch, AgentLoopHostError> {
         Ok(LoopInputBatch {
             inputs: Vec::new(),
+            input_acks: Vec::new(),
             next_cursor: LoopInputCursor::from_host_token(
                 &self.context,
                 LoopInputCursorToken::new("input-cursor:0").unwrap(),
@@ -1946,7 +2002,7 @@ impl LoopInputPort for RecordingAgentLoopHost {
         })
     }
 
-    async fn ack_inputs(&self, _cursor: LoopInputCursor) -> Result<(), AgentLoopHostError> {
+    async fn ack_inputs(&self, _tokens: Vec<LoopInputAckToken>) -> Result<(), AgentLoopHostError> {
         Ok(())
     }
 }
@@ -1962,6 +2018,7 @@ impl LoopPromptPort for RecordingAgentLoopHost {
             .load_loop_context(LoopContextRequest {
                 after: request.context_cursor,
                 limit: request.max_messages.unwrap_or(8) as usize,
+                mode: request.mode,
             })
             .await?;
         let bundle = LoopPromptBundle {
@@ -1980,6 +2037,8 @@ impl LoopPromptPort for RecordingAgentLoopHost {
                 .collect(),
             surface_version: request.surface_version,
             instruction_fingerprint: None,
+            identity_message_count: 0,
+            instruction_snippet_count: 0,
         };
         self.milestone_emitter()
             .prompt_bundle_built(
@@ -2105,6 +2164,12 @@ impl LoopProgressPort for RecordingAgentLoopHost {
     async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError> {
         self.record(format!("progress:{}", event.kind_name()));
         Ok(())
+    }
+}
+
+impl LoopCancellationPort for RecordingAgentLoopHost {
+    fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
+        None
     }
 }
 

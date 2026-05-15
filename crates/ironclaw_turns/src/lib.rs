@@ -6,22 +6,22 @@
 //! transition APIs are intentionally not re-exported from this crate prelude.
 #![warn(unreachable_pub)]
 
-pub mod admission;
-pub mod checkpoint_state;
-pub mod coordinator;
+mod admission;
+mod checkpoint_state;
+mod coordinator;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-pub mod db;
+mod db;
 pub mod events;
-pub mod ids;
+mod ids;
 pub mod loop_exit;
-pub mod memory;
-pub mod request;
-pub mod response;
+mod memory;
+mod request;
+mod response;
 pub mod run_profile;
 pub mod runner;
 pub mod scope;
-pub mod status;
-pub mod store;
+mod status;
+mod store;
 
 pub use admission::{
     AllowAllTurnAdmissionLimitProvider, StaticTurnAdmissionLimitProvider, TurnAdmissionAxisKind,
@@ -74,9 +74,10 @@ pub use run_profile::{
     LoopCheckpointStateRef, LoopDriverId, MemoryPromptContextRequest, MemoryPromptContextService,
     ModelProfileId, PrivilegedRunProfileDimension, RedactedRunProfileProvenance,
     RedactedRunProfileSource, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
-    RunClassId, RunProfileFingerprint, RunProfileRequestAuthority, RunProfileResolutionError,
-    RunProfileResolutionRequest, RunProfileResolver, RunProfileSourceLayer, RunProfileSourceRef,
-    RunnerPoolId, RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
+    RunClassId, RunProfileFingerprint, RunProfileRegistryError, RunProfileRequestAuthority,
+    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver,
+    RunProfileSourceLayer, RunProfileSourceRef, RunnerPoolId, RuntimeProfileConstraints,
+    SchedulingClass, SteeringPolicy,
 };
 pub use scope::{TurnActor, TurnScope};
 pub use status::{
