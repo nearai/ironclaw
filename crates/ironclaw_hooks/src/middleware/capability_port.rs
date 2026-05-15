@@ -547,10 +547,15 @@ fn serialized_len(value: &serde_json::Value) -> Result<u64, serde_json::Error> {
     Ok(writer.0)
 }
 
-/// Stable digest of capability arguments for hook context. The middleware
-/// hashes the input-ref's underlying value so two invocations with identical
-/// arguments produce the same digest, enabling repetition / rate-cap logic
-/// without exposing raw arguments to hook code.
+/// Stable digest of capability invocation identity for hook context. The
+/// middleware hashes the `(capability_id, input_ref)` pair so two
+/// invocations with the same capability id and the same input ref produce
+/// the same digest, enabling repetition / rate-cap logic without exposing
+/// raw arguments to hook code. The digest is over input-ref identity, not
+/// over the resolved argument content the input-ref points at — two
+/// distinct refs that happen to resolve to identical JSON will NOT share a
+/// digest, and the same ref representing changed underlying content will
+/// keep the same digest.
 ///
 /// # Stability contract
 ///
