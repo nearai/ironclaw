@@ -44,6 +44,15 @@ mod sql_common;
 pub use filesystem_store::{FilesystemDurableAuditLog, FilesystemDurableEventLog};
 
 /// Backend configuration for Reborn durable event/audit stores.
+///
+/// Note (audit finding F3): `FilesystemDurableEventLog` /
+/// `FilesystemDurableAuditLog` are exported above but deliberately have no
+/// corresponding `Filesystem` variant on this enum. Production composition
+/// still routes through the SQL stores by design — the filesystem-backed log
+/// is the migration target for the kernel-storage rework, and the variant
+/// will be added during the `src/db/` dissolution pass (task #17 of the
+/// rework; see the doc comment on `filesystem_store.rs` for the longer
+/// rationale). This is the documented expected state, not an oversight.
 #[derive(Debug)]
 pub enum RebornEventStoreConfig {
     /// In-memory reference backend. Valid only for explicit local/test
