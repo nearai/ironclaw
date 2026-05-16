@@ -149,9 +149,12 @@ impl LoopExitEvidencePort for InMemoryLoopExitEvidencePort {
     }
 }
 
-/// Durable text/checkpoint-backed evidence adapter for the current Reborn
-/// text-only host. Capability-result and gate/process evidence deliberately
-/// remain untrusted until dedicated durable stores are wired.
+/// Durable text/checkpoint-backed evidence adapter for the current Reborn host.
+///
+/// A completion that includes a durable finalized assistant reply remains
+/// trusted even if the loop also reports capability result refs. Standalone
+/// result-ref-only completion still fails closed until a dedicated durable
+/// result evidence store is wired.
 pub struct ThreadCheckpointLoopExitEvidencePort<S>
 where
     S: SessionThreadService + ?Sized,
@@ -214,7 +217,7 @@ where
         &self,
         request: CompletionEvidenceRequest<'_>,
     ) -> Result<bool, TurnError> {
-        if !request.result_refs.is_empty() {
+        if !request.result_refs.is_empty() && request.reply_message_refs.is_empty() {
             return Ok(false);
         }
         if request.reply_message_refs.is_empty() {
