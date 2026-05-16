@@ -6,6 +6,7 @@
 //! proxy API (Slack).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::mpsc;
@@ -15,6 +16,7 @@ use crate::channels::{
     Channel, ChatApprovalPrompt, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate,
 };
 use crate::error::ChannelError;
+use crate::pairing::PairingStore;
 
 /// Default channel name for the Slack relay integration.
 pub const DEFAULT_RELAY_NAME: &str = "slack-relay";
@@ -51,6 +53,8 @@ pub struct RelayChannel {
     event_tx: mpsc::Sender<ChannelEvent>,
     /// Receiver side — taken once by `start()`.
     event_rx: tokio::sync::Mutex<Option<mpsc::Receiver<ChannelEvent>>>,
+    /// Resolves Slack sender_id → internal UserId for multi-tenant support.
+    pairing_store: Option<Arc<PairingStore>>,
 }
 
 impl RelayChannel {
@@ -88,7 +92,14 @@ impl RelayChannel {
             instance_id,
             event_tx,
             event_rx: tokio::sync::Mutex::new(Some(event_rx)),
+            pairing_store: None,
         }
+    }
+
+    /// Set the pairing store for multi-tenant identity resolution.
+    pub fn with_pairing_store(mut self, store: Arc<PairingStore>) -> Self {
+        self.pairing_store = Some(store);
+        self
     }
 
     /// Get a clone of the event sender for wiring into the webhook endpoint.
@@ -123,9 +134,10 @@ impl RelayChannel {
         team_id: &str,
         method: &str,
         body: serde_json::Value,
+        slack_user_id: Option<&str>,
     ) -> Result<serde_json::Value, crate::channels::relay::client::RelayError> {
         self.client
-            .proxy_provider(self.provider.as_str(), team_id, method, body)
+            .proxy_provider_with_user(self.provider.as_str(), team_id, method, body, slack_user_id)
             .await
     }
 
@@ -205,6 +217,8 @@ impl Channel for RelayChannel {
         let (tx, rx) = mpsc::channel(64);
         let provider_str = self.provider.as_str().to_string();
         let relay_name = channel_name.clone();
+        let pairing_store = self.pairing_store.clone();
+        let pairing_client = self.client.clone();
 
         // Spawn a task that reads events from the webhook handler and converts to IncomingMessage
         tokio::spawn(async move {
@@ -240,7 +254,80 @@ impl Channel for RelayChannel {
                     "Relay: received message from {}", provider_str
                 );
 
-                let mut msg = IncomingMessage::new(&relay_name, &event.sender_id, event.text())
+                // Resolve sender_id → internal UserId via PairingStore.
+                // External ID is scoped to workspace: "team_id:sender_id".
+                let scoped_external_id = format!("{}:{}", event.provider_scope, event.sender_id);
+                let resolved_user_id: String = if let Some(ref store) = pairing_store {
+                    match store
+                        .resolve_identity(&relay_name, &scoped_external_id)
+                        .await
+                    {
+                        Ok(Some(uid)) => {
+                            let user_str = uid.as_str().to_string();
+                            tracing::debug!(
+                                sender_id = %event.sender_id,
+                                resolved_user = %user_str,
+                                "Relay: resolved sender to internal user"
+                            );
+                            user_str
+                        }
+                        Ok(None) => {
+                            tracing::info!(
+                                sender_id = %event.sender_id,
+                                "Relay: sender not paired, sending pairing code"
+                            );
+                            let meta = serde_json::json!({
+                                "sender_name": event.display_name(),
+                                "channel_id": event.channel_id,
+                            });
+                            match store
+                                .upsert_request(&relay_name, &scoped_external_id, Some(meta))
+                                .await
+                            {
+                                Ok(record) => {
+                                    let instructions = format!(
+                                        "Enter this code in IronClaw to pair your Slack account: `{}`",
+                                        record.code
+                                    );
+                                    let team_id = event.team_id().to_string();
+                                    let body = serde_json::json!({
+                                        "channel": event.channel_id,
+                                        "text": instructions,
+                                        "thread_ts": event.thread_id.as_deref().unwrap_or(&event.id),
+                                    });
+                                    if let Err(e) = pairing_client
+                                        .proxy_provider(
+                                            &provider_str,
+                                            &team_id,
+                                            "chat.postMessage",
+                                            body,
+                                        )
+                                        .await
+                                    {
+                                        tracing::warn!(error = %e, "Relay: failed to send pairing code reply");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, "Relay: failed to create pairing request");
+                                }
+                            }
+                            continue;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                sender_id = %event.sender_id,
+                                error = %e,
+                                "Relay: pairing resolution failed, dropping message"
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    event.sender_id.clone()
+                };
+
+                let mut msg = IncomingMessage::new(&relay_name, &resolved_user_id, event.text())
+                    .with_sender_id(event.sender_id.clone())
                     .with_user_name(event.display_name())
                     .with_metadata(serde_json::json!({
                         "team_id": event.team_id(),
@@ -323,8 +410,9 @@ impl Channel for RelayChannel {
             .filter(|s| !s.is_empty());
 
         let (method, body) = self.build_send_body(channel_id, &response.content, thread_id);
+        let sender_id = metadata.get("sender_id").and_then(|v| v.as_str());
 
-        self.proxy_send(team_id, &method, body)
+        self.proxy_send(team_id, &method, body, sender_id)
             .await
             .map_err(|e| ChannelError::SendFailed {
                 name: channel_name,
@@ -384,7 +472,7 @@ impl Channel for RelayChannel {
             })?;
         let body = self.build_approval_body(channel_id, thread_id, &prompt, &approval_token);
 
-        self.proxy_send(team_id, "chat.postMessage", body)
+        self.proxy_send(team_id, "chat.postMessage", body, None)
             .await
             .map_err(|e| ChannelError::SendFailed {
                 name: self.name().to_string(),
@@ -410,7 +498,7 @@ impl Channel for RelayChannel {
 
         let (method, body) = self.build_send_body(target, &response.content, thread_id);
 
-        self.proxy_send(&self.team_id, &method, body)
+        self.proxy_send(&self.team_id, &method, body, None)
             .await
             .map_err(|e| ChannelError::SendFailed {
                 name: channel_name,

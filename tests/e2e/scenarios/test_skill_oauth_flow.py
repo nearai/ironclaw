@@ -28,6 +28,7 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from helpers import api_get, api_post, auth_headers, AUTH_TOKEN
+from scenarios.test_auth_no_duplicate_response import auth_sse_server
 
 
 # ---------------------------------------------------------------------------
@@ -362,11 +363,16 @@ class TestSSEAuthEvents:
     """Test that auth events are emitted via SSE for web gateway."""
 
     @pytest.mark.asyncio
-    async def test_auth_required_sse_event(self, ironclaw_server):
+    async def test_auth_required_sse_event(self, auth_sse_server):
         """Auth onboarding SSE event should be emitted when credential is missing."""
+        # Use the isolated auth SSE fixture: it starts ironclaw with a mock
+        # GitHub skill whose credential mapping points at the loopback mock API.
+        # The shared ironclaw_server cannot add that host mapping after startup.
+        base_url = auth_sse_server
+
         # Connect to SSE stream
         thread_r = await api_post(
-            ironclaw_server, "/api/chat/thread/new", timeout=15
+            base_url, "/api/chat/thread/new", timeout=15
         )
         thread_id = thread_r.json()["id"]
 
@@ -374,19 +380,22 @@ class TestSSEAuthEvents:
 
         async def collect_sse_events():
             """Collect SSE events in the background."""
-            url = f"{ironclaw_server}/api/chat/events?token={AUTH_TOKEN}"
-            async with httpx.AsyncClient() as client:
-                async with client.stream("GET", url, timeout=30) as resp:
-                    async for line in resp.aiter_lines():
-                        if line.startswith("data:"):
-                            try:
-                                data = json.loads(line[5:].strip())
-                                events_received.append(data)
-                            except json.JSONDecodeError:
-                                pass
-                        # Stop after getting enough events
-                        if len(events_received) > 20:
-                            break
+            url = f"{base_url}/api/chat/events?token={AUTH_TOKEN}"
+            try:
+                async with httpx.AsyncClient() as client:
+                    async with client.stream("GET", url, timeout=30) as resp:
+                        async for line in resp.aiter_lines():
+                            if line.startswith("data:"):
+                                try:
+                                    data = json.loads(line[5:].strip())
+                                    events_received.append(data)
+                                except json.JSONDecodeError:
+                                    pass
+                            # Stop after getting enough events
+                            if len(events_received) > 20:
+                                break
+            except (asyncio.CancelledError, httpx.TimeoutException):
+                pass
 
         # Start collecting events
         sse_task = asyncio.create_task(collect_sse_events())
@@ -396,7 +405,7 @@ class TestSSEAuthEvents:
 
         # Send a message that triggers auth
         await api_post(
-            ironclaw_server,
+            base_url,
             "/api/chat/send",
             json={
                 "content": "show github issues for nearai/ironclaw",
@@ -405,8 +414,16 @@ class TestSSEAuthEvents:
             timeout=30,
         )
 
-        # Wait for events to arrive
-        await asyncio.sleep(10)
+        # Wait for auth events to arrive. Coverage-instrumented CI can be
+        # slow, so poll the collected stream instead of sleeping a fixed 10s.
+        deadline = asyncio.get_running_loop().time() + 45
+        while asyncio.get_running_loop().time() < deadline:
+            if any(
+                e.get("type") == "onboarding_state" and e.get("state") == "auth_required"
+                for e in events_received
+            ) or "approval_needed" in [e.get("type", "") for e in events_received]:
+                break
+            await asyncio.sleep(0.5)
         sse_task.cancel()
         try:
             await sse_task

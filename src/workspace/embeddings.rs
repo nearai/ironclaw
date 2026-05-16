@@ -6,6 +6,17 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+/// AWS Bedrock parameters needed by the embedding provider.
+///
+/// Defined here rather than re-using `ironclaw_llm::BedrockConfig` so the
+/// embeddings layer does not depend on LLM-side config types. Callers
+/// (which already hold an `LlmConfig`) translate at the boundary.
+#[derive(Debug, Clone)]
+pub struct BedrockEmbeddingSetup {
+    pub region: String,
+    pub profile: Option<String>,
+}
+
 /// Error type for embedding operations.
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddingError {
@@ -226,7 +237,7 @@ impl EmbeddingProvider for OpenAiEmbeddings {
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = Some(crate::llm::retry::parse_retry_after(
+            let retry_after = Some(ironclaw_llm::retry::parse_retry_after(
                 response.headers().get("retry-after"),
             ));
             return Err(EmbeddingError::RateLimited { retry_after });
@@ -254,7 +265,7 @@ impl EmbeddingProvider for OpenAiEmbeddings {
 pub struct NearAiEmbeddings {
     client: reqwest::Client,
     base_url: String,
-    session: std::sync::Arc<crate::llm::SessionManager>,
+    session: std::sync::Arc<ironclaw_llm::SessionManager>,
     model: String,
     dimension: usize,
 }
@@ -265,7 +276,7 @@ impl NearAiEmbeddings {
     /// Uses the same session manager as the LLM provider for auth.
     pub fn new(
         base_url: impl Into<String>,
-        session: std::sync::Arc<crate::llm::SessionManager>,
+        session: std::sync::Arc<ironclaw_llm::SessionManager>,
     ) -> Self {
         Self {
             client: reqwest::Client::new(),
@@ -364,7 +375,7 @@ impl EmbeddingProvider for NearAiEmbeddings {
         }
 
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = Some(crate::llm::retry::parse_retry_after(
+            let retry_after = Some(ironclaw_llm::retry::parse_retry_after(
                 response.headers().get("retry-after"),
             ));
             return Err(EmbeddingError::RateLimited { retry_after });
@@ -398,13 +409,13 @@ pub struct BedrockEmbeddings {
 impl BedrockEmbeddings {
     /// Create a new Bedrock embedding provider.
     pub async fn new(
-        config: &crate::llm::BedrockConfig,
+        setup: &BedrockEmbeddingSetup,
         model: impl Into<String>,
         dimension: usize,
     ) -> Result<Self, EmbeddingError> {
         let mut builder = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(aws_config::Region::new(config.region.clone()));
-        if let Some(ref profile) = config.profile {
+            .region(aws_config::Region::new(setup.region.clone()));
+        if let Some(ref profile) = setup.profile {
             builder = builder.profile_name(profile);
         }
 

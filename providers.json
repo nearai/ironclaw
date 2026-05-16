@@ -1,5 +1,57 @@
 [
   {
+    "id": "nearai",
+    "aliases": [
+      "near_ai",
+      "near"
+    ],
+    "protocol": "nearai",
+    "api_key_env": "NEARAI_API_KEY",
+    "api_key_required": false,
+    "base_url_env": "NEARAI_BASE_URL",
+    "model_env": "NEARAI_MODEL",
+    "default_model": "auto",
+    "description": "multi-model access via NEAR account",
+    "setup": {
+      "kind": "session_token",
+      "display_name": "NEAR AI",
+      "key_url": "https://app.near.ai"
+    }
+  },
+  {
+    "id": "gemini_oauth",
+    "aliases": [
+      "gemini-oauth"
+    ],
+    "protocol": "gemini_oauth",
+    "api_key_required": false,
+    "model_env": "GEMINI_MODEL",
+    "default_model": "gemini-2.5-flash",
+    "description": "Official Gemini API via Gemini CLI OAuth",
+    "setup": {
+      "kind": "file_based_credentials",
+      "display_name": "Gemini CLI",
+      "default_path_hint": "~/.gemini/oauth_creds.json"
+    }
+  },
+  {
+    "id": "openai_codex",
+    "aliases": [
+      "openai-codex",
+      "codex"
+    ],
+    "protocol": "openai_codex",
+    "api_key_required": false,
+    "model_env": "OPENAI_CODEX_MODEL",
+    "default_model": "gpt-5.3-codex",
+    "description": "ChatGPT subscription (Plus/Pro/Max)",
+    "setup": {
+      "kind": "o_auth_device_code",
+      "display_name": "OpenAI Codex",
+      "backend": "openai_codex"
+    }
+  },
+  {
     "id": "openai",
     "aliases": [
       "open_ai"
@@ -124,13 +176,14 @@
     "aliases": [
       "open_router"
     ],
-    "protocol": "open_ai_completions",
-    "default_base_url": "https://openrouter.ai/api/v1",
+    "protocol": "open_router",
+    "default_base_url": "",
     "api_key_env": "OPENROUTER_API_KEY",
     "api_key_required": true,
     "model_env": "OPENROUTER_MODEL",
+    "extra_headers_env": "OPENROUTER_EXTRA_HEADERS",
     "default_model": "openai/gpt-4o",
-    "description": "OpenRouter multi-provider gateway (200+ models)",
+    "description": "OpenRouter multi-provider gateway (200+ models, preserves reasoning across turns)",
     "setup": {
       "kind": "api_key",
       "secret_name": "llm_openrouter_api_key",
@@ -246,13 +299,13 @@
     "aliases": [
       "deep_seek"
     ],
-    "protocol": "open_ai_completions",
-    "default_base_url": "https://api.deepseek.com/v1",
+    "protocol": "deep_seek",
+    "default_base_url": "",
     "api_key_env": "DEEPSEEK_API_KEY",
     "api_key_required": true,
     "model_env": "DEEPSEEK_MODEL",
     "default_model": "deepseek-chat",
-    "description": "DeepSeek inference API",
+    "description": "DeepSeek inference API (preserves reasoning_content for thinking-mode models)",
     "setup": {
       "kind": "api_key",
       "secret_name": "llm_deepseek_api_key",
@@ -325,19 +378,19 @@
       "google_gemini",
       "google"
     ],
-    "protocol": "open_ai_completions",
-    "default_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+    "protocol": "gemini",
+    "default_base_url": "",
     "api_key_env": "GEMINI_API_KEY",
     "api_key_required": true,
     "model_env": "GEMINI_MODEL",
     "default_model": "gemini-2.5-flash",
-    "description": "Google Gemini (via OpenAI-compatible endpoint)",
+    "description": "Google Gemini native API (preserves thought_signature on tool calls)",
     "setup": {
       "kind": "api_key",
       "secret_name": "llm_gemini_api_key",
       "key_url": "https://aistudio.google.com/app/apikey",
       "display_name": "Google Gemini",
-      "can_list_models": true
+      "can_list_models": false
     }
   },
   {
@@ -444,6 +497,24 @@
       "secret_name": "llm_cloudflare_api_key",
       "display_name": "Cloudflare Workers AI",
       "can_list_models": false
+    }
+  },
+  {
+    "id": "bedrock",
+    "aliases": [
+      "aws_bedrock",
+      "aws"
+    ],
+    "protocol": "bedrock",
+    "api_key_required": false,
+    "model_env": "BEDROCK_MODEL",
+    "default_model": "anthropic.claude-sonnet-4-20250514-v1:0",
+    "description": "Claude & other models via AWS (IAM, SSO)",
+    "setup": {
+      "kind": "aws_credentials",
+      "display_name": "AWS Bedrock",
+      "supports_cross_region": true,
+      "supports_profile": true
     }
   }
 ]

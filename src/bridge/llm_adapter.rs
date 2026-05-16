@@ -11,7 +11,7 @@ use ironclaw_engine::{
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 
-use crate::llm::{
+use ironclaw_llm::{
     ChatMessage, LlmProvider, Role, ToolCall, ToolCompletionRequest, ToolDefinition,
     clean_response, recover_tool_calls_from_content, sanitize_tool_messages,
 };
@@ -110,8 +110,20 @@ impl LlmBackend for LlmBridgeAdapter {
         sanitize_tool_messages(&mut chat_messages);
 
         // Convert actions to tool definitions
+        //
+        // In disabled-CodeAct mode the model has no Python escape hatch, so
+        // every callable action MUST be reachable via the provider's
+        // structured `tool_calls` interface. Filtering down to
+        // `emits_full_schema_tool()` in that mode would leave compact-info
+        // actions (e.g. `mission_create`, `gmail_send`, `notion_search`)
+        // visible in the prompt as "available" but absent from the provider
+        // tool list — i.e. unreachable. The prompt builder mirrors this by
+        // omitting the "Enabled Tools" section when CodeAct is disabled
+        // (see `prompt::build_codeact_system_prompt_inner`). PR #3665 review.
         let tools: Vec<ToolDefinition> = if config.force_text {
             vec![] // No tools when forcing text
+        } else if ironclaw_engine::executor::prompt::codeact_disabled() {
+            actions.iter().map(action_def_to_tool_def).collect()
         } else {
             actions
                 .iter()
@@ -126,7 +138,7 @@ impl LlmBackend for LlmBridgeAdapter {
 
         if tools.is_empty() {
             // No tools: use plain completion (matches existing no-tools path)
-            let mut request = crate::llm::CompletionRequest::new(chat_messages)
+            let mut request = ironclaw_llm::CompletionRequest::new(chat_messages)
                 .with_max_tokens(max_tokens)
                 .with_temperature(temperature);
             request.metadata = config.metadata.clone();
@@ -403,6 +415,7 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
         tool_call_id: msg.action_call_id.clone(),
         name: msg.action_name.clone(),
         tool_calls: None,
+        reasoning: None,
     };
 
     // Convert action calls if present (assistant message with tool calls)
@@ -415,6 +428,7 @@ fn thread_msg_to_chat(msg: &ThreadMessage) -> ChatMessage {
                     name: c.action_name.clone(),
                     arguments: c.parameters.clone(),
                     reasoning: None,
+                    signature: None,
                 })
                 .collect(),
         );
@@ -513,6 +527,12 @@ fn extract_code_block(text: &str) -> Option<String> {
 }
 
 fn text_response_from_cleaned_text(cleaned_text: String) -> LlmResponse {
+    if ironclaw_engine::executor::prompt::codeact_disabled() {
+        if cleaned_text.trim().is_empty() {
+            return LlmResponse::Text(EMPTY_CLEANED_RESPONSE_FALLBACK.to_string());
+        }
+        return LlmResponse::Text(cleaned_text);
+    }
     match extract_code_block(&cleaned_text) {
         Some(code) => LlmResponse::Code {
             code,
@@ -620,7 +640,7 @@ mod tests {
     use ironclaw_engine::{ActionCall, ActionDef, EffectType, LlmResponse, ThreadMessage};
 
     use crate::error::LlmError;
-    use crate::llm::ToolCompletionResponse;
+    use ironclaw_llm::ToolCompletionResponse;
 
     #[derive(Default)]
     struct CapturingProviderState {
@@ -646,8 +666,8 @@ mod tests {
 
         async fn complete(
             &self,
-            req: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            req: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
             self.state.models.lock().await.push(req.model.clone());
             self.state
                 .completion_requests
@@ -655,11 +675,11 @@ mod tests {
                 .await
                 .push(req.messages);
 
-            Ok(crate::llm::CompletionResponse {
+            Ok(ironclaw_llm::CompletionResponse {
                 content: "ok".to_string(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -682,9 +702,10 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -834,8 +855,8 @@ mod tests {
 
         async fn complete(
             &self,
-            _req: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            _req: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
             unreachable!("test only uses complete_with_tools")
         }
 
@@ -848,9 +869,10 @@ mod tests {
                 tool_calls: Vec::new(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -966,13 +988,13 @@ mod tests {
 
         async fn complete(
             &self,
-            _req: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
-            Ok(crate::llm::CompletionResponse {
+            _req: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
+            Ok(ironclaw_llm::CompletionResponse {
                 content: self.content.clone(),
                 input_tokens: 1,
                 output_tokens: 1,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -1123,15 +1145,27 @@ mod tests {
         assert_eq!(models[0], None);
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn complete_with_tools_only_emits_full_schema_provider_tools() {
+        // Both this test and `complete_emits_compact_actions_when_codeact_disabled`
+        // read the process-global `IRONCLAW_DISABLE_CODEACT` env var. Serialize
+        // via lock_env() and pin the value here so the other test setting
+        // `=true` can't leak across when `cargo test` runs them in parallel.
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var_os("IRONCLAW_DISABLE_CODEACT");
+        // SAFETY: serialized via lock_env().
+        unsafe {
+            std::env::remove_var("IRONCLAW_DISABLE_CODEACT");
+        }
+
         let state = Arc::new(CapturingProviderState::default());
         let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
             state: state.clone(),
         });
         let adapter = LlmBridgeAdapter::new(provider, None);
 
-        adapter
+        let result = adapter
             .complete(
                 &[ThreadMessage::user("hi")],
                 &[
@@ -1156,8 +1190,18 @@ mod tests {
                 ],
                 &LlmCallConfig::default(),
             )
-            .await
-            .unwrap();
+            .await;
+
+        // SAFETY: serialized via lock_env().
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var("IRONCLAW_DISABLE_CODEACT", value);
+            } else {
+                std::env::remove_var("IRONCLAW_DISABLE_CODEACT");
+            }
+        }
+
+        result.unwrap();
 
         let tool_definitions = state.tool_definitions.lock().await;
         let emitted = tool_definitions.last().expect("tool completion request");
@@ -1167,6 +1211,78 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["http"]);
+    }
+
+    /// PR #3665 review (serrrfirat). Disabled-CodeAct mode strips the Python
+    /// escape hatch, so any callable action MUST be reachable via the
+    /// provider's structured `tool_calls`. Filtering down to FullSchema in
+    /// that mode left compact actions (`mission_create`, `gmail_send`, ...)
+    /// visible in the prompt but absent from the provider tool list — i.e.
+    /// unreachable. This test pins the relaxed filter.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn complete_emits_compact_actions_when_codeact_disabled() {
+        let _guard = crate::config::helpers::lock_env();
+        let original = std::env::var_os("IRONCLAW_DISABLE_CODEACT");
+        // SAFETY: serialized via lock_env().
+        unsafe {
+            std::env::set_var("IRONCLAW_DISABLE_CODEACT", "true");
+        }
+
+        let state = Arc::new(CapturingProviderState::default());
+        let provider: Arc<dyn LlmProvider> = Arc::new(CapturingProvider {
+            state: state.clone(),
+        });
+        let adapter = LlmBridgeAdapter::new(provider, None);
+
+        let result = adapter
+            .complete(
+                &[ThreadMessage::user("hi")],
+                &[
+                    ActionDef {
+                        name: "http".into(),
+                        description: "fetch".into(),
+                        parameters_schema: serde_json::json!({"type": "object"}),
+                        effects: vec![EffectType::ReadExternal],
+                        requires_approval: false,
+                        model_tool_surface: ModelToolSurface::FullSchema,
+                        discovery: None,
+                    },
+                    ActionDef {
+                        name: "mission_create".into(),
+                        description: "create mission".into(),
+                        parameters_schema: serde_json::json!({"type": "object"}),
+                        effects: vec![EffectType::WriteLocal],
+                        requires_approval: false,
+                        model_tool_surface: ModelToolSurface::CompactToolInfo,
+                        discovery: None,
+                    },
+                ],
+                &LlmCallConfig::default(),
+            )
+            .await;
+
+        // SAFETY: serialized via lock_env().
+        unsafe {
+            if let Some(value) = original {
+                std::env::set_var("IRONCLAW_DISABLE_CODEACT", value);
+            } else {
+                std::env::remove_var("IRONCLAW_DISABLE_CODEACT");
+            }
+        }
+
+        result.expect("adapter.complete should succeed");
+
+        let tool_definitions = state.tool_definitions.lock().await;
+        let emitted = tool_definitions.last().expect("tool completion request");
+        let mut names: Vec<&str> = emitted.iter().map(|t| t.name.as_str()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["http", "mission_create"],
+            "disabled-CodeAct must emit BOTH FullSchema and CompactToolInfo actions \
+             — otherwise compact actions are unreachable"
+        );
     }
 
     // ── extract_code_block tests ────────────────────────────
@@ -1555,8 +1671,8 @@ And also check the token price:\n\
         }
         async fn complete(
             &self,
-            _req: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
+            _req: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
             unreachable!("should use complete_with_tools")
         }
         async fn complete_with_tools(
@@ -1567,7 +1683,7 @@ And also check the token price:\n\
             // a prior tool result's project_id via template ref.
             Ok(ToolCompletionResponse {
                 content: Some("Creating mission in the new project".to_string()),
-                tool_calls: vec![crate::llm::ToolCall {
+                tool_calls: vec![ironclaw_llm::ToolCall {
                     id: "call-2".to_string(),
                     name: "mission_create".to_string(),
                     arguments: serde_json::json!({
@@ -1576,12 +1692,14 @@ And also check the token price:\n\
                         "project_id": "{{call-1.project_id}}"
                     }),
                     reasoning: None,
+                    signature: None,
                 }],
                 input_tokens: 10,
                 output_tokens: 10,
-                finish_reason: crate::llm::FinishReason::ToolUse,
+                finish_reason: ironclaw_llm::FinishReason::ToolUse,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -1663,13 +1781,13 @@ And also check the token price:\n\
         }
         async fn complete(
             &self,
-            _req: crate::llm::CompletionRequest,
-        ) -> Result<crate::llm::CompletionResponse, LlmError> {
-            Ok(crate::llm::CompletionResponse {
+            _req: ironclaw_llm::CompletionRequest,
+        ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
+            Ok(ironclaw_llm::CompletionResponse {
                 content: "hello".to_string(),
                 input_tokens: 1000,
                 output_tokens: 500,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
             })
@@ -1683,9 +1801,10 @@ And also check the token price:\n\
                 tool_calls: Vec::new(),
                 input_tokens: 1000,
                 output_tokens: 500,
-                finish_reason: crate::llm::FinishReason::Stop,
+                finish_reason: ironclaw_llm::FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -1752,13 +1871,13 @@ And also check the token price:\n\
             }
             async fn complete(
                 &self,
-                _req: crate::llm::CompletionRequest,
-            ) -> Result<crate::llm::CompletionResponse, LlmError> {
-                Ok(crate::llm::CompletionResponse {
+                _req: ironclaw_llm::CompletionRequest,
+            ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
+                Ok(ironclaw_llm::CompletionResponse {
                     content: "ok".into(),
                     input_tokens: 1000,
                     output_tokens: 500,
-                    finish_reason: crate::llm::FinishReason::Stop,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 })
@@ -1811,13 +1930,13 @@ And also check the token price:\n\
             }
             async fn complete(
                 &self,
-                _req: crate::llm::CompletionRequest,
-            ) -> Result<crate::llm::CompletionResponse, LlmError> {
-                Ok(crate::llm::CompletionResponse {
+                _req: ironclaw_llm::CompletionRequest,
+            ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
+                Ok(ironclaw_llm::CompletionResponse {
                     content: "ok".into(),
                     input_tokens: 10_000,
                     output_tokens: 5_000,
-                    finish_reason: crate::llm::FinishReason::Stop,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
                 })
@@ -1879,15 +1998,15 @@ And also check the token price:\n\
             }
             async fn complete(
                 &self,
-                _req: crate::llm::CompletionRequest,
-            ) -> Result<crate::llm::CompletionResponse, LlmError> {
+                _req: ironclaw_llm::CompletionRequest,
+            ) -> Result<ironclaw_llm::CompletionResponse, LlmError> {
                 // Total input = 10_000; 2_000 cache-read, 1_000 cache-write,
                 // 7_000 uncached. Output = 500.
-                Ok(crate::llm::CompletionResponse {
+                Ok(ironclaw_llm::CompletionResponse {
                     content: "ok".into(),
                     input_tokens: 10_000,
                     output_tokens: 500,
-                    finish_reason: crate::llm::FinishReason::Stop,
+                    finish_reason: ironclaw_llm::FinishReason::Stop,
                     cache_read_input_tokens: 2_000,
                     cache_creation_input_tokens: 1_000,
                 })

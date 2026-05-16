@@ -192,7 +192,7 @@ const REASONING_LLM_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// prior work, decisions, preferences, or any historical context.
 pub struct MemorySearchTool {
     resolver: Arc<dyn WorkspaceResolver>,
-    llm: Option<Arc<dyn crate::llm::LlmProvider>>,
+    llm: Option<Arc<dyn ironclaw_llm::LlmProvider>>,
     reasoning_enabled: bool,
     /// Per-user rate limiter for reasoning LLM calls.
     reasoning_limiter: Arc<crate::tools::rate_limiter::RateLimiter>,
@@ -212,7 +212,7 @@ impl MemorySearchTool {
     /// Create a memory search tool with optional reasoning-augmented recall.
     pub fn with_reasoning(
         resolver: Arc<dyn WorkspaceResolver>,
-        llm: Option<Arc<dyn crate::llm::LlmProvider>>,
+        llm: Option<Arc<dyn ironclaw_llm::LlmProvider>>,
         reasoning_enabled: bool,
     ) -> Self {
         Self {
@@ -334,15 +334,16 @@ impl Tool for MemorySearchTool {
                     .join("\n\n");
 
                 let llm_messages = vec![
-                    crate::llm::ChatMessage::system(include_str!(
+                    ironclaw_llm::ChatMessage::system(include_str!(
                         "../../../crates/ironclaw_engine/prompts/memory_reasoning_synthesis.md"
                     )),
-                    crate::llm::ChatMessage::user(format!(
+                    ironclaw_llm::ChatMessage::user(format!(
                         "Query: {query}\n\nMemory fragments:\n{fragments}"
                     )),
                 ];
 
-                let request = crate::llm::CompletionRequest::new(llm_messages).with_max_tokens(500);
+                let request =
+                    ironclaw_llm::CompletionRequest::new(llm_messages).with_max_tokens(500);
 
                 match tokio::time::timeout(REASONING_LLM_TIMEOUT, llm.complete(request)).await {
                     Ok(Ok(response)) => {
@@ -1723,7 +1724,7 @@ mod tests {
     #[cfg(feature = "libsql")]
     mod reasoning_recall_tests {
         use super::*;
-        use crate::llm::{
+        use ironclaw_llm::{
             CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
             ToolCompletionRequest, ToolCompletionResponse,
         };

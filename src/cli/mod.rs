@@ -442,15 +442,20 @@ pub async fn run_memory_command(mem_cmd: &MemoryCommand) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    let session = crate::llm::create_session_manager(config.llm.session.clone()).await;
+    let session = ironclaw_llm::create_session_manager(config.llm.session.clone()).await;
 
+    let bedrock_setup =
+        config
+            .llm
+            .bedrock
+            .as_ref()
+            .map(|b| crate::workspace::BedrockEmbeddingSetup {
+                region: b.region.clone(),
+                profile: b.profile.clone(),
+            });
     let embeddings = config
         .embeddings
-        .create_provider(
-            &config.llm.nearai.base_url,
-            session,
-            config.llm.bedrock.as_ref(),
-        )
+        .create_provider(&config.llm.nearai.base_url, session, bedrock_setup.as_ref())
         .await;
 
     let db: Arc<dyn crate::db::Database> = crate::db::connect_from_config(&config.database)

@@ -21,12 +21,12 @@ use crate::agent::agentic_loop::{
     AgenticLoopConfig, LoopDelegate, LoopOutcome, LoopSignal, TextAction,
 };
 use crate::generated_images::GeneratedImageSentinel;
-use crate::llm::{ChatMessage, Reasoning, ReasoningContext, TokenUsage};
 use crate::tools::permissions::{PermissionState, effective_permission};
 use crate::tools::redact_params;
+use ironclaw_llm::{ChatMessage, Reasoning, ReasoningContext, TokenUsage};
 
 fn selected_model_override(value: &serde_json::Value) -> Option<String> {
-    crate::llm::normalized_model_override(value.as_str()).map(str::to_string)
+    ironclaw_llm::normalized_model_override(value.as_str()).map(str::to_string)
 }
 
 /// Decide whether a settings-derived temperature should override the
@@ -45,6 +45,19 @@ fn resolve_settings_temperature(
     settings_value
         .and_then(|v| v.as_f64())
         .map(|t| (t as f32).clamp(0.0, 2.0))
+}
+
+fn chat_job_context(
+    message: &IncomingMessage,
+    thread_id: Uuid,
+    user_tz: chrono_tz::Tz,
+) -> JobContext {
+    let mut job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
+        .with_requester_id(&message.sender_id);
+    job_ctx.conversation_id = Some(thread_id);
+    job_ctx.user_timezone = user_tz.name().to_string();
+    job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
+    job_ctx
 }
 
 /// Result of the agentic loop execution.
@@ -125,26 +138,22 @@ impl Agent {
             &self.config.default_timezone,
         );
 
-        let system_prompt = if let Some(ws) = self.workspace() {
-            let scoped_workspace = if ws.user_id() == message.user_id {
-                Arc::clone(ws)
-            } else {
-                Arc::new(ws.scoped_to_user(&message.user_id))
-            };
-            match scoped_workspace
-                .system_prompt_for_context_tz(is_group_chat, user_tz)
-                .await
-            {
-                Ok(prompt) if !prompt.is_empty() => Some(prompt),
-                Ok(_) => None,
-                Err(e) => {
-                    tracing::debug!("Could not load workspace system prompt: {}", e);
-                    None
+        let system_prompt =
+            if let Some(scoped_workspace) = self.workspace_for_user(&message.user_id) {
+                match scoped_workspace
+                    .system_prompt_for_context_tz(is_group_chat, user_tz)
+                    .await
+                {
+                    Ok(prompt) if !prompt.is_empty() => Some(prompt),
+                    Ok(_) => None,
+                    Err(e) => {
+                        tracing::debug!("Could not load workspace system prompt: {}", e);
+                        None
+                    }
                 }
-            }
-        } else {
-            None
-        };
+            } else {
+                None
+            };
 
         // Select active skills. Explicit /skill-name mentions are force-activated
         // and replaced with the skill's description in the rewritten message.
@@ -247,12 +256,8 @@ impl Agent {
         }
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
-        let mut job_ctx =
-            JobContext::with_user(&message.user_id, "chat", "Interactive chat session")
-                .with_requester_id(&message.sender_id);
+        let mut job_ctx = chat_job_context(message, thread_id, user_tz);
         job_ctx.http_interceptor = self.deps.http_interceptor.clone();
-        job_ctx.user_timezone = user_tz.name().to_string();
-        job_ctx.metadata = crate::agent::agent_loop::chat_tool_execution_metadata(message);
 
         // Build system prompts once for this turn. Two variants: with tools
         // (normal iterations) and without (force_text final iteration).
@@ -293,7 +298,7 @@ impl Agent {
             if let Some(last_user) = msgs
                 .iter_mut()
                 .rev()
-                .find(|m| m.role == crate::llm::Role::User)
+                .find(|m| m.role == ironclaw_llm::Role::User)
             {
                 *last_user = ChatMessage::user(&user_content);
             }
@@ -485,7 +490,6 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
             self.tenant.user_id(),
             admin_policy,
         );
-
         // Apply per-user tool permission filtering.
         //
         // Load tool_permissions from the per-user DB settings store (same
@@ -550,7 +554,6 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
                 sess.auto_approve_tool(name);
             }
         }
-
         // Update context for this iteration
         reason_ctx.available_tools = tool_defs;
         // Preserve force_text if already set (e.g. by truncation escalation).
@@ -587,7 +590,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
         iteration: usize,
-    ) -> Result<crate::llm::RespondOutput, Error> {
+    ) -> Result<ironclaw_llm::RespondOutput, Error> {
         // Enforce cost guardrails before the LLM call (global + per-user)
         if let Err(limit) = self.tenant.check_cost_allowed().await {
             return Err(crate::error::LlmError::InvalidResponse {
@@ -742,7 +745,7 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
     async fn handle_text_response(
         &self,
         text: &str,
-        _metadata: crate::llm::ResponseMetadata,
+        _metadata: ironclaw_llm::ResponseMetadata,
         _reason_ctx: &mut ReasoningContext,
     ) -> TextAction {
         // Strip internal "[Called tool ...]" text that can leak when
@@ -754,9 +757,10 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
     async fn execute_tool_calls(
         &self,
-        tool_calls: Vec<crate::llm::ToolCall>,
+        tool_calls: Vec<ironclaw_llm::ToolCall>,
         content: Option<String>,
         reason_ctx: &mut ReasoningContext,
+        reasoning: Option<String>,
     ) -> Result<Option<LoopOutcome>, Error> {
         // Extract and sanitize the narrative before consuming `content`.
         let narrative = content
@@ -773,12 +777,12 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
 
         // Add the assistant message with tool_calls to context.
         // OpenAI protocol requires this before tool-result messages.
-        reason_ctx
-            .messages
-            .push(ChatMessage::assistant_with_tool_calls(
-                content,
-                tool_calls.clone(),
-            ));
+        // Carry reasoning so the next request can echo it back — required for
+        // DeepSeek thinking-mode and Gemini 2.5+ to validate the chain (#3201, #3225).
+        reason_ctx.messages.push(
+            ChatMessage::assistant_with_tool_calls(content, tool_calls.clone())
+                .with_reasoning(reasoning),
+        );
 
         // Execute tools and add results to context
         let _ = self
@@ -866,11 +870,11 @@ impl<'a> LoopDelegate for ChatDelegate<'a> {
         // Walk tool_calls checking approval and hooks. Classify
         // each tool as Rejected (by hook) or Runnable. Stop at the
         // first tool that needs approval.
-        let mut preflight: Vec<(crate::llm::ToolCall, PreflightOutcome)> = Vec::new();
-        let mut runnable: Vec<(usize, crate::llm::ToolCall)> = Vec::new();
+        let mut preflight: Vec<(ironclaw_llm::ToolCall, PreflightOutcome)> = Vec::new();
+        let mut runnable: Vec<(usize, ironclaw_llm::ToolCall)> = Vec::new();
         let mut approval_needed: Option<(
             usize,
-            crate::llm::ToolCall,
+            ironclaw_llm::ToolCall,
             Arc<dyn crate::tools::Tool>,
             bool, // allow_always
         )> = None;
@@ -1466,7 +1470,7 @@ pub(super) fn restore_selected_auth_prompt(
     ))
 }
 
-/// Extract auth prompt fields from a tool_auth/tool_activate result JSON string.
+/// Extract auth prompt fields from a tool_auth/tool_install result JSON string.
 pub(super) fn parse_auth_result(result: &Result<String, Error>) -> ParsedAuthData {
     let parsed = result
         .as_ref()
@@ -1504,12 +1508,12 @@ pub(super) fn parse_auth_result(result: &Result<String, Error>) -> ParsedAuthDat
     }
 }
 
-/// Extract actionable auth prompt data from a tool_auth/tool_activate result.
+/// Extract actionable auth prompt data from a tool_auth/tool_install result.
 pub(super) fn extract_auth_prompt(
     tool_name: &str,
     result: &Result<String, Error>,
 ) -> Option<ParsedAuthData> {
-    if tool_name != "tool_auth" && tool_name != "tool_activate" {
+    if tool_name != "tool_auth" && tool_name != "tool_install" {
         return None;
     }
 
@@ -1607,7 +1611,7 @@ fn preflight_rejection_tool_message(
 /// Instead of a generic "Executing 2 tool(s)..." this returns messages like
 /// "Running command..." or "Fetching page..." for single-tool calls, falling
 /// back to "Executing N tool(s)..." for multi-tool calls.
-fn contextual_tool_message(tool_calls: &[crate::llm::ToolCall]) -> String {
+fn contextual_tool_message(tool_calls: &[ironclaw_llm::ToolCall]) -> String {
     if tool_calls.len() == 1 {
         match tool_calls[0].name.as_str() {
             "shell" => "Running command...".into(),
@@ -1633,7 +1637,7 @@ fn contextual_tool_message(tool_calls: &[crate::llm::ToolCall]) -> String {
 /// (the current turn's assistant tool calls and tool results). A short note is
 /// inserted so the LLM knows earlier history was dropped.
 fn compact_messages_for_retry(messages: &[ChatMessage]) -> Vec<ChatMessage> {
-    use crate::llm::Role;
+    use ironclaw_llm::Role;
 
     let mut compacted = Vec::new();
 
@@ -1781,23 +1785,12 @@ fn image_generation_summary_tool_message(
     sentinel: &GeneratedImageSentinel,
 ) -> ChatMessage {
     let media_type = sentinel.media_type().unwrap_or("image");
-    let path = sentinel.path();
-    let summary = if let Some(path) = path {
-        serde_json::json!({
-            "type": "image_generated",
-            "status": "ok",
-            "media_type": media_type,
-            "path": path,
-        })
-        .to_string()
-    } else {
-        serde_json::json!({
-            "type": "image_generated",
-            "status": "ok",
-            "media_type": media_type,
-        })
-        .to_string()
-    };
+    let summary = serde_json::json!({
+        "type": "image_generated",
+        "status": "ok",
+        "media_type": media_type,
+    })
+    .to_string();
     let sanitized = safety.sanitize_tool_output(tool_name, &summary);
     let content = safety.wrap_for_llm(tool_name, &sanitized.content);
     ChatMessage::tool_result(tool_call_id, tool_name, content)
@@ -1818,17 +1811,18 @@ mod tests {
     use crate::agent::agent_loop::{Agent, AgentDeps};
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
     use crate::agent::session::Session;
-    use crate::channels::ChannelManager;
+    use crate::channels::{ChannelManager, IncomingMessage};
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::context::{ContextManager, JobContext};
     use crate::error::Error;
     use crate::hooks::HookRegistry;
-    use crate::llm::{
+    use crate::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRegistry};
+    use ironclaw_llm::{
         CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCall,
         ToolCompletionRequest, ToolCompletionResponse,
     };
-    use crate::tools::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRegistry};
     use ironclaw_safety::SafetyLayer;
+    use uuid::Uuid;
 
     use super::{
         capture_auth_prompt, check_auth_required, extract_auth_prompt, parse_auth_result,
@@ -1878,6 +1872,7 @@ mod tests {
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -1920,6 +1915,7 @@ mod tests {
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -1963,6 +1959,7 @@ mod tests {
                     finish_reason: FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 });
             }
 
@@ -1970,16 +1967,18 @@ mod tests {
                 content: None,
                 tool_calls: vec![
                     ToolCall {
-                        id: crate::llm::generate_tool_call_id(0, 0),
-                        name: "tool_activate".to_string(),
+                        id: ironclaw_llm::generate_tool_call_id(0, 0),
+                        name: "tool_install".to_string(),
                         arguments: serde_json::json!({}),
                         reasoning: None,
+                        signature: None,
                     },
                     ToolCall {
-                        id: crate::llm::generate_tool_call_id(0, 1),
+                        id: ironclaw_llm::generate_tool_call_id(0, 1),
                         name: "approval_tool".to_string(),
                         arguments: serde_json::json!({"target": "danger"}),
                         reasoning: None,
+                        signature: None,
                     },
                 ],
                 input_tokens: 0,
@@ -1987,6 +1986,7 @@ mod tests {
                 finish_reason: FinishReason::ToolUse,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -1996,7 +1996,7 @@ mod tests {
     #[async_trait]
     impl Tool for OAuthPromptTool {
         fn name(&self) -> &str {
-            "tool_activate"
+            "tool_install"
         }
 
         fn description(&self) -> &str {
@@ -2324,12 +2324,14 @@ mod tests {
                     name: "http".to_string(),
                     arguments: serde_json::json!({"url": "https://example.com"}),
                     reasoning: None,
+                    signature: None,
                 },
                 ToolCall {
                     id: "call_3".to_string(),
                     name: "echo".to_string(),
                     arguments: serde_json::json!({"message": "done"}),
                     reasoning: None,
+                    signature: None,
                 },
             ],
             selected_auth_prompt: Some(crate::agent::session::PendingAuthPrompt::new(
@@ -2364,7 +2366,7 @@ mod tests {
     async fn test_need_approval_persists_first_auth_prompt_for_resume() {
         use crate::agent::session::Session;
         use crate::channels::IncomingMessage;
-        use crate::llm::ChatMessage;
+        use ironclaw_llm::ChatMessage;
         use tokio::sync::Mutex;
 
         let registry = Arc::new(ToolRegistry::new());
@@ -2553,7 +2555,7 @@ mod tests {
         })
         .to_string());
 
-        let auth_data = extract_auth_prompt("tool_activate", &result).expect("auth prompt");
+        let auth_data = extract_auth_prompt("tool_install", &result).expect("auth prompt");
         assert_eq!(
             auth_data.extension_name.as_ref().map(|e| e.as_str()),
             Some("gmail")
@@ -2563,7 +2565,7 @@ mod tests {
             Some("https://accounts.google.com/o/oauth2/v2/auth?client_id=test")
         );
         assert!(!auth_data.awaiting_token);
-        assert!(check_auth_required("tool_activate", &result).is_none());
+        assert!(check_auth_required("tool_install", &result).is_none());
     }
 
     #[test]
@@ -2576,7 +2578,7 @@ mod tests {
         })
         .to_string());
 
-        assert!(extract_auth_prompt("tool_activate", &result).is_none());
+        assert!(extract_auth_prompt("tool_install", &result).is_none());
     }
 
     // Helper-level sanitize_auth_url tests live alongside the helper itself
@@ -2640,7 +2642,7 @@ mod tests {
         .to_string());
 
         let mut selected = None;
-        capture_auth_prompt(&mut selected, "tool_activate", &first);
+        capture_auth_prompt(&mut selected, "tool_install", &first);
         capture_auth_prompt(&mut selected, "tool_auth", &second);
 
         let (ext_name, auth_data) = selected.expect("selected auth prompt");
@@ -2670,7 +2672,7 @@ mod tests {
 
         let mut selected = None;
         capture_auth_prompt(&mut selected, "tool_auth", &first);
-        capture_auth_prompt(&mut selected, "tool_activate", &second);
+        capture_auth_prompt(&mut selected, "tool_install", &second);
 
         let (ext_name, auth_data) = selected.expect("selected auth prompt");
         assert_eq!(ext_name, "notion");
@@ -2714,7 +2716,7 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_auth_awaiting_tool_activate() {
+    fn test_detect_auth_awaiting_tool_install() {
         let result: Result<String, Error> = Ok(serde_json::json!({
             "name": "slack",
             "kind": "McpServer",
@@ -2724,7 +2726,7 @@ mod tests {
         })
         .to_string());
 
-        let detected = check_auth_required("tool_activate", &result);
+        let detected = check_auth_required("tool_install", &result);
         assert!(detected.is_some());
         let (name, instructions) = detected.unwrap();
         assert_eq!(name, "slack");
@@ -2732,7 +2734,7 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_auth_awaiting_tool_activate_not_awaiting() {
+    fn test_detect_auth_awaiting_tool_install_not_awaiting() {
         let result: Result<String, Error> = Ok(serde_json::json!({
             "name": "slack",
             "tools_loaded": ["slack_post_message"],
@@ -2740,7 +2742,18 @@ mod tests {
         })
         .to_string());
 
-        assert!(check_auth_required("tool_activate", &result).is_none());
+        assert!(check_auth_required("tool_install", &result).is_none());
+    }
+
+    #[test]
+    fn test_chat_job_context_includes_thread_id_for_sse_scoped_tools() {
+        let thread_id = Uuid::new_v4();
+        let message = IncomingMessage::new("web", "test-user", "/plan Ship it");
+
+        let job_ctx = super::chat_job_context(&message, thread_id, chrono_tz::UTC);
+
+        assert_eq!(job_ctx.conversation_id, Some(thread_id));
+        assert_eq!(job_ctx.user_timezone, "UTC");
     }
 
     #[tokio::test]
@@ -2804,7 +2817,7 @@ mod tests {
     // ---- compact_messages_for_retry tests ----
 
     use super::compact_messages_for_retry;
-    use crate::llm::{ChatMessage, Role};
+    use ironclaw_llm::{ChatMessage, Role};
 
     #[test]
     fn test_compact_keeps_system_and_last_user_exchange() {
@@ -2822,6 +2835,7 @@ mod tests {
                     name: "echo".to_string(),
                     arguments: serde_json::json!({"message": "hi"}),
                     reasoning: None,
+                    signature: None,
                 }],
             ),
             ChatMessage::tool_result("call_1", "echo", "hi"),
@@ -2915,12 +2929,14 @@ mod tests {
                         name: "http".to_string(),
                         arguments: serde_json::json!({}),
                         reasoning: None,
+                        signature: None,
                     },
                     ToolCall {
                         id: "c2".to_string(),
                         name: "echo".to_string(),
                         arguments: serde_json::json!({}),
                         reasoning: None,
+                        signature: None,
                     },
                 ],
             ),
@@ -2955,6 +2971,7 @@ mod tests {
                     name: "echo".to_string(),
                     arguments: serde_json::json!({}),
                     reasoning: None,
+                    signature: None,
                 }],
             ),
             ChatMessage::tool_result("c1", "echo", "done"),
@@ -2987,8 +3004,8 @@ mod tests {
         //   1. Provider returns ContextLengthExceeded
         //   2. compact_messages_for_retry reduces context
         //   3. Retry with compacted messages succeeds
-        use crate::llm::Reasoning;
         use crate::testing::StubLlm;
+        use ironclaw_llm::Reasoning;
 
         let stub = Arc::new(StubLlm::failing_non_transient("ctx-bomb"));
 
@@ -3006,7 +3023,7 @@ mod tests {
             ChatMessage::user("Current request"),
         ];
 
-        let context = crate::llm::ReasoningContext::new().with_messages(messages.clone());
+        let context = ironclaw_llm::ReasoningContext::new().with_messages(messages.clone());
 
         // Step 1: First call fails with ContextLengthExceeded.
         let err = reasoning.respond_with_tools(&context).await.unwrap_err();
@@ -3025,7 +3042,7 @@ mod tests {
 
         // Step 3: Switch provider to success and retry.
         stub.set_failing(false);
-        let retry_context = crate::llm::ReasoningContext::new().with_messages(compacted);
+        let retry_context = ironclaw_llm::ReasoningContext::new().with_messages(compacted);
 
         let result = reasoning.respond_with_tools(&retry_context).await;
         assert!(result.is_ok(), "Retry after compaction should succeed");
@@ -3076,22 +3093,25 @@ mod tests {
                     finish_reason: FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 });
             }
             // Tools available: always call one.
             Ok(ToolCompletionResponse {
                 content: None,
                 tool_calls: vec![ToolCall {
-                    id: crate::llm::generate_tool_call_id(0, 0),
+                    id: ironclaw_llm::generate_tool_call_id(0, 0),
                     name: "echo".to_string(),
                     arguments: serde_json::json!({"message": "looping"}),
                     reasoning: None,
+                    signature: None,
                 }],
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::ToolUse,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -3100,7 +3120,7 @@ mod tests {
     async fn force_text_prevents_infinite_tool_call_loop() {
         // Verify that Reasoning with force_text=true returns text even when
         // the provider would normally return tool calls.
-        use crate::llm::{Reasoning, ReasoningContext, RespondResult, ToolDefinition};
+        use ironclaw_llm::{Reasoning, ReasoningContext, RespondResult, ToolDefinition};
 
         let provider = Arc::new(AlwaysToolCallProvider);
         let reasoning = Reasoning::new(provider);
@@ -3285,22 +3305,25 @@ mod tests {
                     finish_reason: FinishReason::Stop,
                     cache_read_input_tokens: 0,
                     cache_creation_input_tokens: 0,
+                    reasoning: None,
                 });
             }
             // Always call a tool that does not exist in the registry.
             Ok(ToolCompletionResponse {
                 content: None,
                 tool_calls: vec![ToolCall {
-                    id: crate::llm::generate_tool_call_id(0, 0),
+                    id: ironclaw_llm::generate_tool_call_id(0, 0),
                     name: "nonexistent_tool".to_string(),
                     arguments: serde_json::json!({}),
                     reasoning: None,
+                    signature: None,
                 }],
                 input_tokens: 0,
                 output_tokens: 5,
                 finish_reason: FinishReason::ToolUse,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -3351,6 +3374,7 @@ mod tests {
                 finish_reason: FinishReason::Stop,
                 cache_read_input_tokens: 0,
                 cache_creation_input_tokens: 0,
+                reasoning: None,
             })
         }
     }
@@ -3429,7 +3453,7 @@ mod tests {
     async fn test_dispatcher_terminates_with_all_tool_calls_failing() {
         use crate::agent::session::Session;
         use crate::channels::IncomingMessage;
-        use crate::llm::ChatMessage;
+        use ironclaw_llm::ChatMessage;
         use tokio::sync::Mutex;
 
         let agent = make_test_agent_with_llm(Arc::new(FailingToolCallProvider), 5);
@@ -3475,9 +3499,9 @@ mod tests {
     async fn test_admin_policy_filter_happens_before_auto_approval_and_llm_call() {
         use crate::agent::session::Session;
         use crate::channels::IncomingMessage;
-        use crate::llm::ChatMessage;
         use crate::tools::builtin::{EchoTool, TimeTool};
         use crate::tools::permissions::{ADMIN_SETTINGS_USER_ID, ADMIN_TOOL_POLICY_KEY};
+        use ironclaw_llm::ChatMessage;
         use tokio::sync::Mutex;
 
         let (db, _tmp_dir) = crate::testing::test_db().await;
@@ -3629,8 +3653,8 @@ mod tests {
     async fn test_dispatcher_terminates_with_max_iterations() {
         use crate::agent::session::Session;
         use crate::channels::IncomingMessage;
-        use crate::llm::ChatMessage;
         use crate::tools::builtin::EchoTool;
+        use ironclaw_llm::ChatMessage;
         use tokio::sync::Mutex;
 
         // Use AlwaysToolCallProvider which calls "echo" on every turn.
@@ -3758,7 +3782,7 @@ mod tests {
     async fn test_dispatcher_response_usage_is_per_turn_not_cumulative() {
         use crate::agent::session::Session;
         use crate::channels::IncomingMessage;
-        use crate::llm::ChatMessage;
+        use ironclaw_llm::ChatMessage;
         use tokio::sync::Mutex;
 
         let agent = make_test_agent_with_llm(Arc::new(FixedUsageTextProvider), 3);
@@ -4129,8 +4153,8 @@ mod tests {
     /// Disabled tools must be excluded from the LLM's tool definition list.
     #[test]
     fn test_permission_disabled_tool_excluded_from_definitions() {
-        use crate::llm::ToolDefinition;
         use crate::tools::permissions::{PermissionState, effective_permission};
+        use ironclaw_llm::ToolDefinition;
         use std::collections::HashMap;
 
         let mut tool_permissions: HashMap<String, PermissionState> = HashMap::new();

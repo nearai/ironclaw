@@ -89,7 +89,8 @@ def _write_skill(skills_dir, mock_api_host):
         f.write(f"""---
 name: github
 version: "1.0.0"
-keywords: [github, issues]
+activation:
+  keywords: [github, issues]
 credentials:
   - name: github_token
     provider: github
@@ -158,6 +159,8 @@ async def cancel_server(ironclaw_binary, mock_llm_server, cancel_mock_api):
         "CLI_ENABLED": "false",
         "LLM_BACKEND": "openai_compatible",
         "LLM_BASE_URL": mock_llm_server,
+        # Dummy key: mock LLM ignores it, but openai_compatible config requires auth.
+        "LLM_API_KEY": "mock-api-key",
         "LLM_MODEL": "mock-model",
         "DATABASE_BACKEND": "libsql",
         "LIBSQL_PATH": os.path.join(_CANCEL_DB_TMPDIR.name, "cancel-e2e.db"),

@@ -1,10 +1,13 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_engine", "crates/ironclaw_gateway", "crates/ironclaw_tui"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_host_api", "crates/ironclaw_filesystem", "crates/ironclaw_memory", "crates/ironclaw_events", "crates/ironclaw_extensions", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_authorization", "crates/ironclaw_run_state", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_trust", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_oauth", "crates/ironclaw_llm", "crates/ironclaw_engine", "crates/ironclaw_gateway", "crates/ironclaw_tui"]
 exclude = [
     "channels-src/discord",
+    "channels-src/feishu",
     "channels-src/telegram",
     "channels-src/slack",
+    "channels-src/wechat",
     "channels-src/whatsapp",
+    "crates/ironclaw_silk_decoder",
     "tools-src/composio",
     "tools-src/github",
     "tools-src/gmail",
@@ -21,7 +24,7 @@ exclude = [
 
 [package]
 name = "ironclaw"
-version = "0.27.0"
+version = "0.28.2"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -113,11 +116,13 @@ cron = "0.13"
 jsonschema = { version = "0.45", default-features = false }
 
 # Shared types
-ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.0" }
+ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.2" }
 
 # Safety/sanitization
 ironclaw_engine = { path = "crates/ironclaw_engine", version = "0.1.0" }
 ironclaw_gateway = { path = "crates/ironclaw_gateway", version = "0.1.0" }
+ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0" }
+ironclaw_oauth = { path = "crates/ironclaw_oauth", version = "0.1.0" }
 ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.2" }
 ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.3.0" }
 ironclaw_tui = { path = "crates/ironclaw_tui", optional = true, version = "0.1.0" }
@@ -150,14 +155,16 @@ open = "5"
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
-wasmtime = { version = "43.0.1", features = ["component-model"] }
-wasmtime-wasi = "43.0.1"  # WASI support for component model
+wasmtime = { version = "43.0.2", features = ["component-model"] }
+wasmtime-wasi = "43.0.2"  # WASI support for component model
 wasmparser = "0.245.1"  # WASM binary parsing for validation
 
 # Cryptography for secrets management
+aes = "0.8"
 aes-gcm = "0.10"
 hkdf = "0.12"
 hmac = "0.12"
+md-5 = "0.10"
 sha2 = "0.10"
 blake3 = "1"
 rand = "0.8"
@@ -227,6 +234,9 @@ testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"
 insta = { version = "1.46.3", features = ["yaml"] }
+# Pull the LLM crate's `testing` feature in only for tests so `StubLlm` and
+# fault-injection helpers don't ship in release binaries.
+ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0", features = ["testing"] }
 
 [features]
 default = ["postgres", "libsql", "html-to-markdown", "tui"]
@@ -274,7 +284,7 @@ lto = "thin"
 # Config for 'dist'
 [workspace.metadata.dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
-cargo-dist-version = "0.30.3"
+cargo-dist-version = "0.31.0"
 # Ignore out-of-date generated CI so custom release.yml jobs are allowed
 allow-dirty = ["ci"]
 # CI backends to support

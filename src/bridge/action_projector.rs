@@ -204,9 +204,6 @@ fn classify_registered_tool(
     if crate::bridge::effect_adapter::is_v1_auth_tool(tool.name()) {
         return ProjectedAction::Hidden;
     }
-    if hidden_from_model_callable_surface(tool.name()) {
-        return ProjectedAction::Hidden;
-    }
     if tool_permissions.resolve_permission(tool.name()).effective == PermissionState::Disabled {
         return ProjectedAction::Hidden;
     }
@@ -238,10 +235,6 @@ fn classify_registered_tool(
     } else {
         ProjectedAction::Inline(project_tool_action(tool))
     }
-}
-
-fn hidden_from_model_callable_surface(tool_name: &str) -> bool {
-    matches!(tool_name, "tool_install" | "tool-install")
 }
 
 fn supports_pre_activation_discovery(
@@ -367,6 +360,7 @@ mod tests {
             tools: vec![format!("{name}_search")],
             needs_setup: false,
             has_auth: true,
+            requires_binding: false,
             installed: true,
             activation_error: None,
             version: None,
@@ -655,6 +649,9 @@ mod tests {
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
             conversation_scope: None,
+            gate_controller: ironclaw_engine::CancellingGateController::arc(),
+            call_approval_granted: false,
+            conversation_id: None,
         }
     }
 
@@ -788,7 +785,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn needs_auth_provider_tools_omitted_from_available_actions() {
+    async fn needs_auth_provider_tools_stay_in_available_actions() {
+        // Post-#3133/#3166: a NeedsAuth provider tool (e.g. installed-
+        // but-unauthed gmail) stays on the callable surface. The
+        // engine's auth preflight (`AuthManager::check_action_auth`)
+        // raises an `Authentication` gate at execute time when a
+        // declared credential is missing, the inline-await machinery
+        // parks the VM, and the OAuth callback delivers `Approved`
+        // to retry the action against the now-present secret. The
+        // model calls the tool directly — there is no separate
+        // enablement step. Pre-#3133 the contract was inverted: the
+        // tool was hidden until auth completed and the LLM had to
+        // navigate via the now-removed `tool_activate` first.
         let inventory = projected_inventory(
             "gmail_send",
             "Send a Gmail message",
@@ -798,20 +806,13 @@ mod tests {
         .await;
 
         assert!(
-            !inventory
+            inventory
                 .inline
                 .iter()
                 .any(|action| action.name == "gmail_send"),
-            "NeedsAuth provider tool should be omitted from available_actions, got: {:?}",
+            "NeedsAuth provider tool should be callable; auth resolves at \
+             execute time via inline-await. inline={:?}",
             inventory.inline
-        );
-        assert!(
-            inventory
-                .discoverable
-                .iter()
-                .any(|action| action.name == "gmail_send"),
-            "NeedsAuth provider tool should remain discoverable, got: {:?}",
-            inventory.discoverable
         );
     }
 
@@ -933,7 +934,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_install_hidden_from_model_callable_surface() {
+    async fn tool_install_is_callable_by_agent() {
+        // Regression for #3533: the agent must be able to call tool_install
+        // so "connect my telegram" runs an actual install + auth gate, rather
+        // than narrating manual UI steps. The hidden gate added in #2868 is
+        // gone; approval gating in tool_install::requires_approval() is what
+        // mediates user consent now.
         let tools = std::sync::Arc::new(ToolRegistry::new());
         tools
             .register(std::sync::Arc::new(BuiltinTool {
@@ -942,7 +948,7 @@ mod tests {
             .await;
         tools
             .register(std::sync::Arc::new(BuiltinTool {
-                name: "tool_activate",
+                name: "tool_search",
             }))
             .await;
 
@@ -962,8 +968,8 @@ mod tests {
             .map(|action| action.name)
             .collect::<Vec<_>>();
 
-        assert!(!action_names.iter().any(|name| name == "tool_install"));
-        assert!(action_names.iter().any(|name| name == "tool_activate"));
+        assert!(action_names.iter().any(|name| name == "tool_install"));
+        assert!(action_names.iter().any(|name| name == "tool_search"));
     }
 
     #[tokio::test]

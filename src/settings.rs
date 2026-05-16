@@ -54,7 +54,7 @@ impl std::fmt::Debug for CustomLlmProviderSettings {
 /// Per-provider overrides for built-in LLM providers (API key and/or model).
 ///
 /// Stored as `llm_builtin_overrides` in the settings store, keyed by provider ID
-/// (e.g. `"openai"`, `"gemini"`). Resolved at startup during `LlmConfig::resolve()`.
+/// (e.g. `"openai"`, `"gemini"`). Resolved at startup during `crate::config::llm::resolve()`.
 ///
 /// Note: The global `selected_model` (if set) takes precedence over these
 /// per-provider overrides, which in turn take precedence over environment variables.
@@ -69,6 +69,40 @@ pub struct LlmBuiltinOverride {
     /// Base URL override. Takes precedence over environment variables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
+    /// Per-provider settings bag for non-OpenAI-shape backends that need
+    /// extra fields beyond api_key / model / base_url. Example keys:
+    ///
+    /// - `bedrock`: `region`, `cross_region`, `profile`
+    /// - `gemini_oauth`: `credentials_path`
+    /// - `openai_codex`: (none today; reserved)
+    ///
+    /// Settings flow into this bag through the wizard's generic
+    /// `SetupHint` dispatch (Layer C); the binary-side resolver in
+    /// `crate::config::llm::resolve` reads them when assembling the
+    /// per-provider config struct.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub extras: HashMap<String, String>,
+}
+
+impl LlmBuiltinOverride {
+    /// Look up an extras-bag field by key; returns `None` if absent or empty.
+    pub fn extra(&self, key: &str) -> Option<&str> {
+        self.extras
+            .get(key)
+            .map(|s| s.as_str())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Set an extras-bag field; clears the entry when `value` is empty.
+    pub fn set_extra(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        let key = key.into();
+        let value = value.into();
+        if value.is_empty() {
+            self.extras.remove(&key);
+        } else {
+            self.extras.insert(key, value);
+        }
+    }
 }
 
 impl std::fmt::Debug for LlmBuiltinOverride {
@@ -77,6 +111,7 @@ impl std::fmt::Debug for LlmBuiltinOverride {
             .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
             .field("model", &self.model)
             .field("base_url", &self.base_url)
+            .field("extras", &self.extras)
             .finish()
     }
 }
@@ -157,16 +192,23 @@ pub struct Settings {
     #[serde(default)]
     pub openai_compatible_base_url: Option<String>,
 
-    /// Bedrock region (when llm_backend = "bedrock").
-    #[serde(default)]
+    /// **Deprecated.** Bedrock region — moved to
+    /// `llm_builtin_overrides["bedrock"].extras["region"]` in Layer D.
+    /// Existing values are migrated on load via
+    /// [`Settings::migrate_legacy_provider_fields`]; new code must read
+    /// from / write to the extras bag instead. Kept for one release so
+    /// users upgrading from older settings.json files don't lose data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bedrock_region: Option<String>,
 
-    /// Bedrock cross-region inference prefix (when llm_backend = "bedrock").
-    #[serde(default)]
+    /// **Deprecated.** Bedrock cross-region inference prefix — moved to
+    /// `llm_builtin_overrides["bedrock"].extras["cross_region"]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bedrock_cross_region: Option<String>,
 
-    /// AWS profile name for Bedrock (when llm_backend = "bedrock").
-    #[serde(default)]
+    /// **Deprecated.** AWS profile name for Bedrock — moved to
+    /// `llm_builtin_overrides["bedrock"].extras["profile"]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bedrock_profile: Option<String>,
 
     // === Step 4: Model Selection ===
@@ -1120,6 +1162,13 @@ impl Settings {
             }
         }
 
+        // Same migration that runs on JSON disk loads — DB rows written
+        // before Layer D still carry the named `bedrock_*` columns, and
+        // resolvers now read only from `llm_builtin_overrides["bedrock"]
+        // .extras`. Without this call, existing DB-backed operators
+        // silently lose their bedrock region/profile/cross-region after
+        // upgrading.
+        settings.migrate_legacy_provider_fields();
         settings
     }
 
@@ -1150,9 +1199,56 @@ impl Settings {
 
     /// Load settings from a specific path (used by bootstrap legacy migration).
     pub fn load_from(path: &std::path::Path) -> Self {
-        match std::fs::read_to_string(path) {
+        let mut settings: Self = match std::fs::read_to_string(path) {
             Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
             Err(_) => Self::default(),
+        };
+        settings.migrate_legacy_provider_fields();
+        settings
+    }
+
+    /// Move legacy named per-provider fields into the generic
+    /// `llm_builtin_overrides[<id>].extras` bag.
+    ///
+    /// Layer D moved bedrock-specific config out of named columns
+    /// (`bedrock_region`, `bedrock_cross_region`, `bedrock_profile`) and
+    /// into a per-provider settings bag so adding a new non-OpenAI-shape
+    /// backend doesn't require new `Settings` columns. Old persisted
+    /// settings.json / config.toml files still carry the named fields;
+    /// this helper folds them into `extras` once on load and clears the
+    /// originals so subsequent saves write only the new shape.
+    ///
+    /// Existing extras values win over the legacy fields. A file that
+    /// somehow carries both shapes (manual hand-edit, or a future writer
+    /// that emits both) keeps the new-shape value rather than getting
+    /// silently overwritten with the legacy one.
+    ///
+    /// Idempotent: re-runs are no-ops because the named fields are
+    /// `take()`-drained.
+    pub fn migrate_legacy_provider_fields(&mut self) {
+        let region = self.bedrock_region.take();
+        let cross_region = self.bedrock_cross_region.take();
+        let profile = self.bedrock_profile.take();
+        if region.is_some() || cross_region.is_some() || profile.is_some() {
+            let entry = self
+                .llm_builtin_overrides
+                .entry("bedrock".to_string())
+                .or_default();
+            if let Some(v) = region
+                && entry.extra("region").is_none()
+            {
+                entry.set_extra("region", v);
+            }
+            if let Some(v) = cross_region
+                && entry.extra("cross_region").is_none()
+            {
+                entry.set_extra("cross_region", v);
+            }
+            if let Some(v) = profile
+                && entry.extra("profile").is_none()
+            {
+                entry.set_extra("profile", v);
+            }
         }
     }
 
@@ -1172,8 +1268,13 @@ impl Settings {
             Err(e) => return Err(format!("failed to read {}: {}", path.display(), e)),
         };
 
-        let settings: Self = toml::from_str(&data)
+        let mut settings: Self = toml::from_str(&data)
             .map_err(|e| format!("invalid TOML in {}: {}", path.display(), e))?;
+        // Same migration that runs on JSON disk loads and DB rebuilds —
+        // TOML files written before Layer D still carry the named
+        // `bedrock_*` keys at the top level, and resolvers now read
+        // only from `llm_builtin_overrides["bedrock"].extras`.
+        settings.migrate_legacy_provider_fields();
         Ok(Some(settings))
     }
 
@@ -2861,6 +2962,7 @@ mod tests {
             api_key: Some("sk-secret-123".to_string()),
             model: Some("gpt-4".to_string()),
             base_url: None,
+            extras: Default::default(),
         };
         let debug_output = format!("{:?}", override_val);
         assert!(
@@ -2871,5 +2973,178 @@ mod tests {
             debug_output.contains("[REDACTED]"),
             "Debug output must show [REDACTED] for api_key"
         );
+    }
+
+    /// Upgrade-path: a legacy `settings.json` carrying named `bedrock_*`
+    /// columns must round-trip through `load_from` → `save` → `load_from`
+    /// without losing data or re-emitting the deprecated columns.
+    #[test]
+    fn legacy_bedrock_migration_round_trips_through_save() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let path = tmpdir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "llm_backend": "bedrock",
+                "bedrock_region": "eu-west-1",
+                "bedrock_cross_region": "eu",
+                "bedrock_profile": "prod-bedrock"
+            }"#,
+        )
+        .expect("write legacy fixture");
+
+        let settings = Settings::load_from(&path);
+        let serialized = serde_json::to_string(&settings).expect("serialize");
+        std::fs::write(&path, &serialized).expect("write reloaded settings");
+
+        assert!(
+            !serialized.contains("\"bedrock_region\""),
+            "saved settings must not re-emit deprecated bedrock_region: {serialized}"
+        );
+        assert!(!serialized.contains("\"bedrock_cross_region\""));
+        assert!(!serialized.contains("\"bedrock_profile\""));
+
+        let reloaded = Settings::load_from(&path);
+        let bedrock = reloaded
+            .llm_builtin_overrides
+            .get("bedrock")
+            .expect("bedrock entry must survive round-trip");
+        assert_eq!(bedrock.extra("region"), Some("eu-west-1"));
+        assert_eq!(bedrock.extra("cross_region"), Some("eu"));
+        assert_eq!(bedrock.extra("profile"), Some("prod-bedrock"));
+    }
+
+    /// Defense-in-depth: a settings file that somehow carries BOTH a legacy
+    /// `bedrock_region` column AND a populated `extras["region"]` must keep
+    /// the new-shape value, not silently downgrade to the legacy one.
+    /// Reachable in practice only via manual hand-edit, but the docstring
+    /// promises this behaviour.
+    #[test]
+    fn legacy_bedrock_migration_preserves_existing_extras() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let path = tmpdir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "llm_backend": "bedrock",
+                "bedrock_region": "eu-west-1",
+                "bedrock_profile": "prod-bedrock",
+                "llm_builtin_overrides": {
+                    "bedrock": {
+                        "extras": {
+                            "region": "us-east-2"
+                        }
+                    }
+                }
+            }"#,
+        )
+        .expect("write conflicting fixture");
+
+        let settings = Settings::load_from(&path);
+        let bedrock = settings
+            .llm_builtin_overrides
+            .get("bedrock")
+            .expect("bedrock entry");
+        assert_eq!(
+            bedrock.extra("region"),
+            Some("us-east-2"),
+            "pre-existing extras value must win over legacy bedrock_region"
+        );
+        assert_eq!(
+            bedrock.extra("profile"),
+            Some("prod-bedrock"),
+            "absent extras must still be backfilled from legacy field"
+        );
+        assert!(settings.bedrock_region.is_none(), "legacy field is drained");
+        assert!(settings.bedrock_profile.is_none());
+    }
+
+    /// Upgrade-path: a DB row carrying legacy `bedrock_*` settings
+    /// (written before Layer D) must reach the resolver via the new
+    /// `llm_builtin_overrides["bedrock"].extras` bag after
+    /// `Settings::from_db_map`. Without the migration call inside
+    /// `from_db_map`, the resolver would silently fall back to env vars
+    /// or defaults and route through the wrong AWS region/profile.
+    #[test]
+    fn legacy_bedrock_fields_migrate_into_extras_on_db_load() {
+        let mut map: std::collections::HashMap<String, serde_json::Value> = Default::default();
+        map.insert(
+            "llm_backend".to_string(),
+            serde_json::Value::String("bedrock".to_string()),
+        );
+        map.insert(
+            "bedrock_region".to_string(),
+            serde_json::Value::String("eu-west-1".to_string()),
+        );
+        map.insert(
+            "bedrock_cross_region".to_string(),
+            serde_json::Value::String("eu".to_string()),
+        );
+        map.insert(
+            "bedrock_profile".to_string(),
+            serde_json::Value::String("prod-bedrock".to_string()),
+        );
+
+        let settings = Settings::from_db_map(&map);
+        let bedrock = settings
+            .llm_builtin_overrides
+            .get("bedrock")
+            .expect("bedrock entry must exist after DB migration");
+        assert_eq!(bedrock.extra("region"), Some("eu-west-1"));
+        assert_eq!(bedrock.extra("cross_region"), Some("eu"));
+        assert_eq!(bedrock.extra("profile"), Some("prod-bedrock"));
+        assert!(
+            settings.bedrock_region.is_none(),
+            "named bedrock_region must be drained by the migration"
+        );
+        assert!(settings.bedrock_cross_region.is_none());
+        assert!(settings.bedrock_profile.is_none());
+    }
+
+    /// Upgrade-path: a `config.toml` written before Layer D carries the
+    /// named `bedrock_*` keys at the top level. `Settings::load_toml`
+    /// must run the same migration as JSON and DB loads so the resolver
+    /// sees the values via `extras`.
+    #[test]
+    fn legacy_bedrock_fields_migrate_into_extras_on_toml_load() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let path = tmpdir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"llm_backend = "bedrock"
+bedrock_region = "eu-west-1"
+bedrock_cross_region = "eu"
+bedrock_profile = "prod-bedrock"
+"#,
+        )
+        .expect("write legacy toml fixture");
+
+        let settings = Settings::load_toml(&path).expect("load ok").expect("some");
+        let bedrock = settings
+            .llm_builtin_overrides
+            .get("bedrock")
+            .expect("bedrock entry must exist after TOML migration");
+        assert_eq!(bedrock.extra("region"), Some("eu-west-1"));
+        assert_eq!(bedrock.extra("cross_region"), Some("eu"));
+        assert_eq!(bedrock.extra("profile"), Some("prod-bedrock"));
+        assert!(settings.bedrock_region.is_none());
+        assert!(settings.bedrock_cross_region.is_none());
+        assert!(settings.bedrock_profile.is_none());
+    }
+
+    /// `migrate_legacy_provider_fields` is idempotent in-memory: once the
+    /// named fields are drained, repeated calls observe `None` and exit
+    /// without touching `extras`.
+    #[test]
+    fn legacy_bedrock_migration_is_idempotent_in_memory() {
+        let mut settings = Settings {
+            bedrock_region: Some("eu-west-1".to_string()),
+            ..Default::default()
+        };
+        settings.migrate_legacy_provider_fields();
+        let before = serde_json::to_value(&settings.llm_builtin_overrides).expect("serialize");
+        settings.migrate_legacy_provider_fields();
+        let after = serde_json::to_value(&settings.llm_builtin_overrides).expect("serialize");
+        assert_eq!(after, before, "second migrate call must be a no-op");
     }
 }

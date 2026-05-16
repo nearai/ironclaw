@@ -75,19 +75,25 @@ pub use gate::lease::LeaseGate;
 pub use gate::pipeline::GatePipeline;
 pub use gate::tool_tier::{ToolTier, classify_tool_tier};
 pub use gate::{
-    ExecutionGate, ExecutionMode, GateContext, GateDecision, GateResolution, ResumeKind,
+    CancellingGateController, ExecutionGate, ExecutionMode, GateContext, GateController,
+    GateDecision, GatePauseRequest, GateResolution, ResumeKind,
 };
 
 // ── Re-exports: runtime ───────────────────────────────────────
 
 pub use executor::prompt::PlatformInfo;
 pub use runtime::conversation::ConversationManager;
-pub use runtime::manager::ThreadManager;
+pub use runtime::manager::{
+    ENGINE_RESTART_RECOVERY_METADATA_KEY, PENDING_APPROVAL_METADATA_KEY,
+    RUNTIME_CHECKPOINT_METADATA_KEY, ThreadManager,
+};
 pub use runtime::messaging::ThreadOutcome;
 pub use runtime::mission::{
-    BudgetGate, FireRateLimit, MissionManager, MissionNotification, MissionUpdate,
+    BudgetGate, FireRateLimit, GateResolutionOutcome, MissionManager, MissionNotification,
+    MissionUpdate,
 };
 pub use runtime::tree::ThreadTree;
+pub use types::mission::MissionGateInfo;
 
 pub use types::conversation::{
     ConversationEntry, ConversationId, ConversationSurface, EntrySender,

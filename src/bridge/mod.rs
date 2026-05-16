@@ -11,6 +11,7 @@ mod cost_guard_gate;
 mod effect_adapter;
 mod engine_actions;
 mod external_tools;
+mod gate_controller;
 mod llm_adapter;
 mod router;
 pub mod sandbox;
@@ -29,6 +30,7 @@ pub use external_tools::{
 pub use workspace_reader::WorkspaceReaderAdapter;
 
 pub use effect_adapter::EffectBridgeAdapter;
+pub use gate_controller::{BridgeGateController, GateResolutions, PerExecutionContext};
 pub use router::{
     // DTO types
     AttentionItem,
@@ -41,9 +43,12 @@ pub use router::{
     EngineStepInfo,
     EngineThreadDetail,
     EngineThreadInfo,
+    InlineGateError,
+    InlineGateOutcome,
     ProjectOverviewEntry,
     ProjectsOverviewResponse,
     clear_engine_pending_auth,
+    clear_engine_pending_auth_for_credential,
     discard_engine_pending_auth_request,
     // External tool catalog accessor (Responses API)
     engine_external_tool_catalog,
@@ -54,6 +59,7 @@ pub use router::{
     get_engine_project,
     get_engine_projects_overview,
     get_engine_thread,
+    get_pending_gate_by_request_id,
     // Action handlers
     handle_approval,
     handle_auth_gate_resolution,
@@ -63,6 +69,7 @@ pub use router::{
     handle_external_callback,
     handle_interrupt,
     handle_new_thread,
+    handle_pairing_claim,
     handle_with_engine,
     has_any_pending_gate,
     has_pending_auth,
@@ -77,8 +84,12 @@ pub use router::{
     pause_engine_mission,
     resolve_engine_auth_callback,
     resolve_gate,
+    resolve_inline_gates_for_credential,
     resume_engine_mission,
+    resume_paused_missions_for_credential,
+    resume_paused_missions_for_gate_request,
     transition_engine_pending_auth_request_to_pairing,
+    try_resolve_inline_approval_gate,
 };
 
 #[cfg(feature = "libsql")]

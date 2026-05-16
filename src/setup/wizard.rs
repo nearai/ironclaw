@@ -23,13 +23,6 @@ use crate::channels::wasm::{
     ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
 };
 use crate::config::OAUTH_PLACEHOLDER;
-use crate::llm::models::{
-    build_nearai_model_fetch_config, fetch_anthropic_models, fetch_ollama_models,
-    fetch_openai_compatible_models, fetch_openai_models,
-};
-#[cfg(test)]
-use crate::llm::models::{is_openai_chat_model, sort_openai_models};
-use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
 use crate::setup::channels::{
@@ -39,6 +32,31 @@ use crate::setup::prompts::{
     confirm, input, optional_input, print_banner, print_error, print_header, print_info,
     print_step, print_success, secret_input, select_many, select_one,
 };
+use ironclaw_llm::auth::AuthPrompt;
+use ironclaw_llm::models::{ModelFetchOptions, build_nearai_model_fetch_config, fetch_models_for};
+use ironclaw_llm::{SessionConfig, SessionManager};
+
+/// `AuthPrompt` impl for the interactive setup wizard: prints the device
+/// code to stdout and tries to open the verification URL in a browser.
+struct WizardAuthPrompt;
+
+impl AuthPrompt for WizardAuthPrompt {
+    fn show_device_code(&self, verification_uri: &str, user_code: &str) {
+        print_info(&format!("Verification URL: {verification_uri}"));
+        print_info(&format!("One-time code: {user_code}"));
+        if let Err(e) = open::that(verification_uri) {
+            tracing::debug!(
+                url = %verification_uri,
+                error = %e,
+                "Failed to open device login URL in browser"
+            );
+            print_info("Open the URL above manually if your browser did not launch.");
+        } else {
+            print_info("Opened your browser to complete the device login.");
+        }
+        print_info("Waiting for authorization...");
+    }
+}
 
 // unused const, keep commented for clarity / future use
 // const CHANNEL_INDEX_CLI: usize = 0;
@@ -316,7 +334,7 @@ impl SetupWizard {
                 }
                 self.llm_api_key = Some(SecretString::from(api_key));
                 if self.settings.selected_model.is_none() {
-                    let default = crate::llm::DEFAULT_MODEL;
+                    let default = ironclaw_llm::DEFAULT_MODEL;
                     self.settings.selected_model = Some(default.to_string());
                     print_info(&format!("Using default model: {default}"));
                 }
@@ -338,7 +356,7 @@ impl SetupWizard {
                     }
                 }
                 self.llm_api_key = Some(SecretString::from(api_key));
-                let registry = crate::llm::ProviderRegistry::load();
+                let registry = ironclaw_llm::ProviderRegistry::load();
                 if self.settings.selected_model.is_none() {
                     let default = registry
                         .find("anthropic")
@@ -361,7 +379,7 @@ impl SetupWizard {
                     }
                 }
                 self.llm_api_key = Some(SecretString::from(api_key));
-                let registry = crate::llm::ProviderRegistry::load();
+                let registry = ironclaw_llm::ProviderRegistry::load();
                 if self.settings.selected_model.is_none() {
                     let default = registry
                         .find("openai")
@@ -384,7 +402,7 @@ impl SetupWizard {
                     }
                 }
                 self.llm_api_key = Some(SecretString::from(api_key));
-                let registry = crate::llm::ProviderRegistry::load();
+                let registry = ironclaw_llm::ProviderRegistry::load();
                 if self.settings.selected_model.is_none() {
                     let default = registry
                         .find("openrouter")
@@ -1265,60 +1283,27 @@ impl SetupWizard {
 
     /// Step 3: Inference provider selection.
     ///
-    /// Uses the provider registry to dynamically build the selection menu.
-    /// NearAI is always first (special auth), then all registry providers
-    /// that have setup hints.
+    /// The menu is built entirely from the LLM crate's
+    /// [`ironclaw_llm::ProviderRegistry::selectable`] — every supported
+    /// backend including the dedicated-config ones (nearai, bedrock,
+    /// openai_codex, gemini_oauth) declares its `SetupHint` in
+    /// `providers.json`, and dispatch goes through that hint. No
+    /// per-backend `if id == "..."` branches live here.
     async fn step_inference_provider(&mut self) -> Result<(), SetupError> {
-        let registry = crate::llm::ProviderRegistry::load();
+        let registry = ironclaw_llm::ProviderRegistry::load();
 
-        // Show current provider if already configured
+        // Show current provider if already configured.
         if let Some(current) = self.settings.llm_backend.clone() {
-            let display = if current == "nearai" {
-                "NEAR AI".to_string()
-            } else if let Some(def) = registry.find(&current) {
-                def.setup
-                    .as_ref()
-                    .map(|s| s.display_name().to_string())
-                    .unwrap_or_else(|| def.id.clone())
-            } else {
-                match current.as_str() {
-                    "nearai" => "NEAR AI".to_string(),
-                    "gemini_oauth" | "gemini-oauth" => "Gemini API (OAuth)".to_string(),
-                    _ => {
-                        if let Some(def) = registry.find(&current) {
-                            def.setup
-                                .as_ref()
-                                .map(|s| s.display_name().to_string())
-                                .unwrap_or_else(|| def.id.clone())
-                        } else {
-                            current.clone()
-                        }
-                    }
-                }
-            };
+            let display = registry
+                .find(&current)
+                .and_then(|def| def.setup.as_ref().map(|s| s.display_name().to_string()))
+                .unwrap_or_else(|| current.clone());
             print_info(&format!("Current provider: {}", display));
             println!();
 
-            let is_known = current == "nearai"
-                || current == "bedrock"
-                || current == "gemini_oauth"
-                || current == "gemini-oauth"
-                || current == "openai_codex"
-                || registry.is_known(&current);
+            let is_known = registry.is_known(&current);
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
-                if current == "bedrock" {
-                    print_info("Keeping existing AWS Bedrock configuration.");
-                    return Ok(());
-                }
-                if current == "gemini_oauth" || current == "gemini-oauth" {
-                    print_info("Keeping existing Gemini CLI OAuth configuration.");
-                    return Ok(());
-                }
-                if current == "openai_codex" {
-                    print_info("Keeping existing OpenAI Codex configuration.");
-                    return Ok(());
-                }
                 return self.run_provider_setup(&current, &registry).await;
             }
 
@@ -1333,171 +1318,115 @@ impl SetupWizard {
         print_info("Select your inference provider:");
         println!();
 
-        // Build menu: NearAI first, then Gemini OAuth, then OpenAI Codex, then registry providers, then Bedrock
         let selectable = registry.selectable();
 
-        // Detect which providers have API keys already set in the environment.
-        let detected_env: HashMap<&str, bool> = [
-            ("nearai", std::env::var("NEARAI_API_KEY").is_ok()),
-            (
-                "anthropic",
-                std::env::var("ANTHROPIC_API_KEY").is_ok()
-                    || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok(),
-            ),
-            ("openai", std::env::var("OPENAI_API_KEY").is_ok()),
-            ("openrouter", std::env::var("OPENROUTER_API_KEY").is_ok()),
-        ]
-        .into_iter()
-        .collect();
-
-        // Helper: build a label for a provider entry, prepending a checkmark if detected.
-        let make_label = |id: &str, name: &str, desc: &str| -> String {
-            if detected_env.get(id).copied().unwrap_or(false) {
-                format!("\u{2713} {:<15}- {}", name, desc)
-            } else {
-                format!("  {:<15}- {}", name, desc)
-            }
+        // A provider is "detected" if its declared API key env var is
+        // populated, OR if it's Anthropic and the OAuth-token env var is
+        // set instead. Other backends (bedrock = AWS chain, codex = OAuth,
+        // nearai = session) have no env-detectable presence.
+        let is_detected = |def: &ironclaw_llm::ProviderDefinition| -> bool {
+            let primary = def
+                .api_key_env
+                .as_deref()
+                .is_some_and(|env| std::env::var(env).is_ok());
+            let anthropic_oauth =
+                def.id == "anthropic" && std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok();
+            primary || anthropic_oauth
         };
 
-        // Collect all entries as (provider_id, label, is_detected).
         struct ProviderEntry {
             id: String,
             label: String,
             detected: bool,
         }
 
-        let mut entries: Vec<ProviderEntry> = Vec::with_capacity(2 + selectable.len());
+        let mut entries: Vec<ProviderEntry> = selectable
+            .iter()
+            .map(|def| {
+                let display_name = def
+                    .setup
+                    .as_ref()
+                    .map(|s| s.display_name())
+                    .unwrap_or(&def.id);
+                let detected = is_detected(def);
+                let prefix = if detected { '\u{2713}' } else { ' ' };
+                ProviderEntry {
+                    id: def.id.clone(),
+                    label: format!("{prefix} {:<15}- {}", display_name, def.description),
+                    detected,
+                }
+            })
+            .collect();
 
-        entries.push(ProviderEntry {
-            id: "nearai".to_string(),
-            label: make_label("nearai", "NEAR AI", "multi-model access via NEAR account"),
-            detected: detected_env.get("nearai").copied().unwrap_or(false),
-        });
-
-        entries.push(ProviderEntry {
-            id: "gemini_oauth".to_string(),
-            label: make_label(
-                "gemini_oauth",
-                "Gemini CLI",
-                "Official Gemini API via Gemini CLI OAuth",
-            ),
-            detected: false,
-        });
-
-        entries.push(ProviderEntry {
-            id: "openai_codex".to_string(),
-            label: make_label(
-                "openai_codex",
-                "OpenAI Codex",
-                "ChatGPT subscription (Plus/Pro/Max)",
-            ),
-            detected: false,
-        });
-
-        for def in &selectable {
-            let display_name = def
-                .setup
-                .as_ref()
-                .map(|s| s.display_name())
-                .unwrap_or(&def.id);
-            entries.push(ProviderEntry {
-                id: def.id.clone(),
-                label: make_label(&def.id, display_name, &def.description),
-                detected: detected_env.get(def.id.as_str()).copied().unwrap_or(false),
-            });
-        }
-
-        // Bedrock is a special case (native AWS SDK, not registry-based)
-        entries.push(ProviderEntry {
-            id: "bedrock".to_string(),
-            label: make_label(
-                "bedrock",
-                "AWS Bedrock",
-                "Claude & other models via AWS (IAM, SSO)",
-            ),
-            detected: false,
-        });
-
-        // Sort: detected providers first, preserving relative order within each group.
+        // Detected providers first; relative order within each group is
+        // preserved, so providers.json controls the menu ordering for
+        // the no-detection case.
         entries.sort_by_key(|e| !e.detected);
 
-        let mut options: Vec<String> = Vec::with_capacity(entries.len());
-        let mut provider_ids: Vec<String> = Vec::with_capacity(entries.len());
-        for entry in &entries {
-            options.push(entry.label.clone());
-            provider_ids.push(entry.id.clone());
-        }
-
+        let options: Vec<String> = entries.iter().map(|e| e.label.clone()).collect();
         let option_refs: Vec<&str> = options.iter().map(|s| s.as_str()).collect();
         let choice = select_one("Provider:", &option_refs).map_err(SetupError::Io)?;
-        let selected_id = &provider_ids[choice];
+        let selected_id = entries[choice].id.clone();
 
-        if selected_id == "bedrock" {
-            self.setup_bedrock().await?;
-        } else if selected_id == "gemini_oauth" {
-            self.setup_gemini_oauth().await?;
-        } else {
-            self.run_provider_setup(selected_id, &registry).await?;
-        }
+        self.run_provider_setup(&selected_id, &registry).await?;
 
         Ok(())
     }
 
-    /// Run the setup flow for a specific provider.
+    /// Run the setup flow for a specific provider, dispatching purely
+    /// off the registry's [`ironclaw_llm::registry::SetupHint`].
     ///
-    /// NearAI has its own special flow. Registry providers dispatch
-    /// based on their `SetupHint` kind.
+    /// The wizard does not know about per-backend strings — every supported
+    /// backend declares its credential collection style in `providers.json`,
+    /// and that style maps to one of the seven `setup_*` helpers below.
+    /// The two remaining `def.id == "..."` checks live inside the `ApiKey`
+    /// arm because Anthropic and GitHub Copilot present a hybrid choice
+    /// (API key OR OAuth) that the simple ApiKey hint does not capture.
     async fn run_provider_setup(
         &mut self,
         provider_id: &str,
-        registry: &crate::llm::ProviderRegistry,
+        registry: &ironclaw_llm::ProviderRegistry,
     ) -> Result<(), SetupError> {
-        if provider_id == "nearai" {
-            return self.setup_nearai().await;
-        }
-
-        if provider_id == "openai_codex" {
-            return self.setup_openai_codex().await;
-        }
-
         let def = registry
             .find(provider_id)
             .ok_or_else(|| SetupError::Config(format!("Unknown provider: {}", provider_id)))?;
 
-        // Providers without a setup hint (e.g., user-defined providers configured
-        // purely via env vars) skip credential setup and go to model selection.
+        // Providers without a setup hint (e.g., user-defined providers
+        // configured purely via env vars) skip credential setup and go
+        // straight to model selection.
         let Some(setup) = def.setup.as_ref() else {
             print_info(&format!(
                 "Provider '{}' has no setup wizard. Configure via environment variables.",
                 provider_id
             ));
-            self.set_llm_backend_preserving_model(provider_id);
+            self.set_llm_backend_preserving_model(&def.id);
             return Ok(());
         };
 
-        // Anthropic has a custom flow: API key or OAuth token from `claude login`.
-        if provider_id == "anthropic" {
-            return self.setup_anthropic().await;
-        }
-
-        if provider_id == "github_copilot" {
-            return self.setup_github_copilot().await;
-        }
-
+        use ironclaw_llm::registry::SetupHint;
         match setup {
-            crate::llm::registry::SetupHint::ApiKey {
+            SetupHint::ApiKey {
                 secret_name,
                 key_url,
                 display_name,
                 ..
             } => {
+                // Hybrid flows: Anthropic adds an "API key or `claude
+                // login` OAuth" choice; GitHub Copilot adds a paste-vs-
+                // device-code choice. Both still classify as ApiKey.
+                if def.id == "anthropic" {
+                    return self.setup_anthropic().await;
+                }
+                if def.id == "github_copilot" {
+                    return self.setup_github_copilot().await;
+                }
+
                 let env_var = def.api_key_env.as_deref().unwrap_or("LLM_API_KEY");
                 let url = key_url.as_deref().unwrap_or("the provider's website");
 
                 // Only store base URL for providers that resolve through
-                // LLM_BASE_URL (openai_compatible, openrouter). Other providers
-                // like groq/nvidia have their own base_url_env and don't need
-                // this backward-compat setting.
+                // LLM_BASE_URL (openai_compatible, openrouter). Other
+                // providers (groq/nvidia/etc.) have their own base_url_env.
                 if def.base_url_env.as_deref() == Some("LLM_BASE_URL")
                     && let Some(ref base_url) = def.default_base_url
                 {
@@ -1514,16 +1443,33 @@ impl SetupWizard {
                 )
                 .await?;
             }
-            crate::llm::registry::SetupHint::Ollama { .. } => {
+            SetupHint::Ollama { .. } => {
                 self.setup_ollama_generic(def)?;
             }
-            crate::llm::registry::SetupHint::OpenAiCompatible {
+            SetupHint::OpenAiCompatible {
                 secret_name,
                 display_name,
                 ..
             } => {
                 self.setup_openai_compatible_generic(&def.id, secret_name, display_name)
                     .await?;
+            }
+            SetupHint::AwsCredentials { .. } => {
+                self.setup_bedrock().await?;
+            }
+            SetupHint::OAuthDeviceCode { backend, .. } => match backend.as_str() {
+                "openai_codex" => self.setup_openai_codex().await?,
+                other => {
+                    return Err(SetupError::Config(format!(
+                        "OAuth device-code flow for backend '{other}' is not implemented"
+                    )));
+                }
+            },
+            SetupHint::FileBasedCredentials { .. } => {
+                self.setup_gemini_oauth().await?;
+            }
+            SetupHint::SessionToken { .. } => {
+                self.setup_nearai().await?;
             }
         }
 
@@ -1689,58 +1635,31 @@ impl SetupWizard {
             return Err(SetupError::Auth("No token provided".to_string()));
         }
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| SetupError::Auth(format!("Failed to create HTTP client: {e}")))?;
+        ironclaw_llm::auth::validate_token(ironclaw_llm::auth::AuthBackend::GithubCopilot, &token)
+            .await
+            .map_err(|e| SetupError::Auth(e.to_string()))?;
 
-        self.save_github_copilot_token(&client, &token).await
+        self.save_github_copilot_token(&token).await
     }
 
     async fn setup_github_copilot_device_login(&mut self) -> Result<(), SetupError> {
         self.set_llm_backend_preserving_model("github_copilot");
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|e| SetupError::Auth(format!("Failed to create HTTP client: {e}")))?;
-
-        let device = crate::llm::github_copilot_auth::request_device_code(&client)
-            .await
-            .map_err(|e| SetupError::Auth(e.to_string()))?;
-
         print_info("Authorize IronClaw with GitHub Copilot in your browser.");
-        print_info(&format!("Verification URL: {}", device.verification_uri));
-        print_info(&format!("One-time code: {}", device.user_code));
+        let outcome = ironclaw_llm::auth::start_login(
+            ironclaw_llm::auth::LoginRequest::GithubCopilot,
+            &WizardAuthPrompt,
+        )
+        .await
+        .map_err(|e| SetupError::Auth(e.to_string()))?;
 
-        if let Err(e) = open::that(&device.verification_uri) {
-            tracing::debug!(
-                url = %device.verification_uri,
-                error = %e,
-                "Failed to open GitHub Copilot device login URL"
-            );
-            print_info("Open the URL above manually if your browser did not launch.");
-        } else {
-            print_info("Opened your browser to GitHub device login.");
-        }
-
-        print_info("Waiting for GitHub authorization...");
-        let token = crate::llm::github_copilot_auth::wait_for_device_login(&client, &device)
-            .await
-            .map_err(|e| SetupError::Auth(e.to_string()))?;
-
-        self.save_github_copilot_token(&client, &token).await
+        let token = outcome.token_to_persist.ok_or_else(|| {
+            SetupError::Auth("github_copilot login returned no token".to_string())
+        })?;
+        self.save_github_copilot_token(token.expose_secret()).await
     }
 
-    async fn save_github_copilot_token(
-        &mut self,
-        client: &reqwest::Client,
-        token: &str,
-    ) -> Result<(), SetupError> {
-        crate::llm::github_copilot_auth::validate_token(client, token)
-            .await
-            .map_err(|e| SetupError::Auth(e.to_string()))?;
-
+    async fn save_github_copilot_token(&mut self, token: &str) -> Result<(), SetupError> {
         if let Ok(ctx) = self.init_secrets_context().await {
             let key = SecretString::from(token.to_string());
             ctx.save_secret("llm_github_copilot_token", &key)
@@ -1915,17 +1834,14 @@ impl SetupWizard {
             self.settings.selected_model = None;
         }
 
-        use crate::config::OpenAiCodexConfig;
-        use crate::llm::OpenAiCodexSessionManager;
-
-        let config = OpenAiCodexConfig::default();
-
-        let mgr = OpenAiCodexSessionManager::new(config).map_err(|e| {
-            SetupError::Config(format!("OpenAI Codex session manager init failed: {}", e))
-        })?;
-        mgr.device_code_login().await.map_err(|e| {
-            SetupError::Config(format!("OpenAI Codex authentication failed: {}", e))
-        })?;
+        ironclaw_llm::auth::start_login(
+            ironclaw_llm::auth::LoginRequest::OpenAiCodex(
+                ironclaw_llm::auth::OpenAiCodexLoginOptions::default(),
+            ),
+            &WizardAuthPrompt,
+        )
+        .await
+        .map_err(|e| SetupError::Config(format!("OpenAI Codex authentication failed: {e}")))?;
 
         print_success("OpenAI Codex configured (ChatGPT subscription)");
         Ok(())
@@ -1934,7 +1850,7 @@ impl SetupWizard {
     /// Generic Ollama-style setup: just needs a base URL, no API key.
     fn setup_ollama_generic(
         &mut self,
-        def: &crate::llm::ProviderDefinition,
+        def: &ironclaw_llm::ProviderDefinition,
     ) -> Result<(), SetupError> {
         self.set_llm_backend_preserving_model(&def.id);
 
@@ -1965,22 +1881,34 @@ impl SetupWizard {
     }
 
     /// AWS Bedrock provider setup: region, auth, and cross-region config.
+    ///
+    /// Writes through the generic `llm_builtin_overrides["bedrock"].extras`
+    /// bag introduced in Layer D — no top-level `bedrock_*` `Settings`
+    /// fields are touched.
     async fn setup_bedrock(&mut self) -> Result<(), SetupError> {
         self.set_llm_backend_preserving_model("bedrock");
 
         // Region
-        let default_region = self
+        let bedrock = self
             .settings
-            .bedrock_region
-            .as_deref()
-            .unwrap_or("us-east-1");
+            .llm_builtin_overrides
+            .entry("bedrock".to_string())
+            .or_default();
+        let default_region = bedrock
+            .extra("region")
+            .unwrap_or(ironclaw_llm::BedrockConfig::DEFAULT_REGION)
+            .to_string();
 
         let region_input =
             optional_input("AWS region", Some(&format!("default: {}", default_region)))
                 .map_err(SetupError::Io)?;
 
-        let region = region_input.unwrap_or_else(|| default_region.to_string());
-        self.settings.bedrock_region = Some(region.clone());
+        let region = region_input.unwrap_or(default_region);
+        self.settings
+            .llm_builtin_overrides
+            .entry("bedrock".to_string())
+            .or_default()
+            .set_extra("region", region.clone());
 
         // Auth method
         print_info("Select authentication method:");
@@ -1991,10 +1919,15 @@ impl SetupWizard {
         ];
         let auth_choice = select_one("Auth:", auth_options).map_err(SetupError::Io)?;
 
+        let bedrock = self
+            .settings
+            .llm_builtin_overrides
+            .entry("bedrock".to_string())
+            .or_default();
         match auth_choice {
             0 => {
                 // Default AWS credentials — clear any stale named profile
-                self.settings.bedrock_profile = None;
+                bedrock.set_extra("profile", "");
                 print_info(
                     "Using default AWS credential chain (env vars, ~/.aws/credentials, IAM roles).",
                 );
@@ -2004,11 +1937,10 @@ impl SetupWizard {
                 let profile =
                     input("AWS profile name (from ~/.aws/config)").map_err(SetupError::Io)?;
                 if profile.trim().is_empty() {
-                    // Empty input clears any previously configured profile
-                    self.settings.bedrock_profile = None;
+                    bedrock.set_extra("profile", "");
                     print_info("AWS profile cleared; using default AWS credential chain instead.");
                 } else {
-                    self.settings.bedrock_profile = Some(profile.clone());
+                    bedrock.set_extra("profile", profile.clone());
                     print_success(&format!("AWS profile '{}' saved", profile));
                 }
             }
@@ -2031,21 +1963,22 @@ impl SetupWizard {
         ];
         let cross_choice = select_one("Cross-region:", cross_options).map_err(SetupError::Io)?;
 
-        let cross_region = match cross_choice {
-            0 => Some("us".to_string()),
-            1 => Some("global".to_string()),
-            2 => Some("eu".to_string()),
-            3 => Some("apac".to_string()),
-            4 => None,
-            _ => None,
-        };
-        self.settings.bedrock_cross_region = cross_region;
-
-        let region = self
+        let bedrock = self
             .settings
-            .bedrock_region
-            .as_deref()
-            .unwrap_or("us-east-1");
+            .llm_builtin_overrides
+            .entry("bedrock".to_string())
+            .or_default();
+        match cross_choice {
+            0 => bedrock.set_extra("cross_region", "us"),
+            1 => bedrock.set_extra("cross_region", "global"),
+            2 => bedrock.set_extra("cross_region", "eu"),
+            3 => bedrock.set_extra("cross_region", "apac"),
+            _ => bedrock.set_extra("cross_region", ""),
+        }
+
+        let region = bedrock
+            .extra("region")
+            .unwrap_or(ironclaw_llm::BedrockConfig::DEFAULT_REGION);
         print_success(&format!("AWS Bedrock configured (region: {})", region));
         Ok(())
     }
@@ -2107,27 +2040,22 @@ impl SetupWizard {
         print_info("Starting Gemini CLI OAuth authentication...");
         println!();
 
-        let creds_path = crate::config::GeminiOauthConfig::default_credentials_path();
-        let cred_manager =
-            crate::llm::gemini_oauth::CredentialManager::new(&creds_path).map_err(|e| {
-                SetupError::Config(format!(
-                    "Failed to initialize Gemini credential manager: {}",
-                    e
-                ))
-            })?;
+        let credentials_path = crate::config::GeminiOauthConfig::default_credentials_path();
+        let outcome = ironclaw_llm::auth::start_login(
+            ironclaw_llm::auth::LoginRequest::Gemini { credentials_path },
+            &WizardAuthPrompt,
+        )
+        .await
+        .map_err(|e| {
+            SetupError::Config(format!(
+                "Gemini CLI authentication failed: {e}. Please try again."
+            ))
+        })?;
 
-        match cred_manager.get_valid_credential().await {
-            Ok(cred) => {
-                print_success("Gemini CLI authentication successful!");
-                if let Some(ref pid) = cred.project_id {
-                    print_info(&format!("Cloud Code project: {}", pid));
-                }
-            }
-            Err(e) => {
-                return Err(SetupError::Config(format!(
-                    "Gemini CLI authentication failed: {}. Please try again.",
-                    e
-                )));
+        print_success("Gemini CLI authentication successful!");
+        for (key, value) in &outcome.display {
+            if key == "project_id" {
+                print_info(&format!("Cloud Code project: {value}"));
             }
         }
 
@@ -2157,14 +2085,14 @@ impl SetupWizard {
         }
 
         let backend = self.settings.llm_backend.as_deref().unwrap_or("nearai");
-        let registry = crate::llm::ProviderRegistry::load();
+        let registry = ironclaw_llm::ProviderRegistry::load();
 
         match backend {
             "nearai" => {
                 // NEAR AI: use existing provider list_models()
                 let fetched = self.fetch_nearai_models().await;
                 let models = if fetched.is_empty() {
-                    crate::llm::default_models()
+                    ironclaw_llm::default_models()
                 } else {
                     fetched.iter().map(|m| (m.clone(), m.clone())).collect()
                 };
@@ -2232,31 +2160,29 @@ impl SetupWizard {
                             .as_ref()
                             .map(|k| k.expose_secret().to_string());
 
-                        let models = match backend {
-                            "anthropic" => fetch_anthropic_models(cached_key.as_deref()).await,
-                            "openai" => fetch_openai_models(cached_key.as_deref()).await,
-                            "ollama" => {
-                                let base_url = self
-                                    .settings
-                                    .ollama_base_url
-                                    .as_deref()
-                                    .or(def.default_base_url.as_deref())
-                                    .unwrap_or("http://localhost:11434");
-                                let models = fetch_ollama_models(base_url).await;
-                                if models.is_empty() {
-                                    print_info(
-                                        "No models found. Pull one first: ollama pull llama3",
-                                    );
-                                }
-                                models
-                            }
-                            _ => {
-                                // Generic OpenAI-compatible model listing
-                                let base_url = def.default_base_url.as_deref().unwrap_or("");
-                                fetch_openai_compatible_models(base_url, cached_key.as_deref())
-                                    .await
-                            }
+                        let ollama_base = self
+                            .settings
+                            .ollama_base_url
+                            .as_deref()
+                            .or(def.default_base_url.as_deref())
+                            .unwrap_or("http://localhost:11434");
+                        let base_url = if backend == "ollama" {
+                            Some(ollama_base)
+                        } else {
+                            def.default_base_url.as_deref()
                         };
+
+                        let models = fetch_models_for(
+                            backend,
+                            &ModelFetchOptions {
+                                api_key: cached_key.as_deref(),
+                                base_url,
+                            },
+                        )
+                        .await;
+                        if backend == "ollama" && models.is_empty() {
+                            print_info("No models found. Pull one first: ollama pull llama3");
+                        }
 
                         // Apply models_filter from setup hint
                         let models = if let Some(filter) =
@@ -2356,7 +2282,7 @@ impl SetupWizard {
             None => return vec![],
         };
 
-        use crate::llm::create_llm_provider;
+        use ironclaw_llm::create_llm_provider;
 
         let config = build_nearai_model_fetch_config();
 
@@ -4230,7 +4156,7 @@ mod tests {
     async fn test_fetch_anthropic_models_static_fallback() {
         // With no API key, should return static defaults
         let _guard = EnvGuard::clear("ANTHROPIC_API_KEY");
-        let models = fetch_anthropic_models(None).await;
+        let models = fetch_models_for("anthropic", &ModelFetchOptions::default()).await;
         assert!(!models.is_empty());
         assert!(
             models.iter().any(|(id, _)| id.contains("claude")),
@@ -4241,7 +4167,7 @@ mod tests {
     #[tokio::test]
     async fn test_fetch_openai_models_static_fallback() {
         let _guard = EnvGuard::clear("OPENAI_API_KEY");
-        let models = fetch_openai_models(None).await;
+        let models = fetch_models_for("openai", &ModelFetchOptions::default()).await;
         assert!(!models.is_empty());
         assert_eq!(models[0].0, "gpt-5.3-codex");
         assert!(
@@ -4278,49 +4204,6 @@ mod tests {
             wizard.settings.llm_backend.as_deref(),
             Some("github_copilot")
         );
-    }
-
-    #[test]
-    fn test_is_openai_chat_model_includes_gpt5_and_filters_non_chat_variants() {
-        assert!(is_openai_chat_model("gpt-5"));
-        assert!(is_openai_chat_model("gpt-5-mini-2026-01-01"));
-        assert!(is_openai_chat_model("o3-2025-04-16"));
-        assert!(!is_openai_chat_model("chatgpt-image-latest"));
-        assert!(!is_openai_chat_model("gpt-4o-realtime-preview"));
-        assert!(!is_openai_chat_model("gpt-4o-mini-transcribe"));
-        assert!(!is_openai_chat_model("text-embedding-3-large"));
-    }
-
-    #[test]
-    fn test_sort_openai_models_prioritizes_best_models_first() {
-        let mut models = vec![
-            ("gpt-4o-mini".to_string(), "gpt-4o-mini".to_string()),
-            ("gpt-5-mini".to_string(), "gpt-5-mini".to_string()),
-            ("o3".to_string(), "o3".to_string()),
-            ("gpt-4.1".to_string(), "gpt-4.1".to_string()),
-            ("gpt-5".to_string(), "gpt-5".to_string()),
-        ];
-
-        sort_openai_models(&mut models);
-
-        let ordered: Vec<String> = models.into_iter().map(|(id, _)| id).collect();
-        assert_eq!(
-            ordered,
-            vec![
-                "gpt-5".to_string(),
-                "gpt-5-mini".to_string(),
-                "o3".to_string(),
-                "gpt-4.1".to_string(),
-                "gpt-4o-mini".to_string(),
-            ]
-        );
-    }
-
-    #[tokio::test]
-    async fn test_fetch_ollama_models_unreachable_fallback() {
-        // Point at a port nothing listens on
-        let models = fetch_ollama_models("http://127.0.0.1:1").await;
-        assert!(!models.is_empty(), "should fall back to static defaults");
     }
 
     #[tokio::test]
@@ -4474,20 +4357,30 @@ mod tests {
     }
 
     /// Regression: switching from another provider to bedrock must clear
-    /// selected_model, and choosing "default credentials" must clear
-    /// bedrock_profile.
+    /// selected_model, and choosing "default credentials" must clear the
+    /// bedrock profile setting.
     #[test]
     fn test_bedrock_clears_stale_profile_on_default_creds() {
         let mut wizard = SetupWizard::new();
         wizard.settings.llm_backend = Some("bedrock".to_string());
-        wizard.settings.bedrock_profile = Some("old-sso-profile".to_string());
+        let bedrock = wizard
+            .settings
+            .llm_builtin_overrides
+            .entry("bedrock".to_string())
+            .or_default();
+        bedrock.set_extra("profile", "old-sso-profile");
 
         // Simulate auth_choice == 0 (default credentials) clearing the profile
-        wizard.settings.bedrock_profile = None;
+        let bedrock = wizard
+            .settings
+            .llm_builtin_overrides
+            .get_mut("bedrock")
+            .expect("bedrock entry");
+        bedrock.set_extra("profile", "");
 
         assert!(
-            wizard.settings.bedrock_profile.is_none(),
-            "bedrock_profile should be cleared when selecting default credentials"
+            bedrock.extra("profile").is_none(),
+            "bedrock profile should be cleared when selecting default credentials"
         );
     }
 
@@ -4496,20 +4389,65 @@ mod tests {
     #[test]
     fn test_bedrock_empty_profile_clears_existing() {
         let mut wizard = SetupWizard::new();
-        wizard.settings.bedrock_profile = Some("old-profile".to_string());
+        let bedrock = wizard
+            .settings
+            .llm_builtin_overrides
+            .entry("bedrock".to_string())
+            .or_default();
+        bedrock.set_extra("profile", "old-profile");
 
         // Simulate auth_choice == 1 with empty input
         let profile = "".to_string();
+        let bedrock = wizard
+            .settings
+            .llm_builtin_overrides
+            .get_mut("bedrock")
+            .expect("bedrock entry");
         if profile.trim().is_empty() {
-            wizard.settings.bedrock_profile = None;
+            bedrock.set_extra("profile", "");
         } else {
-            wizard.settings.bedrock_profile = Some(profile);
+            bedrock.set_extra("profile", profile);
         }
 
         assert!(
-            wizard.settings.bedrock_profile.is_none(),
-            "empty profile input should clear existing bedrock_profile"
+            bedrock.extra("profile").is_none(),
+            "empty profile input should clear existing bedrock profile"
         );
+    }
+
+    /// Regression: legacy `bedrock_*` fields on disk must migrate into
+    /// `llm_builtin_overrides["bedrock"].extras` on `Settings::load_from`,
+    /// so existing users don't lose configuration when upgrading past
+    /// the Layer D refactor.
+    #[test]
+    fn legacy_bedrock_fields_migrate_into_extras_on_load() {
+        let tmpdir = tempfile::tempdir().expect("tempdir");
+        let path = tmpdir.path().join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "llm_backend": "bedrock",
+                "bedrock_region": "eu-west-1",
+                "bedrock_cross_region": "eu",
+                "bedrock_profile": "prod-bedrock"
+            }"#,
+        )
+        .expect("write fixture");
+
+        let settings = crate::settings::Settings::load_from(&path);
+        let bedrock = settings
+            .llm_builtin_overrides
+            .get("bedrock")
+            .expect("bedrock entry must exist after migration");
+        assert_eq!(bedrock.extra("region"), Some("eu-west-1"));
+        assert_eq!(bedrock.extra("cross_region"), Some("eu"));
+        assert_eq!(bedrock.extra("profile"), Some("prod-bedrock"));
+        assert!(
+            settings.bedrock_region.is_none(),
+            "named bedrock_region must be drained by the migration"
+        );
+        assert!(settings.bedrock_cross_region.is_none());
+        assert!(settings.bedrock_profile.is_none());
     }
 
     #[tokio::test]
@@ -4519,13 +4457,13 @@ mod tests {
         // to be kept during re-onboarding.
         let mut wizard = SetupWizard::new();
 
-        let mut providers: Vec<crate::llm::registry::ProviderDefinition> =
+        let mut providers: Vec<ironclaw_llm::registry::ProviderDefinition> =
             serde_json::from_str(include_str!("../../providers.json")).unwrap();
         // Add a provider with no setup hint
-        providers.push(crate::llm::registry::ProviderDefinition {
+        providers.push(ironclaw_llm::registry::ProviderDefinition {
             id: "custom_no_setup".to_string(),
             aliases: vec![],
-            protocol: crate::llm::registry::ProviderProtocol::OpenAiCompletions,
+            protocol: ironclaw_llm::registry::ProviderProtocol::OpenAiCompletions,
             default_base_url: Some("http://localhost:9999/v1".to_string()),
             base_url_env: None,
             base_url_required: false,
@@ -4538,7 +4476,7 @@ mod tests {
             setup: None,
             unsupported_params: vec![],
         });
-        let registry = crate::llm::ProviderRegistry::new(providers);
+        let registry = ironclaw_llm::ProviderRegistry::new(providers);
 
         let result = wizard
             .run_provider_setup("custom_no_setup", &registry)

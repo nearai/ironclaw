@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2](https://github.com/nearai/ironclaw/compare/ironclaw_common-v0.4.1...ironclaw_common-v0.4.2) - 2026-05-11
+
+### Added
+
+- *(common)* describe paths and platform helpers in crate description ([#3498](https://github.com/nearai/ironclaw/pull/3498))
+
+### Other
+
+- *(llm)* extract multi-provider integration into ironclaw_llm crate ([#3387](https://github.com/nearai/ironclaw/pull/3387))
+
+## [0.4.1](https://github.com/nearai/ironclaw/compare/ironclaw_common-v0.4.0...ironclaw_common-v0.4.1) - 2026-05-07
+
+### Added
+
+- *(common)* align crate description with lib.rs doc wording ([#3372](https://github.com/nearai/ironclaw/pull/3372))
+
+### Fixed
+
+- *(common)* clarify crate-level doc wording ([#3370](https://github.com/nearai/ironclaw/pull/3370))
+
 ## [0.4.0](https://github.com/nearai/ironclaw/compare/ironclaw_common-v0.3.0...ironclaw_common-v0.4.0) - 2026-04-29
 
 ### Added

@@ -95,6 +95,9 @@ fn make_context(project_id: ProjectId) -> ThreadExecutionContext {
         available_actions_snapshot: None,
         available_action_inventory_snapshot: None,
         conversation_scope: None,
+        gate_controller: ironclaw_engine::CancellingGateController::arc(),
+        call_approval_granted: false,
+        conversation_id: None,
     }
 }
 

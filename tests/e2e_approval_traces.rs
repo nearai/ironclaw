@@ -424,7 +424,7 @@ mod approval_trace_tests {
         );
         let last_user_yes = captured.iter().any(|msgs| {
             msgs.iter().any(|m| {
-                matches!(m.role, ironclaw::llm::Role::User)
+                matches!(m.role, ironclaw_llm::Role::User)
                     && m.content.trim().eq_ignore_ascii_case("yes")
             })
         });

@@ -56,14 +56,13 @@ pub async fn execute_action_calls(
     calls: &[ActionCall],
     thread: &Thread,
     effects: &Arc<dyn EffectExecutor>,
-    leases: &LeaseManager,
+    leases: &Arc<LeaseManager>,
     policy: &PolicyEngine,
     context: &ThreadExecutionContext,
     capability_policies: &[crate::types::capability::PolicyRule],
 ) -> Result<ActionBatchResult, EngineError> {
     let mut preflight_results: Vec<PreflightOutcome> = Vec::with_capacity(calls.len());
     let mut early_events = Vec::new();
-    let mut early_results = Vec::new();
     let active_leases = leases.active_for_thread(thread.id).await;
     let available_inventory = Arc::new(
         effects
@@ -183,38 +182,75 @@ pub async fn execute_action_calls(
                 continue;
             }
             PolicyDecision::RequireApproval { .. } => {
-                // Collect error results from earlier preflight failures
-                for pf in preflight_results {
-                    if let PreflightOutcome::Error { result, event, .. } = pf {
-                        early_results.push(result);
-                        early_events.push(event);
-                    }
-                }
+                // Inline gate-await: pause this preflight loop in place
+                // until the user resolves the gate. On approval, fall
+                // through to lease consumption and queue the call for
+                // execution. On denial, mark the call failed and continue
+                // preflight for the rest of the batch — same blast radius
+                // as a policy-Deny.
+                //
+                // The controller is required on the context. Code paths
+                // that don't pause supply `CancellingGateController`,
+                // which surfaces as a typed denial here.
+                //
+                // Policy doesn't carry the `allow_always` axis; default
+                // to the historical value (`true`) so the UI offers it.
+                let resume_kind = crate::gate::ResumeKind::Approval { allow_always: true };
                 early_events.push(EventKind::ApprovalRequested {
                     action_name: call.action_name.clone(),
                     call_id: call.id.clone(),
                     parameters: Some(call.parameters.clone()),
                     description: None,
-                    allow_always: None,
-                    gate_name: None,
+                    allow_always: Some(true),
+                    gate_name: Some("approval".into()),
                     params_summary: crate::types::event::summarize_params(
                         &call.action_name,
                         &call.parameters,
                     ),
                 });
-                return Ok(ActionBatchResult {
-                    results: early_results,
-                    events: early_events,
-                    need_approval: Some(ThreadOutcome::GatePaused {
+                let resolution = context
+                    .gate_controller
+                    .pause(crate::gate::GatePauseRequest {
+                        thread_id: thread.id,
+                        user_id: thread.user_id.clone(),
                         gate_name: "approval".into(),
                         action_name: call.action_name.clone(),
                         call_id: call.id.clone(),
                         parameters: call.parameters.clone(),
-                        resume_kind: crate::gate::ResumeKind::Approval { allow_always: true },
-                        resume_output: None,
-                        paused_lease: None,
-                    }),
-                });
+                        resume_kind,
+                        conversation_id: context.conversation_id,
+                    })
+                    .await;
+
+                let denial = crate::executor::scripting::denial_outcome_for_resolution(&resolution);
+                if let Some(outcome) = denial {
+                    let error_msg = outcome.event_error();
+                    let error_result = ActionResult {
+                        call_id: call.id.clone(),
+                        action_name: call.action_name.clone(),
+                        output: serde_json::json!({"error": &error_msg}),
+                        is_error: true,
+                        duration: std::time::Duration::ZERO,
+                    };
+                    let event = EventKind::ActionFailed {
+                        step_id: context.step_id,
+                        action_name: call.action_name.clone(),
+                        call_id: call.id.clone(),
+                        error: error_msg,
+                        duration_ms: 0,
+                        params_summary: crate::types::event::summarize_params(
+                            &call.action_name,
+                            &call.parameters,
+                        ),
+                    };
+                    preflight_results.push(PreflightOutcome::Error {
+                        index: idx,
+                        result: error_result,
+                        event,
+                    });
+                    continue;
+                }
+                // Approved: fall through to lease-consume + runnable-queue.
             }
             PolicyDecision::Allow => {}
         }
@@ -233,8 +269,14 @@ pub async fn execute_action_calls(
     // All approved calls run concurrently. Results are collected in a
     // HashMap keyed by original index, then merged in order.
 
-    // Separate runnable from preflight errors
-    let mut slot_results: Vec<Option<(ActionResult, EventKind)>> = vec![None; calls.len()];
+    // Separate runnable from preflight errors. Each slot carries the
+    // call's terminal `(ActionResult, EventKind)` plus any
+    // pre-terminal `ApprovalRequested` events emitted by the inline
+    // retry helper. Pre-terminal events are flushed before the
+    // terminal event in the merge phase so audit observers see
+    // "approval asked → action executed/failed" in order.
+    let mut slot_results: Vec<Option<(ActionResult, EventKind, Vec<EventKind>)>> =
+        vec![None; calls.len()];
     let mut runnable_indices = Vec::new();
 
     for pf in preflight_results {
@@ -245,7 +287,7 @@ pub async fn execute_action_calls(
                 event,
                 ..
             } => {
-                slot_results[index] = Some((result, event));
+                slot_results[index] = Some((result, event, Vec::new()));
             }
             PreflightOutcome::Runnable { index, lease } => {
                 runnable_indices.push((index, lease));
@@ -260,28 +302,44 @@ pub async fn execute_action_calls(
         let exec_ctx =
             stamp_execution_context(context, &call.id, &available_actions, &available_inventory);
         let execution_start = Instant::now();
-        let exec_result = effects
-            .execute_action(
-                &call.action_name,
-                call.parameters.clone(),
-                &lease,
-                &exec_ctx,
-            )
-            .await;
+        let (exec_result, pre_events) = execute_with_inline_gate_retry(
+            effects,
+            leases,
+            &lease,
+            call,
+            &exec_ctx,
+            thread.id,
+            &thread.user_id,
+        )
+        .await;
         if interrupted_call_needs_refund(&exec_result) {
             let _ = leases.refund_use(lease.id).await;
         }
-        slot_results[idx] = Some(classify_exec_result(
+        let (result, event) = classify_exec_result(
             exec_result,
             call,
             &exec_ctx,
             execution_start.elapsed().as_millis() as u64,
-        ));
+        );
+        slot_results[idx] = Some((result, event, pre_events));
     } else if runnable_indices.len() > 1 {
-        // Multiple calls: execute in parallel via JoinSet
+        // Multiple calls: execute in parallel via JoinSet. Each task
+        // wraps the call in `execute_with_inline_gate_retry` so a tool
+        // raising `Approval` mid-execution pauses inline through the
+        // shared bridge controller (which serializes concurrent gates
+        // per (user, thread)) and either retries on approval or
+        // surfaces a typed denial — same contract as the single-call
+        // fast path. Without this wrapper, parallel batches reverted
+        // to the legacy `gate_paused` sentinel + thread re-entry path,
+        // re-introducing the double-execution bug for any
+        // already-completed sibling calls in the same batch.
         let mut join_set = tokio::task::JoinSet::new();
-        let effects = effects.clone();
 
+        // Capture thread metadata once outside the spawn loop. Avoids
+        // cloning the full `Thread` (with message/event transcripts)
+        // per task — the helper only needs the id + user_id.
+        let thread_id = thread.id;
+        let user_id = thread.user_id.clone();
         for (idx, lease) in runnable_indices {
             let call = calls[idx].clone();
             let ctx = stamp_execution_context(
@@ -290,18 +348,22 @@ pub async fn execute_action_calls(
                 &available_actions,
                 &available_inventory,
             );
-            let effects = effects.clone();
+            let effects = Arc::clone(effects);
+            let leases = Arc::clone(leases);
             let lease = lease.clone();
+            let user_id = user_id.clone();
 
             join_set.spawn(async move {
                 let execution_start = Instant::now();
-                let result = effects
-                    .execute_action(&call.action_name, call.parameters.clone(), &lease, &ctx)
-                    .await;
+                let (result, pre_events) = execute_with_inline_gate_retry(
+                    &effects, &leases, &lease, &call, &ctx, thread_id, &user_id,
+                )
+                .await;
                 (
                     idx,
                     lease.id,
                     result,
+                    pre_events,
                     call,
                     ctx,
                     execution_start.elapsed().as_millis() as u64,
@@ -311,16 +373,13 @@ pub async fn execute_action_calls(
 
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
-                Ok((idx, lease_id, result, call, ctx, execution_duration_ms)) => {
+                Ok((idx, lease_id, result, pre_events, call, ctx, execution_duration_ms)) => {
                     if interrupted_call_needs_refund(&result) {
                         let _ = leases.refund_use(lease_id).await;
                     }
-                    slot_results[idx] = Some(classify_exec_result(
-                        result,
-                        &call,
-                        &ctx,
-                        execution_duration_ms,
-                    ));
+                    let (action_result, event) =
+                        classify_exec_result(result, &call, &ctx, execution_duration_ms);
+                    slot_results[idx] = Some((action_result, event, pre_events));
                 }
                 Err(e) => {
                     // Task panicked — should not happen, but handle gracefully
@@ -333,11 +392,15 @@ pub async fn execute_action_calls(
     // ── Phase 3: Merge results in original call order ───────────
 
     let mut results = Vec::with_capacity(calls.len());
-    let mut events = Vec::new();
+    // `early_events` carries ApprovalRequested events emitted during
+    // preflight; they're emitted *before* any per-call result event so
+    // observers see "approval asked → action failed" in the right
+    // order.
+    let mut events = std::mem::take(&mut early_events);
     let mut first_interrupt: Option<ThreadOutcome> = None;
 
     for (idx, slot) in slot_results.into_iter().enumerate() {
-        if let Some((result, event)) = slot {
+        if let Some((result, event, pre_events)) = slot {
             // Record the first gate pause as the batch interrupt but still
             // collect all other results.
             if first_interrupt.is_none()
@@ -375,6 +438,12 @@ pub async fn execute_action_calls(
                         .cloned()
                         .and_then(|value| serde_json::from_value(value).ok()),
                 });
+            }
+            // Pre-terminal `ApprovalRequested` events from the inline
+            // retry helper come first so the audit log reads as
+            // "approval asked → action <outcome>" in order.
+            for pe in pre_events {
+                events.push(pe);
             }
             results.push(result);
             events.push(event);
@@ -522,6 +591,262 @@ fn interrupted_call_needs_refund(result: &Result<ActionResult, EngineError>) -> 
     matches!(result, Err(EngineError::GatePaused { .. }))
 }
 
+/// Run a single tool action with inline gate-await retry.
+///
+/// If the executor returns `Err(EngineError::GatePaused { resume_kind: Approval, .. })`,
+/// refund the lease, pause for the user via the context's controller,
+/// and retry on approval. On denial / cancellation, surface as a
+/// deny-style `EngineError::Effect` so the caller produces an
+/// `ActionFailed` event rather than a "gate_paused" sentinel.
+///
+/// Bounded by [`MAX_INLINE_GATE_RETRIES`]: a misbehaving tool that
+/// keeps gating after each approval surfaces a clean error rather than
+/// pinning a CPU. The bridge installs auto-approve before delivering
+/// the resolution, so well-behaved chains converge in 1–2 iterations
+/// and the cap is only ever hit on bugs.
+///
+/// Authentication resume kinds also flow through this loop now —
+/// `bridge::resolve_inline_gates_for_credential` (the OAuth-callback
+/// hook from #3133 half-2) delivers `GateResolution::Approved` to the
+/// parked controller as soon as the credential lands in the secrets
+/// store, so the retry sees the credential and the action succeeds.
+/// (`bridge::resume_paused_missions_for_credential` is the parallel
+/// path for missions whose child threads were paused — separate from
+/// the inline-await waiters this loop drives.)
+/// External resume kinds still keep the legacy re-entry path: their
+/// resolution installs callback-payload state that the suspended call
+/// can't see without unwinding.
+///
+/// Returns `(final_result, events)` where `events` carries the
+/// `ApprovalRequested` audit events emitted across retry iterations
+/// — one per gate-pause cycle, in the order they fired. Callers
+/// MUST emit these events before the per-call outcome event so
+/// replay/audit observers see "approval asked → action <outcome>"
+/// instead of just the final outcome.
+async fn execute_with_inline_gate_retry(
+    effects: &Arc<dyn EffectExecutor>,
+    leases: &LeaseManager,
+    lease: &CapabilityLease,
+    call: &ActionCall,
+    exec_ctx: &ThreadExecutionContext,
+    thread_id: crate::types::thread::ThreadId,
+    user_id: &str,
+) -> (Result<ActionResult, EngineError>, Vec<EventKind>) {
+    let mut current_lease = lease.clone();
+    // `call_ctx` carries the one-shot approval flag across retries.
+    // First iteration: false (the gate hasn't fired yet). After each
+    // approval we set true; we reset to false immediately after the
+    // call so a re-gating tool doesn't get the flag handed back twice
+    // for one approval.
+    let mut call_ctx = exec_ctx.clone();
+    let mut emitted_events: Vec<EventKind> = Vec::new();
+    for _ in 0..crate::executor::scripting::MAX_INLINE_GATE_RETRIES {
+        let result = effects
+            .execute_action(
+                &call.action_name,
+                call.parameters.clone(),
+                &current_lease,
+                &call_ctx,
+            )
+            .await;
+        call_ctx.call_approval_granted = false;
+
+        // Snapshot the original gate (for re-emission on
+        // Cancelled+Authentication, see below).
+        let original_err = match &result {
+            Err(EngineError::GatePaused {
+                resume_kind,
+                paused_lease,
+                resume_output,
+                gate_name,
+                action_name,
+                call_id,
+                parameters,
+            }) if matches!(
+                **resume_kind,
+                crate::gate::ResumeKind::Approval { .. }
+                    | crate::gate::ResumeKind::Authentication { .. }
+            ) =>
+            {
+                Some(EngineError::GatePaused {
+                    gate_name: gate_name.clone(),
+                    action_name: action_name.clone(),
+                    call_id: call_id.clone(),
+                    parameters: parameters.clone(),
+                    resume_kind: resume_kind.clone(),
+                    paused_lease: paused_lease.clone(),
+                    resume_output: resume_output.clone(),
+                })
+            }
+            _ => None,
+        };
+        let (gate_name, action_name, call_id, parameters, resume_kind, resume_output) = match result
+        {
+            Err(EngineError::GatePaused {
+                gate_name,
+                action_name,
+                call_id,
+                parameters,
+                resume_kind,
+                resume_output,
+                ..
+            }) if matches!(
+                *resume_kind,
+                crate::gate::ResumeKind::Approval { .. }
+                    | crate::gate::ResumeKind::Authentication { .. }
+            ) =>
+            {
+                (
+                    gate_name,
+                    action_name,
+                    call_id,
+                    *parameters,
+                    *resume_kind,
+                    resume_output.map(|b| *b),
+                )
+            }
+            other => return (other, emitted_events),
+        };
+
+        // Emit the audit event BEFORE awaiting the controller so
+        // observers see the request even if the user never resolves.
+        // Mirrors the orchestrator (Tier 1) path which records the
+        // event before calling `pause()`.
+        let allow_always = match resume_kind {
+            crate::gate::ResumeKind::Approval { allow_always } => Some(allow_always),
+            _ => None,
+        };
+        emitted_events.push(EventKind::ApprovalRequested {
+            action_name: action_name.clone(),
+            call_id: call_id.clone(),
+            parameters: Some(parameters.clone()),
+            description: None,
+            allow_always,
+            gate_name: Some(gate_name.clone()),
+            params_summary: crate::types::event::summarize_params(&call.action_name, &parameters),
+        });
+
+        // Refund the lease use this attempt consumed; we'll re-consume
+        // on retry if the user approves. EXCEPTION: when `resume_output`
+        // is set, the action has already executed successfully (the
+        // gate is a post-execution Authentication gate carrying cached
+        // output) — the cached-output branch below will return without
+        // re-consuming. Refunding now would net the successful action
+        // to zero lease uses, letting a side-effecting tool drain
+        // `max_uses=∞` for free. See `drive_inline_gate` in scripting.rs
+        // and `execute_action_with_inline_gate` in orchestrator.rs for
+        // the matching guards. Tracked by the #3559 security review.
+        if resume_output.is_none() {
+            let _ = leases.refund_use(current_lease.id).await;
+        }
+
+        let resolution = exec_ctx
+            .gate_controller
+            .pause(crate::gate::GatePauseRequest {
+                thread_id,
+                user_id: user_id.to_string(),
+                gate_name: gate_name.clone(),
+                action_name: action_name.clone(),
+                call_id: call_id.clone(),
+                parameters: parameters.clone(),
+                resume_kind: resume_kind.clone(),
+                conversation_id: exec_ctx.conversation_id,
+            })
+            .await;
+
+        if let Some(outcome) =
+            crate::executor::scripting::denial_outcome_for_resolution(&resolution)
+        {
+            // Cancelled+Authentication → unwind to legacy
+            // `ThreadOutcome::GatePaused` so missions / non-inline-aware
+            // controllers can still surface a Paused state. Cancelled
+            // here means the controller can't resolve the auth inline
+            // (e.g. `CancellingGateController` in tests, or a
+            // BridgeGateController without OAuth wiring) — that's
+            // semantically "no inline path exists" and the legacy
+            // unwind is the right fallback. Denied / explicit
+            // Cancelled-by-user remain failures.
+            if matches!(resolution, crate::gate::GateResolution::Cancelled)
+                && matches!(resume_kind, crate::gate::ResumeKind::Authentication { .. })
+                && let Some(err) = original_err
+            {
+                return (Err(err), emitted_events);
+            }
+            return (
+                Err(EngineError::Effect {
+                    reason: outcome.effect_reason(),
+                }),
+                emitted_events,
+            );
+        }
+
+        // Approved. If the bridge cached the action's output before raising
+        // this gate (post-execution Authentication gate path — see
+        // `effect_adapter::auth_gate_from_extension_result`), the action has
+        // already run and we just needed user-side resolution. Skip
+        // re-execution and synthesize a successful ActionResult from the
+        // cached output. Mirrors the Tier 1 shortcut in
+        // `scripting::drive_inline_gate`. Tracked by #3533.
+        //
+        // Do NOT emit `ActionExecuted` here. The caller wraps the
+        // `Ok(ActionResult)` we return in `classify_exec_result`, which
+        // emits the terminal `ActionExecuted` for the Ok branch. Emitting
+        // here would produce two `ActionExecuted` events for one action,
+        // confusing audit observers. (Tier 1's `scripting::drive_inline_gate`
+        // and Tier 1 alt's `orchestrator::execute_action_with_inline_gate`
+        // emit themselves because their callers don't run an Ok-branch
+        // classifier — see the #3559 review for why structured is the
+        // outlier here.)
+        if let Some(cached_output) = resume_output {
+            return (
+                Ok(ActionResult {
+                    call_id,
+                    action_name,
+                    output: cached_output,
+                    is_error: false,
+                    duration: std::time::Duration::ZERO,
+                }),
+                emitted_events,
+            );
+        }
+
+        // Re-consume a lease use and mark the next call as pre-approved so
+        // the host's `EffectExecutor` skips its approval check.
+        match leases.find_and_consume(thread_id, &call.action_name).await {
+            Ok(new_lease) => {
+                current_lease = new_lease;
+                call_ctx.call_approval_granted = true;
+                continue;
+            }
+            Err(e) => {
+                return (
+                    Err(EngineError::Effect {
+                        reason: format!("lease exhausted after approval: {e}"),
+                    }),
+                    emitted_events,
+                );
+            }
+        }
+    }
+
+    // Retry budget exhausted. The last loop iteration ended with a
+    // successful `find_and_consume` whose lease was never used —
+    // refund it before returning so a misbehaving tool can't slowly
+    // drain `max_uses` across approvals. Best-effort; if the lease
+    // was already revoked/expired the refund is a no-op.
+    let _ = leases.refund_use(current_lease.id).await;
+    (
+        Err(EngineError::Effect {
+            reason: format!(
+                "tool '{}' still requires approval after {} retries",
+                call.action_name,
+                crate::executor::scripting::MAX_INLINE_GATE_RETRIES
+            ),
+        }),
+        emitted_events,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -616,6 +941,9 @@ mod tests {
             available_actions_snapshot: None,
             available_action_inventory_snapshot: None,
             conversation_scope: None,
+            gate_controller: crate::gate::CancellingGateController::arc(),
+            call_approval_granted: false,
+            conversation_id: None,
         }
     }
 
@@ -739,9 +1067,12 @@ mod tests {
             "test-user",
             ThreadConfig::default(),
         );
-        // Register `web_search` in the inventory so the preflight
-        // doesn't short-circuit at "not callable" — we want the path
-        // that hits the lease lookup and finds nothing for this thread.
+        // Inventory contains `web_search` (so the callable-inventory
+        // gate passes), but no lease is granted — the lease lookup is
+        // the failure point this test exercises. Without `web_search`
+        // in the inventory, preflight short-circuits on
+        // "action is not callable in this execution context" before
+        // ever reaching the lease check.
         let effects: Arc<dyn EffectExecutor> =
             Arc::new(MockEffects::new(vec![test_action("web_search")], vec![]));
         let leases = Arc::new(LeaseManager::new());
@@ -935,24 +1266,26 @@ mod tests {
             .await
             .unwrap();
 
-        match result.need_approval {
-            Some(ThreadOutcome::GatePaused {
-                gate_name,
-                action_name,
-                call_id,
-                ..
-            }) => {
-                assert_eq!(gate_name, "approval");
-                assert_eq!(action_name, "create-issue");
-                assert_eq!(call_id, "call_alias_policy");
-            }
-            other => panic!("expected approval gate for aliased action, got {other:?}"),
-        }
-
+        // The default `CancellingGateController` cancels the gate
+        // synchronously, so the batch surfaces a denied error result for
+        // the aliased call rather than the legacy
+        // `need_approval = Some(ThreadOutcome::GatePaused {...})`.
+        // What still must hold: the gate was *evaluated* (an
+        // ApprovalRequested event was emitted with the aliased name and
+        // the original call_id), the action did NOT execute, and the
+        // result is_error.
         assert!(
-            result.results.is_empty(),
-            "policy preflight should pause before executing the aliased action"
+            result.need_approval.is_none(),
+            "controller-driven path must not bubble need_approval up; got {:?}",
+            result.need_approval
         );
+        assert_eq!(result.results.len(), 1);
+        assert!(
+            result.results[0].is_error,
+            "denied gate must surface as an error result"
+        );
+        assert_eq!(result.results[0].call_id, "call_alias_policy");
+        assert_eq!(result.results[0].action_name, "create-issue");
         assert!(
             result.events.iter().any(|event| matches!(
                 event,
@@ -960,6 +1293,14 @@ mod tests {
                     if action_name == "create-issue" && call_id == "call_alias_policy"
             )),
             "approval event should use the aliased action name and original call id"
+        );
+        assert!(
+            result.events.iter().any(|event| matches!(
+                event,
+                EventKind::ActionFailed { action_name, call_id, .. }
+                    if action_name == "create-issue" && call_id == "call_alias_policy"
+            )),
+            "denied gate should produce an ActionFailed event"
         );
     }
 
@@ -1135,6 +1476,158 @@ mod tests {
                 }
             }
             other => panic!("expected GatePaused, got {:?}", other),
+        }
+    }
+
+    /// #3559 security review (finding 2): when a post-execution
+    /// Authentication gate carries cached `resume_output`, the inline
+    /// retry path must NOT refund the lease use the action already
+    /// consumed. The cached-output branch returns without re-consuming,
+    /// so refunding would net a successful side-effecting action to
+    /// zero lease uses — letting a `max_uses=N` budget execute N+ times
+    /// for free.
+    ///
+    /// Wires `MockEffects` to return `GatePaused { resume_output: Some(...) }`
+    /// on the first call, drives it through `execute_action_calls` with an
+    /// always-approve test gate controller, and asserts:
+    /// 1. The cached output is returned (Ok result, no re-execution).
+    /// 2. Exactly one `ActionExecuted` event is emitted.
+    /// 3. The lease's `uses_remaining` ends at `Some(0)` — the original
+    ///    consumption stands; the refund was correctly skipped.
+    ///
+    /// Pre-fix (`refund_use` ran unconditionally), `uses_remaining` would
+    /// end at `Some(1)` and a subsequent call would still succeed,
+    /// breaking the `max_uses=1` contract.
+    #[tokio::test]
+    async fn resume_output_replay_consumes_exactly_one_lease_use() {
+        use crate::gate::{GateController, GatePauseRequest, GateResolution};
+
+        struct ApprovingGateController;
+
+        #[async_trait::async_trait]
+        impl GateController for ApprovingGateController {
+            async fn pause(&self, _request: GatePauseRequest) -> GateResolution {
+                GateResolution::Approved { always: false }
+            }
+        }
+
+        let thread = Thread::new(
+            "test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "test-user",
+            ThreadConfig::default(),
+        );
+
+        let cached_output = serde_json::json!({"installed": "gmail", "ok": true});
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(
+            vec![test_action("tool_install")],
+            vec![Err(EngineError::GatePaused {
+                gate_name: "authentication".into(),
+                action_name: "tool_install".into(),
+                call_id: "call_install_1".into(),
+                parameters: Box::new(serde_json::json!({"name": "gmail"})),
+                resume_kind: Box::new(crate::gate::ResumeKind::Authentication {
+                    credential_name: ironclaw_common::CredentialName::new("google_oauth_token")
+                        .unwrap(),
+                    instructions: "Connect Google".into(),
+                    auth_url: None,
+                }),
+                // The bridge cached the action's output before raising
+                // the post-execution Authentication gate — this is the
+                // exact shape `effect_adapter::auth_gate_from_extension_result`
+                // produces for a successful `tool_install` that needs
+                // user-side OAuth completion.
+                resume_output: Some(Box::new(cached_output.clone())),
+                paused_lease: None,
+            })],
+        ));
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+
+        // Grant a lease with `max_uses: Some(1)` — the budget this test
+        // asserts the engine honors.
+        let lease = leases
+            .grant(thread.id, "tools", GrantedActions::All, None, Some(1))
+            .await
+            .unwrap();
+        assert_eq!(
+            lease.uses_remaining,
+            Some(1),
+            "freshly granted lease should start with full budget"
+        );
+
+        let mut ctx = make_exec_context(&thread);
+        ctx.gate_controller = Arc::new(ApprovingGateController);
+
+        let calls = vec![ActionCall {
+            id: "call_install_1".into(),
+            action_name: "tool_install".into(),
+            parameters: serde_json::json!({"name": "gmail"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        // 1. The cached output reached the caller via an Ok result.
+        assert_eq!(result.results.len(), 1);
+        assert!(
+            !result.results[0].is_error,
+            "cached-output replay must surface as a successful ActionResult"
+        );
+        assert_eq!(
+            result.results[0].output, cached_output,
+            "ActionResult.output must be the gate's cached resume_output verbatim"
+        );
+        assert!(
+            result.need_approval.is_none(),
+            "inline-approved gate must NOT propagate as a top-level need_approval"
+        );
+
+        // 2. Exactly one terminal `ActionExecuted` for the call. The
+        //    pre-gate emission is `ApprovalRequested`, not
+        //    `ActionExecuted`, so the count check catches a future
+        //    regression that re-introduces a double-emit through the
+        //    classifier path.
+        let action_executed_count = result
+            .events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    EventKind::ActionExecuted { call_id, .. } if call_id == "call_install_1"
+                )
+            })
+            .count();
+        assert_eq!(
+            action_executed_count, 1,
+            "expected exactly one ActionExecuted for the cached-output replay; got events={:?}",
+            result.events
+        );
+
+        // 3. The lease use the action consumed before pausing was NOT
+        //    refunded — the original consumption is the correct
+        //    accounting for the already-executed action. The
+        //    `max_uses=1` budget is now exhausted, which surfaces as
+        //    `Err(LeaseExpired)` from both `check` (exhausted leases
+        //    fail `is_valid()`) and from a second `find_and_consume`
+        //    attempt. Pre-fix the refund would have ran, leaving
+        //    `uses_remaining: Some(1)` and both checks would succeed.
+        match leases.check(lease.id).await {
+            Err(EngineError::LeaseExpired { .. }) => {}
+            other => panic!(
+                "expected LeaseExpired after cached-output replay (budget should be \
+                 exhausted); got {other:?}"
+            ),
+        }
+        match leases.find_and_consume(thread.id, "tool_install").await {
+            Err(_) => {}
+            Ok(extra_lease) => panic!(
+                "max_uses=1 contract violated: a second `find_and_consume` succeeded \
+                 with uses_remaining={:?} — the refund-skip must keep the budget at zero",
+                extra_lease.uses_remaining
+            ),
         }
     }
 
@@ -1819,5 +2312,222 @@ mod tests {
             }
             other => panic!("expected ActionFailed event, got {other:?}"),
         }
+    }
+
+    // ── Inline-retry ApprovalRequested audit-event tests ────────
+
+    /// Local stub gate controller for the inline-retry tests below.
+    /// Approves once on first pause, returns the canned resolution
+    /// thereafter; records every pause request for assertion.
+    struct StubGateController {
+        resolution: Mutex<Option<crate::gate::GateResolution>>,
+        pauses: Mutex<Vec<crate::gate::GatePauseRequest>>,
+    }
+
+    impl StubGateController {
+        fn approving_arc() -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                resolution: Mutex::new(Some(crate::gate::GateResolution::Approved {
+                    always: false,
+                })),
+                pauses: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn denying_arc() -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                resolution: Mutex::new(Some(crate::gate::GateResolution::Denied {
+                    reason: Some("user declined".into()),
+                })),
+                pauses: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn pause_count(&self) -> usize {
+            self.pauses.lock().unwrap().len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::gate::GateController for StubGateController {
+        async fn pause(
+            &self,
+            request: crate::gate::GatePauseRequest,
+        ) -> crate::gate::GateResolution {
+            self.pauses.lock().unwrap().push(request);
+            self.resolution
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or(crate::gate::GateResolution::Cancelled)
+        }
+    }
+
+    /// Mid-execution `GatePaused(Approval)` followed by user approval
+    /// must emit BOTH `ApprovalRequested` and the final
+    /// `ActionExecuted` event in order. Regression for the audit drop
+    /// noted by serrrfirat on the structured executor.
+    #[tokio::test]
+    async fn inline_retry_emits_approval_requested_event_before_outcome() {
+        let thread = Thread::new(
+            "audit-test",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "audit-user",
+            ThreadConfig::default(),
+        );
+
+        // Effects:
+        //   call 1 → Err(GatePaused) — tool raises mid-execution gate
+        //   call 2 → Ok(success)     — after user approval, retry succeeds
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(
+            vec![test_action("write_file")],
+            vec![
+                Err(EngineError::GatePaused {
+                    gate_name: "approval".into(),
+                    action_name: "write_file".into(),
+                    call_id: "call_audit_1".into(),
+                    parameters: Box::new(serde_json::json!({"path": "/tmp/x"})),
+                    resume_kind: Box::new(crate::gate::ResumeKind::Approval { allow_always: true }),
+                    resume_output: None,
+                    paused_lease: None,
+                }),
+                Ok(ActionResult {
+                    call_id: String::new(),
+                    action_name: "write_file".into(),
+                    output: serde_json::json!({"bytes_written": 12}),
+                    is_error: false,
+                    duration: Duration::from_millis(7),
+                }),
+            ],
+        ));
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let mut ctx = make_exec_context(&thread);
+        let controller = StubGateController::approving_arc();
+        ctx.gate_controller = controller.clone();
+
+        leases
+            .grant(thread.id, "fs", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_audit_1".into(),
+            action_name: "write_file".into(),
+            parameters: serde_json::json!({"path": "/tmp/x"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        // Controller saw exactly one pause.
+        assert_eq!(controller.pause_count(), 1);
+
+        // Events MUST contain ApprovalRequested followed by ActionExecuted.
+        let approval_idx = result
+            .events
+            .iter()
+            .position(|e| matches!(e, EventKind::ApprovalRequested { .. }))
+            .expect("ApprovalRequested must be emitted");
+        let executed_idx = result
+            .events
+            .iter()
+            .position(|e| matches!(e, EventKind::ActionExecuted { .. }))
+            .expect("ActionExecuted must be emitted after approval");
+        assert!(
+            approval_idx < executed_idx,
+            "ApprovalRequested must come before ActionExecuted; got events={:?}",
+            result.events
+        );
+
+        // ApprovalRequested carries the call's identifying metadata.
+        match &result.events[approval_idx] {
+            EventKind::ApprovalRequested {
+                action_name,
+                call_id,
+                gate_name,
+                allow_always,
+                ..
+            } => {
+                assert_eq!(action_name, "write_file");
+                assert_eq!(call_id, "call_audit_1");
+                assert_eq!(gate_name.as_deref(), Some("approval"));
+                assert_eq!(*allow_always, Some(true));
+            }
+            other => panic!("expected ApprovalRequested, got {other:?}"),
+        }
+
+        // The terminal action result is success (not gate_paused).
+        assert!(!result.results[0].is_error);
+        assert!(result.need_approval.is_none());
+    }
+
+    /// Same shape, but the user denies. The `ApprovalRequested` event
+    /// is still emitted before the `ActionFailed` event so audit logs
+    /// see the full lifecycle.
+    #[tokio::test]
+    async fn inline_retry_emits_approval_requested_event_before_denial() {
+        let thread = Thread::new(
+            "audit-test-denied",
+            ThreadType::Foreground,
+            ProjectId::new(),
+            "audit-user",
+            ThreadConfig::default(),
+        );
+
+        let effects: Arc<dyn EffectExecutor> = Arc::new(MockEffects::new(
+            vec![test_action("write_file")],
+            vec![Err(EngineError::GatePaused {
+                gate_name: "approval".into(),
+                action_name: "write_file".into(),
+                call_id: "call_audit_2".into(),
+                parameters: Box::new(serde_json::json!({"path": "/tmp/y"})),
+                resume_kind: Box::new(crate::gate::ResumeKind::Approval {
+                    allow_always: false,
+                }),
+                resume_output: None,
+                paused_lease: None,
+            })],
+        ));
+        let leases = Arc::new(LeaseManager::new());
+        let policy = Arc::new(PolicyEngine::new());
+        let mut ctx = make_exec_context(&thread);
+        let controller = StubGateController::denying_arc();
+        ctx.gate_controller = controller.clone();
+
+        leases
+            .grant(thread.id, "fs", GrantedActions::All, None, None)
+            .await
+            .unwrap();
+
+        let calls = vec![ActionCall {
+            id: "call_audit_2".into(),
+            action_name: "write_file".into(),
+            parameters: serde_json::json!({"path": "/tmp/y"}),
+        }];
+
+        let result = execute_action_calls(&calls, &thread, &effects, &leases, &policy, &ctx, &[])
+            .await
+            .unwrap();
+
+        assert_eq!(controller.pause_count(), 1);
+
+        let approval_idx = result
+            .events
+            .iter()
+            .position(|e| matches!(e, EventKind::ApprovalRequested { .. }))
+            .expect("ApprovalRequested must be emitted even on denial");
+        let failed_idx = result
+            .events
+            .iter()
+            .position(|e| matches!(e, EventKind::ActionFailed { .. }))
+            .expect("ActionFailed must be emitted after denial");
+        assert!(
+            approval_idx < failed_idx,
+            "ApprovalRequested must come before ActionFailed; got events={:?}",
+            result.events
+        );
     }
 }

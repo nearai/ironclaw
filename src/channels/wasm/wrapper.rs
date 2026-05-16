@@ -50,7 +50,9 @@ use crate::channels::wasm::host::{
 use crate::channels::wasm::router::RegisteredEndpoint;
 use crate::channels::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime};
 use crate::channels::wasm::schema::ChannelConfig;
-use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use crate::channels::{
+    Channel, IncomingMessage, MessageStream, OutgoingAttachment, OutgoingResponse, StatusUpdate,
+};
 use crate::error::ChannelError;
 use crate::pairing::PairingStore;
 use crate::secrets::SecretsStore;
@@ -68,6 +70,8 @@ const TEST_HTTP_REWRITE_MAP_ENV: &str = "IRONCLAW_TEST_HTTP_REWRITE_MAP";
 const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
 const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBSOCKET_EVENT_QUEUE_MAX_ITEMS: usize = 100;
+const WECHAT_CHANNEL_NAME: &str = "wechat";
+const CHANNEL_BOUND_USER_ID_CONFIG_KEY: &str = "bound_user_id";
 #[cfg(any(test, debug_assertions))]
 const TELEGRAM_TEST_API_BASE_ENV: &str = "IRONCLAW_TEST_TELEGRAM_API_BASE_URL";
 
@@ -648,6 +652,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                     storage_key: a.storage_key,
                     local_path: None,
                     extracted_text: a.extracted_text,
+                    extras_json: a.extras_json,
                     data,
                     duration_secs,
                 }
@@ -845,6 +850,9 @@ pub struct WasmChannel {
     /// value after pairing approval without capturing a stale clone.
     owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
 
+    /// User bound to a single-login channel such as WeChat.
+    channel_bound_user_id: Arc<RwLock<Option<String>>>,
+
     /// Secrets store for host-based credential injection.
     /// Used to pre-resolve credentials before each WASM callback.
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
@@ -1001,15 +1009,34 @@ fn resolve_message_scope(
     }
 }
 
+fn parse_channel_bound_user_id(config_json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(config_json).ok()?;
+    value
+        .get(CHANNEL_BOUND_USER_ID_CONFIG_KEY)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 async fn resolve_message_scope_with_pairing(
     channel_name: &str,
     owner_scope_id: &str,
     owner_actor_id: Option<&str>,
+    channel_bound_user_id: Option<&str>,
     sender_id: &str,
     pairing_store: &PairingStore,
 ) -> (String, bool) {
     if owner_actor_id.is_some_and(|owner_actor_id| owner_actor_id == sender_id) {
         return (owner_scope_id.to_string(), true);
+    }
+
+    if channel_name == WECHAT_CHANNEL_NAME
+        && let Some(bound_user_id) = channel_bound_user_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    {
+        return (bound_user_id.to_string(), false);
     }
 
     match pairing_store
@@ -1099,6 +1126,7 @@ impl WasmChannel {
     ) -> Self {
         let name = prepared.name.clone();
         let rate_limiter = ChannelEmitRateLimiter::new(capabilities.emit_rate_limit.clone());
+        let channel_bound_user_id = parse_channel_bound_user_id(&config_json);
 
         Self {
             name,
@@ -1125,6 +1153,7 @@ impl WasmChannel {
             settings_store,
             owner_scope_id: owner_scope_id.into(),
             owner_actor_id: Arc::new(tokio::sync::RwLock::new(None)),
+            channel_bound_user_id: Arc::new(RwLock::new(channel_bound_user_id)),
             secrets_store: None,
         }
     }
@@ -1223,6 +1252,13 @@ impl WasmChannel {
     /// Merges the provided values into the existing config JSON.
     /// Call this before `start()` to inject runtime values like tunnel_url.
     pub async fn update_config(&self, updates: HashMap<String, serde_json::Value>) {
+        let bound_user_update = updates
+            .get(CHANNEL_BOUND_USER_ID_CONFIG_KEY)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        let has_bound_user_update = updates.contains_key(CHANNEL_BOUND_USER_ID_CONFIG_KEY);
         let mut config_guard = self.config_json.write().await;
 
         // Parse existing config
@@ -1242,6 +1278,12 @@ impl WasmChannel {
             config = %*config_guard,
             "Updated channel config"
         );
+
+        drop(config_guard);
+
+        if self.name == WECHAT_CHANNEL_NAME && has_bound_user_update {
+            *self.channel_bound_user_id.write().await = bound_user_update;
+        }
     }
 
     /// Set a credential for URL injection.
@@ -1449,6 +1491,7 @@ impl WasmChannel {
         let last_broadcast_metadata = self.last_broadcast_metadata.clone();
         let settings_store = self.settings_store.clone();
         let owner_scope_id = self.owner_scope_id.clone();
+        let channel_bound_user_id = Arc::clone(&self.channel_bound_user_id);
         let websocket_secrets_store = self.secrets_store.clone();
         let websocket_poll_lock = Arc::clone(&self.websocket_poll_lock);
 
@@ -1609,6 +1652,7 @@ impl WasmChannel {
                                                             settings_store: settings_store.clone(),
                                                             owner_scope_id: owner_scope_id.clone(),
                                                             owner_actor_id: owner_actor_id.clone(),
+                                                            channel_bound_user_id: Arc::clone(&channel_bound_user_id),
                                                             secrets_store: websocket_secrets_store.clone(),
                                                             outbound_tx: outbound_tx.clone(),
                                                             queue_path: queue_path.clone(),
@@ -1814,20 +1858,30 @@ impl WasmChannel {
         committed_paths
     }
 
-    fn log_on_start_host_state(&self, host_state: &mut ChannelHostState) {
+    fn log_host_state_entries(channel_name: &str, host_state: &mut ChannelHostState) {
         for entry in host_state.take_logs() {
             match entry.level {
+                crate::tools::wasm::LogLevel::Trace => {
+                    tracing::trace!(channel = %channel_name, "{}", entry.message);
+                }
+                crate::tools::wasm::LogLevel::Debug => {
+                    tracing::debug!(channel = %channel_name, "{}", entry.message);
+                }
+                crate::tools::wasm::LogLevel::Info => {
+                    tracing::info!(channel = %channel_name, "{}", entry.message);
+                }
                 crate::tools::wasm::LogLevel::Error => {
-                    tracing::error!(channel = %self.name, "{}", entry.message);
+                    tracing::error!(channel = %channel_name, "{}", entry.message);
                 }
                 crate::tools::wasm::LogLevel::Warn => {
-                    tracing::warn!(channel = %self.name, "{}", entry.message);
-                }
-                _ => {
-                    tracing::debug!(channel = %self.name, "{}", entry.message);
+                    tracing::warn!(channel = %channel_name, "{}", entry.message);
                 }
             }
         }
+    }
+
+    fn log_on_start_host_state(&self, host_state: &mut ChannelHostState) {
+        Self::log_host_state_entries(&self.name, host_state);
     }
 
     async fn execute_on_start_with_state(
@@ -2128,18 +2182,20 @@ impl WasmChannel {
 
                 // Call on_poll using the generated typed interface
                 let channel_iface = instance.near_agent_channel();
-                channel_iface
+                let poll_result = channel_iface
                     .call_on_poll(&mut store)
-                    .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
+                    .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel));
 
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
 
-                // Commit pending workspace writes to the persistent store
-                let committed_paths =
-                    Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
+                let committed_paths = if poll_result.is_ok() {
+                    Self::commit_callback_workspace_writes(&mut host_state, &workspace_store)
+                } else {
+                    Vec::new()
+                };
 
-                Ok(((), host_state, committed_paths))
+                Ok((poll_result, host_state, committed_paths))
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -2151,10 +2207,11 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok(((), mut host_state, committed_paths))) => {
+            Ok(Ok((poll_result, mut host_state, committed_paths))) => {
                 self.persist_durable_workspace_snapshot_if_needed(&committed_paths)
                     .await;
                 let _ = drain_guest_logs(&channel_name, "on_poll", &mut host_state);
+                poll_result?;
 
                 // Process emitted messages
                 let emitted = host_state.take_emitted_messages();
@@ -2184,6 +2241,7 @@ impl WasmChannel {
         thread_id: Option<&str>,
         metadata_json: &str,
         attachments: &[String],
+        inline_attachments: &[OutgoingAttachment],
     ) -> Result<(), WasmChannelError> {
         let _callback_guard = self.callback_lock.lock().await;
 
@@ -2192,7 +2250,7 @@ impl WasmChannel {
             message_id = %message_id,
             content_len = content.len(),
             thread_id = ?thread_id,
-            attachment_count = attachments.len(),
+            attachment_count = attachments.len() + inline_attachments.len(),
             "call_on_respond invoked"
         );
 
@@ -2235,19 +2293,20 @@ impl WasmChannel {
         let thread_id = thread_id.map(|s| s.to_string());
         let metadata_json = metadata_json.to_string();
         let attachments = attachments.to_vec();
+        let inline_attachments = inline_attachments.to_vec();
 
         // Execute in blocking task with timeout
         tracing::info!(channel = %channel_name, "Starting on_respond WASM execution");
 
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
-                // Read attachment files from disk before entering WASM
-                let wit_attachments = read_attachments(&attachments).map_err(|e| {
-                    WasmChannelError::CallbackFailed {
-                        name: prepared.name.clone(),
-                        reason: e,
-                    }
-                })?;
+                // Prepare attachment bytes before entering WASM.
+                let wit_attachments =
+                    prepare_response_attachments(&prepared.name, &attachments, &inline_attachments)
+                        .map_err(|e| WasmChannelError::CallbackFailed {
+                            name: prepared.name.clone(),
+                            reason: e,
+                        })?;
 
                 tracing::info!("Creating WASM store for on_respond");
                 let mut store = Self::create_store(
@@ -2278,32 +2337,28 @@ impl WasmChannel {
                     "Calling WASM on_respond"
                 );
 
-                // Call on_respond using the generated typed interface
+                // Call on_respond using the generated typed interface.
+                // Preserve guest logs even if the callback traps so we can
+                // diagnose failures inside the channel implementation.
                 let channel_iface = instance.near_agent_channel();
-                let wasm_result = channel_iface
+                let respond_result = channel_iface
                     .call_on_respond(&mut store, &wit_response)
                     .map_err(|e| {
                         tracing::error!(error = %e, "WASM on_respond call failed");
                         Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel)
-                    })?;
-
-                tracing::info!(wasm_result = ?wasm_result, "WASM on_respond returned");
-
-                // Check for WASM-level errors
-                if let Err(ref err_msg) = wasm_result {
-                    tracing::error!(error = %err_msg, "WASM on_respond returned error");
-                    return Err(WasmChannelError::CallbackFailed {
-                        name: prepared.name.clone(),
-                        reason: err_msg.clone(),
                     });
-                }
 
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
-                let committed_paths =
-                    Self::commit_callback_workspace_writes(&mut host_state, &workspace_store);
-                tracing::info!("on_respond WASM execution completed successfully");
-                Ok(((), host_state, committed_paths))
+
+                let committed_paths = if matches!(&respond_result, Ok(Ok(()))) {
+                    tracing::info!("on_respond WASM execution completed successfully");
+                    Self::commit_callback_workspace_writes(&mut host_state, &workspace_store)
+                } else {
+                    Vec::new()
+                };
+
+                Ok((respond_result, host_state, committed_paths))
             })
             .await
             .map_err(|e| {
@@ -2318,7 +2373,19 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok(((), _host_state, committed_paths))) => {
+            Ok(Ok((respond_result, mut host_state, committed_paths))) => {
+                let _ = drain_guest_logs(&channel_name, "on_respond", &mut host_state);
+                let wasm_result = respond_result?;
+                tracing::info!(wasm_result = ?wasm_result, "WASM on_respond returned");
+
+                if let Err(ref err_msg) = wasm_result {
+                    tracing::error!(error = %err_msg, "WASM on_respond returned error");
+                    return Err(WasmChannelError::CallbackFailed {
+                        name: self.name.clone(),
+                        reason: err_msg.clone(),
+                    });
+                }
+
                 self.persist_durable_workspace_snapshot_if_needed(&committed_paths)
                     .await;
                 tracing::debug!(
@@ -2345,6 +2412,7 @@ impl WasmChannel {
         content: &str,
         thread_id: Option<&str>,
         attachments: &[String],
+        inline_attachments: &[OutgoingAttachment],
     ) -> Result<(), WasmChannelError> {
         let _callback_guard = self.callback_lock.lock().await;
 
@@ -2352,7 +2420,7 @@ impl WasmChannel {
             channel = %self.name,
             user_id = %user_id,
             content_len = content.len(),
-            attachment_count = attachments.len(),
+            attachment_count = attachments.len() + inline_attachments.len(),
             "call_on_broadcast invoked"
         );
 
@@ -2384,16 +2452,16 @@ impl WasmChannel {
         let content = content.to_string();
         let thread_id = thread_id.map(|s| s.to_string());
         let attachments = attachments.to_vec();
+        let inline_attachments = inline_attachments.to_vec();
 
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
-                // Read attachment files from disk
-                let wit_attachments = read_attachments(&attachments).map_err(|e| {
-                    WasmChannelError::CallbackFailed {
-                        name: prepared.name.clone(),
-                        reason: e,
-                    }
-                })?;
+                let wit_attachments =
+                    prepare_response_attachments(&prepared.name, &attachments, &inline_attachments)
+                        .map_err(|e| WasmChannelError::CallbackFailed {
+                            name: prepared.name.clone(),
+                            reason: e,
+                        })?;
 
                 let mut store = Self::create_store(
                     &runtime,
@@ -2769,7 +2837,14 @@ impl WasmChannel {
 
                 let metadata_json = serde_json::to_string(metadata).unwrap_or_default();
                 if let Err(e) = self
-                    .call_on_respond(uuid::Uuid::new_v4(), &prompt, None, &metadata_json, &[])
+                    .call_on_respond(
+                        uuid::Uuid::new_v4(),
+                        &prompt,
+                        None,
+                        &metadata_json,
+                        &[],
+                        &[],
+                    )
                     .await
                 {
                     tracing::warn!(
@@ -2850,7 +2925,28 @@ impl WasmChannel {
             tx.clone()
         };
 
+        let mut hydration_host_state = ChannelHostState::new(&self.name, self.capabilities.clone());
+
         for emitted in messages {
+            if emitted.content.trim().is_empty() && emitted.attachments.is_empty() {
+                tracing::debug!(
+                    channel = %self.name,
+                    user_id = %emitted.user_id,
+                    "Skipping empty emitted message"
+                );
+                continue;
+            }
+
+            let EmittedMessage {
+                user_id,
+                user_name,
+                content,
+                thread_id,
+                metadata_json,
+                attachments,
+                ..
+            } = emitted;
+
             // Check rate limit — acquire and release the write lock before send().await
             {
                 let mut rate_limiter = self.rate_limiter.write().await;
@@ -2865,64 +2961,49 @@ impl WasmChannel {
                 }
             }
 
-            // Clone the owner_actor_id out of the lock to avoid holding
-            // the read guard across the async resolve call below.
+            let channel_bound_user_id = self.channel_bound_user_id.read().await.clone();
             let owner_actor_id = self.owner_actor_id.read().await.clone();
             let (resolved_user_id, is_owner_sender) = resolve_message_scope_with_pairing(
                 &self.name,
                 &self.owner_scope_id,
                 owner_actor_id.as_deref(),
-                &emitted.user_id,
+                channel_bound_user_id.as_deref(),
+                &user_id,
                 self.pairing_store.as_ref(),
             )
             .await;
 
             // Convert to IncomingMessage
-            let mut msg = IncomingMessage::new(&self.name, &resolved_user_id, &emitted.content)
-                .with_sender_id(&emitted.user_id);
+            let mut msg = IncomingMessage::new(&self.name, &resolved_user_id, &content)
+                .with_sender_id(&user_id);
 
-            if let Some(name) = emitted.user_name {
+            if let Some(name) = user_name {
                 msg = msg.with_user_name(name);
             }
 
-            if let Some(thread_id) = emitted.thread_id {
+            if let Some(thread_id) = thread_id {
                 msg = msg.with_thread(thread_id);
             }
 
             // Convert attachments
-            if !emitted.attachments.is_empty() {
-                let incoming_attachments = emitted
-                    .attachments
-                    .iter()
-                    .map(|a| crate::channels::IncomingAttachment {
-                        id: a.id.clone(),
-                        kind: crate::channels::AttachmentKind::from_mime_type(&a.mime_type),
-                        mime_type: a.mime_type.clone(),
-                        filename: a.filename.clone(),
-                        size_bytes: a.size_bytes,
-                        source_url: a.source_url.clone(),
-                        storage_key: a.storage_key.clone(),
-                        local_path: a.local_path.clone(),
-                        extracted_text: a.extracted_text.clone(),
-                        data: a.data.clone(),
-                        duration_secs: a.duration_secs,
-                    })
-                    .collect();
+            if !attachments.is_empty() {
+                let incoming_attachments =
+                    convert_emitted_attachments(&mut hydration_host_state, attachments).await;
                 msg = msg.with_attachments(incoming_attachments);
             }
 
             // Parse metadata JSON
-            msg = apply_emitted_metadata(msg, &emitted.metadata_json);
+            msg = apply_emitted_metadata(msg, &metadata_json);
             if is_owner_sender {
                 // Store for owner-target routing (chat_id etc.).
-                self.update_broadcast_metadata(&emitted.metadata_json).await;
+                self.update_broadcast_metadata(&metadata_json).await;
             }
 
             // Send to stream — no locks held across this await
             tracing::info!(
                 channel = %self.name,
-                user_id = %emitted.user_id,
-                content_len = emitted.content.len(),
+                user_id = %user_id,
+                content_len = content.len(),
                 attachment_count = msg.attachments.len(),
                 "Sending emitted message to agent"
             );
@@ -3010,6 +3091,7 @@ impl WasmChannel {
         let settings_store = self.settings_store.clone();
         let poll_secrets_store = self.secrets_store.clone();
         let owner_scope_id = self.owner_scope_id.clone();
+        let channel_bound_user_id = Arc::clone(&self.channel_bound_user_id);
 
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
@@ -3053,12 +3135,15 @@ impl WasmChannel {
                                 // post-approval changes are visible immediately.
                                 let current_owner = owner_actor_id.read().await.clone();
                                 // Process any emitted messages
+                                let bound_user_id = channel_bound_user_id.read().await.clone();
                                 if !emitted_messages.is_empty()
                                     && let Err(e) = Self::dispatch_emitted_messages(
                                         EmitDispatchContext {
                                             channel_name: &channel_name,
+                                            capabilities: &capabilities,
                                             owner_scope_id: &owner_scope_id,
                                             owner_actor_id: current_owner.as_deref(),
+                                            channel_bound_user_id: bound_user_id.as_deref(),
                                             pairing_store: pairing_store.as_ref(),
                                             message_tx: &message_tx,
                                             rate_limiter: &rate_limiter,
@@ -3165,20 +3250,23 @@ impl WasmChannel {
 
                 // Call on_poll using the generated typed interface
                 let channel_iface = instance.near_agent_channel();
-                channel_iface
+                let poll_result = channel_iface
                     .call_on_poll(&mut store)
-                    .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
+                    .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel));
 
                 let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
 
-                // Commit pending workspace writes to the persistent store
-                let committed_paths = Self::commit_callback_workspace_writes(
-                    &mut host_state,
-                    &workspace_store_for_callback,
-                );
+                let committed_paths = if poll_result.is_ok() {
+                    Self::commit_callback_workspace_writes(
+                        &mut host_state,
+                        &workspace_store_for_callback,
+                    )
+                } else {
+                    Vec::new()
+                };
 
-                Ok((host_state, committed_paths))
+                Ok((poll_result, host_state, committed_paths))
             })
             .await
             .map_err(|e| WasmChannelError::ExecutionPanicked {
@@ -3189,7 +3277,7 @@ impl WasmChannel {
         .await;
 
         match result {
-            Ok(Ok((mut host_state, committed_paths))) => {
+            Ok(Ok((poll_result, mut host_state, committed_paths))) => {
                 if committed_paths.iter().any(|path| {
                     durable_workspace_paths
                         .iter()
@@ -3205,6 +3293,7 @@ impl WasmChannel {
                     .await;
                 }
                 let _ = drain_guest_logs(channel_name, "on_poll", &mut host_state);
+                poll_result?;
                 let emitted = host_state.take_emitted_messages();
                 tracing::debug!(
                     channel = %channel_name,
@@ -3249,7 +3338,28 @@ impl WasmChannel {
             tx.clone()
         };
 
+        let mut hydration_host_state =
+            ChannelHostState::new(dispatch.channel_name, dispatch.capabilities.clone());
+
         for emitted in messages {
+            if emitted.content.trim().is_empty() && emitted.attachments.is_empty() {
+                tracing::debug!(
+                    channel = %dispatch.channel_name,
+                    "Skipping empty emitted message"
+                );
+                continue;
+            }
+
+            let EmittedMessage {
+                user_id,
+                user_name,
+                content,
+                thread_id,
+                metadata_json,
+                attachments,
+                ..
+            } = emitted;
+
             // Check rate limit — acquire and release the write lock before send().await
             {
                 let mut limiter = dispatch.rate_limiter.write().await;
@@ -3268,73 +3378,49 @@ impl WasmChannel {
                 dispatch.channel_name,
                 dispatch.owner_scope_id,
                 dispatch.owner_actor_id,
-                &emitted.user_id,
+                dispatch.channel_bound_user_id,
+                &user_id,
                 dispatch.pairing_store,
             )
             .await;
 
             // Convert to IncomingMessage
-            let mut msg =
-                IncomingMessage::new(dispatch.channel_name, &resolved_user_id, &emitted.content)
-                    .with_sender_id(&emitted.user_id);
+            let mut msg = IncomingMessage::new(dispatch.channel_name, &resolved_user_id, &content)
+                .with_sender_id(&user_id);
 
-            if let Some(name) = emitted.user_name {
+            if let Some(name) = user_name {
                 msg = msg.with_user_name(name);
             }
 
-            if let Some(thread_id) = emitted.thread_id {
+            if let Some(thread_id) = thread_id {
                 msg = msg.with_thread(thread_id);
             }
 
             // Convert attachments
-            if !emitted.attachments.is_empty() {
-                let incoming_attachments = emitted
-                    .attachments
-                    .iter()
-                    .map(|a| crate::channels::IncomingAttachment {
-                        id: a.id.clone(),
-                        kind: crate::channels::AttachmentKind::from_mime_type(&a.mime_type),
-                        mime_type: a.mime_type.clone(),
-                        filename: a.filename.clone(),
-                        size_bytes: a.size_bytes,
-                        source_url: a.source_url.clone(),
-                        storage_key: a.storage_key.clone(),
-                        local_path: a.local_path.clone(),
-                        extracted_text: a.extracted_text.clone(),
-                        data: a.data.clone(),
-                        duration_secs: a.duration_secs,
-                    })
-                    .collect();
+            if !attachments.is_empty() {
+                let incoming_attachments =
+                    convert_emitted_attachments(&mut hydration_host_state, attachments).await;
                 msg = msg.with_attachments(incoming_attachments);
             }
 
-            msg = apply_emitted_metadata(msg, &emitted.metadata_json);
+            msg = apply_emitted_metadata(msg, &metadata_json);
             if is_owner_sender {
                 // Store for owner-target routing (chat_id etc.)
                 do_update_broadcast_metadata(
                     dispatch.channel_name,
                     dispatch.owner_scope_id,
-                    &emitted.metadata_json,
+                    &metadata_json,
                     dispatch.last_broadcast_metadata,
                     dispatch.settings_store,
                 )
                 .await;
             }
 
-            if emitted.content.trim().is_empty() && emitted.attachments.is_empty() {
-                tracing::debug!(
-                    channel = %dispatch.channel_name,
-                    user_id = %emitted.user_id,
-                    "Skipping empty emitted message"
-                );
-                continue;
-            }
-
             // Send to stream — no locks held across this await
             tracing::info!(
                 channel = %dispatch.channel_name,
-                user_id = %emitted.user_id,
-                content_len = emitted.content.len(),
+                user_id = %user_id,
+                content_len = content.len(),
                 attachment_count = msg.attachments.len(),
                 "Sending polled message to agent"
             );
@@ -3359,8 +3445,10 @@ impl WasmChannel {
 
 struct EmitDispatchContext<'a> {
     channel_name: &'a str,
+    capabilities: &'a ChannelCapabilities,
     owner_scope_id: &'a str,
     owner_actor_id: Option<&'a str>,
+    channel_bound_user_id: Option<&'a str>,
     pairing_store: &'a PairingStore,
     message_tx: &'a RwLock<Option<mpsc::Sender<IncomingMessage>>>,
     rate_limiter: &'a RwLock<ChannelEmitRateLimiter>,
@@ -3530,6 +3618,7 @@ impl Channel for WasmChannel {
             response.thread_id.as_ref().map(|t| t.as_str()),
             &metadata_json,
             &response.attachments,
+            &response.inline_attachments,
         )
         .await
         .map_err(|e| ChannelError::SendFailed {
@@ -3567,6 +3656,7 @@ impl Channel for WasmChannel {
             &response.content,
             response.thread_id.as_ref().map(|t| t.as_str()),
             &response.attachments,
+            &response.inline_attachments,
         )
         .await
         .map_err(|e| ChannelError::SendFailed {
@@ -4098,6 +4188,7 @@ struct WebsocketPollContext {
     settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
     owner_scope_id: String,
     owner_actor_id: Arc<tokio::sync::RwLock<Option<String>>>,
+    channel_bound_user_id: Arc<RwLock<Option<String>>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     outbound_tx: mpsc::UnboundedSender<String>,
     queue_path: String,
@@ -4156,12 +4247,15 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
                     // Read the current owner so post-approval changes
                     // are visible immediately.
                     let current_owner = ctx.owner_actor_id.read().await.clone();
+                    let bound_user_id = ctx.channel_bound_user_id.read().await.clone();
                     if !emitted_messages.is_empty()
                         && let Err(error) = WasmChannel::dispatch_emitted_messages(
                             EmitDispatchContext {
                                 channel_name: &ctx.channel_name,
+                                capabilities: &ctx.capabilities,
                                 owner_scope_id: &ctx.owner_scope_id,
                                 owner_actor_id: current_owner.as_deref(),
+                                channel_bound_user_id: bound_user_id.as_deref(),
                                 pairing_store: ctx.pairing_store.as_ref(),
                                 message_tx: &ctx.message_tx,
                                 rate_limiter: &ctx.rate_limiter,
@@ -4839,6 +4933,15 @@ fn is_loopback_test_rewrite_base(base: &str) -> bool {
     let Some(host) = parsed.host_str() else {
         return false;
     };
+    // The `url` crate keeps IPv6 brackets on `host_str()`. Strip them
+    // so `::1` parses as `IpAddr::V6` — without this, valid IPv6
+    // loopback rewrite targets (`http://[::1]:8443`) silently fall
+    // through and are rejected. Mirror in
+    // `tools::wasm::wrapper::is_loopback_test_rewrite_base`.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|v| v.strip_suffix(']'))
+        .unwrap_or(host);
     host.eq_ignore_ascii_case("localhost")
         || host
             .parse::<std::net::IpAddr>()
@@ -4982,6 +5085,37 @@ async fn resolve_channel_host_credentials(
 /// Maximum total attachment size (50 MB).
 const MAX_TOTAL_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
 
+async fn convert_emitted_attachments(
+    hydration_host_state: &mut ChannelHostState,
+    attachments: Vec<crate::channels::wasm::host::Attachment>,
+) -> Vec<crate::channels::IncomingAttachment> {
+    let mut hydrated = attachments;
+    for attachment in &mut hydrated {
+        crate::channels::wasm::attachment_hydration::hydrate_attachment_for_channel(
+            hydration_host_state,
+            attachment,
+        )
+        .await;
+    }
+
+    hydrated
+        .into_iter()
+        .map(|attachment| crate::channels::IncomingAttachment {
+            id: attachment.id,
+            kind: crate::channels::AttachmentKind::from_mime_type(&attachment.mime_type),
+            mime_type: attachment.mime_type,
+            filename: attachment.filename,
+            size_bytes: attachment.size_bytes,
+            source_url: attachment.source_url,
+            storage_key: attachment.storage_key,
+            local_path: attachment.local_path,
+            extracted_text: attachment.extracted_text,
+            data: attachment.data,
+            duration_secs: attachment.duration_secs,
+        })
+        .collect()
+}
+
 /// Detect MIME type from file extension using the `mime_guess` crate.
 fn mime_from_extension(path: &str) -> String {
     mime_guess::from_path(path)
@@ -4989,15 +5123,19 @@ fn mime_from_extension(path: &str) -> String {
         .to_string()
 }
 
-/// Read attachment files from disk and build WIT attachment records.
+/// Build WIT attachment records from file paths and in-memory attachments.
 ///
 /// Validates total size against `MAX_TOTAL_ATTACHMENT_BYTES`.
-fn read_attachments(paths: &[String]) -> Result<Vec<wit_channel::Attachment>, String> {
-    if paths.is_empty() {
+fn prepare_response_attachments(
+    channel_name: &str,
+    paths: &[String],
+    inline_attachments: &[OutgoingAttachment],
+) -> Result<Vec<wit_channel::Attachment>, String> {
+    if paths.is_empty() && inline_attachments.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut attachments = Vec::with_capacity(paths.len());
+    let mut attachments = Vec::with_capacity(paths.len() + inline_attachments.len());
     let mut total_bytes: u64 = 0;
     let tmp_base = std::path::Path::new("/tmp");
     let home_base = dirs::home_dir()
@@ -5029,6 +5167,11 @@ fn read_attachments(paths: &[String]) -> Result<Vec<wit_channel::Attachment>, St
 
         let data = std::fs::read(&validated)
             .map_err(|e| format!("Failed to read attachment '{}': {}", validated.display(), e))?;
+        let data =
+            crate::channels::wasm::attachment_hydration::prepare_outbound_attachment_for_channel(
+                channel_name,
+                &data,
+            )?;
 
         let filename = validated
             .file_name()
@@ -5041,6 +5184,28 @@ fn read_attachments(paths: &[String]) -> Result<Vec<wit_channel::Attachment>, St
         attachments.push(wit_channel::Attachment {
             filename,
             mime_type,
+            data,
+        });
+    }
+
+    for attachment in inline_attachments {
+        total_bytes += attachment.data.len() as u64;
+        if total_bytes > MAX_TOTAL_ATTACHMENT_BYTES {
+            return Err(format!(
+                "Total attachment size exceeds {} MB limit",
+                MAX_TOTAL_ATTACHMENT_BYTES / (1024 * 1024)
+            ));
+        }
+
+        let data =
+            crate::channels::wasm::attachment_hydration::prepare_outbound_attachment_for_channel(
+                channel_name,
+                &attachment.data,
+            )?;
+
+        attachments.push(wit_channel::Attachment {
+            filename: attachment.filename.clone(),
+            mime_type: attachment.mime_type.clone(),
             data,
         });
     }
@@ -5058,7 +5223,6 @@ mod tests {
     use secrecy::SecretString;
 
     use crate::channels::Channel;
-    use crate::channels::OutgoingResponse;
     use crate::channels::wasm::capabilities::ChannelCapabilities;
     use crate::channels::wasm::host::{ChannelHostState, PendingWorkspaceWrite};
     use crate::channels::wasm::runtime::{
@@ -5071,10 +5235,12 @@ mod tests {
         build_websocket_identify_message, build_websocket_resume_message,
         classify_websocket_close_code, discord_gateway_presence_status, drain_guest_logs,
         parse_websocket_invalid_session, parse_websocket_ready_session,
-        resolve_websocket_identify_message, rewrite_http_url_for_testing,
-        should_warn_on_heartbeat_interval, uses_owner_broadcast_target, websocket_auth_preflight,
-        websocket_heartbeat_sleep_duration, websocket_reconnect_backoff, websocket_start_decision,
+        prepare_response_attachments, resolve_websocket_identify_message,
+        rewrite_http_url_for_testing, should_warn_on_heartbeat_interval,
+        uses_owner_broadcast_target, websocket_auth_preflight, websocket_heartbeat_sleep_duration,
+        websocket_reconnect_backoff, websocket_start_decision,
     };
+    use crate::channels::{OutgoingAttachment, OutgoingResponse};
     use crate::pairing::PairingStore;
     use crate::secrets::{CreateSecretParams, InMemorySecretsStore, SecretsCrypto, SecretsStore};
     use crate::testing::credentials::{TEST_CRYPTO_KEY, TEST_TELEGRAM_BOT_TOKEN};
@@ -5284,6 +5450,51 @@ mod tests {
         async fn has_settings(&self, user_id: &str) -> Result<bool, crate::error::DatabaseError> {
             Ok(self.values.read().await.contains_key(user_id))
         }
+    }
+
+    #[test]
+    fn test_prepare_response_attachments_prepares_wechat_file_payloads() {
+        let mut file = tempfile::NamedTempFile::new_in("/tmp").expect("tempfile");
+        std::io::Write::write_all(&mut file, b"wechat image bytes").expect("write");
+        let path = file.path().to_string_lossy().to_string();
+
+        let attachments =
+            prepare_response_attachments("wechat", &[path], &[]).expect("read attachments");
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(
+            attachments[0].filename,
+            file.path().file_name().unwrap().to_string_lossy()
+        );
+        assert_eq!(attachments[0].mime_type, "application/octet-stream");
+        assert_ne!(attachments[0].data, b"wechat image bytes");
+    }
+
+    #[test]
+    fn test_prepare_response_attachments_passthrough_for_non_wechat_channels() {
+        let mut file = tempfile::NamedTempFile::new_in("/tmp").expect("tempfile");
+        std::io::Write::write_all(&mut file, b"plain bytes").expect("write");
+        let path = file.path().to_string_lossy().to_string();
+
+        let attachments =
+            prepare_response_attachments("telegram", &[path], &[]).expect("read attachments");
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].data, b"plain bytes");
+    }
+
+    #[test]
+    fn test_prepare_response_attachments_accepts_inline_payloads() {
+        let inline = OutgoingAttachment {
+            filename: "generated.png".to_string(),
+            mime_type: "image/png".to_string(),
+            data: b"plain bytes".to_vec(),
+        };
+
+        let attachments =
+            prepare_response_attachments("telegram", &[], &[inline]).expect("inline attachment");
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].filename, "generated.png");
+        assert_eq!(attachments[0].mime_type, "image/png");
+        assert_eq!(attachments[0].data, b"plain bytes");
     }
 
     #[test]
@@ -6125,6 +6336,8 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let capabilities =
+            crate::channels::wasm::capabilities::ChannelCapabilities::for_channel("test-channel");
         let pairing_store = PairingStore::new_noop();
 
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
@@ -6142,8 +6355,10 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "test-channel",
+                capabilities: &capabilities,
                 owner_scope_id: "default",
                 owner_actor_id: None,
+                channel_bound_user_id: None,
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
@@ -6175,6 +6390,8 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let capabilities =
+            crate::channels::wasm::capabilities::ChannelCapabilities::for_channel("test-channel");
         let pairing_store = PairingStore::new_noop();
 
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
@@ -6193,8 +6410,10 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "test-channel",
+                capabilities: &capabilities,
                 owner_scope_id: "default",
                 owner_actor_id: None,
+                channel_bound_user_id: None,
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
@@ -6221,6 +6440,8 @@ mod tests {
 
         // No sender available (channel not started)
         let message_tx = Arc::new(tokio::sync::RwLock::new(None));
+        let capabilities =
+            crate::channels::wasm::capabilities::ChannelCapabilities::for_channel("test-channel");
         let pairing_store = PairingStore::new_noop();
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
             crate::channels::wasm::host::ChannelEmitRateLimiter::new(
@@ -6235,8 +6456,10 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "test-channel",
+                capabilities: &capabilities,
                 owner_scope_id: "default",
                 owner_actor_id: None,
+                channel_bound_user_id: None,
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
@@ -6620,7 +6843,14 @@ mod tests {
             .expect("respond should succeed");
 
         let stored_metadata = channel.last_broadcast_metadata.read().await.clone();
-        assert_eq!(stored_metadata.as_deref(), Some(r#"{"chat_id":12345}"#));
+        // `with_metadata` always sets `user_id` from the IncomingMessage
+        // (overwriting any caller-supplied value) so downstream
+        // `send_status` can route SSE events to the owning tenant
+        // unforgeably. The caller-supplied `chat_id` survives alongside it.
+        assert_eq!(
+            stored_metadata.as_deref(),
+            Some(r#"{"chat_id":12345,"user_id":"owner-scope"}"#)
+        );
 
         channel.shutdown().await.expect("Shutdown should succeed");
     }
@@ -7542,6 +7772,8 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let capabilities =
+            crate::channels::wasm::capabilities::ChannelCapabilities::for_channel("test-channel");
         let pairing_store = PairingStore::new_noop();
 
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
@@ -7560,6 +7792,7 @@ mod tests {
                 storage_key: None,
                 local_path: None,
                 extracted_text: None,
+                extras_json: String::new(),
                 data: Vec::new(),
                 duration_secs: None,
             },
@@ -7572,6 +7805,7 @@ mod tests {
                 storage_key: Some("store/doc456".to_string()),
                 local_path: None,
                 extracted_text: Some("Report contents...".to_string()),
+                extras_json: String::new(),
                 data: Vec::new(),
                 duration_secs: None,
             },
@@ -7584,8 +7818,10 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "test-channel",
+                capabilities: &capabilities,
                 owner_scope_id: "default",
                 owner_actor_id: None,
+                channel_bound_user_id: None,
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
@@ -7631,6 +7867,8 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let capabilities =
+            crate::channels::wasm::capabilities::ChannelCapabilities::for_channel("telegram");
         let pairing_store = PairingStore::new_noop();
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
             crate::channels::wasm::host::ChannelEmitRateLimiter::new(
@@ -7647,8 +7885,10 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "telegram",
+                capabilities: &capabilities,
                 owner_scope_id: "owner-scope",
                 owner_actor_id: Some("telegram-owner"),
+                channel_bound_user_id: None,
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
@@ -7709,6 +7949,8 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let capabilities =
+            crate::channels::wasm::capabilities::ChannelCapabilities::for_channel("telegram");
         let pairing_store = PairingStore::new_noop();
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
             crate::channels::wasm::host::ChannelEmitRateLimiter::new(
@@ -7724,8 +7966,10 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "telegram",
+                capabilities: &capabilities,
                 owner_scope_id: "owner-scope",
                 owner_actor_id: Some("telegram-owner"),
+                channel_bound_user_id: None,
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
@@ -7743,6 +7987,53 @@ mod tests {
         assert_eq!(msg.sender_id, "guest-42"); // safety: test-only assertion
         assert_eq!(msg.conversation_scope(), Some("999")); // safety: test-only assertion
         assert!(last_broadcast_metadata.read().await.is_none()); // safety: test-only assertion
+    }
+
+    #[tokio::test]
+    async fn test_dispatch_emitted_messages_wechat_sender_uses_bound_user() {
+        use crate::channels::wasm::host::EmittedMessage;
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(10);
+        let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let capabilities =
+            crate::channels::wasm::capabilities::ChannelCapabilities::for_channel("wechat");
+        let pairing_store = PairingStore::new_noop();
+        let rate_limiter = Arc::new(tokio::sync::RwLock::new(
+            crate::channels::wasm::host::ChannelEmitRateLimiter::new(
+                crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
+            ),
+        ));
+        let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
+
+        let result = WasmChannel::dispatch_emitted_messages(
+            EmitDispatchContext {
+                channel_name: "wechat",
+                capabilities: &capabilities,
+                owner_scope_id: "owner-scope",
+                owner_actor_id: None,
+                channel_bound_user_id: Some("bound-user"),
+                pairing_store: &pairing_store,
+                message_tx: &message_tx,
+                rate_limiter: &rate_limiter,
+                last_broadcast_metadata: &last_broadcast_metadata,
+                settings_store: None,
+            },
+            vec![
+                EmittedMessage::new("wx-user-42", "Hello from WeChat")
+                    .with_metadata(r#"{"from_user_id":"wx-user-42"}"#)
+                    .with_thread_id("wechat:wx-user-42"),
+            ],
+        )
+        .await;
+
+        assert!(result.is_ok());
+
+        let msg = rx.try_recv().expect("Should receive message");
+        assert_eq!(msg.user_id, "bound-user");
+        assert_eq!(msg.sender_id, "wx-user-42");
+        assert_eq!(msg.conversation_scope(), Some("wechat:wx-user-42"));
+        assert!(msg.metadata.get("owner_id").is_none());
+        assert!(last_broadcast_metadata.read().await.is_none());
     }
 
     #[cfg(feature = "libsql")]
@@ -7771,6 +8062,8 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let capabilities =
+            crate::channels::wasm::capabilities::ChannelCapabilities::for_channel("telegram");
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
             crate::channels::wasm::host::ChannelEmitRateLimiter::new(
                 crate::channels::wasm::capabilities::EmitRateLimitConfig::default(),
@@ -7781,8 +8074,10 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "telegram",
+                capabilities: &capabilities,
                 owner_scope_id: "owner-scope",
                 owner_actor_id: Some("telegram-owner"),
+                channel_bound_user_id: None,
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,
@@ -7853,6 +8148,8 @@ mod tests {
 
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
         let message_tx = Arc::new(tokio::sync::RwLock::new(Some(tx)));
+        let capabilities =
+            crate::channels::wasm::capabilities::ChannelCapabilities::for_channel("test-channel");
         let pairing_store = PairingStore::new_noop();
 
         let rate_limiter = Arc::new(tokio::sync::RwLock::new(
@@ -7867,8 +8164,10 @@ mod tests {
         let result = WasmChannel::dispatch_emitted_messages(
             EmitDispatchContext {
                 channel_name: "test-channel",
+                capabilities: &capabilities,
                 owner_scope_id: "default",
                 owner_actor_id: None,
+                channel_bound_user_id: None,
                 pairing_store: &pairing_store,
                 message_tx: &message_tx,
                 rate_limiter: &rate_limiter,

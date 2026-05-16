@@ -309,12 +309,23 @@ impl ConversationManager {
                         serde_json::Value::String(tz.to_string()),
                     );
                 }
+                // Stash the originating conversation_id so
+                // `thread_execution_context` can surface it to the host
+                // via `ThreadExecutionContext.conversation_id`. This
+                // lets the bridge match an inline-await gate to the
+                // right UI surface when the same user has multiple
+                // concurrent conversations.
+                initial_metadata.insert(
+                    "conversation_id".into(),
+                    serde_json::Value::String(conversation_id.to_string()),
+                );
                 // Merge caller-supplied metadata (e.g. `conversation_scope`
                 // from the responses_api bridge so the EffectExecutor can
                 // resolve per-conversation state without racing the
                 // executor task that starts immediately after spawn).
                 // Built-in keys above win on conflict so callers can't
-                // shadow `source_channel` or `user_timezone`.
+                // shadow `source_channel`, `user_timezone`, or
+                // `conversation_id`.
                 if let Some(extra) = extra_initial_metadata {
                     for (k, v) in extra {
                         initial_metadata.entry(k).or_insert(v);
