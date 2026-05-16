@@ -21,8 +21,15 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FileType, FilesystemError, RootFilesystem,
+    CasExpectation, ContentType, Entry, FileType, FilesystemError, RecordVersion, RootFilesystem,
 };
+
+/// Bounded retry budget for compare-and-swap loops on lease writes.
+///
+/// Each iteration re-reads the current row version and rewrites with
+/// `CasExpectation::Version(_)`; a multi-process race that loses the
+/// CAS retries until either it wins or this budget is exhausted.
+const CAS_RETRY_ATTEMPTS: usize = 3;
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason,
     EffectKind, ExecutionContext, HostApiError, InvocationFingerprint, InvocationId, MissionId,
@@ -210,6 +217,18 @@ pub enum CapabilityLeaseError {
     },
     #[error("capability lease persistence error: {reason}")]
     Persistence { reason: String },
+    /// Internal CAS-loop signal: the lease record was updated between our
+    /// read and write. Surfaces only inside the retry loop and is converted
+    /// to [`CasExhausted`] if the budget is exhausted; callers will not see
+    /// this variant escape the public API.
+    #[doc(hidden)]
+    #[error("capability lease version mismatch (internal retry signal)")]
+    VersionMismatch,
+    /// CAS retry budget exhausted: too many concurrent writers contended on
+    /// the same lease row. Callers should treat this as transient and may
+    /// retry at a higher level.
+    #[error("capability lease compare-and-swap retry budget exhausted")]
+    CasExhausted,
 }
 
 /// Store of active/revoked capability leases.
@@ -416,6 +435,22 @@ where
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
     ) -> Result<Option<CapabilityLease>, CapabilityLeaseError> {
+        Ok(self
+            .read_lease_versioned(scope, lease_id)
+            .await?
+            .map(|(lease, _)| lease))
+    }
+
+    /// Read the lease together with its current backend record version.
+    ///
+    /// Used by the mutation paths (`revoke`, `claim`, `consume`) to drive a
+    /// `CasExpectation::Version` write, so a concurrent writer from another
+    /// process fails the CAS instead of clobbering this transition.
+    async fn read_lease_versioned(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<Option<(CapabilityLease, RecordVersion)>, CapabilityLeaseError> {
         let path = lease_path(scope, lease_id)?;
         let Some(versioned) = self
             .filesystem
@@ -425,22 +460,97 @@ where
         else {
             return Ok(None);
         };
-        deserialize(&versioned.entry.body).map(Some)
+        let lease: CapabilityLease = deserialize(&versioned.entry.body)?;
+        Ok(Some((lease, versioned.version)))
     }
 
-    async fn write_lease(&self, lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
+    /// Write the lease with the given CAS expectation.
+    ///
+    /// `CasExpectation::Version(_)` is the canonical path used by the mutation
+    /// flows below — a `VersionMismatch` from the backend signals that a
+    /// concurrent writer modified the same row, and the caller's retry loop
+    /// re-reads and tries again. `CasExpectation::Any` remains in use only
+    /// from the issue path, which is paired with the per-owner
+    /// [`mutation_lock`] and writes a freshly-generated lease id that no
+    /// other writer can collide with.
+    /// Write the lease through the backend with the given CAS expectation.
+    ///
+    /// Backends that don't track per-row versions (e.g. `LocalFilesystem`)
+    /// reject `CasExpectation::Version(_)` with `Unsupported`. For those,
+    /// fall back to `CasExpectation::Any` and carry the safety invariant
+    /// via the per-owner `mutation_lock` — same trade-off documented on
+    /// `FilesystemCapabilityLeaseStore` and matched by sibling crates'
+    /// fallback shape (`ironclaw_processes::put_with_byte_fallback`).
+    async fn write_lease_raw(
+        &self,
+        lease: &CapabilityLease,
+        expectation: CasExpectation,
+    ) -> Result<(), CapabilityLeaseError> {
         let path = lease_path(&lease.scope, lease.grant.id)?;
         let body = serialize_pretty(lease)?;
         let entry = Entry::bytes(body).with_content_type(ContentType::json());
-        // `Any` matches the existing semantics — the per-owner `mutation_lock`
-        // serializes claim/consume/revoke within a single instance, so we do
-        // not need backend-side CAS here. Production shared roots still need
-        // a transactional backend or explicit CAS per the crate guardrail.
-        self.filesystem
-            .put(&path, entry, CasExpectation::Any)
-            .await
-            .map(|_| ())
-            .map_err(lease_persistence_error)
+        match self.filesystem.put(&path, entry.clone(), expectation).await {
+            Ok(_) => Ok(()),
+            Err(FilesystemError::Unsupported { .. })
+                if !matches!(expectation, CasExpectation::Any) =>
+            {
+                // Backend has no per-row versioning — degrade to the legacy
+                // single-instance contract under `mutation_lock`.
+                match self.filesystem.put(&path, entry, CasExpectation::Any).await {
+                    Ok(_) => Ok(()),
+                    Err(error) => Err(lease_persistence_error(error)),
+                }
+            }
+            Err(error) => Err(lease_persistence_error(error)),
+        }
+    }
+
+    async fn write_lease(&self, lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
+        // Issue path only — see `update_lease_cas` for the mutation pattern.
+        // The per-owner mutation lock + fresh-id invariant in `issue` makes
+        // the CAS race unreachable for first-write of a brand-new lease id.
+        self.write_lease_raw(lease, CasExpectation::Any).await
+    }
+
+    /// Read-modify-write a lease under compare-and-swap.
+    ///
+    /// Reads the current row (and its [`RecordVersion`]), hands the
+    /// deserialized lease to `mutate`, writes the result back with
+    /// `CasExpectation::Version(_)`, and retries up to
+    /// [`CAS_RETRY_ATTEMPTS`] times on `FilesystemError::VersionMismatch`.
+    /// A missing lease maps to [`CapabilityLeaseError::UnknownLease`].
+    ///
+    /// This closes the multi-process race documented on
+    /// [`FilesystemCapabilityLeaseStore`]: even with a shared backend root,
+    /// a concurrent writer that updates the lease between our read and
+    /// write fails our CAS, we re-read, and re-apply the mutation against
+    /// the new state. Net effect is last-writer-wins among logically
+    /// concurrent transitions, with no silent clobber.
+    async fn update_lease_cas<M>(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        mut mutate: M,
+    ) -> Result<CapabilityLease, CapabilityLeaseError>
+    where
+        M: FnMut(&mut CapabilityLease) -> Result<(), CapabilityLeaseError>,
+    {
+        for _ in 0..CAS_RETRY_ATTEMPTS {
+            let Some((mut lease, version)) = self.read_lease_versioned(scope, lease_id).await?
+            else {
+                return Err(CapabilityLeaseError::UnknownLease { lease_id });
+            };
+            mutate(&mut lease)?;
+            match self
+                .write_lease_raw(&lease, CasExpectation::Version(version))
+                .await
+            {
+                Ok(()) => return Ok(lease),
+                Err(CapabilityLeaseError::VersionMismatch) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(CapabilityLeaseError::CasExhausted)
     }
 
     async fn read_lease_index(
@@ -584,13 +694,13 @@ where
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
         let lock = self.mutation_lock(scope);
         let _guard = lock.lock().await;
-        let mut lease = self
-            .read_lease(scope, lease_id)
-            .await?
-            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
-        lease.status = CapabilityLeaseStatus::Revoked;
-        self.write_lease(&lease).await?;
-        Ok(lease)
+        // CAS-Version retry: a concurrent claim/consume from another process
+        // must not be clobbered. Idempotent on already-Revoked leases.
+        self.update_lease_cas(scope, lease_id, |lease| {
+            lease.status = CapabilityLeaseStatus::Revoked;
+            Ok(())
+        })
+        .await
     }
 
     async fn get(
@@ -609,14 +719,16 @@ where
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
         let lock = self.mutation_lock(scope);
         let _guard = lock.lock().await;
-        let mut lease = self
-            .read_lease(scope, lease_id)
-            .await?
-            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
-        ensure_claimable(&lease, invocation_fingerprint)?;
-        lease.status = CapabilityLeaseStatus::Claimed;
-        self.write_lease(&lease).await?;
-        Ok(lease)
+        // CAS-Version retry: a concurrent claim/consume/revoke must not
+        // race past `ensure_claimable`. Re-validate inside the loop so a
+        // race that flips status (e.g. another claimant got there first)
+        // surfaces as the proper typed error rather than a clobber.
+        self.update_lease_cas(scope, lease_id, |lease| {
+            ensure_claimable(lease, invocation_fingerprint)?;
+            lease.status = CapabilityLeaseStatus::Claimed;
+            Ok(())
+        })
+        .await
     }
 
     async fn consume(
@@ -626,29 +738,32 @@ where
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
         let lock = self.mutation_lock(scope);
         let _guard = lock.lock().await;
-        let mut lease = self
-            .read_lease(scope, lease_id)
-            .await?
-            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
-        let was_claimed = lease.status == CapabilityLeaseStatus::Claimed;
-        ensure_consumable(&lease)?;
-        if lease.invocation_fingerprint.is_some() {
-            if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
-                *remaining = 0;
-            }
-            lease.status = CapabilityLeaseStatus::Consumed;
-        } else if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
-            *remaining -= 1;
-            if *remaining == 0 {
+        // CAS-Version retry: one-shot fingerprinted leases MUST NOT be
+        // consumable twice. Without CAS, two processes can both read
+        // Active/Claimed, both consume, and both succeed — granting double
+        // authority. The retry re-evaluates `ensure_consumable` against
+        // the latest version so the loser sees `InactiveLease`.
+        self.update_lease_cas(scope, lease_id, |lease| {
+            let was_claimed = lease.status == CapabilityLeaseStatus::Claimed;
+            ensure_consumable(lease)?;
+            if lease.invocation_fingerprint.is_some() {
+                if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
+                    *remaining = 0;
+                }
                 lease.status = CapabilityLeaseStatus::Consumed;
+            } else if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
+                *remaining -= 1;
+                if *remaining == 0 {
+                    lease.status = CapabilityLeaseStatus::Consumed;
+                } else if was_claimed {
+                    lease.status = CapabilityLeaseStatus::Active;
+                }
             } else if was_claimed {
                 lease.status = CapabilityLeaseStatus::Active;
             }
-        } else if was_claimed {
-            lease.status = CapabilityLeaseStatus::Active;
-        }
-        self.write_lease(&lease).await?;
-        Ok(lease)
+            Ok(())
+        })
+        .await
     }
 
     async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
@@ -1358,6 +1473,13 @@ fn lease_host_api_error(error: HostApiError) -> CapabilityLeaseError {
 }
 
 fn lease_persistence_error(error: FilesystemError) -> CapabilityLeaseError {
+    // Preserve the typed `VersionMismatch` signal so the CAS retry loop in
+    // `update_lease_cas` can detect and retry. Every other backend error
+    // collapses into the opaque `Persistence` variant — the redacted
+    // `FilesystemError::Display` is safe to surface across a tenant boundary.
+    if matches!(error, FilesystemError::VersionMismatch { .. }) {
+        return CapabilityLeaseError::VersionMismatch;
+    }
     CapabilityLeaseError::Persistence {
         reason: error.to_string(),
     }

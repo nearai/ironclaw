@@ -122,12 +122,32 @@ impl CapabilityLeaseStore for LibSqlCapabilityLeaseStore {
     }
 
     async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
-        let Ok(conn) = self.connect().await else {
-            return Vec::new();
+        let conn = match self.connect().await {
+            Ok(conn) => conn,
+            Err(error) => {
+                // silent-ok: trait signature returns Vec, no Result channel.
+                // Auth-critical reads fail closed (empty Vec ⇒ deny). Log so
+                // a DB outage is at least visible to operators.
+                tracing::warn!(
+                    target: "ironclaw_authorization::lease_store",
+                    ?error,
+                    "libsql leases_for_scope: connect failed; returning empty set (fails closed)"
+                );
+                return Vec::new();
+            }
         };
-        libsql_leases_for_scope(&conn, scope)
-            .await
-            .unwrap_or_default()
+        match libsql_leases_for_scope(&conn, scope).await {
+            Ok(leases) => leases,
+            Err(error) => {
+                // silent-ok: see above — fail closed, log for visibility.
+                tracing::warn!(
+                    target: "ironclaw_authorization::lease_store",
+                    ?error,
+                    "libsql leases_for_scope: query failed; returning empty set (fails closed)"
+                );
+                Vec::new()
+            }
+        }
     }
 
     async fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease> {
@@ -240,12 +260,32 @@ impl CapabilityLeaseStore for PostgresCapabilityLeaseStore {
     }
 
     async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
-        let Ok(client) = self.pool.get().await else {
-            return Vec::new();
+        let client = match self.pool.get().await {
+            Ok(client) => client,
+            Err(error) => {
+                // silent-ok: trait signature returns Vec, no Result channel.
+                // Auth-critical reads fail closed (empty Vec ⇒ deny). Log so
+                // a DB outage is at least visible to operators.
+                tracing::warn!(
+                    target: "ironclaw_authorization::lease_store",
+                    error = ?error,
+                    "postgres leases_for_scope: pool.get failed; returning empty set (fails closed)"
+                );
+                return Vec::new();
+            }
         };
-        postgres_leases_for_scope(&client, scope)
-            .await
-            .unwrap_or_default()
+        match postgres_leases_for_scope(&client, scope).await {
+            Ok(leases) => leases,
+            Err(error) => {
+                // silent-ok: see above — fail closed, log for visibility.
+                tracing::warn!(
+                    target: "ironclaw_authorization::lease_store",
+                    ?error,
+                    "postgres leases_for_scope: query failed; returning empty set (fails closed)"
+                );
+                Vec::new()
+            }
+        }
     }
 
     async fn active_leases_for_context(&self, context: &ExecutionContext) -> Vec<CapabilityLease> {
