@@ -38,7 +38,7 @@ You have two options:
   <Tab title="Gateway token (single-user)">
     For single-user deployments, set `GATEWAY_AUTH_TOKEN` in the environment. The same token authenticates the web UI, the Telegram bridge, and the Responses API.
 
-    If `GATEWAY_AUTH_TOKEN` is not set, IronClaw prints a random 32-character token to the console on boot.
+    If `GATEWAY_AUTH_TOKEN` is not set, IronClaw generates 32 random bytes and prints the hex-encoded value (64 characters) to the console on boot.
 
     ```bash
     export GATEWAY_AUTH_TOKEN="your-secure-token"
@@ -54,7 +54,7 @@ You have two options:
       -H "Authorization: Bearer $GATEWAY_AUTH_TOKEN" \
       -H "Content-Type: application/json" \
       -d '{"name":"my-integration","expires_in_days":90}'
-    # → {"id":"...","token":"<plaintext shown ONCE>","prefix":"..."}
+    # → {"id":"...","token":"<plaintext shown ONCE>","token_prefix":"...","name":"...","expires_at":"..."}
 
     # List
     curl https://your-host/api/tokens \
@@ -137,9 +137,9 @@ print(resp.output_text)
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `input` | yes | A string, or an array of `message` / `function_call_output` items. See [Input shapes](#input-shapes). |
+| `input` | yes | A string, or an array of `message` / `function_call_output` items. See [External tools](#external-tools) for the array form. |
 | `model` | no | Must be `"default"`. Per-request model override is not yet supported; configure providers via settings. |
-| `instructions` | no | Per-turn system/developer instructions. Injected ahead of `input` as an `<instructions>` block. Not carried by `previous_response_id`. |
+| `instructions` | no | System/developer instructions. Injected ahead of `input` as an `<instructions>` block and stored as part of the persisted user message. See [Per-request instructions](#per-request-instructions) for the IronClaw-specific replay caveat. |
 | `previous_response_id` | no | The `id` from a prior response. Resumes the same thread; see [Session continuity](#session-continuity). |
 | `stream` | no | `true` for SSE; `false` (default) for a single JSON response. |
 | `tools` | no | Caller-supplied function tools. See [External tools](#external-tools). |
@@ -196,7 +196,6 @@ Events follow the OpenAI Responses streaming format. The SSE `event:` field matc
 | `event:` | `type` | Payload |
 |----------|--------|---------|
 | `response.created` | `response.created` | Initial in-progress shell. |
-| `response.in_progress` | `response.in_progress` | Same shell after first activity. |
 | `response.output_item.added` | `response.output_item.added` | A new `message` or `function_call` item began. |
 | `response.output_text.delta` | `response.output_text.delta` | Token delta inside an `output_text` content block. |
 | `response.output_item.done` | `response.output_item.done` | An item is finalised. |
@@ -358,13 +357,15 @@ Use `instructions` to inject a one-turn system/developer message:
 }
 ```
 
-Per the OpenAI spec, `instructions` apply only to the current turn; they are not replayed when you pass `previous_response_id` on a later request. The agent's persistent identity files (`AGENTS.md`, `SOUL.md`, `USER.md`, `IDENTITY.md`) come from workspace memory and are not affected by this field.
+**IronClaw caveat — diverges from the OpenAI spec.** The OpenAI Responses API contract is that `instructions` apply only to the current turn and are not carried by `previous_response_id`. IronClaw currently prepends the `<instructions>` block into the user message and persists it as part of the conversation, so it *is* visible on later turns when history is replayed. Until the handler stores instructions out-of-band, treat them as sticky for the thread and re-send (or override) them explicitly on each turn that needs different behaviour.
+
+The agent's persistent identity files (`AGENTS.md`, `SOUL.md`, `USER.md`, `IDENTITY.md`) come from workspace memory and are not affected by this field.
 
 ---
 
 ## Errors
 
-All errors use the OpenAI envelope:
+Errors from the Responses handler use the OpenAI envelope:
 
 ```json
 {
@@ -381,12 +382,15 @@ Common codes:
 | Status | `type` | When |
 |--------|--------|------|
 | `400` | `invalid_request_error` | Schema, validation, shadowed tool name, missing pending gate, unsupported field. |
-| `401` | `invalid_request_error` | Missing or wrong bearer token. |
-| `404` | `invalid_request_error` | `previous_response_id` thread not owned by this user, or unknown response id. |
 | `429` | `rate_limit_error` | More than 30 requests in 60 seconds for this user. |
 | `503` | `server_error` | Agent loop not started, database unavailable, or connection cap reached. |
 
 A turn that completes but fails mid-flight (the model errored, a required tool raised) returns `200` with `"status": "failed"` and a populated `error` field. Inspect `status` before reading `output`.
+
+Two cases do **not** use the JSON envelope and need separate handling:
+
+- **`401` Unauthorized** comes from the gateway auth middleware before the request reaches the handler, and the body is a plain-text string (`Invalid or missing auth token`). Same for `403` (`Forbidden` for OIDC domain violations) and the `503` (`Database unavailable`) emitted by the middleware when the token store is down.
+- **`GET /api/v1/responses/{id}`** returns `404` (still JSON-enveloped) when the response id is unknown or the thread does not belong to the authenticated user. `POST` with a foreign `previous_response_id` does **not** return `404`; the handler only decodes the UUID and dispatches into the agent, where the cross-user resume surfaces as a turn-level failure rather than an HTTP error. Treat cross-user resume as undefined and avoid relying on the response shape.
 
 The Responses API does **not** support interactive approvals or authentication gates in the response stream. If the agent hits a tool that requires user approval (e.g. shell with a destructive command) or an extension OAuth flow, the turn fails with a clear error directing you to resolve the gate via the web UI or a different channel.
 
