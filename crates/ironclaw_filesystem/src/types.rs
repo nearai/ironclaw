@@ -157,6 +157,17 @@ pub enum FilesystemError {
     /// path raced with the ensure_index call.
     #[error("index spec disappeared after upsert at {path}: {name}")]
     IndexSpecMissingAfterUpsert { path: VirtualPath, name: IndexName },
+    /// Backend infrastructure failure (connection pool, schema migration,
+    /// pragma setup) that has no specific [`VirtualPath`] context. Used by
+    /// backend `new`/`connect`/`run_migrations` paths where the real failure
+    /// happens before any caller-supplied path is in scope — the prior
+    /// `unwrap_or_else(unreachable!)` placeholder lost the operation context
+    /// and the underlying reason in equal measure.
+    #[error("filesystem backend infrastructure error during {operation}: {reason}")]
+    BackendInfrastructure {
+        operation: FilesystemOperation,
+        reason: String,
+    },
 }
 
 /// Reason a [`FilesystemError::IndexConflict`] was raised.

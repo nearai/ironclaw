@@ -133,9 +133,39 @@ pub(crate) fn system_time_from_unix_seconds(seconds: i64) -> Option<SystemTime> 
     Some(UNIX_EPOCH + Duration::from_secs(seconds as u64))
 }
 
+/// Build a [`FilesystemError::BackendInfrastructure`] for a failure that
+/// happens outside any caller-supplied path scope (pool acquisition,
+/// `run_migrations`, pragma setup, schema bootstrapping). The previous
+/// `valid_engine_path()` helper returned a `/engine` placeholder so the
+/// path-bearing [`FilesystemError::Backend`] variant could be used; that
+/// placeholder masked which subsystem actually failed, so a real failure
+/// reported a fictional path. Backends now use this helper instead, and
+/// the variant explicitly omits `path`.
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-pub(crate) fn valid_engine_path() -> VirtualPath {
-    VirtualPath::new("/engine").unwrap_or_else(|_| unreachable!("literal virtual path is valid"))
+pub(crate) fn infrastructure_error(
+    operation: FilesystemOperation,
+    reason: impl Into<String>,
+) -> FilesystemError {
+    FilesystemError::BackendInfrastructure {
+        operation,
+        reason: reason.into(),
+    }
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) fn infrastructure_pg_error(
+    operation: FilesystemOperation,
+    error: tokio_postgres::Error,
+) -> FilesystemError {
+    infrastructure_error(operation, error.to_string())
+}
+
+#[cfg(feature = "libsql")]
+pub(crate) fn infrastructure_libsql_error(
+    operation: FilesystemOperation,
+    error: libsql::Error,
+) -> FilesystemError {
+    infrastructure_error(operation, error.to_string())
 }
 
 /// Build a deterministic SQL index identifier from a mount prefix + spec

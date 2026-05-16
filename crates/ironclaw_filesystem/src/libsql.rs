@@ -7,9 +7,9 @@ use ironclaw_host_api::VirtualPath;
 use crate::backend::EventRecord;
 use crate::db::{
     child_path_like_pattern, direct_children, directory_append_error, directory_write_error,
-    escape_like_literal, escape_like_with_trailing_wildcard, is_not_found, libsql_db_error,
-    not_found, record_version_from_i64, sql_index_name, system_time_from_unix_seconds,
-    valid_engine_path, virtual_path_prefixes,
+    escape_like_literal, escape_like_with_trailing_wildcard, infrastructure_libsql_error,
+    is_not_found, libsql_db_error, not_found, record_version_from_i64, sql_index_name,
+    system_time_from_unix_seconds, virtual_path_prefixes,
 };
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
@@ -42,11 +42,7 @@ impl LibSqlRootFilesystem {
         // concurrent processes attempting first-time migration serialise
         // rather than both racing the pragma checks.
         conn.execute("BEGIN IMMEDIATE", ()).await.map_err(|error| {
-            libsql_db_error(
-                valid_engine_path(),
-                FilesystemOperation::CreateDirAll,
-                error,
-            )
+            infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error)
         })?;
         let result = run_libsql_migrations_inner(&conn).await;
         match result {
@@ -55,11 +51,7 @@ impl LibSqlRootFilesystem {
                 .await
                 .map(|_| ())
                 .map_err(|error| {
-                    libsql_db_error(
-                        valid_engine_path(),
-                        FilesystemOperation::CreateDirAll,
-                        error,
-                    )
+                    infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error)
                 }),
             Err(err) => {
                 // Best-effort rollback. If ROLLBACK itself fails (e.g. the
@@ -74,19 +66,12 @@ impl LibSqlRootFilesystem {
     }
 
     async fn connect(&self) -> Result<libsql::Connection, FilesystemError> {
-        let conn = self
-            .db
-            .connect()
-            .map_err(|error| FilesystemError::Backend {
-                path: valid_engine_path(),
-                operation: FilesystemOperation::Stat,
-                reason: error.to_string(),
-            })?;
+        let conn = self.db.connect().map_err(|error| {
+            crate::db::infrastructure_error(FilesystemOperation::Stat, error.to_string())
+        })?;
         conn.query("PRAGMA busy_timeout = 5000", ())
             .await
-            .map_err(|error| {
-                libsql_db_error(valid_engine_path(), FilesystemOperation::Stat, error)
-            })?;
+            .map_err(|error| infrastructure_libsql_error(FilesystemOperation::Stat, error))?;
         Ok(conn)
     }
 }
@@ -934,13 +919,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
 async fn run_libsql_migrations_inner(conn: &libsql::Connection) -> Result<(), FilesystemError> {
     conn.execute_batch(LIBSQL_ROOT_FILESYSTEM_SCHEMA)
         .await
-        .map_err(|error| {
-            libsql_db_error(
-                valid_engine_path(),
-                FilesystemOperation::CreateDirAll,
-                error,
-            )
-        })?;
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?;
     ensure_libsql_root_is_dir_column(conn).await?;
     ensure_libsql_records_columns(conn).await?;
     ensure_libsql_index_specs_table(conn).await?;
@@ -958,23 +937,11 @@ async fn ensure_libsql_root_is_dir_column(
             (),
         )
         .await
-        .map_err(|error| {
-            libsql_db_error(
-                valid_engine_path(),
-                FilesystemOperation::CreateDirAll,
-                error,
-            )
-        })?;
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?;
     if rows
         .next()
         .await
-        .map_err(|error| {
-            libsql_db_error(
-                valid_engine_path(),
-                FilesystemOperation::CreateDirAll,
-                error,
-            )
-        })?
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?
         .is_some()
     {
         return Ok(());
@@ -984,13 +951,7 @@ async fn ensure_libsql_root_is_dir_column(
         (),
     )
     .await
-    .map_err(|error| {
-        libsql_db_error(
-            valid_engine_path(),
-            FilesystemOperation::CreateDirAll,
-            error,
-        )
-    })?;
+    .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?;
     Ok(())
 }
 
@@ -1367,9 +1328,7 @@ async fn ensure_libsql_records_columns(conn: &libsql::Connection) -> Result<(), 
 async fn ensure_libsql_index_specs_table(conn: &libsql::Connection) -> Result<(), FilesystemError> {
     conn.execute_batch(LIBSQL_INDEX_SPECS_SCHEMA)
         .await
-        .map_err(|error| {
-            libsql_db_error(valid_engine_path(), FilesystemOperation::EnsureIndex, error)
-        })?;
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::EnsureIndex, error))?;
     Ok(())
 }
 
@@ -1377,9 +1336,7 @@ async fn ensure_libsql_index_specs_table(conn: &libsql::Connection) -> Result<()
 async fn ensure_libsql_events_table(conn: &libsql::Connection) -> Result<(), FilesystemError> {
     conn.execute_batch(LIBSQL_EVENTS_SCHEMA)
         .await
-        .map_err(|error| {
-            libsql_db_error(valid_engine_path(), FilesystemOperation::Append, error)
-        })?;
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::Append, error))?;
     Ok(())
 }
 
@@ -1629,34 +1586,18 @@ async fn add_column_if_missing(
             libsql::params![column],
         )
         .await
-        .map_err(|error| {
-            libsql_db_error(
-                valid_engine_path(),
-                FilesystemOperation::CreateDirAll,
-                error,
-            )
-        })?;
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?;
     if rows
         .next()
         .await
-        .map_err(|error| {
-            libsql_db_error(
-                valid_engine_path(),
-                FilesystemOperation::CreateDirAll,
-                error,
-            )
-        })?
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?
         .is_some()
     {
         return Ok(());
     }
-    conn.execute(ddl, ()).await.map_err(|error| {
-        libsql_db_error(
-            valid_engine_path(),
-            FilesystemOperation::CreateDirAll,
-            error,
-        )
-    })?;
+    conn.execute(ddl, ())
+        .await
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?;
     Ok(())
 }
 

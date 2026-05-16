@@ -231,6 +231,71 @@ fn postgres_root_filesystem_implements_root_filesystem_contract() {
 }
 
 #[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_root_filesystem_migration_failure_surfaces_infrastructure_variant() {
+    // Audit finding F1: backend connect/migration paths used to wrap
+    // every infrastructure error in `FilesystemError::Backend` with a
+    // fabricated `/engine` path. The path was always a lie — there is
+    // no caller-supplied path in scope at migration time. Verify the
+    // new `BackendInfrastructure` variant is what surfaces when the
+    // backend's bootstrap path fails.
+    //
+    // Trigger a real migration failure by pre-populating the DB with a
+    // table whose schema collides with what the migration expects to
+    // add (`is_dir` column with an incompatible non-default-able CHECK
+    // constraint that conflicts with the `ALTER` the migration runs).
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("root-filesystem.db");
+    let raw_db = std::sync::Arc::new(libsql::Builder::new_local(&db_path).build().await.unwrap());
+    let conn = raw_db.connect().unwrap();
+    // Pre-create a table that prevents `CREATE TABLE root_filesystem_entries`
+    // from being clean: the migration's CREATE IF NOT EXISTS is fine, but
+    // the subsequent `ALTER TABLE ... ADD COLUMN is_dir INTEGER NOT NULL`
+    // requires a default. Pre-existing rows without that column will
+    // satisfy the default; but inserting an incompatible row first makes
+    // the column add fail.
+    conn.execute(
+        "CREATE TABLE root_filesystem_entries (path TEXT PRIMARY KEY, contents BLOB NOT NULL DEFAULT X'')",
+        (),
+    )
+    .await
+    .unwrap();
+    // Lock the file by removing write permissions so the migration's
+    // ALTER paths fail outright. On platforms where chmod is honoured
+    // (unix), this surfaces a libsql write error from the migration.
+    drop(conn);
+    drop(raw_db);
+    let mut perms = std::fs::metadata(&db_path).unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o444);
+        std::fs::set_permissions(&db_path, perms).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        perms.set_readonly(true);
+        std::fs::set_permissions(&db_path, perms).unwrap();
+    }
+
+    let locked_db =
+        std::sync::Arc::new(libsql::Builder::new_local(&db_path).build().await.unwrap());
+    let filesystem = LibSqlRootFilesystem::new(locked_db);
+    let err = filesystem.run_migrations().await.unwrap_err();
+    assert!(
+        matches!(err, FilesystemError::BackendInfrastructure { .. }),
+        "expected BackendInfrastructure, got {err:?}"
+    );
+    // Display must NOT mention the fictional `/engine` placeholder
+    // (previous behavior leaked it everywhere).
+    let display = err.to_string();
+    assert!(
+        !display.contains("/engine"),
+        "infrastructure error must not fabricate a virtual path: {display}"
+    );
+}
+
+#[cfg(feature = "libsql")]
 struct TestLibSqlRootFilesystem {
     filesystem: LibSqlRootFilesystem,
     _dir: tempfile::TempDir,

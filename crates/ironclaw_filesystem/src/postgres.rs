@@ -6,9 +6,9 @@ use ironclaw_host_api::VirtualPath;
 use crate::backend::EventRecord;
 use crate::db::{
     child_path_like_pattern, db_error, direct_children, directory_append_error,
-    directory_write_error, escape_like_literal, escape_like_with_trailing_wildcard, is_not_found,
-    not_found, record_version_from_i64, sql_index_name, system_time_from_unix_seconds,
-    valid_engine_path, virtual_path_prefixes,
+    directory_write_error, escape_like_literal, escape_like_with_trailing_wildcard,
+    infrastructure_error, infrastructure_pg_error, is_not_found, not_found,
+    record_version_from_i64, sql_index_name, system_time_from_unix_seconds, virtual_path_prefixes,
 };
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
@@ -34,24 +34,14 @@ impl PostgresRootFilesystem {
         client
             .batch_execute(POSTGRES_ROOT_FILESYSTEM_SCHEMA)
             .await
-            .map_err(|error| {
-                db_error(
-                    valid_engine_path(),
-                    FilesystemOperation::CreateDirAll,
-                    error,
-                )
-            })
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))
     }
 
     async fn client(&self) -> Result<deadpool_postgres::Object, FilesystemError> {
         self.pool
             .get()
             .await
-            .map_err(|error| FilesystemError::Backend {
-                path: valid_engine_path(),
-                operation: FilesystemOperation::Stat,
-                reason: error.to_string(),
-            })
+            .map_err(|error| infrastructure_error(FilesystemOperation::Stat, error.to_string()))
     }
 }
 
