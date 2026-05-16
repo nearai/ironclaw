@@ -439,6 +439,93 @@ async fn update_mission_status_persists() {
 }
 
 #[tokio::test]
+async fn update_mission_status_bumps_updated_at() {
+    // F1 regression: HybridStore bumps `mission.updated_at` on every
+    // status transition (`src/bridge/store_adapter.rs:1950`). The
+    // filesystem store must do the same so recency-sorted views agree.
+    let store = make_store();
+    let project_id = ProjectId::new();
+    let mission = Mission::new(project_id, "alice", "m", "goal", MissionCadence::Manual);
+    let original_updated_at = mission.updated_at;
+    store.save_mission(&mission).await.unwrap();
+
+    // Sleep so the timestamp has somewhere to move.
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    store
+        .update_mission_status(mission.id, MissionStatus::Paused)
+        .await
+        .unwrap();
+
+    let loaded = store
+        .load_mission(mission.id)
+        .await
+        .unwrap()
+        .expect("present");
+    assert!(
+        loaded.updated_at > original_updated_at,
+        "update_mission_status must bump updated_at (was {:?}, now {:?})",
+        original_updated_at,
+        loaded.updated_at,
+    );
+}
+
+#[tokio::test]
+async fn list_missions_is_deterministic_across_invocations() {
+    // F2 regression: HybridStore sorts by `(name, id)` so the LLM-facing
+    // `mission_list` tool sees a stable order
+    // (`src/bridge/store_adapter.rs:1913`). The filesystem store's
+    // underlying HashMap-based query is otherwise non-deterministic.
+    let store = make_store();
+    let project_id = ProjectId::new();
+    let names = ["delta", "alpha", "charlie", "bravo", "echo"];
+    for name in names {
+        let mission = Mission::new(project_id, "alice", name, "goal", MissionCadence::Manual);
+        store.save_mission(&mission).await.unwrap();
+    }
+
+    let first = store.list_missions(project_id, "alice").await.unwrap();
+    assert_eq!(first.len(), names.len());
+    // Sorted by name (ids are uuids, second key only kicks in on a tie).
+    let observed: Vec<&str> = first.iter().map(|m| m.name.as_str()).collect();
+    let mut expected = names;
+    expected.sort();
+    assert_eq!(observed, expected.to_vec());
+
+    // Repeat — must produce the exact same ordering.
+    for _ in 0..3 {
+        let again = store.list_missions(project_id, "alice").await.unwrap();
+        let names_again: Vec<&str> = again.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names_again, observed, "list_missions order is unstable");
+    }
+}
+
+#[tokio::test]
+async fn list_all_missions_is_deterministic_across_invocations() {
+    // F2 sibling: admin variant also sorts by (name, id) for parity with
+    // HybridStore (`src/bridge/store_adapter.rs:1937`).
+    let store = make_store();
+    let project_id = ProjectId::new();
+    let names = ["delta", "alpha", "charlie"];
+    for name in names {
+        for user in ["alice", "bob"] {
+            let mission = Mission::new(project_id, user, name, "goal", MissionCadence::Manual);
+            store.save_mission(&mission).await.unwrap();
+        }
+    }
+
+    let first = store.list_all_missions(project_id).await.unwrap();
+    for _ in 0..3 {
+        let again = store.list_all_missions(project_id).await.unwrap();
+        let first_keys: Vec<_> = first.iter().map(|m| (&m.name, m.id.0)).collect();
+        let again_keys: Vec<_> = again.iter().map(|m| (&m.name, m.id.0)).collect();
+        assert_eq!(
+            first_keys, again_keys,
+            "list_all_missions order is unstable"
+        );
+    }
+}
+
+#[tokio::test]
 async fn list_shared_missions_includes_both_owner_aliases() {
     let store = make_store();
     let project_id = ProjectId::new();

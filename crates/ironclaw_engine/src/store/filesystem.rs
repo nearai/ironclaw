@@ -1000,15 +1000,21 @@ where
             key: index_key_user_id(),
             value: index_value_text(user_id),
         };
-        match self.query_all(&prefix, &filter).await {
-            Ok(missions) => Ok(missions),
+        let mut missions: Vec<Mission> = match self.query_all(&prefix, &filter).await {
+            Ok(missions) => missions,
             Err(error) if is_engine_unsupported(&error) => {
                 let mut missions: Vec<Mission> = self.read_all_files_under(&prefix).await?;
                 missions.retain(|mission| mission.user_id == user_id);
-                Ok(missions)
+                missions
             }
-            Err(error) => Err(error),
-        }
+            Err(error) => return Err(error),
+        };
+        // HybridStore parity (`src/bridge/store_adapter.rs:1913`):
+        // sort by (name, id) so the `mission_list` tool sees a stable
+        // order across runs — the underlying `query` / HashMap iteration
+        // is otherwise non-deterministic.
+        missions.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.0.cmp(&b.id.0)));
+        Ok(missions)
     }
 
     async fn update_mission_status(
@@ -1042,6 +1048,10 @@ where
                 };
                 let mut mission: Mission = deserialize(&versioned.entry.body)?;
                 mission.status = status;
+                // HybridStore parity (`src/bridge/store_adapter.rs:1950`):
+                // bump `updated_at` on every status transition so consumers
+                // sorting by recency see the change.
+                mission.updated_at = chrono::Utc::now();
                 let entry =
                     build_record_entry(kind_mission(), &mission, mission_indexed(&mission))?;
                 match self
@@ -1074,11 +1084,18 @@ where
     async fn list_all_missions(&self, project_id: ProjectId) -> Result<Vec<Mission>, EngineError> {
         self.ensure_missions_indexes().await?;
         let prefix = missions_prefix_for_project(project_id)?;
-        match self.query_all(&prefix, &Filter::All).await {
-            Ok(missions) => Ok(missions),
-            Err(error) if is_engine_unsupported(&error) => self.read_all_files_under(&prefix).await,
-            Err(error) => Err(error),
-        }
+        let mut missions: Vec<Mission> = match self.query_all(&prefix, &Filter::All).await {
+            Ok(missions) => missions,
+            Err(error) if is_engine_unsupported(&error) => {
+                self.read_all_files_under(&prefix).await?
+            }
+            Err(error) => return Err(error),
+        };
+        // HybridStore parity (`src/bridge/store_adapter.rs:1937`): admin
+        // listing must also sort by (name, id) so dashboards see stable
+        // output across runs.
+        missions.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.0.cmp(&b.id.0)));
+        Ok(missions)
     }
 }
 
