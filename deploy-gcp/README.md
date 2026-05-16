@@ -344,13 +344,13 @@ account, grants the four required IAM roles, creates the `github-actions` WIF po
 
 **Add GitHub repository secrets**
 
-Go to **Settings → Secrets and variables → Actions** and add the two values printed
-by the script:
+Go to **Settings → Secrets and variables → Actions** and add:
 
-| Secret | Value (printed by `wif-setup.sh`) |
+| Secret | Value |
 |---|---|
-| `WIF_PROVIDER` | `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions/providers/github-provider` |
-| `WIF_SERVICE_ACCOUNT` | `t3claw-ci-deploy@gen-lang-client-0263867259.iam.gserviceaccount.com` |
+| `WIF_PROVIDER` | Printed by `wif-setup.sh` — `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions/providers/github-provider` |
+| `WIF_SERVICE_ACCOUNT` | Printed by `wif-setup.sh` — `t3claw-ci-deploy@gen-lang-client-0263867259.iam.gserviceaccount.com` |
+| `TRINITY_CHECKOUT_TOKEN` | PAT or fine-grained token with `contents:read` on `Terminal-3/trinity` (sidecar image builds from that repo) |
 
 ### How the workflow runs
 
