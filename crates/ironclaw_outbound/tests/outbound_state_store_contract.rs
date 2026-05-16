@@ -1,11 +1,16 @@
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_filesystem::{
+    BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError, Filter,
+    InMemoryBackend, IndexSpec, Page, RecordVersion, RootFilesystem, VersionedEntry,
+};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId, VirtualPath};
 use ironclaw_outbound::*;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
+use tokio::sync::Mutex;
 
 #[tokio::test]
 async fn in_memory_defaults_policy_progress_opt_in_and_subscription_scope() {
@@ -760,4 +765,273 @@ async fn postgres_pool() -> Option<deadpool_postgres::Pool> {
             .build()
             .unwrap(),
     )
+}
+
+// ── F4 — CAS retry / drain / backwards-race regression tests ─────────────
+
+/// Test backend that wraps an inner [`RootFilesystem`] and injects a single
+/// [`FilesystemError::VersionMismatch`] on the next `put` to any path matching
+/// the configured prefix. The injection auto-disarms after firing once so the
+/// retry pass forwards to the inner backend and converges.
+///
+/// Audit finding F4: the existing contract suite never exercised the CAS
+/// retry loop introduced for F1. This mock proves the retry budget actually
+/// converges on a transient race rather than failing the first attempt.
+struct VersionRacingBackend {
+    inner: Arc<InMemoryBackend>,
+    state: Mutex<RacingState>,
+}
+
+struct RacingState {
+    /// Path prefix to inject conflicts on. `None` = no injection scheduled.
+    target_prefix: Option<String>,
+    /// Total number of injected conflicts produced so far.
+    injected: u32,
+    /// Remaining injections; decrements per fired conflict.
+    remaining: u32,
+}
+
+impl VersionRacingBackend {
+    fn new(inner: Arc<InMemoryBackend>) -> Self {
+        Self {
+            inner,
+            state: Mutex::new(RacingState {
+                target_prefix: None,
+                injected: 0,
+                remaining: 0,
+            }),
+        }
+    }
+
+    /// Arm the backend to inject `count` `VersionMismatch` errors on the next
+    /// `count` `put` calls whose path starts with `prefix`. Tests use this to
+    /// simulate a single racing writer landing between our read and put.
+    async fn arm(&self, prefix: &str, count: u32) {
+        let mut state = self.state.lock().await;
+        state.target_prefix = Some(prefix.to_string());
+        state.injected = 0;
+        state.remaining = count;
+    }
+
+    async fn injected_count(&self) -> u32 {
+        self.state.lock().await.injected
+    }
+}
+
+#[async_trait]
+impl RootFilesystem for VersionRacingBackend {
+    fn capabilities(&self) -> BackendCapabilities {
+        self.inner.capabilities()
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        {
+            let mut state = self.state.lock().await;
+            if state.remaining > 0
+                && state
+                    .target_prefix
+                    .as_deref()
+                    .is_some_and(|prefix| path.as_str().starts_with(prefix))
+            {
+                state.remaining -= 1;
+                state.injected += 1;
+                // Surface as if the path's version had advanced under us.
+                return Err(FilesystemError::VersionMismatch {
+                    path: path.clone(),
+                    expected: None,
+                    found: None,
+                });
+            }
+        }
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
+
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        self.inner.list_dir(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.inner.query(path, filter, page).await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        self.inner.ensure_index(path, spec).await
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        self.inner.stat(path).await
+    }
+
+    async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+        self.inner.delete(path).await
+    }
+}
+
+/// Audit finding F4: prove the CAS retry loop on
+/// `advance_subscription_cursor` converges when a racing writer bumps the
+/// version exactly once between the store's read and put. Before F1 this
+/// would silently lose the forward progression because the put used
+/// `CasExpectation::Any`; before F5 the retry loop couldn't distinguish a
+/// transient race from a permanent backend error.
+#[tokio::test]
+async fn advance_subscription_cursor_retries_through_cas_conflict() {
+    let inner = Arc::new(InMemoryBackend::new());
+    let racing = Arc::new(VersionRacingBackend::new(Arc::clone(&inner)));
+    let store = FilesystemOutboundStateStore::new(Arc::clone(&racing));
+    seed_subscription(&store).await;
+
+    // Arm one injected conflict on the next put to any subscription path.
+    // The store's read returns version v1; we inject `VersionMismatch` on
+    // the first put, forcing the retry loop to re-read, re-validate
+    // progression, and put again with the new version — which succeeds.
+    racing.arm("/engine/outbound/subscriptions/", 1).await;
+
+    let cursor = ProjectionCursor::for_scope(projection_scope(), EventCursor::new(101));
+    store
+        .advance_subscription_cursor(AdvanceSubscriptionCursorRequest {
+            subscription_id: subscription_id(),
+            actor: actor(),
+            thread_id: thread_id(),
+            cursor: cursor.clone(),
+        })
+        .await
+        .expect("retry loop must converge after one transient CAS conflict");
+
+    assert_eq!(
+        racing.injected_count().await,
+        1,
+        "exactly one CAS conflict should have been injected and recovered from",
+    );
+
+    let loaded = store
+        .load_subscription_cursor(LoadSubscriptionCursorRequest {
+            subscription_id: subscription_id(),
+            actor: actor(),
+            scope: projection_scope(),
+            thread_id: thread_id(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded, cursor);
+}
+
+/// Audit finding F4: with two racing advancers, the loser must NOT silently
+/// overwrite the winner's higher cursor. F1's retry loop re-reads and
+/// re-validates progression on every attempt, so the loser's request is
+/// rejected with `InvalidRequest` because its target cursor is now
+/// regressing against the winner's persisted state.
+#[tokio::test]
+async fn concurrent_backwards_race_rejected_after_winner_advances() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = FilesystemOutboundStateStore::new(Arc::clone(&backend));
+    seed_subscription(&store).await;
+
+    // Winner advances first to cursor=100.
+    let winner_cursor = ProjectionCursor::for_scope(projection_scope(), EventCursor::new(100));
+    store
+        .advance_subscription_cursor(AdvanceSubscriptionCursorRequest {
+            subscription_id: subscription_id(),
+            actor: actor(),
+            thread_id: thread_id(),
+            cursor: winner_cursor.clone(),
+        })
+        .await
+        .unwrap();
+
+    // Loser tries to advance to a strictly lower cursor=50. Even without a
+    // racing CAS conflict, the progression re-check inside the retry loop
+    // catches the regression on the first iteration.
+    let loser_cursor = ProjectionCursor::for_scope(projection_scope(), EventCursor::new(50));
+    let regression = store
+        .advance_subscription_cursor(AdvanceSubscriptionCursorRequest {
+            subscription_id: subscription_id(),
+            actor: actor(),
+            thread_id: thread_id(),
+            cursor: loser_cursor,
+        })
+        .await;
+    assert!(
+        matches!(regression, Err(OutboundError::InvalidRequest { .. })),
+        "regressing cursor must be rejected, got {regression:?}",
+    );
+
+    // And the winner's progress is preserved.
+    let loaded = store
+        .load_subscription_cursor(LoadSubscriptionCursorRequest {
+            subscription_id: subscription_id(),
+            actor: actor(),
+            scope: projection_scope(),
+            thread_id: thread_id(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded, winner_cursor);
+}
+
+/// Audit finding F4 + F3: write more than `Page::MAX_LIMIT` (1024) delivery
+/// attempts for the same scope and assert `list_delivery_attempts` returns
+/// every one. Before F3 the unpaginated `list_dir` would silently truncate
+/// past 1024 rows; with the drain loop, the consumer sees the full set.
+#[tokio::test]
+async fn list_delivery_attempts_drains_more_than_page_max_limit() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = FilesystemOutboundStateStore::new(backend);
+
+    let scope = turn_scope();
+    let candidate_template = || OutboundPushCandidate {
+        tenant_id: scope.tenant_id.clone(),
+        agent_id: scope.agent_id.clone(),
+        project_id: scope.project_id.clone(),
+        thread_id: scope.thread_id.clone(),
+        turn_run_id: Some(TurnRunId::new()),
+        target: reply_ref("reply-drain"),
+        kind: OutboundPushKind::FinalReply,
+        projection_ref: ProjectionUpdateRef::new(format!("projection:drain:{}", TurnRunId::new()))
+            .unwrap(),
+        requires_reply_target_revalidation: true,
+    };
+
+    // One past the page limit so the drain loop has to execute at least two
+    // iterations to surface the tail. 1025 keeps the test fast in CI.
+    let total: usize = (Page::MAX_LIMIT as usize) + 1;
+    for _ in 0..total {
+        store
+            .record_delivery_attempt(OutboundDeliveryAttempt {
+                delivery_id: OutboundDeliveryId::new(),
+                scope: scope.clone(),
+                candidate: candidate_template(),
+                status: OutboundDeliveryStatus::Pending,
+                attempted_at: now(),
+                failure_kind: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    let drained = store.list_delivery_attempts(scope).await.unwrap();
+    assert_eq!(
+        drained.len(),
+        total,
+        "drain loop must return every delivery, including rows past Page::MAX_LIMIT",
+    );
 }
