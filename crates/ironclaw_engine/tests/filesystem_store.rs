@@ -194,6 +194,52 @@ async fn append_and_load_events_orders_by_timestamp() {
 }
 
 #[tokio::test]
+async fn append_events_dedups_by_event_id() {
+    // F3 regression: HybridStore dedupes by event id when appending
+    // (`src/bridge/store_adapter.rs:1613`). The filesystem store used to
+    // write each event with `CasExpectation::Any`, silently overwriting
+    // an earlier event with the same id — so a retried append could lose
+    // the original `EventKind` payload. Re-append the same event but
+    // with a *different* payload; the original must survive.
+    let store = make_store();
+    let thread_id = ThreadId::new();
+    let original = ThreadEvent::new(
+        thread_id,
+        EventKind::StateChanged {
+            from: ThreadState::Created,
+            to: ThreadState::Running,
+            reason: Some("initial".into()),
+        },
+    );
+    store
+        .append_events(std::slice::from_ref(&original))
+        .await
+        .unwrap();
+
+    // Construct a duplicate with the same id but a different payload.
+    let mut duplicate = original.clone();
+    duplicate.kind = EventKind::StateChanged {
+        from: ThreadState::Running,
+        to: ThreadState::Failed,
+        reason: Some("clobber attempt".into()),
+    };
+    store.append_events(&[duplicate]).await.unwrap();
+
+    let loaded = store.load_events(thread_id).await.unwrap();
+    assert_eq!(loaded.len(), 1, "duplicate id must not produce two events");
+    match &loaded[0].kind {
+        EventKind::StateChanged { reason, .. } => {
+            assert_eq!(
+                reason.as_deref(),
+                Some("initial"),
+                "original event payload must not be overwritten by a duplicate-id append",
+            );
+        }
+        other => panic!("expected StateChanged, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn save_and_load_project_round_trips() {
     let store = make_store();
     let project = Project::new("alice", "commitments", "");

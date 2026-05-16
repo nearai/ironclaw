@@ -704,11 +704,23 @@ where
     // ── Event ops ─────────────────────────────────────────────
 
     async fn append_events(&self, events: &[ThreadEvent]) -> Result<(), EngineError> {
+        // HybridStore parity (`src/bridge/store_adapter.rs:1613`): events
+        // are append-only and de-duplicated by id. The previous
+        // `CasExpectation::Any` write silently overwrote an existing
+        // event with the same id, which a re-emit (e.g. retry after
+        // partial flush) would clobber. Pre-read the destination path
+        // and skip any id that already exists.
         for event in events {
             let path = event_path(event.thread_id, event.id.0)?;
-            // Events are append-only; if the same id is appended twice the
-            // second write is a no-op duplicate. We don't take a per-event
-            // lock because each event id is unique per emission.
+            if self
+                .filesystem
+                .get(&path)
+                .await
+                .map_err(fs_to_engine_error)?
+                .is_some()
+            {
+                continue;
+            }
             self.write_record(&path, kind_event(), event, event_indexed(event))
                 .await?;
         }
