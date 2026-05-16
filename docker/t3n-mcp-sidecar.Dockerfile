@@ -8,11 +8,14 @@ RUN apk add --no-cache dumb-init \
 # do not carry their own pnpm-lock.yaml.
 WORKDIR /workspace
 COPY --from=trinity_client package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY --from=trinity_client t3n-sdk/package.json ./t3n-sdk/package.json
+COPY --from=trinity_client mcp/t3n-mcp/package.json ./mcp/t3n-mcp/package.json
+
+RUN pnpm install --frozen-lockfile --filter @terminal-3/t3n-mcp...
+
 COPY --from=trinity_client t3n-sdk ./t3n-sdk
 COPY --from=trinity_client mcp/t3n-mcp ./mcp/t3n-mcp
 COPY --from=trinity_client shared ./shared
-
-RUN pnpm install --frozen-lockfile --filter @terminal-3/t3n-mcp...
 
 # Runtime cwd matches trinity's Dockerfile: sources under mcp/t3n-mcp, shared at ../../shared.
 WORKDIR /workspace/mcp/t3n-mcp

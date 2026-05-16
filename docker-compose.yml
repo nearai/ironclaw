@@ -132,10 +132,7 @@ services:
       # keeps existing setups unchanged.
       T3N_MCP_AGENT_SECRET_HEX: ${T3N_MCP_AGENT_SECRET_HEX:-}
       MCP_SOCKET_PATH: /var/run/t3n-mcp/t3n-mcp.sock
-      # Source build from Trinity puts everything at /app (see Dockerfile).
-      # The npm-install layout at /app/node_modules/@terminal-3/t3n-mcp was only
-      # valid with the ccefae18 "from npm" approach.
-      T3N_PROJECT_DIR: /app
+      # T3N_PROJECT_DIR is set in docker/t3n-mcp-sidecar.Dockerfile (/workspace/mcp/t3n-mcp).
     volumes:
       - t3n_mcp_socket:/var/run/t3n-mcp
 
