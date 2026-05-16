@@ -51,7 +51,7 @@ bash deploy-gcp/gcp-provision.sh
 
 The script is idempotent — re-runs are safe. It will:
 
-1. Create the `t3claw` Artifact Registry repo (if absent) and build + push the agent and worker images.
+1. Create the `t3claw` Artifact Registry repo (if absent) and build + push the agent and sidecar images.
 2. Create the `t3claw-vm` service account, grant `artifactregistry.reader`, create the LB-health-check and IAP-SSH firewall rules, and create the `t3claw-staging` VM (no public IP).
 3. **Pause** with `Press Enter once the VM is bootstrapped and .env is in place...`. **Leave this terminal at the prompt** and switch to a second terminal for steps 2–5.
 4. After you press Enter: provision the global HTTPS load balancer (static IP, health check, instance group, backend service, URL map, Google-managed SSL cert, HTTPS proxy, forwarding rule).
@@ -69,7 +69,7 @@ If your project uses a non-default VPC name, override:
 NETWORK=my-vpc bash deploy-gcp/gcp-provision.sh
 ```
 
-> **Why SKIP_BUILD exists.** `Dockerfile.worker` uses `COPY . .` followed by `cargo build`, so any file change anywhere in the repo busts the layer cache and triggers a 15-minute Rust rebuild. `SKIP_BUILD=1` skips Phase 1 entirely.
+> **Why SKIP_BUILD exists.** `SKIP_BUILD=1` skips Phase 1 (image build + push) entirely, useful when you've already pushed images and only want to (re-)create GCP infrastructure.
 
 ### Step 2 — Copy bootstrap files to the VM (in a second terminal)
 
@@ -92,9 +92,11 @@ gcloud compute ssh t3claw-staging \
 
 This installs Docker, configures Artifact Registry auth, pre-pulls the agent image, installs `/opt/t3claw/docker-compose.yml` (from `docker-compose.staging.yml`) and the `t3claw.service` systemd unit. It will warn that `/opt/t3claw/.env` is missing — expected, fixed in step 4.
 
-### Step 4 — Build and upload `.env`
+### Step 4 — Store `.env` in Secret Manager
 
-The agent service needs five real values in `.env`. Generate the random ones locally:
+The agent service fetches its environment at every start from the `t3claw-staging-env` Secret Manager secret. You never place a `.env` file on the VM directly.
+
+Generate the random values locally:
 
 ```bash
 echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)"
@@ -104,12 +106,16 @@ echo "SECRETS_MASTER_KEY=$(openssl rand -hex 32)"
 
 > ⚠ Save `SECRETS_MASTER_KEY` somewhere durable (a team password manager). Losing it means losing access to every secret stored in the workspace.
 
-Copy the template, edit it (any editor), then upload. Do this in a working directory of your choice **outside** the repo so the file is never accidentally committed:
+Fill in the template and upload it as the first secret version (outside the repo so it's never committed):
 
 ```bash
 ENV_LOCAL="$(mktemp -t t3claw.env.XXXXXX)"
 cp deploy-gcp/env.example "$ENV_LOCAL"
 "${EDITOR:-vi}" "$ENV_LOCAL"     # fill in the five CHANGE_ME values
+gcloud secrets versions add t3claw-staging-env \
+  --data-file="$ENV_LOCAL" \
+  --project=gen-lang-client-0263867259
+rm "$ENV_LOCAL"
 ```
 
 Required edits:
@@ -124,20 +130,20 @@ Required edits:
 
 Lines 8 and 9 must use the same password — Postgres uses it on container init, the agent uses it to connect.
 
-Push and install (one combined SSH call = one MFA prompt):
+To update a secret value later, add a new version:
 
 ```bash
-gcloud compute scp "$ENV_LOCAL" t3claw-staging:/var/tmp/.env \
-  --zone=asia-southeast1-a --project=gen-lang-client-0263867259 --tunnel-through-iap
-
-gcloud compute ssh t3claw-staging \
-  --zone=asia-southeast1-a --project=gen-lang-client-0263867259 --tunnel-through-iap \
-  -- 'sudo install -m 600 -o root -g root /var/tmp/.env /opt/t3claw/.env && sudo rm /var/tmp/.env && sudo ls -l /opt/t3claw/.env'
-
-rm "$ENV_LOCAL"
+gcloud secrets versions add t3claw-staging-env \
+  --data-file=/path/to/updated.env \
+  --project=gen-lang-client-0263867259
 ```
 
-The trailing `ls -l` confirms `-rw------- 1 root root <size> /opt/t3claw/.env`.
+> **Secret vs image updates.** The CI deploy workflow runs `docker compose pull && up -d` directly — it does **not** invoke `systemctl restart t3claw`. This means secret updates are not picked up automatically by a code deploy. To apply a new secret version, SSH in and restart the service manually:
+> ```bash
+> gcloud compute ssh t3claw-staging \
+>   --zone=asia-southeast1-a --project=gen-lang-client-0263867259 --tunnel-through-iap \
+>   -- 'sudo systemctl restart t3claw'
+> ```
 
 ### Step 5 — Start the service and verify
 
@@ -238,7 +244,7 @@ gcloud compute instances get-serial-port-output t3claw-staging \
   --zone=asia-southeast1-a --project=gen-lang-client-0263867259 | tail -80
 ```
 
-> **Note.** `vm-setup.sh` and `startup-script.sh` are two different bootstrap paths and have drifted: `startup-script.sh` embeds its own compose definition (which includes the t3n-mcp sidecar), while `vm-setup.sh` installs `docker-compose.staging.yml` (no sidecar). Both produce a working agent + Postgres on `:3000`. If you change one path, consider whether the other needs the same change.
+> **Note.** `vm-setup.sh` and `startup-script.sh` are two different bootstrap paths: `startup-script.sh` (used by `instances reset`) embeds its own compose definition that includes the t3n-mcp sidecar and is the authoritative running configuration. `vm-setup.sh` installs `docker-compose.staging.yml` which omits the sidecar — that file is outdated relative to what actually runs. If you change the compose configuration, update `startup-script.sh`.
 
 ---
 
@@ -265,9 +271,9 @@ docker buildx build --platform linux/amd64 \
 
 The first build from a cold cache takes 30–60 minutes (Rust + WASM compile). Subsequent builds use BuildKit's layer cache and finish in seconds **provided** the inputs to the slow steps haven't changed. The agent Dockerfile uses cargo-chef so dependency builds are cached; unrelated repo edits do not bust them.
 
-### t3n-mcp sidecar (optional, off by default)
+### t3n-mcp sidecar
 
-The sidecar is not part of the default staging compose. To enable it, push the image and add the service block to `docker-compose.staging.yml` (or use `startup-script.sh` as a reference — its embedded compose includes the sidecar).
+The sidecar (`t3n-mcp-sidecar:latest`) runs alongside the agent on the VM. CI builds and pushes it to AR as part of `deploy-gcp.yml`. To rebuild it manually:
 
 ---
 
@@ -309,11 +315,56 @@ See `deploy-gcp/env.example` for the full template. Five values must be replaced
 | File | Role |
 |---|---|
 | `gcp-provision.sh` | One-shot provisioning of all GCP resources. Idempotent. |
+| `wif-setup.sh` | One-shot Workload Identity Federation setup for GitHub Actions CD. Idempotent. |
 | `vm-setup.sh` | Run on the VM during step 3 of first-time provisioning. |
 | `startup-script.sh` | Self-contained boot-time bootstrap, used by `instances reset`. |
 | `docker-compose.staging.yml` | Compose file installed at `/opt/t3claw/docker-compose.yml` on the VM. |
 | `t3claw.service` | systemd unit. |
-| `env.example` | Template for `/opt/t3claw/.env`. |
+| `env.example` | Template for the `t3claw-staging-env` Secret Manager secret. |
+
+---
+
+## CI/CD — automated deploy on merge to main
+
+`.github/workflows/deploy-gcp.yml` runs automatically when the `Run Tests` workflow
+passes on `main`. It builds and pushes both images to Artifact Registry, then IAP-SSHes
+into the VM and does a rolling update. No human action required.
+
+### One-time GCP setup
+
+Run the setup script once from a machine authenticated as a project owner:
+
+```bash
+gcloud auth login
+bash deploy-gcp/wif-setup.sh
+```
+
+The script is idempotent — safe to re-run. It creates the `t3claw-ci-deploy` service
+account, grants the four required IAM roles, creates the `github-actions` WIF pool and
+`github-provider` OIDC provider scoped to this repo, and prints the two secret values.
+
+**Add GitHub repository secrets**
+
+Go to **Settings → Secrets and variables → Actions** and add the two values printed
+by the script:
+
+| Secret | Value (printed by `wif-setup.sh`) |
+|---|---|
+| `WIF_PROVIDER` | `projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/github-actions/providers/github-provider` |
+| `WIF_SERVICE_ACCOUNT` | `t3claw-ci-deploy@gen-lang-client-0263867259.iam.gserviceaccount.com` |
+
+### How the workflow runs
+
+```
+push to main
+  ├── build-agent    Dockerfile --target runtime-staging → AR agent:latest + :<sha>
+  └── build-sidecar  docker/t3n-mcp-sidecar.Dockerfile → AR t3n-mcp-sidecar:latest + :<sha>
+        ↓ both succeed
+  └── deploy         IAP SSH → docker compose --profile app pull && up -d
+                     Smoke test: curl /api/health (retries 10×10 s)
+```
+
+The deploy job runs `docker compose --profile app pull` which pulls both the agent and sidecar images, then restarts with `up -d`.
 
 ---
 
@@ -326,7 +377,7 @@ See `deploy-gcp/env.example` for the full template. Five values must be replaced
 | `vm-setup.sh` succeeds but `t3claw.service` fails with `yaml: did not find expected key` | Old `vm-setup.sh` did sed-mangling of the dev `docker-compose.yml` and produced broken YAML | Re-run from a checkout that has `docker-compose.staging.yml` and the updated `vm-setup.sh`. |
 | `gcloud crashed (SSLError): UNEXPECTED_EOF_WHILE_READING` | Transient TLS handshake flake | Just retry. Three failures in a row → check VPN/proxy. |
 | `A security code has been sent to your phone` and the SMS never arrives | Wrong/stale phone number on Google account, or SMS is being filtered | Update phone at `https://myaccount.google.com/two-step-verification` and prefer Google prompts. Use a backup code as a one-off. |
-| Agent container restart-loops | Bad value in `.env` (most often password mismatch on lines 8/9, or malformed `ANTHROPIC_API_KEY`) | `sudo docker logs t3claw-t3claw-1` and read the first 30 lines. |
+| Agent container restart-loops | Bad value in env (most often password mismatch on lines 8/9, or malformed `ANTHROPIC_API_KEY`) | `sudo docker logs t3claw-t3claw-1` and read the first 30 lines. Fix by adding a corrected secret version: `gcloud secrets versions add t3claw-staging-env --data-file=fixed.env` then `sudo systemctl restart t3claw`. |
 | HTTPS endpoint returns cert error | Google-managed cert hasn't provisioned yet | Wait. `gcloud compute ssl-certificates describe t3claw-cert ...` — wait for `managed.status: ACTIVE`. |
-| Docker build is slow on every script run | `Dockerfile.worker` uses `COPY . .`, so any repo edit busts the cache | Use `SKIP_BUILD=1` when iterating on infrastructure rather than code. |
+| Docker build is slow on every script run | `gcp-provision.sh` builds the agent (cargo-chef cached) and the sidecar (Node, fast). Use `SKIP_BUILD=1` when iterating on infrastructure rather than code. |
 | `gcloud compute scp ... ERROR: ... Permission denied` on first run | Stale `~/.ssh/google_compute_engine` from a previous account | `rm ~/.ssh/google_compute_engine*` and retry — gcloud will regenerate. |

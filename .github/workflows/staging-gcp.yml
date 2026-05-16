@@ -1,0 +1,125 @@
+name: Deploy to GCP Staging
+
+on:
+  push:
+    branches: [staging]
+
+concurrency:
+  group: deploy-gcp-staging
+  cancel-in-progress: true
+
+jobs:
+  build-agent:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # required for Workload Identity Federation
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and push agent image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: Dockerfile
+          target: runtime-staging   # includes pre-built WASM extensions
+          platforms: linux/amd64
+          push: true
+          tags: |
+            us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/agent:latest
+            us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/agent:${{ github.sha }}
+          cache-from: type=gha,scope=agent
+          cache-to: type=gha,mode=max,scope=agent
+
+  build-sidecar:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and push sidecar image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: docker/t3n-mcp-sidecar.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/t3n-mcp-sidecar:latest
+            us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/t3n-mcp-sidecar:${{ github.sha }}
+          secrets: |
+            npm_github_token=${{ secrets.NPM_GITHUB_TOKEN }}
+          cache-from: type=gha,scope=sidecar
+          cache-to: type=gha,mode=max,scope=sidecar
+
+  deploy:
+    needs: [build-agent, build-sidecar]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+
+    steps:
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+
+      - name: Rolling update on VM
+        # Runs compose pull + up directly, not via systemctl restart.
+        # This is intentional: image-only updates don't need a full service
+        # restart and avoid the ExecStartPre Secret Manager fetch on every deploy.
+        #
+        # Secret-only updates (new t3claw-staging-env version) are NOT picked up
+        # by this path. To reload secrets, SSH in and run:
+        #   sudo systemctl restart t3claw
+        run: |
+          gcloud compute ssh t3claw-staging \
+            --zone=asia-southeast1-a \
+            --project=gen-lang-client-0263867259 \
+            --tunnel-through-iap \
+            --ssh-key-expire-after=10m \
+            --quiet \
+            -- 'sudo bash -c "cd /opt/t3claw && docker compose --profile app pull && docker compose --profile app up -d"'
+
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fsS https://t3claw.agent.staging.gc.terminal3.io/api/health; then
+              echo
+              exit 0
+            fi
+            echo "Attempt $i/10 — waiting 10 s..."
+            sleep 10
+          done
+          echo "Health check failed after 100 s"
+          exit 1

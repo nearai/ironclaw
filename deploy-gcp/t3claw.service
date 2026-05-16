@@ -8,7 +8,11 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/opt/t3claw
 
-# Pull latest images before starting so every restart picks up a new push.
+# Fetch latest .env from Secret Manager before doing anything else.
+# The VM service account (t3claw-vm) must have roles/secretmanager.secretAccessor.
+ExecStartPre=/bin/bash -c 'gcloud secrets versions access latest --secret=t3claw-staging-env --project=gen-lang-client-0263867259 > /opt/t3claw/.env && chmod 600 /opt/t3claw/.env'
+
+# Pull latest images so every restart picks up a new push.
 ExecStartPre=/usr/bin/docker compose --profile app pull
 
 # Start all services defined in docker-compose.yml (postgres, t3claw, t3n-mcp-sidecar).

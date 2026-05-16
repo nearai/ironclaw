@@ -119,6 +119,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/t3claw
+ExecStartPre=/bin/bash -c 'gcloud secrets versions access latest --secret=t3claw-staging-env --project=gen-lang-client-0263867259 > /opt/t3claw/.env && chmod 600 /opt/t3claw/.env'
 ExecStartPre=/usr/bin/docker compose --profile app pull
 ExecStart=/usr/bin/docker compose --profile app up --remove-orphans
 ExecStop=/usr/bin/docker compose --profile app down
@@ -166,5 +167,5 @@ docker pull "${IMAGE_PREFIX}/t3n-mcp-sidecar:latest"
 
 echo ""
 echo "==> Bootstrap complete."
-echo "    Create /opt/t3claw/.env then run:"
+echo "    Ensure the 't3claw-staging-env' Secret Manager secret has a version, then run:"
 echo "      systemctl enable t3claw && systemctl start t3claw"
