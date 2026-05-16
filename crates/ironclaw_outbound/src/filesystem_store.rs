@@ -22,7 +22,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
-use ironclaw_filesystem::{CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem};
+use ironclaw_filesystem::{
+    CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem, VersionedEntry,
+};
 use ironclaw_host_api::{ThreadId, VirtualPath};
 use ironclaw_turns::{TurnActor, TurnScope};
 use serde::Serialize;
@@ -38,6 +40,14 @@ use crate::{
     OutboundDeliveryId, OutboundError, OutboundStateStore, ProjectionSubscriptionId,
     ProjectionSubscriptionRecord, ThreadNotificationPolicy, UpdateDeliveryStatusRequest,
 };
+
+/// Maximum number of compare-and-swap retries on a read-then-write path
+/// before surfacing the conflict as a permanent backend failure. Sized to
+/// absorb a small burst of concurrent writers without spinning indefinitely;
+/// progression invariants (e.g. cursor must not move backwards) are
+/// re-validated on every iteration so a regression breaks the loop early
+/// rather than ricocheting between racing writers.
+const MAX_CAS_RETRIES: usize = 5;
 
 /// Filesystem-backed outbound store. Construct with any
 /// [`RootFilesystem`] implementation (libSQL, Postgres, in-memory, …) — the
@@ -61,26 +71,40 @@ where
         &self,
         path: &VirtualPath,
         value: &T,
+        cas: CasExpectation,
     ) -> Result<(), OutboundError> {
         let body = serde_json::to_vec(value).map_err(|_| OutboundError::Serialization)?;
         let entry = Entry::bytes(body).with_content_type(ContentType::json());
         self.filesystem
-            .put(path, entry, CasExpectation::Any)
+            .put(path, entry, cas)
             .await
             .map(|_| ())
             .map_err(map_fs_error)
+    }
+
+    /// Read the current versioned entry at `path` and decode its body as `T`.
+    /// Returns the parsed value alongside the version token that can be passed
+    /// back as [`CasExpectation::Version`] to detect concurrent writers.
+    async fn get_versioned_json<T: for<'de> serde::Deserialize<'de>>(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<(T, VersionedEntry)>, OutboundError> {
+        let Some(versioned) = self.filesystem.get(path).await.map_err(map_fs_error)? else {
+            return Ok(None);
+        };
+        let parsed = serde_json::from_slice(&versioned.entry.body)
+            .map_err(|_| OutboundError::Serialization)?;
+        Ok(Some((parsed, versioned)))
     }
 
     async fn get_json<T: for<'de> serde::Deserialize<'de>>(
         &self,
         path: &VirtualPath,
     ) -> Result<Option<T>, OutboundError> {
-        let Some(versioned) = self.filesystem.get(path).await.map_err(map_fs_error)? else {
-            return Ok(None);
-        };
-        let parsed = serde_json::from_slice(&versioned.entry.body)
-            .map_err(|_| OutboundError::Serialization)?;
-        Ok(Some(parsed))
+        Ok(self
+            .get_versioned_json::<T>(path)
+            .await?
+            .map(|(value, _)| value))
     }
 }
 
@@ -95,7 +119,11 @@ where
     ) -> Result<(), OutboundError> {
         validate_policy(&policy)?;
         let path = policy_path(&policy.scope)?;
-        self.put_json(&path, &policy).await
+        // Notification policy puts are blind overwrites — the caller owns the
+        // full policy and there is no read-then-write progression invariant to
+        // protect. `CasExpectation::Any` is correct here; the read-then-write
+        // paths below carry their own version expectations (audit finding F1).
+        self.put_json(&path, &policy, CasExpectation::Any).await
     }
 
     async fn load_thread_notification_policy(
@@ -120,10 +148,32 @@ where
             &record.scope,
             &record.thread_id,
         )?;
-        if let Some(existing) = self.get_json::<ProjectionSubscriptionRecord>(&path).await? {
-            validate_subscription_identity(&existing, &record)?;
+        // CAS retry loop (audit finding F1): a concurrent writer could insert
+        // or update the same subscription record between our read and put,
+        // racing the "cursor must not move backwards" check. Re-read on
+        // version mismatch and re-validate identity + progression on every
+        // attempt so a regressing cursor breaks the loop rather than letting
+        // a later writer overwrite it.
+        for _ in 0..MAX_CAS_RETRIES {
+            let (cas, existing) = match self
+                .get_versioned_json::<ProjectionSubscriptionRecord>(&path)
+                .await?
+            {
+                Some((existing, versioned)) => {
+                    (CasExpectation::Version(versioned.version), Some(existing))
+                }
+                None => (CasExpectation::Absent, None),
+            };
+            if let Some(existing) = existing.as_ref() {
+                validate_subscription_identity(existing, &record)?;
+            }
+            match self.put_json(&path, &record, cas).await {
+                Ok(()) => return Ok(()),
+                Err(OutboundError::CasConflict) => continue,
+                Err(error) => return Err(error),
+            }
         }
-        self.put_json(&path, &record).await
+        Err(OutboundError::Backend)
     }
 
     async fn load_subscription_cursor(
@@ -153,12 +203,33 @@ where
             &request.cursor.scope,
             &request.thread_id,
         )?;
-        let Some(mut record) = self.get_json::<ProjectionSubscriptionRecord>(&path).await? else {
-            return Err(OutboundError::SubscriptionScopeMismatch);
-        };
-        validate_advance_request(&record, &request)?;
-        record.cursor = Some(request.cursor);
-        self.put_json(&path, &record).await
+        // CAS retry loop (audit finding F1): the audit specifically calls
+        // this out as the load-bearing site for the "cursor must not move
+        // backwards" invariant. On every retry we re-read the existing
+        // record and re-run `validate_advance_request`, which re-checks
+        // progression against the current persisted cursor. If a racing
+        // writer already advanced the cursor past `request.cursor.runtime`,
+        // the second-pass validation surfaces `InvalidRequest` rather than
+        // silently overwriting forward progress with stale state.
+        for _ in 0..MAX_CAS_RETRIES {
+            let Some((mut record, versioned)) = self
+                .get_versioned_json::<ProjectionSubscriptionRecord>(&path)
+                .await?
+            else {
+                return Err(OutboundError::SubscriptionScopeMismatch);
+            };
+            validate_advance_request(&record, &request)?;
+            record.cursor = Some(request.cursor.clone());
+            match self
+                .put_json(&path, &record, CasExpectation::Version(versioned.version))
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(OutboundError::CasConflict) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(OutboundError::Backend)
     }
 
     async fn record_delivery_attempt(
@@ -167,11 +238,25 @@ where
     ) -> Result<(), OutboundError> {
         validate_delivery_attempt(&attempt)?;
         let path = delivery_path(&attempt.delivery_id)?;
-        if let Some(existing) = self.get_json::<OutboundDeliveryAttempt>(&path).await? {
-            validate_delivery_identity(&existing, &attempt)?;
-            return Ok(());
+        // CAS retry loop (audit finding F1): two concurrent writers racing the
+        // same `delivery_id` (e.g. an at-least-once orchestrator retry firing
+        // twice) must not both succeed at the first-write branch. We use
+        // `CasExpectation::Absent` for the initial insert so the second
+        // writer's put fails with `CasConflict`; the loop then re-reads and
+        // falls into the identity-validate branch, which treats a matching
+        // existing record as a duplicate-OK no-op.
+        for _ in 0..MAX_CAS_RETRIES {
+            if let Some(existing) = self.get_json::<OutboundDeliveryAttempt>(&path).await? {
+                validate_delivery_identity(&existing, &attempt)?;
+                return Ok(());
+            }
+            match self.put_json(&path, &attempt, CasExpectation::Absent).await {
+                Ok(()) => return Ok(()),
+                Err(OutboundError::CasConflict) => continue,
+                Err(error) => return Err(error),
+            }
         }
-        self.put_json(&path, &attempt).await
+        Err(OutboundError::Backend)
     }
 
     async fn update_delivery_status(
@@ -180,15 +265,33 @@ where
     ) -> Result<(), OutboundError> {
         validate_delivery_status_request(&request)?;
         let path = delivery_path(&request.delivery_id)?;
-        let Some(mut attempt) = self.get_json::<OutboundDeliveryAttempt>(&path).await? else {
-            return Err(OutboundError::DeliveryNotFound);
-        };
-        if attempt.scope != request.scope {
-            return Err(OutboundError::SubscriptionScopeMismatch);
+        // CAS retry loop (audit finding F1): two concurrent status writes
+        // (e.g. delivered + failed firing simultaneously after a retry) race
+        // the read-modify-write. Re-read on version mismatch so the second
+        // writer sees the first writer's state instead of clobbering it with
+        // stale fields.
+        for _ in 0..MAX_CAS_RETRIES {
+            let Some((mut attempt, versioned)) = self
+                .get_versioned_json::<OutboundDeliveryAttempt>(&path)
+                .await?
+            else {
+                return Err(OutboundError::DeliveryNotFound);
+            };
+            if attempt.scope != request.scope {
+                return Err(OutboundError::SubscriptionScopeMismatch);
+            }
+            attempt.status = request.status;
+            attempt.failure_kind = request.failure_kind;
+            match self
+                .put_json(&path, &attempt, CasExpectation::Version(versioned.version))
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(OutboundError::CasConflict) => continue,
+                Err(error) => return Err(error),
+            }
         }
-        attempt.status = request.status;
-        attempt.failure_kind = request.failure_kind;
-        self.put_json(&path, &attempt).await
+        Err(OutboundError::Backend)
     }
 
     async fn list_delivery_attempts(
