@@ -1680,6 +1680,53 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    async fn postgres_fts_index_predicate_is_scoped_to_declaring_prefix() {
+        // Audit finding F4: the Postgres GIN FTS index used to be
+        // global over root_filesystem_entries. libsql FTS5 vtables are
+        // declared per-mount-prefix, so cross-backend parity required a
+        // partial index gated on `path LIKE '<prefix>/%' OR path =
+        // '<prefix>'`. Verify the DDL emits the predicate by reading
+        // it back from pg_indexes.
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let prefix_path = VirtualPath::new(&prefix).unwrap();
+        let content = IndexKey::new("content").unwrap();
+        let spec = IndexSpec::new(
+            IndexName::new("by_content_scoped").unwrap(),
+            vec![content.clone()],
+            IndexKind::Fts,
+        );
+        fs.ensure_index(&prefix_path, &spec).await.unwrap();
+
+        // Use a fresh client; we don't have direct access to the pool
+        // through `fs`, so re-derive it from the same env vars.
+        let pool = postgres_pool().await.expect("pool available");
+        let client = pool.get().await.unwrap();
+        let row = client
+            .query_one(
+                "SELECT indexdef FROM pg_indexes \
+                 WHERE schemaname = current_schema() \
+                   AND tablename = 'root_filesystem_entries' \
+                   AND indexname LIKE 'idx_rfs_%' \
+                 ORDER BY indexname DESC LIMIT 1",
+                &[],
+            )
+            .await
+            .expect("at least one rfs index visible");
+        let indexdef: String = row.get("indexdef");
+        assert!(
+            indexdef.contains(prefix.as_str()),
+            "GIN FTS index DDL must include the declaring prefix as a partial-index \
+             predicate, got: {indexdef}"
+        );
+        assert!(
+            indexdef.contains("WHERE") || indexdef.to_lowercase().contains("where"),
+            "GIN FTS index DDL must be a partial index, got: {indexdef}"
+        );
+    }
+
+    #[tokio::test]
     async fn postgres_vector_index_ranks_by_cosine_brute_force() {
         let Some((fs, prefix)) = postgres_root().await else {
             return;

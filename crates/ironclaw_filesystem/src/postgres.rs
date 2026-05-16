@@ -323,9 +323,29 @@ impl RootFilesystem for PostgresRootFilesystem {
                 // indexed JSON projection. Postgres `to_tsvector` returns
                 // `tsvector`, which GIN indexes natively. The matching
                 // predicate at query time uses `@@ plainto_tsquery`.
+                //
+                // Audit finding F4: libsql FTS5 virtual tables are
+                // declared per-mount-prefix (one vtable per
+                // `ensure_index(prefix, ...)`), so a query at one prefix
+                // can't accidentally match indexed rows under a sibling
+                // prefix. The Postgres GIN index, by contrast, used to
+                // be global over `root_filesystem_entries` regardless of
+                // which prefix declared it — fine for correctness (the
+                // query path still scopes by `path LIKE prefix/%`) but
+                // it breaks parity in two ways: a search at `/memory/a`
+                // would have its planner consider postings from
+                // `/memory/b` before filtering, and `DROP INDEX` for a
+                // prefix-scoped tear-down would impact other prefixes.
+                // Make the index a partial index gated by the prefix to
+                // restore parity.
+                let prefix_pattern =
+                    escape_like_with_trailing_wildcard(&format!("{}/%", path.as_str()));
+                let prefix_literal = prefix_pattern.replace('\'', "''");
                 let ddl = format!(
                     "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries \
-                     USING GIN (to_tsvector('english', COALESCE(indexed->>'{fts_key}', '')))"
+                     USING GIN (to_tsvector('english', COALESCE(indexed->>'{fts_key}', ''))) \
+                     WHERE path = '{path_literal}' OR path LIKE '{prefix_literal}' ESCAPE '!'",
+                    path_literal = path.as_str().replace('\'', "''"),
                 );
                 client.batch_execute(&ddl).await.map_err(|error| {
                     db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
