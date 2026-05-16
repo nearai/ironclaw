@@ -578,3 +578,56 @@ fn broker_session(
         })
         .unwrap()
 }
+
+// ---------------------------------------------------------------------------
+// F1 — consume_if_matches uses constant-time comparison
+// ---------------------------------------------------------------------------
+//
+// We cannot reliably prove constant-time-ness from a timing measurement on a
+// shared CI runner, but we *can* lock in that the production source uses
+// `subtle::ConstantTimeEq::ct_eq` rather than `!=` for the
+// decrypted-plaintext comparison in `consume_if_matches`. A future regression
+// that "simplifies" the comparison back to
+// `decrypted.expose() != expected_value` re-opens the timing oracle described
+// in F1 of the 2026-05 audit; this test forces such a change to also update
+// the allowlisted source files, making the security regression visible in
+// review.
+//
+// See `crates/ironclaw_secrets/src/legacy_store.rs::consume_if_matches` and
+// `crates/ironclaw_secrets/src/db.rs::consume_if_matches` (libSQL + Postgres).
+
+#[test]
+fn f1_consume_if_matches_uses_constant_time_compare() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let sources = [
+        ("legacy_store.rs", "src/legacy_store.rs"),
+        ("db.rs", "src/db.rs"),
+    ];
+    for (label, relative) in sources {
+        let path = std::path::Path::new(manifest_dir).join(relative);
+        let body = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!("F1: failed to read {label} at {path:?}: {error}");
+        });
+        assert!(
+            body.contains("use subtle::ConstantTimeEq;"),
+            "F1: {label} must import `subtle::ConstantTimeEq` so the production \
+             consume_if_matches path can perform constant-time comparison. A \
+             non-constant-time `!=` re-opens the timing oracle described in the \
+             2026-05 audit (F1, HIGH)."
+        );
+        assert!(
+            body.contains("ConstantTimeEq::ct_eq"),
+            "F1: {label} must call `ConstantTimeEq::ct_eq(..)` on the decrypted \
+             plaintext. Reverting to `decrypted.expose() != expected_value` \
+             short-circuits on the first differing byte and lets a network-side \
+             adversary recover the secret byte-by-byte via response-latency \
+             measurement."
+        );
+        assert!(
+            !body.contains("decrypted.expose() != expected_value"),
+            "F1: {label} still contains a non-constant-time \
+             `decrypted.expose() != expected_value` comparison. Use \
+             `ConstantTimeEq::ct_eq` instead."
+        );
+    }
+}

@@ -14,6 +14,7 @@ use ironclaw_host_api::{
 };
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 const CREDENTIAL_ACCOUNTS_FOR_SCOPE_LIMIT: usize = 1000;
@@ -1270,7 +1271,15 @@ impl SecretsStore for LibSqlSecretsStore {
             let decrypted = self
                 .crypto
                 .decrypt(&secret.encrypted_value, &secret.key_salt, &aad)?;
-            if decrypted.expose() != expected_value {
+            // Constant-time comparison — see F1 (HIGH, timing oracle) in the
+            // 2026-05 audit. AES-GCM authenticated decrypt closes the ciphertext
+            // oracle, but a byte-wise `!=` over the decrypted plaintext would
+            // short-circuit on the first differing byte and leak the secret
+            // through measurable response-latency variance.
+            let matches: bool =
+                ConstantTimeEq::ct_eq(decrypted.expose().as_bytes(), expected_value.as_bytes())
+                    .into();
+            if !matches {
                 return Ok(SecretConsumeResult::Mismatched);
             }
             libsql_delete_secret(&conn, user_id, &name).await?;
@@ -1428,7 +1437,15 @@ impl SecretsStore for PostgresSecretsStore {
             let decrypted = self
                 .crypto
                 .decrypt(&secret.encrypted_value, &secret.key_salt, &aad)?;
-            if decrypted.expose() != expected_value {
+            // Constant-time comparison — see F1 (HIGH, timing oracle) in the
+            // 2026-05 audit. AES-GCM authenticated decrypt closes the ciphertext
+            // oracle, but a byte-wise `!=` over the decrypted plaintext would
+            // short-circuit on the first differing byte and leak the secret
+            // through measurable response-latency variance.
+            let matches: bool =
+                ConstantTimeEq::ct_eq(decrypted.expose().as_bytes(), expected_value.as_bytes())
+                    .into();
+            if !matches {
                 return Ok(SecretConsumeResult::Mismatched);
             }
             postgres_delete_secret(&transaction, user_id, &name).await?;

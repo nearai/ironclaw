@@ -23,6 +23,7 @@ secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "sync"] }
 tokio-postgres = { version = "0.7", optional = true }
