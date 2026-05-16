@@ -4003,7 +4003,6 @@ dependencies = [
  "insta",
  "ironclaw_common",
  "ironclaw_engine",
- "ironclaw_filesystem",
  "ironclaw_gateway",
  "ironclaw_host_api",
  "ironclaw_llm",

@@ -25,27 +25,6 @@ pub mod libsql;
 pub mod libsql_migrations;
 
 pub mod cached_settings;
-pub mod filesystem_conversations;
-pub mod filesystem_jobs;
-
-pub mod filesystem_routines;
-pub mod filesystem_sandbox;
-pub mod filesystem_tool_failures;
-
-// Filesystem-backed facades over `ironclaw_filesystem::RootFilesystem`.
-// These are the forward-looking implementations of the sub-traits under the
-// kernel-storage rework (see `docs/reborn/2026-05-14-universal-fs-dispatch.md`).
-// They mirror the canonical migration shape from
-// `crates/ironclaw_secrets/src/filesystem_store.rs` and
-// `crates/ironclaw_authorization/src/lib.rs`. They do not replace the
-// libSQL/Postgres backends yet — both surfaces coexist during the consumer
-// migration window. New code should construct these directly over a shared
-// `RootFilesystem`.
-pub mod filesystem_identities;
-pub mod filesystem_pairing;
-pub mod filesystem_settings;
-pub mod filesystem_users;
-pub mod filesystem_workspace;
 
 use std::collections::HashMap;
 use std::sync::Arc;
