@@ -134,7 +134,13 @@ async fn approving_pending_dispatch_request_preserves_reviewed_grant_constraints
 }
 
 #[tokio::test]
-async fn approving_pending_request_keeps_pending_when_lease_issue_fails() {
+async fn approving_pending_request_marks_request_approved_even_when_lease_issue_fails() {
+    // F2 semantics: the approval record is the authority of record. Once
+    // it flips to `Approved`, lease issuance is a recoverable operation
+    // against an already-decided request. If lease issuance fails, the
+    // request must stay `Approved` (not roll back to `Pending`) so that
+    // the system can surface the error to the caller and re-attempt
+    // lease issuance later.
     let approvals = InMemoryApprovalRequestStore::new();
     let leases = FailingIssueLeaseStore;
     let resolver = ApprovalResolver::new(&approvals, &leases);
@@ -176,12 +182,15 @@ async fn approving_pending_request_keeps_pending_when_lease_issue_fails() {
             .unwrap()
             .unwrap()
             .status,
-        ApprovalStatus::Pending
+        ApprovalStatus::Approved
     );
 }
 
 #[tokio::test]
-async fn approving_pending_request_revokes_issued_lease_when_approval_update_fails() {
+async fn approving_pending_request_issues_no_lease_when_approval_update_fails() {
+    // F2 semantics: with persist-approval-first ordering, a store error
+    // on the approval write must short-circuit before any lease is
+    // issued. There is no orphaned lease to revoke.
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id, CapabilityId::new("echo.say").unwrap());
@@ -215,13 +224,15 @@ async fn approving_pending_request_revokes_issued_lease_when_approval_update_fai
         .unwrap_err();
 
     assert!(matches!(err, ApprovalResolutionError::RunState(_)));
-    let issued = leases.leases_for_scope(&scope).await;
-    assert_eq!(issued.len(), 1);
-    assert_eq!(issued[0].status, CapabilityLeaseStatus::Revoked);
+    assert_eq!(leases.leases_for_scope(&scope).await, Vec::new());
 }
 
 #[tokio::test]
-async fn approving_pending_request_revokes_issued_lease_when_status_was_resolved_concurrently() {
+async fn approving_pending_request_issues_no_lease_when_status_was_resolved_concurrently() {
+    // F2 semantics: when a concurrent resolver has already flipped the
+    // status off `Pending`, the lease store must remain empty — the
+    // approval write fails first under persist-approval-first ordering,
+    // so no lease is ever created.
     let invocation_id = InvocationId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
     let approval = approval_request(invocation_id, CapabilityId::new("echo.say").unwrap());
@@ -261,9 +272,7 @@ async fn approving_pending_request_revokes_issued_lease_when_status_was_resolved
             status: ApprovalStatus::Denied
         }
     ));
-    let issued = leases.leases_for_scope(&scope).await;
-    assert_eq!(issued.len(), 1);
-    assert_eq!(issued[0].status, CapabilityLeaseStatus::Revoked);
+    assert_eq!(leases.leases_for_scope(&scope).await, Vec::new());
 }
 
 #[tokio::test]

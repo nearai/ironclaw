@@ -86,7 +86,8 @@ where
         }
 
         let capability = capability_for_action(record.request.action.as_ref(), expected_action)
-            .ok_or(ApprovalResolutionError::UnsupportedAction)?;
+            .ok_or(ApprovalResolutionError::UnsupportedAction)?
+            .clone();
 
         let invocation_fingerprint = record
             .request
@@ -94,10 +95,27 @@ where
             .clone()
             .ok_or(ApprovalResolutionError::MissingInvocationFingerprint)?;
         let resolved_by = approval.issued_by.clone();
+
+        // F2: persist the approval state *before* issuing the lease. The
+        // approval record is the authority of record — once it flips to
+        // `Approved`, any subsequent lease re-issue is a recoverable
+        // operation against an already-decided request. The previous
+        // order (issue lease, then approve, best-effort revoke on
+        // failure) left a window where a transient store error could
+        // produce a live lease whose approval status was still
+        // `Pending`. See audit finding F2.
+        let approved_record = match self.approvals.approve(scope, request_id).await {
+            Ok(record) => record,
+            Err(RunStateError::ApprovalNotPending { status, .. }) => {
+                return Err(ApprovalResolutionError::NotPending { status });
+            }
+            Err(error) => return Err(error.into()),
+        };
+
         let grant = CapabilityGrant {
             id: CapabilityGrantId::new(),
-            capability: capability.clone(),
-            grantee: record.request.requested_by.clone(),
+            capability,
+            grantee: approved_record.request.requested_by.clone(),
             issued_by: approval.issued_by,
             constraints: GrantConstraints {
                 allowed_effects: approval.allowed_effects,
@@ -109,21 +127,12 @@ where
                 max_invocations: approval.max_invocations,
             },
         };
-        let mut lease = CapabilityLease::new(record.scope.clone(), grant);
+        let mut lease = CapabilityLease::new(approved_record.scope.clone(), grant);
         lease.invocation_fingerprint = Some(invocation_fingerprint);
         let lease = self.leases.issue(lease).await?;
-        if let Err(error) = self.approvals.approve(scope, request_id).await {
-            let _ = self.leases.revoke(&lease.scope, lease.grant.id).await;
-            return match error {
-                RunStateError::ApprovalNotPending { status, .. } => {
-                    Err(ApprovalResolutionError::NotPending { status })
-                }
-                error => Err(error.into()),
-            };
-        }
         self.emit_audit_best_effort(ironclaw_host_api::AuditEnvelope::approval_resolved(
-            &record.scope,
-            &record.request,
+            &approved_record.scope,
+            &approved_record.request,
             resolved_by,
             ApprovalDecisionKind::Approved,
         ))
