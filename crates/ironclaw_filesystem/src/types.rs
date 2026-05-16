@@ -420,8 +420,21 @@ impl BackendCapabilities {
         Capability::all().iter().copied().filter(|c| self.has(*c))
     }
 
-    /// Convenience: read + write + list + stat + delete + records + query
-    /// + IndexExact + IndexPrefix + CAS — the typical SQL backend shape.
+    /// Convenience: the **minimum** SQL backend shape — read, write,
+    /// append, list, stat, delete, records, query, IndexExact,
+    /// IndexPrefix, and CAS transactions.
+    ///
+    /// Audit finding F7: this constructor deliberately omits
+    /// [`Capability::IndexFts`] and [`Capability::IndexVector`]. A SQL
+    /// backend that advertises *only* `sql_typical()` claims it does
+    /// **not** serve FTS or vector indexes — mount-time validation will
+    /// refuse to attach it to a descriptor that demands either. The
+    /// two real backends in this crate (libsql + postgres) layer
+    /// `IndexFts` and `IndexVector` on top of this base via
+    /// [`Self::with`] / [`Self::sql_typical_full`]. New hand-rolled SQL
+    /// backends should pick the variant that matches what they
+    /// genuinely implement; advertising less than you serve is harmless,
+    /// advertising more is a mount-time false-positive.
     pub const fn sql_typical() -> Self {
         Self::empty()
             .with(Capability::Read)
@@ -435,6 +448,16 @@ impl BackendCapabilities {
             .with(Capability::IndexExact)
             .with(Capability::IndexPrefix)
             .with_txn(TxnCapability::Cas)
+    }
+
+    /// Convenience: [`Self::sql_typical`] **plus** Events + IndexFts +
+    /// IndexVector — the shape the libsql and postgres backends in this
+    /// crate actually advertise.
+    pub const fn sql_typical_full() -> Self {
+        Self::sql_typical()
+            .with(Capability::Events)
+            .with(Capability::IndexFts)
+            .with(Capability::IndexVector)
     }
 
     /// Convenience: every capability the in-memory reference backend

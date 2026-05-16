@@ -1,4 +1,4 @@
-//! Index and query primitives for the universal `StorageBackend` surface.
+//! Index and query primitives for the universal `RootFilesystem` surface.
 //!
 //! Stores declare indexes once with [`IndexSpec`], then query with [`Filter`].
 //! Backends translate to native machinery (Postgres `CREATE INDEX`, libSQL
@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 #[serde(try_from = "String")]
 pub struct IndexName(String);
 
-/// Key of an indexed field within a [`Record`](crate::Record).
+/// Key of an indexed field within an [`Entry`](crate::Entry).
 ///
 /// Same shape and validation rules as [`IndexName`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -51,7 +51,18 @@ pub(crate) fn validate_simple_identifier(kind: &'static str, s: &str) -> Result<
     //   Restrict to `[A-Za-z_][A-Za-z0-9_]*` so the same value is safe as a
     //   JSON path component, a SQL identifier, and a row key.
     let bytes = s.as_bytes();
-    let first = bytes[0];
+    // Audit finding F8: `bytes[0]` is safe here because the
+    // `s.is_empty()` check above rules out a zero-length slice, but
+    // indexing-by-position is fragile to refactors that reorder the
+    // emptiness guard. `bytes.first()` makes the dependency explicit
+    // and removes the panic path entirely.
+    let Some(&first) = bytes.first() else {
+        return Err(HostApiError::InvalidId {
+            kind,
+            value: s.to_string(),
+            reason: "must not be empty".to_string(),
+        });
+    };
     if !(first.is_ascii_alphabetic() || first == b'_') {
         return Err(HostApiError::InvalidId {
             kind,
@@ -167,7 +178,7 @@ impl From<IndexKey> for String {
     }
 }
 
-/// Typed value projected into the indexed map of a [`Record`](crate::Record).
+/// Typed value projected into the indexed map of an [`Entry`](crate::Entry).
 ///
 /// Variants are intentionally narrow — backends translate to their native
 /// column type. New variants require coordinated backend updates and a wire
@@ -209,6 +220,16 @@ pub enum IndexKind {
     /// Equality lookup on the indexed key(s).
     Exact,
     /// Prefix lookup on a text key (e.g. `scope LIKE 'tenant:acme/%'`).
+    ///
+    /// **Type constraint** (audit finding F3): `IndexKind::Prefix` is only
+    /// meaningful against [`IndexValue::Text`] values. Backends accept this
+    /// kind at `ensure_index` time without inspecting future
+    /// [`IndexValue`] variants — but [`Filter::PrefixOn`] rejects every
+    /// non-text variant at query time with
+    /// [`FilesystemError::Unsupported`](crate::FilesystemError::Unsupported).
+    /// Consumers that declare `IndexKind::Prefix` on a numeric or boolean
+    /// projection will silently get an unused index and a query-time
+    /// failure; declare `IndexKind::Exact` instead.
     Prefix,
     /// Full-text search on a text key. Backends translate to `fts5` /
     /// `tsvector` / equivalent.
@@ -295,8 +316,8 @@ pub enum Filter {
     Or(Vec<Filter>),
 }
 
-/// Pagination cursor for [`list`](crate::StorageBackend::list) and
-/// [`query`](crate::StorageBackend::query).
+/// Pagination cursor for [`list_dir`](crate::RootFilesystem::list_dir) and
+/// [`query`](crate::RootFilesystem::query).
 ///
 /// `offset` is 0-based; `limit` is bounded by [`Page::MAX_LIMIT`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
