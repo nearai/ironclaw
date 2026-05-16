@@ -18,10 +18,11 @@ handling, gate routing, mission routing, and redacted acknowledgements.
 | `ConversationBindingService` | Resolves external adapter refs → canonical Reborn identifiers |
 | `IdempotencyLedger` | Durable action deduplication port |
 | `ProductInboundAction` | Durable ledger record for inbound actions |
+| `RebornServicesApi` / `RebornServices` | Native WebChat v2 facade — stable surface beta WebUI route handlers consume in place of reaching into turn coordination, thread stores, runtime lanes, dispatchers, or capability hosts. Enforces caller ownership of the thread before any turn mutation; rejects stale or attacker-supplied `gate_ref` on denied/cancelled gate resolutions; refuses persistent (`always: true`) approvals until an approval-policy port lands |
 
 ## Dependencies
 
-- `ironclaw_product_adapters` — trait definitions, envelope/ack types
+- `ironclaw_product_adapters` — trait definitions, envelope/ack types, `ProjectionStream` for SSE
 - `ironclaw_turns` — turn coordinator, scope, IDs
 - `ironclaw_threads` — session thread service contract
 - `ironclaw_host_api` — canonical identifiers (TenantId, UserId, etc.)
