@@ -130,12 +130,12 @@ where
         let mut lease = CapabilityLease::new(approved_record.scope.clone(), grant);
         lease.invocation_fingerprint = Some(invocation_fingerprint);
         let lease = self.leases.issue(lease).await?;
-        self.emit_audit_best_effort(ironclaw_host_api::AuditEnvelope::approval_resolved(
+        self.emit_approval_resolved(
             &approved_record.scope,
             &approved_record.request,
             resolved_by,
             ApprovalDecisionKind::Approved,
-        ))
+        )
         .await;
         Ok(lease)
     }
@@ -164,14 +164,34 @@ where
             }
             Err(error) => return Err(error.into()),
         };
-        self.emit_audit_best_effort(ironclaw_host_api::AuditEnvelope::approval_resolved(
+        self.emit_approval_resolved(
             &denied.scope,
             &denied.request,
             denial.denied_by,
             ApprovalDecisionKind::Denied,
-        ))
+        )
         .await;
         Ok(denied)
+    }
+
+    /// Single emission path for approval-resolution audit events. Both
+    /// `approve_*` and `deny` go through this so the audit envelope's
+    /// scope/request/decision shape cannot diverge between resolution
+    /// kinds. See audit finding F3.
+    async fn emit_approval_resolved(
+        &self,
+        scope: &ResourceScope,
+        request: &ironclaw_host_api::ApprovalRequest,
+        resolved_by: Principal,
+        decision: ApprovalDecisionKind,
+    ) {
+        self.emit_audit_best_effort(ironclaw_host_api::AuditEnvelope::approval_resolved(
+            scope,
+            request,
+            resolved_by,
+            decision,
+        ))
+        .await;
     }
 
     async fn emit_audit_best_effort(&self, record: ironclaw_host_api::AuditEnvelope) {
