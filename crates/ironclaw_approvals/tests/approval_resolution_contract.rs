@@ -625,6 +625,100 @@ async fn approving_request_from_other_tenant_fails_closed() {
     assert_eq!(leases.leases_for_scope(&tenant_b).await, Vec::new());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_approve_dispatch_on_same_request_is_first_write_wins() {
+    // F4 caller-level regression coverage: two concurrent
+    // `approve_dispatch` calls against the same `request_id` must
+    // resolve as first-write-wins. The loser sees `ApprovalNotPending`
+    // and the lease store ends up with exactly one lease — never two —
+    // because under F2 ordering the approval write happens before lease
+    // issuance, so a loser approval never reaches the lease store.
+    let approvals = std::sync::Arc::new(InMemoryApprovalRequestStore::new());
+    let leases = std::sync::Arc::new(InMemoryCapabilityLeaseStore::new());
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let approval = approval_request(invocation_id, CapabilityId::new("echo.say").unwrap());
+    let request_id = approval.id;
+    approvals
+        .save_pending(scope.clone(), approval)
+        .await
+        .unwrap();
+
+    let lease_approval = || LeaseApproval {
+        issued_by: Principal::User(scope.user_id.clone()),
+        allowed_effects: vec![EffectKind::DispatchCapability],
+        mounts: Default::default(),
+        network: Default::default(),
+        secrets: Vec::new(),
+        resource_ceiling: None,
+        expires_at: None,
+        max_invocations: Some(1),
+    };
+
+    let approvals_a = approvals.clone();
+    let leases_a = leases.clone();
+    let scope_a = scope.clone();
+    let approval_a = lease_approval();
+    let approvals_b = approvals.clone();
+    let leases_b = leases.clone();
+    let scope_b = scope.clone();
+    let approval_b = lease_approval();
+
+    let first = tokio::spawn(async move {
+        let resolver = ApprovalResolver::new(approvals_a.as_ref(), leases_a.as_ref());
+        resolver
+            .approve_dispatch(&scope_a, request_id, approval_a)
+            .await
+    });
+    let second = tokio::spawn(async move {
+        let resolver = ApprovalResolver::new(approvals_b.as_ref(), leases_b.as_ref());
+        resolver
+            .approve_dispatch(&scope_b, request_id, approval_b)
+            .await
+    });
+
+    let (first_result, second_result) = tokio::join!(first, second);
+    let outcomes = [first_result.unwrap(), second_result.unwrap()];
+
+    let winners = outcomes.iter().filter(|outcome| outcome.is_ok()).count();
+    let losers = outcomes
+        .iter()
+        .filter(|outcome| {
+            matches!(
+                outcome,
+                Err(ApprovalResolutionError::NotPending {
+                    status: ApprovalStatus::Approved
+                })
+            )
+        })
+        .count();
+    assert_eq!(
+        winners, 1,
+        "exactly one approve must win first-write-wins; got outcomes {outcomes:?}"
+    );
+    assert_eq!(
+        losers, 1,
+        "the other approve must report NotPending(Approved); got outcomes {outcomes:?}"
+    );
+
+    let issued = leases.leases_for_scope(&scope).await;
+    assert_eq!(
+        issued.len(),
+        1,
+        "first-write-wins must leave exactly one lease in the store; got {issued:?}"
+    );
+    assert_eq!(issued[0].status, CapabilityLeaseStatus::Active);
+    assert_eq!(
+        approvals
+            .get(&scope, request_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ApprovalStatus::Approved
+    );
+}
+
 struct FailingAuditSink;
 
 #[async_trait]
