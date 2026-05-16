@@ -21,7 +21,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem};
+use ironclaw_filesystem::{
+    CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RecordVersion,
+    RootFilesystem,
+};
 use ironclaw_host_api::{
     AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, HostApiError, InvocationId,
     MissionId, ProjectId, ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
@@ -535,6 +538,13 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
     }
 }
 
+/// Bound on the CAS retry loop. Picked deliberately small: in normal
+/// operation the in-process serialization mutex collapses contention to
+/// one writer at a time, and cross-process contention on filesystem mounts
+/// is what audit finding F2 is meant to surface — exhausting retries is
+/// expected to be a backend error, not a routine condition.
+const FILESYSTEM_CAS_RETRIES: usize = 8;
+
 /// Filesystem-backed run-state store under resource-owner-scoped `/engine` paths.
 pub struct FilesystemRunStateStore<'a, F>
 where
@@ -551,14 +561,69 @@ where
         Self { filesystem }
     }
 
-    async fn write_record(&self, record: &RunRecord) -> Result<(), RunStateError> {
-        let path = run_record_path(&record.scope, record.invocation_id)?;
+    fn record_entry(record: &RunRecord) -> Result<Entry, RunStateError> {
         let body = serialize_pretty(record)?;
-        let entry = Entry::bytes(body).with_content_type(ContentType::json());
-        self.filesystem
-            .put(&path, entry, CasExpectation::Any)
-            .await?;
-        Ok(())
+        Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+    }
+
+    async fn read_versioned(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<(RunRecord, RecordVersion)>, RunStateError> {
+        let path = run_record_path(scope, invocation_id)?;
+        let Some(versioned) = self.filesystem.get(&path).await? else {
+            return Ok(None);
+        };
+        let record = deserialize::<RunRecord>(&versioned.entry.body)?;
+        if same_scope_owner(&record.scope, scope) {
+            Ok(Some((record, versioned.version)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Read-modify-write a run record with optimistic CAS and bounded retry.
+    ///
+    /// `mutate` projects the staged record onto its new shape. The loop
+    /// re-reads on `VersionMismatch` (cross-process contention) and on
+    /// `Unsupported` falls back to `CasExpectation::Any` so the byte-only
+    /// `LocalFilesystem` path stays serializable through the in-process
+    /// lock map. (Audit finding F2.)
+    async fn apply_update<M>(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        mut mutate: M,
+    ) -> Result<RunRecord, RunStateError>
+    where
+        M: FnMut(&mut RunRecord),
+    {
+        let path = run_record_path(scope, invocation_id)?;
+        for _ in 0..FILESYSTEM_CAS_RETRIES {
+            let (mut record, version) = self
+                .read_versioned(scope, invocation_id)
+                .await?
+                .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+            mutate(&mut record);
+            let entry = Self::record_entry(&record)?;
+            match put_with_cas(
+                self.filesystem,
+                &path,
+                entry,
+                CasExpectation::Version(version),
+            )
+            .await
+            {
+                Ok(()) => return Ok(record),
+                Err(PutError::VersionMismatch) => continue,
+                Err(PutError::Other(error)) => return Err(error),
+            }
+        }
+        Err(RunStateError::Backend(format!(
+            "filesystem CAS retries exhausted for path {}",
+            path.as_str()
+        )))
     }
 }
 
@@ -571,11 +636,6 @@ where
         let path = run_record_path(&start.scope, start.invocation_id)?;
         let record_lock = filesystem_record_lock(&path);
         let _guard = record_lock.lock().await;
-        if self.get(&start.scope, start.invocation_id).await?.is_some() {
-            return Err(RunStateError::InvocationAlreadyExists {
-                invocation_id: start.invocation_id,
-            });
-        }
         let record = RunRecord {
             invocation_id: start.invocation_id,
             capability_id: start.capability_id,
@@ -584,8 +644,14 @@ where
             approval_request_id: None,
             error_kind: None,
         };
-        self.write_record(&record).await?;
-        Ok(record)
+        let entry = Self::record_entry(&record)?;
+        match put_with_cas(self.filesystem, &path, entry, CasExpectation::Absent).await {
+            Ok(()) => Ok(record),
+            Err(PutError::VersionMismatch) => Err(RunStateError::InvocationAlreadyExists {
+                invocation_id: record.invocation_id,
+            }),
+            Err(PutError::Other(error)) => Err(error),
+        }
     }
 
     async fn block_approval(
@@ -597,15 +663,12 @@ where
         let path = run_record_path(scope, invocation_id)?;
         let record_lock = filesystem_record_lock(&path);
         let _guard = record_lock.lock().await;
-        let mut record = self
-            .get(scope, invocation_id)
-            .await?
-            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
-        record.status = RunStatus::BlockedApproval;
-        record.approval_request_id = Some(approval.id);
-        record.error_kind = None;
-        self.write_record(&record).await?;
-        Ok(record)
+        self.apply_update(scope, invocation_id, |record| {
+            record.status = RunStatus::BlockedApproval;
+            record.approval_request_id = Some(approval.id);
+            record.error_kind = None;
+        })
+        .await
     }
 
     async fn block_auth(
@@ -617,15 +680,12 @@ where
         let path = run_record_path(scope, invocation_id)?;
         let record_lock = filesystem_record_lock(&path);
         let _guard = record_lock.lock().await;
-        let mut record = self
-            .get(scope, invocation_id)
-            .await?
-            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
-        record.status = RunStatus::BlockedAuth;
-        record.approval_request_id = None;
-        record.error_kind = Some(error_kind);
-        self.write_record(&record).await?;
-        Ok(record)
+        self.apply_update(scope, invocation_id, |record| {
+            record.status = RunStatus::BlockedAuth;
+            record.approval_request_id = None;
+            record.error_kind = Some(error_kind.clone());
+        })
+        .await
     }
 
     async fn complete(
@@ -636,15 +696,12 @@ where
         let path = run_record_path(scope, invocation_id)?;
         let record_lock = filesystem_record_lock(&path);
         let _guard = record_lock.lock().await;
-        let mut record = self
-            .get(scope, invocation_id)
-            .await?
-            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
-        record.status = RunStatus::Completed;
-        record.approval_request_id = None;
-        record.error_kind = None;
-        self.write_record(&record).await?;
-        Ok(record)
+        self.apply_update(scope, invocation_id, |record| {
+            record.status = RunStatus::Completed;
+            record.approval_request_id = None;
+            record.error_kind = None;
+        })
+        .await
     }
 
     async fn fail(
@@ -656,15 +713,12 @@ where
         let path = run_record_path(scope, invocation_id)?;
         let record_lock = filesystem_record_lock(&path);
         let _guard = record_lock.lock().await;
-        let mut record = self
-            .get(scope, invocation_id)
-            .await?
-            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
-        record.status = RunStatus::Failed;
-        record.approval_request_id = None;
-        record.error_kind = Some(error_kind);
-        self.write_record(&record).await?;
-        Ok(record)
+        self.apply_update(scope, invocation_id, |record| {
+            record.status = RunStatus::Failed;
+            record.approval_request_id = None;
+            record.error_kind = Some(error_kind.clone());
+        })
+        .await
     }
 
     async fn get(
@@ -672,16 +726,10 @@ where
         scope: &ResourceScope,
         invocation_id: InvocationId,
     ) -> Result<Option<RunRecord>, RunStateError> {
-        let path = run_record_path(scope, invocation_id)?;
-        let Some(versioned) = self.filesystem.get(&path).await? else {
-            return Ok(None);
-        };
-        let record = deserialize::<RunRecord>(&versioned.entry.body)?;
-        if same_scope_owner(&record.scope, scope) {
-            Ok(Some(record))
-        } else {
-            Ok(None)
-        }
+        Ok(self
+            .read_versioned(scope, invocation_id)
+            .await?
+            .map(|(record, _)| record))
     }
 
     async fn records_for_scope(
@@ -727,6 +775,31 @@ where
         Self { filesystem }
     }
 
+    fn record_entry(record: &ApprovalRecord) -> Result<Entry, RunStateError> {
+        let body = serialize_pretty(record)?;
+        Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+    }
+
+    async fn read_versioned(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<Option<(ApprovalRecord, RecordVersion)>, RunStateError> {
+        let path = approval_record_path(scope, request_id)?;
+        let Some(versioned) = self.filesystem.get(&path).await? else {
+            return Ok(None);
+        };
+        let record = deserialize::<ApprovalRecord>(&versioned.entry.body)?;
+        if same_scope_owner(&record.scope, scope) {
+            Ok(Some((record, versioned.version)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Read-modify-write an approval record with optimistic CAS and bounded
+    /// retry. Mirrors `FilesystemRunStateStore::apply_update` — see audit
+    /// finding F2.
     async fn update_status(
         &self,
         scope: &ResourceScope,
@@ -734,31 +807,36 @@ where
         status: ApprovalStatus,
     ) -> Result<ApprovalRecord, RunStateError> {
         let path = approval_record_path(scope, request_id)?;
-        let record_lock = filesystem_record_lock(&path);
-        let _guard = record_lock.lock().await;
-        let mut record = self
-            .get(scope, request_id)
-            .await?
-            .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
-        if record.status != ApprovalStatus::Pending {
-            return Err(RunStateError::ApprovalNotPending {
-                request_id,
-                status: record.status,
-            });
+        for _ in 0..FILESYSTEM_CAS_RETRIES {
+            let (mut record, version) = self
+                .read_versioned(scope, request_id)
+                .await?
+                .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+            if record.status != ApprovalStatus::Pending {
+                return Err(RunStateError::ApprovalNotPending {
+                    request_id,
+                    status: record.status,
+                });
+            }
+            record.status = status;
+            let entry = Self::record_entry(&record)?;
+            match put_with_cas(
+                self.filesystem,
+                &path,
+                entry,
+                CasExpectation::Version(version),
+            )
+            .await
+            {
+                Ok(()) => return Ok(record),
+                Err(PutError::VersionMismatch) => continue,
+                Err(PutError::Other(error)) => return Err(error),
+            }
         }
-        record.status = status;
-        self.write_record(&record).await?;
-        Ok(record)
-    }
-
-    async fn write_record(&self, record: &ApprovalRecord) -> Result<(), RunStateError> {
-        let path = approval_record_path(&record.scope, record.request.id)?;
-        let body = serialize_pretty(record)?;
-        let entry = Entry::bytes(body).with_content_type(ContentType::json());
-        self.filesystem
-            .put(&path, entry, CasExpectation::Any)
-            .await?;
-        Ok(())
+        Err(RunStateError::Backend(format!(
+            "filesystem CAS retries exhausted for path {}",
+            path.as_str()
+        )))
     }
 }
 
@@ -775,18 +853,19 @@ where
         let path = approval_record_path(&scope, request.id)?;
         let record_lock = filesystem_record_lock(&path);
         let _guard = record_lock.lock().await;
-        if self.get(&scope, request.id).await?.is_some() {
-            return Err(RunStateError::ApprovalRequestAlreadyExists {
-                request_id: request.id,
-            });
-        }
         let record = ApprovalRecord {
             scope,
             request,
             status: ApprovalStatus::Pending,
         };
-        self.write_record(&record).await?;
-        Ok(record)
+        let entry = Self::record_entry(&record)?;
+        match put_with_cas(self.filesystem, &path, entry, CasExpectation::Absent).await {
+            Ok(()) => Ok(record),
+            Err(PutError::VersionMismatch) => Err(RunStateError::ApprovalRequestAlreadyExists {
+                request_id: record.request.id,
+            }),
+            Err(PutError::Other(error)) => Err(error),
+        }
     }
 
     async fn get(
@@ -794,16 +873,10 @@ where
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
     ) -> Result<Option<ApprovalRecord>, RunStateError> {
-        let path = approval_record_path(scope, request_id)?;
-        let Some(versioned) = self.filesystem.get(&path).await? else {
-            return Ok(None);
-        };
-        let record = deserialize::<ApprovalRecord>(&versioned.entry.body)?;
-        if same_scope_owner(&record.scope, scope) {
-            Ok(Some(record))
-        } else {
-            Ok(None)
-        }
+        Ok(self
+            .read_versioned(scope, request_id)
+            .await?
+            .map(|(record, _)| record))
     }
 
     async fn approve(
@@ -811,6 +884,9 @@ where
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
     ) -> Result<ApprovalRecord, RunStateError> {
+        let path = approval_record_path(scope, request_id)?;
+        let record_lock = filesystem_record_lock(&path);
+        let _guard = record_lock.lock().await;
         self.update_status(scope, request_id, ApprovalStatus::Approved)
             .await
     }
@@ -820,6 +896,9 @@ where
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
     ) -> Result<ApprovalRecord, RunStateError> {
+        let path = approval_record_path(scope, request_id)?;
+        let record_lock = filesystem_record_lock(&path);
+        let _guard = record_lock.lock().await;
         self.update_status(scope, request_id, ApprovalStatus::Denied)
             .await
     }
@@ -842,7 +921,6 @@ where
                 status: record.status,
             });
         }
-        let path = approval_record_path(scope, request_id)?;
         self.filesystem.delete(&path).await?;
         Ok(record)
     }
@@ -996,6 +1074,65 @@ where
 
 fn is_not_found(error: &FilesystemError) -> bool {
     matches!(error, FilesystemError::NotFound { .. })
+}
+
+/// Local error classification for the CAS-aware put helper.
+enum PutError {
+    /// Backend reported `VersionMismatch` (cross-process raced us). The
+    /// caller retries by re-reading the current record.
+    VersionMismatch,
+    /// Any other backend or serialization failure; surface to caller.
+    Other(RunStateError),
+}
+
+/// Issue a `put` honoring the requested CAS expectation.
+///
+/// Falls back to `CasExpectation::Any` when the backend reports `Unsupported`
+/// for the request — `LocalFilesystem` is byte-only and only accepts `Any`.
+/// On a byte-only backend the in-process record-lock map provides
+/// intra-process serialization; cross-process safety on those backends is
+/// documented as a process-local limitation
+/// (`crates/ironclaw_run_state/CLAUDE.md`).
+///
+/// On the byte-only fallback path, `CasExpectation::Absent` is emulated via
+/// a `get` precheck so callers still see `PutError::VersionMismatch` when
+/// the record already exists. The check-then-write race is closed by the
+/// in-process lock map; cross-process callers fall back to the documented
+/// process-local limitation.
+async fn put_with_cas<F>(
+    filesystem: &F,
+    path: &VirtualPath,
+    entry: Entry,
+    cas: CasExpectation,
+) -> Result<(), PutError>
+where
+    F: RootFilesystem,
+{
+    let fallback_entry = entry.clone();
+    match filesystem.put(path, entry, cas).await {
+        Ok(_) => Ok(()),
+        Err(FilesystemError::VersionMismatch { .. }) => Err(PutError::VersionMismatch),
+        Err(FilesystemError::Unsupported {
+            operation: FilesystemOperation::WriteFile,
+            ..
+        }) => {
+            if matches!(cas, CasExpectation::Absent) {
+                let existing = filesystem
+                    .get(path)
+                    .await
+                    .map_err(|error| PutError::Other(error.into()))?;
+                if existing.is_some() {
+                    return Err(PutError::VersionMismatch);
+                }
+            }
+            filesystem
+                .put(path, fallback_entry, CasExpectation::Any)
+                .await
+                .map(|_| ())
+                .map_err(|error| PutError::Other(error.into()))
+        }
+        Err(error) => Err(PutError::Other(error.into())),
+    }
 }
 
 #[cfg(test)]
