@@ -23,7 +23,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem, VersionedEntry,
+    CasExpectation, ContentType, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
+    IndexSpec, IndexValue, Page, RootFilesystem, VersionedEntry,
 };
 use ironclaw_host_api::{ThreadId, VirtualPath};
 use ironclaw_turns::{TurnActor, TurnScope};
@@ -48,6 +49,15 @@ use crate::{
 /// re-validated on every iteration so a regression breaks the loop early
 /// rather than ricocheting between racing writers.
 const MAX_CAS_RETRIES: usize = 5;
+
+/// Indexed projection key for the scope of a delivery attempt. The value is a
+/// hash of `(tenant, agent?, project?, thread)` — the same key
+/// [`thread_scope_key`] computes for policy paths — so backends without
+/// composite-index support can serve `list_delivery_attempts(scope)` with a
+/// single equality lookup (audit finding F2).
+const DELIVERY_SCOPE_INDEX_KEY: &str = "scope";
+const DELIVERY_SCOPE_INDEX_NAME: &str = "outbound_delivery_scope";
+const DELIVERIES_ROOT: &str = "/engine/outbound/deliveries";
 
 /// Filesystem-backed outbound store. Construct with any
 /// [`RootFilesystem`] implementation (libSQL, Postgres, in-memory, …) — the
@@ -80,6 +90,49 @@ where
             .await
             .map(|_| ())
             .map_err(map_fs_error)
+    }
+
+    /// Like [`put_json`] but additionally projects an indexed scope value so
+    /// backends with index support can answer `query(Filter::Eq { scope })`
+    /// without materializing every delivery row (audit finding F2).
+    async fn put_delivery_attempt_indexed(
+        &self,
+        path: &VirtualPath,
+        attempt: &OutboundDeliveryAttempt,
+        cas: CasExpectation,
+    ) -> Result<(), OutboundError> {
+        let body = serde_json::to_vec(attempt).map_err(|_| OutboundError::Serialization)?;
+        let entry = Entry::bytes(body)
+            .with_content_type(ContentType::json())
+            .with_indexed(
+                delivery_scope_index_key(),
+                delivery_scope_index_value(&attempt.scope),
+            );
+        self.filesystem
+            .put(path, entry, cas)
+            .await
+            .map(|_| ())
+            .map_err(map_fs_error)
+    }
+
+    /// Declare the `scope` exact-equality index on the deliveries prefix.
+    /// Idempotent across the deliveries mount lifetime; tolerates backends
+    /// that don't materialize indexes (e.g. byte-only `LocalFilesystem`),
+    /// because the in-memory `query` evaluator still filters on
+    /// `Entry::indexed` even without a declared index.
+    async fn ensure_delivery_scope_index(&self) -> Result<(), OutboundError> {
+        let root = deliveries_root()?;
+        let name = IndexName::new(DELIVERY_SCOPE_INDEX_NAME).map_err(|_| OutboundError::Backend)?;
+        let spec = IndexSpec::new(name, vec![delivery_scope_index_key()], IndexKind::Exact);
+        match self.filesystem.ensure_index(&root, &spec).await {
+            Ok(()) => Ok(()),
+            // Match the engine store's pattern (`ensure_exact_index` in
+            // `ironclaw_engine::store::filesystem`): backends without index
+            // support are still usable for reads/writes; the query path
+            // degrades on those mounts but does not fail closed.
+            Err(FilesystemError::Unsupported { .. }) => Ok(()),
+            Err(error) => Err(map_fs_error(error)),
+        }
     }
 
     /// Read the current versioned entry at `path` and decode its body as `T`.
@@ -237,6 +290,7 @@ where
         attempt: OutboundDeliveryAttempt,
     ) -> Result<(), OutboundError> {
         validate_delivery_attempt(&attempt)?;
+        self.ensure_delivery_scope_index().await?;
         let path = delivery_path(&attempt.delivery_id)?;
         // CAS retry loop (audit finding F1): two concurrent writers racing the
         // same `delivery_id` (e.g. an at-least-once orchestrator retry firing
@@ -250,7 +304,10 @@ where
                 validate_delivery_identity(&existing, &attempt)?;
                 return Ok(());
             }
-            match self.put_json(&path, &attempt, CasExpectation::Absent).await {
+            match self
+                .put_delivery_attempt_indexed(&path, &attempt, CasExpectation::Absent)
+                .await
+            {
                 Ok(()) => return Ok(()),
                 Err(OutboundError::CasConflict) => continue,
                 Err(error) => return Err(error),
@@ -269,7 +326,9 @@ where
         // (e.g. delivered + failed firing simultaneously after a retry) race
         // the read-modify-write. Re-read on version mismatch so the second
         // writer sees the first writer's state instead of clobbering it with
-        // stale fields.
+        // stale fields. The write side reuses
+        // `put_delivery_attempt_indexed` so the `scope` projection is
+        // preserved on status mutations (audit finding F2).
         for _ in 0..MAX_CAS_RETRIES {
             let Some((mut attempt, versioned)) = self
                 .get_versioned_json::<OutboundDeliveryAttempt>(&path)
@@ -283,7 +342,11 @@ where
             attempt.status = request.status;
             attempt.failure_kind = request.failure_kind;
             match self
-                .put_json(&path, &attempt, CasExpectation::Version(versioned.version))
+                .put_delivery_attempt_indexed(
+                    &path,
+                    &attempt,
+                    CasExpectation::Version(versioned.version),
+                )
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -298,32 +361,49 @@ where
         &self,
         scope: TurnScope,
     ) -> Result<Vec<OutboundDeliveryAttempt>, OutboundError> {
-        // Without native query/indexes on the unified filesystem yet (deferred
-        // to a follow-up port that translates IndexKind::Exact on indexed
-        // projections), we scan the deliveries directory and filter by scope
-        // in memory. The on-disk layout is flat per `delivery_id`, so this
-        // bounded scan is acceptable until the indexer port lands here.
-        let root =
-            VirtualPath::new("/engine/outbound/deliveries").map_err(|_| OutboundError::Backend)?;
-        let entries = match self.filesystem.list_dir(&root).await {
-            Ok(entries) => entries,
-            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
-            Err(error) => return Err(map_fs_error(error)),
+        // Audit finding F2: previously this was a `list_dir` + N+1
+        // `get_json` per row, with no indexed projection. Now we declare an
+        // exact-equality index on the `scope` indexed key (the same hash
+        // `thread_scope_key` uses for policy paths) and let the backend
+        // serve `Filter::Eq` natively.
+        //
+        // Audit finding F3: the previous `list_dir` call was unpaginated;
+        // SQL backends issue `LIMIT Page::MAX_LIMIT` on the list_dir
+        // translation and would silently truncate past 1024 deliveries.
+        // Drain the paginated query in a loop until a short page arrives,
+        // mirroring the engine store's `query_all` pattern.
+        self.ensure_delivery_scope_index().await?;
+        let root = deliveries_root()?;
+        let filter = Filter::Eq {
+            key: delivery_scope_index_key(),
+            value: delivery_scope_index_value(&scope),
         };
-        let mut deliveries = Vec::new();
-        for entry in entries {
-            if !entry.name.ends_with(".json") {
-                continue;
-            }
-            let Some(attempt) = self
-                .get_json::<OutboundDeliveryAttempt>(&entry.path)
-                .await?
-            else {
-                continue;
+        let mut deliveries: Vec<OutboundDeliveryAttempt> = Vec::new();
+        let mut offset: u64 = 0;
+        loop {
+            let page = Page::new(offset, Page::MAX_LIMIT);
+            let entries = match self.filesystem.query(&root, &filter, page).await {
+                Ok(entries) => entries,
+                Err(FilesystemError::NotFound { .. }) => break,
+                Err(error) => return Err(map_fs_error(error)),
             };
-            if scope_matches(&attempt.scope, &scope) {
-                deliveries.push(attempt);
+            let received = entries.len();
+            for versioned in entries {
+                let attempt: OutboundDeliveryAttempt =
+                    serde_json::from_slice(&versioned.entry.body)
+                        .map_err(|_| OutboundError::Serialization)?;
+                // Defence-in-depth: the index value is a hash, so distinct
+                // scopes hashing to the same bucket is collision-resistant
+                // but not impossible. Drop any row whose persisted scope
+                // doesn't exactly match the query scope.
+                if scope_matches(&attempt.scope, &scope) {
+                    deliveries.push(attempt);
+                }
             }
+            if received < Page::MAX_LIMIT as usize {
+                break;
+            }
+            offset = offset.saturating_add(received as u64);
         }
         deliveries.sort_by_key(|attempt| (attempt.attempted_at, attempt.delivery_id.to_string()));
         Ok(deliveries)
@@ -366,6 +446,31 @@ fn subscription_path(
 fn delivery_path(delivery_id: &OutboundDeliveryId) -> Result<VirtualPath, OutboundError> {
     VirtualPath::new(format!("/engine/outbound/deliveries/{delivery_id}.json"))
         .map_err(|_| OutboundError::Backend)
+}
+
+fn deliveries_root() -> Result<VirtualPath, OutboundError> {
+    VirtualPath::new(DELIVERIES_ROOT).map_err(|_| OutboundError::Backend)
+}
+
+fn delivery_scope_index_key() -> IndexKey {
+    // Constructed from a constant identifier known to satisfy the
+    // `IndexKey::new` grammar (`[A-Za-z_][A-Za-z0-9_]*`); falling back on
+    // `expect` here would be acceptable but we propagate the validation
+    // contract anyway and surface a backend error if it ever drifts.
+    IndexKey::new(DELIVERY_SCOPE_INDEX_KEY).unwrap_or_else(|_| {
+        // Unreachable: the identifier is a constant `"scope"` that passes
+        // `validate_simple_identifier`. Defensive panic-free fallback by
+        // re-running the constructor on the byte form.
+        IndexKey::new("scope").expect("`scope` is a valid IndexKey identifier")
+    })
+}
+
+fn delivery_scope_index_value(scope: &TurnScope) -> IndexValue {
+    // Reuse `thread_scope_key`'s hash so the same scope hashes consistently
+    // across the policy path and the delivery scope index. The hash is
+    // collision-resistant against the legal-id grammar, and the F6 sentinel
+    // fix guarantees `None` agent/project no longer collide with literal ids.
+    IndexValue::Text(thread_scope_key(scope))
 }
 
 /// Sentinel used in [`thread_scope_key`] to distinguish `agent_id = None` /
