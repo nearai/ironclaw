@@ -37,9 +37,9 @@ use ironclaw_threads::{
     ThreadScope,
 };
 use ironclaw_turns::{
-    GetRunStateRequest, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
-    InMemoryTurnStateStore, TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStateStore,
-    TurnStatus,
+    CancelRunRequest, GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore,
+    InMemoryLoopCheckpointStore, InMemoryTurnStateStore, SanitizedCancelReason, TurnActor,
+    TurnCoordinator, TurnRunId, TurnRunState, TurnRunWake, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
         LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
@@ -56,12 +56,14 @@ pub struct ProductLiveAgentLoopHarness {
     thread_scope: ThreadScope,
     thread_service: InMemorySessionThreadService,
     turn_store: Arc<InMemoryTurnStateStore>,
+    cancellation_factory: Arc<ReadyRunCancellationFactory>,
     composition: RebornRuntimeLoopComposition<
         InMemoryTurnStateStore,
         InMemorySessionThreadService,
         RecordingModelGateway,
     >,
     model_requests: Arc<Mutex<Vec<HostManagedModelRequest>>>,
+    model_release: Option<CancellationToken>,
     worker_cancel: CancellationToken,
     worker_handle: JoinHandle<()>,
 }
@@ -75,6 +77,7 @@ pub struct ProductLiveAgentLoopHarnessConfig {
     pub agent_id: String,
     pub model_provider: String,
     pub model_id: String,
+    pub pause_model_until_released: bool,
 }
 
 impl Default for ProductLiveAgentLoopHarnessConfig {
@@ -87,6 +90,7 @@ impl Default for ProductLiveAgentLoopHarnessConfig {
             agent_id: "agent:harness".to_string(),
             model_provider: "nearai".to_string(),
             model_id: "qwen3-coder".to_string(),
+            pause_model_until_released: false,
         }
     }
 }
@@ -112,9 +116,13 @@ impl ProductLiveAgentLoopHarness {
         let turn_store = Arc::new(InMemoryTurnStateStore::default());
         let checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
         let model_requests = Arc::new(Mutex::new(Vec::new()));
+        let model_release = config
+            .pause_model_until_released
+            .then(CancellationToken::new);
         let model_gateway = Arc::new(RecordingModelGateway {
             reply: config.assistant_reply,
             requests: Arc::clone(&model_requests),
+            release: model_release.clone(),
         });
         let model_route_resolver = Arc::new(
             StaticModelRouteResolver::new(ModelRoutePolicy::new(
@@ -148,7 +156,7 @@ impl ProductLiveAgentLoopHarness {
             ),
             config: DefaultPlannedRuntimeConfig::default(),
             model_route_resolver: Some(model_route_resolver),
-            cancellation_factory: Some(cancellation_factory),
+            cancellation_factory: Some(cancellation_factory.clone()),
             skill_context_source: None,
             input_queue: Some(Arc::new(EmptyInputQueue)),
             identity_context_source: Arc::new(EmptyIdentityContextSource),
@@ -169,8 +177,10 @@ impl ProductLiveAgentLoopHarness {
             thread_scope,
             thread_service,
             turn_store,
+            cancellation_factory,
             composition,
             model_requests,
+            model_release,
             worker_cancel,
             worker_handle,
         }
@@ -181,6 +191,31 @@ impl ProductLiveAgentLoopHarness {
             .lock()
             .expect("harness model requests lock poisoned")
             .clone()
+    }
+
+    pub async fn wait_for_model_request_count(&self, expected: usize) {
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if self
+                    .model_requests
+                    .lock()
+                    .expect("harness model requests lock poisoned")
+                    .len()
+                    >= expected
+                {
+                    return;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("harness model gateway should receive request count");
+    }
+
+    pub fn release_model(&self) {
+        if let Some(release) = &self.model_release {
+            release.cancel();
+        }
     }
 
     pub fn user_message(&self, event_suffix: &str, text: &str) -> ProductInboundEnvelope {
@@ -224,6 +259,38 @@ impl ProductLiveAgentLoopHarness {
         .expect("harness run should reach a terminal state")
     }
 
+    pub async fn cancel_run(&self, run_id: TurnRunId) -> TurnStatus {
+        self.composition
+            .coordinator
+            .cancel_run(CancelRunRequest {
+                scope: self.turn_scope(),
+                actor: TurnActor::new(self.binding.user_id.clone()),
+                run_id,
+                reason: SanitizedCancelReason::UserRequested,
+                idempotency_key: IdempotencyKey::new(format!("idem-harness-cancel-{run_id}"))
+                    .expect("valid harness cancellation idempotency key"),
+            })
+            .await
+            .expect("harness cancel run")
+            .status
+    }
+
+    pub async fn wait_for_cancellation_observed(&self, run_id: TurnRunId) {
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if self
+                    .cancellation_factory
+                    .product_cancellation_observed(run_id)
+                {
+                    return;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("harness cancellation factory should observe run cancellation");
+    }
+
     pub async fn thread_history(&self) -> Vec<ThreadMessageRecord> {
         self.thread_service
             .list_thread_history(ThreadHistoryRequest {
@@ -256,6 +323,7 @@ impl ProductLiveAgentLoopHarness {
 struct RecordingModelGateway {
     reply: String,
     requests: Arc<Mutex<Vec<HostManagedModelRequest>>>,
+    release: Option<CancellationToken>,
 }
 
 #[async_trait]
@@ -268,6 +336,9 @@ impl HostManagedModelGateway for RecordingModelGateway {
             .lock()
             .expect("recording model gateway requests lock poisoned")
             .push(request);
+        if let Some(release) = &self.release {
+            release.cancelled().await;
+        }
         Ok(HostManagedModelResponse::assistant_reply(
             self.reply.clone(),
         ))
@@ -339,6 +410,17 @@ impl HostIdentityContextSource for EmptyIdentityContextSource {
 #[derive(Default)]
 struct ReadyRunCancellationFactory {
     handles: Arc<Mutex<HashMap<TurnRunId, RunCancellationHandle>>>,
+}
+
+impl ReadyRunCancellationFactory {
+    fn product_cancellation_observed(&self, run_id: TurnRunId) -> bool {
+        self.handles
+            .lock()
+            .expect("ready cancellation lock poisoned")
+            .get(&run_id)
+            .map(RunCancellationHandle::is_requested)
+            .unwrap_or(false)
+    }
 }
 
 #[async_trait]

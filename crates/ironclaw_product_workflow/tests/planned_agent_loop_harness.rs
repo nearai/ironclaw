@@ -44,3 +44,88 @@ async fn product_live_harness_runs_planned_loop_and_persists_reply() {
 
     harness.shutdown().await;
 }
+
+#[tokio::test]
+async fn ported_product_live_fixture_uses_shared_harness_for_no_profile_reply() {
+    let harness = ProductLiveAgentLoopHarness::new(ProductLiveAgentLoopHarnessConfig {
+        assistant_reply: "planned product reply".to_string(),
+        user_id: "user:product-live".to_string(),
+        thread_id: "thread:product-live".to_string(),
+        ..ProductLiveAgentLoopHarnessConfig::default()
+    })
+    .await;
+    let envelope = harness.user_message("planned-product-live-ported", "hello world");
+
+    let outcome = harness
+        .accept_user_message(&envelope)
+        .await
+        .expect("ported product live submit");
+    let InboundTurnOutcome::Submitted {
+        submitted_run_id, ..
+    } = outcome
+    else {
+        panic!("expected submitted outcome, got {outcome:?}");
+    };
+    let state = harness.wait_for_terminal(submitted_run_id).await;
+
+    assert_eq!(state.status, TurnStatus::Completed);
+    assert_eq!(
+        state.resolved_run_profile_id.as_str(),
+        PLANNED_DEFAULT_PROFILE_ID
+    );
+    assert_eq!(harness.model_requests().len(), 1);
+    let history = harness.thread_history().await;
+    assert!(history.iter().any(|message| {
+        message.status == MessageStatus::Finalized
+            && message.turn_run_id.as_deref() == Some(submitted_run_id.to_string().as_str())
+            && message.content.as_deref() == Some("planned product reply")
+    }));
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn ported_product_live_fixture_cancels_through_public_turn_path() {
+    let harness = ProductLiveAgentLoopHarness::new(ProductLiveAgentLoopHarnessConfig {
+        assistant_reply: "reply after cancel".to_string(),
+        user_id: "user:product-live".to_string(),
+        thread_id: "thread:product-live-cancel-live".to_string(),
+        pause_model_until_released: true,
+        ..ProductLiveAgentLoopHarnessConfig::default()
+    })
+    .await;
+    let envelope = harness.user_message("planned-product-live-cancel-ported", "hello world");
+
+    let outcome = harness
+        .accept_user_message(&envelope)
+        .await
+        .expect("ported product live submit");
+    let InboundTurnOutcome::Submitted {
+        submitted_run_id, ..
+    } = outcome
+    else {
+        panic!("expected submitted outcome, got {outcome:?}");
+    };
+
+    harness.wait_for_model_request_count(1).await;
+    assert_eq!(
+        harness.cancel_run(submitted_run_id).await,
+        TurnStatus::CancelRequested
+    );
+    harness
+        .wait_for_cancellation_observed(submitted_run_id)
+        .await;
+
+    harness.release_model();
+    let state = harness.wait_for_terminal(submitted_run_id).await;
+
+    assert_eq!(state.status, TurnStatus::Cancelled);
+    let history = harness.thread_history().await;
+    assert!(history.iter().any(|message| {
+        message.status == MessageStatus::Finalized
+            && message.turn_run_id.as_deref() == Some(submitted_run_id.to_string().as_str())
+            && message.content.as_deref() == Some("reply after cancel")
+    }));
+
+    harness.shutdown().await;
+}
