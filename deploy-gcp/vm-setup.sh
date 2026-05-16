@@ -76,6 +76,23 @@ echo "==> Installing t3claw.service"
 cp /var/tmp/deploy/t3claw.service /etc/systemd/system/t3claw.service
 systemctl daemon-reload
 
+echo "==> Waiting for t3claw-staging-env secret to have an enabled version..."
+_secret_ready=0
+for _i in $(seq 1 24); do
+  if gcloud secrets versions list t3claw-staging-env \
+       --filter="state=ENABLED" --limit=1 --format="value(name)" 2>/dev/null \
+     | grep -q .; then
+    _secret_ready=1
+    break
+  fi
+  echo "    attempt ${_i}/24 — no enabled version yet, retrying in 10 s..."
+  sleep 10
+done
+if [ "${_secret_ready}" -eq 0 ]; then
+  echo "ERROR: timed out after 240 s waiting for an enabled version of t3claw-staging-env"
+  exit 1
+fi
+
 echo "==> Starting T3Claw"
 systemctl enable t3claw
 systemctl start t3claw

@@ -98,12 +98,6 @@ gcloud projects add-iam-policy-binding "${PROJECT}" \
 # Secret Manager: enable API, grant VM SA read access, create secret placeholder
 gcloud services enable secretmanager.googleapis.com --project="${PROJECT}" --quiet
 
-gcloud projects add-iam-policy-binding "${PROJECT}" \
-  --member="serviceAccount:${SA_EMAIL}" \
-  --role="roles/secretmanager.secretAccessor" \
-  --condition=None \
-  --quiet
-
 if gcloud secrets describe t3claw-staging-env \
     --project="${PROJECT}" &>/dev/null; then
   echo "     secret 't3claw-staging-env' already exists"
@@ -114,6 +108,12 @@ else
   echo "     secret created (no versions yet) — add your .env as the first version:"
   echo "     gcloud secrets versions add t3claw-staging-env --data-file=.env --project=${PROJECT}"
 fi
+
+gcloud secrets add-iam-policy-binding t3claw-staging-env \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/secretmanager.secretAccessor" \
+  --project="${PROJECT}" \
+  --quiet
 
 # Firewall: allow LB health check IP ranges to reach port 3000 on tagged VMs.
 # Google health check source ranges: 130.211.0.0/22, 35.191.0.0/16

@@ -95,13 +95,8 @@ jobs:
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
 
       - name: Rolling update on VM
-        # Runs compose pull + up directly, not via systemctl restart.
-        # This is intentional: image-only updates don't need a full service
-        # restart and avoid the ExecStartPre Secret Manager fetch on every deploy.
-        #
-        # Secret-only updates (new t3claw-staging-env version) are NOT picked up
-        # by this path. To reload secrets, SSH in and run:
-        #   sudo systemctl restart t3claw
+        # Pulls new images first, then restarts via systemctl so ExecStartPre
+        # runs on every deploy and refreshes /opt/t3claw/.env from Secret Manager.
         run: |
           gcloud compute ssh t3claw-staging \
             --zone=asia-southeast1-a \
@@ -109,7 +104,7 @@ jobs:
             --tunnel-through-iap \
             --ssh-key-expire-after=10m \
             --quiet \
-            -- 'sudo bash -c "cd /opt/t3claw && docker compose --profile app pull && docker compose --profile app up -d"'
+            -- 'sudo bash -c "cd /opt/t3claw && docker compose --profile app pull && sudo systemctl restart t3claw"'
 
       - name: Smoke test
         run: |

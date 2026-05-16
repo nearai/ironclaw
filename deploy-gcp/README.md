@@ -53,7 +53,7 @@ The script is idempotent — re-runs are safe. It will:
 
 1. Create the `t3claw` Artifact Registry repo (if absent) and build + push the agent and sidecar images.
 2. Create the `t3claw-vm` service account, grant `artifactregistry.reader`, create the LB-health-check and IAP-SSH firewall rules, and create the `t3claw-staging` VM (no public IP).
-3. **Pause** with `Press Enter once the VM is bootstrapped and .env is in place...`. **Leave this terminal at the prompt** and switch to a second terminal for steps 2–5.
+3. **Pause** with `Press Enter once the VM is bootstrapped and required secrets are available in Secret Manager (do not place a .env on the VM)...`. **Leave this terminal at the prompt** and switch to a second terminal for steps 2–5.
 4. After you press Enter: provision the global HTTPS load balancer (static IP, health check, instance group, backend service, URL map, Google-managed SSL cert, HTTPS proxy, forwarding rule).
 5. Create the Cloud DNS A record.
 

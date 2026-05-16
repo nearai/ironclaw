@@ -10,7 +10,7 @@ WorkingDirectory=/opt/t3claw
 
 # Fetch latest .env from Secret Manager before doing anything else.
 # The VM service account (t3claw-vm) must have roles/secretmanager.secretAccessor.
-ExecStartPre=/bin/bash -c 'gcloud secrets versions access latest --secret=t3claw-staging-env --project=gen-lang-client-0263867259 > /opt/t3claw/.env && chmod 600 /opt/t3claw/.env'
+ExecStartPre=/bin/bash -c 'set -e; tmp=$(mktemp /opt/t3claw/.env.XXXXXX); chmod 600 "$tmp"; gcloud secrets versions access latest --secret=t3claw-staging-env > "$tmp"; mv "$tmp" /opt/t3claw/.env'
 
 # Pull latest images so every restart picks up a new push.
 ExecStartPre=/usr/bin/docker compose --profile app pull
