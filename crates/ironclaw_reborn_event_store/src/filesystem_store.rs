@@ -347,10 +347,13 @@ fn stream_path(kind: StreamKind, stream: &EventStreamKey) -> Result<ScopedPath, 
 }
 
 fn map_filesystem_append_error(error: FilesystemError) -> EventError {
-    // Don't leak backend details into the durable error surface; the
-    // crate-level error policy keeps backend specifics behind a redacted
-    // boundary. Categorise the few cases callers can act on, then fall
-    // back to the generic DurableLog error.
+    // Categorise the few cases callers can act on with a fixed, redaction-safe
+    // message, then fall back to threading the underlying `FilesystemError`
+    // through `Display` for the remaining variants (`VersionMismatch`,
+    // `NotFound`, `Backend`, …). The filesystem layer's `Display` is already
+    // redaction-safe — it uses scoped/virtual paths and never raw host paths
+    // (see `FilesystemError` doc) — so operators get the variant + path/reason
+    // they need to debug without leaking host-side detail.
     match error {
         FilesystemError::PermissionDenied { .. } => {
             durable_error("filesystem event store rejected append: permission denied")
@@ -361,7 +364,7 @@ fn map_filesystem_append_error(error: FilesystemError) -> EventError {
         FilesystemError::Unsupported { .. } => {
             durable_error("filesystem event store mount does not advertise the events plane")
         }
-        _ => durable_error("filesystem event store failed to append record"),
+        other => durable_error(format!("filesystem event store failed to append: {other}")),
     }
 }
 
@@ -376,6 +379,8 @@ fn map_filesystem_tail_error(error: FilesystemError) -> EventError {
         FilesystemError::Unsupported { .. } => {
             durable_error("filesystem event store mount does not advertise the events plane")
         }
-        _ => durable_error("filesystem event store failed to read stream"),
+        other => durable_error(format!(
+            "filesystem event store failed to read stream: {other}"
+        )),
     }
 }
