@@ -453,16 +453,20 @@ fn deliveries_root() -> Result<VirtualPath, OutboundError> {
 }
 
 fn delivery_scope_index_key() -> IndexKey {
-    // Constructed from a constant identifier known to satisfy the
-    // `IndexKey::new` grammar (`[A-Za-z_][A-Za-z0-9_]*`); falling back on
-    // `expect` here would be acceptable but we propagate the validation
-    // contract anyway and surface a backend error if it ever drifts.
-    IndexKey::new(DELIVERY_SCOPE_INDEX_KEY).unwrap_or_else(|_| {
-        // Unreachable: the identifier is a constant `"scope"` that passes
-        // `validate_simple_identifier`. Defensive panic-free fallback by
-        // re-running the constructor on the byte form.
-        IndexKey::new("scope").expect("`scope` is a valid IndexKey identifier")
+    // safety: `DELIVERY_SCOPE_INDEX_KEY` is the constant identifier `"scope"`,
+    // which is statically known to satisfy `IndexKey::new`'s
+    // `[A-Za-z_][A-Za-z0-9_]*` grammar; if the grammar ever changes such that
+    // this constructor fails, the regression surfaces at the first call site
+    // of this function (covered by every CAS/index test in this crate).
+    static KEY: std::sync::OnceLock<IndexKey> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| match IndexKey::new(DELIVERY_SCOPE_INDEX_KEY) {
+        Ok(key) => key,
+        Err(_) => unreachable!(
+            "DELIVERY_SCOPE_INDEX_KEY must satisfy IndexKey::new grammar — \
+             update the constant or grammar"
+        ),
     })
+    .clone()
 }
 
 fn delivery_scope_index_value(scope: &TurnScope) -> IndexValue {

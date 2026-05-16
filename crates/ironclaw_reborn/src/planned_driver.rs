@@ -299,7 +299,7 @@ fn resumable_checkpoint_kind_from_host(kind: LoopCheckpointKind) -> Result<Check
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID, build_loop_family_registry};
+    use crate::build_loop_family_registry;
     use ironclaw_agent_loop::test_support::{
         MockAgentLoopDriverHost, MockHostCall, test_run_context,
     };
@@ -333,7 +333,7 @@ mod tests {
         );
         assert_eq!(
             descriptor.checkpoint_schema_id,
-            Some(CheckpointSchemaId::new(PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID).expect("valid"))
+            Some(CheckpointSchemaId::new(CHECKPOINT_SCHEMA_ID).expect("valid"))
         );
         assert_eq!(
             descriptor.checkpoint_schema_version,
