@@ -31,8 +31,10 @@ pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
 pub use input::RebornBuildInput;
 pub use product_live_adapters::{
-    ProductLiveModelRouteSettings, ProductLivePlannedRuntimeAdapterConfig,
-    ProductLivePlannedRuntimeAdapterError, ProductLivePlannedRuntimeAdapters, capability_allowlist,
+    ProductLiveCapabilityIo, ProductLiveModelRouteSettings, ProductLivePlannedRuntimeAdapterConfig,
+    ProductLivePlannedRuntimeAdapterError, ProductLivePlannedRuntimeAdapters,
+    ProductLiveVisibleCapabilityRequestConfig, capability_allowlist,
+    visible_capability_request_for_run,
 };
 pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
 pub use readiness::{RebornFacadeReadiness, RebornReadiness, RebornReadinessState};

@@ -7,7 +7,7 @@ use ironclaw_host_api::{
     ThreadId, TrustClass, UserId,
 };
 use ironclaw_host_runtime::{
-    SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
+    CapabilitySurfacePolicy, SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
@@ -23,11 +23,13 @@ use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, build_product_live_planned_runtime,
 };
 use ironclaw_reborn_composition::{
-    ProductLiveModelRouteSettings, ProductLivePlannedRuntimeAdapterConfig,
-    ProductLivePlannedRuntimeAdapterError, ProductLivePlannedRuntimeAdapters, RebornBuildInput,
-    RebornServices, build_reborn_services, capability_allowlist,
+    ProductLiveCapabilityIo, ProductLiveModelRouteSettings, ProductLivePlannedRuntimeAdapterConfig,
+    ProductLivePlannedRuntimeAdapterError, ProductLivePlannedRuntimeAdapters,
+    ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput, RebornServices,
+    build_reborn_services, capability_allowlist, visible_capability_request_for_run,
 };
 use ironclaw_threads::{InMemorySessionThreadService, ThreadScope};
+use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_turns::{
     CheckpointStateStore, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
     InMemoryTurnStateStore, LoopCheckpointStore, LoopResultRef, RunProfileResolutionRequest,
@@ -39,6 +41,116 @@ use ironclaw_turns::{
         VisibleCapabilityRequest,
     },
 };
+
+#[tokio::test]
+async fn capability_io_resolves_staged_inputs_and_materializes_run_scoped_results() {
+    let io = ProductLiveCapabilityIo::default();
+    let run_context = loop_run_context("capability-io").await;
+    let input_ref = io
+        .stage_input(&run_context, serde_json::json!({ "text": "hello" }))
+        .unwrap();
+
+    let resolved = io
+        .resolve_capability_input(&run_context, &input_ref)
+        .await
+        .unwrap();
+    assert_eq!(resolved, serde_json::json!({ "text": "hello" }));
+
+    let result_ref = io
+        .write_capability_result(
+            &run_context,
+            &capability_id("demo.echo"),
+            serde_json::json!({ "reply": "hello" }),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        result_ref
+            .as_str()
+            .starts_with(&format!("result:{}.", run_context.run_id)),
+        "result refs must be scoped to the loop run: {}",
+        result_ref.as_str()
+    );
+    assert_eq!(
+        io.result_for_ref(&run_context, &result_ref).unwrap(),
+        serde_json::json!({ "reply": "hello" })
+    );
+}
+
+#[tokio::test]
+async fn capability_io_rejects_cross_run_input_and_result_refs() {
+    let io = ProductLiveCapabilityIo::default();
+    let first_run = loop_run_context("capability-io-first").await;
+    let second_run = loop_run_context("capability-io-second").await;
+    let input_ref = io
+        .stage_input(&first_run, serde_json::json!({ "text": "first" }))
+        .unwrap();
+
+    let input_error = io
+        .resolve_capability_input(&second_run, &input_ref)
+        .await
+        .expect_err("cross-run input refs must fail closed");
+    assert_eq!(
+        input_error.kind,
+        ironclaw_turns::run_profile::AgentLoopHostErrorKind::ScopeMismatch
+    );
+
+    let result_ref = io
+        .write_capability_result(
+            &first_run,
+            &capability_id("demo.echo"),
+            serde_json::json!({ "reply": "first" }),
+        )
+        .await
+        .unwrap();
+    let result_error = io
+        .result_for_ref(&second_run, &result_ref)
+        .expect_err("cross-run result refs must fail closed");
+    assert_eq!(
+        result_error.kind,
+        ironclaw_turns::run_profile::AgentLoopHostErrorKind::ScopeMismatch
+    );
+}
+
+#[tokio::test]
+async fn visible_capability_request_builder_scopes_context_to_loop_run() {
+    let run_context = loop_run_context("visible-builder").await;
+    let request = visible_capability_request_for_run(
+        &run_context,
+        ProductLiveVisibleCapabilityRequestConfig::new(
+            UserId::new("user-visible-builder").unwrap(),
+            ExtensionId::new("planned-driver").unwrap(),
+            RuntimeKind::FirstParty,
+            TrustClass::System,
+            SurfaceKind::new("agent_loop").unwrap(),
+            CapabilitySurfacePolicy::allow_all(),
+        )
+        .with_grants(CapabilitySet::default())
+        .with_provider_trust(
+            ExtensionId::new("demo").unwrap(),
+            EffectiveTrustClass::user_trusted(),
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(request.context.tenant_id, run_context.scope.tenant_id);
+    assert_eq!(request.context.agent_id, run_context.scope.agent_id);
+    assert_eq!(request.context.project_id, run_context.scope.project_id);
+    assert_eq!(
+        request.context.thread_id.as_ref(),
+        Some(&run_context.thread_id)
+    );
+    assert_eq!(
+        request.context.resource_scope.thread_id.as_ref(),
+        Some(&run_context.thread_id)
+    );
+    assert!(
+        request
+            .provider_trust
+            .contains_key(&ExtensionId::new("demo").unwrap())
+    );
+}
 
 #[tokio::test]
 async fn adapter_bundle_requires_host_runtime_facade() {
