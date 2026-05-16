@@ -280,6 +280,21 @@ impl RootFilesystem for InMemoryBackend {
                 })
                 .collect());
         }
+        // Audit finding F5: a `Filter::VectorNearest` nested inside
+        // `And`/`Or` is `Unsupported` on both SQL backends (the WHERE-
+        // fragment translator refuses to inline a ranking op as a
+        // predicate; the top of `query` only handles a top-level
+        // `VectorNearest`). The in-memory backend previously treated a
+        // nested `VectorNearest` as "any row with `IndexValue::Bytes` at
+        // `key`", silently changing semantics across backends. Align by
+        // surfacing the same `Unsupported` error before the scalar
+        // filter loop runs.
+        if contains_nested_vector_nearest(filter) {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::Query,
+            });
+        }
         let mut matched: Vec<(&VirtualPath, &StoredEntry)> = candidates
             .into_iter()
             .filter(|(_, stored)| filter_matches(filter, &stored.entry.indexed))
@@ -465,14 +480,16 @@ fn filter_matches(
             Some(IndexValue::Text(stored)) => fts_naive_matches(stored, query),
             _ => false,
         },
-        // VectorNearest is handled at the top of `query` because it ranks
-        // rather than predicates. Surfacing it here (e.g. nested inside an
-        // And) is treated as "any row with a vector under `key`": ranking
-        // requires the full candidate set and a limit, and the in-memory
-        // backend evaluates compound filters per-row.
-        Filter::VectorNearest { key, .. } => {
-            matches!(indexed.get(key), Some(IndexValue::Bytes(_)))
-        }
+        // Audit finding F5: `Filter::VectorNearest` is a ranking operation
+        // and is only meaningful at the top level of a `query` filter.
+        // The top of `query` extracts a top-level `VectorNearest` before
+        // any scalar `filter_matches` call, and a `contains_nested_vector_nearest`
+        // pre-check rejects nested occurrences with `Unsupported`. Reaching
+        // this arm therefore indicates that pre-check was bypassed; return
+        // `false` (the conservative answer; the caller already errored) so
+        // we don't fall through to "match any row with a bytes value at
+        // key" the way prior versions did.
+        Filter::VectorNearest { .. } => false,
         Filter::And(children) => children.iter().all(|f| filter_matches(f, indexed)),
         Filter::Or(children) => children.iter().any(|f| filter_matches(f, indexed)),
     }
@@ -502,6 +519,23 @@ fn top_level_vector_nearest(filter: &Filter) -> Option<(&IndexKey, &[f32], u32)>
         return Some((key, embedding, *limit));
     }
     None
+}
+
+/// Walk `filter` and report whether any `VectorNearest` occurs strictly
+/// inside an `And`/`Or` compound. A top-level `VectorNearest` is handled
+/// by the query method's ranking path; nested occurrences are rejected
+/// with `Unsupported` to match the SQL backends (audit finding F5).
+fn contains_nested_vector_nearest(filter: &Filter) -> bool {
+    fn walk(filter: &Filter, inside_compound: bool) -> bool {
+        match filter {
+            Filter::VectorNearest { .. } => inside_compound,
+            Filter::And(children) | Filter::Or(children) => {
+                children.iter().any(|child| walk(child, true))
+            }
+            _ => false,
+        }
+    }
+    walk(filter, false)
 }
 
 fn with_trailing_slash(s: &str) -> String {
@@ -959,5 +993,83 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 1, "only the numeric row should match");
         assert_eq!(results[0].path.as_str(), "/memory/numeric");
+    }
+
+    #[tokio::test]
+    async fn vector_nearest_nested_in_and_or_returns_unsupported() {
+        // Audit finding F5: cross-backend semantic alignment. SQL backends
+        // reject `VectorNearest` nested inside `And`/`Or` with
+        // `Unsupported` because ranking can't be expressed as a WHERE
+        // fragment. Previously the in-memory backend silently treated
+        // such a filter as "match any row whose `key` is an
+        // `IndexValue::Bytes`", which is semantically nothing like the
+        // SQL result. The in-memory backend must now surface
+        // `Unsupported` too.
+        let fs = InMemoryBackend::new();
+        let kind = crate::RecordKind::new("chunk").unwrap();
+        let blob = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|f| f.to_le_bytes()).collect() };
+        let entry = crate::Entry::record(kind, &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(key("embedding"), IndexValue::Bytes(blob(&[1.0_f32, 0.0])));
+        fs.put(&vpath("/memory/A"), entry, CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        let nested_and = crate::Filter::And(vec![crate::Filter::VectorNearest {
+            key: key("embedding"),
+            embedding: vec![1.0_f32, 0.0],
+            limit: 5,
+        }]);
+        let err = fs
+            .query(&vpath("/memory"), &nested_and, crate::Page::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                FilesystemError::Unsupported {
+                    operation: FilesystemOperation::Query,
+                    ..
+                }
+            ),
+            "VectorNearest nested in And must error Unsupported, got {err:?}"
+        );
+
+        let nested_or = crate::Filter::Or(vec![
+            crate::Filter::Eq {
+                key: key("embedding"),
+                value: IndexValue::Bytes(blob(&[1.0_f32, 0.0])),
+            },
+            crate::Filter::VectorNearest {
+                key: key("embedding"),
+                embedding: vec![1.0_f32, 0.0],
+                limit: 5,
+            },
+        ]);
+        let err = fs
+            .query(&vpath("/memory"), &nested_or, crate::Page::default())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                FilesystemError::Unsupported {
+                    operation: FilesystemOperation::Query,
+                    ..
+                }
+            ),
+            "VectorNearest nested in Or must error Unsupported, got {err:?}"
+        );
+
+        // Top-level VectorNearest still works.
+        let top = crate::Filter::VectorNearest {
+            key: key("embedding"),
+            embedding: vec![1.0_f32, 0.0],
+            limit: 5,
+        };
+        let ok = fs
+            .query(&vpath("/memory"), &top, crate::Page::default())
+            .await;
+        assert!(ok.is_ok(), "top-level VectorNearest must still work");
     }
 }
