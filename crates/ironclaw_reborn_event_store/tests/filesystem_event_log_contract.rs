@@ -386,3 +386,86 @@ async fn filesystem_event_log_resume_after_cursor_returns_only_new_records() {
     assert_eq!(replay.entries.len(), 2);
     assert_eq!(replay.entries.last().unwrap().cursor, e3.cursor);
 }
+
+#[tokio::test]
+async fn filesystem_event_log_caught_up_to_head_returns_empty_not_replay_gap() {
+    // Audit finding F1(a): after appending N events, a replay starting from
+    // the last entry's cursor must report "caught up to head" — empty entries
+    // and `next_cursor == last.cursor` — and must NOT raise ReplayGap. The
+    // ReplayGap signal is reserved for cursors that exceed head.
+    let fs = build_scoped_fs();
+    let log = FilesystemDurableEventLog::new(Arc::clone(&fs));
+    let scope = scope_for("alice", "project-a");
+    let stream = EventStreamKey::from_scope(&scope);
+
+    let mut entries = Vec::new();
+    for _ in 0..4 {
+        let entry = log
+            .append(RuntimeEvent::dispatch_requested(
+                scope.clone(),
+                capability_id(),
+            ))
+            .await
+            .expect("append");
+        entries.push(entry);
+    }
+    let last = entries.last().expect("at least one entry");
+
+    let replay = log
+        .read_after_cursor(&stream, &ReadScope::any(), Some(last.cursor), 10)
+        .await
+        .expect("caught-up replay should not error");
+    assert!(
+        replay.entries.is_empty(),
+        "caught-up-to-head replay must return no entries"
+    );
+    assert_eq!(
+        replay.next_cursor, last.cursor,
+        "next_cursor must remain at head when caught up"
+    );
+}
+
+#[tokio::test]
+async fn filesystem_event_log_concurrent_appends_assign_distinct_cursors() {
+    // Audit finding F1(b): 8 concurrent appenders against the same stream
+    // must each receive a distinct cursor, and the assigned cursors must be
+    // strictly increasing (1..=8) once sorted. This guards the per-stream
+    // monotonic-cursor invariant under contention.
+    let fs = build_scoped_fs();
+    let log = Arc::new(FilesystemDurableEventLog::new(Arc::clone(&fs)));
+    let scope = scope_for("alice", "project-a");
+
+    let mut tasks = Vec::with_capacity(8);
+    for _ in 0..8 {
+        let log = Arc::clone(&log);
+        let scope = scope.clone();
+        tasks.push(tokio::spawn(async move {
+            log.append(RuntimeEvent::dispatch_requested(scope, capability_id()))
+                .await
+                .expect("concurrent append")
+        }));
+    }
+
+    let mut cursors = Vec::with_capacity(8);
+    for task in tasks {
+        let entry = task.await.expect("task join");
+        cursors.push(entry.cursor.as_u64());
+    }
+    cursors.sort_unstable();
+
+    // Pairwise-distinct: dedup must not change the length.
+    let mut deduped = cursors.clone();
+    deduped.dedup();
+    assert_eq!(
+        deduped.len(),
+        cursors.len(),
+        "concurrent appends must assign pairwise-distinct cursors, got {cursors:?}"
+    );
+    // Strictly increasing per stream — for a fresh stream, cursors are 1..=8.
+    for window in cursors.windows(2) {
+        assert!(
+            window[0] < window[1],
+            "cursors must be strictly increasing per stream, got {cursors:?}"
+        );
+    }
+}
