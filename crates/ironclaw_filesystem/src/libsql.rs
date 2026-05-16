@@ -8,8 +8,8 @@ use crate::backend::EventRecord;
 use crate::db::{
     child_path_like_pattern, direct_children, directory_append_error, directory_write_error,
     escape_like_literal, escape_like_with_trailing_wildcard, infrastructure_libsql_error,
-    is_not_found, libsql_db_error, not_found, record_version_from_i64, sql_index_name,
-    system_time_from_unix_seconds, virtual_path_prefixes,
+    is_not_found, libsql_db_error, not_found, page_offset_to_i64, record_version_from_i64,
+    record_version_to_i64, sql_index_name, system_time_from_unix_seconds, virtual_path_prefixes,
 };
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
@@ -152,7 +152,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
             }
             CasExpectation::Version(expected) => {
                 let conn = self.connect().await?;
-                let expected_raw = expected.get() as i64;
+                let expected_raw = record_version_to_i64(path, expected)?;
                 let rows = conn
                     .execute(
                         r#"
@@ -568,10 +568,18 @@ impl RootFilesystem for LibSqlRootFilesystem {
             sql.push_str(&conditions);
         }
         sql.push_str(" ORDER BY path LIMIT ? OFFSET ?");
-        params.push(libsql::Value::Integer(
-            page.limit.min(crate::Page::MAX_LIMIT) as i64,
-        ));
-        params.push(libsql::Value::Integer(page.offset as i64));
+        // `page.limit` is `u32` and clamped to `Page::MAX_LIMIT` (1024),
+        // so the i64 cast is bounded and safe. `page.offset` is `u64`
+        // and is user-supplied — guard with `try_from` so values ≥ 2^63
+        // surface a typed `Backend` error instead of wrapping to a
+        // negative OFFSET. (Audit finding F6.)
+        params.push(libsql::Value::Integer(i64::from(
+            page.limit.min(crate::Page::MAX_LIMIT),
+        )));
+        params.push(libsql::Value::Integer(page_offset_to_i64(
+            path,
+            page.offset,
+        )?));
 
         let conn = self.connect().await?;
         let mut rows = conn

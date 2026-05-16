@@ -296,6 +296,42 @@ async fn libsql_root_filesystem_migration_failure_surfaces_infrastructure_varian
 }
 
 #[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_query_page_offset_overflow_surfaces_typed_error() {
+    // Audit finding F6: `page.offset as i64` previously truncate-wrapped
+    // values ≥ 2^63 into a negative SQLite OFFSET, which produced a
+    // cryptic backend error or (worse) silently returned an empty page.
+    // Surface a typed `Backend` error naming the operation and value.
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/engine/tenants/t1/users/u1/file.txt").unwrap();
+    filesystem.write_file(&path, b"hello").await.unwrap();
+
+    let err = filesystem
+        .query(
+            &VirtualPath::new("/engine/tenants/t1/users/u1").unwrap(),
+            &Filter::All,
+            Page {
+                offset: u64::MAX,
+                limit: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+    match &err {
+        FilesystemError::Backend {
+            operation, reason, ..
+        } => {
+            assert_eq!(*operation, FilesystemOperation::Query);
+            assert!(
+                reason.contains("page offset"),
+                "expected reason to name the overflow, got {reason}"
+            );
+        }
+        other => panic!("expected Backend error, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "libsql")]
 struct TestLibSqlRootFilesystem {
     filesystem: LibSqlRootFilesystem,
     _dir: tempfile::TempDir,

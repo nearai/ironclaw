@@ -7,8 +7,9 @@ use crate::backend::EventRecord;
 use crate::db::{
     child_path_like_pattern, db_error, direct_children, directory_append_error,
     directory_write_error, escape_like_literal, escape_like_with_trailing_wildcard,
-    infrastructure_error, infrastructure_pg_error, is_not_found, not_found,
-    record_version_from_i64, sql_index_name, system_time_from_unix_seconds, virtual_path_prefixes,
+    infrastructure_error, infrastructure_pg_error, is_not_found, not_found, page_offset_to_i64,
+    record_version_from_i64, record_version_to_i64, sql_index_name, system_time_from_unix_seconds,
+    virtual_path_prefixes,
 };
 use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
@@ -120,7 +121,7 @@ impl RootFilesystem for PostgresRootFilesystem {
                 Ok(RecordVersion::from_backend(1))
             }
             CasExpectation::Version(expected) => {
-                let expected_raw = expected.get() as i64;
+                let expected_raw = record_version_to_i64(path, expected)?;
                 let rows = client
                     .execute(
                         r#"
@@ -389,8 +390,13 @@ impl RootFilesystem for PostgresRootFilesystem {
             params.len() + 1,
             params.len() + 2
         ));
+        // `page.limit` is `u32` and clamped to `Page::MAX_LIMIT`, so the
+        // `i64::from` is safe by construction. `page.offset` is `u64` and
+        // user-supplied — guard with `try_from` so values ≥ 2^63 surface
+        // a typed `Backend` error instead of wrapping to a negative
+        // OFFSET. (Audit finding F6.)
         params.push(Box::new(i64::from(page.limit.min(Page::MAX_LIMIT))));
-        params.push(Box::new(page.offset as i64));
+        params.push(Box::new(page_offset_to_i64(path, page.offset)?));
 
         let client = self.client().await?;
         let params_ref: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =

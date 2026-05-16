@@ -259,3 +259,36 @@ pub(crate) fn record_version_from_i64(
             raw,
         })
 }
+
+/// Convert a u64 [`RecordVersion`] value into the i64 SQL binding both
+/// backends use. Audit finding F6: the prior `expected.get() as i64` cast
+/// silently wraps for `RecordVersion` values ≥ 2^63 (a corrupt or
+/// future-large version), producing a negative bind parameter that the
+/// `WHERE version = ?` clause would never match. Surface
+/// `CorruptRecordVersion` instead of letting the write silently
+/// VersionMismatch.
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+pub(crate) fn record_version_to_i64(
+    path: &VirtualPath,
+    version: crate::RecordVersion,
+) -> Result<i64, FilesystemError> {
+    i64::try_from(version.get()).map_err(|_| FilesystemError::CorruptRecordVersion {
+        path: path.clone(),
+        raw: version.get() as i64,
+    })
+}
+
+/// Convert a u64 [`Page::offset`](crate::Page::offset) into the i64 SQL
+/// binding both backends use. Audit finding F6: `page.offset as i64`
+/// wraps for offsets ≥ 2^63, producing a negative `OFFSET` that SQLite
+/// rejects with a cryptic backend error and Postgres rejects loudly but
+/// without naming what overflowed. Surface a typed `Backend` error
+/// naming the operation and value instead.
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+pub(crate) fn page_offset_to_i64(path: &VirtualPath, offset: u64) -> Result<i64, FilesystemError> {
+    i64::try_from(offset).map_err(|_| FilesystemError::Backend {
+        path: path.clone(),
+        operation: FilesystemOperation::Query,
+        reason: format!("page offset {offset} exceeds backend i64 range"),
+    })
+}
