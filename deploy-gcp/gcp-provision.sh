@@ -68,7 +68,7 @@ else
   echo "     Building t3n-mcp-sidecar image ..."
   docker build --platform linux/amd64 \
     -f "${REPO_ROOT}/docker/t3n-mcp-sidecar.Dockerfile" \
-    --secret id=npm_github_token,env=NPM_GITHUB_TOKEN \
+    --build-context trinity_client="${REPO_ROOT}/../trinity/client" \
     -t "${IMAGE_PREFIX}/t3n-mcp-sidecar:latest" \
     "${REPO_ROOT}"
 
