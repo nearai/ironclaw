@@ -41,7 +41,13 @@ struct StoredEntry {
 }
 
 struct State {
-    entries: HashMap<String, StoredEntry>,
+    // Audit finding F2: keying on `VirtualPath` directly removes the
+    // hot-path `VirtualPath::new(...).unwrap_or_else(unreachable!)` that
+    // the prior `HashMap<String, _>` shape forced on every `query` /
+    // `list_dir` result. Paths originate as `VirtualPath` on `put`, so
+    // they're already validated — re-parsing them on every read was
+    // both wasted work and a sloppy invariant to assert via panic.
+    entries: HashMap<VirtualPath, StoredEntry>,
     indexes: HashMap<String, Vec<IndexSpec>>,
     event_logs: HashMap<String, Vec<EventRecord>>,
 }
@@ -82,26 +88,29 @@ impl RootFilesystem for InMemoryBackend {
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
         let mut state = self.state.lock().await;
-        let key = path.as_str().to_string();
         // PR #3679 review fix: the SQL backends reject `put(/a)` when `/a/b`
         // already exists. Mirror the SQL contract so cross-backend tests
         // can't pass against impossible production state.
         let prefix = with_trailing_slash(path.as_str());
-        if state.entries.keys().any(|k| k.starts_with(&prefix)) {
+        if state
+            .entries
+            .keys()
+            .any(|k| k.as_str().starts_with(&prefix))
+        {
             return Err(FilesystemError::Backend {
                 path: path.clone(),
                 operation: FilesystemOperation::WriteFile,
                 reason: "cannot overwrite a directory".to_string(),
             });
         }
-        let current_version = state.entries.get(&key).map(|stored| stored.version);
+        let current_version = state.entries.get(path).map(|stored| stored.version);
         check_cas(path, cas, current_version)?;
 
         let next_version = current_version
             .map(|v| v.next())
             .unwrap_or_else(|| RecordVersion::from_backend(1));
         state.entries.insert(
-            key,
+            path.clone(),
             StoredEntry {
                 entry,
                 version: next_version,
@@ -113,14 +122,11 @@ impl RootFilesystem for InMemoryBackend {
 
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
         let state = self.state.lock().await;
-        Ok(state
-            .entries
-            .get(path.as_str())
-            .map(|stored| VersionedEntry {
-                path: path.clone(),
-                entry: stored.entry.clone(),
-                version: stored.version,
-            }))
+        Ok(state.entries.get(path).map(|stored| VersionedEntry {
+            path: path.clone(),
+            entry: stored.entry.clone(),
+            version: stored.version,
+        }))
     }
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
@@ -131,17 +137,21 @@ impl RootFilesystem for InMemoryBackend {
         // this a directory), remove every entry under it. Returns
         // NotFound only when neither an exact entry nor any descendants
         // exist.
-        if state.entries.remove(path.as_str()).is_some() {
+        if state.entries.remove(path).is_some() {
             // Also sweep any descendants under the deleted path — a
             // record-shaped entry at /a/b plus byte entries at /a/b/c
             // should both be cleared on `delete("/a/b")`.
             let prefix = with_trailing_slash(path.as_str());
-            state.entries.retain(|key, _| !key.starts_with(&prefix));
+            state
+                .entries
+                .retain(|key, _| !key.as_str().starts_with(&prefix));
             return Ok(());
         }
         let prefix = with_trailing_slash(path.as_str());
         let before = state.entries.len();
-        state.entries.retain(|key, _| !key.starts_with(&prefix));
+        state
+            .entries
+            .retain(|key, _| !key.as_str().starts_with(&prefix));
         if state.entries.len() == before {
             return Err(FilesystemError::NotFound {
                 path: path.clone(),
@@ -156,7 +166,7 @@ impl RootFilesystem for InMemoryBackend {
         let prefix = with_trailing_slash(path.as_str());
         let mut seen: HashMap<String, FileType> = HashMap::new();
         for stored_path in state.entries.keys() {
-            if let Some(suffix) = stored_path.strip_prefix(&prefix) {
+            if let Some(suffix) = stored_path.as_str().strip_prefix(&prefix) {
                 let (head, has_more) = first_segment(suffix);
                 if head.is_empty() {
                     continue;
@@ -197,7 +207,7 @@ impl RootFilesystem for InMemoryBackend {
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         let state = self.state.lock().await;
-        if let Some(stored) = state.entries.get(path.as_str()) {
+        if let Some(stored) = state.entries.get(path) {
             return Ok(FileStat {
                 path: path.clone(),
                 file_type: FileType::File,
@@ -207,7 +217,11 @@ impl RootFilesystem for InMemoryBackend {
             });
         }
         let prefix = with_trailing_slash(path.as_str());
-        if state.entries.keys().any(|key| key.starts_with(&prefix)) {
+        if state
+            .entries
+            .keys()
+            .any(|key| key.as_str().starts_with(&prefix))
+        {
             return Ok(FileStat {
                 path: path.clone(),
                 file_type: FileType::Directory,
@@ -230,13 +244,18 @@ impl RootFilesystem for InMemoryBackend {
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         let state = self.state.lock().await;
         let prefix = with_trailing_slash(path.as_str());
-        let candidates: Vec<(&String, &StoredEntry)> = state
+        // Audit finding F2: `State::entries` now keys on `VirtualPath`
+        // directly so the per-row `VirtualPath::new(...).unwrap_or_else(
+        // unreachable!)` reparse on the hot path is gone. Candidates carry
+        // borrowed `&VirtualPath` values that drop straight into
+        // `VersionedEntry::path` on a cheap `clone()`.
+        let candidates: Vec<(&VirtualPath, &StoredEntry)> = state
             .entries
             .iter()
-            .filter(|(key, _)| key.as_str() == path.as_str() || key.starts_with(&prefix))
+            .filter(|(key, _)| key.as_str() == path.as_str() || key.as_str().starts_with(&prefix))
             .collect();
         if let Some((key, embedding, limit)) = top_level_vector_nearest(filter) {
-            let mut ranked: Vec<(&String, &StoredEntry, f32)> = candidates
+            let mut ranked: Vec<(&VirtualPath, &StoredEntry, f32)> = candidates
                 .into_iter()
                 .filter_map(|(p, stored)| {
                     let stored_vec = match stored.entry.indexed.get(key) {
@@ -249,24 +268,23 @@ impl RootFilesystem for InMemoryBackend {
             ranked.sort_by(|a, b| {
                 b.2.partial_cmp(&a.2)
                     .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.0.cmp(b.0))
+                    .then_with(|| a.0.as_str().cmp(b.0.as_str()))
             });
             ranked.truncate(limit as usize);
             return Ok(ranked
                 .into_iter()
                 .map(|(matched_path, stored, _)| VersionedEntry {
-                    path: VirtualPath::new(matched_path.clone())
-                        .unwrap_or_else(|_| unreachable!("stored paths originated as VirtualPath")),
+                    path: matched_path.clone(),
                     entry: stored.entry.clone(),
                     version: stored.version,
                 })
                 .collect());
         }
-        let mut matched: Vec<(&String, &StoredEntry)> = candidates
+        let mut matched: Vec<(&VirtualPath, &StoredEntry)> = candidates
             .into_iter()
             .filter(|(_, stored)| filter_matches(filter, &stored.entry.indexed))
             .collect();
-        matched.sort_by(|a, b| a.0.cmp(b.0));
+        matched.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         let start = page.offset as usize;
         let end = start.saturating_add(page.limit as usize).min(matched.len());
         if start >= matched.len() {
@@ -275,8 +293,7 @@ impl RootFilesystem for InMemoryBackend {
         Ok(matched[start..end]
             .iter()
             .map(|(matched_path, stored)| VersionedEntry {
-                path: VirtualPath::new((*matched_path).clone())
-                    .unwrap_or_else(|_| unreachable!("stored paths originated as VirtualPath")),
+                path: (*matched_path).clone(),
                 entry: stored.entry.clone(),
                 version: stored.version,
             })
@@ -365,8 +382,7 @@ impl RootFilesystem for InMemoryBackend {
 
     async fn append_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         let mut state = self.state.lock().await;
-        let key = path.as_str().to_string();
-        let existing = state.entries.get(&key).cloned();
+        let existing = state.entries.get(path).cloned();
         let mut entry = existing
             .as_ref()
             .map(|s| s.entry.clone())
@@ -383,7 +399,7 @@ impl RootFilesystem for InMemoryBackend {
             .map(|s| s.version.next())
             .unwrap_or_else(|| RecordVersion::from_backend(1));
         state.entries.insert(
-            key,
+            path.clone(),
             StoredEntry {
                 entry,
                 version: next_version,
