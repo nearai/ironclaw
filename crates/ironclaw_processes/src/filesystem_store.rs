@@ -15,7 +15,10 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_events::sanitize_error_kind;
-use ironclaw_filesystem::{CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem};
+use ironclaw_filesystem::{
+    CasExpectation, ContentType, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
+    IndexSpec, IndexValue, Page, RootFilesystem,
+};
 use ironclaw_host_api::{ProcessId, ResourceScope, VirtualPath};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -88,19 +91,53 @@ where
     async fn write_record(&self, record: &ProcessRecord) -> Result<(), ProcessError> {
         let path = process_record_path(&record.scope, record.process_id)?;
         let body = serialize_pretty(record)?;
-        // Entry::bytes (kind=None) keeps the legacy on-disk layout — JSON
-        // file at `process_record_path`. The unified `put` op gives us the
-        // same write semantics as `write_file` against any backend, and
-        // backends that support records natively (libSQL, Postgres,
-        // InMemoryBackend) will still store the body as an opaque entry.
-        // Once LocalFilesystem grows native put with sidecar metadata, the
-        // consumer can switch to Entry::record(process_record_kind, ...)
-        // without changing the on-disk layout.
-        let entry = Entry::bytes(body).with_content_type(ContentType::json());
-        self.filesystem
-            .as_ref()
-            .put(&path, entry, CasExpectation::Any)
-            .await?;
+        self.ensure_indexes(&record.scope).await?;
+        let entry = process_record_entry(body, record);
+        put_with_byte_fallback(self.filesystem.as_ref(), &path, entry, CasExpectation::Any).await?;
+        Ok(())
+    }
+
+    /// Declare the indexed-projection fields on the per-owner `processes/`
+    /// prefix so `records_for_scope` can use a native `query` filter.
+    /// Tolerates `Unsupported` for byte-only backends (e.g. LocalFilesystem)
+    /// so the existing list+get fallback path is still reachable.
+    async fn ensure_indexes(&self, scope: &ResourceScope) -> Result<(), ProcessError> {
+        let prefix = process_records_root(scope)?;
+        ensure_exact_index(
+            self.filesystem.as_ref(),
+            &prefix,
+            index_name("processes_by_tenant"),
+            index_key_tenant_id(),
+        )
+        .await?;
+        ensure_exact_index(
+            self.filesystem.as_ref(),
+            &prefix,
+            index_name("processes_by_user"),
+            index_key_user_id(),
+        )
+        .await?;
+        ensure_exact_index(
+            self.filesystem.as_ref(),
+            &prefix,
+            index_name("processes_by_status"),
+            index_key_status(),
+        )
+        .await?;
+        ensure_exact_index(
+            self.filesystem.as_ref(),
+            &prefix,
+            index_name("processes_by_extension"),
+            index_key_extension_id(),
+        )
+        .await?;
+        ensure_exact_index(
+            self.filesystem.as_ref(),
+            &prefix,
+            index_name("processes_by_parent"),
+            index_key_parent_process_id(),
+        )
+        .await?;
         Ok(())
     }
 
@@ -217,7 +254,55 @@ where
         scope: &ResourceScope,
     ) -> Result<Vec<ProcessRecord>, ProcessError> {
         let root = process_records_root(scope)?;
-        let entries = match self.filesystem.as_ref().list_dir(&root).await {
+        // Try the indexed query path first. The `tenant_id` + `user_id`
+        // pair narrows backend-side to the same owner the path encodes,
+        // and the post-query `same_scope_owner` check guards the
+        // remaining sub-scope (agent/project/mission/thread) axes that
+        // are not in the index spec yet. Backends without index support
+        // (LocalFilesystem) return `Unsupported` and we fall back to the
+        // legacy list+get scan so behaviour is identical.
+        self.ensure_indexes(scope).await?;
+        let filter = Filter::And(vec![
+            Filter::Eq {
+                key: index_key_tenant_id(),
+                value: IndexValue::Text(scope.tenant_id.as_str().to_string()),
+            },
+            Filter::Eq {
+                key: index_key_user_id(),
+                value: IndexValue::Text(scope.user_id.as_str().to_string()),
+            },
+        ]);
+        match query_all_records(self.filesystem.as_ref(), &root, &filter).await {
+            Ok(records) => {
+                let mut filtered = records
+                    .into_iter()
+                    .filter(|record| same_scope_owner(&record.scope, scope))
+                    .collect::<Vec<_>>();
+                filtered.sort_by_key(|record| record.process_id.as_uuid());
+                Ok(filtered)
+            }
+            Err(error) if is_unsupported(&error) => {
+                self.records_for_scope_via_list(scope, &root).await
+            }
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+impl<F> FilesystemProcessStore<'_, F>
+where
+    F: RootFilesystem,
+{
+    /// Legacy list+get scan used as the fallback for byte-only backends
+    /// (LocalFilesystem) that cannot serve `query` over indexed
+    /// projections. Production deployments on libSQL / Postgres / the
+    /// in-memory backend take the indexed path in [`records_for_scope`].
+    async fn records_for_scope_via_list(
+        &self,
+        scope: &ResourceScope,
+        root: &VirtualPath,
+    ) -> Result<Vec<ProcessRecord>, ProcessError> {
+        let entries = match self.filesystem.as_ref().list_dir(root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -550,4 +635,175 @@ where
 
 fn is_not_found(error: &FilesystemError) -> bool {
     matches!(error, FilesystemError::NotFound { .. })
+}
+
+fn is_unsupported(error: &FilesystemError) -> bool {
+    matches!(error, FilesystemError::Unsupported { .. })
+}
+
+/// Construct the [`Entry`] persisted for a process lifecycle record.
+///
+/// The on-disk JSON body is unchanged from the migration commit; we only
+/// decorate the entry with indexed projections so backends that support
+/// records can answer [`ProcessStore::records_for_scope`] through
+/// [`RootFilesystem::query`] instead of an N+1 list+get scan.
+fn process_record_entry(body: Vec<u8>, record: &ProcessRecord) -> Entry {
+    let mut entry = Entry::bytes(body)
+        .with_content_type(ContentType::json())
+        .with_indexed(
+            index_key_tenant_id(),
+            IndexValue::Text(record.scope.tenant_id.as_str().to_string()),
+        )
+        .with_indexed(
+            index_key_user_id(),
+            IndexValue::Text(record.scope.user_id.as_str().to_string()),
+        )
+        .with_indexed(
+            index_key_status(),
+            IndexValue::Text(process_status_label(record.status).to_string()),
+        )
+        .with_indexed(
+            index_key_extension_id(),
+            IndexValue::Text(record.extension_id.as_str().to_string()),
+        );
+    if let Some(parent) = record.parent_process_id {
+        entry = entry.with_indexed(
+            index_key_parent_process_id(),
+            IndexValue::Text(parent.to_string()),
+        );
+    }
+    entry
+}
+
+fn process_status_label(status: ProcessStatus) -> &'static str {
+    // Match the snake_case serde rename on [`ProcessStatus`]. Used as the
+    // indexed projection text value so filters can match the same wire
+    // form callers would serialize.
+    match status {
+        ProcessStatus::Running => "running",
+        ProcessStatus::Completed => "completed",
+        ProcessStatus::Failed => "failed",
+        ProcessStatus::Killed => "killed",
+    }
+}
+
+/// `put` with a fallback to an opaque (byte-only) entry on `Unsupported`.
+///
+/// Backends that don't yet implement records (LocalFilesystem with no
+/// sidecar metadata) reject `kind = Some(_)` or any non-empty
+/// `indexed` projection. We try the indexed write first so SQL and
+/// in-memory backends get the projection, then retry with the same body
+/// stripped of metadata so the legacy byte-only path keeps working
+/// during the consumer migration.
+async fn put_with_byte_fallback<F>(
+    filesystem: &F,
+    path: &VirtualPath,
+    entry: Entry,
+    cas: CasExpectation,
+) -> Result<(), FilesystemError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    match filesystem.put(path, entry.clone(), cas).await {
+        Ok(_) => Ok(()),
+        Err(error) if is_unsupported(&error) => {
+            let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
+            filesystem.put(path, opaque, cas).await.map(|_| ())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Declare a single-key `Exact` index on `prefix`, tolerating backends
+/// that don't support indexes. Mirrors the engine store's
+/// `ensure_exact_index` shape so backends without index support degrade
+/// to the list+get fallback path instead of failing closed.
+async fn ensure_exact_index<F>(
+    filesystem: &F,
+    prefix: &VirtualPath,
+    name: IndexName,
+    key: IndexKey,
+) -> Result<(), ProcessError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    let spec = IndexSpec::new(name, vec![key], IndexKind::Exact);
+    match filesystem.ensure_index(prefix, &spec).await {
+        Ok(()) => Ok(()),
+        Err(FilesystemError::Unsupported { .. }) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Drain a paginated `query` against `prefix` with `filter`, materializing
+/// every matched [`ProcessRecord`].
+async fn query_all_records<F>(
+    filesystem: &F,
+    prefix: &VirtualPath,
+    filter: &Filter,
+) -> Result<Vec<ProcessRecord>, FilesystemError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    let mut out = Vec::new();
+    let mut offset: u64 = 0;
+    loop {
+        let page = Page::new(offset, Page::MAX_LIMIT);
+        let entries = filesystem.query(prefix, filter, page).await?;
+        let received = entries.len();
+        for entry in entries {
+            let record: ProcessRecord =
+                serde_json::from_slice(&entry.entry.body).map_err(|error| {
+                    FilesystemError::Backend {
+                        path: entry.path.clone(),
+                        operation: ironclaw_filesystem::FilesystemOperation::Query,
+                        reason: format!("process record deserialization failed: {error}"),
+                    }
+                })?;
+            out.push(record);
+        }
+        if received < Page::MAX_LIMIT as usize {
+            break;
+        }
+        offset = offset.saturating_add(received as u64);
+    }
+    Ok(out)
+}
+
+// ── Index identifiers ──────────────────────────────────────────
+//
+// `IndexName` / `IndexKey` validate as `[A-Za-z_][A-Za-z0-9_]*`. The
+// literals below all satisfy that shape, so construction cannot fail at
+// runtime — but we still route through the validating constructor and
+// `unwrap_or_else(unreachable!())` so a future rename catches the typo
+// at the test site rather than silently producing an empty filter.
+
+fn index_name(value: &'static str) -> IndexName {
+    IndexName::new(value)
+        .unwrap_or_else(|_| unreachable!("process index name {value} must be a simple identifier"))
+}
+
+fn index_key(value: &'static str) -> IndexKey {
+    IndexKey::new(value)
+        .unwrap_or_else(|_| unreachable!("process index key {value} must be a simple identifier"))
+}
+
+fn index_key_tenant_id() -> IndexKey {
+    index_key("tenant_id")
+}
+
+fn index_key_user_id() -> IndexKey {
+    index_key("user_id")
+}
+
+fn index_key_status() -> IndexKey {
+    index_key("status")
+}
+
+fn index_key_extension_id() -> IndexKey {
+    index_key("extension_id")
+}
+
+fn index_key_parent_process_id() -> IndexKey {
+    index_key("parent_process_id")
 }

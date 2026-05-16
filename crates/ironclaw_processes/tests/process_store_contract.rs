@@ -10,7 +10,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_filesystem::{
-    DirEntry, FileStat, FilesystemError, FilesystemOperation, LocalFilesystem, RootFilesystem,
+    DirEntry, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend, LocalFilesystem,
+    RootFilesystem,
 };
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
@@ -1523,6 +1524,66 @@ async fn filesystem_process_store_persists_under_resource_scope_engine_processes
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn filesystem_process_store_records_for_scope_uses_index_on_record_backend() {
+    // Drive `records_for_scope` against the in-memory backend (which
+    // supports `query` over indexed projections) so the indexed path
+    // exercised by SQL backends is covered. Asserts that records from
+    // a different tenant or user under the same `processes/` root are
+    // not returned, and that the result matches the legacy list+get
+    // fallback path used on byte-only backends.
+    let backend = Arc::new(InMemoryBackend::new());
+    let store = FilesystemProcessStore::from_arc(Arc::clone(&backend));
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let other_user_scope = sample_scope(invocation_id, "tenant1", "user2");
+    let other_tenant_scope = sample_scope(invocation_id, "tenant2", "user1");
+
+    let mine_a = ProcessId::new();
+    let mine_b = ProcessId::new();
+    let other_user = ProcessId::new();
+    let other_tenant = ProcessId::new();
+    store
+        .start(process_start(mine_a, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+    store
+        .start(process_start(mine_b, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+    store
+        .start(process_start(
+            other_user,
+            invocation_id,
+            other_user_scope.clone(),
+        ))
+        .await
+        .unwrap();
+    store
+        .start(process_start(
+            other_tenant,
+            invocation_id,
+            other_tenant_scope.clone(),
+        ))
+        .await
+        .unwrap();
+
+    let mine = store.records_for_scope(&scope).await.unwrap();
+    let mut got: Vec<ProcessId> = mine.iter().map(|record| record.process_id).collect();
+    got.sort_by_key(|id| id.as_uuid());
+    let mut expected = vec![mine_a, mine_b];
+    expected.sort_by_key(|id| id.as_uuid());
+    assert_eq!(got, expected);
+
+    let theirs = store.records_for_scope(&other_user_scope).await.unwrap();
+    assert_eq!(theirs.len(), 1);
+    assert_eq!(theirs[0].process_id, other_user);
+
+    let cross_tenant = store.records_for_scope(&other_tenant_scope).await.unwrap();
+    assert_eq!(cross_tenant.len(), 1);
+    assert_eq!(cross_tenant[0].process_id, other_tenant);
 }
 
 enum UnownedTransition {
