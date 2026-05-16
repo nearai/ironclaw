@@ -217,7 +217,7 @@ async fn dispatch_payload(
                 }
             };
             let outcome = inbound_turn_service
-                .accept_user_message(envelope_for_turn)
+                .accept_user_message_after_policy(envelope_for_turn)
                 .await?;
             let ack = outcome.to_ack();
             let dispatch_kind = dispatch_kind_from_ack(&ack, envelope_for_turn.payload())?;

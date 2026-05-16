@@ -89,6 +89,14 @@ pub trait InboundTurnService: Send + Sync {
         &self,
         envelope: &ProductInboundEnvelope,
     ) -> Result<InboundTurnOutcome, ProductWorkflowError>;
+
+    /// Accept a user message after the caller already performed replay lookup.
+    async fn accept_user_message_after_policy(
+        &self,
+        envelope: &ProductInboundEnvelope,
+    ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
+        self.accept_user_message(envelope).await
+    }
 }
 
 /// Default implementation that composes a [`ConversationBindingService`] with a
@@ -157,6 +165,17 @@ where
         &self,
         envelope: &ProductInboundEnvelope,
     ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
+        if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
+            return Ok(outcome);
+        }
+
+        self.accept_user_message_after_policy(envelope).await
+    }
+
+    async fn accept_user_message_after_policy(
+        &self,
+        envelope: &ProductInboundEnvelope,
+    ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
             return Err(ProductWorkflowError::UnsupportedActionKind {
                 kind: "non_user_message".into(),
@@ -164,10 +183,6 @@ where
         };
         let source_binding_id = product_source_binding_id(envelope);
         let submit_idempotency_key = submit_idempotency_key(envelope);
-
-        if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
-            return Ok(outcome);
-        }
 
         let binding = self
             .binding_service

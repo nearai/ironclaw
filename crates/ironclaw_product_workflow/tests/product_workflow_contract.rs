@@ -1,7 +1,8 @@
 //! Contract tests for the product workflow facade.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
@@ -16,8 +17,8 @@ use ironclaw_product_adapters::{
 use ironclaw_product_workflow::{
     ActionDispatchKind, ActionFingerprintKey, AuthRequestRef, DefaultProductWorkflow,
     FakeBeforeInboundPolicy, FakeIdempotencyLedger, FakeInboundTurnService, IdempotencyDecision,
-    IdempotencyLedger, InboundTurnOutcome, LinkedThreadActionId, ProductCommandName,
-    ProductWorkflowError, ResolvedBinding, SourceBindingKey,
+    IdempotencyLedger, InboundTurnOutcome, InboundTurnService, LinkedThreadActionId,
+    ProductCommandName, ProductWorkflowError, ResolvedBinding, SourceBindingKey,
 };
 use ironclaw_turns::{AcceptedMessageRef, LoopGateRef, TurnError, TurnRunId};
 
@@ -172,6 +173,77 @@ fn fake_binding() -> ResolvedBinding {
     }
 }
 
+#[derive(Default)]
+struct ReplayCountingInboundTurnService {
+    replay_attempts: Mutex<usize>,
+    attempts: Mutex<usize>,
+    accepted: Mutex<Vec<ProductInboundEnvelope>>,
+}
+
+impl ReplayCountingInboundTurnService {
+    fn replay_attempt_count(&self) -> usize {
+        *self
+            .replay_attempts
+            .lock()
+            .expect("replay counter lock poisoned")
+    }
+
+    fn attempt_count(&self) -> usize {
+        *self.attempts.lock().expect("attempt counter lock poisoned")
+    }
+
+    fn accepted_envelopes(&self) -> Vec<ProductInboundEnvelope> {
+        self.accepted
+            .lock()
+            .expect("accepted envelopes lock poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl InboundTurnService for ReplayCountingInboundTurnService {
+    async fn replay_accepted_user_message(
+        &self,
+        _envelope: &ProductInboundEnvelope,
+    ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError> {
+        *self
+            .replay_attempts
+            .lock()
+            .expect("replay counter lock poisoned") += 1;
+        Ok(None)
+    }
+
+    async fn accept_user_message(
+        &self,
+        envelope: &ProductInboundEnvelope,
+    ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
+        if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
+            return Ok(outcome);
+        }
+        self.accept_user_message_after_policy(envelope).await
+    }
+
+    async fn accept_user_message_after_policy(
+        &self,
+        envelope: &ProductInboundEnvelope,
+    ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
+        *self.attempts.lock().expect("attempt counter lock poisoned") += 1;
+        self.accepted
+            .lock()
+            .expect("accepted envelopes lock poisoned")
+            .push(envelope.clone());
+        Ok(InboundTurnOutcome::Submitted {
+            accepted_message_ref: AcceptedMessageRef::new(format!(
+                "msg:{}",
+                envelope.external_event_id()
+            ))
+            .expect("valid accepted message ref"),
+            submitted_run_id: TurnRunId::new(),
+            binding: fake_binding(),
+        })
+    }
+}
+
 fn build_workflow() -> (
     DefaultProductWorkflow,
     Arc<FakeInboundTurnService>,
@@ -233,6 +305,33 @@ async fn before_inbound_policy_rewrite_reaches_inbound_turn_service() {
         panic!("expected rewritten user message payload")
     };
     assert_eq!(payload.text, "rewritten by policy");
+    assert_eq!(ledger.settled_count(), 1);
+}
+
+#[tokio::test]
+async fn before_inbound_policy_path_probes_replay_once() {
+    let inbound = Arc::new(ReplayCountingInboundTurnService::default());
+    let ledger = Arc::new(FakeIdempotencyLedger::new());
+    let policy = Arc::new(FakeBeforeInboundPolicy::new());
+    policy.rewrite_user_message(
+        UserMessagePayload::new("rewritten once", vec![], ProductTriggerReason::DirectChat)
+            .expect("valid rewrite"),
+    );
+    let workflow = DefaultProductWorkflow::new(inbound.clone(), ledger.clone())
+        .with_before_inbound_policy(policy.clone());
+    let envelope = sample_envelope("policy-replay-once");
+
+    let ack = workflow.accept_inbound(envelope).await.expect("accept");
+
+    assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
+    assert_eq!(inbound.replay_attempt_count(), 1);
+    assert_eq!(inbound.attempt_count(), 1);
+    let accepted = inbound.accepted_envelopes();
+    let ProductInboundPayload::UserMessage(payload) = accepted[0].payload() else {
+        panic!("expected rewritten user message payload")
+    };
+    assert_eq!(payload.text, "rewritten once");
+    assert_eq!(policy.request_count(), 1);
     assert_eq!(ledger.settled_count(), 1);
 }
 
