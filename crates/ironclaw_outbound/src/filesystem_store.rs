@@ -368,17 +368,26 @@ fn delivery_path(delivery_id: &OutboundDeliveryId) -> Result<VirtualPath, Outbou
         .map_err(|_| OutboundError::Backend)
 }
 
+/// Sentinel used in [`thread_scope_key`] to distinguish `agent_id = None` /
+/// `project_id = None` from a literal id value. `\x1F` (ASCII unit-separator)
+/// is a control character; `validate_scope_id` in `ironclaw_host_api` rejects
+/// every ASCII control character via `has_forbidden_control`, so no real
+/// `AgentId` / `ProjectId` can ever contain it. Using the previous `"_"`
+/// sentinel collided with a legal id of literally `"_"` (audit finding F6),
+/// silently hashing two distinct scopes to the same key.
+const SCOPE_NONE_SENTINEL: &str = "\x1f";
+
 fn thread_scope_key(scope: &TurnScope) -> String {
     let agent = scope
         .agent_id
         .as_ref()
         .map(ToString::to_string)
-        .unwrap_or_else(|| "_".to_string());
+        .unwrap_or_else(|| SCOPE_NONE_SENTINEL.to_string());
     let project = scope
         .project_id
         .as_ref()
         .map(ToString::to_string)
-        .unwrap_or_else(|| "_".to_string());
+        .unwrap_or_else(|| SCOPE_NONE_SENTINEL.to_string());
     let serialized = format!(
         "{}|{}|{}|{}",
         scope.tenant_id, agent, project, scope.thread_id
@@ -405,5 +414,49 @@ fn map_fs_error(error: FilesystemError) -> OutboundError {
     match error {
         FilesystemError::VersionMismatch { .. } => OutboundError::CasConflict,
         _ => OutboundError::Backend,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_turns::TurnScope;
+
+    use super::{SCOPE_NONE_SENTINEL, thread_scope_key};
+
+    fn tenant() -> TenantId {
+        TenantId::new("tenant-scope-key").unwrap()
+    }
+
+    fn thread() -> ThreadId {
+        ThreadId::new("thread-scope-key").unwrap()
+    }
+
+    #[test]
+    fn sentinel_is_control_character_rejected_by_scope_id_validators() {
+        // Audit finding F6: the sentinel for `agent_id = None` /
+        // `project_id = None` must be a value that no legal scope id can
+        // ever contain. `validate_scope_id` (`ironclaw_host_api::ids`)
+        // rejects every ASCII control character, so a single byte in the
+        // C0 control range is safe to use as a path-illegal sentinel.
+        assert_eq!(SCOPE_NONE_SENTINEL, "\x1f");
+        assert!(AgentId::new(SCOPE_NONE_SENTINEL).is_err());
+        assert!(ProjectId::new(SCOPE_NONE_SENTINEL).is_err());
+    }
+
+    #[test]
+    fn underscore_agent_id_no_longer_collides_with_none_sentinel() {
+        // Audit finding F6 regression test: before the sentinel fix, a
+        // scope with `agent_id = Some("_")` hashed to the same key as a
+        // scope with `agent_id = None`, because the sentinel was literally
+        // `"_"`. With `\x1F` as the sentinel — rejected by `AgentId::new`
+        // — no legal agent_id can collide with the absence marker.
+        let underscore_agent =
+            TurnScope::new(tenant(), Some(AgentId::new("_").unwrap()), None, thread());
+        let none_agent = TurnScope::new(tenant(), None, None, thread());
+        assert_ne!(
+            thread_scope_key(&underscore_agent),
+            thread_scope_key(&none_agent),
+        );
     }
 }
