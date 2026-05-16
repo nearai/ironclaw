@@ -17,7 +17,7 @@ pub use db::{PostgresApprovalRequestStore, PostgresRunStateApprovalStore, Postgr
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard, OnceLock},
+    sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
 };
 
 use async_trait::async_trait;
@@ -906,7 +906,22 @@ fn approval_records_root(scope: &ResourceScope) -> Result<VirtualPath, RunStateE
 
 type FilesystemRecordLock = Arc<tokio::sync::Mutex<()>>;
 
-static FILESYSTEM_RECORD_LOCKS: OnceLock<Mutex<HashMap<String, FilesystemRecordLock>>> =
+// Per-path async serialization for filesystem-backed run/approval stores.
+//
+// Values are stored as `Weak<Mutex<()>>` so the map does not pin lock entries
+// alive once all in-flight operations on a path have released their `Arc`
+// clones. Each call:
+//
+//   1. Opportunistically prunes entries whose `Weak` no longer upgrades —
+//      keeps the map size bounded under high tenant churn (audit finding F1).
+//   2. Returns the live `Arc` if one is still in flight on this path.
+//   3. Otherwise installs a fresh `Arc` and hands back a clone.
+//
+// Race note: we hold the outer `std::sync::Mutex` for the whole upgrade-or-
+// insert window, so two callers asking for the same path receive the same
+// `Arc`; the previously-stale entry path is the only one that creates a new
+// lock, and only when no other `Arc` exists.
+static FILESYSTEM_RECORD_LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
     OnceLock::new();
 
 fn filesystem_record_lock(path: &VirtualPath) -> FilesystemRecordLock {
@@ -914,11 +929,20 @@ fn filesystem_record_lock(path: &VirtualPath) -> FilesystemRecordLock {
     let mut guard = locks
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    Arc::clone(
-        guard
-            .entry(path.as_str().to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-    )
+
+    // Drop entries whose owning Arc has been released. Cheap O(n) scan;
+    // run-state and approval traffic only ever holds a handful of live
+    // paths at once, and pruning here avoids a separate sweeper task.
+    guard.retain(|_, weak| weak.strong_count() > 0);
+
+    let key = path.as_str();
+    if let Some(existing) = guard.get(key).and_then(Weak::upgrade) {
+        return existing;
+    }
+
+    let fresh: FilesystemRecordLock = Arc::new(tokio::sync::Mutex::new(()));
+    guard.insert(key.to_string(), Arc::downgrade(&fresh));
+    fresh
 }
 
 fn tenant_user_root(scope: &ResourceScope) -> String {
@@ -972,4 +996,69 @@ where
 
 fn is_not_found(error: &FilesystemError) -> bool {
     matches!(error, FilesystemError::NotFound { .. })
+}
+
+#[cfg(test)]
+mod lock_map_tests {
+    use super::*;
+
+    /// Returns whether the lock map currently holds an entry for `key`
+    /// whose `Weak` still upgrades to a live `Arc`.
+    fn entry_is_live(key: &str) -> bool {
+        FILESYSTEM_RECORD_LOCKS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(key)
+            .and_then(Weak::upgrade)
+            .is_some()
+    }
+
+    #[test]
+    fn filesystem_record_lock_returns_same_arc_while_holders_alive() {
+        let path = VirtualPath::new(
+            "/engine/tenants/lockmap-share/users/u/projects/p/runs/share.json".to_string(),
+        )
+        .unwrap();
+        let a = filesystem_record_lock(&path);
+        let b = filesystem_record_lock(&path);
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "concurrent callers must share the lock"
+        );
+    }
+
+    #[test]
+    fn filesystem_record_lock_prunes_dead_entries_on_reuse() {
+        // Hold a lock for a path, then drop it; the next call against a
+        // *different* path triggers the pruning sweep, after which the
+        // first path's entry must no longer be reachable. Demonstrates
+        // the map does not grow unboundedly with tenant/path churn
+        // (audit finding F1).
+        let path = VirtualPath::new(
+            "/engine/tenants/lockmap-prune/users/u/projects/p/runs/prune.json".to_string(),
+        )
+        .unwrap();
+        let other = VirtualPath::new(
+            "/engine/tenants/lockmap-prune/users/u/projects/p/runs/other.json".to_string(),
+        )
+        .unwrap();
+
+        let arc = filesystem_record_lock(&path);
+        assert!(
+            entry_is_live(path.as_str()),
+            "acquisition should produce a live entry"
+        );
+        drop(arc);
+
+        // After the Arc drops, the Weak in the map is dead. Acquire any
+        // other path to trigger the prune sweep — the dead entry for
+        // the first path must be gone afterwards.
+        let _other_arc = filesystem_record_lock(&other);
+        assert!(
+            !entry_is_live(path.as_str()),
+            "dead Weak entry should have been pruned for {}",
+            path.as_str()
+        );
+    }
 }
