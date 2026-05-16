@@ -3,6 +3,10 @@ use ironclaw_reborn_config::RebornDoctorReport;
 
 use crate::context::RebornCliContext;
 
+mod apply;
+mod diff;
+mod watch;
+
 #[derive(Debug, Args)]
 pub(crate) struct ConfigCommand {
     #[command(subcommand)]
@@ -13,6 +17,22 @@ pub(crate) struct ConfigCommand {
 enum ConfigSubcommand {
     /// Show resolved Reborn configuration paths without creating state.
     Path(ConfigPathCommand),
+    /// Apply a declarative IronClaw blueprint to the runtime's typed repos.
+    ///
+    /// Stub today; lands fully via epic
+    /// [#3036](https://github.com/nearai/ironclaw/issues/3036) sub-issue
+    /// "Blueprint apply service".
+    Apply(apply::ConfigApplyCommand),
+    /// Diff a declarative blueprint against the runtime's typed repos
+    /// without writing.
+    ///
+    /// Stub today; lands fully via epic #3036 sub-issue "Blueprint diff".
+    Diff(diff::ConfigDiffCommand),
+    /// Watch a git URL for blueprint revisions and apply on each new
+    /// revision (GitOps mode).
+    ///
+    /// Stub today; lands via epic #3036 sub-issue "GitOps watcher".
+    Watch(watch::ConfigWatchCommand),
 }
 
 #[derive(Debug, Args)]
@@ -22,6 +42,9 @@ impl ConfigCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
         match self.command {
             ConfigSubcommand::Path(command) => command.execute(context),
+            ConfigSubcommand::Apply(command) => command.execute(context),
+            ConfigSubcommand::Diff(command) => command.execute(context),
+            ConfigSubcommand::Watch(command) => command.execute(context),
         }
     }
 }

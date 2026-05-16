@@ -4,12 +4,14 @@ pub(crate) mod channels;
 pub(crate) mod completion;
 pub(crate) mod config;
 pub(crate) mod doctor;
+pub(crate) mod harness;
 pub(crate) mod hooks;
 pub(crate) mod logs;
 pub(crate) mod models;
 pub(crate) mod profile;
 pub(crate) mod run;
 pub(crate) mod skills;
+pub(crate) mod stubs;
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
@@ -21,6 +23,10 @@ pub(crate) enum Command {
     Config(config::ConfigCommand),
     /// Check Reborn binary configuration without creating state.
     Doctor(doctor::DoctorCommand),
+    /// Install / activate / list use-case harnesses (epic #3036).
+    /// Subcommands ship as discoverable stubs today; substrate lands
+    /// incrementally via epic sub-issues.
+    Harness(harness::HarnessCommand),
     /// Inspect configured Reborn hooks.
     Hooks(hooks::HooksCommand),
     /// Inspect Reborn logs.
@@ -44,6 +50,9 @@ impl Command {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
             Self::Doctor(command) => {
+                command.execute(crate::context::RebornCliContext::resolve_from_env()?)
+            }
+            Self::Harness(command) => {
                 command.execute(crate::context::RebornCliContext::resolve_from_env()?)
             }
             Self::Hooks(command) => command.execute(),
