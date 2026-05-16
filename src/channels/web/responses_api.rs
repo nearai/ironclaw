@@ -1225,10 +1225,7 @@ pub async fn create_response_handler(
                 "function_call_output supplied but no pending external tool call for \
                  this thread. Verify the prior response.output array contained a \
                  `function_call` item for this call_id; if it did not, the agent did \
-                 not actually invoke the caller-supplied tool. Note: caller-supplied \
-                 tools are currently dispatched only when the LLM emits a structured \
-                 tool call. CodeAct (Python) execution does not yet pause for caller \
-                 tools — see PR #3157 for the in-progress engine fix.",
+                 not actually invoke the caller-supplied tool.",
                 "invalid_request_error",
             )
         })?;
@@ -1684,10 +1681,48 @@ async fn streaming_worker(
             ..
         } = event
         {
-            // If buffered chunks accumulated before the pause, flush them
-            // as a leading message item so the OpenAI client sees the
-            // prose then the function_call in order.
-            if !acc.text_chunks.is_empty() {
+            // Finalize any in-flight Message placeholder before
+            // emitting the function_call item. Two shapes to handle:
+            //
+            // - StreamChunk-created placeholder: a Message item was
+            //   pushed with `output_item.added` when the first chunk
+            //   arrived (`message_output_index` is `Some`). The
+            //   accumulated text needs to be folded into that item
+            //   and `output_item.done` emitted for the same index.
+            //   Leaving it dangling without a matching `done` event
+            //   would render as "in progress" forever in OpenAI
+            //   clients (mirrors the bug the Response terminal path's
+            //   `streaming_worker_finalizes_item_when_resolved_text_is_empty`
+            //   regression test pins down).
+            //
+            // - No placeholder yet: we can have accumulated chunks if
+            //   the worker batched them, or we may have nothing. Only
+            //   push a new Message item when there's actual text.
+            if let Some(idx) = message_output_index.take() {
+                let leading: String = acc.text_chunks.drain(..).collect();
+                let item_id = match acc.output.get(idx) {
+                    Some(ResponseOutputItem::Message { id, .. }) => id.clone(),
+                    _ => make_item_id(),
+                };
+                let item = ResponseOutputItem::Message {
+                    id: item_id,
+                    role: "assistant".to_string(),
+                    content: vec![MessageContent::OutputText { text: leading }],
+                };
+                if idx < acc.output.len() {
+                    acc.output[idx] = item.clone();
+                } else {
+                    acc.output.push(item.clone());
+                }
+                let _ = emit(
+                    &tx,
+                    "response.output_item.done",
+                    &ResponseStreamEvent::OutputItemDone {
+                        output_index: idx,
+                        item,
+                    },
+                );
+            } else if !acc.text_chunks.is_empty() {
                 let leading: String = acc.text_chunks.drain(..).collect();
                 if !leading.is_empty() {
                     let idx = acc.output.len();
@@ -2482,10 +2517,9 @@ mod tests {
 
         // Expected wire-frame sequence:
         //   response.created
-        //   response.output_item.added       (Message placeholder for the streaming text)
-        //   response.output_text.delta × 2   (one per chunk)
-        //   response.output_item.added       (Message — flushed prose)
-        //   response.output_item.done        (Message — flushed prose)
+        //   response.output_item.added       (Message placeholder, opened on first StreamChunk)
+        //   response.output_text.delta × 2   (one per chunk, into the placeholder)
+        //   response.output_item.done        (Message — placeholder finalized with accumulated text)
         //   response.output_item.added       (FunctionCall)
         //   response.output_item.done        (FunctionCall)
         //   response.completed
@@ -2496,13 +2530,29 @@ mod tests {
                 "response.output_item.added",
                 "response.output_text.delta",
                 "response.output_text.delta",
-                "response.output_item.added",
                 "response.output_item.done",
                 "response.output_item.added",
                 "response.output_item.done",
                 "response.completed",
             ],
             "wire frame sequence does not match expected ordering"
+        );
+
+        // Pairing invariant: every `output_item.added` must have a
+        // matching `output_item.done`. Without this, a streaming
+        // client sees "in progress" placeholders that never resolve.
+        let added_count = event_types
+            .iter()
+            .filter(|t| **t == "response.output_item.added")
+            .count();
+        let done_count = event_types
+            .iter()
+            .filter(|t| **t == "response.output_item.done")
+            .count();
+        assert_eq!(
+            added_count, done_count,
+            "every output_item.added must have a matching output_item.done; \
+             added={added_count} done={done_count}"
         );
 
         // Find the function_call frames and assert they carry the
