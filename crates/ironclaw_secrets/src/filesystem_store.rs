@@ -228,27 +228,6 @@ where
         Ok(Some(stored))
     }
 
-    async fn read_lease(
-        &self,
-        scope: &ResourceScope,
-        lease_id: SecretLeaseId,
-    ) -> Result<Option<StoredLease>, SecretStoreError> {
-        let path = lease_path(scope, lease_id)?;
-        let Some(versioned) = self
-            .filesystem
-            .get(&path)
-            .await
-            .map_err(fs_to_secret_store_error)?
-        else {
-            return Ok(None);
-        };
-        let stored: StoredLease = deserialize_secret(&versioned.entry.body)?;
-        if !same_scope_for_lease(&stored.scope, scope) {
-            return Ok(None);
-        }
-        Ok(Some(stored))
-    }
-
     async fn write_secret(&self, secret: &StoredSecret) -> Result<(), SecretStoreError> {
         let path = secret_path(&secret.scope, &secret.handle)?;
         let body = serialize_secret(secret)?;
@@ -476,13 +455,47 @@ where
     ) -> Result<SecretLease, SecretStoreError> {
         let lock = filesystem_secret_lock_for_lease(scope, lease_id);
         let _guard = lock.lock().await;
-        let mut lease = self.read_lease(scope, lease_id).await?.ok_or_else(|| {
-            SecretStoreError::UnknownLease {
-                scope: Box::new(scope.clone()),
-                lease_id,
+        // The process-local mutex above only serializes writers in this
+        // process; multi-process callers sharing the same backend root could
+        // otherwise both observe an `Active` lease and the slower `revoke`
+        // could clobber a `Consumed` marker written by a concurrent
+        // `consume`. Re-read with the row version and write with
+        // `CasExpectation::Version`, retrying on `VersionMismatch`. Pattern
+        // mirrors `consume` and `consume_session_use` above. See F2 (Medium)
+        // in the 2026-05 audit.
+        let path = lease_path(scope, lease_id)?;
+        for _ in 0..CAS_RETRY_ATTEMPTS {
+            let Some(versioned) = self
+                .filesystem
+                .get(&path)
+                .await
+                .map_err(fs_to_secret_store_error)?
+            else {
+                return Err(SecretStoreError::UnknownLease {
+                    scope: Box::new(scope.clone()),
+                    lease_id,
+                });
+            };
+            let mut lease: StoredLease = deserialize_secret(&versioned.entry.body)?;
+            if !same_scope_for_lease(&lease.scope, scope) {
+                return Err(SecretStoreError::UnknownLease {
+                    scope: Box::new(scope.clone()),
+                    lease_id,
+                });
             }
-        })?;
-        if lease.status == SecretLeaseStatus::Active {
+            // Idempotent on terminal states: revoking an already-Consumed or
+            // already-Revoked lease succeeds without rewriting the marker, so
+            // a race with `consume` cannot overwrite the Consumed signal.
+            // Expired is similarly terminal — `effective_status` decides
+            // whether an Active lease has aged into Expired.
+            match lease.status {
+                SecretLeaseStatus::Consumed
+                | SecretLeaseStatus::Revoked
+                | SecretLeaseStatus::Expired => {
+                    return Ok(Self::lease_to_public(&lease));
+                }
+                SecretLeaseStatus::Active => {}
+            }
             let now = Utc::now();
             // Promote a stale Active lease to Expired before revoking, mirroring
             // the in-memory adapter's `expire_stale_active_leases` step.
@@ -491,9 +504,21 @@ where
             } else {
                 lease.status = SecretLeaseStatus::Revoked;
             }
-            self.write_lease(&lease).await?;
+            let body = serialize_secret(&lease)?;
+            let entry = Entry::bytes(body).with_content_type(ContentType::json());
+            match self
+                .filesystem
+                .put(&path, entry, CasExpectation::Version(versioned.version))
+                .await
+            {
+                Ok(_) => return Ok(Self::lease_to_public(&lease)),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(fs_to_secret_store_error(error)),
+            }
         }
-        Ok(Self::lease_to_public(&lease))
+        Err(SecretStoreError::StoreUnavailable {
+            reason: "secret lease revoke retry limit exceeded".to_string(),
+        })
     }
 
     async fn leases_for_scope(
@@ -1291,6 +1316,67 @@ mod tests {
         store.revoke(&scope, lease.id).await.unwrap();
         let error = store.consume(&scope, lease.id).await.unwrap_err();
         assert!(error.is_revoked());
+    }
+
+    /// F2 regression: when `consume` wins the race against `revoke`, the
+    /// consumed marker must survive — the late-arriving `revoke` must observe
+    /// the Consumed state and become a no-op rather than overwriting it with
+    /// Revoked. Before the fix, `revoke` read with no version, computed the
+    /// new status from the stale `Active` snapshot it observed, and wrote
+    /// back with `CasExpectation::Any`, silently clobbering the consume.
+    #[tokio::test]
+    async fn filesystem_secret_store_revoke_after_consume_is_idempotent() {
+        let fs = Arc::new(InMemoryBackend::new());
+        let store = FilesystemSecretStore::new(fs, test_crypto());
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("api_key").unwrap();
+        store
+            .put(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("super-secret"),
+            )
+            .await
+            .unwrap();
+
+        let lease = store.lease_once(&scope, &handle).await.unwrap();
+        // Consume first, then revoke. The revoke must not overwrite the
+        // Consumed status, and the returned lease must still report
+        // Consumed so external observers see the terminal state.
+        let _material = store.consume(&scope, lease.id).await.unwrap();
+        let revoked = store.revoke(&scope, lease.id).await.unwrap();
+        assert_eq!(
+            revoked.status,
+            SecretLeaseStatus::Consumed,
+            "F2: revoke after consume must remain Consumed, not promote to Revoked"
+        );
+        // Calling revoke again is still idempotent.
+        let revoked_again = store.revoke(&scope, lease.id).await.unwrap();
+        assert_eq!(revoked_again.status, SecretLeaseStatus::Consumed);
+    }
+
+    /// F2 regression: revoking an already-Revoked lease is idempotent and
+    /// does not rewrite the record.
+    #[tokio::test]
+    async fn filesystem_secret_store_revoke_is_idempotent_on_revoked() {
+        let fs = Arc::new(InMemoryBackend::new());
+        let store = FilesystemSecretStore::new(fs, test_crypto());
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("api_key").unwrap();
+        store
+            .put(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("super-secret"),
+            )
+            .await
+            .unwrap();
+
+        let lease = store.lease_once(&scope, &handle).await.unwrap();
+        let first = store.revoke(&scope, lease.id).await.unwrap();
+        let second = store.revoke(&scope, lease.id).await.unwrap();
+        assert_eq!(first.status, SecretLeaseStatus::Revoked);
+        assert_eq!(second.status, SecretLeaseStatus::Revoked);
     }
 
     #[tokio::test]
