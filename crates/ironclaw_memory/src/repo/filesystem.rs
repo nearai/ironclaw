@@ -240,77 +240,70 @@ where
                 error.to_string(),
             )
         })?;
-        // Filter on the record kind: every document this repository writes
-        // carries `kind = "memory_document"`. Other records under the
-        // same prefix (e.g. event logs, future chunk projections) are
-        // excluded.
-        let results = match self
-            .filesystem
-            .query(&prefix, &Filter::All, Page::new(0, Page::MAX_LIMIT))
-            .await
-        {
-            Ok(results) => results,
-            Err(FilesystemError::NotFound { .. }) => return Ok(Vec::new()),
-            Err(error) => return Err(error),
-        };
-        let mut documents = Vec::new();
+        // Drain every page of the query: `Page::MAX_LIMIT == 1024`, so a
+        // single-shot query silently truncates at 1024 documents — the
+        // `write_document` ancestor/descendant conflict check at the call
+        // site below would then miss conflicts across the truncation
+        // boundary (PR #3679 audit F1). Mirrors the `query_all_pages`
+        // helper added to `src/db/filesystem_jobs.rs`.
+        //
+        // `VersionedEntry.path` carries the absolute virtual path of the
+        // record (added in #3659), so we can recover `MemoryDocumentPath`
+        // directly from the query results without a second `list_dir`
+        // pass. The previous fallback to `list_dir` was dead code under
+        // any backend that supports `query` (F9).
         let prefix_str = format!("{}/", prefix.as_str().trim_end_matches('/'));
-        for versioned in results {
-            // Discard metadata sibling entries; they're addressed via
-            // `read_document_metadata`.
-            //
-            // The query returns the indexed map but not the path it was
-            // stored under. The filesystem trait's `query` returns
-            // VersionedEntry, which doesn't carry the path. We re-derive
-            // it from the indexed scope columns + a relative path that
-            // we don't have here — so we fall back to a query result
-            // that includes only entries the caller can subsequently
-            // resolve through `get` once the trait surfaces paths in
-            // query results. Until then, documents may be empty for
-            // backends whose query() doesn't surface path metadata.
-            //
-            // Workaround: filter through `versioned.entry.indexed` for
-            // the record kind, then re-look up by listing the prefix
-            // through the legacy bytes plane to discover paths. This
-            // matches what the existing SQL repos do.
-            if versioned
-                .entry
-                .kind
-                .as_ref()
-                .is_none_or(|kind| kind.as_str() != "memory_document")
-            {
-                continue;
-            }
-            // We can't recover the path purely from the VersionedEntry.
-            // The trait limitation is documented as a TODO above.
-            let _ = (versioned, &prefix_str);
-        }
-        // Path enumeration falls back to the legacy bytes plane until the
-        // trait exposes paths in query results (see TODO above). For the
-        // common case this yields the same paths the SQL repos would.
-        match self.filesystem.list_dir(&prefix).await {
-            Ok(entries) => {
-                for entry in entries {
-                    let relative = entry
-                        .path
-                        .as_str()
-                        .strip_prefix(&prefix_str)
-                        .unwrap_or(entry.name.as_str());
-                    if relative.ends_with(".meta") {
-                        continue;
-                    }
-                    if let Ok(doc) = MemoryDocumentPath::new(
-                        scope.tenant_id(),
-                        scope.user_id(),
-                        scope.project_id(),
-                        relative,
-                    ) {
-                        documents.push(doc);
-                    }
+        let mut documents = Vec::new();
+        let mut offset: u64 = 0;
+        loop {
+            let page = Page::new(offset, Page::MAX_LIMIT);
+            let entries = match self.filesystem.query(&prefix, &Filter::All, page).await {
+                Ok(entries) => entries,
+                Err(FilesystemError::NotFound { .. }) => break,
+                Err(error) => return Err(error),
+            };
+            let received = entries.len() as u64;
+            for versioned in entries {
+                // Only memory documents (skip `.meta` siblings, chunk
+                // projections, and any other record kind that may live
+                // under the same prefix).
+                if versioned
+                    .entry
+                    .kind
+                    .as_ref()
+                    .is_none_or(|kind| kind.as_str() != "memory_document")
+                {
+                    continue;
+                }
+                let path_str = versioned.path.as_str();
+                let Some(relative) = path_str.strip_prefix(&prefix_str) else {
+                    continue;
+                };
+                // `write_document_metadata` writes a sibling at
+                // `<doc>.meta` with an untyped bytes entry (no record
+                // kind), so it would already be filtered above — but
+                // keep an explicit suffix check in case the kind-less
+                // metadata contract changes.
+                if relative.ends_with(".meta") {
+                    continue;
+                }
+                if let Ok(doc) = MemoryDocumentPath::new_with_agent(
+                    scope.tenant_id(),
+                    scope.user_id(),
+                    scope.agent_id(),
+                    scope.project_id(),
+                    relative,
+                ) {
+                    documents.push(doc);
                 }
             }
-            Err(FilesystemError::NotFound { .. }) => {}
-            Err(error) => return Err(error),
+            // Short page means we've drained everything; a zero-length
+            // page also ends the loop and prevents an infinite spin if
+            // the backend ever returns an unexpected empty trailing page.
+            if received < Page::MAX_LIMIT as u64 {
+                break;
+            }
+            offset = offset.saturating_add(received);
         }
         documents.sort();
         documents.dedup();
@@ -410,5 +403,27 @@ mod tests {
         // `notes/a` is now an implicit directory; writing to it must fail.
         let result = repo.write_document(&doc("notes/a"), b"x").await;
         assert!(result.is_err());
+    }
+
+    /// Regression for audit F1: `list_documents` previously issued a single
+    /// `Page::new(0, Page::MAX_LIMIT)` query and trusted the result was
+    /// complete. With `Page::MAX_LIMIT == 1024`, scopes holding >1024
+    /// documents silently lost every entry past the cap, and the
+    /// `write_document` ancestor-conflict check above the cap stopped
+    /// firing. The drain loop must surface every row.
+    #[tokio::test]
+    async fn list_documents_drains_pages_beyond_max_limit() {
+        let fs = Arc::new(InMemoryBackend::new());
+        let repo = FilesystemMemoryDocumentRepository::new(fs);
+        // `Page::MAX_LIMIT == 1024`; write a few past the cap so a
+        // single-shot query would visibly truncate.
+        let total = (Page::MAX_LIMIT as usize) + 5;
+        let scope = doc("seed.md").scope().clone();
+        for index in 0..total {
+            let path = doc(&format!("notes/doc-{index:05}.md"));
+            repo.write_document(&path, b"body").await.unwrap();
+        }
+        let listed = repo.list_documents(&scope).await.unwrap();
+        assert_eq!(listed.len(), total);
     }
 }
