@@ -141,6 +141,20 @@ where
         Ok(())
     }
 
+    /// Read the current record, validate the requested transition,
+    /// then write it back with `CasExpectation::Version` so a concurrent
+    /// writer from another process is rejected at the backend instead of
+    /// silently overwriting our status flip. The bounded retry loop
+    /// handles the legitimate race where another caller transitioned the
+    /// same record between our read and write — we re-read, re-validate,
+    /// and try again until either the CAS succeeds or
+    /// [`MAX_CAS_RETRIES`] is exhausted.
+    ///
+    /// Backends without versioning (LocalFilesystem) return version `0`
+    /// for every read and reject `CasExpectation::Version` with
+    /// `Unsupported`; for those, `put_with_byte_fallback_versioned` falls
+    /// through to `CasExpectation::Any` so the existing single-instance
+    /// guarantee from `transition_lock` carries the safety invariant.
     async fn update_status(
         &self,
         scope: &ResourceScope,
@@ -149,17 +163,47 @@ where
         error_kind: Option<String>,
     ) -> Result<ProcessRecord, ProcessError> {
         let _guard = self.transition_lock.lock().await;
-        let mut record = self
-            .get(scope, process_id)
-            .await?
-            .ok_or(ProcessError::UnknownProcess { process_id })?;
-        ensure_status_transition(process_id, record.status, to)?;
-        record.status = to;
-        record.error_kind = error_kind;
-        self.write_record(&record).await?;
-        Ok(record)
+        for _ in 0..MAX_CAS_RETRIES {
+            let path = process_record_path(scope, process_id)?;
+            let Some(versioned) = self.filesystem.as_ref().get(&path).await? else {
+                return Err(ProcessError::UnknownProcess { process_id });
+            };
+            let mut record = deserialize::<ProcessRecord>(&versioned.entry.body)?;
+            ensure_process_record_matches(&record, process_id)?;
+            if !same_scope_owner(&record.scope, scope) {
+                return Err(ProcessError::UnknownProcess { process_id });
+            }
+            ensure_status_transition(process_id, record.status, to)?;
+            record.status = to;
+            record.error_kind = error_kind.clone();
+            self.ensure_indexes(&record.scope).await?;
+            let body = serialize_pretty(&record)?;
+            let entry = process_record_entry(body, &record);
+            match put_with_byte_fallback(
+                self.filesystem.as_ref(),
+                &path,
+                entry,
+                CasExpectation::Version(versioned.version),
+            )
+            .await
+            {
+                Ok(()) => return Ok(record),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(ProcessError::Filesystem(format!(
+            "process {process_id} status transition exhausted {MAX_CAS_RETRIES} CAS retries"
+        )))
     }
 }
+
+/// Maximum number of compare-and-swap retries before
+/// [`FilesystemProcessStore::update_status`] returns a `Filesystem`
+/// error. Five attempts mirrors the retry budget used by the secrets and
+/// authorization stores and is enough to absorb common contention while
+/// failing loudly on pathological loops.
+const MAX_CAS_RETRIES: usize = 5;
 
 #[async_trait]
 impl<F> ProcessStore for FilesystemProcessStore<'_, F>
