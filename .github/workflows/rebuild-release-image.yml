@@ -20,7 +20,6 @@ jobs:
     name: Rebuild Historical Image
     runs-on: ubuntu-24.04
     permissions:
-      actions: write
       contents: read
       packages: read
     steps:
@@ -97,8 +96,8 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:${{ inputs.tag }}
           target: runtime
           platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=release
+          cache-to: type=gha,mode=max,scope=release
 
       - name: Build and push (final stage)
         if: steps.target.outputs.has_runtime_stage != 'true'
@@ -108,8 +107,8 @@ jobs:
           push: true
           tags: ${{ env.IMAGE_NAME }}:${{ inputs.tag }}
           platforms: linux/amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=release
+          cache-to: type=gha,mode=max,scope=release
 
       - name: Summary
         env:

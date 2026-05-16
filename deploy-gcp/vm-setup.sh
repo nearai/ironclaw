@@ -69,29 +69,33 @@ chmod 700 /opt/t3claw
 # staging file is the dedicated VM variant.
 install -m 644 /var/tmp/deploy/docker-compose.staging.yml /opt/t3claw/docker-compose.yml
 
-# ── Environment file ──────────────────────────────────────────────────────────
-if [ ! -f /opt/t3claw/.env ]; then
-  echo ""
-  echo "WARNING: /opt/t3claw/.env does not exist."
-  echo "Create it with your secrets before starting the service."
-  echo "See deploy-gcp/env.example for the required variables."
-  echo ""
-  echo "Once .env is in place, run:"
-  echo "  systemctl enable t3claw && systemctl start t3claw"
-else
-  chmod 600 /opt/t3claw/.env
-fi
-
 # ── Systemd service ───────────────────────────────────────────────────────────
+# The service fetches /opt/t3claw/.env from Secret Manager (t3claw-staging-env)
+# on every start via ExecStartPre — no manual .env file needed on the VM.
 echo "==> Installing t3claw.service"
 cp /var/tmp/deploy/t3claw.service /etc/systemd/system/t3claw.service
 systemctl daemon-reload
 
-if [ -f /opt/t3claw/.env ]; then
-  echo "==> Starting T3Claw"
-  systemctl enable t3claw
-  systemctl start t3claw
+echo "==> Waiting for t3claw-staging-env secret to have an enabled version..."
+_secret_ready=0
+for _i in $(seq 1 24); do
+  if gcloud secrets versions list t3claw-staging-env \
+       --filter="state=ENABLED" --limit=1 --format="value(name)" 2>/dev/null \
+     | grep -q .; then
+    _secret_ready=1
+    break
+  fi
+  echo "    attempt ${_i}/24 — no enabled version yet, retrying in 10 s..."
+  sleep 10
+done
+if [ "${_secret_ready}" -eq 0 ]; then
+  echo "ERROR: timed out after 240 s waiting for an enabled version of t3claw-staging-env"
+  exit 1
 fi
+
+echo "==> Starting T3Claw"
+systemctl enable t3claw
+systemctl start t3claw
 
 echo ""
 echo "==> Bootstrap complete"

@@ -12,12 +12,8 @@ name: Build t3n MCP Sidecar
 # (A classic PAT with read:packages scope is sufficient — no write access needed.)
 
 on:
-  push:
-    branches: [staging]
-    paths:
-      - docker/t3n-mcp-sidecar.Dockerfile
-      - docker/t3n-mcp-bridge.mjs
-  # Allow manual re-builds from the Actions UI (e.g. after a t3n-mcp release).
+  # Disabled: push trigger removed until sidecar CI is re-enabled.
+  # Allow manual re-builds from the Actions UI.
   workflow_dispatch:
 
 permissions:
@@ -58,5 +54,5 @@ jobs:
           # is all that npm install @terminal-3/t3n-mcp requires.
           secrets: |
             npm_github_token=${{ secrets.NPM_GITHUB_TOKEN }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=sidecar
+          cache-to: type=gha,mode=max,scope=sidecar

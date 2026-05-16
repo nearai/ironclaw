@@ -7,7 +7,7 @@
 #
 # What this script creates:
 #   - Artifact Registry repo "t3claw" (us-central1)
-#   - Builds and pushes agent + worker Docker images
+#   - Builds and pushes agent + t3n-mcp-sidecar Docker images
 #   - IAM service account for the VM with AR read access
 #   - Firewall rule for LB health checks on port 3000
 #   - Compute Engine VM (e2-standard-2, Debian 12, us-central1-a)
@@ -36,7 +36,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 echo "==> Project : ${PROJECT}"
 echo "==> Region  : ${REGION} / ${ZONE}"
-echo "==> Images  : ${IMAGE_PREFIX}/{agent,worker}:latest"
+echo "==> Images  : ${IMAGE_PREFIX}/{agent,t3n-mcp-sidecar}:latest"
 echo ""
 
 # ── Phase 1: Artifact Registry ────────────────────────────────────────────────
@@ -65,15 +65,16 @@ else
     -t "${IMAGE_PREFIX}/agent:latest" \
     "${REPO_ROOT}"
 
-  echo "     Building worker image ..."
+  echo "     Building t3n-mcp-sidecar image ..."
   docker build --platform linux/amd64 \
-    -f "${REPO_ROOT}/Dockerfile.worker" \
-    -t "${IMAGE_PREFIX}/worker:latest" \
+    -f "${REPO_ROOT}/docker/t3n-mcp-sidecar.Dockerfile" \
+    --secret id=npm_github_token,env=NPM_GITHUB_TOKEN \
+    -t "${IMAGE_PREFIX}/t3n-mcp-sidecar:latest" \
     "${REPO_ROOT}"
 
   echo "     Pushing images ..."
   docker push "${IMAGE_PREFIX}/agent:latest"
-  docker push "${IMAGE_PREFIX}/worker:latest"
+  docker push "${IMAGE_PREFIX}/t3n-mcp-sidecar:latest"
 fi
 
 # ── Phase 2: Service Account + VM ─────────────────────────────────────────────
@@ -92,6 +93,26 @@ gcloud projects add-iam-policy-binding "${PROJECT}" \
   --member="serviceAccount:${SA_EMAIL}" \
   --role="roles/artifactregistry.reader" \
   --condition=None \
+  --quiet
+
+# Secret Manager: enable API, grant VM SA read access, create secret placeholder
+gcloud services enable secretmanager.googleapis.com --project="${PROJECT}" --quiet
+
+if gcloud secrets describe t3claw-staging-env \
+    --project="${PROJECT}" &>/dev/null; then
+  echo "     secret 't3claw-staging-env' already exists"
+else
+  gcloud secrets create t3claw-staging-env \
+    --replication-policy=automatic \
+    --project="${PROJECT}"
+  echo "     secret created (no versions yet) — add your .env as the first version:"
+  echo "     gcloud secrets versions add t3claw-staging-env --data-file=.env --project=${PROJECT}"
+fi
+
+gcloud secrets add-iam-policy-binding t3claw-staging-env \
+  --member="serviceAccount:${SA_EMAIL}" \
+  --role="roles/secretmanager.secretAccessor" \
+  --project="${PROJECT}" \
   --quiet
 
 # Firewall: allow LB health check IP ranges to reach port 3000 on tagged VMs.
