@@ -336,13 +336,9 @@ fn stream_path(kind: StreamKind, stream: &EventStreamKey) -> Result<ScopedPath, 
         .as_ref()
         .map(|id| id.as_str())
         .unwrap_or("_none");
-    let raw = format!(
-        "/events/{kind}/{tenant}/{user}/{agent}",
-        kind = kind_segment,
-        tenant = stream.tenant_id.as_str(),
-        user = stream.user_id.as_str(),
-        agent = agent_segment,
-    );
+    let tenant_segment = stream.tenant_id.as_str();
+    let user_segment = stream.user_id.as_str();
+    let raw = format!("/events/{kind_segment}/{tenant_segment}/{user_segment}/{agent_segment}");
     ScopedPath::new(raw).map_err(|_| durable_error("filesystem event store stream path is invalid"))
 }
 
