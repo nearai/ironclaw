@@ -189,6 +189,22 @@ impl ConversationManager {
     /// The per-conversation `Mutex` is held for the entire operation — from
     /// the active-thread check through `save_conversation`. This eliminates
     /// the TOCTOU double-spawn window present in the old 5-phase split.
+    ///
+    /// **`extra_initial_metadata` is spawn-only.** It is merged into the
+    /// thread's `metadata` map ONLY when this call allocates a new
+    /// thread (the `None` active-foreground branch below). On the
+    /// `Running` (inject) and `Resumable` (resume) paths the caller-
+    /// supplied metadata is *ignored* — those threads already exist
+    /// with their own metadata. Callers that need per-request state
+    /// (e.g. the bridge's external tool catalog keyed by
+    /// `conversation_scope`) must therefore either re-establish the
+    /// state out-of-band per request (the responses_api handler
+    /// re-registers its catalog every request and the bridge
+    /// `transfer`s it onto the engine thread_id), or persist the
+    /// value with `ThreadManager::set_thread_metadata` before resume
+    /// so the engine reload picks it up. Extending this method to
+    /// also write metadata on inject/resume is a future change, not
+    /// the current contract.
     // Bundling these into an options struct would just push the
     // argument list around without making any caller easier to read —
     // every caller passes literal None for the optional fields and

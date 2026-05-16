@@ -530,6 +530,15 @@ fn extract_user_content(input: &ResponsesInput) -> Result<ExtractedInput, String
 /// schemas. Mirrors the existing 10 KiB cap on `x_context`.
 const MAX_TOOLS_BYTES: usize = 16 * 1024;
 
+/// Maximum length of a single external tool name, in characters.
+///
+/// Matches the OpenAI Responses API constraint
+/// `^[A-Za-z0-9_-]{1,64}$`. Catches accidental over-long names
+/// before they propagate into engine action surfaces and SSE
+/// payloads where they would corrupt logs and break downstream
+/// LLM clients that enforce the same limit.
+const MAX_TOOL_NAME_LEN: usize = 64;
+
 /// `io::Write` sink that counts bytes without storing them. Lets
 /// `serde_json::to_writer` measure the serialized size of the
 /// caller-supplied tool list against `MAX_TOOLS_BYTES` without
@@ -555,10 +564,23 @@ fn validate_external_tools(tools: &[ResponsesTool]) -> Result<(), String> {
         return Ok(());
     }
     // Stream the payload through a counting writer instead of
-    // building a `Vec<Value>` + `String` just to call `.len()`. The
-    // closure mirrors the wire shape `serde` would produce for the
-    // tool array (`type`/`name`/`description`/`parameters`) so the
-    // count matches what the caller actually sent over the wire.
+    // building a `Vec<Value>` + `String` just to call `.len()`.
+    //
+    // What this measures: the canonicalised JSON length the tool
+    // array would serialise to (single field ordering, no
+    // pretty-printing, optional fields skipped when absent). It is
+    // NOT the byte-for-byte length of what the caller put on the
+    // wire — whitespace and key ordering in the request body can
+    // make the wire size diverge from this count by a constant
+    // factor. The 16 KiB cap is therefore on the canonical size,
+    // which is the meaningful "how much do we have to handle"
+    // number; the actual request body is already bounded by the
+    // gateway's 14 MiB body limit.
+    //
+    // The `Serializer` import brings the trait into scope so the
+    // method calls on the concrete `serde_json::Serializer` below
+    // resolve. `SerializeMap` / `SerializeSeq` do the same for the
+    // associated types returned by `serialize_map` / `serialize_seq`.
     use serde::ser::{SerializeMap, SerializeSeq, Serializer};
     struct ToolEntry<'a>(&'a ResponsesTool, usize);
     impl serde::Serialize for ToolEntry<'_> {
@@ -623,6 +645,27 @@ fn validate_external_tools(tools: &[ResponsesTool]) -> Result<(), String> {
             .as_deref()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| "function tool missing 'name'".to_string())?;
+        // OpenAI Responses API spec for function names: max 64 chars,
+        // `[A-Za-z0-9_-]` only. Enforce here so non-conformant names
+        // can't propagate into engine action surfaces, SSE payloads,
+        // logs, or downstream LLM clients (which would reject them
+        // anyway). Whitespace and control characters in particular
+        // would corrupt log lines and confuse pattern-matching
+        // downstream.
+        if name.len() > MAX_TOOL_NAME_LEN {
+            return Err(format!(
+                "tool name '{name}' exceeds {MAX_TOOL_NAME_LEN}-character limit"
+            ));
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(format!(
+                "tool name '{name}' contains invalid characters; \
+                 only ASCII letters, digits, '_', and '-' are allowed"
+            ));
+        }
         if !seen.insert(name.to_string()) {
             return Err(format!("duplicate tool name '{name}'"));
         }
@@ -1062,13 +1105,22 @@ pub async fn create_response_handler(
     validate_external_tools(&external_tools)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
 
-    // Reject names that shadow registered (built-in or extension)
-    // tools. Without this check, the catalog short-circuits the
-    // dispatcher, so an LLM call to (say) `shell` lands in
+    // Reject names that shadow internal action names (built-in tools,
+    // extension tools, or engine v2 capability actions like
+    // `mission_*` / `skill_*` / `memory_*`). Without this check the
+    // catalog short-circuits dispatch in `EffectBridgeAdapter`, so an
+    // LLM call to (say) `shell` or `mission_create` lands in
     // caller-side execution even though the LLM saw the internal
-    // `shell` description in its action surface — a confused-deputy
-    // surface where the caller can craft any output and the LLM
-    // treats it as the trusted internal tool's reply.
+    // action's description in its action surface — a confused-deputy
+    // path where the caller crafts any output and the LLM treats it
+    // as the trusted internal action's reply.
+    //
+    // Two collision sources:
+    //   - `ToolRegistry::tool_definitions()` — built-ins + extensions.
+    //   - `engine_capability_action_names()` — capability actions
+    //     registered via the engine v2 CapabilityRegistry. The
+    //     `tool_registry` check alone misses these because they live
+    //     on a different surface.
     //
     // The check runs only when the tool registry is wired; deployments
     // without a registry also lack engine v2 (they are constructed
@@ -1078,21 +1130,24 @@ pub async fn create_response_handler(
     if !external_tools.is_empty()
         && let Some(registry) = state.tool_registry.as_ref()
     {
-        let registered: std::collections::HashSet<String> = registry
+        let mut reserved: std::collections::HashSet<String> = registry
             .tool_definitions()
             .await
             .into_iter()
             .map(|t| t.name)
             .collect();
+        if let Some(capability_names) = crate::bridge::engine_capability_action_names().await {
+            reserved.extend(capability_names);
+        }
         for tool in &external_tools {
             if let Some(name) = tool.name.as_deref()
-                && registered.contains(name)
+                && reserved.contains(name)
             {
                 return Err(api_error(
                     StatusCode::BAD_REQUEST,
                     format!(
-                        "tool '{name}' shadows a built-in or extension action; \
-                         pick a different name"
+                        "tool '{name}' shadows a built-in, extension, or engine \
+                         action; pick a different name"
                     ),
                     "invalid_request_error",
                 ));
@@ -2246,6 +2301,64 @@ mod tests {
             parameters: None,
         }];
         assert!(validate_external_tools(&tools).is_err());
+    }
+
+    #[test]
+    fn validate_external_tools_rejects_name_with_invalid_chars() {
+        // Whitespace, control chars, dots, slashes — anything outside
+        // ASCII alphanumeric + `_` + `-` must be rejected.
+        for bad in [
+            "has space",
+            "has\ttab",
+            "has\nnewline",
+            "has.dot",
+            "has/slash",
+            "has\x07bell",
+            "has;semicolon",
+            "🦀rust",
+        ] {
+            let tools = vec![ResponsesTool {
+                tool_type: "function".to_string(),
+                name: Some(bad.to_string()),
+                description: None,
+                parameters: None,
+            }];
+            let err = validate_external_tools(&tools)
+                .expect_err(&format!("name {bad:?} must be rejected"));
+            assert!(
+                err.contains("invalid characters"),
+                "wrong rejection message for {bad:?}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_external_tools_rejects_name_exceeding_length() {
+        let too_long = "a".repeat(MAX_TOOL_NAME_LEN + 1);
+        let tools = vec![ResponsesTool {
+            tool_type: "function".to_string(),
+            name: Some(too_long),
+            description: None,
+            parameters: None,
+        }];
+        let err = validate_external_tools(&tools).expect_err("over-long name must be rejected");
+        assert!(
+            err.contains(&MAX_TOOL_NAME_LEN.to_string()),
+            "rejection should cite the limit: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_external_tools_accepts_max_length_name() {
+        // Exactly MAX_TOOL_NAME_LEN must be accepted.
+        let name = "a".repeat(MAX_TOOL_NAME_LEN);
+        let tools = vec![ResponsesTool {
+            tool_type: "function".to_string(),
+            name: Some(name),
+            description: None,
+            parameters: None,
+        }];
+        validate_external_tools(&tools).expect("max-length name must be accepted");
     }
 
     #[test]

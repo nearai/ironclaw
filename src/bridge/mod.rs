@@ -50,6 +50,10 @@ pub use router::{
     clear_engine_pending_auth,
     clear_engine_pending_auth_for_credential,
     discard_engine_pending_auth_request,
+    // Engine internal action names — used by request validators to
+    // reject caller-supplied tool names that would shadow internal
+    // capability actions (mission_*, skill_*, memory_*, etc.).
+    engine_capability_action_names,
     // External tool catalog accessor (Responses API)
     engine_external_tool_catalog,
     // Query functions

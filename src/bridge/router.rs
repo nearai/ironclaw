@@ -1379,6 +1379,29 @@ pub async fn engine_external_tool_catalog() -> Option<Arc<crate::bridge::Externa
     guard.as_ref().map(|s| Arc::clone(&s.external_tool_catalog))
 }
 
+/// Action names that are dispatchable via the engine v2 capability
+/// registry (`mission_*`, `skill_*`, `memory_*`, etc.). Used by the
+/// Responses API handler to reject caller-supplied tools whose names
+/// would shadow internal engine actions — the `tool_registry` check
+/// alone catches built-in and extension tools but misses capability
+/// actions, which can land in the catalog short-circuit even though
+/// the LLM-visible inventory dedup hides them.
+///
+/// Returns `None` if engine v2 is not initialised; callers treat that
+/// the same as "no engine v2 actions to collide with".
+pub async fn engine_capability_action_names() -> Option<Vec<String>> {
+    let lock = ENGINE_STATE.get()?;
+    let guard = lock.read().await;
+    let state = guard.as_ref()?;
+    let names: Vec<String> = state
+        .capability_registry
+        .list()
+        .into_iter()
+        .flat_map(|cap| cap.actions.iter().map(|a| a.name.clone()))
+        .collect();
+    Some(names)
+}
+
 /// Persistent engine state that lives across messages.
 struct EngineState {
     thread_manager: Arc<ThreadManager>,
@@ -1406,6 +1429,11 @@ struct EngineState {
     /// API handler (which writes to it before sending the request to
     /// the agent loop).
     external_tool_catalog: Arc<crate::bridge::ExternalToolCatalog>,
+    /// Engine v2 capability registry. Held here (in addition to the
+    /// `effect_adapter`'s internal handle) so the Responses API
+    /// handler can enumerate internal action names and reject
+    /// caller-supplied tools that would shadow them.
+    capability_registry: Arc<ironclaw_engine::CapabilityRegistry>,
     /// Inline gate-await controller. Lets the engine pause Tier 0 and
     /// Tier 1 executions in place on `Approval` and `Authentication`
     /// gates, rather than unwinding back to the orchestrator and
@@ -1801,7 +1829,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         llm_adapter,
         effect_adapter.clone(),
         store_dyn.clone(),
-        capabilities,
+        Arc::clone(&capabilities),
         leases,
         policy,
     ));
@@ -2128,6 +2156,7 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
         extension_manager: agent.deps.extension_manager.clone(),
         project_root: resolve_project_root(),
         external_tool_catalog,
+        capability_registry: Arc::clone(&capabilities),
         gate_controller,
         gate_resolutions: resolutions,
     });
@@ -7877,6 +7906,7 @@ pub(crate) mod test_support {
             gate_resolutions: test_gate_resolutions,
             project_root: super::resolve_project_root(),
             external_tool_catalog: Arc::new(crate::bridge::ExternalToolCatalog::new()),
+            capability_registry: Arc::new(ironclaw_engine::CapabilityRegistry::new()),
         };
 
         let lock = ENGINE_STATE.get_or_init(|| TokioRwLock::new(None));
@@ -10285,6 +10315,7 @@ mod tests {
             gate_resolutions: resolutions,
             project_root: resolve_project_root(),
             external_tool_catalog: Arc::new(crate::bridge::ExternalToolCatalog::new()),
+            capability_registry: Arc::new(ironclaw_engine::CapabilityRegistry::new()),
         }
     }
 
@@ -10451,6 +10482,7 @@ mod tests {
             gate_resolutions: resolutions,
             project_root: resolve_project_root(),
             external_tool_catalog: Arc::new(crate::bridge::ExternalToolCatalog::new()),
+            capability_registry: Arc::new(ironclaw_engine::CapabilityRegistry::new()),
         }
     }
 
@@ -12215,6 +12247,7 @@ mod tests {
             gate_resolutions: resolutions,
             project_root: resolve_project_root(),
             external_tool_catalog: Arc::new(crate::bridge::ExternalToolCatalog::new()),
+            capability_registry: Arc::new(ironclaw_engine::CapabilityRegistry::new()),
         }
     }
 
