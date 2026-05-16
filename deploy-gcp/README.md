@@ -273,7 +273,7 @@ The first build from a cold cache takes 30–60 minutes (Rust + WASM compile). S
 
 ### t3n-mcp sidecar
 
-The sidecar (`t3n-mcp-sidecar:latest`) runs alongside the agent on the VM. CI builds and pushes it to AR as part of `deploy-gcp.yml`. To rebuild it manually:
+The sidecar (`t3n-mcp-sidecar:latest`) runs alongside the agent on the VM. CI builds and pushes it to AR as part of `.github/workflows/staging-gcp.yml`. To rebuild it manually:
 
 ---
 
