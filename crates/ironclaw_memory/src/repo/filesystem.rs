@@ -321,6 +321,19 @@ where
         // expose only the FTS branch via `Filter::Fts` against the
         // `content` indexed projection so callers can opt into a partial
         // search that bypasses chunking + embeddings.
+        //
+        // The previous scaffold issued the query, then dropped the
+        // results with `let _ = results; Ok(Vec::new())`. That was worse
+        // than returning `Unsupported`: a caller wiring up the trait
+        // would see a clean empty result set and assume "no matches",
+        // when in fact the search call had simply lied. Now we map every
+        // `VersionedEntry.path` (added in #3659) back to a
+        // `MemoryDocumentPath`, de-dupe by path (FTS may return multiple
+        // chunk records for the same document once chunk projections
+        // come online), and assign a per-rank score from RRF over the
+        // FTS-only branch so the result vector is consistent with the
+        // native repos' fusion contract for the trivial single-branch
+        // case.
         let prefix = scope.virtual_prefix().map_err(|error| {
             memory_error(
                 valid_memory_path(),
@@ -339,16 +352,65 @@ where
             key,
             query: request.query().to_string(),
         };
-        let page = Page::new(0, request.limit() as u32);
+        let page = Page::new(0, request.pre_fusion_limit() as u32);
         let results = self.filesystem.query(&prefix, &filter, page).await?;
-        // We currently can't map a VersionedEntry back to its
-        // MemoryDocumentPath without the trait surfacing the row's
-        // path (see TODO on list_documents). Return an empty result set
-        // rather than fabricating paths — callers querying this
-        // repository know it is the scaffold path and will fall back to
-        // the native repos for end-to-end hybrid search.
-        let _ = results;
-        Ok(Vec::new())
+        let prefix_str = format!("{}/", prefix.as_str().trim_end_matches('/'));
+        let mut seen = std::collections::HashSet::<String>::new();
+        let mut out: Vec<MemorySearchResult> = Vec::new();
+        for (index, versioned) in results.into_iter().enumerate() {
+            // Skip non-memory-document entries that may live under the
+            // same prefix (chunk projections, metadata siblings).
+            if versioned
+                .entry
+                .kind
+                .as_ref()
+                .is_none_or(|kind| kind.as_str() != "memory_document")
+            {
+                continue;
+            }
+            let path_str = versioned.path.as_str();
+            let Some(relative) = path_str.strip_prefix(&prefix_str) else {
+                continue;
+            };
+            if relative.ends_with(".meta") {
+                continue;
+            }
+            let Ok(doc) = MemoryDocumentPath::new_with_agent(
+                scope.tenant_id(),
+                scope.user_id(),
+                scope.agent_id(),
+                scope.project_id(),
+                relative,
+            ) else {
+                continue;
+            };
+            if !seen.insert(doc.relative_path().to_string()) {
+                continue;
+            }
+            let rank = (index as u32).saturating_add(1);
+            // RRF score using the request's `rrf_k`: matches the
+            // single-branch shape of `fuse_memory_search_results` for the
+            // FTS-only case. Once the chunk projection is wired in, this
+            // call site will route through `fuse_memory_search_results`
+            // directly.
+            let score = 1.0 / (request.rrf_k() as f32 + rank as f32);
+            // Snippet uses the document body — the FTS index sits on
+            // the `content` projection which already mirrors the body
+            // bytes (lossy UTF-8 conversion is fixed by F8 in a
+            // follow-up commit).
+            let snippet = String::from_utf8_lossy(&versioned.entry.body).into_owned();
+            out.push(MemorySearchResult {
+                path: doc,
+                score,
+                snippet,
+                full_text_rank: Some(rank),
+                vector_rank: None,
+            });
+            if out.len() >= request.limit() {
+                break;
+            }
+        }
+        Ok(out)
     }
 }
 
