@@ -1,0 +1,241 @@
+# ScopedFilesystem-centric Tenant Isolation
+
+**Date:** 2026-05-16
+**Owner:** TBD
+**Status:** in-flight (engine migration in PR #3679; remaining consumer crates tracked here)
+
+## Why
+
+Two findings on PR #3679 (universal-FS dispatch) surfaced a systemic
+issue: the migrated consumer stores (`ironclaw_processes`,
+`ironclaw_secrets`, `ironclaw_outbound`, `ironclaw_authorization`,
+`ironclaw_engine`) all take a raw `Arc<F: RootFilesystem>` at
+construction. They bypass the existing `ScopedFilesystem` /
+`MountView` permissions layer, so:
+
+- Tenant isolation is either manually threaded into paths (processes:
+  `/engine/tenants/{tenant_id}/users/{user_id}/...`) or absent
+  (engine: `/engine/threads/<thread_id>.json`).
+- The `MountPermissions { read, write, list, delete, execute }` ACL
+  exists but is unused — no consumer differentiates read-only from
+  write-allowed mounts.
+- Shared system data (capability defs, system prompts) has no
+  canonical "read-only for everyone, write for root" place.
+
+Two reviewer findings on commit `4eccad56d` (`serrrfirat`) made this
+concrete:
+
+1. **HIGH**: `ironclaw_engine::FilesystemStore` is not tenant-scoped.
+   Path layout omits tenant; engine record types omit `tenant_id`;
+   composition builds a single shared root. Two tenants with the
+   same `user_id`/`project_id` collide on `/engine/projects/<id>` etc.
+2. **HIGH regression**: byte-only `LocalFilesystem` backends fail
+   under filesystem-backed store contracts because the stores write
+   `CasExpectation::Version` and record-shaped entries that the
+   byte-only backend rejects — already addressed via per-store
+   `put_with_byte_fallback` helpers (commit `199137b57`), but the
+   underlying ScopedFilesystem layer would have caught this once
+   uniformly via `BackendCapabilities` declaration at mount time.
+
+## The Design
+
+### Filesystem-layer enforcement (already exists)
+
+`ironclaw_filesystem` already implements a Linux-like permissions
+model:
+
+```text
+MountView                                        # per-invocation
+  └── Vec<MountGrant>
+        ├── MountAlias (consumer-visible — "/engine")
+        ├── VirtualPath (storage target — "/tenants/X/users/Y/engine")
+        └── MountPermissions { read, write, list, delete, execute }
+
+ScopedFilesystem<F>                              # wraps RootFilesystem + MountView
+  ├── put / get / query / append / tail / delete / list_dir / stat / begin
+  ├── resolve_with_permission() — ACL check, alias→VirtualPath rewrite
+  └── ScopedStorageTxn — carries ACL across txn boundaries
+```
+
+### Migration shape
+
+**1. Consumer stores accept `Arc<ScopedFilesystem<F>>`, not `Arc<F>`.**
+
+Each migrated consumer crate's `FilesystemXxxStore::new` changes:
+
+```rust
+// Before
+pub fn new(filesystem: Arc<F>) -> Self;
+
+// After
+pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self;
+```
+
+**2. Path helpers return `ScopedPath`, not `VirtualPath`.**
+
+Path strings stay the same (`/engine/threads/<id>.json`). They are
+alias-relative under the consumer's canonical mount alias. The
+MountView wired by composition resolves the alias to the
+tenant/user-scoped VirtualPath.
+
+**3. Composition wires per-invocation `MountView`.**
+
+A single helper builds the canonical MountView per `ResourceScope`:
+
+```rust
+pub fn invocation_mount_view(scope: &ResourceScope) -> Result<MountView, HostApiError> {
+    MountView::new(vec![
+        // Per-user, per-tenant private state — full r/w/l/d
+        MountGrant::new(
+            MountAlias::new("/engine")?,
+            VirtualPath::new(&format!(
+                "/tenants/{}/users/{}/engine",
+                scope.tenant_id, scope.user_id
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/secrets")?,
+            VirtualPath::new(&format!(
+                "/tenants/{}/users/{}/secrets",
+                scope.tenant_id, scope.user_id
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/processes")?,
+            VirtualPath::new(&format!(
+                "/tenants/{}/users/{}/processes",
+                scope.tenant_id, scope.user_id
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/outbound")?,
+            VirtualPath::new(&format!(
+                "/tenants/{}/users/{}/outbound",
+                scope.tenant_id, scope.user_id
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/authorization")?,
+            VirtualPath::new(&format!(
+                "/tenants/{}/users/{}/authorization",
+                scope.tenant_id, scope.user_id
+            ))?,
+            MountPermissions::read_write_list_delete(),
+        ),
+        // Tenant-shared (between users/agents in same tenant)
+        MountGrant::new(
+            MountAlias::new("/tenant-shared")?,
+            VirtualPath::new(&format!("/tenants/{}/shared", scope.tenant_id))?,
+            MountPermissions::read_write_list(),
+        ),
+        // System-globally readable (capability defs, system prompts)
+        MountGrant::new(
+            MountAlias::new("/system")?,
+            VirtualPath::new("/system")?,
+            MountPermissions::read_only(),
+        ),
+    ])
+}
+```
+
+**Net effect:** consumer code is **tenant-agnostic**. It uses paths
+like `/engine/threads/<id>.json`. The MountView (built once per
+invocation in composition) handles tenant prefixing and ACL.
+
+### What this gives us
+
+- **One place to mess up:** the composition `invocation_mount_view`
+  helper. If it's wrong, every consumer's data is misrouted —
+  but it's wrong _consistently_, which a single cross-tenant
+  isolation test catches.
+- **Cross-tenant isolation by construction:** two `ScopedFilesystem`
+  instances over the same `RootFilesystem` cannot see each other's
+  data because their MountViews resolve to disjoint VirtualPath
+  prefixes.
+- **Defense in depth:** every consumer's `put` carries a `tenant_id`
+  indexed projection (alongside the path-prefix scope) so an
+  admin-tier query can filter and a path-rewriting bug surfaces as
+  a query-time mismatch.
+- **Read-only carve-out:** the `/system` mount has `read_only` perms.
+  Engine and other consumers reading capability definitions or
+  system prompts go through the same `ScopedFilesystem`; writes are
+  rejected at the ACL layer.
+- **Eliminates duplicated tenant-prefixing logic:** `ironclaw_processes`
+  currently has manual `/engine/tenants/{tenant_id}/...` formatting
+  in 30+ path builders; that goes away.
+
+## Migration Status
+
+| Crate | Status | PR |
+|---|---|---|
+| `ironclaw_engine` | **In flight** — converting FilesystemStore + paths + tests | #3679 |
+| `ironclaw_processes` | Deferred — drop manual tenant prefixing, take ScopedFilesystem | follow-up |
+| `ironclaw_secrets` | Deferred — same | follow-up |
+| `ironclaw_outbound` | Deferred — same | follow-up |
+| `ironclaw_authorization` | Deferred — same | follow-up |
+| `ironclaw_reborn_composition` | **In flight** — `invocation_mount_view` helper, wire engine | #3679 |
+| `MountPermissions` helpers | Add `read_write_list_delete()`, `read_only_list()` to `ironclaw_host_api::mount` | #3679 |
+
+## Tests required
+
+Each migrated crate adds one regression test of the shape:
+
+```rust
+#[tokio::test]
+async fn store_isolates_two_tenants_with_same_user_project_ids() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped_a = Arc::new(ScopedFilesystem::new(
+        backend.clone(),
+        // tenant "a" — same user "u1" / project "p1"
+        invocation_mount_view(&scope_with(tenant_id_a(), "u1", "p1"))?,
+    ));
+    let scoped_b = Arc::new(ScopedFilesystem::new(
+        backend.clone(),
+        // tenant "b" — same user/project
+        invocation_mount_view(&scope_with(tenant_id_b(), "u1", "p1"))?,
+    ));
+
+    let store_a = FilesystemStore::new(scoped_a);
+    let store_b = FilesystemStore::new(scoped_b);
+
+    store_a.save_thread(&thread_with_id(thread_id())).await?;
+    assert!(store_b.load_thread(thread_id()).await?.is_none());
+}
+```
+
+## Open Questions
+
+1. **Per-tenant `FilesystemStore` lifetime.** Engine `ThreadManager`
+   currently holds one `FilesystemStore`. With ScopedFilesystem,
+   each invocation has a different MountView. Two options:
+   - Per-tenant long-lived: `HashMap<TenantId, Arc<ThreadManager>>`
+     in the host, one ThreadManager per tenant.
+   - Per-invocation: rebuild ThreadManager per request.
+   The composition layer's choice. Per-tenant long-lived is cheaper
+   and matches how single-tenant deployments work today.
+
+2. **Engine `Store` trait does not carry tenant.** Methods take
+   `user_id: &str` / `project_id: ProjectId` but no `tenant_id`. The
+   trait is single-tenant-by-construction. Multi-tenancy lives at
+   the wiring layer (one Store impl per tenant). This means the
+   engine internally never sees `tenant_id` — which is the goal
+   ("minimize the places we need to carry tenant around").
+
+3. **Audit / observability cross-tenant queries.** When operators
+   want to see "all jobs across all tenants", they need a path that
+   bypasses ScopedFilesystem (or constructs an admin MountView with
+   `/tenants/*/...` access). Out of scope for this design; tracked
+   as a separate operator-tooling concern.
+
+## References
+
+- ADR: `docs/reborn/2026-05-14-universal-fs-dispatch.md` —
+  "Per-tenant routing is a mount table choice, not a code change."
+- `ironclaw_filesystem` CLAUDE.md invariant 7 — "Multi-tenant
+  deployments rely on the path prefix to route to per-tenant mounts."
+- PR #3679 review comments by `serrrfirat` (2026-05-16) — original
+  finding.
