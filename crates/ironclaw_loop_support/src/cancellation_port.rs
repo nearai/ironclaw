@@ -132,6 +132,14 @@ pub trait RunCancellationFactory: Send + Sync {
         run_id: TurnRunId,
     ) -> Result<RunCancellationHandle, AgentLoopHostError>;
 
+    /// Observe a `TurnRunWake` published by the turn coordinator.
+    ///
+    /// **Called synchronously on the wake publisher's thread** by
+    /// `CompositeTurnRunWakeNotifier` when the runtime composition wires a
+    /// cancellation factory into the coordinator's wake notifier. Implementations
+    /// MUST be non-blocking: no I/O, no awaits, no locks held across awaits, no
+    /// waiting on channels. Slow work here directly slows
+    /// `TurnCoordinator::cancel_run` and `submit_turn`. Default is a no-op.
     fn notify_run_wake(&self, _wake: &TurnRunWake) {}
 
     fn product_live_cancellation_probe(&self) -> Option<Box<dyn ProductLiveCancellationProbe>> {
@@ -152,6 +160,12 @@ pub trait RunCancellationFactory: Send + Sync {
 /// Executable product-path cancellation probe used to gate product-live runtime
 /// wiring. Implementations must exercise the same request/observe path product
 /// code uses for a retained run handle.
+///
+/// Probes are short-lived and self-contained: implementations MUST NOT retain
+/// probe handles in any shared map keyed by run id. The probe's lifetime ends
+/// when the verifier drops the `Box<dyn ProductLiveCancellationProbe>`; any
+/// state owned by the probe must be released by that point. This avoids growing
+/// the factory's run-handle map on every readiness check.
 pub trait ProductLiveCancellationProbe: Send + Sync {
     fn request_cancellation(
         &self,

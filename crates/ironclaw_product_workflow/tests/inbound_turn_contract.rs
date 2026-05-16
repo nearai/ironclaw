@@ -44,9 +44,9 @@ use ironclaw_turns::{
     TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnRunWake, TurnScope,
     TurnStateStore, TurnStatus,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, InMemoryLoopHostMilestoneSink,
-        InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
-        LoopInputCursorToken, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
+        AgentLoopHostError, InMemoryLoopHostMilestoneSink, InstructionSafetyContext,
+        LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
+        LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
     },
 };
 use tokio::time::{sleep, timeout};
@@ -322,15 +322,11 @@ impl RunCancellationFactory for ReadyRunCancellationFactory {
     }
 
     fn product_live_cancellation_probe(&self) -> Option<Box<dyn ProductLiveCancellationProbe>> {
-        let run_id = TurnRunId::new();
-        let handle = RunCancellationHandle::default();
-        self.handles
-            .lock()
-            .expect("ready cancellation lock poisoned")
-            .insert(run_id, handle);
+        // Probe owns its handle directly. Not inserted into `self.handles` —
+        // the readiness probe is ephemeral and self-contained, so the factory's
+        // run-keyed handle map must not grow on every verifier call.
         Some(Box::new(ReadyRunCancellationProbe {
-            handles: Arc::clone(&self.handles),
-            run_id,
+            handle: RunCancellationHandle::default(),
         }))
     }
 
@@ -343,24 +339,7 @@ impl RunCancellationFactory for ReadyRunCancellationFactory {
 }
 
 struct ReadyRunCancellationProbe {
-    handles: Arc<Mutex<HashMap<TurnRunId, RunCancellationHandle>>>,
-    run_id: TurnRunId,
-}
-
-impl ReadyRunCancellationProbe {
-    fn handle_for(&self) -> Result<RunCancellationHandle, AgentLoopHostError> {
-        self.handles
-            .lock()
-            .expect("ready cancellation lock poisoned")
-            .get(&self.run_id)
-            .cloned()
-            .ok_or_else(|| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "product cancellation probe handle was not retained",
-                )
-            })
-    }
+    handle: RunCancellationHandle,
 }
 
 impl ProductLiveCancellationProbe for ReadyRunCancellationProbe {
@@ -368,12 +347,12 @@ impl ProductLiveCancellationProbe for ReadyRunCancellationProbe {
         &self,
         reason_kind: LoopCancelReasonKind,
     ) -> Result<(), AgentLoopHostError> {
-        self.handle_for()?.request(reason_kind);
+        self.handle.request(reason_kind);
         Ok(())
     }
 
     fn is_cancellation_observed(&self) -> Result<bool, AgentLoopHostError> {
-        Ok(self.handle_for()?.is_requested())
+        Ok(self.handle.is_requested())
     }
 }
 
@@ -388,6 +367,15 @@ impl RunCancellationFactory for UnretainedRunCancellationFactory {
     ) -> Result<RunCancellationHandle, AgentLoopHostError> {
         Ok(RunCancellationHandle::default())
     }
+}
+
+fn turn_state_store_dyn(store: &Arc<InMemoryTurnStateStore>) -> Arc<dyn TurnStateStore> {
+    Arc::clone(store) as Arc<dyn TurnStateStore>
+}
+
+fn test_safety_context() -> InstructionSafetyContext {
+    InstructionSafetyContext::new("policy:test", "test safety context")
+        .expect("test safety context")
 }
 
 fn binding_with_user(user: &str, thread: &str) -> ironclaw_product_workflow::ResolvedBinding {
@@ -568,7 +556,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         loop_exit_evidence: Arc::new(
             ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
                 Arc::new(thread_service.clone()),
-                Arc::clone(&turn_store) as Arc<dyn TurnStateStore>,
+                turn_state_store_dyn(&turn_store),
                 checkpoint_store,
                 thread_scope.clone(),
             )
@@ -582,9 +570,7 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
-        safety_context: Some(
-            InstructionSafetyContext::new("policy:test", "test safety context").expect("safety"),
-        ),
+        safety_context: Some(test_safety_context()),
     })
     .expect("product-live runtime should build");
 
@@ -727,7 +713,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         // runtime cancellation source even if the supplied evidence is not.
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
             Arc::new(thread_service.clone()),
-            Arc::clone(&turn_store) as Arc<dyn TurnStateStore>,
+            turn_state_store_dyn(&turn_store),
             checkpoint_store,
             thread_scope.clone(),
         )),
@@ -739,9 +725,7 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
-        safety_context: Some(
-            InstructionSafetyContext::new("policy:test", "test safety context").expect("safety"),
-        ),
+        safety_context: Some(test_safety_context()),
     })
     .expect("product-live runtime should build");
 
@@ -908,9 +892,7 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
-        safety_context: Some(
-            InstructionSafetyContext::new("policy:test", "test safety context").expect("safety"),
-        ),
+        safety_context: Some(test_safety_context()),
     }) {
         Ok(_) => panic!("product-live readiness must reject inert cancellation"),
         Err(error) => error,

@@ -156,7 +156,7 @@ pub enum ProductLiveRuntimeBuildError {
     Inert(ProductLiveRuntimeReadinessComponent),
     Probe {
         component: ProductLiveRuntimeReadinessComponent,
-        reason: String,
+        source: AgentLoopHostError,
     },
     Runtime(DefaultPlannedRuntimeBuildError),
 }
@@ -178,12 +178,12 @@ impl fmt::Display for ProductLiveRuntimeBuildError {
                     component.as_str()
                 )
             }
-            Self::Probe { component, reason } => {
+            Self::Probe { component, source } => {
                 write!(
                     formatter,
                     "product live runtime could not probe {}: {}",
                     component.as_str(),
-                    reason
+                    source,
                 )
             }
             Self::Runtime(error) => write!(formatter, "{error}"),
@@ -191,7 +191,15 @@ impl fmt::Display for ProductLiveRuntimeBuildError {
     }
 }
 
-impl Error for ProductLiveRuntimeBuildError {}
+impl Error for ProductLiveRuntimeBuildError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Probe { source, .. } => Some(source),
+            Self::Runtime(error) => Some(error),
+            Self::Missing(_) | Self::Inert(_) => None,
+        }
+    }
+}
 
 pub fn build_product_live_planned_runtime<T, S, G>(
     mut parts: DefaultPlannedRuntimeParts<T, S, G>,
@@ -235,7 +243,7 @@ where
         verify_product_live_cancellation_probe(cancellation_factory.as_ref()).map_err(|error| {
             ProductLiveRuntimeBuildError::Probe {
                 component: ProductLiveRuntimeReadinessComponent::CancellationFactory,
-                reason: error.safe_summary,
+                source: error,
             }
         })?;
     if readiness != ProductLiveCancellationReadiness::ExternallyControllable {

@@ -109,6 +109,15 @@ fn driver_requirements_for(
     )])
 }
 
+fn turn_state_store_dyn(store: &Arc<InMemoryTurnStateStore>) -> Arc<dyn TurnStateStore> {
+    Arc::clone(store) as Arc<dyn TurnStateStore>
+}
+
+fn test_safety_context() -> InstructionSafetyContext {
+    InstructionSafetyContext::new("policy:test", "test safety context")
+        .expect("test safety context")
+}
+
 #[tokio::test]
 async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
     let fixture = HostFixture::new("thread-host-complete", "hello reborn").await;
@@ -2146,7 +2155,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         )),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
             fixture.thread_service.clone(),
-            Arc::clone(&turn_store) as Arc<dyn TurnStateStore>,
+            turn_state_store_dyn(&turn_store),
             turn_store,
         )),
         config: DefaultPlannedRuntimeConfig::default(),
@@ -2157,9 +2166,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
-        safety_context: Some(
-            InstructionSafetyContext::new("policy:test", "test safety context").expect("safety"),
-        ),
+        safety_context: Some(test_safety_context()),
     })
     .expect("all product-live adapters should satisfy readiness");
 
@@ -2216,7 +2223,7 @@ async fn product_live_parts_for_gate_test(
         )),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
             fixture.thread_service.clone(),
-            Arc::clone(&turn_store) as Arc<dyn TurnStateStore>,
+            turn_state_store_dyn(&turn_store),
             turn_store,
         )),
         config: DefaultPlannedRuntimeConfig::default(),
@@ -2227,9 +2234,7 @@ async fn product_live_parts_for_gate_test(
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
-        safety_context: Some(
-            InstructionSafetyContext::new("policy:test", "test safety context").expect("safety"),
-        ),
+        safety_context: Some(test_safety_context()),
     }
 }
 
