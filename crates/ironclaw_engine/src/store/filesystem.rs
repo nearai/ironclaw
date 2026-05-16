@@ -705,24 +705,46 @@ where
 
     async fn append_events(&self, events: &[ThreadEvent]) -> Result<(), EngineError> {
         // HybridStore parity (`src/bridge/store_adapter.rs:1613`): events
-        // are append-only and de-duplicated by id. The previous
-        // `CasExpectation::Any` write silently overwrote an existing
-        // event with the same id, which a re-emit (e.g. retry after
-        // partial flush) would clobber. Pre-read the destination path
-        // and skip any id that already exists.
+        // are append-only and de-duplicated by id. Use
+        // `CasExpectation::Absent` so the dedup check + insert are atomic
+        // even across processes — a second writer for the same event id
+        // sees `FilesystemError::VersionMismatch` (the typed "already
+        // present" signal on Absent CAS) and treats it as the expected
+        // duplicate-ack. Backends without per-row versioning fall back
+        // to the legacy pre-read pattern so byte-only mounts keep working.
         for event in events {
             let path = event_path(event.thread_id, event.id.0)?;
-            if self
+            let entry = build_record_entry(kind_event(), event, event_indexed(event))?;
+            match self
                 .filesystem
-                .get(&path)
+                .put(&path, entry, CasExpectation::Absent)
                 .await
-                .map_err(fs_to_engine_error)?
-                .is_some()
             {
-                continue;
+                Ok(_) => {}
+                // Some other writer already inserted this event id — duplicate
+                // ack is the contract here. Same `VersionMismatch` discriminant
+                // is used for "expected absent but found present" per the
+                // `ironclaw_filesystem` CAS surface.
+                Err(FilesystemError::VersionMismatch { .. }) => {}
+                // Backends without versioning return `Unsupported` for
+                // `CasExpectation::Absent`. Fall through to the legacy
+                // pre-read pattern: if the path already exists, treat as a
+                // duplicate; otherwise write with `Any`.
+                Err(FilesystemError::Unsupported { .. }) => {
+                    if self
+                        .filesystem
+                        .get(&path)
+                        .await
+                        .map_err(fs_to_engine_error)?
+                        .is_some()
+                    {
+                        continue;
+                    }
+                    self.write_record(&path, kind_event(), event, event_indexed(event))
+                        .await?;
+                }
+                Err(error) => return Err(fs_to_engine_error(error)),
             }
-            self.write_record(&path, kind_event(), event, event_indexed(event))
-                .await?;
         }
         Ok(())
     }

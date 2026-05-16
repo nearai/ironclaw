@@ -8,8 +8,8 @@ use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLe
 use ironclaw_events::AuditSink;
 use ironclaw_host_api::{
     Action, ApprovalDecisionKind, ApprovalRequestId, CapabilityGrant, CapabilityGrantId,
-    CapabilityId, EffectKind, GrantConstraints, MountView, NetworkPolicy, Principal,
-    ResourceCeiling, ResourceScope, SecretHandle, Timestamp,
+    CapabilityId, EffectKind, GrantConstraints, InvocationFingerprint, MountView, NetworkPolicy,
+    Principal, ResourceCeiling, ResourceScope, SecretHandle, Timestamp,
 };
 use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStore, ApprovalStatus, RunStateError};
 use thiserror::Error;
@@ -67,6 +67,79 @@ where
             .await
     }
 
+    /// Retry lease issuance for a request that is already `Approved`.
+    ///
+    /// Closes the "approved but no lease" recovery window: if
+    /// [`approve_dispatch`] / [`approve_spawn`] persisted the approval
+    /// record but the subsequent `leases.issue(...)` call failed with a
+    /// transient store error, the request status stays `Approved` and
+    /// the caller can recover by calling this method with the same
+    /// [`LeaseApproval`] terms. Idempotent on the approval record (no
+    /// status flip); the underlying lease store generates a fresh
+    /// `CapabilityGrantId` per call, so callers retrying after a partial
+    /// success must compare against `leases_for_scope` if duplicate
+    /// leases are unacceptable.
+    pub async fn retry_lease_issue_for_dispatch(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+        approval: LeaseApproval,
+    ) -> Result<CapabilityLease, ApprovalResolutionError> {
+        self.retry_lease_issue_for_action(
+            scope,
+            request_id,
+            approval,
+            ApprovedCapabilityAction::Dispatch,
+        )
+        .await
+    }
+
+    /// See [`retry_lease_issue_for_dispatch`] — same recovery path for
+    /// spawn-action approvals.
+    pub async fn retry_lease_issue_for_spawn(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+        approval: LeaseApproval,
+    ) -> Result<CapabilityLease, ApprovalResolutionError> {
+        self.retry_lease_issue_for_action(
+            scope,
+            request_id,
+            approval,
+            ApprovedCapabilityAction::Spawn,
+        )
+        .await
+    }
+
+    async fn retry_lease_issue_for_action(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+        approval: LeaseApproval,
+        expected_action: ApprovedCapabilityAction,
+    ) -> Result<CapabilityLease, ApprovalResolutionError> {
+        let record = self
+            .approvals
+            .get(scope, request_id)
+            .await?
+            .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+        if record.status != ApprovalStatus::Approved {
+            return Err(ApprovalResolutionError::NotApproved {
+                status: record.status,
+            });
+        }
+        let capability = capability_for_action(record.request.action.as_ref(), expected_action)
+            .ok_or(ApprovalResolutionError::UnsupportedAction)?
+            .clone();
+        let invocation_fingerprint = record
+            .request
+            .invocation_fingerprint
+            .clone()
+            .ok_or(ApprovalResolutionError::MissingInvocationFingerprint)?;
+        self.issue_lease_for_approved(record, capability, approval, invocation_fingerprint)
+            .await
+    }
+
     async fn approve_capability_action(
         &self,
         scope: &ResourceScope,
@@ -94,7 +167,6 @@ where
             .invocation_fingerprint
             .clone()
             .ok_or(ApprovalResolutionError::MissingInvocationFingerprint)?;
-        let resolved_by = approval.issued_by.clone();
 
         // F2: persist the approval state *before* issuing the lease. The
         // approval record is the authority of record — once it flips to
@@ -104,6 +176,12 @@ where
         // failure) left a window where a transient store error could
         // produce a live lease whose approval status was still
         // `Pending`. See audit finding F2.
+        //
+        // Recovery path for the "approved but no lease" window when
+        // `leases.issue(...)` fails after `approvals.approve(...)`
+        // succeeded: callers can invoke [`retry_lease_issue_for_dispatch`]
+        // / [`retry_lease_issue_for_spawn`] against the now-Approved
+        // record.
         let approved_record = match self.approvals.approve(scope, request_id).await {
             Ok(record) => record,
             Err(RunStateError::ApprovalNotPending { status, .. }) => {
@@ -112,6 +190,27 @@ where
             Err(error) => return Err(error.into()),
         };
 
+        self.issue_lease_for_approved(
+            approved_record,
+            capability,
+            approval,
+            invocation_fingerprint,
+        )
+        .await
+    }
+
+    /// Shared lease-issuance path used by both the first-time approve and
+    /// the retry-after-transient-failure recovery path. The approval
+    /// record must already be in `Approved` status; the caller is
+    /// responsible for that precondition.
+    async fn issue_lease_for_approved(
+        &self,
+        approved_record: ApprovalRecord,
+        capability: CapabilityId,
+        approval: LeaseApproval,
+        invocation_fingerprint: InvocationFingerprint,
+    ) -> Result<CapabilityLease, ApprovalResolutionError> {
+        let resolved_by = approval.issued_by.clone();
         let grant = CapabilityGrant {
             id: CapabilityGrantId::new(),
             capability,
@@ -251,6 +350,12 @@ pub enum ApprovalResolutionError {
     RunState(#[from] RunStateError),
     #[error("approval request is not pending: {status:?}")]
     NotPending { status: ApprovalStatus },
+    /// Surfaced by [`retry_lease_issue_for_dispatch`] /
+    /// [`retry_lease_issue_for_spawn`] when the approval record is not in
+    /// `Approved` status — the retry path is only valid for requests that
+    /// already cleared the first approve call.
+    #[error("approval request is not approved: {status:?}")]
+    NotApproved { status: ApprovalStatus },
     #[error("approval request is missing an invocation fingerprint")]
     MissingInvocationFingerprint,
     #[error("approval action cannot issue a dispatch lease")]
