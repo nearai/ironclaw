@@ -7,9 +7,9 @@
 use ironclaw_authorization::{CapabilityLease, CapabilityLeaseError, CapabilityLeaseStore};
 use ironclaw_events::AuditSink;
 use ironclaw_host_api::{
-    Action, ApprovalRequestId, CapabilityGrant, CapabilityGrantId, CapabilityId, EffectKind,
-    GrantConstraints, MountView, NetworkPolicy, Principal, ResourceCeiling, ResourceScope,
-    SecretHandle, Timestamp,
+    Action, ApprovalDecisionKind, ApprovalRequestId, CapabilityGrant, CapabilityGrantId,
+    CapabilityId, EffectKind, GrantConstraints, MountView, NetworkPolicy, Principal,
+    ResourceCeiling, ResourceScope, SecretHandle, Timestamp,
 };
 use ironclaw_run_state::{ApprovalRecord, ApprovalRequestStore, ApprovalStatus, RunStateError};
 use thiserror::Error;
@@ -125,7 +125,7 @@ where
             &record.scope,
             &record.request,
             resolved_by,
-            "approved",
+            ApprovalDecisionKind::Approved,
         ))
         .await;
         Ok(lease)
@@ -159,7 +159,7 @@ where
             &denied.scope,
             &denied.request,
             denial.denied_by,
-            "denied",
+            ApprovalDecisionKind::Denied,
         ))
         .await;
         Ok(denied)
