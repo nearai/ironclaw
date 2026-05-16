@@ -18,9 +18,9 @@ COPY --from=trinity_client mcp/t3n-mcp ./mcp/t3n-mcp
 COPY --from=trinity_client shared ./shared
 
 # pnpm install links workspace packages but does not compile them. The bridge
-# falls back to `npx tsx src/index.ts` when dist/ is missing; t3n-mcp sources
-# import @terminal-3/t3n-sdk/dist/index.esm.js, so both packages must be built.
-RUN pnpm --filter @terminal-3/t3n-sdk build \
+# falls back to `npx tsx src/index.ts` when dist/ is missing; t3n-mcp imports
+# @terminal3/t3n-sdk (workspace package under client/t3n-sdk/), so both must build.
+RUN pnpm --filter @terminal3/t3n-sdk build \
     && pnpm --filter @terminal-3/t3n-mcp build \
     && test -f t3n-sdk/dist/index.esm.js \
     && test -f mcp/t3n-mcp/dist/esm/index.js

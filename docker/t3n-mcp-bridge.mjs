@@ -11,7 +11,7 @@ const builtEntrypoint = path.join(projectDir, "dist/esm/index.js");
 
 try {
   const mcp = JSON.parse(fs.readFileSync(path.join(projectDir, "package.json"), "utf8"));
-  const sdkPkg = path.join(projectDir, "node_modules/@terminal-3/t3n-sdk/package.json");
+  const sdkPkg = path.join(projectDir, "node_modules/@terminal3/t3n-sdk/package.json");
   const sdk = JSON.parse(fs.readFileSync(sdkPkg, "utf8"));
   process.stderr.write(`[t3n-mcp-bridge] versions t3n-mcp=${mcp.version} t3n-sdk=${sdk.version}\n`);
 } catch { /* non-fatal */ }
