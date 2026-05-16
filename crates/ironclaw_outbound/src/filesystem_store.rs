@@ -292,10 +292,15 @@ fn scope_matches(left: &TurnScope, right: &TurnScope) -> bool {
         && left.thread_id == right.thread_id
 }
 
-fn map_fs_error(_error: FilesystemError) -> OutboundError {
+fn map_fs_error(error: FilesystemError) -> OutboundError {
     // The outbound CLAUDE.md guardrails forbid leaking backend error detail
     // strings. The FilesystemError variants already keep host paths internal,
     // but we collapse to OutboundError::Backend to honour the crate's no-leak
-    // contract.
-    OutboundError::Backend
+    // contract. The one exception is `VersionMismatch`: read-then-write paths
+    // need a typed conflict variant so the bounded retry loop can match on it
+    // discriminator-wise (audit finding F5).
+    match error {
+        FilesystemError::VersionMismatch { .. } => OutboundError::CasConflict,
+        _ => OutboundError::Backend,
+    }
 }
