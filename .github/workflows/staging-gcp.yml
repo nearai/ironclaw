@@ -53,6 +53,22 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      # Sidecar Dockerfile COPYs from trinity via named build contexts (see
+      # docker-compose.yml additional_contexts). Without this checkout, buildx
+      # resolves trinity_* as docker.io/library/* and fails.
+      - name: Checkout trinity (sidecar sources)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: Terminal-3/trinity
+          path: trinity
+          token: ${{ secrets.TRINITY_CHECKOUT_TOKEN }}
+
+      - name: Verify trinity build contexts
+        run: |
+          test -d trinity/client/mcp/t3n-mcp
+          test -d trinity/client/shared
+          test -d trinity/client/t3n-sdk
+
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -72,11 +88,13 @@ jobs:
           file: docker/t3n-mcp-sidecar.Dockerfile
           platforms: linux/amd64
           push: true
+          build-contexts: |
+            trinity_mcp=trinity/client/mcp/t3n-mcp
+            trinity_shared=trinity/client/shared
+            trinity_t3n_sdk=trinity/client/t3n-sdk
           tags: |
             us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/t3n-mcp-sidecar:latest
             us-central1-docker.pkg.dev/gen-lang-client-0263867259/t3claw/t3n-mcp-sidecar:${{ github.sha }}
-          secrets: |
-            npm_github_token=${{ secrets.NPM_GITHUB_TOKEN }}
           cache-from: type=gha,scope=sidecar
           cache-to: type=gha,mode=max,scope=sidecar
 
