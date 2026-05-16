@@ -1826,10 +1826,23 @@ impl EffectExecutor for EffectBridgeAdapter {
         // External-tool short-circuit. If the per-thread catalog claims
         // this action name, the caller will execute it; we pause the
         // thread with `ResumeKind::External { ext_tool:<call_id> }` and
-        // wait for the resume payload. Skipping the dispatch path here
-        // also bypasses the safety pipeline — that's intentional, the
-        // caller is the trust boundary for the tool's parameters and
-        // output, not the engine.
+        // wait for the resume payload.
+        //
+        // Parameters skip dispatch-time validation (the caller's tool
+        // schema isn't registered with the host), but the resume
+        // payload is run through `SafetyLayer::sanitize_tool_output`
+        // in `bridge::router` before reaching the LLM — see the
+        // `is_external_tool_callback` branch in `resolve_gate`.
+        //
+        // Known limitation (multi-call batching): the engine pauses on
+        // the first external-tool invocation in an assistant turn. If
+        // the LLM emits N caller-tool calls together, only the first
+        // surfaces as `AppEvent::ExternalToolCall`; subsequent calls
+        // re-emit on the next assistant turn after the caller posts
+        // back the first result. The OpenAI Responses contract allows
+        // "post all N results together"; matching that needs an engine
+        // change to collect N pauses before unwinding (tracked as a
+        // follow-up to PR #3122).
         if let Some(catalog) = self.external_tool_catalog().await {
             let mut hit = false;
             for key in Self::external_tool_catalog_keys(context) {
@@ -1839,7 +1852,17 @@ impl EffectExecutor for EffectBridgeAdapter {
                 }
             }
             if hit {
-                let call_id = context.current_call_id.as_deref().unwrap_or("").to_string();
+                // Synthesize a call_id when the executor didn't stamp
+                // one (Tier 1 / CodeAct paths can reach here without a
+                // structured call envelope). Without a stable id, the
+                // resume payload can't be correlated back to the
+                // originating action — the `function_call_output` would
+                // arrive with the caller's id but the gate would carry
+                // `ext_tool:` with no suffix.
+                let call_id = match context.current_call_id.as_deref() {
+                    Some(id) if !id.is_empty() => id.to_string(),
+                    _ => format!("call_ext_{}", uuid::Uuid::new_v4().simple()),
+                };
                 return Err(Self::gate_paused(
                     "external_tool",
                     action_name,

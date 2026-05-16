@@ -470,8 +470,24 @@ fn extract_user_content(input: &ResponsesInput) -> Result<ExtractedInput, String
                                     .to_string(),
                             );
                         };
-                        let call_id = item.call_id.clone().unwrap_or_default();
-                        tool_outputs.push((call_id, output.clone()));
+                        // Defaulting to an empty call_id silently breaks
+                        // resume correlation (the bridge looks up the
+                        // pending external-tool gate by call_id and
+                        // would return Value::Null to the LLM). Reject
+                        // explicitly instead.
+                        let Some(call_id) = item.call_id.as_deref().map(str::trim) else {
+                            return Err(
+                                "function_call_output items must include a non-empty `call_id` field"
+                                    .to_string(),
+                            );
+                        };
+                        if call_id.is_empty() {
+                            return Err(
+                                "function_call_output items must include a non-empty `call_id` field"
+                                    .to_string(),
+                            );
+                        }
+                        tool_outputs.push((call_id.to_string(), output.clone()));
                     }
                     other => {
                         return Err(format!(
@@ -1053,6 +1069,12 @@ pub async fn create_response_handler(
     // `shell` description in its action surface — a confused-deputy
     // surface where the caller can craft any output and the LLM
     // treats it as the trusted internal tool's reply.
+    //
+    // The check runs only when the tool registry is wired; deployments
+    // without a registry also lack engine v2 (they are constructed
+    // together in `init_engine`), and the engine-v2 availability check
+    // below will reject the request before any external tool can be
+    // dispatched, so there is no bypass path in those configurations.
     if !external_tools.is_empty()
         && let Some(registry) = state.tool_registry.as_ref()
     {
@@ -1077,6 +1099,7 @@ pub async fn create_response_handler(
             }
         }
     }
+
     if req.tool_choice.is_some() {
         // `tool_choice` (auto / none / required / specific function) is not
         // honoured because the engine doesn't have a per-request tool surface
@@ -1209,6 +1232,48 @@ pub async fn create_response_handler(
                 "invalid_request_error",
             )
         })?;
+        // Verify the pending gate is actually an external-tool gate.
+        // A thread can be paused on an unrelated approval/auth gate
+        // (e.g. OAuth callback in progress); without this check, a
+        // `function_call_output` would route through the wrong gate
+        // and silently fail to resolve, returning a confusing
+        // response to the client.
+        let expected_call_id = match &pending.resume_kind {
+            ironclaw_engine::ResumeKind::External { callback_id }
+                if crate::bridge::is_external_tool_callback_id(callback_id) =>
+            {
+                crate::bridge::call_id_from_external_callback(callback_id)
+                    .unwrap_or("")
+                    .to_string()
+            }
+            _ => {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "function_call_output supplied but the pending gate for this thread \
+                     is not an external tool callback (it is an unrelated approval, \
+                     authentication, or OAuth/pairing gate). Resolve that gate first.",
+                    "invalid_request_error",
+                ));
+            }
+        };
+        // The pending gate names exactly one outstanding external
+        // tool call (call_id is embedded in the callback id). At
+        // least one of the supplied `function_call_output` items
+        // must match it — otherwise the resume payload describes a
+        // call the engine never made.
+        if !extracted
+            .tool_outputs
+            .iter()
+            .any(|(call_id, _)| call_id == &expected_call_id)
+        {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "function_call_output supplied does not match the pending external \
+                 tool callback for this thread; verify the call_id matches the \
+                 `function_call` item from the prior response.",
+                "invalid_request_error",
+            ));
+        }
         let request_uuid = uuid::Uuid::parse_str(&pending.request_id).map_err(|_| {
             api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,

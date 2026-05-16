@@ -148,9 +148,10 @@ mod tests {
     /// tool output — so if the payload never reaches the LLM, this
     /// test fails.
     ///
-    /// Currently expected to **fail** until the resume materialisation
-    /// fix lands (`bridge::router::resolve_gate` doesn't currently
-    /// consume the payload for `ExternalCallback` resolutions).
+    /// Pins the resume materialisation contract: `resolve_gate`'s
+    /// `ExternalCallback` arm consumes the payload via
+    /// `extract_external_tool_output` and synthesises an
+    /// `ActionResult` `ThreadMessage` for the LLM's next turn.
     #[tokio::test]
     async fn round_trip_resume_payload_reaches_llm() {
         let _engine_guard = engine_state_lock().lock().await;

@@ -744,16 +744,14 @@ async fn notify_pending_gate(
             if let Some(ref sse) = sse {
                 let arguments = serde_json::to_string(&pending.parameters)
                     .unwrap_or_else(|_| pending.parameters.to_string());
-                sse.broadcast_for_user(
-                    &message.user_id,
-                    AppEvent::ExternalToolCall {
-                        request_id: pending.request_id.to_string(),
-                        call_id: pending.call_id.clone(),
-                        name: pending.action_name.clone(),
-                        arguments,
-                        thread_id: Some(pending.effective_wire_thread_id()),
-                    },
-                );
+                let event = AppEvent::ExternalToolCall {
+                    request_id: pending.request_id.to_string(),
+                    call_id: pending.call_id.clone(),
+                    name: pending.action_name.clone(),
+                    arguments,
+                    thread_id: Some(pending.effective_wire_thread_id()),
+                };
+                sse.broadcast_for_user(&message.user_id, event); // projection-exempt: bridge dispatcher, ResumeKind::External(ext_tool) → Responses API function_call surface
             } else {
                 // Today every external-tool flow runs through the
                 // gateway, which always wires SSE — so this branch
@@ -2115,7 +2113,6 @@ pub async fn init_engine(agent: &Agent) -> Result<(), Error> {
     thread_manager
         .set_gate_controller(gate_controller.clone() as Arc<dyn ironclaw_engine::GateController>)
         .await;
-
 
     *guard = Some(EngineState {
         thread_manager,
@@ -3696,15 +3693,28 @@ pub async fn resolve_gate(
                 let resolved_call_id =
                     resolved_or_synthetic_call_id_for_pending_action(state, &pending).await?;
                 let synthesized_output = extract_external_tool_output(payload, &resolved_call_id);
+                // External-tool payloads originate outside the
+                // EffectBridgeAdapter's sanitization pipeline. Run them
+                // through the same safety pass internal tool outputs
+                // get — leak detection, length cap, injection sanitizer,
+                // policy — before they reach the LLM. Caller is not a
+                // trust boundary; treat the payload like any other
+                // tool output.
+                let raw_rendered = serde_json::to_string_pretty(&synthesized_output)
+                    .unwrap_or_else(|_| synthesized_output.to_string());
+                let sanitized = state
+                    .effect_adapter
+                    .safety()
+                    .sanitize_tool_output(&pending.action_name, &raw_rendered);
                 state
                     .thread_manager
                     .resume_thread(
                         pending.thread_id,
                         message.user_id.clone(),
-                        Some(resumed_action_result_message(
+                        Some(ironclaw_engine::ThreadMessage::action_result(
                             &resolved_call_id,
                             &pending.action_name,
-                            &synthesized_output,
+                            sanitized.content,
                         )),
                         None,
                         Some(resolved_call_id),
@@ -5713,17 +5723,14 @@ async fn await_thread_outcome(
                 if let Some(ref sse) = state.sse {
                     let arguments = serde_json::to_string(&pending.parameters)
                         .unwrap_or_else(|_| pending.parameters.to_string());
-                    sse.broadcast_for_user(
-                        &message.user_id,
-                        AppEvent::ExternalToolCall {
-                            // projection-exempt: bridge dispatcher, ThreadOutcome::GatePaused External-tool projection from CodeAct re-entry path
-                            request_id: pending.request_id.to_string(),
-                            call_id: pending.call_id.clone(),
-                            name: pending.action_name.clone(),
-                            arguments,
-                            thread_id: Some(pending.effective_wire_thread_id()),
-                        },
-                    );
+                    let event = AppEvent::ExternalToolCall {
+                        request_id: pending.request_id.to_string(),
+                        call_id: pending.call_id.clone(),
+                        name: pending.action_name.clone(),
+                        arguments,
+                        thread_id: Some(pending.effective_wire_thread_id()),
+                    };
+                    sse.broadcast_for_user(&message.user_id, event); // projection-exempt: bridge dispatcher, ThreadOutcome::GatePaused External-tool projection from CodeAct re-entry path
                 } else {
                     tracing::debug!(
                         user_id = %message.user_id,

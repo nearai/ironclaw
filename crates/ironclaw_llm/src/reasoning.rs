@@ -1734,8 +1734,10 @@ pub fn recover_tool_calls_from_content(
     //     {"name": "get_balances", "arguments": {}}
     //     ```
     //
-    // Also accepts `function_call` and `tool_calls` as fence info
-    // strings, plus opening fences with extra spaces or backticks.
+    // Also accepts `function_call` and `tool_calls` as the fence info
+    // string. The opening fence itself must be an exact `\`\`\`{tag}`
+    // at the start of a line, followed by whitespace or a newline —
+    // extra backticks or a space before `{tag}` are not recognised.
     for tag in TOOL_TAGS {
         let mut search_from = 0;
         while search_from < content.len() {
