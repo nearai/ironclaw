@@ -1901,7 +1901,18 @@ fn verify_secret_store_key_check(
 ) -> Result<(), SecretError> {
     let aad = secret_store_key_check_aad();
     let decrypted = crypto.decrypt(encrypted_value, key_salt, &aad)?;
-    if decrypted.expose() != SECRET_STORE_KEY_CHECK_PLAINTEXT {
+    // The sentinel is a fixed compile-time string, so the practical risk of a
+    // timing oracle is low — an attacker who can move the encrypted_value/
+    // key_salt blobs across rows already has full DB write access. We still
+    // use constant-time compare to stay consistent with the F1 fix and to
+    // avoid a future caller passing a non-constant sentinel in here. See F3
+    // (Low) in the 2026-05 audit.
+    let matches: bool = ConstantTimeEq::ct_eq(
+        decrypted.expose().as_bytes(),
+        SECRET_STORE_KEY_CHECK_PLAINTEXT.as_bytes(),
+    )
+    .into();
+    if !matches {
         return Err(SecretError::DecryptionFailed(
             "secret store key check mismatch".to_string(),
         ));
