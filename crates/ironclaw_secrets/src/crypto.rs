@@ -323,7 +323,17 @@ pub fn credential_session_aad(scope: &ResourceScope, session_id: CredentialSessi
 /// `(user_id, name)` — a swap between the two encodings must fail decryption
 /// even with an identical scope/user, which the domain separator enforces.
 pub fn filesystem_secret_aad(scope: &ResourceScope, handle: &SecretHandle) -> Vec<u8> {
-    let key = ScopeKey::from_full_scope(scope);
+    // The filesystem secret store keys by *owner scope*
+    // (`tenant/user/agent/project`) — see `secret_path` and
+    // `same_scope_owner` in `filesystem_store.rs`. The AAD must match the
+    // storage scope: previously this bound `mission_id`/`thread_id`/
+    // `invocation_id` too, so a secret written by one invocation could be
+    // *read* by another invocation under the same owner (the path layer
+    // allowed it) but `consume` failed with a confusing decryption error.
+    // Bind AAD to the owner scope so cross-invocation reads within the
+    // same owner succeed and cross-owner reads still fail closed (both at
+    // the path layer and via AAD).
+    let key = ScopeKey::from_account_scope(scope);
     build_aad(
         AAD_DOMAIN_FILESYSTEM_SECRET,
         &[
@@ -331,9 +341,6 @@ pub fn filesystem_secret_aad(scope: &ResourceScope, handle: &SecretHandle) -> Ve
             key.user_id.as_bytes(),
             key.agent_id.as_bytes(),
             key.project_id.as_bytes(),
-            key.mission_id.as_bytes(),
-            key.thread_id.as_bytes(),
-            key.invocation_id.as_bytes(),
             handle.as_str().as_bytes(),
         ],
     )

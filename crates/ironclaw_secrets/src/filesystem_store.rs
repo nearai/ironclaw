@@ -403,10 +403,13 @@ where
                         // and return the same error to the caller.
                         let body = serialize_secret(&lease)?;
                         let entry = Entry::bytes(body).with_content_type(ContentType::json());
-                        match self
-                            .filesystem
-                            .put(&path, entry, CasExpectation::Version(versioned.version))
-                            .await
+                        match put_with_version_fallback(
+                            &*self.filesystem,
+                            &path,
+                            entry,
+                            CasExpectation::Version(versioned.version),
+                        )
+                        .await
                         {
                             Ok(_) | Err(FilesystemError::VersionMismatch { .. }) => {}
                             Err(error) => return Err(fs_to_secret_store_error(error)),
@@ -433,10 +436,13 @@ where
             lease.status = SecretLeaseStatus::Consumed;
             let body = serialize_secret(&lease)?;
             let entry = Entry::bytes(body).with_content_type(ContentType::json());
-            match self
-                .filesystem
-                .put(&path, entry, CasExpectation::Version(versioned.version))
-                .await
+            match put_with_version_fallback(
+                &*self.filesystem,
+                &path,
+                entry,
+                CasExpectation::Version(versioned.version),
+            )
+            .await
             {
                 Ok(_) => return Ok(material),
                 Err(FilesystemError::VersionMismatch { .. }) => continue,
@@ -506,10 +512,13 @@ where
             }
             let body = serialize_secret(&lease)?;
             let entry = Entry::bytes(body).with_content_type(ContentType::json());
-            match self
-                .filesystem
-                .put(&path, entry, CasExpectation::Version(versioned.version))
-                .await
+            match put_with_version_fallback(
+                &*self.filesystem,
+                &path,
+                entry,
+                CasExpectation::Version(versioned.version),
+            )
+            .await
             {
                 Ok(_) => return Ok(Self::lease_to_public(&lease)),
                 Err(FilesystemError::VersionMismatch { .. }) => continue,
@@ -840,10 +849,13 @@ where
             stored.uses += 1;
             let body = serialize_credential(&stored)?;
             let entry = Entry::bytes(body).with_content_type(ContentType::json());
-            match self
-                .filesystem
-                .put(&path, entry, CasExpectation::Version(versioned.version))
-                .await
+            match put_with_version_fallback(
+                &*self.filesystem,
+                &path,
+                entry,
+                CasExpectation::Version(versioned.version),
+            )
+            .await
             {
                 Ok(_) => return wire.into_session(),
                 Err(FilesystemError::VersionMismatch { .. }) => continue,
@@ -1022,6 +1034,38 @@ fn lock_or_recover<T>(mutex: &Mutex<HashMap<String, T>>) -> MutexGuard<'_, HashM
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Write `entry` with `cas`, falling back to `CasExpectation::Any` if the
+/// backend reports `Unsupported` for a non-`Any` CAS expectation. Used by
+/// the lease/secret transitions in this file so byte-only mounts like
+/// `LocalFilesystem` (which advertises no per-row versioning) stay
+/// writeable while CAS-capable backends still get the multi-process
+/// safety. The per-owner mutation lock on the caller carries the
+/// ordering safety invariant on the fallback path.
+///
+/// Returns the raw `FilesystemError` (including `VersionMismatch`) so the
+/// caller's CAS retry loop can detect contention; we only intercept the
+/// specific `Unsupported` shape.
+async fn put_with_version_fallback<F>(
+    filesystem: &F,
+    path: &ironclaw_host_api::VirtualPath,
+    entry: Entry,
+    cas: CasExpectation,
+) -> Result<(), FilesystemError>
+where
+    F: RootFilesystem + ?Sized,
+{
+    match filesystem.put(path, entry.clone(), cas).await {
+        Ok(_) => Ok(()),
+        Err(FilesystemError::Unsupported { .. }) if !matches!(cas, CasExpectation::Any) => {
+            filesystem
+                .put(path, entry, CasExpectation::Any)
+                .await
+                .map(|_| ())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 // -- Error mapping ----------------------------------------------------------

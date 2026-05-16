@@ -85,11 +85,7 @@ where
     ) -> Result<(), OutboundError> {
         let body = serde_json::to_vec(value).map_err(|_| OutboundError::Serialization)?;
         let entry = Entry::bytes(body).with_content_type(ContentType::json());
-        self.filesystem
-            .put(path, entry, cas)
-            .await
-            .map(|_| ())
-            .map_err(map_fs_error)
+        self.put_with_byte_fallback(path, entry, cas).await
     }
 
     /// Like [`put_json`] but additionally projects an indexed scope value so
@@ -108,11 +104,34 @@ where
                 delivery_scope_index_key(),
                 delivery_scope_index_value(&attempt.scope),
             );
-        self.filesystem
-            .put(path, entry, cas)
-            .await
-            .map(|_| ())
-            .map_err(map_fs_error)
+        self.put_with_byte_fallback(path, entry, cas).await
+    }
+
+    /// Write `entry` with the given CAS expectation, falling back to a
+    /// metadata-stripped opaque write + `CasExpectation::Any` for backends
+    /// that reject record-shape entries or non-`Any` CAS (e.g.
+    /// `LocalFilesystem`). Mirrors
+    /// [`ironclaw_processes::filesystem_store::put_with_byte_fallback`] so
+    /// every byte-only mount in the workspace stays writeable through the
+    /// new filesystem stores.
+    async fn put_with_byte_fallback(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<(), OutboundError> {
+        match self.filesystem.put(path, entry.clone(), cas).await {
+            Ok(_) => Ok(()),
+            Err(FilesystemError::Unsupported { .. }) => {
+                let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
+                self.filesystem
+                    .put(path, opaque, CasExpectation::Any)
+                    .await
+                    .map(|_| ())
+                    .map_err(map_fs_error)
+            }
+            Err(error) => Err(map_fs_error(error)),
+        }
     }
 
     /// Declare the `scope` exact-equality index on the deliveries prefix.

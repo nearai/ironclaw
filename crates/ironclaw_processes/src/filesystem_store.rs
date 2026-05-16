@@ -751,8 +751,17 @@ where
     match filesystem.put(path, entry.clone(), cas).await {
         Ok(_) => Ok(()),
         Err(error) if is_unsupported(&error) => {
+            // Byte-only backends (LocalFilesystem) reject BOTH record-shaped
+            // entries AND non-`Any` CAS in a single `Unsupported` response.
+            // Strip the record metadata and downgrade the CAS expectation to
+            // `Any` so the legacy byte-only path stays writeable. The
+            // single-instance `transition_lock` on the caller carries the
+            // ordering safety invariant that CAS would otherwise provide.
             let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
-            filesystem.put(path, opaque, cas).await.map(|_| ())
+            filesystem
+                .put(path, opaque, CasExpectation::Any)
+                .await
+                .map(|_| ())
         }
         Err(error) => Err(error),
     }
