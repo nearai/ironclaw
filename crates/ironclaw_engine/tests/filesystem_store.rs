@@ -21,10 +21,39 @@ use ironclaw_engine::types::step::Step;
 use ironclaw_engine::types::thread::{Thread, ThreadConfig, ThreadId, ThreadState, ThreadType};
 use ironclaw_engine::types::{LEGACY_SHARED_OWNER_ID, shared_owner_id};
 use ironclaw_engine::{EventKind, FilesystemStore, ProjectId, Store, ThreadEvent};
-use ironclaw_filesystem::InMemoryBackend;
+use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+
+/// Build a `ScopedFilesystem<InMemoryBackend>` with full
+/// read/write/list/delete permissions on the `/engine` alias, mapped to a
+/// distinct tenant-scoped [`VirtualPath`] subtree. Tests can pass in a
+/// different `target_root` to simulate multiple tenants sharing one
+/// underlying backend (`filesystem_store_isolates_two_tenants_*` below).
+fn build_scoped_fs(
+    backend: Arc<InMemoryBackend>,
+    target_root: &str,
+) -> Arc<ScopedFilesystem<InMemoryBackend>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/engine").expect("alias"),
+        VirtualPath::new(target_root).expect("target"),
+        MountPermissions {
+            read: true,
+            write: true,
+            list: true,
+            delete: true,
+            execute: false,
+        },
+    )])
+    .expect("mount view");
+    Arc::new(ScopedFilesystem::new(backend, mounts))
+}
 
 fn make_store() -> FilesystemStore<InMemoryBackend> {
-    FilesystemStore::new(Arc::new(InMemoryBackend::new()))
+    let backend = Arc::new(InMemoryBackend::new());
+    FilesystemStore::new(build_scoped_fs(
+        backend,
+        "/engine/tenants/test/users/test/engine",
+    ))
 }
 
 fn make_thread(project_id: ProjectId, user_id: &str) -> Thread {
@@ -623,4 +652,72 @@ async fn list_skills_global_returns_only_shared_skills() {
     let globals = store.list_skills_global().await.unwrap();
     assert_eq!(globals.len(), 1);
     assert_eq!(globals[0].id, shared_skill.id);
+}
+
+/// Regression test for the HIGH-severity finding flagged in PR #3679
+/// review (commit `4eccad56d`): the engine's `FilesystemStore` must
+/// enforce tenant isolation through the [`ScopedFilesystem`] mount
+/// permission boundary, not assume that path strings inside engine code
+/// already encode tenant identity.
+///
+/// Two stores share one [`InMemoryBackend`] but are constructed with
+/// different [`MountView`]s — each one resolves the `/engine` alias to a
+/// distinct tenant-scoped [`VirtualPath`] subtree. Writing the same
+/// `(user_id, project_id, thread_id)` tuple on store A must NOT make the
+/// thread visible from store B. Before the migration to
+/// `Arc<ScopedFilesystem<F>>`, the engine spoke raw `VirtualPath`s
+/// directly to a `RootFilesystem`, so any composition layer that forgot
+/// to wrap the backend in a tenant scope would leak across tenants —
+/// this test fails closed if that ever regresses.
+#[tokio::test]
+async fn filesystem_store_isolates_two_tenants_with_same_user_project_ids() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store_a = FilesystemStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        "/engine/tenants/a/users/alice/engine",
+    ));
+    let store_b = FilesystemStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        "/engine/tenants/b/users/alice/engine",
+    ));
+
+    // Identical `(user_id, project_id)` for both stores — the only thing
+    // that should keep them apart is the mount-time tenant prefix.
+    let project_id = ProjectId::new();
+    let thread = make_thread(project_id, "alice");
+    let thread_id = thread.id;
+
+    store_a.save_thread(&thread).await.unwrap();
+
+    // Tenant A sees its own thread.
+    let from_a = store_a
+        .load_thread(thread_id)
+        .await
+        .expect("store_a load_thread succeeds");
+    assert!(
+        from_a.is_some(),
+        "tenant A must see the thread it just wrote",
+    );
+
+    // Tenant B does NOT see tenant A's thread, despite identical
+    // (user_id, project_id, thread_id).
+    let from_b = store_b
+        .load_thread(thread_id)
+        .await
+        .expect("store_b load_thread succeeds");
+    assert!(
+        from_b.is_none(),
+        "tenant B must NOT see tenant A's thread (cross-tenant leak)",
+    );
+
+    // Tenant B's list_threads for the same user/project must be empty.
+    let b_threads = store_b
+        .list_threads(project_id, "alice")
+        .await
+        .expect("store_b list_threads succeeds");
+    assert!(
+        b_threads.is_empty(),
+        "tenant B list_threads must be empty under (user, project) shared with tenant A; got {} threads",
+        b_threads.len(),
+    );
 }

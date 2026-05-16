@@ -34,16 +34,16 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use async_trait::async_trait;
 use ironclaw_filesystem::{
     CasExpectation, Entry, FileType, FilesystemError, Filter, IndexKind, IndexSpec, Page,
-    RecordKind, RootFilesystem, VersionedEntry,
+    RecordKind, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
-use ironclaw_host_api::VirtualPath;
+use ironclaw_host_api::ScopedPath;
 use serde::{Serialize, de::DeserializeOwned};
 
 use crate::store::paths::{
-    conversation_path, conversations_prefix, event_path, events_prefix, host_api_to_engine_error,
-    index_key_doc_type, index_key_parent_thread_id, index_key_project_id, index_key_revoked,
-    index_key_status, index_key_thread_id, index_key_user_id, index_name, index_value_bool,
-    index_value_text, lease_path, leases_prefix, memory_path, memory_prefix_all,
+    conversation_path, conversations_prefix, event_path, events_prefix, index_key_doc_type,
+    index_key_parent_thread_id, index_key_project_id, index_key_revoked, index_key_status,
+    index_key_thread_id, index_key_user_id, index_name, index_value_bool, index_value_text,
+    lease_path, leases_prefix, leases_root, memory_path, memory_prefix_all,
     memory_prefix_for_project, mission_path, missions_prefix, missions_prefix_for_project,
     project_path, projects_prefix, step_path, steps_prefix, thread_path, threads_prefix,
 };
@@ -91,26 +91,33 @@ fn kind_mission() -> RecordKind {
 
 /// Filesystem-backed [`Store`] implementation.
 ///
-/// Construct with any [`RootFilesystem`] — typically a
-/// [`CompositeRootFilesystem`](ironclaw_filesystem::CompositeRootFilesystem)
-/// or the in-memory backend for tests. Indexes are declared lazily on the
-/// first write that needs them (mirrors the secrets / authorization stores).
+/// Construct with a [`ScopedFilesystem`] over any [`RootFilesystem`] —
+/// typically a [`CompositeRootFilesystem`](ironclaw_filesystem::CompositeRootFilesystem)
+/// or the in-memory backend for tests. The [`ScopedFilesystem`] enforces
+/// the caller's [`MountView`](ironclaw_host_api::MountView) per-operation
+/// ACL and resolves the `/engine` alias to a tenant-scoped
+/// [`VirtualPath`](ironclaw_host_api::VirtualPath) before any backend
+/// dispatch — so tenant isolation is structural, not a convention engine
+/// code has to remember.
+///
+/// Indexes are declared lazily on the first write that needs them
+/// (mirrors the secrets / authorization stores).
 pub struct FilesystemStore<F>
 where
     F: RootFilesystem,
 {
-    filesystem: Arc<F>,
+    filesystem: Arc<ScopedFilesystem<F>>,
 }
 
 impl<F> FilesystemStore<F>
 where
     F: RootFilesystem,
 {
-    pub fn new(filesystem: Arc<F>) -> Self {
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self { filesystem }
     }
 
-    pub fn filesystem(&self) -> &Arc<F> {
+    pub fn filesystem(&self) -> &Arc<ScopedFilesystem<F>> {
         &self.filesystem
     }
 
@@ -119,28 +126,28 @@ where
     async fn ensure_threads_indexes(&self) -> Result<(), EngineError> {
         let prefix = threads_prefix()?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("threads_by_project"),
             index_key_project_id(),
         )
         .await?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("threads_by_user"),
             index_key_user_id(),
         )
         .await?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("threads_by_parent"),
             index_key_parent_thread_id(),
         )
         .await?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("threads_by_status"),
             index_key_status(),
@@ -152,7 +159,7 @@ where
     async fn ensure_projects_indexes(&self) -> Result<(), EngineError> {
         let prefix = projects_prefix()?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("projects_by_user"),
             index_key_user_id(),
@@ -163,7 +170,7 @@ where
     async fn ensure_conversations_indexes(&self) -> Result<(), EngineError> {
         let prefix = conversations_prefix()?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("conversations_by_user"),
             index_key_user_id(),
@@ -174,21 +181,21 @@ where
     async fn ensure_memory_indexes(&self) -> Result<(), EngineError> {
         let prefix = memory_prefix_all()?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("memory_by_project"),
             index_key_project_id(),
         )
         .await?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("memory_by_user"),
             index_key_user_id(),
         )
         .await?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("memory_by_doc_type"),
             index_key_doc_type(),
@@ -200,21 +207,21 @@ where
     async fn ensure_missions_indexes(&self) -> Result<(), EngineError> {
         let prefix = missions_prefix()?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("missions_by_project"),
             index_key_project_id(),
         )
         .await?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("missions_by_user"),
             index_key_user_id(),
         )
         .await?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("missions_by_status"),
             index_key_status(),
@@ -225,7 +232,7 @@ where
 
     // ── Read helpers ───────────────────────────────────────────
 
-    async fn read_one<T>(&self, path: &VirtualPath) -> Result<Option<T>, EngineError>
+    async fn read_one<T>(&self, path: &ScopedPath) -> Result<Option<T>, EngineError>
     where
         T: DeserializeOwned,
     {
@@ -238,14 +245,14 @@ where
 
     async fn read_versioned(
         &self,
-        path: &VirtualPath,
+        path: &ScopedPath,
     ) -> Result<Option<VersionedEntry>, EngineError> {
         self.filesystem.get(path).await.map_err(fs_to_engine_error)
     }
 
     async fn query_all<T>(
         &self,
-        prefix: &VirtualPath,
+        prefix: &ScopedPath,
         filter: &Filter,
     ) -> Result<Vec<T>, EngineError>
     where
@@ -272,22 +279,36 @@ where
         Ok(out)
     }
 
-    async fn list_subdir_paths(
-        &self,
-        prefix: &VirtualPath,
-    ) -> Result<Vec<VirtualPath>, EngineError> {
+    /// List the immediate child subdirectories of `prefix`, returning each
+    /// child's directory name (the trailing segment).
+    ///
+    /// The underlying `list_dir` op returns
+    /// [`VirtualPath`](ironclaw_host_api::VirtualPath) results because
+    /// resolution has already happened — we only need the leaf name to
+    /// reconstruct the child as a [`ScopedPath`] under the same prefix, so
+    /// we strip it here and let callers join it back. This keeps every
+    /// public path in this module a [`ScopedPath`] enforced by the
+    /// [`ScopedFilesystem`] ACL.
+    async fn list_subdir_names(&self, prefix: &ScopedPath) -> Result<Vec<String>, EngineError> {
         match self.filesystem.list_dir(prefix).await {
             Ok(entries) => Ok(entries
                 .into_iter()
                 .filter(|entry| entry.file_type == FileType::Directory)
-                .map(|entry| entry.path)
+                .filter_map(|entry| {
+                    entry
+                        .path
+                        .as_str()
+                        .rsplit('/')
+                        .next()
+                        .map(|s| s.to_string())
+                })
                 .collect()),
             Err(error) if is_not_found(&error) => Ok(Vec::new()),
             Err(error) => Err(fs_to_engine_error(error)),
         }
     }
 
-    async fn read_all_files_under<T>(&self, prefix: &VirtualPath) -> Result<Vec<T>, EngineError>
+    async fn read_all_files_under<T>(&self, prefix: &ScopedPath) -> Result<Vec<T>, EngineError>
     where
         T: DeserializeOwned,
     {
@@ -304,7 +325,11 @@ where
             if !entry.name.ends_with(".json") {
                 continue;
             }
-            if let Some(value) = self.read_one::<T>(&entry.path).await? {
+            // `list_dir` returned a `VirtualPath`; reconstruct the
+            // equivalent `ScopedPath` under our prefix so the per-op
+            // ACL is enforced on the follow-up `get`.
+            let scoped_child = join_scoped(prefix, &entry.name)?;
+            if let Some(value) = self.read_one::<T>(&scoped_child).await? {
                 out.push(value);
             }
         }
@@ -315,7 +340,7 @@ where
 
     async fn write_record<T>(
         &self,
-        path: &VirtualPath,
+        path: &ScopedPath,
         kind: RecordKind,
         value: &T,
         indexed: Vec<(
@@ -372,7 +397,7 @@ type FilesystemRecordLock = Arc<tokio::sync::Mutex<()>>;
 static FILESYSTEM_RECORD_LOCKS: OnceLock<Mutex<HashMap<String, FilesystemRecordLock>>> =
     OnceLock::new();
 
-fn lock_for_path(path: &VirtualPath) -> FilesystemRecordLock {
+fn lock_for_path(path: &ScopedPath) -> FilesystemRecordLock {
     let locks = FILESYSTEM_RECORD_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = lock_or_recover(locks);
     Arc::clone(
@@ -391,13 +416,13 @@ fn lock_or_recover<T>(mutex: &Mutex<HashMap<String, T>>) -> MutexGuard<'_, HashM
 // ── Helpers ────────────────────────────────────────────────────
 
 async fn ensure_exact_index<F>(
-    filesystem: &F,
-    prefix: &VirtualPath,
+    filesystem: &ScopedFilesystem<F>,
+    prefix: &ScopedPath,
     name: ironclaw_filesystem::IndexName,
     key: ironclaw_filesystem::IndexKey,
 ) -> Result<(), EngineError>
 where
-    F: RootFilesystem + ?Sized,
+    F: RootFilesystem,
 {
     let spec = IndexSpec::new(name, vec![key], IndexKind::Exact);
     match filesystem.ensure_index(prefix, &spec).await {
@@ -408,6 +433,17 @@ where
         Err(ironclaw_filesystem::FilesystemError::Unsupported { .. }) => Ok(()),
         Err(error) => Err(fs_to_engine_error(error)),
     }
+}
+
+/// Join a leaf segment onto a `ScopedPath` prefix. Used when reconstructing
+/// a child path after `list_dir` (which returns
+/// [`VirtualPath`](ironclaw_host_api::VirtualPath)s) so the per-op ACL
+/// check still runs on the follow-up `get`.
+fn join_scoped(prefix: &ScopedPath, leaf: &str) -> Result<ScopedPath, EngineError> {
+    let joined = format!("{}/{}", prefix.as_str().trim_end_matches('/'), leaf);
+    ScopedPath::new(joined).map_err(|error| EngineError::Store {
+        reason: format!("filesystem engine store: invalid scoped path: {error}"),
+    })
 }
 
 fn fs_to_engine_error(error: ironclaw_filesystem::FilesystemError) -> EngineError {
@@ -845,13 +881,9 @@ where
         // not hit this hot — most consumers call `list_memory_docs` with a
         // project scope first.
         let memory_root = memory_prefix_all()?;
-        let project_dirs = self.list_subdir_paths(&memory_root).await?;
-        for dir in project_dirs {
-            let candidate = match dir.as_str().rsplit('/').next() {
-                Some(slug) => slug,
-                None => continue,
-            };
-            let project_id = match uuid::Uuid::parse_str(candidate) {
+        let project_dirs = self.list_subdir_names(&memory_root).await?;
+        for slug in project_dirs {
+            let project_id = match uuid::Uuid::parse_str(&slug) {
                 Ok(uuid) => ProjectId(uuid),
                 Err(_) => continue,
             };
@@ -906,10 +938,11 @@ where
             // over `list_all_projects()`, which on a fresh filesystem is
             // empty — the directory scan is the right primitive here.
             Err(error) if is_engine_unsupported(&error) => {
-                let project_dirs = self.list_subdir_paths(&prefix).await?;
+                let project_dirs = self.list_subdir_names(&prefix).await?;
                 let mut docs = Vec::new();
-                for dir in project_dirs {
-                    docs.extend(self.read_all_files_under::<MemoryDoc>(&dir).await?);
+                for slug in project_dirs {
+                    let child = join_scoped(&prefix, &slug)?;
+                    docs.extend(self.read_all_files_under::<MemoryDoc>(&child).await?);
                 }
                 docs.retain(|doc| doc.user_id == user_id);
                 Ok(docs)
@@ -942,14 +975,10 @@ where
         // lease subdirectories until we find it. Lease lookup is rare
         // (revoke + grant flows), and the directory cardinality is
         // bounded by active threads.
-        let leases_root = leases_root_path()?;
-        let thread_dirs = self.list_subdir_paths(&leases_root).await?;
-        for dir in thread_dirs {
-            let candidate = match dir.as_str().rsplit('/').next() {
-                Some(slug) => slug,
-                None => continue,
-            };
-            let thread_id = match uuid::Uuid::parse_str(candidate) {
+        let leases_root_path = leases_root()?;
+        let thread_dirs = self.list_subdir_names(&leases_root_path).await?;
+        for slug in thread_dirs {
+            let thread_id = match uuid::Uuid::parse_str(&slug) {
                 Ok(uuid) => ThreadId(uuid),
                 Err(_) => continue,
             };
@@ -1005,13 +1034,9 @@ where
         // mission project subdirectories. Same approach as
         // `load_memory_doc`.
         let mission_root = missions_prefix()?;
-        let project_dirs = self.list_subdir_paths(&mission_root).await?;
-        for dir in project_dirs {
-            let candidate = match dir.as_str().rsplit('/').next() {
-                Some(slug) => slug,
-                None => continue,
-            };
-            let project_id = match uuid::Uuid::parse_str(candidate) {
+        let project_dirs = self.list_subdir_names(&mission_root).await?;
+        for slug in project_dirs {
+            let project_id = match uuid::Uuid::parse_str(&slug) {
                 Ok(uuid) => ProjectId(uuid),
                 Err(_) => continue,
             };
@@ -1057,13 +1082,9 @@ where
         status: MissionStatus,
     ) -> Result<(), EngineError> {
         let mission_root = missions_prefix()?;
-        let project_dirs = self.list_subdir_paths(&mission_root).await?;
-        for dir in project_dirs {
-            let candidate = match dir.as_str().rsplit('/').next() {
-                Some(slug) => slug,
-                None => continue,
-            };
-            let project_id = match uuid::Uuid::parse_str(candidate) {
+        let project_dirs = self.list_subdir_names(&mission_root).await?;
+        for slug in project_dirs {
+            let project_id = match uuid::Uuid::parse_str(&slug) {
                 Ok(uuid) => ProjectId(uuid),
                 Err(_) => continue,
             };
@@ -1143,8 +1164,4 @@ fn is_engine_unsupported(error: &EngineError) -> bool {
         EngineError::Store { reason } => reason.contains(FS_UNSUPPORTED_TAG),
         _ => false,
     }
-}
-
-fn leases_root_path() -> Result<VirtualPath, EngineError> {
-    VirtualPath::new("/engine/leases").map_err(host_api_to_engine_error)
 }

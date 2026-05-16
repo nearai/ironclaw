@@ -1,14 +1,14 @@
 //! Path layout for the filesystem-backed engine store.
 //!
-//! All engine state lives under `/engine/...` on the unified
-//! [`RootFilesystem`](ironclaw_filesystem::RootFilesystem) surface. The path
-//! shape is intentionally simple — there is no tenant/user/agent prefix here
-//! because the engine's entities already carry `user_id` / `project_id`
-//! fields, and tenant/user isolation is enforced at the mount-table layer
-//! when the engine's `/engine` mount is composed.
+//! All engine state lives under the `/engine` mount alias on a
+//! [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). The paths
+//! below are alias-relative [`ScopedPath`] strings, not raw
+//! [`VirtualPath`]s — at every op the [`ScopedFilesystem`] resolves the
+//! alias against its [`MountView`](ironclaw_host_api::MountView) and
+//! enforces per-grant ACL before any backend dispatch.
 //!
 //! ```text
-//! /engine/threads/<thread_id>.json
+//! /engine/threads/<thread_id>.json            — alias-relative
 //! /engine/steps/<thread_id>/<step_id>.json
 //! /engine/events/<thread_id>/<event_id>.json
 //! /engine/projects/<project_id>.json
@@ -18,11 +18,18 @@
 //! /engine/missions/<project_id>/<mission_id>.json
 //! ```
 //!
-//! Indexed projection (rather than path hierarchy) is the queryable surface
-//! for `user_id`, `status`, `parent_thread_id`, etc.
+//! These are [`ScopedPath`] strings under the `/engine` mount alias. The
+//! [`MountView`](ironclaw_host_api::MountView) granted by composition
+//! resolves the alias to a tenant-scoped
+//! [`VirtualPath`](ironclaw_host_api::VirtualPath) (e.g.
+//! `/engine/tenants/<tenant_id>/users/<user_id>/engine`), so the engine
+//! code itself is tenant-agnostic.
+//!
+//! Indexed projection (rather than path hierarchy) is the queryable
+//! surface for `user_id`, `status`, `parent_thread_id`, etc.
 
 use ironclaw_filesystem::{IndexKey, IndexName, IndexValue};
-use ironclaw_host_api::{HostApiError, VirtualPath};
+use ironclaw_host_api::{HostApiError, ScopedPath};
 use uuid::Uuid;
 
 use crate::types::capability::LeaseId;
@@ -43,104 +50,105 @@ const MEMORY_PREFIX: &str = "/engine/memory";
 const LEASES_PREFIX: &str = "/engine/leases";
 const MISSIONS_PREFIX: &str = "/engine/missions";
 
-pub(super) fn threads_prefix() -> Result<VirtualPath, EngineError> {
-    virtual_path(THREADS_PREFIX)
+pub(super) fn threads_prefix() -> Result<ScopedPath, EngineError> {
+    scoped_path(THREADS_PREFIX)
 }
 
-pub(super) fn thread_path(thread_id: ThreadId) -> Result<VirtualPath, EngineError> {
-    virtual_path(&format!("{THREADS_PREFIX}/{}.json", thread_id.0))
+pub(super) fn thread_path(thread_id: ThreadId) -> Result<ScopedPath, EngineError> {
+    scoped_path(&format!("{THREADS_PREFIX}/{}.json", thread_id.0))
 }
 
-pub(super) fn steps_prefix(thread_id: ThreadId) -> Result<VirtualPath, EngineError> {
-    virtual_path(&format!("{STEPS_PREFIX}/{}", thread_id.0))
+pub(super) fn steps_prefix(thread_id: ThreadId) -> Result<ScopedPath, EngineError> {
+    scoped_path(&format!("{STEPS_PREFIX}/{}", thread_id.0))
 }
 
-pub(super) fn step_path(thread_id: ThreadId, step_id: StepId) -> Result<VirtualPath, EngineError> {
-    virtual_path(&format!(
+pub(super) fn step_path(thread_id: ThreadId, step_id: StepId) -> Result<ScopedPath, EngineError> {
+    scoped_path(&format!(
         "{STEPS_PREFIX}/{}/{}.json",
         thread_id.0, step_id.0
     ))
 }
 
-pub(super) fn events_prefix(thread_id: ThreadId) -> Result<VirtualPath, EngineError> {
-    virtual_path(&format!("{EVENTS_PREFIX}/{}", thread_id.0))
+pub(super) fn events_prefix(thread_id: ThreadId) -> Result<ScopedPath, EngineError> {
+    scoped_path(&format!("{EVENTS_PREFIX}/{}", thread_id.0))
 }
 
-pub(super) fn event_path(thread_id: ThreadId, event_id: Uuid) -> Result<VirtualPath, EngineError> {
-    virtual_path(&format!(
+pub(super) fn event_path(thread_id: ThreadId, event_id: Uuid) -> Result<ScopedPath, EngineError> {
+    scoped_path(&format!(
         "{EVENTS_PREFIX}/{}/{}.json",
         thread_id.0, event_id
     ))
 }
 
-pub(super) fn projects_prefix() -> Result<VirtualPath, EngineError> {
-    virtual_path(PROJECTS_PREFIX)
+pub(super) fn projects_prefix() -> Result<ScopedPath, EngineError> {
+    scoped_path(PROJECTS_PREFIX)
 }
 
-pub(super) fn project_path(project_id: ProjectId) -> Result<VirtualPath, EngineError> {
-    virtual_path(&format!("{PROJECTS_PREFIX}/{}.json", project_id.0))
+pub(super) fn project_path(project_id: ProjectId) -> Result<ScopedPath, EngineError> {
+    scoped_path(&format!("{PROJECTS_PREFIX}/{}.json", project_id.0))
 }
 
 pub(super) fn conversation_path(
     conversation_id: ConversationId,
-) -> Result<VirtualPath, EngineError> {
-    virtual_path(&format!(
+) -> Result<ScopedPath, EngineError> {
+    scoped_path(&format!(
         "{CONVERSATIONS_PREFIX}/{}.json",
         conversation_id.0
     ))
 }
 
-pub(super) fn conversations_prefix() -> Result<VirtualPath, EngineError> {
-    virtual_path(CONVERSATIONS_PREFIX)
+pub(super) fn conversations_prefix() -> Result<ScopedPath, EngineError> {
+    scoped_path(CONVERSATIONS_PREFIX)
 }
 
-pub(super) fn memory_prefix_for_project(project_id: ProjectId) -> Result<VirtualPath, EngineError> {
-    virtual_path(&format!("{MEMORY_PREFIX}/{}", project_id.0))
+pub(super) fn memory_prefix_for_project(project_id: ProjectId) -> Result<ScopedPath, EngineError> {
+    scoped_path(&format!("{MEMORY_PREFIX}/{}", project_id.0))
 }
 
-pub(super) fn memory_prefix_all() -> Result<VirtualPath, EngineError> {
-    virtual_path(MEMORY_PREFIX)
+pub(super) fn memory_prefix_all() -> Result<ScopedPath, EngineError> {
+    scoped_path(MEMORY_PREFIX)
 }
 
-pub(super) fn memory_path(
-    project_id: ProjectId,
-    doc_id: DocId,
-) -> Result<VirtualPath, EngineError> {
-    virtual_path(&format!(
+pub(super) fn memory_path(project_id: ProjectId, doc_id: DocId) -> Result<ScopedPath, EngineError> {
+    scoped_path(&format!(
         "{MEMORY_PREFIX}/{}/{}.json",
         project_id.0, doc_id.0
     ))
 }
 
-pub(super) fn leases_prefix(thread_id: ThreadId) -> Result<VirtualPath, EngineError> {
-    virtual_path(&format!("{LEASES_PREFIX}/{}", thread_id.0))
+pub(super) fn leases_prefix(thread_id: ThreadId) -> Result<ScopedPath, EngineError> {
+    scoped_path(&format!("{LEASES_PREFIX}/{}", thread_id.0))
 }
 
 pub(super) fn lease_path(
     thread_id: ThreadId,
     lease_id: LeaseId,
-) -> Result<VirtualPath, EngineError> {
-    virtual_path(&format!(
+) -> Result<ScopedPath, EngineError> {
+    scoped_path(&format!(
         "{LEASES_PREFIX}/{}/{}.json",
         thread_id.0, lease_id.0
     ))
 }
 
-pub(super) fn missions_prefix() -> Result<VirtualPath, EngineError> {
-    virtual_path(MISSIONS_PREFIX)
+pub(super) fn leases_root() -> Result<ScopedPath, EngineError> {
+    scoped_path(LEASES_PREFIX)
+}
+
+pub(super) fn missions_prefix() -> Result<ScopedPath, EngineError> {
+    scoped_path(MISSIONS_PREFIX)
 }
 
 pub(super) fn missions_prefix_for_project(
     project_id: ProjectId,
-) -> Result<VirtualPath, EngineError> {
-    virtual_path(&format!("{MISSIONS_PREFIX}/{}", project_id.0))
+) -> Result<ScopedPath, EngineError> {
+    scoped_path(&format!("{MISSIONS_PREFIX}/{}", project_id.0))
 }
 
 pub(super) fn mission_path(
     project_id: ProjectId,
     mission_id: MissionId,
-) -> Result<VirtualPath, EngineError> {
-    virtual_path(&format!(
+) -> Result<ScopedPath, EngineError> {
+    scoped_path(&format!(
         "{MISSIONS_PREFIX}/{}/{}.json",
         project_id.0, mission_id.0
     ))
@@ -192,8 +200,8 @@ pub(super) fn index_value_bool(b: bool) -> IndexValue {
 
 // ── Internals ────────────────────────────────────────────────
 
-fn virtual_path(raw: &str) -> Result<VirtualPath, EngineError> {
-    VirtualPath::new(raw).map_err(host_api_to_engine_error)
+fn scoped_path(raw: &str) -> Result<ScopedPath, EngineError> {
+    ScopedPath::new(raw).map_err(host_api_to_engine_error)
 }
 
 fn index_key(key: &str) -> IndexKey {
@@ -204,6 +212,6 @@ fn index_key(key: &str) -> IndexKey {
 
 pub(super) fn host_api_to_engine_error(error: HostApiError) -> EngineError {
     EngineError::Store {
-        reason: format!("filesystem engine store: invalid virtual path: {error}"),
+        reason: format!("filesystem engine store: invalid scoped path: {error}"),
     }
 }
