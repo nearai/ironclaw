@@ -485,6 +485,112 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
     }
 }
 
+/// Lock the futureproof RebornRuntimeInput / RebornRuntime / RebornAdminClient
+/// surface introduced for epic #3036 ("Configuration-as-Code for IronClaw
+/// Reborn: tenant blueprints and use-case harnesses").
+///
+/// The CLI's previous shape carried only `services`, `llm`, and `runner` on
+/// the runtime input; identity, runtime policy, driver choice, and harness
+/// selection were all implicit and would have required breaking the input
+/// contract once epic #3036 wired them up. This test pins the new explicit
+/// fields so a future contributor can't drift back to the implicit shape.
+///
+/// Boundary assertions:
+/// 1. `RebornRuntimeInput` carries `api_version`, `identity`, `policy`,
+///    `drivers`, `harness` fields.
+/// 2. `RebornAdminClient` + `RebornAdminScope` exist on the composition
+///    crate's public surface (the privileged-op handle epic #3036's
+///    `config apply` / `harness install/activate` use).
+/// 3. The CLI command tree contains the stub directories (`config/{apply,
+///    diff, watch}.rs`, `harness/{install, list, activate, deactivate}.rs`)
+///    so the operator-facing surface for epic #3036 is discoverable from
+///    day one rather than appearing later and surprising tooling.
+#[test]
+fn reborn_runtime_surface_is_futureproof_for_epic_3036() {
+    let root = workspace_root();
+
+    let input_lib =
+        std::fs::read_to_string(root.join("crates/ironclaw_reborn_composition/src/runtime_input/mod.rs"))
+            .expect("composition runtime_input must be readable");
+    for required_field in [
+        "pub api_version: RebornRuntimeApiVersion",
+        "pub identity: RebornIdentityConfig",
+        "pub policy: RebornPolicyConfig",
+        "pub drivers: RebornDriverConfig",
+        "pub harness: Option<RebornHarnessSelection>",
+    ] {
+        assert!(
+            input_lib.contains(required_field),
+            "RebornRuntimeInput must carry `{required_field}` so epic #3036 (Configuration-as-Code) \
+             lands without breaking the input contract. See \
+             reborn_runtime_surface_is_futureproof_for_epic_3036 in the boundary tests."
+        );
+    }
+
+    let admin =
+        std::fs::read_to_string(root.join("crates/ironclaw_reborn_composition/src/runtime_admin.rs"))
+            .expect("composition runtime_admin must be readable");
+    for required_decl in [
+        "pub struct RebornAdminScope",
+        "pub struct RebornAdminClient",
+        "pub enum RebornAdminError",
+        "pub async fn apply_blueprint",
+        "pub async fn diff_blueprint",
+        "pub async fn install_harness",
+        "pub async fn activate_harness",
+        "pub async fn deactivate_harness",
+        "pub async fn list_harnesses",
+    ] {
+        assert!(
+            admin.contains(required_decl),
+            "RebornAdminClient must expose `{required_decl}` so epic #3036's privileged ops \
+             (config apply / harness install / activate / list / deactivate) have a stable \
+             admin surface to land into."
+        );
+    }
+
+    // The admin scope must be sealed: only the composition root can
+    // construct one. We enforce this by checking that the type carries a
+    // private sealed marker field and only exposes the documented CLI
+    // constructor. A boundary regression that adds another public
+    // constructor (e.g. `from_anything()`) without auth-credential
+    // discipline trips this assertion.
+    assert!(
+        admin.contains("_sealed: SealedMarker"),
+        "RebornAdminScope must remain sealed against accidental escalation; restore the \
+         private `_sealed: SealedMarker` field. The only legitimate public constructor today \
+         is `for_cli_admin(audit_reason)`; broader admin paths require the future privilege \
+         crate from epic #3036."
+    );
+
+    // CLI command tree: stub commands are present as compiling-but-stubbed
+    // discoverable subcommands. The epic explicitly calls out the
+    // operator-facing CLI surface (`ironclaw config apply`,
+    // `ironclaw harness install/list/activate/deactivate`,
+    // `ironclaw config watch`).
+    let cli_root = root.join("crates/ironclaw_reborn_cli/src/commands");
+    for required_path in [
+        "config/mod.rs",
+        "config/apply.rs",
+        "config/diff.rs",
+        "config/watch.rs",
+        "harness/mod.rs",
+        "harness/install.rs",
+        "harness/list.rs",
+        "harness/activate.rs",
+        "harness/deactivate.rs",
+        "stubs.rs",
+    ] {
+        assert!(
+            cli_root.join(required_path).exists(),
+            "ironclaw_reborn_cli must ship `{}` so the epic #3036 operator surface is \
+             discoverable from day one. Removing one of these files re-opens the surface \
+             instability problem the stub commands exist to prevent.",
+            cli_root.join(required_path).display()
+        );
+    }
+}
+
 #[test]
 fn reborn_turns_public_surface_uses_turn_ids_not_runtime_or_process_ids() {
     let root = workspace_root();

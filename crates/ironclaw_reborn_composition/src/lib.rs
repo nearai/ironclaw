@@ -24,6 +24,7 @@ mod input;
 mod profile;
 mod readiness;
 mod runtime;
+mod runtime_admin;
 mod runtime_input;
 
 pub use error::RebornBuildError;
@@ -32,9 +33,21 @@ pub use input::RebornBuildInput;
 pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
 pub use readiness::{RebornFacadeReadiness, RebornReadiness, RebornReadinessState};
 pub use runtime::{
-    AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, build_reborn_runtime,
+    AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, SendMessageOptions,
+    build_reborn_runtime,
 };
-pub use runtime_input::{RebornRuntimeInput, TurnRunnerSettings};
+pub use runtime_admin::{
+    ActivateHarnessRequest, ApplyBlueprintRequest, ApplyChange, ApplyChangeAction, ApplyMode,
+    ApplyReport, BlueprintSource, DeactivateHarnessRequest, DiffBlueprintRequest,
+    HarnessActivationScope, HarnessDescriptor, InstallHarnessRequest, RebornAdminClient,
+    RebornAdminError, RebornAdminScope,
+};
+pub use runtime_input::{
+    ConversationIdentity, RebornDriverChoice, RebornDriverConfig, RebornHarnessId,
+    RebornHarnessIdError, RebornHarnessSelection, RebornIdentityConfig, RebornPolicyConfig,
+    RebornRuntimeApiVersion, RebornRuntimeApiVersionError, RebornRuntimeInput,
+    TurnRunnerSettings,
+};
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::RebornLlmConfig;
 

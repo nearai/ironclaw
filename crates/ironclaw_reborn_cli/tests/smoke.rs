@@ -830,3 +830,121 @@ fn doctor_rejects_missing_home_for_default_reborn_home() {
         "stderr: {stderr}"
     );
 }
+
+// ─── Stub commands locked from epic #3036 ────────────────────────────────────
+
+#[test]
+fn help_lists_harness_subcommand_for_epic_3036() {
+    let output = Command::new(reborn_bin())
+        .arg("--help")
+        .output()
+        .expect("ironclaw-reborn --help should run");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("harness"), "stdout: {stdout}");
+    assert!(stdout.contains("#3036"), "stdout: {stdout}");
+}
+
+#[test]
+fn config_apply_is_a_discoverable_stub() {
+    let output = Command::new(reborn_bin())
+        .args(["config", "apply", "--dry-run", "/tmp/does-not-matter"])
+        .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_HOME", std::env::temp_dir().join("reborn-stub-home"))
+        .output()
+        .expect("ironclaw-reborn config apply should run");
+    assert!(!output.status.success(), "stub command must exit non-zero");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("config.apply"),
+        "stub stderr should name operation; got: {stderr}"
+    );
+    assert!(
+        stderr.contains("#3036"),
+        "stub stderr should reference epic; got: {stderr}"
+    );
+}
+
+#[test]
+fn config_diff_is_a_discoverable_stub() {
+    let output = Command::new(reborn_bin())
+        .args(["config", "diff", "/tmp/does-not-matter"])
+        .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_HOME", std::env::temp_dir().join("reborn-stub-home"))
+        .output()
+        .expect("ironclaw-reborn config diff should run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("config.diff"), "stderr: {stderr}");
+    assert!(stderr.contains("#3036"), "stderr: {stderr}");
+}
+
+#[test]
+fn config_watch_is_a_discoverable_stub() {
+    let output = Command::new(reborn_bin())
+        .args(["config", "watch", "https://example.com/x.git"])
+        .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_HOME", std::env::temp_dir().join("reborn-stub-home"))
+        .output()
+        .expect("ironclaw-reborn config watch should run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("config.watch"), "stderr: {stderr}");
+    assert!(stderr.contains("#3036"), "stderr: {stderr}");
+}
+
+#[test]
+fn harness_install_is_a_discoverable_stub() {
+    let output = Command::new(reborn_bin())
+        .args(["harness", "install", "/tmp/does-not-matter"])
+        .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_HOME", std::env::temp_dir().join("reborn-stub-home"))
+        .output()
+        .expect("ironclaw-reborn harness install should run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("harness.install"), "stderr: {stderr}");
+    assert!(stderr.contains("#3036"), "stderr: {stderr}");
+}
+
+#[test]
+fn harness_list_is_a_discoverable_stub() {
+    let output = Command::new(reborn_bin())
+        .args(["harness", "list"])
+        .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_HOME", std::env::temp_dir().join("reborn-stub-home"))
+        .output()
+        .expect("ironclaw-reborn harness list should run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("harness.list"), "stderr: {stderr}");
+    assert!(stderr.contains("#3036"), "stderr: {stderr}");
+}
+
+#[test]
+fn harness_activate_is_a_discoverable_stub() {
+    let output = Command::new(reborn_bin())
+        .args(["harness", "activate", "red-team", "--thread", "t1"])
+        .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_HOME", std::env::temp_dir().join("reborn-stub-home"))
+        .output()
+        .expect("ironclaw-reborn harness activate should run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("harness.activate"), "stderr: {stderr}");
+    assert!(stderr.contains("#3036"), "stderr: {stderr}");
+}
+
+#[test]
+fn harness_deactivate_is_a_discoverable_stub() {
+    let output = Command::new(reborn_bin())
+        .args(["harness", "deactivate", "--thread", "t1"])
+        .env_remove("USERPROFILE")
+        .env("IRONCLAW_REBORN_HOME", std::env::temp_dir().join("reborn-stub-home"))
+        .output()
+        .expect("ironclaw-reborn harness deactivate should run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("harness.deactivate"), "stderr: {stderr}");
+    assert!(stderr.contains("#3036"), "stderr: {stderr}");
+}

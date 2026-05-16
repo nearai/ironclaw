@@ -29,7 +29,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+
+use crate::runtime_admin::{RebornAdminClient, RebornAdminScope};
+use crate::runtime_input::{ConversationIdentity, RebornIdentityConfig};
 use ironclaw_reborn::driver_registry::{DriverKind, DriverRegistry, DriverRequirements};
 use ironclaw_reborn::loop_driver_host::{RebornLoopDriverHostFactory, TextOnlyLoopHostConfig};
 use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
@@ -46,8 +49,8 @@ use ironclaw_turns::{
     AcceptedMessageRef, AgentLoopDriver, DefaultTurnCoordinator, GetRunStateRequest,
     IdempotencyKey, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
     InMemoryTurnStateStore, LoopExitApplier, ReplyTargetBindingRef, RunProfileId,
-    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
+    RunProfileRequest, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
     run_profile::{
         CapabilitySurfaceProfileId, CheckpointSchemaId, InMemoryRunProfileRegistry,
         InMemoryRunProfileResolver, RunProfileDefinition,
@@ -57,7 +60,7 @@ use ironclaw_turns::{
 use crate::{
     RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services,
 };
-use crate::runtime_input::{RebornRuntimeInput, TurnRunnerSettings};
+use crate::runtime_input::{RebornRuntimeApiVersion, RebornRuntimeInput, TurnRunnerSettings};
 
 #[cfg(feature = "root-llm-provider")]
 use crate::runtime_input::RebornLlmConfig;
@@ -65,6 +68,19 @@ use crate::runtime_input::RebornLlmConfig;
 /// Stable identifier for a Reborn CLI conversation. Wraps a `ThreadId`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ConversationId(pub ThreadId);
+
+/// Per-conversation tenant/agent/owner/project resolution recorded at
+/// conversation creation. Stored so `send_user_message` can construct the
+/// right `TurnScope` for each conversation rather than reusing the
+/// runtime-wide default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConversationContext {
+    tenant: TenantId,
+    agent: AgentId,
+    owner: UserId,
+    project: Option<ProjectId>,
+    thread_scope: ThreadScope,
+}
 
 /// Final-form assistant reply read back from the session thread service after
 /// a `send_user_message` completes.
@@ -74,6 +90,38 @@ pub struct AssistantReply {
     pub run_id: TurnRunId,
     pub status: TurnStatus,
     pub text: Option<String>,
+}
+
+/// Per-message options for `RebornRuntime::send_user_message`.
+///
+/// Today only `requested_run_profile` is consumed (forwarded into
+/// `SubmitTurnRequest`); `harness_override` is recorded and logged but
+/// has no effect until the harness substrate lands (epic #3036).
+#[derive(Debug, Clone, Default)]
+pub struct SendMessageOptions {
+    /// Requested run-profile identifier. Maps onto
+    /// `RunProfileResolver` keys — drives which loop driver runs the
+    /// turn. `None` means "use the runtime's implicit default profile".
+    pub requested_run_profile: Option<String>,
+    /// Per-message harness override. `Some` records the operator's
+    /// intent for this turn; takes effect once the harness substrate
+    /// lands (epic #3036).
+    pub harness_override: Option<crate::runtime_input::RebornHarnessId>,
+}
+
+impl SendMessageOptions {
+    pub fn with_requested_run_profile(mut self, profile: impl Into<String>) -> Self {
+        self.requested_run_profile = Some(profile.into());
+        self
+    }
+
+    pub fn with_harness(
+        mut self,
+        harness: crate::runtime_input::RebornHarnessId,
+    ) -> Self {
+        self.harness_override = Some(harness);
+        self
+    }
 }
 
 /// Errors returned by `RebornRuntime` methods.
@@ -97,6 +145,10 @@ pub enum RebornRuntimeError {
     RunTimeout { timeout: Duration },
     #[error("invalid scope or identifier: {reason}")]
     InvalidArgument { reason: String },
+    #[error("incompatible RebornRuntimeInput.api_version: {0}")]
+    IncompatibleApiVersion(String),
+    #[error("reborn runtime admin surface: {0}")]
+    Admin(String),
     #[cfg(feature = "root-llm-provider")]
     #[error("llm provider construction failed: {0}")]
     LlmProvider(String),
@@ -127,18 +179,34 @@ pub(crate) fn reborn_runtime_capability_surface_id() -> CapabilitySurfaceProfile
 
 /// Started, running Reborn agent runtime.
 ///
-/// `RebornRuntime` is the single user-facing handle returned by
-/// [`build_reborn_runtime`]. Downstream code never reaches into the substrate
-/// or worker machinery: it talks to the runtime through task-level methods.
+/// `RebornRuntime` exposes two narrow surfaces:
+///
+/// 1. **Agent surface** — `new_conversation`, `new_conversation_for`,
+///    `send_user_message`, `shutdown`. Channels, REPLs, and remote
+///    inbound handlers use these.
+/// 2. **Admin surface** — `admin(scope)` returns a [`RebornAdminClient`]
+///    for privileged operations (blueprint apply, harness install /
+///    activate). Construction requires a [`RebornAdminScope`] that is
+///    sealed against accidental escalation.
+///
+/// Downstream code never reaches into the substrate or worker machinery:
+/// it talks to the runtime through task-level methods.
 pub struct RebornRuntime {
     services: RebornServices,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     thread_service: Arc<InMemorySessionThreadService>,
-    thread_scope: ThreadScope,
+    /// Default identity used for `new_conversation()` (no override).
+    /// Per-conversation overrides are recorded in `conversations` below.
+    default_identity: RebornIdentityConfig,
+    /// Per-conversation context — maps each `ConversationId` to the
+    /// resolved tenant/agent/owner/project that conversation was
+    /// created with. The lookup happens on every `send_user_message`.
+    conversations: tokio::sync::RwLock<
+        std::collections::HashMap<ThreadId, ConversationContext>,
+    >,
     worker_handle: JoinHandle<()>,
     worker_cancel: CancellationToken,
     poll_settings: PollSettings,
-    actor_user_id: UserId,
 }
 
 #[derive(Debug, Clone)]
@@ -163,52 +231,154 @@ impl RebornRuntime {
         &self.services
     }
 
-    /// Create a fresh conversation. Returns the opaque conversation id used
-    /// in subsequent `send_user_message` calls.
+    /// Obtain the privileged admin surface backed by the supplied scope.
+    ///
+    /// `scope` is sealed — construction is restricted to the CLI binary
+    /// via [`RebornAdminScope::for_cli_admin`]. Every admin method returns
+    /// `RebornAdminError::NotYetWired` today; the substrate that makes
+    /// them live lands in epic #3036.
+    pub fn admin(&self, scope: RebornAdminScope) -> RebornAdminClient {
+        RebornAdminClient::new(scope)
+    }
+
+    /// Default identity this runtime was built with.
+    pub fn default_identity(&self) -> &RebornIdentityConfig {
+        &self.default_identity
+    }
+
+    /// Create a fresh conversation bound to the runtime's default identity.
+    pub async fn new_conversation(&self) -> Result<ConversationId, RebornRuntimeError> {
+        self.new_conversation_for(ConversationIdentity::default()).await
+    }
+
+    /// Create a fresh conversation with a per-conversation tenant / agent /
+    /// owner / project override. Any field left `None` on `override_` falls
+    /// back to the runtime's `default_identity`.
     ///
     /// The thread is materialized inside the session thread service so
-    /// `accept_inbound_message` does not error on the first send.
-    pub async fn new_conversation(&self) -> Result<ConversationId, RebornRuntimeError> {
+    /// `accept_inbound_message` does not error on the first send, and the
+    /// per-conversation identity is recorded so subsequent
+    /// `send_user_message` calls can construct the right `TurnScope`.
+    pub async fn new_conversation_for(
+        &self,
+        override_: ConversationIdentity,
+    ) -> Result<ConversationId, RebornRuntimeError> {
+        let tenant = override_.tenant.unwrap_or_else(|| self.default_identity.tenant.clone());
+        let agent = override_
+            .agent
+            .unwrap_or_else(|| self.default_identity.default_agent.clone());
+        let owner = override_
+            .owner
+            .unwrap_or_else(|| self.default_identity.default_owner.clone());
+        let project = override_
+            .project
+            .or_else(|| self.default_identity.default_project.clone());
+
+        let thread_scope = ThreadScope {
+            tenant_id: tenant.clone(),
+            agent_id: agent.clone(),
+            project_id: project.clone(),
+            owner_user_id: Some(owner.clone()),
+            mission_id: None,
+        };
         let thread_id = ThreadId::new(format!("reborn-conv-{}", Uuid::new_v4()))
             .map_err(|reason| RebornRuntimeError::InvalidArgument {
                 reason: reason.to_string(),
             })?;
         self.thread_service
             .ensure_thread(EnsureThreadRequest {
-                scope: self.thread_scope.clone(),
+                scope: thread_scope.clone(),
                 thread_id: Some(thread_id.clone()),
-                created_by_actor_id: self.actor_user_id.as_str().to_string(),
+                created_by_actor_id: owner.as_str().to_string(),
                 title: None,
                 metadata_json: None,
             })
             .await
             .map_err(|error| RebornRuntimeError::ThreadService(error.to_string()))?;
+        let context = ConversationContext {
+            tenant,
+            agent,
+            owner,
+            project,
+            thread_scope,
+        };
+        self.conversations.write().await.insert(thread_id.clone(), context);
         Ok(ConversationId(thread_id))
     }
 
-    /// Submit a user message into the conversation, wait for the run to
-    /// reach a terminal state, and return the assistant reply read back
-    /// from the session thread service.
-    ///
-    /// Without an LLM gateway wired in (i.e. when this crate is built
-    /// without the `root-llm-provider` feature or `RebornLlmConfig` is not
-    /// provided), the run will fail and the returned reply will surface
-    /// that failure via `status = Failed` and `text = None`.
+    /// Submit a user message and wait for the run to reach a terminal
+    /// state. Convenience wrapper over
+    /// `send_user_message_with_options` with default options.
     pub async fn send_user_message(
         &self,
         conversation: &ConversationId,
         text: &str,
     ) -> Result<AssistantReply, RebornRuntimeError> {
+        self.send_user_message_with_options(conversation, text, SendMessageOptions::default())
+            .await
+    }
+
+    /// Submit a user message with explicit per-turn options. The options
+    /// flow into `SubmitTurnRequest` so the run-profile resolver / driver
+    /// registry pick the right driver for the turn.
+    ///
+    /// Without an LLM gateway wired in (i.e. when this crate is built
+    /// without the `root-llm-provider` feature or `RebornLlmConfig` is not
+    /// provided), the run will fail and the returned reply will surface
+    /// that failure via `status = Failed` (or `RecoveryRequired`) and
+    /// `text = None`.
+    pub async fn send_user_message_with_options(
+        &self,
+        conversation: &ConversationId,
+        text: &str,
+        options: SendMessageOptions,
+    ) -> Result<AssistantReply, RebornRuntimeError> {
         if self.worker_handle.is_finished() {
             return Err(RebornRuntimeError::WorkerStopped);
         }
-        let scope = self.turn_scope_for(&conversation.0);
+        let context = self
+            .conversations
+            .read()
+            .await
+            .get(&conversation.0)
+            .cloned()
+            .ok_or_else(|| RebornRuntimeError::InvalidArgument {
+                reason: format!(
+                    "unknown ConversationId {} -- was new_conversation() called?",
+                    conversation.0.as_str()
+                ),
+            })?;
+
+        // Per-message harness override is recorded today; it takes effect
+        // once the harness substrate from epic #3036 lands.
+        if let Some(harness) = &options.harness_override {
+            tracing::warn!(
+                harness_id = %harness,
+                thread_id = %conversation.0,
+                "SendMessageOptions.harness_override is recorded but not yet wired (epic #3036)"
+            );
+        }
+
+        let requested_run_profile = match options.requested_run_profile {
+            Some(profile) => Some(
+                RunProfileRequest::new(profile)
+                    .map_err(|reason| RebornRuntimeError::InvalidArgument { reason })?,
+            ),
+            None => None,
+        };
+
+        let scope = TurnScope::new(
+            context.tenant.clone(),
+            Some(context.agent.clone()),
+            context.project.clone(),
+            conversation.0.clone(),
+        );
         let accepted = self
             .thread_service
             .accept_inbound_message(AcceptInboundMessageRequest {
-                scope: self.thread_scope.clone(),
+                scope: context.thread_scope.clone(),
                 thread_id: conversation.0.clone(),
-                actor_id: self.actor_user_id.as_str().to_string(),
+                actor_id: context.owner.as_str().to_string(),
                 source_binding_id: Some("reborn-cli".to_string()),
                 reply_target_binding_id: Some("reborn-cli".to_string()),
                 external_event_id: Some(format!("reborn-cli:{}", Uuid::new_v4())),
@@ -231,11 +401,11 @@ impl RebornRuntime {
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
                 scope: scope.clone(),
-                actor: TurnActor::new(self.actor_user_id.clone()),
+                actor: TurnActor::new(context.owner.clone()),
                 accepted_message_ref: accepted_message_ref.clone(),
                 source_binding_ref,
                 reply_target_binding_ref,
-                requested_run_profile: None,
+                requested_run_profile,
                 idempotency_key,
                 received_at: Utc::now(),
             })
@@ -245,7 +415,7 @@ impl RebornRuntime {
 
         let terminal_status = self.wait_for_terminal(&scope, run_id).await?;
         let assistant_text = self
-            .read_latest_assistant_text(&conversation.0, run_id)
+            .read_latest_assistant_text(&context.thread_scope, &conversation.0, run_id)
             .await?;
 
         Ok(AssistantReply {
@@ -262,15 +432,6 @@ impl RebornRuntime {
         self.worker_cancel.cancel();
         let _ = self.worker_handle.await;
         Ok(())
-    }
-
-    fn turn_scope_for(&self, thread_id: &ThreadId) -> TurnScope {
-        TurnScope::new(
-            self.thread_scope.tenant_id.clone(),
-            Some(self.thread_scope.agent_id.clone()),
-            self.thread_scope.project_id.clone(),
-            thread_id.clone(),
-        )
     }
 
     async fn wait_for_terminal(
@@ -310,13 +471,14 @@ impl RebornRuntime {
 
     async fn read_latest_assistant_text(
         &self,
+        thread_scope: &ThreadScope,
         thread_id: &ThreadId,
         run_id: TurnRunId,
     ) -> Result<Option<String>, RebornRuntimeError> {
         let history = self
             .thread_service
             .list_thread_history(ThreadHistoryRequest {
-                scope: self.thread_scope.clone(),
+                scope: thread_scope.clone(),
                 thread_id: thread_id.clone(),
             })
             .await
@@ -351,11 +513,20 @@ pub async fn build_reborn_runtime(
     input: RebornRuntimeInput,
 ) -> Result<RebornRuntime, RebornRuntimeError> {
     let RebornRuntimeInput {
+        api_version,
         services: services_input,
+        identity,
+        policy,
+        drivers,
+        harness,
         #[cfg(feature = "root-llm-provider")]
         llm,
         runner,
     } = input;
+
+    api_version
+        .compatible_with(RebornRuntimeApiVersion::current())
+        .map_err(|error| RebornRuntimeError::IncompatibleApiVersion(error.to_string()))?;
 
     let services_input = services_input.ok_or(RebornRuntimeError::InvalidArgument {
         reason: "RebornRuntimeInput.services is required".to_string(),
@@ -370,6 +541,49 @@ pub async fn build_reborn_runtime(
             ),
         });
     }
+
+    // Today's composition wires only the text-only driver end-to-end.
+    // The planned-driver variant is a recognized choice (operator-facing
+    // config validation accepts it) but selecting it as the default at
+    // boot is a clear NotYetWired error rather than a silent fallback.
+    if drivers.default == crate::runtime_input::RebornDriverChoice::Planned {
+        return Err(RebornRuntimeError::InvalidArgument {
+            reason: "RebornDriverConfig.default = Planned is recognized but not yet \
+                     wired end-to-end in build_reborn_runtime; track epic #3036 sub-issue \
+                     'harness composition over planned driver'"
+                .to_string(),
+        });
+    }
+
+    // Harness selection is forward-compat-only today: epic #3036 ships the
+    // HarnessRepo + HarnessActivationService + capability-surface filter
+    // that make this take effect. Record the operator's intent in the boot
+    // log so audit traces show *why* the runtime is starting without an
+    // overlay even when a harness is requested.
+    if let Some(selection) = &harness {
+        tracing::warn!(
+            harness_id = %selection.harness_id,
+            "RebornHarnessSelection requested but harness substrate is not yet wired (epic #3036); proceeding without overlay"
+        );
+    }
+
+    tracing::debug!(
+        api_version = %api_version,
+        tenant = %identity.tenant,
+        agent = %identity.default_agent,
+        owner = %identity.default_owner,
+        deployment_mode = %policy.deployment_mode.as_str(),
+        default_profile = ?policy.default_profile,
+        approval_policy = ?policy.default_approval_policy,
+        driver_default = %drivers.default,
+        driver_additional = ?drivers.additional,
+        "build_reborn_runtime: composing assembled runtime"
+    );
+
+    let _ = identity.default_project.as_ref();
+    let _ = (&policy, &drivers); // policy/drivers are recorded; values
+    // surface in the boot log above. Field-level enforcement is downstream
+    // work in epic #3036 (RuntimePolicyRepo + per-turn resolver).
 
     let owner_id = services_input.owner_id().to_string();
     let services = build_reborn_services(services_input).await?;
@@ -415,29 +629,21 @@ pub async fn build_reborn_runtime(
             .with_run_profile_resolver(Arc::new(resolver)),
     );
 
-    // Thread scope: a stable, single-tenant scope for the CLI session.
-    let tenant_id = TenantId::new("reborn-cli").map_err(|reason| {
-        RebornRuntimeError::InvalidArgument {
-            reason: format!("tenant id: {reason}"),
-        }
-    })?;
-    let agent_id = AgentId::new("reborn-cli-agent").map_err(|reason| {
-        RebornRuntimeError::InvalidArgument {
-            reason: format!("agent id: {reason}"),
-        }
-    })?;
-    let actor_user_id = UserId::new(owner_id.clone()).map_err(|reason| {
-        RebornRuntimeError::InvalidArgument {
-            reason: format!("user id: {reason}"),
-        }
-    })?;
-    let thread_scope = ThreadScope {
-        tenant_id,
-        agent_id,
-        project_id: None,
-        owner_user_id: Some(actor_user_id.clone()),
+    // Default thread scope: built from the runtime's default identity.
+    // Per-conversation overrides are recorded in `RebornRuntime.conversations`
+    // and shadowed in their own `ThreadScope`.
+    let default_thread_scope = ThreadScope {
+        tenant_id: identity.tenant.clone(),
+        agent_id: identity.default_agent.clone(),
+        project_id: identity.default_project.clone(),
+        owner_user_id: Some(identity.default_owner.clone()),
         mission_id: None,
     };
+
+    // `owner_id` from substrate is kept for compatibility but is no
+    // longer used to mint the actor identity — that comes from
+    // `RebornIdentityConfig` now.
+    let _ = owner_id;
 
     // Driver registry + worker — these are gated on the model gateway being
     // available (i.e. the `root-llm-provider` feature + LLM config).
@@ -447,7 +653,7 @@ pub async fn build_reborn_runtime(
         Arc::clone(&checkpoint_state_store) as Arc<_>,
         Arc::clone(&loop_checkpoint_store) as Arc<_>,
         Arc::clone(&thread_service),
-        thread_scope.clone(),
+        default_thread_scope,
         text_only_descriptor.clone(),
         #[cfg(feature = "root-llm-provider")]
         llm,
@@ -457,11 +663,11 @@ pub async fn build_reborn_runtime(
         services,
         turn_coordinator,
         thread_service,
-        thread_scope,
+        default_identity: identity,
+        conversations: tokio::sync::RwLock::new(std::collections::HashMap::new()),
         worker_handle,
         worker_cancel,
         poll_settings: PollSettings::default(),
-        actor_user_id,
     })
 }
 
