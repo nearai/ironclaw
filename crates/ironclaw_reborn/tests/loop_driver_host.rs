@@ -92,8 +92,8 @@ use ironclaw_turns::{
         LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError,
         LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent,
         LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelCallOutcome,
-        ParentLoopOutput, PromptMode, SkillVisibility, StageCheckpointPayloadRequest,
-        VisibleCapabilityRequest,
+        NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PromptMode, SkillVisibility,
+        StageCheckpointPayloadRequest, VisibleCapabilityRequest,
     },
     runner::{ClaimRunRequest, ClaimedTurnRun, TurnRunTransitionPort},
 };
@@ -1795,7 +1795,7 @@ async fn planned_host_factory_create_host_uses_profiled_capabilities() {
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
     ));
     let planned = default_planned_run_profile_resolver()
-        .unwrap()
+        .expect("planned default profile resolver")
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
         .await
         .unwrap();
@@ -1843,7 +1843,7 @@ async fn planned_host_factory_create_host_uses_profiled_capabilities() {
 async fn planned_host_factory_create_host_requires_profiled_capabilities() {
     let fixture = HostFixture::new("thread-host-planned-missing-capabilities", "hello").await;
     let planned = default_planned_run_profile_resolver()
-        .unwrap()
+        .expect("planned default profile resolver")
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
         .await
         .unwrap();
@@ -1874,7 +1874,7 @@ async fn planned_host_factory_create_host_requires_profiled_capabilities() {
 async fn planned_host_factory_fails_closed_when_driver_requirements_are_missing() {
     let fixture = HostFixture::new("thread-host-planned-missing-requirements", "hello").await;
     let planned = default_planned_run_profile_resolver()
-        .unwrap()
+        .expect("planned default profile resolver")
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
         .await
         .unwrap();
@@ -1912,7 +1912,7 @@ async fn planned_host_factory_sanitizes_capability_profile_resolver_errors() {
         "RAW_SECRET_TOKEN /tmp/private/trace",
     ));
     let planned = default_planned_run_profile_resolver()
-        .unwrap()
+        .expect("planned default profile resolver")
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
         .await
         .unwrap();
@@ -1947,7 +1947,7 @@ async fn planned_host_factory_sanitizes_capability_profile_resolver_errors() {
 async fn profiled_capability_surface_resolver_errors_are_sanitized() {
     let fixture = HostFixture::new("thread-planned-host-sanitized-surface", "hello").await;
     let planned = default_planned_run_profile_resolver()
-        .unwrap()
+        .expect("planned default profile resolver")
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
         .await
         .unwrap();
@@ -2037,6 +2037,9 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         skill_context_source: None,
         input_queue: None,
         identity_context_source: Arc::new(StaticIdentityContextSource::new(Vec::new())),
+        model_policy_guard: None,
+        model_budget_accountant: None,
+        safety_context: None,
     })
     .unwrap();
 
@@ -2152,6 +2155,11 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         skill_context_source: None,
         input_queue: Some(Arc::new(EmptyHostInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
+        model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
+        model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
+        safety_context: Some(
+            InstructionSafetyContext::new("policy:test", "test safety context").expect("safety"),
+        ),
     })
     .expect("all product-live adapters should satisfy readiness");
 
@@ -2161,6 +2169,107 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         .await
         .unwrap();
     assert_eq!(resolved.profile_id.as_str(), "reborn-planned-default");
+}
+
+/// Build a fully-populated `DefaultPlannedRuntimeParts` for the WS-17
+/// product-live readiness gate tests. Callers below override individual
+/// fields with `None` to assert the fail-closed branch fires.
+async fn product_live_parts_for_gate_test(
+    thread_label: &'static str,
+) -> DefaultPlannedRuntimeParts<
+    InMemoryTurnStateStore,
+    InMemorySessionThreadService,
+    RecordingGateway,
+> {
+    let fixture = HostFixture::new_unsubmitted(thread_label, "hello").await;
+    let turn_store = Arc::new(InMemoryTurnStateStore::default());
+    let runtime = Arc::new(RecordingHostRuntime::with_surface(host_runtime_surface([
+        capability_descriptor("demo.allowed"),
+    ])));
+    let io = Arc::new(InMemoryCapabilityIo::default());
+    let capability_factory = Arc::new(TestHostRuntimeCapabilityFactory {
+        runtime,
+        visible_request: host_runtime_visible_request(&fixture, ["demo"]),
+        io,
+        milestone_sink: fixture.milestone_sink.clone(),
+    });
+    let model_route_resolver: Arc<dyn ModelRouteResolver> = Arc::new(
+        StaticModelRouteResolver::new(ModelRoutePolicy::new(
+            ModelSelectionMode::DeveloperAnyConfigured,
+        ))
+        .with_route(
+            ModelSlot::Default,
+            ModelRoute::new("nearai", "qwen3-coder").unwrap(),
+        ),
+    );
+    DefaultPlannedRuntimeParts {
+        turn_state: turn_store.clone(),
+        thread_service: fixture.thread_service.clone(),
+        thread_scope: fixture.thread_scope.clone(),
+        model_gateway: fixture.gateway.clone(),
+        checkpoint_state_store: fixture.checkpoint_state_store.clone(),
+        loop_checkpoint_store: turn_store.clone(),
+        milestone_sink: fixture.milestone_sink.clone(),
+        capability_factory,
+        capability_surface_resolver: Arc::new(StaticCapabilitySurfaceProfileResolver::new(
+            CapabilityAllowSet::allowlist([CapabilityId::new("demo.allowed").unwrap()]),
+        )),
+        loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
+            fixture.thread_service.clone(),
+            Arc::clone(&turn_store) as Arc<dyn TurnStateStore>,
+            turn_store,
+        )),
+        config: DefaultPlannedRuntimeConfig::default(),
+        model_route_resolver: Some(model_route_resolver),
+        cancellation_factory: Some(Arc::new(ReadyRunCancellationFactory::default())),
+        skill_context_source: None,
+        input_queue: Some(Arc::new(EmptyHostInputQueue)),
+        identity_context_source: Arc::new(EmptyIdentityContextSource),
+        model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
+        model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
+        safety_context: Some(
+            InstructionSafetyContext::new("policy:test", "test safety context").expect("safety"),
+        ),
+    }
+}
+
+#[tokio::test]
+async fn product_live_runtime_fails_closed_without_model_policy_guard() {
+    let mut parts = product_live_parts_for_gate_test("thread-gate-policy-guard").await;
+    parts.model_policy_guard = None;
+    let error = build_product_live_planned_runtime(parts)
+        .err()
+        .expect("missing model_policy_guard must fail closed");
+    assert!(
+        error.to_string().contains("model_policy_guard"),
+        "error should name the missing component: {error}"
+    );
+}
+
+#[tokio::test]
+async fn product_live_runtime_fails_closed_without_model_budget_accountant() {
+    let mut parts = product_live_parts_for_gate_test("thread-gate-budget-accountant").await;
+    parts.model_budget_accountant = None;
+    let error = build_product_live_planned_runtime(parts)
+        .err()
+        .expect("missing model_budget_accountant must fail closed");
+    assert!(
+        error.to_string().contains("model_budget_accountant"),
+        "error should name the missing component: {error}"
+    );
+}
+
+#[tokio::test]
+async fn product_live_runtime_fails_closed_without_safety_context() {
+    let mut parts = product_live_parts_for_gate_test("thread-gate-safety-context").await;
+    parts.safety_context = None;
+    let error = build_product_live_planned_runtime(parts)
+        .err()
+        .expect("missing safety_context must fail closed");
+    assert!(
+        error.to_string().contains("safety_context"),
+        "error should name the missing component: {error}"
+    );
 }
 
 #[tokio::test]

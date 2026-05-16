@@ -142,6 +142,9 @@ pub trait RunCancellationFactory: Send + Sync {
         &self,
         _run_id: TurnRunId,
     ) -> Result<bool, AgentLoopHostError> {
+        tracing::debug!(
+            "run cancellation factory does not observe product cancellation: default Ok(false) — factory is not product-live-capable"
+        );
         Ok(false)
     }
 }
@@ -380,6 +383,44 @@ fn turn_state_error_to_host_error(_error: ironclaw_turns::TurnError) -> AgentLoo
         AgentLoopHostErrorKind::Unavailable,
         "turn state was unavailable while building cancellation handle",
     )
+}
+
+/// Fan-out `TurnRunWakeNotifier` that delivers each wake to a worker-side
+/// notifier (e.g. the runner wake sender) AND a `RunCancellationFactory`'s
+/// `notify_run_wake` observer so retained product run handles flip in lockstep
+/// with the worker wake.
+///
+/// This is the wiring required to drive end-to-end cancellation observation
+/// from `TurnCoordinator::cancel_run` alone: the coordinator publishes a single
+/// `TurnRunWake`, and both consumers see it.
+pub struct CompositeTurnRunWakeNotifier {
+    worker: Arc<dyn TurnRunWakeNotifier>,
+    cancellation_factory: Arc<dyn RunCancellationFactory>,
+}
+
+impl CompositeTurnRunWakeNotifier {
+    pub fn new(
+        worker: Arc<dyn TurnRunWakeNotifier>,
+        cancellation_factory: Arc<dyn RunCancellationFactory>,
+    ) -> Self {
+        Self {
+            worker,
+            cancellation_factory,
+        }
+    }
+}
+
+impl TurnRunWakeNotifier for CompositeTurnRunWakeNotifier {
+    fn notify_queued_run(
+        &self,
+        wake: TurnRunWake,
+    ) -> Result<(), ironclaw_turns::TurnRunWakeNotifyError> {
+        // Observe the wake on the cancellation factory FIRST so a retained
+        // product run handle reflects the new status before any worker task
+        // potentially terminates the run and clears local state.
+        self.cancellation_factory.notify_run_wake(&wake);
+        self.worker.notify_queued_run(wake)
+    }
 }
 
 /// Default factory used until the host runtime wires real cancel observation.

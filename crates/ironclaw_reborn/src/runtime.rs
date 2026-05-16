@@ -4,9 +4,9 @@ use std::{error::Error, fmt, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_loop_support::{
-    CapabilitySurfaceProfileResolver, HostIdentityContextSource, HostInputQueue,
-    HostManagedModelGateway, HostRuntimeLoopCapabilityPortFactory, HostSkillContextSource,
-    ProductLiveCancellationReadiness, RunCancellationFactory,
+    CapabilitySurfaceProfileResolver, CompositeTurnRunWakeNotifier, HostIdentityContextSource,
+    HostInputQueue, HostManagedModelGateway, HostRuntimeLoopCapabilityPortFactory,
+    HostSkillContextSource, ProductLiveCancellationReadiness, RunCancellationFactory,
     verify_product_live_cancellation_probe,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
@@ -14,7 +14,10 @@ use ironclaw_turns::{
     AgentLoopDriverError, CheckpointStateStore, DefaultTurnCoordinator, LoopCheckpointStore,
     RunProfileResolver, TurnRunWakeNotifier, TurnStateStore,
     loop_exit::LoopExitEvidencePort,
-    run_profile::{AgentLoopHostError, LoopCapabilityPort, LoopHostMilestoneSink, LoopRunContext},
+    run_profile::{
+        AgentLoopHostError, InstructionSafetyContext, LoopCapabilityPort, LoopHostMilestoneSink,
+        LoopModelBudgetAccountant, LoopModelPolicyGuard, LoopRunContext,
+    },
     runner::TurnRunTransitionPort,
 };
 
@@ -68,6 +71,13 @@ where
     /// and WS-17 product cutover. `None` is only acceptable for helper-level
     /// WS-14 unit tests; live composition must always supply identity context.
     pub identity_context_source: Arc<dyn HostIdentityContextSource>,
+    /// WS-17 product-live readiness extensions. `RebornLoopDriverHostFactory`
+    /// defaults these to no-op implementations so legacy WS-14 helper tests
+    /// keep compiling. `build_product_live_planned_runtime` fails closed when
+    /// any of them is `None`, matching the cancellation/identity contract.
+    pub model_policy_guard: Option<Arc<dyn LoopModelPolicyGuard>>,
+    pub model_budget_accountant: Option<Arc<dyn LoopModelBudgetAccountant>>,
+    pub safety_context: Option<InstructionSafetyContext>,
 }
 
 pub struct RebornRuntimeLoopComposition<T, S, G>
@@ -121,6 +131,9 @@ pub enum ProductLiveRuntimeReadinessComponent {
     InputQueue,
     CancellationFactory,
     IdentityContextSource,
+    ModelPolicyGuard,
+    ModelBudgetAccountant,
+    SafetyContext,
 }
 
 impl ProductLiveRuntimeReadinessComponent {
@@ -130,6 +143,9 @@ impl ProductLiveRuntimeReadinessComponent {
             Self::InputQueue => "input_queue",
             Self::CancellationFactory => "cancellation_factory",
             Self::IdentityContextSource => "identity_context_source",
+            Self::ModelPolicyGuard => "model_policy_guard",
+            Self::ModelBudgetAccountant => "model_budget_accountant",
+            Self::SafetyContext => "safety_context",
         }
     }
 }
@@ -195,6 +211,21 @@ where
             ProductLiveRuntimeReadinessComponent::InputQueue,
         ));
     }
+    if parts.model_policy_guard.is_none() {
+        return Err(ProductLiveRuntimeBuildError::Missing(
+            ProductLiveRuntimeReadinessComponent::ModelPolicyGuard,
+        ));
+    }
+    if parts.model_budget_accountant.is_none() {
+        return Err(ProductLiveRuntimeBuildError::Missing(
+            ProductLiveRuntimeReadinessComponent::ModelBudgetAccountant,
+        ));
+    }
+    if parts.safety_context.is_none() {
+        return Err(ProductLiveRuntimeBuildError::Missing(
+            ProductLiveRuntimeReadinessComponent::SafetyContext,
+        ));
+    }
     let Some(cancellation_factory) = parts.cancellation_factory.clone() else {
         return Err(ProductLiveRuntimeBuildError::Missing(
             ProductLiveRuntimeReadinessComponent::CancellationFactory,
@@ -254,7 +285,19 @@ where
     let run_profile_resolver: Arc<dyn RunProfileResolver> = resolver;
 
     let (wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
-    let wake_notifier: Arc<dyn TurnRunWakeNotifier> = Arc::new(wake_sender.clone());
+    let worker_wake_notifier: Arc<dyn TurnRunWakeNotifier> = Arc::new(wake_sender.clone());
+    // When a cancellation factory is supplied, fan-out each coordinator wake to
+    // BOTH the worker AND the factory's `notify_run_wake` observer. Without
+    // this composite, the worker still wakes but retained product run handles
+    // never flip on `cancel_run` — breaking end-to-end product-live
+    // cancellation observation.
+    let wake_notifier: Arc<dyn TurnRunWakeNotifier> = match parts.cancellation_factory.clone() {
+        Some(factory) => Arc::new(CompositeTurnRunWakeNotifier::new(
+            worker_wake_notifier,
+            factory,
+        )),
+        None => worker_wake_notifier,
+    };
     let coordinator = Arc::new(
         DefaultTurnCoordinator::new(Arc::clone(&parts.turn_state))
             .with_run_profile_resolver(Arc::clone(&run_profile_resolver))
@@ -288,6 +331,15 @@ where
     }
     if let Some(queue) = parts.input_queue {
         host_factory = host_factory.with_input_queue(queue);
+    }
+    if let Some(guard) = parts.model_policy_guard {
+        host_factory = host_factory.with_model_policy_guard(guard);
+    }
+    if let Some(accountant) = parts.model_budget_accountant {
+        host_factory = host_factory.with_model_budget_accountant(accountant);
+    }
+    if let Some(safety) = parts.safety_context {
+        host_factory = host_factory.with_safety_context(safety);
     }
     host_factory = host_factory.with_identity_context_source(parts.identity_context_source);
     let host_factory = Arc::new(host_factory);

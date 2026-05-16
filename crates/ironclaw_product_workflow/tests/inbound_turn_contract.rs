@@ -41,12 +41,12 @@ use ironclaw_turns::{
     IdempotencyKey, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
     InMemoryTurnStateStore, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
     SanitizedCancelReason, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor,
-    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnScope, TurnStateStore,
-    TurnStatus,
+    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnRunWake, TurnScope,
+    TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, InMemoryLoopHostMilestoneSink,
-        LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken, LoopInputCursorToken,
-        LoopRunContext, PromptMode,
+        InstructionSafetyContext, LoopCancelReasonKind, LoopCapabilityPort, LoopInputAckToken,
+        LoopInputCursorToken, LoopRunContext, NoOpBudgetAccountant, NoOpPolicyGuard, PromptMode,
     },
 };
 use tokio::time::{sleep, timeout};
@@ -286,21 +286,6 @@ impl ReadyRunCancellationFactory {
             .cloned()
     }
 
-    fn request_product_cancellation(
-        &self,
-        run_id: TurnRunId,
-        reason_kind: LoopCancelReasonKind,
-    ) -> Result<(), AgentLoopHostError> {
-        let Some(handle) = self.handle_for(run_id) else {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Unavailable,
-                "product cancellation handle was not retained",
-            ));
-        };
-        handle.request(reason_kind);
-        Ok(())
-    }
-
     fn product_cancellation_observed(&self, run_id: TurnRunId) -> bool {
         self.handle_for(run_id)
             .map(|handle| handle.is_requested())
@@ -321,6 +306,19 @@ impl RunCancellationFactory for ReadyRunCancellationFactory {
             .expect("ready cancellation lock poisoned")
             .insert(run_id, handle.clone());
         Ok(handle)
+    }
+
+    fn notify_run_wake(&self, wake: &TurnRunWake) {
+        // End-to-end product-live cancellation observation: when the
+        // coordinator publishes a `CancelRequested` wake, flip the retained
+        // run handle so product code can observe cancellation without any
+        // factory backdoor.
+        if wake.status != TurnStatus::CancelRequested {
+            return;
+        }
+        if let Some(handle) = self.handle_for(wake.run_id) {
+            handle.request(LoopCancelReasonKind::UserRequested);
+        }
     }
 
     fn product_live_cancellation_probe(&self) -> Option<Box<dyn ProductLiveCancellationProbe>> {
@@ -485,7 +483,8 @@ async fn user_message_no_profile_submission_uses_planned_reborn_default() {
     let binding_service = FakeConversationBindingService::new();
     let thread_service = InMemorySessionThreadService::default();
     let store = Arc::new(InMemoryTurnStateStore::default());
-    let resolver = Arc::new(default_planned_run_profile_resolver().unwrap());
+    let resolver =
+        Arc::new(default_planned_run_profile_resolver().expect("planned default profile resolver"));
     let coordinator =
         DefaultTurnCoordinator::new(store.clone()).with_run_profile_resolver(resolver);
     let service =
@@ -581,6 +580,11 @@ async fn user_message_no_profile_uses_product_live_runtime_and_persists_reply() 
         skill_context_source: None,
         input_queue: Some(Arc::new(EmptyInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
+        model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
+        model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
+        safety_context: Some(
+            InstructionSafetyContext::new("policy:test", "test safety context").expect("safety"),
+        ),
     })
     .expect("product-live runtime should build");
 
@@ -733,6 +737,11 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         skill_context_source: None,
         input_queue: Some(Arc::new(EmptyInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
+        model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
+        model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
+        safety_context: Some(
+            InstructionSafetyContext::new("policy:test", "test safety context").expect("safety"),
+        ),
     })
     .expect("product-live runtime should build");
 
@@ -789,10 +798,19 @@ async fn user_message_no_profile_can_cancel_product_live_run_from_product_path()
         .await
         .expect("product cancel request");
     assert_eq!(cancel_response.status, TurnStatus::CancelRequested);
-    cancellation_factory
-        .request_product_cancellation(submitted_run_id, LoopCancelReasonKind::UserRequested)
-        .expect("product cancellation path should request retained run handle");
-    assert!(cancellation_factory.product_cancellation_observed(submitted_run_id));
+    // End-to-end proof: `coordinator.cancel_run` alone — no factory backdoor —
+    // must reach the retained run handle through the runtime's wake-notifier
+    // composition. Poll briefly to absorb async wake propagation.
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if cancellation_factory.product_cancellation_observed(submitted_run_id) {
+                return;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("coordinator.cancel_run must drive product cancellation observation end-to-end");
 
     model_release.cancel();
     let state = timeout(Duration::from_secs(3), async {
@@ -888,6 +906,11 @@ async fn product_live_runtime_rejects_unretained_cancellation_factory() {
         skill_context_source: None,
         input_queue: Some(Arc::new(EmptyInputQueue)),
         identity_context_source: Arc::new(EmptyIdentityContextSource),
+        model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
+        model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
+        safety_context: Some(
+            InstructionSafetyContext::new("policy:test", "test safety context").expect("safety"),
+        ),
     }) {
         Ok(_) => panic!("product-live readiness must reject inert cancellation"),
         Err(error) => error,
