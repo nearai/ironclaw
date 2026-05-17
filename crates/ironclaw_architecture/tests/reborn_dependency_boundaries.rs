@@ -943,7 +943,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
-                "ironclaw_filesystem",
+                // ironclaw_filesystem is permitted: FilesystemResourceGovernorStore
+                // routes the resource-governor snapshot through ScopedFilesystem
+                // under the universal-fs-dispatch rework (plan
+                // 2026-05-14-universal-fs-dispatch).
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
                 "ironclaw_network",
@@ -1213,7 +1216,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_engine",
                 "ironclaw_events",
                 "ironclaw_extensions",
-                "ironclaw_filesystem",
+                // ironclaw_filesystem is permitted: FilesystemSessionThreadService
+                // routes thread/transcript persistence through ScopedFilesystem
+                // under the universal-fs-dispatch rework (plan
+                // 2026-05-14-universal-fs-dispatch).
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
@@ -1271,7 +1277,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                "ironclaw_filesystem",
+                // ironclaw_filesystem is permitted: FilesystemTurnStateStore
+                // routes turn-coordination persistence through ScopedFilesystem
+                // under the universal-fs-dispatch rework (plan
+                // 2026-05-14-universal-fs-dispatch).
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
                 "ironclaw_memory",
