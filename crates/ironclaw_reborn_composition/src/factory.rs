@@ -262,12 +262,13 @@ async fn build_libsql_production(
         auth_token,
     };
 
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem))?;
     let services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
         Arc::clone(&filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::filesystem(Arc::clone(&filesystem)),
+        ProcessServices::filesystem(scoped_filesystem),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
     .with_trust_policy(production_wiring.trust_policy)
@@ -324,12 +325,13 @@ async fn build_postgres_production(
 
     let event_store = ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url };
 
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem))?;
     let services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
         Arc::clone(&filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::filesystem(Arc::clone(&filesystem)),
+        ProcessServices::filesystem(scoped_filesystem),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
     .with_trust_policy(production_wiring.trust_policy)

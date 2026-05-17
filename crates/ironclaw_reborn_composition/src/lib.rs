@@ -32,7 +32,11 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_api::{ResourceScope, SecretHandle};
+use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_host_api::{
+    MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SecretHandle, VirtualPath,
+};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -71,17 +75,62 @@ use thiserror::Error;
 pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
     LibSqlRootFilesystem,
     PersistentResourceGovernor<LibSqlResourceGovernorStore>,
-    FilesystemProcessStore<'static, LibSqlRootFilesystem>,
-    FilesystemProcessResultStore<'static, LibSqlRootFilesystem>,
+    FilesystemProcessStore<LibSqlRootFilesystem>,
+    FilesystemProcessResultStore<LibSqlRootFilesystem>,
 >;
 
 #[cfg(feature = "postgres")]
 pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
     PostgresRootFilesystem,
     PersistentResourceGovernor<PostgresResourceGovernorStore>,
-    FilesystemProcessStore<'static, PostgresRootFilesystem>,
-    FilesystemProcessResultStore<'static, PostgresRootFilesystem>,
+    FilesystemProcessStore<PostgresRootFilesystem>,
+    FilesystemProcessResultStore<PostgresRootFilesystem>,
 >;
+
+/// Build the default single-tenant [`MountView`] for production composition.
+///
+/// Wires the canonical consumer-store aliases (`/processes`, `/secrets`,
+/// `/authorization`, `/outbound`, `/engine`) to top-level
+/// [`VirtualPath`] roots and grants full per-user-owner permissions.
+///
+/// This is the **single-tenant** default: every alias maps to the
+/// root-level prefix with no `tenants/<tenant_id>/users/<user_id>/...`
+/// rewriting. Multi-tenant deployments build a per-invocation MountView
+/// that points each alias to a tenant/user-scoped subtree of the same
+/// underlying [`RootFilesystem`] — see
+/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn default_singleton_mount_view() -> Result<MountView, ironclaw_host_api::HostApiError> {
+    let aliases: &[(&str, &str)] = &[
+        ("/processes", "/processes"),
+        ("/secrets", "/secrets"),
+        ("/authorization", "/authorization"),
+        ("/outbound", "/outbound"),
+        ("/engine", "/engine"),
+    ];
+    let grants = aliases
+        .iter()
+        .map(|(alias, target)| {
+            Ok(MountGrant::new(
+                MountAlias::new(*alias)?,
+                VirtualPath::new(*target)?,
+                MountPermissions::read_write_list_delete(),
+            ))
+        })
+        .collect::<Result<Vec<_>, ironclaw_host_api::HostApiError>>()?;
+    MountView::new(grants)
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub(crate) fn wrap_scoped<F>(
+    root: Arc<F>,
+) -> Result<Arc<ScopedFilesystem<F>>, ironclaw_host_api::HostApiError>
+where
+    F: RootFilesystem,
+{
+    let view = default_singleton_mount_view()?;
+    Ok(Arc::new(ScopedFilesystem::new(root, view)))
+}
 
 /// libSQL substrate handles needed to build production host-runtime services.
 #[cfg(feature = "libsql")]
@@ -117,6 +166,8 @@ where
 pub enum RebornCompositionError {
     #[error("reborn production composition requires explicit secret master key")]
     MissingSecretMasterKey,
+    #[error("reborn mount view construction failed: {0}")]
+    Mount(#[from] ironclaw_host_api::HostApiError),
     #[error("reborn filesystem substrate failed: {0}")]
     Filesystem(#[from] ironclaw_filesystem::FilesystemError),
     #[error("reborn resource governor substrate failed: {0}")]
@@ -156,7 +207,8 @@ where
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
     filesystem.run_migrations().await?;
 
-    let process_services = ProcessServices::filesystem(Arc::clone(&filesystem));
+    let scoped_filesystem = wrap_scoped(Arc::clone(&filesystem))?;
+    let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
 
     let resource_store = LibSqlResourceGovernorStore::new(Arc::clone(&config.database));
     resource_store.run_migrations().await?;
@@ -219,7 +271,8 @@ where
     let filesystem = Arc::new(PostgresRootFilesystem::new(config.pool.clone()));
     filesystem.run_migrations().await?;
 
-    let process_services = ProcessServices::filesystem(Arc::clone(&filesystem));
+    let scoped_filesystem = wrap_scoped(Arc::clone(&filesystem))?;
+    let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
 
     let resource_store = PostgresResourceGovernorStore::new(config.pool.clone());
     resource_store.run_migrations().await?;

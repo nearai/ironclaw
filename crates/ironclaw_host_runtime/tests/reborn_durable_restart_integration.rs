@@ -11,7 +11,7 @@ use ironclaw_events::{
     DurableAuditSink, DurableEventSink, EventStreamKey, ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
@@ -319,15 +319,15 @@ async fn jsonl_event_and_audit_replay_survive_reopen_without_raw_sentinels() {
 }
 
 type DurableProcessServices = ProcessServices<
-    FilesystemProcessStore<'static, LocalFilesystem>,
-    FilesystemProcessResultStore<'static, LocalFilesystem>,
+    FilesystemProcessStore<LocalFilesystem>,
+    FilesystemProcessResultStore<LocalFilesystem>,
 >;
 
 type DurableHostRuntimeServices = HostRuntimeServices<
     LocalFilesystem,
     InMemoryResourceGovernor,
-    FilesystemProcessStore<'static, LocalFilesystem>,
-    FilesystemProcessResultStore<'static, LocalFilesystem>,
+    FilesystemProcessStore<LocalFilesystem>,
+    FilesystemProcessResultStore<LocalFilesystem>,
 >;
 
 struct DurableServices {
@@ -342,10 +342,10 @@ async fn durable_services(engine_root: &Path, event_root: &Path) -> DurableServi
     let event_stores = jsonl_event_stores(event_root).await;
     let run_state_fs = leaked_engine_filesystem(engine_root);
     let approval_fs = leaked_engine_filesystem(engine_root);
-    let lease_fs = leaked_engine_filesystem(engine_root);
+    let lease_scoped_fs = leaked_scoped_engine_filesystem(engine_root);
     let run_state = Arc::new(FilesystemRunStateStore::new(run_state_fs));
     let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(approval_fs));
-    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(lease_fs));
+    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(lease_scoped_fs));
     let services = base_services(
         engine_root,
         event_stores.clone(),
@@ -403,7 +403,41 @@ async fn jsonl_event_stores(event_root: &Path) -> RebornEventStores {
 }
 
 fn filesystem_process_services(engine_root: &Path) -> DurableProcessServices {
-    ProcessServices::filesystem(Arc::new(mounted_engine_filesystem(engine_root)))
+    let scoped = Arc::new(ScopedFilesystem::new(
+        Arc::new(mounted_engine_filesystem(engine_root)),
+        durable_mount_view(),
+    ));
+    ProcessServices::filesystem(scoped)
+}
+
+/// Mount view granting the migrated consumer crates full per-user-owner
+/// permissions on their canonical aliases. Test-only: production
+/// composition (`ironclaw_reborn_composition::default_singleton_mount_view`)
+/// has the equivalent shape but is `pub(crate)`.
+fn durable_mount_view() -> MountView {
+    MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/processes").unwrap(),
+            VirtualPath::new("/processes").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/authorization").unwrap(),
+            VirtualPath::new("/authorization").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        ),
+    ])
+    .unwrap()
+}
+
+fn leaked_scoped_engine_filesystem(
+    engine_root: &Path,
+) -> &'static ScopedFilesystem<LocalFilesystem> {
+    let scoped = ScopedFilesystem::new(
+        Arc::new(mounted_engine_filesystem(engine_root)),
+        durable_mount_view(),
+    );
+    Box::leak(Box::new(scoped))
 }
 
 fn mounted_engine_filesystem(engine_root: &Path) -> LocalFilesystem {
