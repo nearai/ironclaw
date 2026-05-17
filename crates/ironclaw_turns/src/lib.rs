@@ -9,9 +9,8 @@
 mod admission;
 mod checkpoint_state;
 mod coordinator;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-mod db;
 pub mod events;
+mod filesystem_store;
 mod ids;
 pub mod loop_exit;
 mod memory;
@@ -39,15 +38,12 @@ pub use coordinator::{
     AllowAllTurnAdmissionPolicy, DefaultTurnCoordinator, NoopTurnRunWakeNotifier,
     TurnAdmissionPolicy, TurnCoordinator, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
 };
-#[cfg(feature = "libsql")]
-pub use db::LibSqlTurnStateStore;
-#[cfg(feature = "postgres")]
-pub use db::PostgresTurnStateStore;
 pub use events::{
     EventCursor, InMemoryTurnEventSink, TurnEventKind, TurnEventPage, TurnEventProjectionCursor,
     TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService,
     TurnEventProjectionSnapshot, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
 };
+pub use filesystem_store::FilesystemTurnStateStore;
 pub use ids::{
     AcceptedMessageRef, GateRef, IdempotencyKey, LoopDiagnosticRef, LoopExitId, LoopGateRef,
     LoopMessageRef, LoopResultRef, LoopUsageSummaryRef, ReplyTargetBindingRef, RunProfileId,
@@ -74,9 +70,10 @@ pub use run_profile::{
     LoopCheckpointStateRef, LoopDriverId, MemoryPromptContextRequest, MemoryPromptContextService,
     ModelProfileId, PrivilegedRunProfileDimension, RedactedRunProfileProvenance,
     RedactedRunProfileSource, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
-    RunClassId, RunProfileFingerprint, RunProfileRequestAuthority, RunProfileResolutionError,
-    RunProfileResolutionRequest, RunProfileResolver, RunProfileSourceLayer, RunProfileSourceRef,
-    RunnerPoolId, RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
+    RunClassId, RunProfileFingerprint, RunProfileRegistryError, RunProfileRequestAuthority,
+    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver,
+    RunProfileSourceLayer, RunProfileSourceRef, RunnerPoolId, RuntimeProfileConstraints,
+    SchedulingClass, SteeringPolicy,
 };
 pub use scope::{TurnActor, TurnScope};
 pub use status::{

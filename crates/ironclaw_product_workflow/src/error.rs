@@ -13,9 +13,25 @@ use thiserror::Error;
 /// Internal error type for the product workflow facade.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProductWorkflowError {
+    /// The adapter installation is not mapped to a tenant.
+    #[error("unknown adapter installation")]
+    UnknownInstallation,
+
     /// The conversation binding could not be resolved for the given external refs.
     #[error("binding resolution failed: {reason}")]
     BindingResolutionFailed { reason: String },
+
+    /// The external actor has no trusted binding to a canonical user.
+    #[error("binding required: {reason}")]
+    BindingRequired { reason: String },
+
+    /// The actor or route is not allowed to use the resolved thread.
+    #[error("binding access denied")]
+    BindingAccessDenied,
+
+    /// The binding request is invalid and should not be retried unchanged.
+    #[error("invalid binding request: {reason}")]
+    InvalidBindingRequest { reason: String },
 
     /// Turn coordinator rejected the submission before typed turn errors were available.
     #[error("turn submission rejected: {reason}")]
@@ -32,6 +48,10 @@ pub enum ProductWorkflowError {
     /// A transient store or service failure.
     #[error("transient workflow failure: {reason}")]
     Transient { reason: String },
+
+    /// Before-inbound policy failed before it could produce an allow/rewrite/reject outcome.
+    #[error("before-inbound policy failed: {reason}")]
+    BeforeInboundPolicyFailed { reason: String, permanent: bool },
 
     /// The action was identified as a duplicate and the prior outcome should be replayed.
     #[error("duplicate action")]
@@ -63,9 +83,37 @@ fn workflow_rejection_kind(category: TurnErrorCategory) -> ProductWorkflowReject
 impl From<ProductWorkflowError> for ProductAdapterError {
     fn from(value: ProductWorkflowError) -> Self {
         match value {
+            ProductWorkflowError::UnknownInstallation => ProductAdapterError::WorkflowRejected {
+                kind: ProductWorkflowRejectionKind::Unauthorized,
+                status_code: 403,
+                retryable: false,
+                reason: RedactedString::new("unknown adapter installation"),
+            },
             ProductWorkflowError::BindingResolutionFailed { reason } => {
                 ProductAdapterError::Internal {
                     detail: RedactedString::new(reason),
+                }
+            }
+            ProductWorkflowError::BindingRequired { reason } => {
+                ProductAdapterError::WorkflowRejected {
+                    kind: ProductWorkflowRejectionKind::ScopeNotFound,
+                    status_code: 404,
+                    retryable: false,
+                    reason: RedactedString::new(reason),
+                }
+            }
+            ProductWorkflowError::BindingAccessDenied => ProductAdapterError::WorkflowRejected {
+                kind: ProductWorkflowRejectionKind::Unauthorized,
+                status_code: 403,
+                retryable: false,
+                reason: RedactedString::new("binding access denied"),
+            },
+            ProductWorkflowError::InvalidBindingRequest { reason } => {
+                ProductAdapterError::WorkflowRejected {
+                    kind: ProductWorkflowRejectionKind::InvalidRequest,
+                    status_code: 400,
+                    retryable: false,
+                    reason: RedactedString::new(reason),
                 }
             }
             ProductWorkflowError::TurnSubmissionRejected { reason } => {
@@ -88,6 +136,23 @@ impl From<ProductWorkflowError> for ProductAdapterError {
             ProductWorkflowError::Transient { reason } => ProductAdapterError::WorkflowTransient {
                 reason: RedactedString::new(reason),
             },
+            ProductWorkflowError::BeforeInboundPolicyFailed { reason, permanent } => {
+                // Adapter error surfaces wrap the reason in RedactedString, so
+                // diagnostics remain available internally without leaking to
+                // public protocol output.
+                if permanent {
+                    ProductAdapterError::WorkflowRejected {
+                        kind: ProductWorkflowRejectionKind::AdmissionRejected,
+                        status_code: 403,
+                        retryable: false,
+                        reason: RedactedString::new(reason),
+                    }
+                } else {
+                    ProductAdapterError::WorkflowTransient {
+                        reason: RedactedString::new(reason),
+                    }
+                }
+            }
             ProductWorkflowError::DuplicateAction { .. } => ProductAdapterError::Internal {
                 detail: RedactedString::new("duplicate action escaped workflow layer"),
             },
@@ -123,5 +188,16 @@ mod tests {
         }
         .into();
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn permanent_before_inbound_policy_failure_maps_to_rejection() {
+        let err: ProductAdapterError = ProductWorkflowError::BeforeInboundPolicyFailed {
+            reason: "classifier misconfigured".into(),
+            permanent: true,
+        }
+        .into();
+        assert!(!err.is_retryable());
+        assert!(matches!(err, ProductAdapterError::WorkflowRejected { .. }));
     }
 }

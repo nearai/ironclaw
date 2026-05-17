@@ -2,24 +2,18 @@
 //!
 //! Each strategy receives `&LoopExecutionState` and returns an outcome enum
 //! that carries the new value of its own slot. The executor swaps the slot
-//! into the next whole state. See `docs/reborn/agent-loop-skeleton.md` §6
-//! ("Strategy decomposition") and §8 ("Outcome enums").
-//!
-//! WS-1/2/3 land the alpha, beta, and gamma trait stubs and outcome enums.
-//! `Default*` impls land in WS-5; the executor body that consumes these
-//! outcomes lands in WS-6.
+//! into the next whole state.
 //!
 //! Checkpoint/observability wire enums are `#[non_exhaustive]`; later
-//! workstreams should extend them without forcing consumers to assume the
-//! current variants are closed.
+//! changes should extend them without forcing consumers to assume the current
+//! variants are closed.
 //!
 //! Pure policy traits with no host or future host consult may stay sync.
 //! Gate and recovery traits are async because they can consult host/runtime
 //! state such as grant history, auth flow status, route health, or
 //! circuit-breaker counters.
 
-// WS-1/2/3 land crate-private strategy contracts before WS-4/5/6 compose and
-// execute them. Keep the unused lint local to these forward-declared contracts.
+// Keep the unused lint local to these crate-private strategy contracts.
 #![allow(dead_code, unused_imports)]
 
 pub(crate) mod batch;
@@ -29,6 +23,7 @@ mod context;
 mod drain;
 pub(crate) mod gate;
 mod model;
+pub mod progress;
 pub(crate) mod recovery;
 mod stop;
 
@@ -194,6 +189,7 @@ mod tests {
                 max_model_calls: 32,
                 max_capability_invocations: 64,
             },
+            personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {
                 allow_raw_runtime_backend_selection: false,
                 allow_broad_capability_surface: false,

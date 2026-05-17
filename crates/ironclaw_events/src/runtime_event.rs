@@ -43,6 +43,7 @@ pub enum RuntimeEventKind {
     ModelFailed,
     AssistantReplyFinalized,
     LoopCompleted,
+    LoopCancelled,
     LoopFailed,
     ProcessStarted,
     ProcessCompleted,
@@ -331,6 +332,10 @@ impl RuntimeEvent {
 
     pub fn loop_completed(scope: ResourceScope, capability_id: CapabilityId) -> Self {
         Self::new_metadata_only(RuntimeEventKind::LoopCompleted, scope, capability_id)
+    }
+
+    pub fn loop_cancelled(scope: ResourceScope, capability_id: CapabilityId) -> Self {
+        Self::new_metadata_only(RuntimeEventKind::LoopCancelled, scope, capability_id)
     }
 
     pub fn loop_failed(

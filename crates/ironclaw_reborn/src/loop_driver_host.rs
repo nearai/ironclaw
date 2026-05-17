@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     error::Error,
     fmt,
     sync::{Arc, Mutex},
@@ -14,19 +15,33 @@ use ironclaw_hooks::middleware::{
 };
 use ironclaw_host_api::ExtensionId;
 use ironclaw_loop_support::{
-    CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver, EmptyLoopCapabilityPort,
-    HostInputQueue, HostManagedModelGateway, HostQueueLoopInputPort, HostSkillContextSource,
-    LoopCapabilityInputResolver, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
-    ThreadBackedLoopTranscriptPort,
+    CapabilityResolveError, CapabilitySurfaceProfileFilter, CapabilitySurfaceProfileResolver,
+    EmptyLoopCapabilityPort, HostIdentityContextSource, HostInputQueue, HostManagedModelGateway,
+    HostQueueLoopInputPort, HostSkillContextSource, LoopCapabilityInputResolver,
+    RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
+    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort,
+    TurnStateRunCancellationFactory,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
+use crate::driver_registry::{DriverRequirements, LoopDriverRegistryKey, RequirementLevel};
 use crate::model_routes::{ModelRouteError, ModelRouteResolver, ModelSlot};
+use crate::text_loop_driver::{TEXT_ONLY_DRIVER_ID, TEXT_ONLY_DRIVER_VERSION};
+
+// Legacy text-only driver key used by `is_text_only_driver_key`'s fail-closed
+// allowlist. Kept alongside `TEXT_ONLY_DRIVER_ID` so legacy registry entries
+// still resolve through the text-only host path. Retire once no callers
+// register or persist the `lightweight_loop` key.
+const LEGACY_TEXT_ONLY_DRIVER_ID: &str = "lightweight_loop";
+const LEGACY_TEXT_ONLY_DRIVER_VERSION: u64 = 1;
+const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_ID: &str = "interactive_checkpoint_v1";
+const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_VERSION: u64 = 1;
 
 use ironclaw_turns::{
     CheckpointStateStore, GetCheckpointStateRequest, GetLoopCheckpointRequest,
     LoopCheckpointStateRef, LoopCheckpointStore, PutCheckpointStateRequest,
-    PutLoopCheckpointRequest, RunProfileId, TurnCheckpointId, TurnError, TurnStatus,
+    PutLoopCheckpointRequest, RunProfileId, TurnCheckpointId, TurnError, TurnRunWake,
+    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, BeginAssistantDraft,
         CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome,
@@ -34,19 +49,33 @@ use ironclaw_turns::{
         HostManagedLoopPromptPort, InMemoryInstructionMaterializationStore,
         InstructionBundleMaterializedMessage, InstructionMaterializationStore,
         InstructionSafetyContext, LoadCheckpointPayloadRequest, LoadedCheckpointPayload,
-        LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest, LoopContextBundle,
-        LoopContextPort, LoopContextRequest, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
-        LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
-        LoopModelBudgetAccountant, LoopModelGateway, LoopModelGatewayError,
-        LoopModelGatewayRequest, LoopModelPolicyGuard, LoopModelPort, LoopModelRequest,
-        LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
+        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
+        LoopCheckpointRequest, LoopContextBundle, LoopContextPort, LoopContextRequest,
+        LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch,
+        LoopInputCursor, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
+        LoopModelGatewayError, LoopModelGatewayRequest, LoopModelPolicyGuard, LoopModelPort,
+        LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
         LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
         LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, NoOpBudgetAccountant,
-        NoOpPolicyGuard, RunScopedHookMilestoneSink, StageCheckpointPayloadRequest,
+        NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, RunScopedHookMilestoneSink,
+        StageCheckpointPayloadRequest,
         UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
+
+#[async_trait]
+pub trait LoopCapabilityPortFactory: Send + Sync {
+    async fn create_capability_port(
+        &self,
+        run_context: &LoopRunContext,
+    ) -> Result<Arc<dyn LoopCapabilityPort>, AgentLoopHostError>;
+}
+
+struct ProfiledCapabilityHostRuntime {
+    capability_factory: Arc<dyn LoopCapabilityPortFactory>,
+    surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextOnlyLoopHostConfig {
@@ -190,6 +219,24 @@ impl SurfaceTrackingLoopCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
+    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        self.inner.tool_definitions()
+    }
+
+    fn validate_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        self.inner.validate_provider_tool_call(tool_call)
+    }
+
+    async fn register_provider_tool_call(
+        &self,
+        tool_call: ProviderToolCall,
+    ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
+        self.inner.register_provider_tool_call(tool_call).await
+    }
+
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
@@ -349,6 +396,7 @@ where
     milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     model_accountant: Arc<dyn LoopModelBudgetAccountant>,
     model_policy_guard: Arc<dyn LoopModelPolicyGuard>,
+    cancellation_factory: Arc<dyn RunCancellationFactory>,
     config: TextOnlyLoopHostConfig,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     /// Optional hook dispatcher factory. When set, the factory invokes the
@@ -380,7 +428,10 @@ where
     /// See [`Self::with_hook_gate_ref_factory`].
     hook_gate_ref_factory: Option<Arc<dyn ironclaw_hooks::middleware::HookGateRefFactory>>,
     safety_context: Option<InstructionSafetyContext>,
+    identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
+    profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
+    driver_requirements: HashMap<LoopDriverRegistryKey, DriverRequirements>,
 }
 
 impl<S, G> RebornLoopDriverHostFactory<S, G>
@@ -388,15 +439,20 @@ where
     S: SessionThreadService + ?Sized + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         thread_service: Arc<S>,
         thread_scope: ThreadScope,
         model_gateway: Arc<G>,
         checkpoint_state_store: Arc<dyn CheckpointStateStore>,
+        turn_state_store: Arc<dyn TurnStateStore>,
         loop_checkpoint_store: Arc<dyn LoopCheckpointStore>,
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
         config: TextOnlyLoopHostConfig,
     ) -> Self {
+        let cancellation_factory: Arc<dyn RunCancellationFactory> = Arc::new(
+            TurnStateRunCancellationFactory::new(Arc::clone(&turn_state_store)),
+        );
         Self {
             thread_service,
             thread_scope,
@@ -407,6 +463,7 @@ where
             milestone_sink,
             model_accountant: Arc::new(NoOpBudgetAccountant),
             model_policy_guard: Arc::new(NoOpPolicyGuard),
+            cancellation_factory,
             config,
             skill_context_source: None,
             hook_dispatcher_factory: None,
@@ -414,8 +471,20 @@ where
             capability_input_resolver: None,
             hook_gate_ref_factory: None,
             safety_context: None,
+            identity_context_source: None,
             input_queue: None,
+            profiled_capabilities: None,
+            driver_requirements: HashMap::new(),
         }
+    }
+
+    pub fn with_cancellation_factory(mut self, factory: Arc<dyn RunCancellationFactory>) -> Self {
+        self.cancellation_factory = factory;
+        self
+    }
+
+    pub fn cancellation_observation_kind(&self) -> RunCancellationObservationKind {
+        self.cancellation_factory.observation_kind()
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
@@ -554,20 +623,43 @@ where
         self
     }
 
-    // Note: the WS-11 brief specifies input_queue on PlannedDriverConfig; the implementation
-    // puts it here on RebornLoopDriverHostFactory instead, which is the factory pattern already
-    // used for capability/context ports. PlannedDriver delegates fully to the host for
-    // input port construction. This deviation is intentional; update the brief if keeping.
+    // Queue ownership follows the same factory used for capability/context
+    // ports. PlannedDriver delegates fully to the host for input port
+    // construction.
     pub fn with_input_queue(mut self, queue: Arc<dyn HostInputQueue>) -> Self {
         self.input_queue = Some(queue);
         self
     }
 
-    pub fn with_model_route_resolver<R>(mut self, resolver: Arc<R>) -> Self
-    where
-        R: ModelRouteResolver + 'static,
-    {
-        let resolver: Arc<dyn ModelRouteResolver> = resolver;
+    pub fn with_identity_context_source(
+        mut self,
+        source: Arc<dyn HostIdentityContextSource>,
+    ) -> Self {
+        self.identity_context_source = Some(source);
+        self
+    }
+
+    pub fn with_profiled_capability_port_factory(
+        mut self,
+        capability_factory: Arc<dyn LoopCapabilityPortFactory>,
+        surface_resolver: Arc<dyn CapabilitySurfaceProfileResolver>,
+    ) -> Self {
+        self.profiled_capabilities = Some(ProfiledCapabilityHostRuntime {
+            capability_factory,
+            surface_resolver,
+        });
+        self
+    }
+
+    pub fn with_driver_requirements(
+        mut self,
+        driver_requirements: HashMap<LoopDriverRegistryKey, DriverRequirements>,
+    ) -> Self {
+        self.driver_requirements = driver_requirements;
+        self
+    }
+
+    pub fn with_model_route_resolver(mut self, resolver: Arc<dyn ModelRouteResolver>) -> Self {
         self.model_route_resolver = Some(resolver);
         self
     }
@@ -605,9 +697,7 @@ where
             surface_resolver
                 .resolve(&request.loop_run_context)
                 .await
-                .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
-                    reason: format!("capability surface profile resolver failed: {error}"),
-                })?,
+                .map_err(capability_resolve_error_to_host_error)?,
         );
         let capabilities: Arc<dyn LoopCapabilityPort> =
             Arc::new(CapabilitySurfaceProfileFilter::new(capabilities, allow_set));
@@ -634,6 +724,10 @@ where
         if let Some(source) = self.skill_context_source.as_ref() {
             context_adapter = context_adapter.with_skill_context_source(source.clone());
         }
+        if let Some(source) = self.identity_context_source.as_ref() {
+            context_adapter = context_adapter.with_identity_context_source(source.clone());
+        }
+        context_adapter = context_adapter.with_milestone_sink(Arc::clone(&self.milestone_sink));
         let context: Arc<dyn LoopContextPort> = Arc::new(context_adapter);
         // Mint a fresh dispatcher per build when a factory is installed. This
         // localizes dispatcher-owned state (slot poisoning, registry edits,
@@ -748,13 +842,19 @@ where
             None => Arc::new(NoExtraLoopInputPort::new(run_context.clone())),
         };
         let model_gateway = Arc::new(ThreadResolvingLoopModelGateway::new(
-            Arc::clone(&self.thread_service),
-            self.thread_scope.clone(),
-            Arc::clone(&self.model_gateway),
-            max_messages,
-            self.skill_context_source.clone(),
-            Some(Arc::clone(&instruction_materialization_store)),
-            prompt_authority,
+            ThreadResolvingLoopModelGatewayConfig {
+                thread_service: Arc::clone(&self.thread_service),
+                thread_scope: self.thread_scope.clone(),
+                host_gateway: Arc::clone(&self.model_gateway),
+                max_messages,
+                skill_context_source: self.skill_context_source.clone(),
+                identity_context_source: self.identity_context_source.clone(),
+                instruction_materialization_store: Some(Arc::clone(
+                    &instruction_materialization_store,
+                )),
+                capabilities: Some(Arc::clone(&capabilities)),
+                prompt_authority,
+            },
         ));
         let mut model: Arc<dyn LoopModelPort> = Arc::new(HostManagedLoopModelPort::with_guards(
             run_context.clone(),
@@ -798,6 +898,15 @@ where
             run_context.clone(),
             Arc::clone(&self.milestone_sink),
         ));
+        let cancellation_handle = self
+            .cancellation_factory
+            .handle_for_run(&run_context.scope, run_context.run_id)
+            .await
+            .map_err(|error| RebornLoopDriverHostError::InvalidRequest {
+                reason: error.safe_summary,
+            })?;
+        let cancellation: Arc<dyn LoopCancellationPort> =
+            Arc::new(RunStateLoopCancellationPort::new(cancellation_handle));
 
         Ok(RebornLoopDriverHost {
             run_context,
@@ -809,6 +918,7 @@ where
             capabilities,
             transcript,
             progress,
+            cancellation,
         })
     }
 
@@ -852,6 +962,17 @@ where
     }
 }
 
+impl<S, G> TurnRunWakeNotifier for RebornLoopDriverHostFactory<S, G>
+where
+    S: SessionThreadService + ?Sized + Send + Sync + 'static,
+    G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
+{
+    fn notify_queued_run(&self, wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
+        self.cancellation_factory.notify_run_wake(&wake);
+        Ok(())
+    }
+}
+
 struct ThreadResolvingLoopModelGateway<S, G>
 where
     S: SessionThreadService + ?Sized,
@@ -862,7 +983,25 @@ where
     host_gateway: Arc<G>,
     max_messages: usize,
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
+    capabilities: Option<Arc<dyn LoopCapabilityPort>>,
+    prompt_authority: LoopPromptBundleAuthority,
+}
+
+struct ThreadResolvingLoopModelGatewayConfig<S, G>
+where
+    S: SessionThreadService + ?Sized,
+    G: HostManagedModelGateway + ?Sized,
+{
+    thread_service: Arc<S>,
+    thread_scope: ThreadScope,
+    host_gateway: Arc<G>,
+    max_messages: usize,
+    skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
+    identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
+    instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
+    capabilities: Option<Arc<dyn LoopCapabilityPort>>,
     prompt_authority: LoopPromptBundleAuthority,
 }
 
@@ -871,23 +1010,17 @@ where
     S: SessionThreadService + ?Sized,
     G: HostManagedModelGateway + ?Sized,
 {
-    fn new(
-        thread_service: Arc<S>,
-        thread_scope: ThreadScope,
-        host_gateway: Arc<G>,
-        max_messages: usize,
-        skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
-        instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
-        prompt_authority: LoopPromptBundleAuthority,
-    ) -> Self {
+    fn new(config: ThreadResolvingLoopModelGatewayConfig<S, G>) -> Self {
         Self {
-            thread_service,
-            thread_scope,
-            host_gateway,
-            max_messages,
-            skill_context_source,
-            instruction_materialization_store,
-            prompt_authority,
+            thread_service: config.thread_service,
+            thread_scope: config.thread_scope,
+            host_gateway: config.host_gateway,
+            max_messages: config.max_messages,
+            skill_context_source: config.skill_context_source,
+            identity_context_source: config.identity_context_source,
+            instruction_materialization_store: config.instruction_materialization_store,
+            capabilities: config.capabilities,
+            prompt_authority: config.prompt_authority,
         }
     }
 }
@@ -913,8 +1046,14 @@ where
         if let Some(source) = self.skill_context_source.as_ref() {
             model_port = model_port.with_skill_context_source(source.clone());
         }
+        if let Some(source) = self.identity_context_source.as_ref() {
+            model_port = model_port.with_identity_context_source(source.clone());
+        }
         if let Some(store) = self.instruction_materialization_store.as_ref() {
             model_port = model_port.with_instruction_materialization_store(Arc::clone(store));
+        }
+        if let Some(capabilities) = self.capabilities.as_ref() {
+            model_port = model_port.with_capability_port(Arc::clone(capabilities));
         }
         model_port
             .stream_model(request.request)
@@ -949,6 +1088,7 @@ pub struct RebornLoopDriverHost {
     capabilities: Arc<dyn LoopCapabilityPort>,
     transcript: Arc<dyn LoopTranscriptPort>,
     progress: Arc<dyn LoopProgressPort>,
+    cancellation: Arc<dyn LoopCancellationPort>,
 }
 
 impl fmt::Debug for RebornLoopDriverHost {
@@ -966,6 +1106,12 @@ impl fmt::Debug for RebornLoopDriverHost {
 impl LoopRunInfoPort for RebornLoopDriverHost {
     fn run_context(&self) -> &LoopRunContext {
         &self.run_context
+    }
+}
+
+impl LoopCancellationPort for RebornLoopDriverHost {
+    fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
+        self.cancellation.observe_cancellation()
     }
 }
 
@@ -1016,6 +1162,26 @@ impl LoopModelPort for RebornLoopDriverHost {
 
 #[async_trait]
 impl LoopCapabilityPort for RebornLoopDriverHost {
+    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        self.capabilities.tool_definitions()
+    }
+
+    fn validate_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        self.capabilities.validate_provider_tool_call(tool_call)
+    }
+
+    async fn register_provider_tool_call(
+        &self,
+        tool_call: ProviderToolCall,
+    ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
+        self.capabilities
+            .register_provider_tool_call(tool_call)
+            .await
+    }
+
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
@@ -1540,26 +1706,139 @@ where
             claimed.state.turn_id,
             claimed.state.run_id,
             claimed.resolved_run_profile.clone(),
-        );
+        )
+        .with_accepted_message_ref(claimed.state.accepted_message_ref.clone());
+        if let Some(actor) = claimed.state.actor.clone() {
+            loop_run_context = loop_run_context.with_actor(actor);
+        }
         if let Some(snapshot) = claimed.state.resolved_model_route.clone() {
             loop_run_context = loop_run_context.with_resolved_model_route(snapshot);
         }
-        self.build_text_only_host(RebornLoopDriverHostRequest {
+        let request = RebornLoopDriverHostRequest {
             claimed_run: claimed.clone(),
             loop_run_context,
-        })
-        .await
-        .map(|host| {
-            Box::new(host)
-                as Box<dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync>
-        })
-        .map_err(|error| crate::turn_runner::HostFactoryError::new(error.to_string()))
+        };
+        let capability_requirement = self.capability_requirement(claimed)?;
+        let host_result = if capability_requirement.requires_profiled_capabilities() {
+            let Some(profiled) = self.profiled_capabilities.as_ref() else {
+                return Err(crate::turn_runner::HostFactoryError::new(
+                    "profiled capability port factory is required for capability-required driver host",
+                ));
+            };
+            let capabilities = profiled
+                .capability_factory
+                .create_capability_port(&request.loop_run_context)
+                .await
+                .map_err(|error| crate::turn_runner::HostFactoryError::new(error.safe_summary))?;
+            self.build_text_only_host_with_profiled_capabilities(
+                request,
+                capabilities,
+                Arc::clone(&profiled.surface_resolver),
+            )
+            .await
+        } else {
+            self.build_text_only_host(request).await
+        };
+        host_result
+            .map(|host| {
+                Box::new(host)
+                    as Box<dyn ironclaw_turns::run_profile::AgentLoopDriverHost + Send + Sync>
+            })
+            .map_err(|error| crate::turn_runner::HostFactoryError::new(error.to_string()))
     }
+}
+
+impl<S, G> RebornLoopDriverHostFactory<S, G>
+where
+    S: SessionThreadService + ?Sized + Send + Sync + 'static,
+    G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
+{
+    fn capability_requirement(
+        &self,
+        claimed: &ClaimedTurnRun,
+    ) -> Result<DriverCapabilityRequirement, crate::turn_runner::HostFactoryError> {
+        let key = LoopDriverRegistryKey::from_descriptor(&claimed.resolved_run_profile.loop_driver)
+            .map_err(|reason| {
+                crate::turn_runner::HostFactoryError::new(format!(
+                    "invalid loop driver descriptor: {reason}"
+                ))
+            })?;
+        let Some(requirements) = self.driver_requirements.get(&key) else {
+            // Older text-only factory paths predate driver requirement snapshots.
+            // Keep only those known descriptors on the no-capability host path.
+            if is_text_only_driver_key(&key) {
+                return Ok(DriverCapabilityRequirement::ExplicitlyTextOnly);
+            }
+            return Err(crate::turn_runner::HostFactoryError::new(
+                "loop driver requirements metadata is unavailable; cannot determine capability requirements",
+            ));
+        };
+        Ok(DriverCapabilityRequirement::from_requirements(requirements))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriverCapabilityRequirement {
+    ExplicitlyTextOnly,
+    ProfiledCapabilitiesRequired,
+    ProfiledCapabilitiesNotRequired,
+}
+
+impl DriverCapabilityRequirement {
+    fn from_requirements(requirements: &DriverRequirements) -> Self {
+        if matches!(requirements.capabilities, RequirementLevel::Required) {
+            Self::ProfiledCapabilitiesRequired
+        } else {
+            Self::ProfiledCapabilitiesNotRequired
+        }
+    }
+
+    fn requires_profiled_capabilities(self) -> bool {
+        matches!(self, Self::ProfiledCapabilitiesRequired)
+    }
+}
+
+fn is_text_only_driver_key(key: &LoopDriverRegistryKey) -> bool {
+    is_reborn_text_only_driver_key(key) || is_legacy_text_only_driver_key(key)
+}
+
+fn is_reborn_text_only_driver_key(key: &LoopDriverRegistryKey) -> bool {
+    key.id.as_str() == TEXT_ONLY_DRIVER_ID
+        && key.version.as_u64() == TEXT_ONLY_DRIVER_VERSION
+        && key.checkpoint_schema_id.is_none()
+        && key.checkpoint_schema_version.is_none()
+}
+
+fn is_legacy_text_only_driver_key(key: &LoopDriverRegistryKey) -> bool {
+    key.id.as_str() == LEGACY_TEXT_ONLY_DRIVER_ID
+        && key.version.as_u64() == LEGACY_TEXT_ONLY_DRIVER_VERSION
+        && key
+            .checkpoint_schema_id
+            .as_ref()
+            .is_some_and(|schema_id| schema_id.as_str() == LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_ID)
+        && key
+            .checkpoint_schema_version
+            .is_some_and(|version| version.as_u64() == LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_VERSION)
 }
 
 fn model_route_error_to_host_error(error: ModelRouteError) -> RebornLoopDriverHostError {
     RebornLoopDriverHostError::InvalidRequest {
         reason: format!("model route resolution failed: {}", error.kind().as_str()),
+    }
+}
+
+fn capability_resolve_error_to_host_error(
+    error: CapabilityResolveError,
+) -> RebornLoopDriverHostError {
+    let reason = match error {
+        CapabilityResolveError::Unavailable { .. } => "capability surface profile is unavailable",
+        CapabilityResolveError::Internal { .. } => {
+            "capability surface profile could not be resolved"
+        }
+        _ => "capability surface profile resolution failed",
+    };
+    RebornLoopDriverHostError::InvalidRequest {
+        reason: reason.to_string(),
     }
 }
 

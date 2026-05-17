@@ -157,6 +157,13 @@ impl MemorySearchRequest {
         self.query_embedding.as_deref()
     }
 
+    /// Dimension of [`query_embedding`](Self::query_embedding) if set; used
+    /// by `FilesystemMemoryDocumentRepository::ensure_search_indexes` to
+    /// register a `Vector { dim }` index that matches the query.
+    pub fn query_embedding_dim(&self) -> Option<u32> {
+        self.query_embedding.as_deref().map(|v| v.len() as u32)
+    }
+
     pub fn fusion_strategy(&self) -> FusionStrategy {
         self.fusion_strategy
     }
@@ -202,7 +209,6 @@ impl MemorySearchResult {
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[derive(Debug, Clone)]
 pub(crate) struct RankedMemorySearchResult {
     pub(crate) path: MemoryDocumentPath,
@@ -210,7 +216,6 @@ pub(crate) struct RankedMemorySearchResult {
     pub(crate) rank: u32,
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn fuse_memory_search_results(
     full_text_results: Vec<RankedMemorySearchResult>,
     vector_results: Vec<RankedMemorySearchResult>,
@@ -313,20 +318,7 @@ pub(crate) fn fuse_memory_search_results(
     fused
 }
 
-#[cfg(feature = "libsql")]
-pub(crate) fn escape_fts5_query(query: &str) -> Option<String> {
-    let phrases = query
-        .split_whitespace()
-        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
-        .collect::<Vec<_>>();
-    if phrases.is_empty() {
-        None
-    } else {
-        Some(phrases.join(" "))
-    }
-}
-
-#[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::path::MemoryDocumentPath;

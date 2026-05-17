@@ -40,3 +40,6 @@ V24__llm_calls_created_at_index = 2650126284755685421
 V25__wasm_fuel_limit_bump = 8924323300096627270
 V26__root_filesystem_entries = 11094038407147728260
 V27__root_filesystem_entries_directories = 4126641792698406758
+V28__root_filesystem_records = 3989652150745692033
+V29__root_filesystem_index_specs = 1572937030361291327
+V30__root_filesystem_events = 7621479473639627207

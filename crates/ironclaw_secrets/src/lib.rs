@@ -8,14 +8,10 @@
 #![warn(unreachable_pub)]
 
 mod crypto;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-mod db;
+mod filesystem_store;
 mod legacy_store;
 
-#[cfg(feature = "libsql")]
-pub use db::{LibSqlCredentialStore, LibSqlSecretsStore};
-#[cfg(feature = "postgres")]
-pub use db::{PostgresCredentialStore, PostgresSecretsStore};
+pub use filesystem_store::{FilesystemCredentialBroker, FilesystemSecretStore};
 
 use std::collections::HashMap;
 use std::fmt;
@@ -23,7 +19,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-pub use crypto::SecretsCrypto;
+pub use crypto::{
+    SecretsCrypto, credential_account_aad, credential_session_aad, filesystem_secret_aad,
+    secret_record_aad,
+};
 use ironclaw_host_api::{
     AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, NetworkMethod, ProjectId,
     ResourceScope, SecretHandle, TenantId, ThreadId, Timestamp, UserId,
@@ -40,7 +39,8 @@ const CREDENTIAL_ID_MAX_LEN: usize = 128;
 const DEFAULT_SECRET_LEASE_TTL_SECONDS: i64 = 300;
 
 /// Opaque identifier for a one-shot secret lease.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct SecretLeaseId(Uuid);
 
 impl SecretLeaseId {
@@ -69,7 +69,8 @@ pub struct SecretMetadata {
 }
 
 /// Lease lifecycle for one secret access.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SecretLeaseStatus {
     Active,
     Consumed,
@@ -244,8 +245,16 @@ impl CredentialSessionId {
         Uuid::parse_str(value).map(Self)
     }
 
-    // Keep this helper feature-agnostic so private DTO conversion code does not
-    // depend on backend feature gates. It may be unused in featureless builds.
+    /// Returns the underlying UUID as a storage-formatted string.
+    ///
+    /// This is the **only** way to obtain the bearer-like value of a
+    /// `CredentialSessionId`. It exists so durable backends can write the id
+    /// into their primary-key columns; callers must not log, audit, or echo
+    /// the result to runtime/plugin code. `Display` and `Debug` deliberately
+    /// redact, so `format!("{id}")` and `{id:?}` both refuse to leak.
+    ///
+    /// Kept feature-agnostic so private DTO conversion code does not depend on
+    /// backend feature gates. It may be unused in featureless builds.
     #[allow(dead_code)]
     pub(crate) fn to_private_storage_string(self) -> String {
         self.0.to_string()
@@ -266,6 +275,11 @@ impl fmt::Debug for CredentialSessionId {
 
 impl fmt::Display for CredentialSessionId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Bearer-like identifier: Display must not leak the raw UUID, because
+        // `format!("{id}")`, `tracing::info!(%id, ...)`, and any
+        // `error.to_string()` interpolation would otherwise echo a value an
+        // attacker can reuse. Narrow storage paths must call
+        // `to_private_storage_string()` instead.
         formatter.write_str("[REDACTED]")
     }
 }
@@ -359,6 +373,45 @@ pub struct CredentialSession {
     expires_at: Option<Timestamp>,
     max_uses: Option<u64>,
     correlation_id: CredentialSessionId,
+}
+
+/// Crate-private constructor for [`CredentialSession`] used by durable
+/// storage backends to rehydrate sessions read from disk.
+///
+/// This is **not** part of the public API; the fields stay private so callers
+/// outside the crate cannot mint trust-bearing sessions. The libSQL/Postgres
+/// stores already use the equivalent `pub(crate)` pattern inline; the
+/// filesystem backend lives in a sibling module and uses this explicit helper
+/// to avoid duplicating that constructor for every backend.
+#[allow(clippy::too_many_arguments)]
+// arch-exempt: too_many_args, all fields are required to reconstruct a
+// CredentialSession; the alternative is to add another helper struct that
+// duplicates the existing struct shape, which is exactly the kind of
+// parallel surface the architecture rule warns against.
+pub(crate) fn __internal_session_for_filesystem_store(
+    scope: ResourceScope,
+    invocation_id: InvocationId,
+    capability_id: CapabilityId,
+    extension_id: ExtensionId,
+    account_id: CredentialAccountId,
+    secret_handles: Vec<SecretHandle>,
+    allowed_targets: Vec<CredentialTargetPolicy>,
+    expires_at: Option<Timestamp>,
+    max_uses: Option<u64>,
+    correlation_id: CredentialSessionId,
+) -> CredentialSession {
+    CredentialSession {
+        scope,
+        invocation_id,
+        capability_id,
+        extension_id,
+        account_id,
+        secret_handles,
+        allowed_targets,
+        expires_at,
+        max_uses,
+        correlation_id,
+    }
 }
 
 impl CredentialSession {
@@ -1589,6 +1642,15 @@ mod tests {
         let debug = format!("{session:?}");
         assert!(!debug.contains("sk-live-sentinel"));
         assert!(!debug.contains("token"));
+        // CredentialSessionId is bearer-like: the raw UUID (obtainable only via
+        // to_private_storage_string) must never appear in Debug output. Display
+        // is now redacted to "[REDACTED]" so a contains-on-Display check would
+        // be tautologically true here; this assertion still catches a
+        // regression that would leak the underlying UUID.
+        assert!(
+            !debug.contains(&session.correlation_id().to_private_storage_string()),
+            "CredentialSession Debug must not include the raw correlation UUID"
+        );
         assert!(debug.contains("CredentialSessionId([REDACTED])"));
     }
 

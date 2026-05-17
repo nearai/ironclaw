@@ -12,8 +12,6 @@ use crate::state::LoopExecutionState;
 /// `LoopPromptBundleRequest`. There is no separate nudge strategy; loop
 /// families that need nudges extend their context strategy to populate this
 /// field from `state`.
-///
-/// See `docs/reborn/agent-loop-skeleton.md` section 6.
 #[async_trait]
 pub(crate) trait ContextStrategy: Send + Sync {
     async fn plan_context_request(&self, state: &LoopExecutionState) -> LoopPromptBundleRequest;
@@ -28,9 +26,6 @@ fn _assert_object_safe(_: &dyn ContextStrategy) {}
 /// transcript messages and no inline nudges. Loop families that want
 /// CodeAct-shaped prompts or want to inject nudges swap this strategy
 /// rather than mutating state.
-///
-/// See `docs/reborn/agent-loop-skeleton.md` §6 ("The nine strategies" →
-/// `ContextStrategy`).
 #[derive(Debug, Clone, Copy)]
 pub struct DefaultContextStrategy {
     /// Max messages to ask the host to include in the bundle. Default
@@ -64,6 +59,7 @@ impl ContextStrategy for DefaultContextStrategy {
             checkpoint_state_ref: None,
             max_messages: Some(self.max_messages.max(1)),
             inline_messages: Vec::new(),
+            capability_view: None,
         }
     }
 }
@@ -144,6 +140,7 @@ mod tests {
                 max_model_calls: 32,
                 max_capability_invocations: 64,
             },
+            personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {
                 allow_raw_runtime_backend_selection: false,
                 allow_broad_capability_surface: false,

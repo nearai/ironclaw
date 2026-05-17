@@ -4,9 +4,8 @@ use ironclaw_host_api::CapabilityId;
 /// without retaining raw arguments (per turns-agent-loop.md §6: no raw tool
 /// input in loop state).
 ///
-/// Constructed by the executor via [`CapabilityCallSignature::from_call`]
-/// which canonicalizes the JSON args via JCS (RFC 8785) before hashing. See
-/// `docs/reborn/agent-loop-briefs/state-and-checkpoints.md` §3.4a.
+/// Constructed by the executor via [`CapabilityCallSignature::from_call`],
+/// which canonicalizes the JSON args via JCS (RFC 8785) before hashing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CapabilityCallSignature {
     pub name: CapabilityId,
@@ -41,7 +40,7 @@ impl CapabilityCallSignature {
     /// The args are canonicalized via JCS (RFC 8785) — UTF-16 code-unit
     /// key-sort, minimal whitespace, number representation preserved. Returns
     /// `Err(CapabilityCallSignatureError::NonFiniteNumber)` if the args carry
-    /// `NaN` or `±Infinity` (per §3.4a rule 2 — non-finite numbers are not
+    /// `NaN` or `±Infinity` (non-finite numbers are not
     /// valid JSON; an upstream serializer leaked invalid input).
     pub fn from_call(
         name: CapabilityId,

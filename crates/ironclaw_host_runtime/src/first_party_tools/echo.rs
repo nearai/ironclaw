@@ -1,28 +1,21 @@
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
-use ironclaw_host_api::{CapabilityId, EffectKind, PermissionMode};
-use serde_json::{Value, json};
+use ironclaw_host_api::{EffectKind, PermissionMode};
+use serde_json::Value;
 
 use crate::FirstPartyCapabilityError;
 
-use super::{input_error, resource_profile};
+use super::{first_party_capability_manifest, input_error, resource_profile};
 
 pub const ECHO_CAPABILITY_ID: &str = "builtin.echo";
 
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
-    Ok(CapabilityManifest {
-        id: CapabilityId::new(ECHO_CAPABILITY_ID)?,
-        description: "Echo a message".to_string(),
-        effects: vec![EffectKind::DispatchCapability],
-        default_permission: PermissionMode::Allow,
-        parameters_schema: json!({
-            "type": "object",
-            "properties": {
-                "message": { "type": "string", "description": "Message to echo" }
-            },
-            "required": ["message"]
-        }),
-        resource_profile: resource_profile(),
-    })
+    first_party_capability_manifest(
+        ECHO_CAPABILITY_ID,
+        "Echo a message",
+        vec![EffectKind::DispatchCapability],
+        PermissionMode::Allow,
+        resource_profile(),
+    )
 }
 
 pub(super) fn dispatch(input: &Value) -> Result<Value, FirstPartyCapabilityError> {

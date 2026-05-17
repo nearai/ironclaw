@@ -105,4 +105,11 @@ async fn retries_do_not_push_signatures_again() {
             .count(),
         1
     );
+    assert_eq!(
+        host.call_log()
+            .iter()
+            .filter(|call| matches!(call, MockHostCall::AppendCapabilityResultRef { .. }))
+            .count(),
+        1
+    );
 }

@@ -95,6 +95,7 @@ fn test_resolved_profile_with_driver(
             max_model_calls: 32,
             max_capability_invocations: 64,
         },
+        personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
         runtime_constraints: RuntimeProfileConstraints {
             allow_raw_runtime_backend_selection: false,
             allow_broad_capability_surface: false,
@@ -113,6 +114,7 @@ fn test_resolved_profile_with_driver(
 fn test_run_state(scope: TurnScope, status: TurnStatus) -> TurnRunState {
     TurnRunState {
         scope,
+        actor: None,
         turn_id: TurnId::new(),
         run_id: TurnRunId::new(),
         status,
@@ -545,6 +547,12 @@ impl ironclaw_turns::run_profile::LoopProgressPort for StubHost {
         _event: ironclaw_turns::run_profile::LoopProgressEvent,
     ) -> Result<(), AgentLoopHostError> {
         unimplemented!("stub host: never called by mock driver")
+    }
+}
+
+impl ironclaw_turns::run_profile::LoopCancellationPort for StubHost {
+    fn observe_cancellation(&self) -> Option<ironclaw_turns::run_profile::LoopCancellationSignal> {
+        None
     }
 }
 

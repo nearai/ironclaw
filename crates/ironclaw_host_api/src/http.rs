@@ -19,6 +19,9 @@ pub struct RuntimeHttpEgressRequest {
     pub url: String,
     pub headers: Vec<(String, String)>,
     pub body: Vec<u8>,
+    /// Request-carried fallback policy used only by legacy/test egress services.
+    /// Production first-party dispatch stages network policy in the host service
+    /// before this request is executed, so the field is ignored on that path.
     pub network_policy: NetworkPolicy,
     /// Host-derived credential injection plan.
     ///
@@ -43,20 +46,19 @@ pub struct RuntimeHttpEgressRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCredentialInjection {
     pub handle: SecretHandle,
-    #[serde(default)]
     pub source: RuntimeCredentialSource,
     pub target: RuntimeCredentialTarget,
     pub required: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum RuntimeCredentialSource {
     /// Lease and consume material directly from the scoped secret store.
     ///
-    /// This remains the compatibility path for host-derived credentials that
-    /// are not backed by an already-satisfied authorization obligation.
-    #[default]
+    /// This is the legacy/test compatibility path for host-derived credentials
+    /// that are not backed by an already-satisfied authorization obligation.
+    /// Production runtime tool egress must use [`Self::StagedObligation`].
     SecretStoreLease,
     /// Consume material staged by an `InjectSecretOnce` obligation handler.
     ///
@@ -86,6 +88,17 @@ pub struct RuntimeHttpEgressResponse {
     pub request_bytes: u64,
     pub response_bytes: u64,
     pub redaction_applied: bool,
+}
+
+pub const RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED: &str = "response_body_limit_exceeded";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeHttpEgressReasonCode {
+    CredentialUnavailable,
+    RequestDenied,
+    NetworkError,
+    ResponseError,
+    ResponseBodyLimitExceeded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -131,13 +144,30 @@ impl RuntimeHttpEgressError {
         }
     }
 
+    pub fn reason_code(&self) -> RuntimeHttpEgressReasonCode {
+        match self {
+            Self::Credential { .. } => RuntimeHttpEgressReasonCode::CredentialUnavailable,
+            Self::Request { .. } => RuntimeHttpEgressReasonCode::RequestDenied,
+            Self::Network { reason, .. } | Self::Response { reason, .. }
+                if reason == RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED =>
+            {
+                RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded
+            }
+            Self::Network { .. } => RuntimeHttpEgressReasonCode::NetworkError,
+            Self::Response { .. } => RuntimeHttpEgressReasonCode::ResponseError,
+        }
+    }
+
     /// Stable reason token safe to expose to runtime/plugin callers.
     pub fn stable_runtime_reason(&self) -> &'static str {
-        match self {
-            Self::Credential { .. } => "credential_unavailable",
-            Self::Request { .. } => "request_denied",
-            Self::Network { .. } => "network_error",
-            Self::Response { .. } => "response_error",
+        match self.reason_code() {
+            RuntimeHttpEgressReasonCode::CredentialUnavailable => "credential_unavailable",
+            RuntimeHttpEgressReasonCode::RequestDenied => "request_denied",
+            RuntimeHttpEgressReasonCode::NetworkError => "network_error",
+            RuntimeHttpEgressReasonCode::ResponseError => "response_error",
+            RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded => {
+                RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED
+            }
         }
     }
 }

@@ -11,8 +11,6 @@ use crate::state::LoopExecutionState;
 /// route. The strategy's preference is a hint the host may interpret, such as
 /// choosing among already-resolved fallbacks. Strategies cannot introduce new
 /// routes mid-run.
-///
-/// See `docs/reborn/agent-loop-skeleton.md` section 6.
 #[async_trait]
 pub(crate) trait ModelStrategy: Send + Sync {
     async fn preference(&self, state: &LoopExecutionState) -> ModelPreference;
@@ -25,11 +23,8 @@ fn _assert_object_safe(_: &dyn ModelStrategy) {}
 /// index in `state.model_state.fallback_index`.
 ///
 /// In the skeleton the executor never advances `fallback_index`, so this
-/// always returns `Primary`. The `Fallback` arm is wired through for the
-/// deferred `ModelRouteChain` follow-up (master doc §9).
-///
-/// See `docs/reborn/agent-loop-skeleton.md` §6 ("The nine strategies" →
-/// `ModelStrategy`).
+/// always returns `Primary`. The `Fallback` arm is wired through for a future
+/// model-route-chain implementation.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultModelStrategy;
 
@@ -136,6 +131,7 @@ mod tests {
                 max_model_calls: 32,
                 max_capability_invocations: 64,
             },
+            personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {
                 allow_raw_runtime_backend_selection: false,
                 allow_broad_capability_surface: false,

@@ -66,7 +66,7 @@ enum TrySelectOutcome {
 /// is implausibly low relative to the prompt content. Enforces a
 /// minimum of 1 token so a `max_context_tokens: 0` declaration can't
 /// bypass budgeting.
-fn skill_token_cost(skill: &LoadedSkill) -> usize {
+pub fn skill_token_cost(skill: &LoadedSkill) -> usize {
     let declared_tokens = skill.manifest.activation.max_context_tokens;
     // Rough token estimate: ~0.25 tokens per byte (~4 bytes per token for English prose)
     let approx_tokens = (skill.prompt_content.len() as f64 * 0.25) as usize;
@@ -364,34 +364,30 @@ pub fn extract_skill_mentions<'a>(
     // Find /word patterns that match skill names. Scan from end to avoid
     // index shifts when replacing.
     let mut replacements: Vec<(usize, usize, String)> = Vec::new();
-    let bytes = message.as_bytes();
+    let chars: Vec<(usize, char)> = message.char_indices().collect();
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'/' {
+    while i < chars.len() {
+        if chars[i].1 == '/' {
             // Check that / is at start or preceded by whitespace/punctuation
-            let is_boundary = i == 0
-                || bytes[i - 1] == b' '
-                || bytes[i - 1] == b'\n'
-                || bytes[i - 1] == b'\t'
-                || bytes[i - 1] == b'"'
-                || bytes[i - 1] == b'(';
+            let is_boundary = i == 0 || is_skill_mention_boundary(chars[i - 1].1);
 
             if is_boundary {
                 // Extract the name using the same character class accepted by
                 // skill validation: [a-zA-Z0-9._-]+
-                let start = i + 1;
-                let mut end = start;
-                while end < bytes.len()
-                    && (bytes[end].is_ascii_lowercase()
-                        || bytes[end].is_ascii_uppercase()
-                        || bytes[end].is_ascii_digit()
-                        || bytes[end] == b'-'
-                        || bytes[end] == b'_'
-                        || bytes[end] == b'.')
+                let start_char = i + 1;
+                let mut end_char = start_char;
+                while end_char < chars.len()
+                    && (chars[end_char].1.is_ascii_alphanumeric()
+                        || matches!(chars[end_char].1, '-' | '_' | '.'))
                 {
-                    end += 1;
+                    end_char += 1;
                 }
-                if end > start {
+                if end_char > start_char {
+                    let start = chars[start_char].0;
+                    let end = chars
+                        .get(end_char)
+                        .map(|(index, _)| *index)
+                        .unwrap_or(message.len());
                     let name = &message[start..end];
                     let lookup = name.to_lowercase();
                     if let Some(skill) = skill_map.get(&lookup) {
@@ -401,7 +397,7 @@ pub fn extract_skill_mentions<'a>(
                         } else {
                             skill.manifest.description.clone()
                         };
-                        replacements.push((i, end, replacement));
+                        replacements.push((chars[i].0, end, replacement));
                         if !matched
                             .iter()
                             .any(|s: &&LoadedSkill| s.manifest.name == skill.manifest.name)
@@ -421,6 +417,10 @@ pub fn extract_skill_mentions<'a>(
     }
 
     (matched, rewritten)
+}
+
+fn is_skill_mention_boundary(previous: char) -> bool {
+    matches!(previous, ' ' | '\n' | '\t' | '"' | '(' | '[') || !previous.is_ascii()
 }
 
 /// Apply confidence factor to a base score.
@@ -839,6 +839,15 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_bracketed_slash_mention() {
+        let skills = vec![make_skill("github", &["github"], &[], &[])];
+        let (matched, rewritten) = extract_skill_mentions("fetch issues from [/github]", &skills);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].manifest.name, "github");
+        assert_eq!(rewritten, "fetch issues from [github skill]");
+    }
+
+    #[test]
     fn test_extract_slash_mention_with_description() {
         let mut skill = make_skill("github", &["github"], &[], &[]);
         skill.manifest.description = "GitHub API".to_string();
@@ -882,6 +891,17 @@ mod tests {
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].manifest.name, "skill.v2");
         assert_eq!(rewritten, "please use second generation skill here");
+    }
+
+    #[test]
+    fn test_extract_slash_mention_after_multibyte_text() {
+        let mut skill = make_skill("review", &["review"], &[], &[]);
+        skill.manifest.description = "review helper".to_string();
+        let skills = vec![skill];
+        let (matched, rewritten) = extract_skill_mentions("café/review this", &skills);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].manifest.name, "review");
+        assert_eq!(rewritten, "caféreview helper this");
     }
 
     #[test]

@@ -19,16 +19,16 @@ postgres = [
     "dep:rustls",
     "dep:rustls-native-certs",
     "dep:webpki-roots",
-    "dep:url",
-    "dep:uuid",
+    "ironclaw_filesystem/postgres",
 ]
-libsql = ["dep:libsql"]
+libsql = ["dep:libsql", "ironclaw_filesystem/libsql"]
 
 [dependencies]
 async-trait = "0.1"
 deadpool-postgres = { version = "0.14", optional = true }
 hex = "0.4"
 ironclaw_events = { path = "../ironclaw_events", version = "0.1.0" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring"] }
@@ -39,13 +39,11 @@ serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "rt", "sync", "time"] }
-tokio-postgres = { version = "0.7", optional = true, features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
+tokio-postgres = { version = "0.7", optional = true, features = ["with-serde_json-1"] }
 tokio-postgres-rustls = { version = "0.13", optional = true }
 tracing = "0.1"
-url = { version = "2", optional = true }
 urlencoding = "2"
 webpki-roots = { version = "0.26", optional = true }
-uuid = { version = "1", optional = true }
 
 [dev-dependencies]
 chrono = { version = "0.4", features = ["serde"] }

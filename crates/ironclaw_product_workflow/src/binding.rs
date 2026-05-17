@@ -8,8 +8,8 @@
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ProductAdapterId,
-    VerifiedAuthClaim,
+    AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ExternalEventId,
+    ProductAdapterId, VerifiedAuthClaim,
 };
 use serde::{Deserialize, Serialize};
 
@@ -35,7 +35,19 @@ pub struct ResolveBindingRequest {
     pub installation_id: AdapterInstallationId,
     pub external_actor_ref: ExternalActorRef,
     pub external_conversation_ref: ExternalConversationRef,
+    pub external_event_id: ExternalEventId,
+    pub route_kind: ProductConversationRouteKind,
     pub auth_claim: VerifiedAuthClaim,
+}
+
+/// Stable route-access shape for product bindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductConversationRouteKind {
+    /// One external actor owns the external conversation route.
+    Direct,
+    /// A shared channel/group route where allowed participants may post.
+    Shared,
 }
 
 /// Conversation binding resolution contract. Host implementations wire this to
@@ -48,4 +60,30 @@ pub trait ConversationBindingService: Send + Sync {
         &self,
         request: ResolveBindingRequest,
     ) -> Result<ResolvedBinding, ProductWorkflowError>;
+
+    /// Look up an existing binding without creating conversation/thread state.
+    async fn lookup_binding(
+        &self,
+        request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductWorkflowError>;
+}
+
+#[async_trait]
+impl<T> ConversationBindingService for std::sync::Arc<T>
+where
+    T: ConversationBindingService + ?Sized,
+{
+    async fn resolve_binding(
+        &self,
+        request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+        self.as_ref().resolve_binding(request).await
+    }
+
+    async fn lookup_binding(
+        &self,
+        request: ResolveBindingRequest,
+    ) -> Result<ResolvedBinding, ProductWorkflowError> {
+        self.as_ref().lookup_binding(request).await
+    }
 }

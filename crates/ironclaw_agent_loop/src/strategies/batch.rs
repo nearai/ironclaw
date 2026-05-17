@@ -6,9 +6,7 @@
 //! authoritative for "this specific call must run alone"; this strategy
 //! decides only the batch-level default.
 //!
-//! See `docs/reborn/agent-loop-skeleton.md` §6 ("Strategy decomposition"
-//! → batch policy) and `contracts/turns-agent-loop.md` §6 (the loop never
-//! sees raw tool input — only the sanitized projection).
+//! The loop never sees raw tool input, only the sanitized projection.
 
 use ironclaw_host_api::CapabilityId;
 use ironclaw_turns::run_profile::ConcurrencyHint;
@@ -36,9 +34,6 @@ fn _batch_policy_strategy_object_safe(_: &dyn BatchPolicyStrategy) {}
 /// An empty batch returns `Parallel`. The default is a no-op for a zero-call
 /// batch (the executor never invokes the strategy in that case in practice),
 /// but a stable answer keeps the strategy total.
-///
-/// See `docs/reborn/agent-loop-skeleton.md` §6 ("The nine strategies" →
-/// `BatchPolicyStrategy`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultBatchPolicyStrategy;
 
@@ -149,6 +144,7 @@ mod tests {
                 max_model_calls: 32,
                 max_capability_invocations: 64,
             },
+            personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {
                 allow_raw_runtime_backend_selection: false,
                 allow_broad_capability_surface: false,

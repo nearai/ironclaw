@@ -3,11 +3,11 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use ironclaw_host_api::{HostPath, VirtualPath};
 use ironclaw_safety::sensitive_paths::is_sensitive_path;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
-    DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, RootFilesystem,
-    path_prefix_matches,
+    CasExpectation, DirEntry, Entry, FileStat, FileType, FilesystemError, FilesystemOperation,
+    RecordVersion, RootFilesystem, VersionedEntry, path_prefix_matches,
 };
 
 /// Local filesystem backend mounted into the virtual namespace.
@@ -172,6 +172,53 @@ impl LocalFilesystem {
 
 #[async_trait]
 impl RootFilesystem for LocalFilesystem {
+    /// Native `put` for the byte-only local filesystem. Opaque-file entries
+    /// (`kind = None`, empty `indexed`) with `CasExpectation::Any` delegate
+    /// to `write_file`. Record-shaped entries, populated indexed
+    /// projections, and `CasExpectation::Absent` / `Version(_)` are
+    /// `Unsupported` because the local filesystem has no native metadata or
+    /// version tracking (sidecar metadata is a future addition; see the
+    /// reborn storage rework plan). We implement `put` here rather than
+    /// relying on a trait default so that the put/write_file pair is
+    /// non-recursive even when downstream consumers route through `put`.
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        if entry.kind.is_some() || !entry.indexed.is_empty() {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+            });
+        }
+        if !matches!(cas, CasExpectation::Any) {
+            return Err(FilesystemError::Unsupported {
+                path: path.clone(),
+                operation: FilesystemOperation::WriteFile,
+            });
+        }
+        self.write_file(path, &entry.body).await?;
+        Ok(RecordVersion::from_backend(0))
+    }
+
+    /// Native `get` mirroring `put`: read the bytes and wrap as an opaque
+    /// `Entry`. Version is always `0` because the local filesystem doesn't
+    /// track per-path versions. Non-existent paths return `Ok(None)`;
+    /// directories or symlinks return their respective `read_file` errors.
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        match self.read_file(path).await {
+            Ok(body) => Ok(Some(VersionedEntry {
+                path: path.clone(),
+                entry: Entry::bytes(body),
+                version: RecordVersion::from_backend(0),
+            })),
+            Err(FilesystemError::NotFound { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
         let resolved = self
             .resolve_existing(path, FilesystemOperation::ReadFile)
@@ -179,6 +226,43 @@ impl RootFilesystem for LocalFilesystem {
         tokio::fs::read(resolved)
             .await
             .map_err(|error| io_error(path.clone(), FilesystemOperation::ReadFile, error))
+    }
+
+    async fn read_file_bounded(
+        &self,
+        path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        let resolved = self
+            .resolve_existing(path, FilesystemOperation::ReadFile)
+            .await?;
+        let file = tokio::fs::File::open(&resolved)
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        let metadata = file
+            .metadata()
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        if !metadata.is_file() {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "not a file".to_string(),
+            });
+        }
+        if metadata.len() > max_bytes as u64 {
+            return Ok(None);
+        }
+
+        let mut bytes = Vec::with_capacity(max_bytes.min(metadata.len() as usize));
+        file.take((max_bytes as u64).saturating_add(1))
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        if bytes.len() > max_bytes {
+            return Ok(None);
+        }
+        Ok(Some(bytes))
     }
 
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {

@@ -12,53 +12,113 @@ publish = false
 
 [features]
 default = []
+# Wire a host-managed LLM model gateway into the assembled runtime via
+# ironclaw_reborn's `LlmProviderModelGateway`. Off by default so this crate
+# stays substrate-only when callers don't want a model gateway in the
+# composed runtime. Mirrors `ironclaw_reborn`'s own `root-llm-provider`
+# feature shape (optional dep, `default-features = false`).
+root-llm-provider = [
+    "dep:ironclaw_llm",
+    "ironclaw_llm/registry-provider-factory",
+    "ironclaw_reborn/root-llm-provider",
+]
+# Compose the Reborn WebChat v2 HTTP gateway in this crate. Off by
+# default; turning this on pulls in the v2 route crate plus the axum /
+# tower-http middleware stack used by the `webui_serve` module. The
+# standalone `ironclaw-reborn` binary opts in to call `serve_webui_v2`
+# from its `serve` subcommand. Substrate-only callers (v1 `AppBuilder`,
+# diagnostic harnesses) stay off the feature and carry no WebUI code.
+webui-v2-beta = [
+    "dep:ironclaw_webui_v2",
+    "ironclaw_webui_v2/webui-v2-beta",
+    "dep:axum",
+    "dep:tower",
+    "dep:tower-http",
+    "dep:lru",
+]
 libsql = [
     "dep:libsql",
-    "ironclaw_authorization/libsql",
     "ironclaw_filesystem/libsql",
     "ironclaw_host_runtime/libsql",
     "ironclaw_reborn_event_store/libsql",
     "ironclaw_resources/libsql",
     "ironclaw_run_state/libsql",
-    "ironclaw_secrets/libsql",
-    "ironclaw_turns/libsql",
 ]
 postgres = [
     "dep:deadpool-postgres",
-    "ironclaw_authorization/postgres",
     "ironclaw_filesystem/postgres",
     "ironclaw_host_runtime/postgres",
     "ironclaw_reborn_event_store/postgres",
     "ironclaw_resources/postgres",
     "ironclaw_run_state/postgres",
-    "ironclaw_secrets/postgres",
-    "ironclaw_turns/postgres",
 ]
 
 [dependencies]
 async-trait = "0.1"
+chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
+ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
+ironclaw_event_projections = { path = "../ironclaw_event_projections" }
+ironclaw_event_streams = { path = "../ironclaw_event_streams" }
+ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
+ironclaw_llm = { path = "../ironclaw_llm", optional = true, default-features = false }
+ironclaw_loop_support = { path = "../ironclaw_loop_support" }
 ironclaw_network = { path = "../ironclaw_network" }
+ironclaw_outbound = { path = "../ironclaw_outbound" }
 ironclaw_processes = { path = "../ironclaw_processes" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
+ironclaw_reborn = { path = "../ironclaw_reborn" }
+ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
+ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
+ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
+ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
+# WebUI v2 route surface — feature-gated; only used by `webui_serve`.
+ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+# axum + tower middleware stack used by the `webui_serve` module. Each
+# entry is feature-gated so non-beta builds carry no HTTP surface code.
+axum = { version = "0.8", optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", optional = true, features = ["cors", "set-header", "limit", "catch-panic"] }
+lru = { version = "0.16", optional = true }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-serde_json = "1"
+async-trait = "0.1"
+http = "1"
+http-body-util = "0.1"
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_skills = { path = "../ironclaw_skills" }
+ironclaw_threads = { path = "../ironclaw_threads" }
+ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 tempfile = "3"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
-tokio = { version = "1", features = ["macros", "rt", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
+# Real WebSocket client for the v2 stream-events-ws caller-level test.
+# Oneshot via `tower::ServiceExt::oneshot` cannot complete a true WS
+# upgrade (no underlying TCP stream → axum's WebSocketUpgrade extractor
+# returns 426), so the happy-path test needs a bound listener and a
+# proper WS client.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
+tower = { version = "0.5", features = ["util"] }

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 
@@ -245,13 +245,28 @@ where
             .load_loop_context(LoopContextRequest {
                 after: request.context_cursor.clone(),
                 limit: self.message_limit(&request),
+                mode: request.mode,
             })
             .await?;
         let identity_message_count = context.identity_messages.len() as u32;
         let instruction_snippet_count = context.instruction_snippets.len() as u32;
         let visible_surface = if request.surface_version.is_some() {
             match self.current_surface.as_ref() {
-                Some(current_surface) => current_surface()?,
+                Some(current_surface) => {
+                    let mut surface = current_surface()?;
+                    if let (Some(surface), Some(capability_view)) =
+                        (surface.as_mut(), request.capability_view.as_ref())
+                    {
+                        let visible_ids = capability_view
+                            .visible_capability_ids
+                            .iter()
+                            .collect::<HashSet<_>>();
+                        surface
+                            .descriptors
+                            .retain(|descriptor| visible_ids.contains(&descriptor.capability_id));
+                    }
+                    surface
+                }
                 None => None,
             }
         } else {
@@ -340,6 +355,7 @@ mod tests {
                 surface_version: None,
                 checkpoint_state_ref: None,
                 max_messages: Some(8),
+                capability_view: None,
                 inline_messages: vec![LoopInlineMessage {
                     role: LoopInlineMessageRole::User,
                     safe_body: LoopSafeSummary::new("safe inline nudge").unwrap(),
@@ -415,6 +431,7 @@ mod tests {
                 surface_version: None,
                 checkpoint_state_ref: None,
                 max_messages: Some(8),
+                capability_view: None,
                 inline_messages: vec![],
             })
             .await
@@ -466,6 +483,7 @@ mod tests {
                 surface_version: None,
                 checkpoint_state_ref: None,
                 max_messages: Some(8),
+                capability_view: None,
                 inline_messages: vec![],
             })
             .await

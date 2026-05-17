@@ -143,7 +143,12 @@ impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
 }
 
 pub fn registry_with_echo_capability() -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse(ECHO_MANIFEST).unwrap();
+    let manifest = ExtensionManifest::parse(
+        ECHO_MANIFEST,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/echo").unwrap(),
@@ -223,6 +228,7 @@ pub fn extension_id() -> ExtensionId {
 }
 
 const ECHO_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
 id = "echo"
 name = "Echo"
 version = "0.1.0"
@@ -238,5 +244,7 @@ id = "echo.say"
 description = "Echoes input"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = {}
+visibility = "host_internal"
+input_schema_ref = "schemas/echo/say.input.v1.json"
+output_schema_ref = "schemas/echo/say.output.v1.json"
 "#;

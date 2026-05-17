@@ -21,7 +21,7 @@ async fn scoped_read_resolves_mount_view_and_reads_bytes() {
     )
     .unwrap();
 
-    let scoped = ScopedFilesystem::new(
+    let scoped = ScopedFilesystem::with_fixed_view(
         Arc::new(root),
         MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").unwrap(),
@@ -32,11 +32,36 @@ async fn scoped_read_resolves_mount_view_and_reads_bytes() {
     );
 
     let bytes = scoped
-        .read_file(&ScopedPath::new("/workspace/README.md").unwrap())
+        .read_file(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/README.md").unwrap(),
+        )
         .await
         .unwrap();
 
     assert_eq!(bytes, b"hello filesystem");
+}
+
+#[tokio::test]
+async fn bounded_read_returns_none_without_materializing_oversized_local_file() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    std::fs::write(storage.path().join("project1/schema.json"), b"abcdef").unwrap();
+
+    let mut root = LocalFilesystem::new();
+    root.mount_local(
+        VirtualPath::new("/projects").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+
+    let path = VirtualPath::new("/projects/project1/schema.json").unwrap();
+
+    assert_eq!(
+        root.read_file_bounded(&path, 6).await.unwrap(),
+        Some(b"abcdef".to_vec())
+    );
+    assert_eq!(root.read_file_bounded(&path, 5).await.unwrap(), None);
 }
 
 #[tokio::test]
@@ -51,7 +76,7 @@ async fn scoped_write_is_denied_on_read_only_mount() {
     )
     .unwrap();
 
-    let scoped = ScopedFilesystem::new(
+    let scoped = ScopedFilesystem::with_fixed_view(
         Arc::new(root),
         MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").unwrap(),
@@ -63,6 +88,7 @@ async fn scoped_write_is_denied_on_read_only_mount() {
 
     let err = scoped
         .write_file(
+            &ResourceScope::system(),
             &ScopedPath::new("/workspace/generated.txt").unwrap(),
             b"nope",
         )
@@ -88,6 +114,7 @@ async fn scoped_append_requires_write_permission_and_appends_bytes() {
     let read_only = scoped_project_fs(storage.path(), MountPermissions::read_only());
     let err = read_only
         .append_file(
+            &ResourceScope::system(),
             &ScopedPath::new("/workspace/log.jsonl").unwrap(),
             b"denied\n",
         )
@@ -103,7 +130,11 @@ async fn scoped_append_requires_write_permission_and_appends_bytes() {
 
     let writable = scoped_project_fs(storage.path(), MountPermissions::read_write());
     writable
-        .append_file(&ScopedPath::new("/workspace/log.jsonl").unwrap(), b"two\n")
+        .append_file(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/log.jsonl").unwrap(),
+            b"two\n",
+        )
         .await
         .unwrap();
 
@@ -121,7 +152,10 @@ async fn scoped_delete_requires_delete_permission_and_removes_file() {
 
     let no_delete = scoped_project_fs(storage.path(), MountPermissions::read_write());
     let err = no_delete
-        .delete(&ScopedPath::new("/workspace/generated.txt").unwrap())
+        .delete(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/generated.txt").unwrap(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -144,14 +178,20 @@ async fn scoped_delete_requires_delete_permission_and_removes_file() {
         },
     );
     can_delete
-        .delete(&ScopedPath::new("/workspace/generated.txt").unwrap())
+        .delete(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/generated.txt").unwrap(),
+        )
         .await
         .unwrap();
 
     assert!(!storage.path().join("project1/generated.txt").exists());
 
     let err = can_delete
-        .delete(&ScopedPath::new("/workspace/generated.txt").unwrap())
+        .delete(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/generated.txt").unwrap(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -170,7 +210,10 @@ async fn scoped_create_dir_all_requires_write_permission() {
 
     let read_only = scoped_project_fs(storage.path(), MountPermissions::read_only());
     let err = read_only
-        .create_dir_all(&ScopedPath::new("/workspace/generated/deep").unwrap())
+        .create_dir_all(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/generated/deep").unwrap(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -183,7 +226,10 @@ async fn scoped_create_dir_all_requires_write_permission() {
 
     let writable = scoped_project_fs(storage.path(), MountPermissions::read_write());
     writable
-        .create_dir_all(&ScopedPath::new("/workspace/generated/deep").unwrap())
+        .create_dir_all(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/generated/deep").unwrap(),
+        )
         .await
         .unwrap();
 
@@ -202,7 +248,7 @@ async fn list_requires_list_permission_through_scoped_api() {
     )
     .unwrap();
 
-    let scoped = ScopedFilesystem::new(
+    let scoped = ScopedFilesystem::with_fixed_view(
         Arc::new(root),
         MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").unwrap(),
@@ -219,7 +265,10 @@ async fn list_requires_list_permission_through_scoped_api() {
     );
 
     let err = scoped
-        .list_dir(&ScopedPath::new("/workspace").unwrap())
+        .list_dir(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace").unwrap(),
+        )
         .await
         .unwrap_err();
 
@@ -270,9 +319,13 @@ async fn unknown_scoped_alias_fails_closed_through_filesystem_api() {
     )
     .unwrap();
 
-    let scoped = ScopedFilesystem::new(Arc::new(root), MountView::new(Vec::new()).unwrap());
+    let scoped =
+        ScopedFilesystem::with_fixed_view(Arc::new(root), MountView::new(Vec::new()).unwrap());
     let err = scoped
-        .read_file(&ScopedPath::new("/memory/facts.md").unwrap())
+        .read_file(
+            &ResourceScope::system(),
+            &ScopedPath::new("/memory/facts.md").unwrap(),
+        )
         .await
         .unwrap_err();
 
@@ -290,7 +343,7 @@ async fn artifact_write_is_confined_to_approved_virtual_mount() {
     )
     .unwrap();
 
-    let scoped = ScopedFilesystem::new(
+    let scoped = ScopedFilesystem::with_fixed_view(
         Arc::new(root),
         MountView::new(vec![MountGrant::new(
             MountAlias::new("/artifacts").unwrap(),
@@ -301,7 +354,11 @@ async fn artifact_write_is_confined_to_approved_virtual_mount() {
     );
 
     scoped
-        .write_file(&ScopedPath::new("/artifacts/result.json").unwrap(), b"{}")
+        .write_file(
+            &ResourceScope::system(),
+            &ScopedPath::new("/artifacts/result.json").unwrap(),
+            b"{}",
+        )
         .await
         .unwrap();
 
@@ -354,7 +411,7 @@ async fn local_backend_denies_symlink_escape() {
     )
     .unwrap();
 
-    let scoped = ScopedFilesystem::new(
+    let scoped = ScopedFilesystem::with_fixed_view(
         Arc::new(root),
         MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").unwrap(),
@@ -365,7 +422,10 @@ async fn local_backend_denies_symlink_escape() {
     );
 
     let err = scoped
-        .read_file(&ScopedPath::new("/workspace/escape.txt").unwrap())
+        .read_file(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/escape.txt").unwrap(),
+        )
         .await
         .unwrap_err();
 
@@ -390,7 +450,10 @@ async fn read_requires_read_permission_through_scoped_api() {
     );
 
     let err = scoped
-        .read_file(&ScopedPath::new("/workspace/secret.txt").unwrap())
+        .read_file(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/secret.txt").unwrap(),
+        )
         .await
         .unwrap_err();
 
@@ -420,7 +483,10 @@ async fn stat_is_allowed_by_read_or_list_and_denied_without_both() {
         },
     );
     let stat = read_only
-        .stat(&ScopedPath::new("/workspace/file.txt").unwrap())
+        .stat(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/file.txt").unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(stat.len, 3);
@@ -436,14 +502,20 @@ async fn stat_is_allowed_by_read_or_list_and_denied_without_both() {
         },
     );
     let stat = list_only
-        .stat(&ScopedPath::new("/workspace/file.txt").unwrap())
+        .stat(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/file.txt").unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(stat.file_type, FileType::File);
 
     let no_stat = scoped_project_fs(storage.path(), MountPermissions::none());
     let err = no_stat
-        .stat(&ScopedPath::new("/workspace/file.txt").unwrap())
+        .stat(
+            &ResourceScope::system(),
+            &ScopedPath::new("/workspace/file.txt").unwrap(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -488,6 +560,7 @@ async fn workspace_write_creates_parent_directories() {
     let scoped = scoped_project_fs(storage.path(), MountPermissions::read_write());
     scoped
         .write_file(
+            &ResourceScope::system(),
             &ScopedPath::new("/workspace/generated/deep/file.txt").unwrap(),
             b"created",
         )
@@ -573,6 +646,7 @@ async fn local_backend_denies_write_through_symlink_escape() {
     let scoped = scoped_project_fs(storage.path(), MountPermissions::read_write());
     let err = scoped
         .write_file(
+            &ResourceScope::system(),
             &ScopedPath::new("/workspace/escape.txt").unwrap(),
             b"changed",
         )
@@ -599,6 +673,7 @@ async fn local_backend_denies_write_through_symlinked_parent_escape() {
     let scoped = scoped_project_fs(storage.path(), MountPermissions::read_write());
     let err = scoped
         .write_file(
+            &ResourceScope::system(),
             &ScopedPath::new("/workspace/outside-dir/new.txt").unwrap(),
             b"escaped",
         )
@@ -623,7 +698,7 @@ fn scoped_project_fs(
     path: &std::path::Path,
     permissions: MountPermissions,
 ) -> ScopedFilesystem<LocalFilesystem> {
-    ScopedFilesystem::new(
+    ScopedFilesystem::with_fixed_view(
         Arc::new(local_root_with_projects_mount(path)),
         MountView::new(vec![MountGrant::new(
             MountAlias::new("/workspace").unwrap(),

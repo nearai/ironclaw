@@ -91,6 +91,202 @@ async fn unpaired_external_actor_returns_binding_required_before_message_or_turn
 }
 
 #[tokio::test]
+async fn lookup_binding_does_not_create_missing_conversation_binding() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+
+    let missing = services
+        .lookup_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-lookup-only", None),
+            "telegram-event-lookup-only",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(missing, InboundTurnError::BindingRequired { .. }));
+
+    let created = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-lookup-only", None),
+            "telegram-event-create-after-lookup",
+        ))
+        .await
+        .expect("lookup-only miss must not poison later create");
+    assert_eq!(created.actor.user_id, user("alice"));
+}
+
+#[tokio::test]
+async fn lookup_binding_miss_does_not_reserve_external_event_route() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+
+    let missing = services
+        .lookup_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-lookup-miss-source", None),
+            "telegram-event-lookup-miss-shared",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(missing, InboundTurnError::BindingRequired { .. }));
+
+    let created = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-lookup-miss-legitimate", None),
+            "telegram-event-lookup-miss-shared",
+        ))
+        .await
+        .expect("lookup-only miss must not reserve the event route");
+    assert_eq!(created.actor.user_id, user("alice"));
+}
+
+#[tokio::test]
+async fn trusted_scope_is_persisted_on_first_bind() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+
+    let first = services
+        .resolve_or_create_binding_with_trusted_scope(
+            resolve_request(
+                telegram(),
+                external_actor("telegram-user-1"),
+                external_conversation("chat-trusted-scope", None),
+                "telegram-event-trusted-scope-1",
+            ),
+            Some(AgentId::new("agent-alpha").unwrap()),
+            Some(ProjectId::new("project-alpha").unwrap()),
+        )
+        .await
+        .expect("first bind");
+    assert_eq!(
+        first.turn_scope.agent_id.as_ref().map(AgentId::as_str),
+        Some("agent-alpha")
+    );
+
+    let second = services
+        .resolve_or_create_binding_with_trusted_scope(
+            resolve_request(
+                telegram(),
+                external_actor("telegram-user-1"),
+                external_conversation("chat-trusted-scope", None),
+                "telegram-event-trusted-scope-2",
+            ),
+            Some(AgentId::new("agent-beta").unwrap()),
+            Some(ProjectId::new("project-beta").unwrap()),
+        )
+        .await
+        .expect("existing bind");
+    assert_eq!(
+        second.turn_scope.agent_id.as_ref().map(AgentId::as_str),
+        Some("agent-alpha")
+    );
+    assert_eq!(
+        second.turn_scope.project_id.as_ref().map(ProjectId::as_str),
+        Some("project-alpha")
+    );
+}
+
+#[tokio::test]
+async fn trusted_scope_rejects_existing_unscoped_binding() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-2"),
+            user("bob"),
+        )
+        .await;
+
+    let legacy = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-legacy-unscoped", None),
+            "telegram-event-legacy-unscoped",
+        ))
+        .await
+        .expect("legacy unscoped bind");
+    assert_eq!(legacy.turn_scope.agent_id, None);
+    assert_eq!(legacy.turn_scope.project_id, None);
+    services
+        .add_thread_participant(&tenant(), &legacy.turn_scope.thread_id, user("bob"))
+        .await
+        .expect("participant added");
+
+    let mut trusted_shared = resolve_request(
+        telegram(),
+        external_actor("telegram-user-1"),
+        external_conversation("chat-legacy-unscoped", None),
+        "telegram-event-legacy-trusted-scope",
+    );
+    trusted_shared.route_kind = ConversationRouteKind::Shared;
+    let err = services
+        .resolve_or_create_binding_with_trusted_scope(
+            trusted_shared,
+            Some(AgentId::new("agent-alpha").unwrap()),
+            Some(ProjectId::new("project-alpha").unwrap()),
+        )
+        .await
+        .expect_err("trusted scope must not reinterpret legacy bindings");
+
+    assert!(matches!(err, InboundTurnError::BindingConflict { .. }));
+
+    let mut bob_shared = resolve_request(
+        telegram(),
+        external_actor("telegram-user-2"),
+        external_conversation("chat-legacy-unscoped", None),
+        "telegram-event-legacy-bob-after-rejected-widen",
+    );
+    bob_shared.route_kind = ConversationRouteKind::Shared;
+    let err = services
+        .resolve_or_create_binding(bob_shared)
+        .await
+        .expect_err("rejected trusted resolve must not widen route access");
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+#[tokio::test]
 async fn pairing_is_scoped_by_tenant_and_adapter_installation() {
     let services = InMemoryConversationServices::default();
     services
@@ -845,266 +1041,6 @@ async fn explicit_link_uses_existing_thread_scope_not_spoofed_link_scope() {
     assert_eq!(telegram_resolution.turn_scope, web_resolution.turn_scope);
 }
 
-#[cfg(feature = "libsql")]
-#[tokio::test]
-async fn libsql_conversation_services_survive_restart_for_retry_replay() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("conversations.db");
-    let db = Arc::new(
-        libsql::Builder::new_local(db_path.display().to_string())
-            .build()
-            .await
-            .unwrap(),
-    );
-    let services = ironclaw_conversations::RebornLibSqlConversationServices::new(db)
-        .await
-        .unwrap();
-    services
-        .pair_external_actor(
-            tenant(),
-            telegram(),
-            default_installation(),
-            external_actor("telegram-user-1"),
-            user("alice"),
-        )
-        .await
-        .unwrap();
-    let coordinator = Arc::new(FailFirstTurnCoordinator::default());
-    let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
-    let request = inbound_request(
-        telegram(),
-        external_actor("telegram-user-1"),
-        external_conversation("durable-chat", None),
-        "durable-event-1",
-    );
-
-    let err = inbound
-        .handle_inbound_turn(request.clone())
-        .await
-        .unwrap_err();
-    assert!(matches!(err, InboundTurnError::TurnSubmissionFailed { .. }));
-    drop(inbound);
-    drop(services);
-
-    let reopened_db = Arc::new(
-        libsql::Builder::new_local(db_path.display().to_string())
-            .build()
-            .await
-            .unwrap(),
-    );
-    let reopened = ironclaw_conversations::RebornLibSqlConversationServices::new(reopened_db)
-        .await
-        .unwrap();
-    reopened
-        .unpair_external_actor(
-            &tenant(),
-            &telegram(),
-            &default_installation(),
-            &external_actor("telegram-user-1"),
-        )
-        .await
-        .unwrap();
-    let retry_inbound = InboundTurnService::new(reopened.clone(), reopened, coordinator.clone());
-
-    let retry = retry_inbound.handle_inbound_turn(request).await.unwrap();
-
-    assert_eq!(
-        retry.accepted_message.idempotency,
-        MessageIdempotencyStatus::Duplicate
-    );
-    assert_eq!(coordinator.submissions().len(), 2);
-    assert_eq!(
-        coordinator.submissions()[1].actor,
-        TurnActor::new(user("alice"))
-    );
-
-    let inspect_db = libsql::Builder::new_local(db_path.display().to_string())
-        .build()
-        .await
-        .unwrap();
-    let inspect_conn = inspect_db.connect().unwrap();
-    assert_eq!(
-        table_count(&inspect_conn, "reborn_conversation_actor_pairings").await,
-        0
-    );
-    assert_eq!(
-        table_count(&inspect_conn, "reborn_conversation_bindings").await,
-        1
-    );
-    assert_eq!(
-        table_count(&inspect_conn, "reborn_conversation_reply_targets").await,
-        2
-    );
-    assert_eq!(
-        table_count(&inspect_conn, "reborn_conversation_accepted_messages").await,
-        1
-    );
-    assert_eq!(
-        table_count(&inspect_conn, "reborn_conversation_message_replays").await,
-        1
-    );
-    assert_eq!(
-        table_count(&inspect_conn, "reborn_conversation_submission_keys").await,
-        1
-    );
-    assert_eq!(
-        table_count(&inspect_conn, "reborn_conversation_submit_responses").await,
-        1
-    );
-}
-
-#[cfg(feature = "libsql")]
-#[tokio::test]
-async fn libsql_stale_service_write_fails_without_overwriting_newer_rows() {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("stale-conversations.db");
-    let db_a = Arc::new(
-        libsql::Builder::new_local(db_path.display().to_string())
-            .build()
-            .await
-            .unwrap(),
-    );
-    let db_b = Arc::new(
-        libsql::Builder::new_local(db_path.display().to_string())
-            .build()
-            .await
-            .unwrap(),
-    );
-    let services_a = ironclaw_conversations::RebornLibSqlConversationServices::new(db_a)
-        .await
-        .unwrap();
-    let services_b = ironclaw_conversations::RebornLibSqlConversationServices::new(db_b)
-        .await
-        .unwrap();
-
-    services_a
-        .pair_external_actor(
-            tenant(),
-            telegram(),
-            default_installation(),
-            external_actor("alice-telegram"),
-            user("alice"),
-        )
-        .await
-        .unwrap();
-
-    services_b
-        .pair_external_actor(
-            tenant(),
-            telegram(),
-            default_installation(),
-            external_actor("bob-telegram"),
-            user("bob"),
-        )
-        .await
-        .unwrap();
-    let bob = services_b
-        .resolve_or_create_binding(resolve_request(
-            telegram(),
-            external_actor("bob-telegram"),
-            external_conversation("stale-chat", None),
-            "stale-event",
-        ))
-        .await
-        .unwrap();
-    assert_eq!(bob.actor, TurnActor::new(user("bob")));
-
-    let inspect_db = libsql::Builder::new_local(db_path.display().to_string())
-        .build()
-        .await
-        .unwrap();
-    let inspect_conn = inspect_db.connect().unwrap();
-    assert_eq!(
-        table_count(&inspect_conn, "reborn_conversation_actor_pairings").await,
-        2
-    );
-}
-
-#[cfg(feature = "postgres")]
-#[tokio::test]
-async fn postgres_conversation_services_round_trip_restart_replay_when_available() {
-    let Ok(database_url) = std::env::var("DATABASE_URL") else {
-        eprintln!("skipping Postgres conversation contract: DATABASE_URL is not set");
-        return;
-    };
-    let config: tokio_postgres::Config = database_url
-        .parse()
-        .expect("DATABASE_URL must parse as a Postgres connection string");
-    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-    let pool = deadpool_postgres::Pool::builder(manager)
-        .max_size(2)
-        .build()
-        .expect("Postgres pool must build");
-    let _connection = pool
-        .get()
-        .await
-        .expect("DATABASE_URL must point at a reachable Postgres test database");
-
-    let suffix = Utc::now().timestamp_nanos_opt().unwrap_or_default();
-    let actor_ref = external_actor(&format!("pg-telegram-user-{suffix}"));
-    let conversation_ref = external_conversation(&format!("pg-durable-chat-{suffix}"), None);
-    let event_id = format!("pg-durable-event-{suffix}");
-    let services = ironclaw_conversations::RebornPostgresConversationServices::new(pool.clone())
-        .await
-        .unwrap();
-    services
-        .pair_external_actor(
-            tenant(),
-            telegram(),
-            default_installation(),
-            actor_ref.clone(),
-            user("alice"),
-        )
-        .await
-        .unwrap();
-    let coordinator = Arc::new(FailFirstTurnCoordinator::default());
-    let inbound = InboundTurnService::new(services.clone(), services.clone(), coordinator.clone());
-    let request = inbound_request(
-        telegram(),
-        actor_ref.clone(),
-        conversation_ref.clone(),
-        &event_id,
-    );
-
-    let err = inbound
-        .handle_inbound_turn(request.clone())
-        .await
-        .unwrap_err();
-    assert!(matches!(err, InboundTurnError::TurnSubmissionFailed { .. }));
-    drop(inbound);
-    drop(services);
-
-    let reopened = ironclaw_conversations::RebornPostgresConversationServices::new(pool)
-        .await
-        .unwrap();
-    reopened
-        .unpair_external_actor(&tenant(), &telegram(), &default_installation(), &actor_ref)
-        .await
-        .unwrap();
-    let retry_inbound = InboundTurnService::new(reopened.clone(), reopened, coordinator.clone());
-    let retry = retry_inbound.handle_inbound_turn(request).await.unwrap();
-
-    assert_eq!(
-        retry.accepted_message.idempotency,
-        MessageIdempotencyStatus::Duplicate
-    );
-    assert_eq!(coordinator.submissions().len(), 2);
-    assert_eq!(
-        coordinator.submissions()[1].actor,
-        TurnActor::new(user("alice"))
-    );
-}
-
-#[cfg(feature = "libsql")]
-async fn table_count(conn: &libsql::Connection, table: &str) -> i64 {
-    let mut rows = conn
-        .query(&format!("SELECT COUNT(*) FROM {table}"), ())
-        .await
-        .unwrap();
-    let row = rows.next().await.unwrap().unwrap();
-    row.get(0).unwrap()
-}
-
 #[tokio::test]
 async fn duplicate_retry_after_submit_failure_survives_pairing_churn() {
     let services = InMemoryConversationServices::default();
@@ -1573,6 +1509,67 @@ async fn failed_shared_route_probe_does_not_widen_direct_binding() {
         ))
         .await
         .unwrap_err();
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+#[tokio::test]
+async fn lookup_binding_shared_owner_probe_does_not_widen_direct_binding() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("bob-web"),
+            user("bob"),
+        )
+        .await;
+    let resolution = services
+        .resolve_or_create_binding(resolve_request(
+            web(),
+            external_actor("alice-web"),
+            external_conversation("alice-direct-lookup-probe", None),
+            "alice-direct-lookup-probe-event",
+        ))
+        .await
+        .unwrap();
+    services
+        .add_thread_participant(&tenant(), &resolution.turn_scope.thread_id, user("bob"))
+        .await
+        .unwrap();
+
+    let mut owner_probe = resolve_request(
+        web(),
+        external_actor("alice-web"),
+        external_conversation("alice-direct-lookup-probe", None),
+        "alice-direct-lookup-owner-shared-probe",
+    );
+    owner_probe.route_kind = ConversationRouteKind::Shared;
+    services
+        .lookup_binding(owner_probe)
+        .await
+        .expect("owner lookup may inspect shared route without widening");
+
+    let mut bob_shared = resolve_request(
+        web(),
+        external_actor("bob-web"),
+        external_conversation("alice-direct-lookup-probe", None),
+        "bob-after-lookup-owner-shared-probe",
+    );
+    bob_shared.route_kind = ConversationRouteKind::Shared;
+    let err = services
+        .resolve_or_create_binding(bob_shared)
+        .await
+        .expect_err("lookup-only shared probe must not widen direct binding");
     assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
 }
 
@@ -2687,6 +2684,22 @@ impl ConversationBindingService for DriftBindingService {
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply:shared").unwrap(),
             access: ThreadAccessDecision::Allowed,
         })
+    }
+
+    async fn resolve_or_create_binding_with_trusted_scope(
+        &self,
+        request: ironclaw_conversations::ResolveConversationRequest,
+        _trusted_agent_id: Option<AgentId>,
+        _trusted_project_id: Option<ProjectId>,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        self.resolve_or_create_binding(request).await
+    }
+
+    async fn lookup_binding(
+        &self,
+        _request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        unimplemented!("not used by inbound facade tests")
     }
 
     async fn link_conversation_to_thread(

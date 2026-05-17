@@ -36,6 +36,25 @@ pub struct PlannedDriver {
 }
 
 impl PlannedDriver {
+    pub fn from_family_with_descriptor(
+        family: Arc<LoopFamily>,
+        executor: Arc<CanonicalAgentLoopExecutor>,
+        descriptor: AgentLoopDriverDescriptor,
+    ) -> Result<Self, AgentLoopDriverError> {
+        if descriptor.checkpoint_schema_id.is_none()
+            || descriptor.checkpoint_schema_version.is_none()
+        {
+            return Err(AgentLoopDriverError::InvalidRequest {
+                reason: "planned driver descriptor must carry a checkpoint schema".to_string(),
+            });
+        }
+        Ok(Self {
+            descriptor,
+            family,
+            executor,
+        })
+    }
+
     pub fn from_family(
         driver_id: LoopDriverId,
         family: Arc<LoopFamily>,
@@ -280,7 +299,7 @@ fn resumable_checkpoint_kind_from_host(kind: LoopCheckpointKind) -> Result<Check
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build_loop_family_registry;
+    use crate::app_loop_family::build_loop_family_registry;
     use ironclaw_agent_loop::test_support::{
         MockAgentLoopDriverHost, MockHostCall, test_run_context,
     };
@@ -290,14 +309,14 @@ mod tests {
             AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef,
             BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome,
             CapabilityInvocation, CapabilityOutcome, CheckpointSchemaId, FinalizeAssistantMessage,
-            LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCapabilityPort,
-            LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle,
-            LoopContextPort, LoopContextRequest, LoopDriverId, LoopInputAckToken, LoopInputBatch,
-            LoopInputCursor, LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse,
-            LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest,
-            LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopTranscriptPort,
-            StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
-            VisibleCapabilitySurface,
+            LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancellationPort,
+            LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
+            LoopCheckpointStateRef, LoopContextBundle, LoopContextPort, LoopContextRequest,
+            LoopDriverId, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
+            LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
+            LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
+            LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, StageCheckpointPayloadRequest,
+            UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
         },
     };
     use std::sync::Mutex;
@@ -314,6 +333,11 @@ mod tests {
         );
         assert_eq!(
             descriptor.checkpoint_schema_id,
+            // Keep the unprefixed `CHECKPOINT_SCHEMA_ID` (already in scope via
+            // `use super::*` -> `use ironclaw_agent_loop::state::*`) — the
+            // `crate::PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID` alias trips clippy's
+            // `unused-imports` lint on newer toolchains because it resolves to
+            // the same const value, and that gate is enforced on this PR.
             Some(CheckpointSchemaId::new(CHECKPOINT_SCHEMA_ID).expect("valid"))
         );
         assert_eq!(
@@ -678,6 +702,12 @@ mod tests {
         }
     }
 
+    impl LoopCancellationPort for ResumePayloadHost {
+        fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
+            self.inner.observe_cancellation()
+        }
+    }
+
     #[async_trait::async_trait]
     impl LoopContextPort for ResumePayloadHost {
         async fn load_loop_context(
@@ -829,4 +859,10 @@ mod tests {
             self.inner.emit_loop_progress(event).await
         }
     }
+    // Note: a duplicate `impl LoopCancellationPort for ResumePayloadHost`
+    // existed here on baseline and broke `cargo test --no-run` for this crate.
+    // The earlier delegating impl (a few hundred lines above) is the
+    // intended one; the trailing one returned `None` unconditionally and
+    // was unreachable behind the conflict. Removed here while updating
+    // tests for the narrowed public surface.
 }

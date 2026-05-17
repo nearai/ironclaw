@@ -3,24 +3,33 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
 };
 
+use chrono::Utc;
 use ironclaw_agent_loop::{
     state::CheckpointKind,
-    test_support::{MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedModelResponse},
+    test_support::{
+        MockAgentLoopDriverHost, MockHostCall, ScenarioScript, ScriptedModelResponse,
+        test_run_context,
+    },
 };
-use ironclaw_reborn::{PlannedDriver, build_loop_family_registry};
+use ironclaw_reborn::app_loop_family::build_loop_family_registry;
+use ironclaw_reborn::planned_driver::PlannedDriver;
+use ironclaw_reborn::planned_driver_factory::{
+    PLANNED_DEFAULT_PROFILE_ID, PLANNED_DRIVER_DEFAULT_ID, default_planned_run_profile_resolver,
+};
 use ironclaw_turns::{
-    AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopExit, LoopMessageRef,
-    TurnCheckpointId,
+    AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopCancelledReasonKind, LoopExit,
+    LoopMessageRef, TurnCheckpointId,
     run_profile::{
         AgentLoopDriver, AgentLoopDriverError, AgentLoopHostError, AgentLoopHostErrorKind,
         AppendCapabilityResultRef, BeginAssistantDraft, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityInvocation, CapabilityOutcome, FinalizeAssistantMessage,
-        LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCapabilityPort,
-        LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle,
-        LoopContextPort, LoopContextRequest, LoopInput, LoopInputAckToken, LoopInputBatch,
-        LoopInputCursor, LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse,
-        LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest,
-        LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopTranscriptPort,
+        LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancelReasonKind,
+        LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort,
+        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextPort,
+        LoopContextRequest, LoopInput, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
+        LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
+        LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
+        LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, RunProfileResolver,
         StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
     },
@@ -94,7 +103,73 @@ async fn default_planned_driver_smoke() {
         .expect("planned driver run should succeed");
 
     assert!(matches!(exit, LoopExit::Completed(_)));
-    assert_eq!(driver.descriptor().id.as_str(), "reborn:planned-default");
+    assert_eq!(driver.descriptor().id.as_str(), PLANNED_DRIVER_DEFAULT_ID);
+}
+
+#[tokio::test]
+async fn planned_driver_cancellation_short_circuits_through_adapter() {
+    let registry = build_loop_family_registry().expect("registry should build");
+    let driver = PlannedDriver::default_from_registry(&registry).expect("driver should build");
+    let signal = LoopCancellationSignal {
+        reason_kind: LoopCancelReasonKind::UserRequested,
+        requested_at: Utc::now(),
+    };
+    let (host, checkpoints) = MockAgentLoopDriverHost::builder()
+        .script(ScenarioScript::reply_only("should not be requested"))
+        .cancellation_signal(signal)
+        .build();
+
+    let exit = driver
+        .run(run_request(&driver, &host), &host)
+        .await
+        .expect("planned driver cancellation should be a loop exit");
+
+    match exit {
+        LoopExit::Cancelled(cancelled) => {
+            assert_eq!(
+                cancelled.reason_kind,
+                LoopCancelledReasonKind::HostCancellation
+            );
+            assert!(cancelled.checkpoint_id.is_some());
+        }
+        other => panic!("expected cancelled exit, got {other:?}"),
+    }
+    assert_eq!(host.model_call_count(), 0);
+    checkpoints.assert_kinds(&[CheckpointKind::Final]);
+}
+
+#[tokio::test]
+async fn planned_driver_live_default_smoke() {
+    let resolver = default_planned_run_profile_resolver().expect("resolver should build");
+    let resolved = resolver
+        .resolve_run_profile(ironclaw_turns::RunProfileResolutionRequest::interactive_default())
+        .await
+        .expect("implicit profile should resolve");
+    assert_eq!(resolved.profile_id.as_str(), PLANNED_DEFAULT_PROFILE_ID);
+    assert_eq!(resolved.loop_driver.id.as_str(), PLANNED_DRIVER_DEFAULT_ID);
+
+    let registry = build_loop_family_registry().expect("registry should build");
+    let driver = PlannedDriver::default_from_registry(&registry).expect("driver should build");
+    let base_context = test_run_context("planned-live-default");
+    let context = LoopRunContext::new(
+        base_context.scope,
+        base_context.turn_id,
+        base_context.run_id,
+        resolved.clone(),
+    );
+    let (host, _) = MockAgentLoopDriverHost::builder()
+        .run_context(context)
+        .script(ScenarioScript::reply_only("hi"))
+        .build();
+    let request = run_request(&driver, &host);
+    assert_eq!(request.resolved_run_profile, resolved);
+
+    let exit = driver
+        .run(request, &host)
+        .await
+        .expect("planned live default should run");
+
+    assert!(matches!(exit, LoopExit::Completed(_)));
 }
 
 #[tokio::test]
@@ -474,5 +549,11 @@ impl LoopProgressPort for ForbiddenResumeHost {
         _event: LoopProgressEvent,
     ) -> Result<(), AgentLoopHostError> {
         Err(self.forbidden_call("emit_loop_progress"))
+    }
+}
+
+impl LoopCancellationPort for ForbiddenResumeHost {
+    fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
+        None
     }
 }

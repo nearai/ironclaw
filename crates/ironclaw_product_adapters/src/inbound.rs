@@ -93,13 +93,17 @@ impl UserMessagePayload {
         attachments: Vec<ProductAttachmentDescriptor>,
         trigger: ProductTriggerReason,
     ) -> Result<Self, ProductAdapterError> {
-        let text = text.into();
-        validate_payload_string("user message text", &text, USER_MESSAGE_TEXT_MAX_BYTES)?;
-        Ok(Self {
-            text,
+        let payload = Self {
+            text: text.into(),
             attachments,
             trigger,
-        })
+        };
+        payload.validate()?;
+        Ok(payload)
+    }
+
+    pub fn validate(&self) -> Result<(), ProductAdapterError> {
+        validate_payload_string("user message text", &self.text, USER_MESSAGE_TEXT_MAX_BYTES)
     }
 }
 
@@ -485,6 +489,21 @@ impl ProductInboundEnvelope {
         &self.payload
     }
 
+    /// Preserve host-stamped trusted context while replacing only the
+    /// user-message payload after workflow-owned before-inbound policy rewrite.
+    pub fn with_rewritten_user_message(
+        &self,
+        payload: UserMessagePayload,
+    ) -> Result<Self, ProductAdapterError> {
+        if !matches!(self.payload(), ProductInboundPayload::UserMessage(_)) {
+            return Err(malformed("cannot rewrite non-user-message payload"));
+        }
+        payload.validate()?;
+        let mut envelope = self.clone();
+        envelope.payload = ProductInboundPayload::UserMessage(payload);
+        Ok(envelope)
+    }
+
     pub fn source_binding_key(&self) -> String {
         self.external_conversation_ref.conversation_fingerprint()
     }
@@ -629,6 +648,30 @@ mod tests {
     }
 
     #[test]
+    fn user_message_text_length_bounded_through_serde() {
+        let empty = serde_json::json!({
+            "text": "",
+            "attachments": [],
+            "trigger": "direct_chat"
+        });
+        assert!(serde_json::from_value::<UserMessagePayload>(empty).is_ok());
+
+        let at_limit = serde_json::json!({
+            "text": "a".repeat(USER_MESSAGE_TEXT_MAX_BYTES),
+            "attachments": [],
+            "trigger": "direct_chat"
+        });
+        assert!(serde_json::from_value::<UserMessagePayload>(at_limit).is_ok());
+
+        let forged = serde_json::json!({
+            "text": "a".repeat(USER_MESSAGE_TEXT_MAX_BYTES + 1),
+            "attachments": [],
+            "trigger": "direct_chat"
+        });
+        assert!(serde_json::from_value::<UserMessagePayload>(forged).is_err());
+    }
+
+    #[test]
     fn command_payload_bounds_are_enforced_through_serde() {
         assert!(
             InboundCommandPayload::new(
@@ -638,6 +681,20 @@ mod tests {
             )
             .is_err()
         );
+        let empty_command = serde_json::json!({
+            "command": "",
+            "arguments": "",
+            "trigger": "bot_command"
+        });
+        assert!(serde_json::from_value::<InboundCommandPayload>(empty_command).is_err());
+
+        let at_limit = serde_json::json!({
+            "command": "h".repeat(COMMAND_MAX_BYTES),
+            "arguments": "",
+            "trigger": "bot_command"
+        });
+        assert!(serde_json::from_value::<InboundCommandPayload>(at_limit).is_ok());
+
         let forged = serde_json::json!({
             "command": "h".repeat(COMMAND_MAX_BYTES + 1),
             "arguments": "",
@@ -655,6 +712,27 @@ mod tests {
         .expect("envelope");
         assert_eq!(envelope.adapter_id().as_str(), "telegram_v2");
         assert_eq!(envelope.payload(), &ProductInboundPayload::NoOp);
+    }
+
+    #[test]
+    fn rewritten_user_message_rejects_non_user_message_envelope() {
+        let envelope = ProductInboundEnvelope::from_trusted_parse(
+            sample_context(),
+            sample_parsed(ProductInboundPayload::NoOp),
+        )
+        .expect("envelope");
+        let rewrite =
+            UserMessagePayload::new("rewritten", vec![], ProductTriggerReason::DirectChat)
+                .expect("valid rewrite");
+
+        let err = envelope
+            .with_rewritten_user_message(rewrite)
+            .expect_err("non-user-message envelope must not be rewritten");
+
+        assert!(matches!(
+            err,
+            ProductAdapterError::MalformedInboundPayload { .. }
+        ));
     }
 
     #[test]

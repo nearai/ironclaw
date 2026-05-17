@@ -1,26 +1,30 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_runtime::SchedulerTurnRunWakeNotifier;
 use ironclaw_trust::HostTrustPolicy;
 
-use crate::RebornCompositionProfile;
+use crate::{RebornCompositionProfile, RebornProductAuthServices};
 
 pub struct RebornBuildInput {
     pub(crate) profile: RebornCompositionProfile,
     pub(crate) owner_id: String,
     pub(crate) storage: RebornStorageInput,
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
+    pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
     pub(crate) turn_run_wake_notifier: Option<Arc<SchedulerTurnRunWakeNotifier>>,
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
     pub(crate) require_wasm_credentials: bool,
+    pub(crate) product_auth_services: Option<Arc<RebornProductAuthServices>>,
 }
 
 pub(crate) enum RebornStorageInput {
     Disabled,
     LocalDev {
         root: PathBuf,
+        workspace_root: Option<PathBuf>,
     },
     #[cfg(feature = "libsql")]
     Libsql {
@@ -38,6 +42,17 @@ pub(crate) enum RebornStorageInput {
 }
 
 impl RebornBuildInput {
+    /// Selected composition profile.
+    pub fn profile(&self) -> RebornCompositionProfile {
+        self.profile
+    }
+
+    /// Owner id (string form). Used by the assembled runtime to mint the
+    /// `UserId` actor for inbound CLI messages.
+    pub fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+
     pub fn disabled(owner_id: impl Into<String>) -> Self {
         Self::new(
             RebornCompositionProfile::Disabled,
@@ -50,8 +65,22 @@ impl RebornBuildInput {
         Self::new(
             RebornCompositionProfile::LocalDev,
             owner_id,
-            RebornStorageInput::LocalDev { root },
+            RebornStorageInput::LocalDev {
+                root,
+                workspace_root: None,
+            },
         )
+    }
+
+    pub fn with_local_dev_workspace_root(mut self, workspace_root: PathBuf) -> Self {
+        if let RebornStorageInput::LocalDev {
+            workspace_root: root,
+            ..
+        } = &mut self.storage
+        {
+            *root = Some(workspace_root);
+        }
+        self
     }
 
     #[cfg(feature = "libsql")]
@@ -107,6 +136,15 @@ impl RebornBuildInput {
         self
     }
 
+    pub fn with_runtime_policy(mut self, policy: EffectiveRuntimePolicy) -> Self {
+        self.runtime_policy = Some(policy);
+        self
+    }
+
+    pub fn runtime_policy(&self) -> Option<&EffectiveRuntimePolicy> {
+        self.runtime_policy.as_ref()
+    }
+
     pub fn with_turn_run_wake_notifier(
         mut self,
         notifier: Arc<SchedulerTurnRunWakeNotifier>,
@@ -125,6 +163,16 @@ impl RebornBuildInput {
         self
     }
 
+    /// Inject a Reborn-native product-auth composition bundle.
+    ///
+    /// Production callers should provide durable implementations here once the
+    /// auth-flow and credential-account storage substrate is available. The
+    /// composition root never falls back to V1 route state or V1 secret stores.
+    pub fn with_product_auth_services(mut self, services: Arc<RebornProductAuthServices>) -> Self {
+        self.product_auth_services = Some(services);
+        self
+    }
+
     fn new(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -135,10 +183,39 @@ impl RebornBuildInput {
             owner_id: owner_id.into(),
             storage,
             production_trust_policy: None,
+            runtime_policy: None,
             turn_run_wake_notifier: None,
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
+            product_auth_services: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ironclaw_auth::InMemoryAuthProductServices;
+
+    use super::*;
+
+    #[test]
+    fn with_product_auth_services_records_injected_bundle() {
+        let product_auth = Arc::new(RebornProductAuthServices::from_shared(Arc::new(
+            InMemoryAuthProductServices::new(),
+        )));
+
+        let input = RebornBuildInput::disabled("test-owner")
+            .with_product_auth_services(Arc::clone(&product_auth));
+
+        assert!(Arc::ptr_eq(
+            input
+                .product_auth_services
+                .as_ref()
+                .expect("builder should retain injected product auth services"),
+            &product_auth
+        ));
     }
 }

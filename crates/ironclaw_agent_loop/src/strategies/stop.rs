@@ -74,9 +74,8 @@ pub(crate) enum StopKind {
     Aborted(LoopFailureKind),
 }
 
-/// Reference baseline `StopConditionStrategy` — owns the safety-net escape
-/// trio per master spec §10 ("Production-safe escape" — repetition /
-/// no-progress detection):
+/// Reference baseline `StopConditionStrategy`, including repetition and
+/// no-progress safety-net escapes:
 ///
 /// 1. **Graceful terminate-hint**: every result in the just-completed batch
 ///    asked to terminate → `Stop { GracefulStop }`.
@@ -88,9 +87,6 @@ pub(crate) enum StopKind {
 ///    `Stop { NoProgressDetected }`.
 ///
 /// On no signal, returns `Continue` with `turns_completed += 1`.
-///
-/// See `docs/reborn/agent-loop-skeleton.md` §6 ("The nine strategies" →
-/// `StopConditionStrategy`) and §10 ("Production-safe escape").
 #[derive(Debug, Clone, Copy)]
 pub struct DefaultStopConditionStrategy {
     /// Window size for the "same call signature ≥ N times" check.
@@ -338,6 +334,8 @@ mod tests {
                     max_model_calls: 32,
                     max_capability_invocations: 64,
                 },
+                personal_context_policy:
+                    ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
                 runtime_constraints: RuntimeProfileConstraints {
                     allow_raw_runtime_backend_selection: false,
                     allow_broad_capability_surface: false,
@@ -366,7 +364,7 @@ mod tests {
         }
 
         #[test]
-        fn defaults_match_master_spec() {
+        fn defaults_match_documented_baseline() {
             let strategy = DefaultStopConditionStrategy::default();
             assert_eq!(strategy.repetition_window, 5);
             assert_eq!(strategy.repetition_threshold, 3);

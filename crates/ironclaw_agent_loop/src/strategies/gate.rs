@@ -5,11 +5,8 @@
 //! Async because future strategies may consult host state for grant-history
 //! or auth-flow lookups.
 //!
-//! See `docs/reborn/agent-loop-skeleton.md` §6 ("Strategy decomposition" →
-//! gate handling) and §8 ("Outcome enums"). Sanitization at the host port
-//! boundary (per master doc §9 + `contracts/turns-agent-loop.md` §6 +
-//! `contracts/lightweight-agent-loop.md` §8) means strategies never see
-//! raw input, secrets, or auth state.
+//! Sanitization at the host port boundary means strategies never see raw
+//! input, secrets, or auth state.
 
 use async_trait::async_trait;
 use ironclaw_turns::{LoopFailureKind, LoopGateRef};
@@ -35,9 +32,6 @@ fn _gate_handling_strategy_object_safe(_: &dyn GateHandlingStrategy) {}
 /// The executor checkpoints (`BeforeBlock`) and returns
 /// `LoopExit::Blocked`. Loop families that want skip-and-continue or abort
 /// semantics swap this strategy.
-///
-/// See `docs/reborn/agent-loop-skeleton.md` §6 ("The nine strategies" →
-/// `GateHandlingStrategy`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultGateHandlingStrategy;
 
@@ -98,7 +92,7 @@ pub(crate) enum GateOutcome {
 
 impl GateOutcome {
     /// Validate the outcome against the originating gate kind before an
-    /// executor honors it. WS-6 executor code must call this first.
+    /// executor honors it.
     pub(crate) fn validate_for_gate_kind(&self, kind: GateKind) -> Result<(), LoopFailureKind> {
         match (kind, self) {
             (GateKind::Approval, GateOutcome::SkipAndContinue { .. }) => {
@@ -185,6 +179,7 @@ mod tests {
                 max_model_calls: 32,
                 max_capability_invocations: 64,
             },
+            personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {
                 allow_raw_runtime_backend_selection: false,
                 allow_broad_capability_surface: false,

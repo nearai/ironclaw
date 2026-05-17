@@ -10,7 +10,28 @@ use crate::{
 
 #[async_trait]
 pub trait ConversationBindingService: Send + Sync {
+    /// Resolve an existing binding or create a first-contact binding without
+    /// trusting adapter-supplied requested scope hints.
     async fn resolve_or_create_binding(
+        &self,
+        request: ResolveConversationRequest,
+    ) -> Result<ConversationBindingResolution, InboundTurnError>;
+
+    /// Resolve or create a binding while applying host-owned default scope.
+    ///
+    /// The trusted scope must come from host configuration, not adapter input.
+    /// Implementations that persist bindings should persist these values on
+    /// first bind so later configuration changes do not silently reinterpret
+    /// the existing external conversation route.
+    async fn resolve_or_create_binding_with_trusted_scope(
+        &self,
+        request: ResolveConversationRequest,
+        trusted_agent_id: Option<ironclaw_host_api::AgentId>,
+        trusted_project_id: Option<ironclaw_host_api::ProjectId>,
+    ) -> Result<ConversationBindingResolution, InboundTurnError>;
+
+    /// Look up an existing binding without creating or widening binding state.
+    async fn lookup_binding(
         &self,
         request: ResolveConversationRequest,
     ) -> Result<ConversationBindingResolution, InboundTurnError>;

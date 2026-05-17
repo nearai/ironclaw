@@ -14,13 +14,15 @@ postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
 [dependencies]
 async-trait = "0.1"
 deadpool-postgres = { version = "0.14", optional = true }
+hex = "0.4"
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
+ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
-ironclaw_storage = { path = "../ironclaw_storage" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 thiserror = "2"
 tokio-postgres = { version = "0.7", optional = true }
 tracing = "0.1"
@@ -30,4 +32,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ironclaw_events = { path = "../ironclaw_events" }
 tempfile = "3"
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync"] }

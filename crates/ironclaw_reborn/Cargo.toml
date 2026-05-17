@@ -13,11 +13,21 @@ publish = false
 [features]
 default = []
 root-llm-provider = ["dep:ironclaw_llm"]
-libsql-secrets = ["dep:ironclaw_secrets", "ironclaw_secrets/libsql", "dep:libsql", "dep:secrecy"]
+libsql-secrets = [
+    "dep:ironclaw_secrets",
+    "dep:libsql",
+    "dep:secrecy",
+    "dep:ironclaw_filesystem",
+    "ironclaw_filesystem/libsql",
+]
 # Opt-in because the restart coverage opens real libSQL-backed turn/thread stores.
 # Keep separate from `libsql-secrets` so local `cargo test -p ironclaw_reborn`
 # stays fast, while CI can exercise process-restart persistence explicitly.
-libsql-restart-tests = ["dep:libsql", "ironclaw_threads/libsql", "ironclaw_turns/libsql"]
+libsql-restart-tests = [
+    "dep:libsql",
+    "dep:ironclaw_filesystem",
+    "ironclaw_filesystem/libsql",
+]
 
 [dependencies]
 async-trait = "0.1"
@@ -31,6 +41,7 @@ ironclaw_host_runtime = { path = "../ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0", optional = true, default-features = false }
 ironclaw_loop_support = { path = "../ironclaw_loop_support", version = "0.1.0" }
 ironclaw_secrets = { path = "../ironclaw_secrets", version = "0.1.0", optional = true }
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0", optional = true }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }

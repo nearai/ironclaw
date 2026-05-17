@@ -382,21 +382,22 @@ impl ResourceGovernor for ReleaseFailingGovernor {
         self.inner.set_limit(account, limits)
     }
 
-    fn reserve(
+    fn reserve_with_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
-    ) -> Result<ResourceReservation, ResourceError> {
-        self.inner.reserve(scope, estimate)
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        self.inner.reserve_with_outcome(scope, estimate)
     }
 
-    fn reserve_with_id(
+    fn reserve_with_id_and_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
         reservation_id: ResourceReservationId,
-    ) -> Result<ResourceReservation, ResourceError> {
-        self.inner.reserve_with_id(scope, estimate, reservation_id)
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        self.inner
+            .reserve_with_id_and_outcome(scope, estimate, reservation_id)
     }
 
     fn reconcile(
@@ -413,6 +414,13 @@ impl ResourceGovernor for ReleaseFailingGovernor {
     ) -> Result<ResourceReceipt, ResourceError> {
         Err(ResourceError::UnknownReservation { id: reservation_id })
     }
+
+    fn account_snapshot(
+        &self,
+        account: &ResourceAccount,
+    ) -> Result<Option<ironclaw_resources::AccountSnapshot>, ResourceError> {
+        self.inner.account_snapshot(account)
+    }
 }
 
 fn script_package() -> ExtensionPackage {
@@ -424,9 +432,23 @@ fn wasm_package() -> ExtensionPackage {
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse(manifest).unwrap();
+    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+        manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .unwrap();
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
+}
+
+fn capability_provider_contracts() -> HostApiContractRegistry {
+    let mut contracts = HostApiContractRegistry::new();
+    contracts
+        .register(Arc::new(CapabilityProviderHostApiContract::new().unwrap()))
+        .unwrap();
+    contracts
 }
 
 fn sample_scope() -> ResourceScope {
@@ -441,7 +463,7 @@ fn sample_scope() -> ResourceScope {
     }
 }
 
-const SCRIPT_MANIFEST: &str = r#"
+const SCRIPT_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "script"
 name = "Script Echo"
 version = "0.1.0"
@@ -450,20 +472,28 @@ trust = "untrusted"
 
 [runtime]
 kind = "script"
-backend = "docker"
+runner = "docker"
 image = "alpine:latest"
 command = "script-echo"
 args = ["--json"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "script.echo"
 description = "Echo text"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/script/echo.input.v1.json"
+output_schema_ref = "schemas/script/echo.output.v1.json"
 "#;
 
-const WASM_MANIFEST: &str = r#"
+const WASM_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "echo"
 name = "Echo"
 version = "0.1.0"
@@ -479,5 +509,7 @@ id = "echo.say"
 description = "Echo text"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/echo/say.input.v1.json"
+output_schema_ref = "schemas/echo/say.output.v1.json"
 "#;

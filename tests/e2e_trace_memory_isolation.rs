@@ -82,7 +82,7 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(
         not(feature = "pr7-ready"),
-        ignore = "tool-layer rejection requires PR 7 (product-tool migration) to route memory_write through ironclaw_memory's PromptWriteSafetyPolicy. Today the tool path runs against the legacy host workspace, which does not consult the substrate, so this test would fail prematurely. Distinct from `pr3180-ready` (substrate-level guards) — split here because the substrate and the tool routing land in separate PRs. Enable with --features pr7-ready when PR 7 lands. Substrate-level SOUL.md rejection has always-on coverage in `crates/ironclaw_memory/tests/e2e_scope_isolation_safety.rs::protected_paths_high_risk_writes_blocked_at_libsql_backend`."
+        ignore = "tool-layer rejection requires PR 7 (product-tool migration) to route memory_write through ironclaw_memory's PromptWriteSafetyPolicy. Today the tool path runs against the legacy host workspace, which does not consult the substrate, so this test would fail prematurely. Distinct from `pr3180-ready` (substrate-level guards) — split here because the substrate and the tool routing land in separate PRs. Enable with --features pr7-ready when PR 7 lands. Substrate-level SOUL.md rejection coverage lives in `crates/ironclaw_memory/tests/memory_filesystem_contract.rs` and `memory_backend_contract.rs` against `FilesystemMemoryDocumentRepository` over `InMemoryBackend`."
     )]
     async fn memory_write_to_soul_md_rejects_through_tool_layer_no_persistence() {
         let trace = LlmTrace::from_file(concat!(

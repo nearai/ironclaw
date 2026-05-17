@@ -9,14 +9,19 @@
 use std::{collections::HashMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityId, MountView, ResourceEstimate, ResourceScope, ResourceUsage,
     RuntimeDispatchErrorKind,
 };
 use serde_json::Value;
 
+use crate::InvocationServices;
+
 /// Already-authorized first-party capability dispatch input.
+///
+/// This is host-composed first-party surface, so the struct is `non_exhaustive`:
+/// external crates may inspect fields in custom handlers but must not construct
+/// it with a struct literal.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct FirstPartyCapabilityRequest {
@@ -24,7 +29,7 @@ pub struct FirstPartyCapabilityRequest {
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
-    pub filesystem: Arc<dyn RootFilesystem>,
+    pub services: InvocationServices,
     pub input: Value,
 }
 
@@ -36,7 +41,7 @@ impl fmt::Debug for FirstPartyCapabilityRequest {
             .field("scope", &self.scope)
             .field("estimate", &self.estimate)
             .field("mounts", &self.mounts)
-            .field("filesystem", &"<root filesystem>")
+            .field("services", &self.services)
             .field("input", &self.input)
             .finish()
     }

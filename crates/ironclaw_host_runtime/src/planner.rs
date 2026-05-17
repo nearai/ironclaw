@@ -21,10 +21,11 @@
 //!
 //! Fail-closed rules locked in here:
 //!
-//! - A capability that requires `SpawnProcess` / `ExecuteCode` against
-//!   a policy whose `process_backend` is `None` is rejected.
-//! - A capability that requires `Network` against `NetworkMode::Deny`
-//!   is rejected.
+//! - A script-runtime capability, or a capability that requires
+//!   `SpawnProcess` / `ExecuteCode`, against a policy whose
+//!   `process_backend` is `None` is rejected.
+//! - An MCP-runtime capability, or a capability that requires
+//!   `Network`, against `NetworkMode::Deny` is rejected.
 //! - A capability that requires `UseSecret` against `SecretMode::Deny`
 //!   is rejected.
 //!
@@ -50,9 +51,10 @@
 //! planner-write-scope).
 
 use ironclaw_host_api::runtime_policy::{
-    EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, ProcessBackendKind, SecretMode,
+    DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
+    RuntimeProfile, SecretMode,
 };
-use ironclaw_host_api::{CapabilityDescriptor, CapabilityId, EffectKind};
+use ironclaw_host_api::{CapabilityDescriptor, CapabilityId, EffectKind, RuntimeKind};
 use thiserror::Error;
 
 /// Concrete plan derived from an `EffectiveRuntimePolicy` for a single
@@ -66,10 +68,16 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionPlan {
     pub capability: CapabilityId,
+    pub deployment: DeploymentMode,
+    pub resolved_profile: RuntimeProfile,
     pub filesystem_backend: FilesystemBackendKind,
     pub process_backend: ProcessBackendKind,
     pub network_mode: NetworkMode,
     pub secret_mode: SecretMode,
+    pub requires_filesystem: bool,
+    pub requires_process: bool,
+    pub requires_network: bool,
+    pub requires_secret: bool,
 }
 
 /// Reasons the planner refuses to produce an `ExecutionPlan`.
@@ -113,9 +121,16 @@ pub fn plan_capability(
     policy: &EffectiveRuntimePolicy,
 ) -> Result<ExecutionPlan, PlannerError> {
     let effects = &descriptor.effects;
-    let needs_process = effects
-        .iter()
-        .any(|e| matches!(e, EffectKind::SpawnProcess | EffectKind::ExecuteCode));
+    let needs_filesystem = effects.iter().any(|e| {
+        matches!(
+            e,
+            EffectKind::ReadFilesystem | EffectKind::WriteFilesystem | EffectKind::DeleteFilesystem
+        )
+    });
+    let needs_process = descriptor.runtime == RuntimeKind::Script
+        || effects
+            .iter()
+            .any(|e| matches!(e, EffectKind::SpawnProcess | EffectKind::ExecuteCode));
     if needs_process && matches!(policy.process_backend, ProcessBackendKind::None) {
         return Err(
             PlannerError::ProcessEffectsRequiredButProcessBackendIsNone {
@@ -124,7 +139,8 @@ pub fn plan_capability(
         );
     }
 
-    let needs_network = effects.iter().any(|e| matches!(e, EffectKind::Network));
+    let needs_network = descriptor.runtime == RuntimeKind::Mcp
+        || effects.iter().any(|e| matches!(e, EffectKind::Network));
     if needs_network && matches!(policy.network_mode, NetworkMode::Deny) {
         return Err(PlannerError::NetworkRequiredButNetworkModeIsDeny {
             capability: descriptor.id.clone(),
@@ -140,10 +156,16 @@ pub fn plan_capability(
 
     Ok(ExecutionPlan {
         capability: descriptor.id.clone(),
+        deployment: policy.deployment,
+        resolved_profile: policy.resolved_profile,
         filesystem_backend: policy.filesystem_backend,
         process_backend: policy.process_backend,
         network_mode: policy.network_mode,
         secret_mode: policy.secret_mode,
+        requires_filesystem: needs_filesystem,
+        requires_process: needs_process,
+        requires_network: needs_network,
+        requires_secret: needs_secret,
     })
 }
 
@@ -156,10 +178,17 @@ mod tests {
     use ironclaw_host_api::{ExtensionId, PermissionMode, RuntimeKind, TrustClass};
 
     fn descriptor(effects: Vec<EffectKind>) -> CapabilityDescriptor {
+        descriptor_with_runtime(RuntimeKind::Script, effects)
+    }
+
+    fn descriptor_with_runtime(
+        runtime: RuntimeKind,
+        effects: Vec<EffectKind>,
+    ) -> CapabilityDescriptor {
         CapabilityDescriptor {
             id: CapabilityId::new("test.capability".to_string()).unwrap(),
             provider: ExtensionId::new("test_extension".to_string()).unwrap(),
-            runtime: RuntimeKind::Script,
+            runtime,
             trust_ceiling: TrustClass::UserTrusted,
             description: "test".to_string(),
             parameters_schema: serde_json::Value::Null,
@@ -194,7 +223,7 @@ mod tests {
         // read under selected root`. The planner forwards the
         // resolved filesystem backend; downstream composition picks
         // the actual root.
-        let desc = descriptor(vec![EffectKind::ReadFilesystem]);
+        let desc = descriptor_with_runtime(RuntimeKind::Wasm, vec![EffectKind::ReadFilesystem]);
         let policy = policy_with(
             FilesystemBackendKind::HostWorkspace,
             ProcessBackendKind::None,
@@ -206,6 +235,61 @@ mod tests {
             plan.filesystem_backend,
             FilesystemBackendKind::HostWorkspace
         );
+    }
+
+    #[test]
+    fn marks_required_services_from_declared_effects() {
+        let policy = policy_with(
+            FilesystemBackendKind::HostWorkspace,
+            ProcessBackendKind::LocalHost,
+            NetworkMode::DirectLogged,
+            SecretMode::ScrubbedEnv,
+        );
+
+        let cases = [
+            (
+                vec![EffectKind::ReadFilesystem],
+                (true, false, false, false),
+            ),
+            (
+                vec![EffectKind::WriteFilesystem],
+                (true, false, false, false),
+            ),
+            (
+                vec![EffectKind::DeleteFilesystem],
+                (true, false, false, false),
+            ),
+            (vec![EffectKind::SpawnProcess], (false, true, false, false)),
+            (vec![EffectKind::ExecuteCode], (false, true, false, false)),
+            (vec![EffectKind::Network], (false, false, true, false)),
+            (vec![EffectKind::UseSecret], (false, false, false, true)),
+            (
+                vec![EffectKind::ReadFilesystem, EffectKind::Network],
+                (true, false, true, false),
+            ),
+            (
+                vec![EffectKind::SpawnProcess, EffectKind::UseSecret],
+                (false, true, false, true),
+            ),
+            (Vec::new(), (false, false, false, false)),
+        ];
+
+        for (effects, expected) in cases {
+            let plan = plan_capability(
+                &descriptor_with_runtime(RuntimeKind::Wasm, effects),
+                &policy,
+            )
+            .unwrap();
+            assert_eq!(
+                (
+                    plan.requires_filesystem,
+                    plan.requires_process,
+                    plan.requires_network,
+                    plan.requires_secret,
+                ),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -266,8 +350,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_script_runtime_when_policy_disables_processes_even_without_process_effects() {
+        let desc = descriptor(vec![EffectKind::DispatchCapability]);
+        let policy = policy_with(
+            FilesystemBackendKind::ScopedVirtual,
+            ProcessBackendKind::None,
+            NetworkMode::Brokered,
+            SecretMode::BrokeredHandles,
+        );
+        let err = plan_capability(&desc, &policy).unwrap_err();
+        assert!(matches!(
+            err,
+            PlannerError::ProcessEffectsRequiredButProcessBackendIsNone { .. }
+        ));
+    }
+
+    #[test]
     fn rejects_network_capability_when_policy_denies_network() {
-        let desc = descriptor(vec![EffectKind::Network]);
+        let desc = descriptor_with_runtime(RuntimeKind::Wasm, vec![EffectKind::Network]);
         let policy = policy_with(
             FilesystemBackendKind::ScopedVirtual,
             ProcessBackendKind::None,
@@ -283,7 +383,7 @@ mod tests {
 
     #[test]
     fn rejects_secret_capability_when_policy_denies_secrets() {
-        let desc = descriptor(vec![EffectKind::UseSecret]);
+        let desc = descriptor_with_runtime(RuntimeKind::Wasm, vec![EffectKind::UseSecret]);
         let policy = policy_with(
             FilesystemBackendKind::ScopedVirtual,
             ProcessBackendKind::None,
@@ -302,7 +402,7 @@ mod tests {
         // A capability with empty `effects` (e.g. a pure
         // dispatch/observability capability) doesn't trigger any
         // fail-closed branches and just gets the policy's defaults.
-        let desc = descriptor(vec![]);
+        let desc = descriptor_with_runtime(RuntimeKind::Wasm, vec![]);
         let policy = policy_with(
             FilesystemBackendKind::ScopedVirtual,
             ProcessBackendKind::None,

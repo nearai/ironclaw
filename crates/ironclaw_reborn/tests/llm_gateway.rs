@@ -1,40 +1,51 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_llm::{
-    CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider,
+    CompletionRequest, CompletionResponse, FinishReason, LlmError, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
 };
 use ironclaw_loop_support::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelRouteSnapshot,
 };
-use ironclaw_reborn::{
-    LlmModelProfilePolicy, LlmProviderModelGateway, ModelRoute, ModelRoutePolicy,
-    ModelSelectionMode, ModelSlot, RoutedLlmProviderModelGateway, StaticModelRouteProviderPool,
-    StaticModelRouteResolver, ThreadBackedLoopModelGateway,
+use ironclaw_reborn::model_gateway::{
+    LlmModelProfilePolicy, LlmProviderModelGateway, RoutedLlmProviderModelGateway,
+    StaticModelRouteProviderPool, ThreadBackedLoopModelGateway,
+};
+use ironclaw_reborn::model_routes::{
+    ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
-    SessionThreadService, ThreadScope,
+    ProviderToolCallReferenceEnvelope, SessionThreadService, ThreadScope,
+    ToolResultReferenceEnvelope, ToolResultSafeSummary,
 };
 use ironclaw_turns::{
     LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostErrorKind, CapabilitySurfaceVersion, HostManagedLoopModelPort,
-        InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopHostMilestoneKind,
-        LoopModelMessage, LoopModelPort, LoopModelRequest, LoopRunContext, ModelProfileId,
+        InMemoryLoopHostMilestoneSink, InMemoryRunProfileResolver, LoopCapabilityPort,
+        LoopHostMilestoneKind, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopRunContext,
+        ModelProfileId, ParentLoopOutput, ProviderToolCall, ProviderToolCallReplay,
+        ProviderToolDefinition, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use rust_decimal::Decimal;
+
+const STATIC_PROVIDER_ID: &str = "static-test-provider";
 
 #[tokio::test]
 async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
     let policy = LlmModelProfilePolicy::new()
         .allow_model_profile(interactive_model(), Some("host-selected-model".to_string()));
-    let gateway = LlmProviderModelGateway::new(provider.clone(), policy);
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        policy,
+    );
 
     let request = model_request(interactive_model());
     let expected_run_id = request.run_id.to_string();
@@ -70,9 +81,615 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
 }
 
 #[tokio::test]
+async fn gateway_with_empty_tool_definitions_uses_plain_complete() {
+    let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::default());
+
+    let response = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.safe_text_deltas,
+        vec!["assistant response".to_string()]
+    );
+    assert_eq!(provider.complete_requests.lock().unwrap().len(), 1);
+    assert!(provider.tool_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn gateway_with_tool_surface_calls_complete_with_tools_and_returns_capability_calls() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![ToolCall {
+        id: "call_1".to_string(),
+        name: "demo__echo".to_string(),
+        arguments: serde_json::json!({"message":"hello"}),
+        reasoning: None,
+        signature: Some("sig-1".to_string()),
+    }]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let response = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap();
+
+    assert!(provider.complete_requests.lock().unwrap().is_empty());
+    let tool_requests = provider.tool_requests.lock().unwrap();
+    assert_eq!(tool_requests.len(), 1);
+    assert_eq!(
+        tool_requests[0].model.as_deref(),
+        Some("host-selected-model")
+    );
+    assert_eq!(tool_requests[0].tools[0].name, "demo__echo");
+    drop(tool_requests);
+
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected capability calls");
+    };
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0].capability_id,
+        CapabilityId::new("demo.echo").unwrap()
+    );
+    let provider_replay = calls[0]
+        .provider_replay
+        .as_ref()
+        .expect("provider replay metadata");
+    assert_eq!(provider_replay.provider_id, STATIC_PROVIDER_ID);
+    assert_eq!(provider_replay.provider_model_id, "host-selected-model");
+    assert_eq!(provider_replay.provider_call_id, "call_1");
+    assert_eq!(provider_replay.provider_tool_name, "demo__echo");
+    assert_eq!(
+        provider_replay.arguments,
+        serde_json::json!({"message":"hello"})
+    );
+    assert_eq!(
+        provider_replay.response_reasoning.as_deref(),
+        Some("response reasoning")
+    );
+    assert_eq!(provider_replay.signature.as_deref(), Some("sig-1"));
+
+    let registered = capabilities.registered.lock().unwrap();
+    assert_eq!(registered.len(), 1);
+    assert_eq!(
+        registered[0].arguments,
+        serde_json::json!({"message":"hello"})
+    );
+}
+
+#[tokio::test]
+async fn gateway_rejects_unknown_provider_tool_call_before_registration() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![
+        ToolCall {
+            id: "call_1".to_string(),
+            name: "demo__echo".to_string(),
+            arguments: serde_json::json!({"message":"one"}),
+            reasoning: None,
+            signature: None,
+        },
+        ToolCall {
+            id: "call_2".to_string(),
+            name: "hidden__tool".to_string(),
+            arguments: serde_json::json!({"message":"two"}),
+            reasoning: None,
+            signature: None,
+        },
+    ]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let error = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
+    assert!(capabilities.registered.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn gateway_rejects_invalid_provider_tool_batch_before_any_registration() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![
+        ToolCall {
+            id: "call_1".to_string(),
+            name: "demo__echo".to_string(),
+            arguments: serde_json::json!({"message":"one"}),
+            reasoning: None,
+            signature: None,
+        },
+        ToolCall {
+            id: "call_2".to_string(),
+            name: "demo__echo".to_string(),
+            arguments: serde_json::json!({"message":"x".repeat(20 * 1024)}),
+            reasoning: None,
+            signature: None,
+        },
+    ]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let error = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
+    assert!(capabilities.registered.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn gateway_with_two_tool_calls_returns_two_candidates() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![
+        ToolCall {
+            id: "call_1".to_string(),
+            name: "demo__echo".to_string(),
+            arguments: serde_json::json!({"message":"one"}),
+            reasoning: Some("call reasoning".to_string()),
+            signature: None,
+        },
+        ToolCall {
+            id: "call_2".to_string(),
+            name: "demo__echo".to_string(),
+            arguments: serde_json::json!({"message":"two"}),
+            reasoning: None,
+            signature: None,
+        },
+    ]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let response = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities)
+        .await
+        .unwrap();
+
+    let ParentLoopOutput::CapabilityCalls(calls) = response.output else {
+        panic!("expected capability calls");
+    };
+    assert_eq!(calls.len(), 2);
+    assert_eq!(
+        calls[0]
+            .provider_replay
+            .as_ref()
+            .and_then(|replay| replay.reasoning.as_deref()),
+        Some("call reasoning")
+    );
+    assert_eq!(
+        calls[1]
+            .provider_replay
+            .as_ref()
+            .and_then(|replay| replay.response_reasoning.as_deref()),
+        Some("response reasoning")
+    );
+}
+
+#[tokio::test]
+async fn gateway_reconstructs_provider_tool_roundtrip_from_tool_result_reference() {
+    let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let envelope = ToolResultReferenceEnvelope::new(
+        "result:demo-tool",
+        ToolResultSafeSummary::new("tool completed").unwrap(),
+    )
+    .unwrap();
+    let provider_call = ProviderToolCallReferenceEnvelope {
+        provider_id: STATIC_PROVIDER_ID.to_string(),
+        provider_model_id: "host-selected-model".to_string(),
+        provider_turn_id: "turn_1".to_string(),
+        provider_call_id: "call_1".to_string(),
+        provider_tool_name: "demo__echo".to_string(),
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        arguments: serde_json::json!({"message":"hello"}),
+        response_reasoning: Some("provider reasoning".to_string()),
+        reasoning: Some("provider reasoning".to_string()),
+        signature: Some("sig-1".to_string()),
+    };
+    let mut request = model_request(interactive_model());
+    request.messages = vec![HostManagedModelMessage {
+        role: HostManagedModelMessageRole::ToolResult,
+        content: serde_json::to_string(&envelope).unwrap(),
+        content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
+        tool_result_provider_call: Some(provider_call),
+    }];
+
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.complete_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].messages.len(), 2);
+    let assistant = &requests[0].messages[0];
+    assert_eq!(assistant.role, Role::Assistant);
+    assert_eq!(assistant.reasoning.as_deref(), Some("provider reasoning"));
+    let tool_calls = assistant.tool_calls.as_ref().expect("assistant tool call");
+    assert_eq!(tool_calls[0].id, "call_1");
+    assert_eq!(tool_calls[0].name, "demo__echo");
+    assert_eq!(
+        tool_calls[0].arguments,
+        serde_json::json!({"message":"hello"})
+    );
+    assert_eq!(
+        tool_calls[0].reasoning.as_deref(),
+        Some("provider reasoning")
+    );
+    assert_eq!(tool_calls[0].signature.as_deref(), Some("sig-1"));
+    let tool_result = &requests[0].messages[1];
+    assert_eq!(tool_result.role, Role::Tool);
+    assert_eq!(tool_result.tool_call_id.as_deref(), Some("call_1"));
+    assert_eq!(tool_result.name.as_deref(), Some("demo__echo"));
+    assert_eq!(tool_result.content, "tool completed");
+}
+
+#[tokio::test]
+async fn gateway_reconstructs_multi_tool_provider_turn_from_grouped_result_references() {
+    let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let first_envelope = ToolResultReferenceEnvelope::new(
+        "result:first-tool",
+        ToolResultSafeSummary::new("first tool completed").unwrap(),
+    )
+    .unwrap();
+    let second_envelope = ToolResultReferenceEnvelope::new(
+        "result:second-tool",
+        ToolResultSafeSummary::new("second tool completed").unwrap(),
+    )
+    .unwrap();
+    let first_provider_call = ProviderToolCallReferenceEnvelope {
+        provider_id: STATIC_PROVIDER_ID.to_string(),
+        provider_model_id: "host-selected-model".to_string(),
+        provider_turn_id: "turn_1".to_string(),
+        provider_call_id: "call_1".to_string(),
+        provider_tool_name: "demo__echo".to_string(),
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        arguments: serde_json::json!({"message":"first"}),
+        response_reasoning: Some("provider reasoning".to_string()),
+        reasoning: Some("provider reasoning".to_string()),
+        signature: Some("sig-1".to_string()),
+    };
+    let second_provider_call = ProviderToolCallReferenceEnvelope {
+        provider_id: STATIC_PROVIDER_ID.to_string(),
+        provider_model_id: "host-selected-model".to_string(),
+        provider_turn_id: "turn_1".to_string(),
+        provider_call_id: "call_2".to_string(),
+        provider_tool_name: "demo__echo".to_string(),
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        arguments: serde_json::json!({"message":"second"}),
+        response_reasoning: Some("provider reasoning".to_string()),
+        reasoning: None,
+        signature: None,
+    };
+    let mut request = model_request(interactive_model());
+    request.messages = vec![
+        HostManagedModelMessage {
+            role: HostManagedModelMessageRole::ToolResult,
+            content: serde_json::to_string(&first_envelope).unwrap(),
+            content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
+            tool_result_provider_call: Some(first_provider_call),
+        },
+        HostManagedModelMessage {
+            role: HostManagedModelMessageRole::ToolResult,
+            content: serde_json::to_string(&second_envelope).unwrap(),
+            content_ref: LoopMessageRef::new("msg:44444444-4444-4444-4444-444444444444").unwrap(),
+            tool_result_provider_call: Some(second_provider_call),
+        },
+    ];
+
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.complete_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].messages.len(), 3);
+    let assistant = &requests[0].messages[0];
+    assert_eq!(assistant.role, Role::Assistant);
+    assert_eq!(assistant.reasoning.as_deref(), Some("provider reasoning"));
+    let tool_calls = assistant.tool_calls.as_ref().expect("assistant tool calls");
+    assert_eq!(tool_calls.len(), 2);
+    assert_eq!(tool_calls[0].id, "call_1");
+    assert_eq!(
+        tool_calls[0].arguments,
+        serde_json::json!({"message":"first"})
+    );
+    assert_eq!(tool_calls[1].id, "call_2");
+    assert_eq!(
+        tool_calls[1].arguments,
+        serde_json::json!({"message":"second"})
+    );
+    let first_tool_result = &requests[0].messages[1];
+    assert_eq!(first_tool_result.role, Role::Tool);
+    assert_eq!(first_tool_result.tool_call_id.as_deref(), Some("call_1"));
+    assert_eq!(first_tool_result.content, "first tool completed");
+    let second_tool_result = &requests[0].messages[2];
+    assert_eq!(second_tool_result.role, Role::Tool);
+    assert_eq!(second_tool_result.tool_call_id.as_deref(), Some("call_2"));
+    assert_eq!(second_tool_result.content, "second tool completed");
+}
+
+#[tokio::test]
+async fn gateway_splits_adjacent_provider_tool_results_from_different_turns() {
+    let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let first_envelope = ToolResultReferenceEnvelope::new(
+        "result:first-tool",
+        ToolResultSafeSummary::new("first tool completed").unwrap(),
+    )
+    .unwrap();
+    let second_envelope = ToolResultReferenceEnvelope::new(
+        "result:second-tool",
+        ToolResultSafeSummary::new("second tool completed").unwrap(),
+    )
+    .unwrap();
+    let first_provider_call = ProviderToolCallReferenceEnvelope {
+        provider_id: STATIC_PROVIDER_ID.to_string(),
+        provider_model_id: "host-selected-model".to_string(),
+        provider_turn_id: "turn_1".to_string(),
+        provider_call_id: "call_1".to_string(),
+        provider_tool_name: "demo__echo".to_string(),
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        arguments: serde_json::json!({"message":"first"}),
+        response_reasoning: Some("first provider reasoning".to_string()),
+        reasoning: Some("first call reasoning".to_string()),
+        signature: Some("sig-1".to_string()),
+    };
+    let second_provider_call = ProviderToolCallReferenceEnvelope {
+        provider_id: STATIC_PROVIDER_ID.to_string(),
+        provider_model_id: "host-selected-model".to_string(),
+        provider_turn_id: "turn_2".to_string(),
+        provider_call_id: "call_2".to_string(),
+        provider_tool_name: "demo__echo".to_string(),
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        arguments: serde_json::json!({"message":"second"}),
+        response_reasoning: Some("second provider reasoning".to_string()),
+        reasoning: Some("second call reasoning".to_string()),
+        signature: Some("sig-2".to_string()),
+    };
+    let mut request = model_request(interactive_model());
+    request.messages = vec![
+        HostManagedModelMessage {
+            role: HostManagedModelMessageRole::ToolResult,
+            content: serde_json::to_string(&first_envelope).unwrap(),
+            content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
+            tool_result_provider_call: Some(first_provider_call),
+        },
+        HostManagedModelMessage {
+            role: HostManagedModelMessageRole::ToolResult,
+            content: serde_json::to_string(&second_envelope).unwrap(),
+            content_ref: LoopMessageRef::new("msg:44444444-4444-4444-4444-444444444444").unwrap(),
+            tool_result_provider_call: Some(second_provider_call),
+        },
+    ];
+
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.complete_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].messages.len(), 4);
+
+    let first_assistant = &requests[0].messages[0];
+    assert_eq!(first_assistant.role, Role::Assistant);
+    assert_eq!(
+        first_assistant.reasoning.as_deref(),
+        Some("first provider reasoning")
+    );
+    let first_tool_calls = first_assistant
+        .tool_calls
+        .as_ref()
+        .expect("first assistant tool call");
+    assert_eq!(first_tool_calls.len(), 1);
+    assert_eq!(first_tool_calls[0].id, "call_1");
+    assert_eq!(
+        first_tool_calls[0].arguments,
+        serde_json::json!({"message":"first"})
+    );
+    let first_tool_result = &requests[0].messages[1];
+    assert_eq!(first_tool_result.role, Role::Tool);
+    assert_eq!(first_tool_result.tool_call_id.as_deref(), Some("call_1"));
+    assert_eq!(first_tool_result.content, "first tool completed");
+
+    let second_assistant = &requests[0].messages[2];
+    assert_eq!(second_assistant.role, Role::Assistant);
+    assert_eq!(
+        second_assistant.reasoning.as_deref(),
+        Some("second provider reasoning")
+    );
+    let second_tool_calls = second_assistant
+        .tool_calls
+        .as_ref()
+        .expect("second assistant tool call");
+    assert_eq!(second_tool_calls.len(), 1);
+    assert_eq!(second_tool_calls[0].id, "call_2");
+    assert_eq!(
+        second_tool_calls[0].arguments,
+        serde_json::json!({"message":"second"})
+    );
+    let second_tool_result = &requests[0].messages[3];
+    assert_eq!(second_tool_result.role, Role::Tool);
+    assert_eq!(second_tool_result.tool_call_id.as_deref(), Some("call_2"));
+    assert_eq!(second_tool_result.content, "second tool completed");
+}
+
+#[tokio::test]
+async fn gateway_keeps_same_turn_provider_roundtrip_when_plain_tool_result_is_interleaved() {
+    let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let first_envelope = ToolResultReferenceEnvelope::new(
+        "result:first-tool",
+        ToolResultSafeSummary::new("first tool completed").unwrap(),
+    )
+    .unwrap();
+    let plain_envelope = ToolResultReferenceEnvelope::new(
+        "result:plain-tool",
+        ToolResultSafeSummary::new("plain tool completed").unwrap(),
+    )
+    .unwrap();
+    let second_envelope = ToolResultReferenceEnvelope::new(
+        "result:second-tool",
+        ToolResultSafeSummary::new("second tool completed").unwrap(),
+    )
+    .unwrap();
+    let first_provider_call = ProviderToolCallReferenceEnvelope {
+        provider_id: STATIC_PROVIDER_ID.to_string(),
+        provider_model_id: "host-selected-model".to_string(),
+        provider_turn_id: "turn_1".to_string(),
+        provider_call_id: "call_1".to_string(),
+        provider_tool_name: "demo__echo".to_string(),
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        arguments: serde_json::json!({"message":"first"}),
+        response_reasoning: Some("provider reasoning".to_string()),
+        reasoning: Some("provider reasoning".to_string()),
+        signature: Some("sig-1".to_string()),
+    };
+    let second_provider_call = ProviderToolCallReferenceEnvelope {
+        provider_id: STATIC_PROVIDER_ID.to_string(),
+        provider_model_id: "host-selected-model".to_string(),
+        provider_turn_id: "turn_1".to_string(),
+        provider_call_id: "call_2".to_string(),
+        provider_tool_name: "demo__echo".to_string(),
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        arguments: serde_json::json!({"message":"second"}),
+        response_reasoning: Some("provider reasoning".to_string()),
+        reasoning: None,
+        signature: None,
+    };
+    let mut request = model_request(interactive_model());
+    request.messages = vec![
+        HostManagedModelMessage {
+            role: HostManagedModelMessageRole::ToolResult,
+            content: serde_json::to_string(&first_envelope).unwrap(),
+            content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
+            tool_result_provider_call: Some(first_provider_call),
+        },
+        HostManagedModelMessage {
+            role: HostManagedModelMessageRole::ToolResult,
+            content: serde_json::to_string(&plain_envelope).unwrap(),
+            content_ref: LoopMessageRef::new("msg:55555555-5555-5555-5555-555555555555").unwrap(),
+            tool_result_provider_call: None,
+        },
+        HostManagedModelMessage {
+            role: HostManagedModelMessageRole::ToolResult,
+            content: serde_json::to_string(&second_envelope).unwrap(),
+            content_ref: LoopMessageRef::new("msg:44444444-4444-4444-4444-444444444444").unwrap(),
+            tool_result_provider_call: Some(second_provider_call),
+        },
+    ];
+
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.complete_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].messages.len(), 4);
+    let assistant = &requests[0].messages[0];
+    assert_eq!(assistant.role, Role::Assistant);
+    let tool_calls = assistant.tool_calls.as_ref().expect("assistant tool calls");
+    assert_eq!(tool_calls.len(), 2);
+    assert_eq!(tool_calls[0].id, "call_1");
+    assert_eq!(tool_calls[1].id, "call_2");
+    assert_eq!(requests[0].messages[1].role, Role::Tool);
+    assert_eq!(
+        requests[0].messages[1].tool_call_id.as_deref(),
+        Some("call_1")
+    );
+    assert_eq!(requests[0].messages[2].role, Role::Tool);
+    assert_eq!(
+        requests[0].messages[2].tool_call_id.as_deref(),
+        Some("call_2")
+    );
+    assert_eq!(requests[0].messages[3].role, Role::System);
+    assert_eq!(requests[0].messages[3].content, "plain tool completed");
+}
+
+#[tokio::test]
+async fn gateway_rejects_provider_tool_replay_from_different_provider_route() {
+    let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let envelope = ToolResultReferenceEnvelope::new(
+        "result:demo-tool",
+        ToolResultSafeSummary::new("tool completed").unwrap(),
+    )
+    .unwrap();
+    let provider_call = ProviderToolCallReferenceEnvelope {
+        provider_id: "other-provider".to_string(),
+        provider_model_id: "host-selected-model".to_string(),
+        provider_turn_id: "turn_1".to_string(),
+        provider_call_id: "call_1".to_string(),
+        provider_tool_name: "demo__echo".to_string(),
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        arguments: serde_json::json!({"message":"hello"}),
+        response_reasoning: None,
+        reasoning: None,
+        signature: None,
+    };
+    let mut request = model_request(interactive_model());
+    request.messages = vec![HostManagedModelMessage {
+        role: HostManagedModelMessageRole::ToolResult,
+        content: serde_json::to_string(&envelope).unwrap(),
+        content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
+        tool_result_provider_call: Some(provider_call),
+    }];
+
+    let error = gateway.stream_model(request).await.unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::PolicyDenied);
+    assert!(provider.complete_requests.lock().unwrap().is_empty());
+    assert!(provider.tool_requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn gateway_rejects_unknown_model_profile_without_calling_provider() {
     let provider = Arc::new(RecordingLlmProvider::reply("unused"));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
@@ -90,7 +707,8 @@ async fn gateway_rejects_unknown_model_profile_without_calling_provider() {
 #[tokio::test]
 async fn gateway_rejects_unpinned_model_profile_without_calling_provider() {
     let provider = Arc::new(RecordingLlmProvider::reply("unused"));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new().allow_model_profile(interactive_model(), None),
     );
@@ -110,7 +728,8 @@ async fn gateway_rejects_truncated_provider_responses() {
         "partial response",
         FinishReason::Length,
     ));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
         provider,
         LlmModelProfilePolicy::new()
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
@@ -130,7 +749,8 @@ async fn gateway_rejects_content_filtered_provider_responses() {
         "filtered response",
         FinishReason::ContentFilter,
     ));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
         provider,
         LlmModelProfilePolicy::new()
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
@@ -150,7 +770,8 @@ async fn gateway_rejects_tool_use_provider_responses() {
         "tool call requested",
         FinishReason::ToolUse,
     ));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
         provider,
         LlmModelProfilePolicy::new()
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
@@ -165,12 +786,33 @@ async fn gateway_rejects_tool_use_provider_responses() {
 }
 
 #[tokio::test]
+async fn gateway_rejects_tool_use_without_tool_calls_on_capability_path() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(Vec::new()));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let error = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
+    assert!(capabilities.registered.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn gateway_rejects_unknown_finish_reason_provider_responses() {
     let provider = Arc::new(RecordingLlmProvider::reply_with_finish_reason(
         "unknown completion",
         FinishReason::Unknown,
     ));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
         provider,
         LlmModelProfilePolicy::new()
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
@@ -188,7 +830,8 @@ async fn gateway_rejects_unknown_finish_reason_provider_responses() {
 async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones() {
     let fixture = ThreadFixture::new().await;
     let provider = Arc::new(RecordingLlmProvider::reply("production response"));
-    let provider_gateway = Arc::new(LlmProviderModelGateway::new(
+    let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
@@ -215,6 +858,7 @@ async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones
             }],
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -248,7 +892,8 @@ async fn production_loop_model_gateway_sanitizes_provider_output_before_public_c
     let provider = Arc::new(RecordingLlmProvider::reply(
         "RAW_CREDENTIAL_SENTINEL sk-production-secret",
     ));
-    let provider_gateway = Arc::new(LlmProviderModelGateway::new(
+    let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
@@ -275,6 +920,7 @@ async fn production_loop_model_gateway_sanitizes_provider_output_before_public_c
             }],
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -308,7 +954,8 @@ async fn production_loop_model_gateway_maps_provider_auth_and_session_to_credent
     ] {
         let fixture = ThreadFixture::new().await;
         let provider = Arc::new(RecordingLlmProvider::fail(provider_error));
-        let provider_gateway = Arc::new(LlmProviderModelGateway::new(
+        let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
+            STATIC_PROVIDER_ID,
             provider.clone(),
             LlmModelProfilePolicy::new()
                 .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
@@ -335,6 +982,7 @@ async fn production_loop_model_gateway_maps_provider_auth_and_session_to_credent
                 }],
                 surface_version: None,
                 model_preference: None,
+                capability_view: None,
             })
             .await
             .unwrap_err();
@@ -355,7 +1003,8 @@ async fn production_loop_model_gateway_maps_provider_auth_and_session_to_credent
 async fn production_loop_model_gateway_fails_closed_before_provider_call() {
     let fixture = ThreadFixture::new().await;
     let provider = Arc::new(RecordingLlmProvider::reply("unused"));
-    let provider_gateway = Arc::new(LlmProviderModelGateway::new(
+    let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
@@ -382,6 +1031,7 @@ async fn production_loop_model_gateway_fails_closed_before_provider_call() {
             }],
             surface_version: None,
             model_preference: Some(ModelProfileId::new("mission_model").unwrap()),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -400,7 +1050,8 @@ async fn production_loop_model_gateway_fails_closed_before_provider_call() {
 async fn production_loop_model_gateway_rejects_forged_context_summary_before_provider_call() {
     let fixture = ThreadFixture::new().await;
     let provider = Arc::new(RecordingLlmProvider::reply("unused"));
-    let provider_gateway = Arc::new(LlmProviderModelGateway::new(
+    let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
@@ -427,6 +1078,7 @@ async fn production_loop_model_gateway_rejects_forged_context_summary_before_pro
             }],
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -445,7 +1097,8 @@ async fn production_loop_model_gateway_rejects_forged_context_summary_before_pro
 async fn production_loop_model_gateway_rejects_unvalidated_surface_before_provider_call() {
     let fixture = ThreadFixture::new().await;
     let provider = Arc::new(RecordingLlmProvider::reply("unused"));
-    let provider_gateway = Arc::new(LlmProviderModelGateway::new(
+    let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
@@ -472,6 +1125,7 @@ async fn production_loop_model_gateway_rejects_unvalidated_surface_before_provid
             }],
             surface_version: Some(CapabilitySurfaceVersion::new("surface-stale").unwrap()),
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -512,6 +1166,7 @@ async fn production_loop_model_gateway_preserves_error_kind_when_summary_is_resa
             }],
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -526,7 +1181,8 @@ async fn gateway_sanitizes_provider_errors() {
         provider: "raw-provider".to_string(),
         reason: "RAW_PROVIDER_SECRET".to_string(),
     }));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
         provider,
         LlmModelProfilePolicy::new()
             .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
@@ -588,7 +1244,7 @@ async fn routed_gateway_uses_provider_pool_route_not_request_model_override() {
 async fn provider_pool_rejects_wrong_provider_identity_with_same_model() {
     let route = ModelRoute::new("rig-openai", "gpt-4.1").unwrap();
     let provider = Arc::new(RecordingLlmProvider::reply_for_model("gpt-4.1", "unused"));
-    let key = ironclaw_reborn::ModelRouteProviderKey::for_route(route);
+    let key = ironclaw_reborn::model_routes::ModelRouteProviderKey::for_route(route);
 
     let error =
         match StaticModelRouteProviderPool::new().with_provider_identity("nearai", key, provider) {
@@ -943,12 +1599,14 @@ fn model_request(model_profile_id: ModelProfileId) -> HostManagedModelRequest {
                 content: "system instructions".to_string(),
                 content_ref: LoopMessageRef::new("msg:11111111-1111-1111-1111-111111111111")
                     .unwrap(),
+                tool_result_provider_call: None,
             },
             HostManagedModelMessage {
                 role: HostManagedModelMessageRole::User,
                 content: "hello model".to_string(),
                 content_ref: LoopMessageRef::new("msg:22222222-2222-2222-2222-222222222222")
                     .unwrap(),
+                tool_result_provider_call: None,
             },
         ],
         surface_version: None,
@@ -1084,6 +1742,210 @@ impl RecordingLlmProvider {
             requests: Mutex::new(Vec::new()),
             response: Mutex::new(Some(Err(error))),
         }
+    }
+}
+
+struct ToolAwareProvider {
+    complete_requests: Mutex<Vec<CompletionRequest>>,
+    tool_requests: Mutex<Vec<ToolCompletionRequest>>,
+    plain_response: Mutex<Option<CompletionResponse>>,
+    tool_response: Mutex<Option<ToolCompletionResponse>>,
+}
+
+impl ToolAwareProvider {
+    fn plain_reply(content: &str) -> Self {
+        Self {
+            complete_requests: Mutex::new(Vec::new()),
+            tool_requests: Mutex::new(Vec::new()),
+            plain_response: Mutex::new(Some(CompletionResponse {
+                content: content.to_string(),
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+            })),
+            tool_response: Mutex::new(None),
+        }
+    }
+
+    fn tool_calls(tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            complete_requests: Mutex::new(Vec::new()),
+            tool_requests: Mutex::new(Vec::new()),
+            plain_response: Mutex::new(None),
+            tool_response: Mutex::new(Some(ToolCompletionResponse {
+                content: None,
+                tool_calls,
+                input_tokens: 1,
+                output_tokens: 1,
+                finish_reason: FinishReason::ToolUse,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning: Some("response reasoning".to_string()),
+            })),
+        }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for ToolAwareProvider {
+    fn model_name(&self) -> &str {
+        "tool-aware-provider"
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.complete_requests.lock().unwrap().push(request);
+        Ok(self
+            .plain_response
+            .lock()
+            .unwrap()
+            .take()
+            .expect("plain response configured"))
+    }
+
+    async fn complete_with_tools(
+        &self,
+        request: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        self.tool_requests.lock().unwrap().push(request);
+        Ok(self
+            .tool_response
+            .lock()
+            .unwrap()
+            .take()
+            .expect("tool response configured"))
+    }
+}
+
+#[derive(Default)]
+struct GatewayCapabilityPort {
+    definitions: Vec<ProviderToolDefinition>,
+    registered: Mutex<Vec<ProviderToolCall>>,
+}
+
+impl GatewayCapabilityPort {
+    fn with_tool_surface() -> Self {
+        Self {
+            definitions: vec![ProviderToolDefinition {
+                capability_id: CapabilityId::new("demo.echo").unwrap(),
+                name: "demo__echo".to_string(),
+                description: "Echo input".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "message": { "type": "string" }
+                    }
+                }),
+            }],
+            registered: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPort for GatewayCapabilityPort {
+    fn tool_definitions(
+        &self,
+    ) -> Result<Vec<ProviderToolDefinition>, ironclaw_turns::run_profile::AgentLoopHostError> {
+        Ok(self.definitions.clone())
+    }
+
+    fn validate_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+        if !self
+            .definitions
+            .iter()
+            .any(|definition| definition.name == tool_call.name)
+        {
+            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call is outside the visible capability surface",
+            ));
+        }
+        let arguments_len = serde_json::to_vec(&tool_call.arguments)
+            .map_err(|error| {
+                ironclaw_turns::run_profile::AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    error.to_string(),
+                )
+            })?
+            .len();
+        if arguments_len > 16 * 1024 {
+            return Err(ironclaw_turns::run_profile::AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool arguments exceed 16384 bytes",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn register_provider_tool_call(
+        &self,
+        tool_call: ProviderToolCall,
+    ) -> Result<
+        ironclaw_turns::run_profile::CapabilityCallCandidate,
+        ironclaw_turns::run_profile::AgentLoopHostError,
+    > {
+        self.validate_provider_tool_call(&tool_call)?;
+        let input_ref =
+            ironclaw_turns::run_profile::CapabilityInputRef::new(format!("input:{}", tool_call.id))
+                .unwrap();
+        self.registered.lock().unwrap().push(tool_call.clone());
+        Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
+            surface_version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+            capability_id: CapabilityId::new("demo.echo").unwrap(),
+            input_ref,
+            provider_replay: tool_call
+                .turn_id
+                .map(|provider_turn_id| ProviderToolCallReplay {
+                    provider_id: tool_call.provider_id,
+                    provider_model_id: tool_call.provider_model_id,
+                    provider_turn_id,
+                    provider_call_id: tool_call.id,
+                    provider_tool_name: tool_call.name,
+                    arguments: tool_call.arguments,
+                    response_reasoning: tool_call.response_reasoning,
+                    reasoning: tool_call.reasoning,
+                    signature: tool_call.signature,
+                }),
+        })
+    }
+
+    async fn visible_capabilities(
+        &self,
+        _request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, ironclaw_turns::run_profile::AgentLoopHostError> {
+        Ok(VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+            descriptors: Vec::new(),
+        })
+    }
+
+    async fn invoke_capability(
+        &self,
+        _request: ironclaw_turns::run_profile::CapabilityInvocation,
+    ) -> Result<
+        ironclaw_turns::run_profile::CapabilityOutcome,
+        ironclaw_turns::run_profile::AgentLoopHostError,
+    > {
+        panic!("gateway tests do not invoke capabilities")
+    }
+
+    async fn invoke_capability_batch(
+        &self,
+        _request: ironclaw_turns::run_profile::CapabilityBatchInvocation,
+    ) -> Result<
+        ironclaw_turns::run_profile::CapabilityBatchOutcome,
+        ironclaw_turns::run_profile::AgentLoopHostError,
+    > {
+        panic!("gateway tests do not invoke capability batches")
     }
 }
 

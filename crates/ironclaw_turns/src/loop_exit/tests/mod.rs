@@ -642,6 +642,101 @@ fn delegated_result_with_result_refs_maps_to_trusted_completed() {
 }
 
 #[test]
+fn result_only_with_result_refs_maps_to_trusted_completed() {
+    let decision = LoopExit::Completed(LoopCompleted {
+        completion_kind: LoopCompletionKind::ResultOnly,
+        reply_message_refs: vec![],
+        result_refs: vec![result_ref("result:tool-output-1")],
+        final_checkpoint_id: None,
+        usage_summary_ref: None,
+        exit_id: exit_id("exit:result-only"),
+    })
+    .validate(LoopExitValidationPolicy {
+        require_final_checkpoint: false,
+        allow_no_reply_completion: false,
+        final_checkpoint_verified: false,
+        host_cancellation_observed: false,
+        invalid_handling: LoopExitInvalidHandling::FailTerminal,
+        completion_refs_verified: true,
+        blocked_evidence_verified: false,
+        failure_evidence_verified: false,
+    });
+
+    assert_eq!(decision.violation, None);
+    assert_eq!(decision.mapping, TurnRunnerOutcome::Completed.into());
+}
+
+#[test]
+fn completion_kind_must_match_durable_reference_shape() {
+    let policy = LoopExitValidationPolicy {
+        require_final_checkpoint: false,
+        allow_no_reply_completion: true,
+        final_checkpoint_verified: false,
+        host_cancellation_observed: false,
+        invalid_handling: LoopExitInvalidHandling::FailTerminal,
+        completion_refs_verified: true,
+        blocked_evidence_verified: false,
+        failure_evidence_verified: false,
+    };
+
+    for (completion_kind, reply_message_refs, result_refs, expected_violation) in [
+        (
+            LoopCompletionKind::FinalReply,
+            vec![],
+            vec![result_ref("result:tool-output-only")],
+            LoopExitViolationKind::MissingCompletionReference,
+        ),
+        (
+            LoopCompletionKind::ResultOnly,
+            vec![message_ref("msg:unexpected-assistant")],
+            vec![result_ref("result:tool-output-1")],
+            LoopExitViolationKind::MismatchedCompletionReferenceKind,
+        ),
+        (
+            LoopCompletionKind::DelegatedResult,
+            vec![message_ref("msg:unexpected-assistant")],
+            vec![result_ref("result:delegated-job-1")],
+            LoopExitViolationKind::MismatchedCompletionReferenceKind,
+        ),
+        (
+            LoopCompletionKind::NoReply,
+            vec![message_ref("msg:unexpected-assistant")],
+            vec![],
+            LoopExitViolationKind::MismatchedCompletionReferenceKind,
+        ),
+        (
+            LoopCompletionKind::NoReply,
+            vec![],
+            vec![result_ref("result:unexpected-output")],
+            LoopExitViolationKind::MismatchedCompletionReferenceKind,
+        ),
+    ] {
+        let decision = LoopExit::Completed(LoopCompleted {
+            completion_kind,
+            reply_message_refs,
+            result_refs,
+            final_checkpoint_id: None,
+            usage_summary_ref: None,
+            exit_id: exit_id("exit:mismatched-completion-kind"),
+        })
+        .validate(policy);
+
+        assert_eq!(
+            decision.violation.as_ref().map(LoopExitViolation::kind),
+            Some(expected_violation),
+            "completion kind {completion_kind:?} should reject mismatched refs"
+        );
+        assert_eq!(
+            decision.mapping,
+            TurnRunnerOutcome::Failed {
+                failure: SanitizedFailure::new("driver_protocol_violation").unwrap(),
+            }
+            .into()
+        );
+    }
+}
+
+#[test]
 fn blocked_variants_map_to_correct_blocked_reason() {
     for kind in [
         LoopBlockedKind::Approval,
