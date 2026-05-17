@@ -19,7 +19,6 @@ libsql = [
     "ironclaw_reborn_event_store/libsql",
     "ironclaw_resources/libsql",
     "ironclaw_run_state/libsql",
-    "ironclaw_turns/libsql",
 ]
 postgres = [
     "dep:deadpool-postgres",
@@ -28,7 +27,6 @@ postgres = [
     "ironclaw_reborn_event_store/postgres",
     "ironclaw_resources/postgres",
     "ironclaw_run_state/postgres",
-    "ironclaw_turns/postgres",
 ]
 
 [dependencies]

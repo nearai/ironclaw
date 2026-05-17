@@ -27,7 +27,6 @@ libsql-restart-tests = [
     "dep:libsql",
     "dep:ironclaw_filesystem",
     "ironclaw_filesystem/libsql",
-    "ironclaw_turns/libsql",
 ]
 
 [dependencies]

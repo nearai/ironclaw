@@ -1,17 +1,16 @@
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::sync::Arc;
 
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
-use ironclaw_turns::{
-    CheckpointSchemaId, GetLoopCheckpointRequest, InMemoryLoopCheckpointStore,
-    InMemoryTurnStateStore, LoopCheckpointStateRef, LoopCheckpointStore, PutLoopCheckpointRequest,
-    RunProfileVersion, TurnId, TurnRunId, TurnScope, run_profile::LoopCheckpointKind,
+use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::{
+    AgentId, HostPath, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
+    ThreadId, VirtualPath,
 };
-
-#[cfg(feature = "libsql")]
-use ironclaw_turns::LibSqlTurnStateStore;
-#[cfg(feature = "postgres")]
-use ironclaw_turns::PostgresTurnStateStore;
+use ironclaw_turns::{
+    CheckpointSchemaId, FilesystemTurnStateStore, GetLoopCheckpointRequest,
+    InMemoryLoopCheckpointStore, InMemoryTurnStateStore, LoopCheckpointStateRef,
+    LoopCheckpointStore, PutLoopCheckpointRequest, RunProfileVersion, TurnId, TurnRunId, TurnScope,
+    run_profile::LoopCheckpointKind,
+};
 
 fn test_scope(thread: &str) -> TurnScope {
     TurnScope::new(
@@ -126,22 +125,40 @@ async fn inmemory_turn_state_loop_checkpoint_roundtrip_and_snapshot() {
     assert_loop_checkpoint_store_cross_scope_and_run_miss(&reopened).await;
 }
 
-#[cfg(feature = "libsql")]
-async fn libsql_store() -> (Arc<LibSqlTurnStateStore>, tempfile::TempDir) {
-    let dir = tempfile::tempdir().unwrap();
-    let db_path = dir.path().join("turns.db");
-    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let store = Arc::new(LibSqlTurnStateStore::new(db));
-    store.run_migrations().await.unwrap();
-    (store, dir)
+/// Build a [`LocalFilesystem`] with `/engine` mounted to a tempdir; the
+/// `/turns` alias on the outer [`ScopedFilesystem`] resolves under
+/// `/engine/...`.
+fn engine_filesystem() -> LocalFilesystem {
+    let storage = tempfile::tempdir().unwrap().keep();
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/engine").unwrap(),
+        HostPath::from_path_buf(storage),
+    )
+    .unwrap();
+    fs
 }
 
-#[cfg(feature = "libsql")]
+fn scoped_turns_fs<F>(backend: Arc<F>) -> Arc<ScopedFilesystem<F>>
+where
+    F: RootFilesystem,
+{
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").expect("alias"),
+        VirtualPath::new("/engine/tenants/test-tenant/users/test-user/turns").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    Arc::new(ScopedFilesystem::new(backend, mounts))
+}
+
 #[tokio::test]
-async fn libsql_loop_checkpoint_roundtrip_uses_loop_mapping_table() {
-    let (store, _dir) = libsql_store().await;
-    assert_loop_checkpoint_store_roundtrip(store.as_ref()).await;
-    assert_loop_checkpoint_store_cross_scope_and_run_miss(store.as_ref()).await;
+async fn filesystem_turn_state_loop_checkpoint_roundtrip_and_snapshot() {
+    let backend = Arc::new(engine_filesystem());
+    let scoped = scoped_turns_fs(backend);
+    let store = FilesystemTurnStateStore::new(Arc::clone(&scoped));
+    assert_loop_checkpoint_store_roundtrip(&store).await;
+    assert_loop_checkpoint_store_cross_scope_and_run_miss(&store).await;
 
     let snapshot = store.persistence_snapshot().await.unwrap();
     assert_eq!(snapshot.loop_checkpoints.len(), 2);
@@ -150,61 +167,13 @@ async fn libsql_loop_checkpoint_roundtrip_uses_loop_mapping_table() {
             .checkpoints
             .iter()
             .all(|record| record.state_ref.as_str() != "checkpoint:test-state"),
-        "libSQL loop mappings must not be written to turn_checkpoints"
+        "filesystem loop mappings must not collide with turn_checkpoints"
     );
-}
 
-#[cfg(feature = "postgres")]
-#[tokio::test]
-async fn postgres_loop_checkpoint_roundtrip_uses_loop_mapping_table() {
-    let Some(pool) = postgres_pool().await else {
-        return;
-    };
-    let store = Arc::new(PostgresTurnStateStore::new(pool));
-    store.run_migrations().await.unwrap();
-    assert_loop_checkpoint_store_roundtrip(store.as_ref()).await;
-    assert_loop_checkpoint_store_cross_scope_and_run_miss(store.as_ref()).await;
-
-    let snapshot = store.persistence_snapshot().await.unwrap();
-    assert!(
-        snapshot
-            .loop_checkpoints
-            .iter()
-            .any(|record| record.state_ref.as_str() == "checkpoint:test-state"),
-        "Postgres loop mappings must be written to turn_loop_checkpoints"
-    );
-    assert!(
-        snapshot
-            .checkpoints
-            .iter()
-            .all(|record| record.state_ref.as_str() != "checkpoint:test-state"),
-        "Postgres loop mappings must not be written to turn_checkpoints"
-    );
-}
-
-#[cfg(feature = "postgres")]
-async fn postgres_pool() -> Option<deadpool_postgres::Pool> {
-    let Ok(url) = std::env::var("IRONCLAW_TURNS_POSTGRES_URL") else {
-        eprintln!(
-            "skipping postgres loop checkpoint contract: IRONCLAW_TURNS_POSTGRES_URL not set"
-        );
-        return None;
-    };
-    let config: tokio_postgres::Config = match url.parse() {
-        Ok(config) => config,
-        Err(error) => {
-            eprintln!("skipping postgres loop checkpoint contract: invalid url ({error})");
-            return None;
-        }
-    };
-    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-    let pool = deadpool_postgres::Pool::builder(manager)
-        .max_size(4)
-        .build()
-        .unwrap();
-    if let Err(error) = pool.get().await {
-        eprintln!("skipping postgres loop checkpoint contract: database unavailable ({error})");
-        return None;
-    }
-    Some(pool)
+    // Reopen against the same scoped filesystem; the persistence snapshot must
+    // rehydrate the same loop-checkpoint set without any backend-specific
+    // migration step.
+    let reopened = FilesystemTurnStateStore::new(scoped);
+    let reopened_snapshot = reopened.persistence_snapshot().await.unwrap();
+    assert_eq!(reopened_snapshot.loop_checkpoints.len(), 2);
 }

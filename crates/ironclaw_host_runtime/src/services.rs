@@ -62,13 +62,10 @@ use ironclaw_run_state::{
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::{InMemorySecretStore, SecretStore};
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
-#[cfg(feature = "libsql")]
-use ironclaw_turns::LibSqlTurnStateStore;
-#[cfg(feature = "postgres")]
-use ironclaw_turns::PostgresTurnStateStore;
 use ironclaw_turns::{
-    DefaultTurnCoordinator, InMemoryTurnStateStore, NoopTurnRunWakeNotifier, RunProfileResolver,
-    TurnRunWakeNotifier, TurnStateStore, runner::TurnRunTransitionPort,
+    DefaultTurnCoordinator, FilesystemTurnStateStore, InMemoryTurnStateStore,
+    NoopTurnRunWakeNotifier, RunProfileResolver, TurnRunWakeNotifier, TurnStateStore,
+    runner::TurnRunTransitionPort,
 };
 use ironclaw_wasm::{
     DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,
@@ -845,24 +842,33 @@ where
         self
     }
 
-    #[cfg(feature = "libsql")]
-    pub async fn with_libsql_turn_state_store(
+    /// Builds and attaches a filesystem-backed turn-state store over the
+    /// supplied [`ScopedFilesystem`].
+    ///
+    /// Production composition wires the `/turns` mount alias on the same
+    /// [`ScopedFilesystem`] that carries the other consumer-store aliases,
+    /// so a single handle is enough to construct this store: it takes its
+    /// alias-relative subtree through the shared `MountView`. The backend
+    /// choice (`LibSqlRootFilesystem`, `PostgresRootFilesystem`,
+    /// `InMemoryBackend`, …) happens at the [`RootFilesystem`] layer, not
+    /// here.
+    ///
+    /// Replaces the legacy `with_libsql_turn_state_store` /
+    /// `with_postgres_turn_state_store` builders (deleted along with the
+    /// corresponding per-backend `Filesystem*Store` siblings — see
+    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`). The
+    /// filesystem store implements both [`TurnStateStore`] and
+    /// [`TurnRunTransitionPort`], so this wiring covers production
+    /// readiness for both axes.
+    pub fn with_filesystem_turn_state_store<FsBackend>(
         self,
-        db: Arc<libsql::Database>,
-    ) -> Result<Self, ironclaw_turns::TurnError> {
-        let store = Arc::new(LibSqlTurnStateStore::new(db));
-        store.run_migrations().await?;
-        Ok(self.with_turn_state_and_transition_port(store))
-    }
-
-    #[cfg(feature = "postgres")]
-    pub async fn with_postgres_turn_state_store(
-        self,
-        pool: deadpool_postgres::Pool,
-    ) -> Result<Self, ironclaw_turns::TurnError> {
-        let store = Arc::new(PostgresTurnStateStore::new(pool));
-        store.run_migrations().await?;
-        Ok(self.with_turn_state_and_transition_port(store))
+        scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
+    ) -> Self
+    where
+        FsBackend: RootFilesystem + 'static,
+    {
+        let store = Arc::new(FilesystemTurnStateStore::new(scoped_filesystem));
+        self.with_turn_state_and_transition_port(store)
     }
 
     pub fn with_turn_run_wake_notifier<T>(mut self, notifier: Arc<T>) -> Self

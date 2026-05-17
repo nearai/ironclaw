@@ -32,6 +32,8 @@ use ironclaw_events::{
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
+#[cfg(feature = "libsql")]
+use ironclaw_filesystem::ScopedFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
@@ -75,7 +77,7 @@ use ironclaw_trust::{
     HostTrustPolicy, TrustDecision, TrustProvenance,
 };
 #[cfg(feature = "libsql")]
-use ironclaw_turns::LibSqlTurnStateStore;
+use ironclaw_turns::FilesystemTurnStateStore;
 #[cfg(feature = "libsql")]
 use ironclaw_turns::{
     AcceptedMessageRef, IdempotencyKey, InMemoryRunProfileResolver, ReplyTargetBindingRef,
@@ -578,14 +580,34 @@ async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
     );
 }
 
+/// Construct an [`Arc<ScopedFilesystem<LibSqlRootFilesystem>>`] that exposes
+/// the `/turns` mount alias over a libSQL-backed [`RootFilesystem`]. Mirrors
+/// the production composition shape: the `/turns` alias rewrites to a
+/// tenant/user-scoped target inside `/engine`, and the filesystem backend
+/// supplies durable storage. Used by tests that previously constructed
+/// `LibSqlTurnStateStore` directly.
+#[cfg(feature = "libsql")]
+async fn libsql_scoped_turns_fs(
+    db: Arc<libsql::Database>,
+) -> Arc<ScopedFilesystem<LibSqlRootFilesystem>> {
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await.unwrap();
+    let view = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").unwrap(),
+        VirtualPath::new("/engine/tenants/tenant1/users/user1/turns").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    Arc::new(ScopedFilesystem::new(filesystem, view))
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
-async fn production_turn_state_selection_accepts_libsql_turn_state_store() {
+async fn production_turn_state_selection_accepts_filesystem_turn_state_store() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("turn-state.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let turn_state = Arc::new(LibSqlTurnStateStore::new(Arc::clone(&db)));
-    turn_state.run_migrations().await.unwrap();
+    let scoped = libsql_scoped_turns_fs(Arc::clone(&db)).await;
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -595,9 +617,7 @@ async fn production_turn_state_selection_accepts_libsql_turn_state_store() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_libsql_turn_state_store(Arc::clone(&db))
-    .await
-    .unwrap();
+    .with_filesystem_turn_state_store(scoped);
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]))
@@ -607,14 +627,14 @@ async fn production_turn_state_selection_accepts_libsql_turn_state_store() {
             ProductionWiringComponent::TurnState,
             ProductionWiringIssueKind::Missing
         ),
-        "LibSqlTurnStateStore must satisfy production turn-state presence: {report:?}"
+        "FilesystemTurnStateStore must satisfy production turn-state presence: {report:?}"
     );
     assert!(
         !report.contains(
             ProductionWiringComponent::TurnState,
             ProductionWiringIssueKind::LocalOnlyImplementation
         ),
-        "LibSqlTurnStateStore must not be classified local-only: {report:?}"
+        "FilesystemTurnStateStore over LibSqlRootFilesystem must not be classified local-only: {report:?}"
     );
 }
 
@@ -647,6 +667,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     let db_path = db_dir.path().join("turn-coordinator.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
     let notifier = Arc::new(RecordingTurnRunWakeNotifier::default());
+    let scoped = libsql_scoped_turns_fs(Arc::clone(&db)).await;
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -656,9 +677,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_libsql_turn_state_store(Arc::clone(&db))
-    .await
-    .unwrap()
+    .with_filesystem_turn_state_store(Arc::clone(&scoped))
     .with_run_profile_resolver(Arc::new(InMemoryRunProfileResolver::default()))
     .with_turn_run_wake_notifier(Arc::clone(&notifier));
 
@@ -669,7 +688,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     let response = coordinator.submit_turn(request.clone()).await.unwrap();
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
 
-    let reopened = LibSqlTurnStateStore::new(Arc::clone(&db));
+    let reopened = FilesystemTurnStateStore::new(scoped);
     let state = reopened
         .get_run_state(ironclaw_turns::GetRunStateRequest {
             scope: request.scope,
@@ -688,6 +707,7 @@ async fn production_turn_coordinator_requires_explicit_run_profile_resolver() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("turn-coordinator-missing-resolver.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let scoped = libsql_scoped_turns_fs(Arc::clone(&db)).await;
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -697,9 +717,7 @@ async fn production_turn_coordinator_requires_explicit_run_profile_resolver() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_libsql_turn_state_store(Arc::clone(&db))
-    .await
-    .unwrap()
+    .with_filesystem_turn_state_store(scoped)
     .with_turn_run_wake_notifier(Arc::new(RecordingTurnRunWakeNotifier::default()));
 
     let report = match services.turn_coordinator_for_production() {

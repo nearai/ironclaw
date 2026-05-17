@@ -9,8 +9,6 @@
 mod admission;
 mod checkpoint_state;
 mod coordinator;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-mod db;
 pub mod events;
 mod filesystem_store;
 mod ids;
@@ -40,10 +38,6 @@ pub use coordinator::{
     AllowAllTurnAdmissionPolicy, DefaultTurnCoordinator, NoopTurnRunWakeNotifier,
     TurnAdmissionPolicy, TurnCoordinator, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
 };
-#[cfg(feature = "libsql")]
-pub use db::LibSqlTurnStateStore;
-#[cfg(feature = "postgres")]
-pub use db::PostgresTurnStateStore;
 pub use events::{
     EventCursor, InMemoryTurnEventSink, TurnEventKind, TurnEventPage, TurnEventProjectionCursor,
     TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService,

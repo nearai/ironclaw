@@ -337,8 +337,7 @@ where
     .with_secret_store(Arc::clone(&secret_store))
     .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
     .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
-    .with_libsql_turn_state_store(Arc::clone(&config.database))
-    .await?
+    .with_filesystem_turn_state_store(Arc::clone(&scoped_filesystem))
     .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
     .await?;
 
@@ -400,8 +399,7 @@ where
     .with_secret_store(Arc::clone(&secret_store))
     .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
     .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
-    .with_postgres_turn_state_store(config.pool.clone())
-    .await?
+    .with_filesystem_turn_state_store(Arc::clone(&scoped_filesystem))
     .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
     .await?;
 

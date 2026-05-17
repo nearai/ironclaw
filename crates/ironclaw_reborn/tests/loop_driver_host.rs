@@ -880,8 +880,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
                 .unwrap(),
         );
         let thread_service = build_libsql_thread_service(thread_db).await;
-        let turn_store = ironclaw_turns::LibSqlTurnStateStore::new(turn_db);
-        turn_store.run_migrations().await.unwrap();
+        let turn_store = libsql_filesystem_turn_store(turn_db).await;
         thread_service
             .ensure_thread(EnsureThreadRequest {
                 scope: thread_scope.clone(),
@@ -955,8 +954,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
             .unwrap(),
     );
     let thread_service = Arc::new(build_libsql_thread_service(thread_db).await);
-    let turn_store = Arc::new(ironclaw_turns::LibSqlTurnStateStore::new(turn_db));
-    turn_store.run_migrations().await.unwrap();
+    let turn_store = Arc::new(libsql_filesystem_turn_store(turn_db).await);
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
     let transition_port: Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort> =
         turn_store.clone();
@@ -1078,6 +1076,32 @@ async fn build_libsql_thread_service(
     .unwrap();
     let scoped = Arc::new(ScopedFilesystem::new(Arc::new(fs), mounts));
     ironclaw_threads::FilesystemSessionThreadService::new(scoped)
+}
+
+/// Construct a [`FilesystemTurnStateStore`] backed by [`LibSqlRootFilesystem`]
+/// over the supplied libSQL database. The on-disk shape is the same single
+/// `/turns/state.json` snapshot the production composition uses; the libSQL
+/// backend just provides durability for the underlying filesystem record.
+/// Mounts `/turns` at the canonical
+/// `/engine/tenants/<tenant>/users/<user>/turns` target so the per-invocation
+/// `MountView` shape lines up with the production wiring.
+#[cfg(feature = "libsql-restart-tests")]
+async fn libsql_filesystem_turn_store(
+    db: Arc<libsql::Database>,
+) -> ironclaw_turns::FilesystemTurnStateStore<ironclaw_filesystem::LibSqlRootFilesystem> {
+    use ironclaw_filesystem::{LibSqlRootFilesystem, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await.unwrap();
+    let view = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").unwrap(),
+        VirtualPath::new("/engine/tenants/tenant-libsql-restart/users/user-libsql-restart/turns")
+            .unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let scoped = Arc::new(ScopedFilesystem::new(filesystem, view));
+    ironclaw_turns::FilesystemTurnStateStore::new(scoped)
 }
 
 #[tokio::test]

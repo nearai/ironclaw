@@ -277,9 +277,8 @@ async fn build_libsql_production(
     .await?
     .with_reborn_event_store_config(profile.to_event_store_profile(), event_store)
     .await?
-    .with_filesystem_run_state(scoped_filesystem)
-    .with_libsql_turn_state_store(db)
-    .await?
+    .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
+    .with_filesystem_turn_state_store(scoped_filesystem)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
@@ -341,9 +340,8 @@ async fn build_postgres_production(
     .await?
     .with_reborn_event_store_config(profile.to_event_store_profile(), event_store)
     .await?
-    .with_filesystem_run_state(scoped_filesystem)
-    .with_postgres_turn_state_store(pool)
-    .await?
+    .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
+    .with_filesystem_turn_state_store(scoped_filesystem)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
