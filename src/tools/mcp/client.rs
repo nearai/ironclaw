@@ -817,40 +817,6 @@ impl McpClient {
         Ok(serde_json::Value::Object(merged))
     }
 
-    /// Determine whether a t3n-mcp tool requires delegation-credential injection.
-    ///
-    /// Reads `annotations.requires_delegation` from the cached tool list. If the
-    /// cache is empty, `list_tools` is called first. Returns `false` when the tool
-    /// is not found — the underlying call will surface a not-found error from the
-    /// upstream MCP server through the normal error path.
-    async fn tool_requires_delegation(&self, name: &str) -> Result<bool, ToolError> {
-        // Populate the cache on first call if it isn't already warm.
-        if self.tools_cache.read().await.is_none() {
-            self.list_tools().await?;
-        }
-
-        let cache = self.tools_cache.read().await;
-        let tools = match cache.as_ref() {
-            Some(t) => t,
-            None => return Ok(false),
-        };
-
-        match tools.iter().find(|t| t.name == name) {
-            Some(tool) => Ok(tool
-                .annotations
-                .as_ref()
-                .map(|a| a.requires_delegation)
-                .unwrap_or(false)),
-            None => {
-                tracing::warn!(
-                    tool = %name,
-                    "tool_requires_delegation: tool not found in cache; skipping injection — a stale tools/list response may be masking a tool that genuinely requires delegation"
-                );
-                Ok(false)
-            }
-        }
-    }
-
     /// Call a tool on the MCP server.
     pub async fn call_tool(
         &self,
@@ -859,13 +825,17 @@ impl McpClient {
     ) -> Result<CallToolResult, ToolError> {
         self.initialize().await?;
 
-        // For t3n-mcp tools, inject the per-user Trinity delegation credential only
-        // when the tool's annotations declare `requiresDelegation: true`. Read-only
-        // and direct-mode tools leave the flag absent (defaults to false) and receive
-        // the call unmodified.
+        // For t3n-mcp calls, inject the per-user Trinity delegation credential when
+        // the agent signals intent by including either `credential_jcs_b64u` or
+        // `user_sig_b64u` in its arguments (any value, including a placeholder such
+        // as `"__inject__"`). The stored credential unconditionally overwrites
+        // whatever value the agent supplied, so the agent cannot forge the credential.
+        //
+        // When both fields are absent the call is forwarded as-is — this is the
+        // correct path for read-only tools and direct-mode callers.
         let arguments = if self.server_name.as_str()
             == crate::tools::mcp::config::T3N_MCP_SERVER_NAME_NORMALISED
-            && self.tool_requires_delegation(name).await?
+            && agent_supplied_delegation_fields(&arguments)
         {
             self.inject_t3n_delegation_credential(arguments).await?
         } else {
@@ -959,6 +929,22 @@ impl McpClient {
         self.list_tools().await?;
         Ok(())
     }
+}
+
+/// Returns `true` when the agent has signalled delegation intent by supplying
+/// either `credential_jcs_b64u` or `user_sig_b64u` as a key in its arguments.
+///
+/// Any non-`null` value (including a placeholder such as `"__inject__"`) is
+/// treated as intent — the real stored credential always overwrites whatever
+/// the agent supplied, so the actual value does not matter.
+///
+/// Returns `false` when `arguments` is not a JSON object or when neither field
+/// is present.
+fn agent_supplied_delegation_fields(arguments: &serde_json::Value) -> bool {
+    let Some(obj) = arguments.as_object() else {
+        return false;
+    };
+    obj.contains_key("credential_jcs_b64u") || obj.contains_key("user_sig_b64u")
 }
 
 /// Clone the client, resetting the tools cache and initialization state.
@@ -2623,170 +2609,28 @@ mod tests {
         );
     }
 
-    /// Caller-level integration test: drives `McpClient::call_tool` for a
-    /// `t3n_mcp` server and asserts that the JSON-RPC params forwarded to the
-    /// transport contain the merged `credential_jcs_b64u` and `user_sig_b64u`
-    /// fields from the stored delegation token.
-    ///
-    /// This is the "Test Through the Caller, Not Just the Helper" pattern from
-    /// `.claude/rules/testing.md`.  The three unit tests above exercise the
-    /// `inject_t3n_delegation_credential` helper in isolation; this test
-    /// exercises `call_tool` — the caller that invokes the helper — so that a
-    /// future refactor that bypasses the helper (or changes when it is called)
-    /// would be caught here rather than only at runtime.
-    #[tokio::test]
-    async fn call_tool_injects_delegation_credential_for_t3n_mcp() {
-        use crate::secrets::CreateSecretParams;
-
-        // ── Build a mock transport that captures the full request ──────
-        struct CapturingTransport {
-            requests: std::sync::Mutex<Vec<McpRequest>>,
-        }
-        #[async_trait]
-        impl McpTransport for CapturingTransport {
-            async fn send(
-                &self,
-                request: &McpRequest,
-                _headers: &HashMap<String, String>,
-            ) -> Result<McpResponse, crate::tools::tool::ToolError> {
-                self.requests.lock().unwrap().push(request.clone());
-                let result = match request.method.as_str() {
-                    "initialize" => serde_json::json!({
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {},
-                        "serverInfo": {"name": "t3n-mcp", "version": "1.0"}
-                    }),
-                    "notifications/initialized" => {
-                        return Ok(McpResponse {
-                            jsonrpc: "2.0".to_string(),
-                            id: None,
-                            result: None,
-                            error: None,
-                        });
-                    }
-                    // Serve `runPayroll` as a delegation-requiring tool so the
-                    // injection path is exercised when `call_tool` queries the cache.
-                    "tools/list" => serde_json::json!({
-                        "tools": [{
-                            "name": "runPayroll",
-                            "description": "Run payroll",
-                            "inputSchema": {"type": "object", "properties": {}},
-                            "annotations": {"requiresDelegation": true}
-                        }]
-                    }),
-                    _ => serde_json::json!({
-                        "content": [{"type": "text", "text": "ok"}],
-                        "isError": false
-                    }),
-                };
-                Ok(McpResponse {
-                    jsonrpc: "2.0".to_string(),
-                    id: request.id,
-                    result: Some(result),
-                    error: None,
-                })
-            }
-            async fn shutdown(&self) -> Result<(), crate::tools::tool::ToolError> {
-                Ok(())
-            }
-            fn supports_http_features(&self) -> bool {
-                false
-            }
-        }
-
-        // ── Seed the delegation token in an in-memory store ───────────
-        let store = make_test_secrets_store();
-        store
-            .create(
-                "test-user",
-                CreateSecretParams::new(
-                    crate::tools::mcp::config::T3N_DELEGATION_TOKEN_SECRET,
-                    &make_token_json(TEST_ORG_DID),
-                ),
-            )
-            .await
-            .expect("store delegation token");
-
-        // ── Build a t3n_mcp client wired to the capturing transport ───
-        let transport = Arc::new(CapturingTransport {
-            requests: std::sync::Mutex::new(Vec::new()),
-        });
-        let client = McpClient::new_with_transport(
-            crate::tools::mcp::config::T3N_MCP_SERVER_NAME_NORMALISED,
-            Arc::clone(&transport) as Arc<dyn McpTransport>,
-            None,
-            Some(store),
-            "test-user",
-            None,
-        );
-
-        // ── Drive call_tool (the caller) ──────────────────────────────
-        let result = client
-            .call_tool("runPayroll", serde_json::json!({"cycle_id": "2025-01"}))
-            .await
-            .expect("call_tool should succeed with delegation token present");
-        assert!(!result.is_error);
-
-        // ── Assert the forwarded params contain the injected fields ───
-        let requests = transport.requests.lock().unwrap();
-        let call_req = requests
-            .iter()
-            .find(|r| r.method == "tools/call")
-            .expect("a tools/call request must have been forwarded");
-
-        let params = call_req
-            .params
-            .as_ref()
-            .expect("tools/call must have params");
-        let args = &params["arguments"];
-
-        assert_eq!(
-            args["credential_jcs_b64u"],
-            make_credential_jcs_b64u(TEST_ORG_DID),
-            "credential_jcs_b64u must be injected into the forwarded arguments"
-        );
-        assert_eq!(
-            args["user_sig_b64u"], "usig-value",
-            "user_sig_b64u must be injected into the forwarded arguments"
-        );
-        assert_eq!(
-            args["org_did"], TEST_ORG_DID,
-            "org_did must be injected from the stored credential"
-        );
-        assert_eq!(
-            args["cycle_id"], "2025-01",
-            "caller-supplied params must be preserved alongside injected fields"
-        );
-    }
-
-    // ── per-tool delegation gating ───────────────────────────────────────────
+    // ── field-presence delegation gating ────────────────────────────────────
     //
-    // These tests exercise the `requiresDelegation` annotation gating added to
-    // `call_tool`. A helper builds a `CapturingTransport` that serves a
-    // configurable tool list so each test can control whether the tool under
-    // test has the flag set.
+    // These tests exercise the field-presence gating in `call_tool`: injection
+    // fires when the agent includes `credential_jcs_b64u` or `user_sig_b64u` in
+    // its arguments, and is skipped when both fields are absent.
+    //
+    // A shared `CapturingTransport` records every outgoing request so tests can
+    // inspect the forwarded arguments directly.
 
     /// Build a `CapturingTransport` that records every request and serves a
-    /// `tools/list` response containing exactly one tool.
-    ///
-    /// `requires_delegation` controls the `requiresDelegation` annotation
-    /// value on that tool. The `tools/call` arm always returns a success
-    /// response so tests can focus on injection behaviour rather than result
-    /// parsing.
-    fn make_gating_transport(
+    /// minimal `tools/list` response for the given tool name.
+    fn make_capturing_transport(
         tool_name: &'static str,
-        requires_delegation: bool,
     ) -> std::sync::Arc<GatingCapturingTransport> {
         std::sync::Arc::new(GatingCapturingTransport {
             tool_name,
-            requires_delegation,
             requests: std::sync::Mutex::new(Vec::new()),
         })
     }
 
     struct GatingCapturingTransport {
         tool_name: &'static str,
-        requires_delegation: bool,
         requests: std::sync::Mutex<Vec<McpRequest>>,
     }
 
@@ -2816,8 +2660,7 @@ mod tests {
                     "tools": [{
                         "name": self.tool_name,
                         "description": "test tool",
-                        "inputSchema": {"type": "object", "properties": {}},
-                        "annotations": {"requiresDelegation": self.requires_delegation}
+                        "inputSchema": {"type": "object", "properties": {}}
                     }]
                 }),
                 _ => serde_json::json!({
@@ -2840,66 +2683,24 @@ mod tests {
         }
     }
 
-    /// When a tool declares `requiresDelegation: false`, `call_tool` must NOT
-    /// inject any delegation fields into the forwarded arguments.
-    #[tokio::test]
-    async fn call_tool_skips_injection_for_unflagged_tool() {
-        use crate::secrets::CreateSecretParams;
-
-        let store = make_test_secrets_store();
-        store
-            .create(
-                "test-user",
-                CreateSecretParams::new(
-                    crate::tools::mcp::config::T3N_DELEGATION_TOKEN_SECRET,
-                    &make_token_json(TEST_ORG_DID),
-                ),
-            )
-            .await
-            .expect("store delegation token");
-
-        let transport = make_gating_transport("getAgentDid", false);
-        let client = McpClient::new_with_transport(
+    fn make_t3n_client_with_store(
+        transport: std::sync::Arc<GatingCapturingTransport>,
+        store: std::sync::Arc<dyn crate::secrets::SecretsStore + Send + Sync>,
+    ) -> McpClient {
+        McpClient::new_with_transport(
             crate::tools::mcp::config::T3N_MCP_SERVER_NAME_NORMALISED,
             Arc::clone(&transport) as Arc<dyn McpTransport>,
             None,
             Some(store),
             "test-user",
             None,
-        );
-
-        let result = client
-            .call_tool("getAgentDid", serde_json::json!({}))
-            .await
-            .expect("call should succeed");
-        assert!(!result.is_error);
-
-        let requests = transport.requests.lock().unwrap();
-        let call_req = requests
-            .iter()
-            .find(|r| r.method == "tools/call")
-            .expect("a tools/call request must have been forwarded");
-
-        let args = &call_req.params.as_ref().expect("params present")["arguments"];
-
-        assert!(
-            args.get("credential_jcs_b64u").is_none(),
-            "credential_jcs_b64u must NOT be injected for an unflagged tool"
-        );
-        assert!(
-            args.get("user_sig_b64u").is_none(),
-            "user_sig_b64u must NOT be injected for an unflagged tool"
-        );
-        assert!(
-            args.get("org_did").is_none(),
-            "org_did must NOT be injected for an unflagged tool"
-        );
+        )
     }
 
-    /// When a tool declares `requiresDelegation: true`, `call_tool` must inject
-    /// the delegation fields even when the call originates from a non-payroll tool.
+    /// Agent supplies both credential placeholder fields → claw substitutes with
+    /// the real stored values and forwards.
     #[tokio::test]
-    async fn call_tool_injects_for_flagged_tool() {
+    async fn call_tool_injects_when_agent_supplies_credential_fields() {
         use crate::secrets::CreateSecretParams;
 
         let store = make_test_secrets_store();
@@ -2914,20 +2715,20 @@ mod tests {
             .await
             .expect("store delegation token");
 
-        let transport = make_gating_transport("someDelegatedTool", true);
-        let client = McpClient::new_with_transport(
-            crate::tools::mcp::config::T3N_MCP_SERVER_NAME_NORMALISED,
-            Arc::clone(&transport) as Arc<dyn McpTransport>,
-            None,
-            Some(store),
-            "test-user",
-            None,
-        );
+        let transport = make_capturing_transport("runPayroll");
+        let client = make_t3n_client_with_store(Arc::clone(&transport), store);
 
         let result = client
-            .call_tool("someDelegatedTool", serde_json::json!({"foo": "bar"}))
+            .call_tool(
+                "runPayroll",
+                serde_json::json!({
+                    "cycle_id": "2025-01",
+                    "credential_jcs_b64u": "__inject__",
+                    "user_sig_b64u": "__inject__"
+                }),
+            )
             .await
-            .expect("call should succeed with token present");
+            .expect("call_tool should succeed with delegation token present");
         assert!(!result.is_error);
 
         let requests = transport.requests.lock().unwrap();
@@ -2941,74 +2742,227 @@ mod tests {
         assert_eq!(
             args["credential_jcs_b64u"],
             make_credential_jcs_b64u(TEST_ORG_DID),
-            "credential_jcs_b64u must be injected for a flagged tool"
+            "placeholder must be replaced with the stored credential"
         );
         assert_eq!(
             args["user_sig_b64u"], "usig-value",
-            "user_sig_b64u must be injected for a flagged tool"
+            "placeholder must be replaced with the stored user signature"
         );
         assert_eq!(
             args["org_did"], TEST_ORG_DID,
-            "org_did must be injected for a flagged tool"
+            "org_did from the stored credential must be injected"
         );
-        assert_eq!(args["foo"], "bar", "caller args must be preserved");
+        assert_eq!(
+            args["cycle_id"], "2025-01",
+            "other caller-supplied params must be preserved"
+        );
     }
 
-    /// Regression test for the original bug: an unflagged tool (e.g. `getAgentDid`)
-    /// must succeed even when no delegation token is configured. Previously, every
-    /// t3n-mcp call injected unconditionally, so read-only tools failed closed with
-    /// "no delegation token configured" when the user had no token.
+    /// Agent omits both credential fields → claw does not touch the arguments.
     #[tokio::test]
-    async fn call_tool_unflagged_tool_works_without_delegation_token_configured() {
-        // No secret seeded — the store is empty.
+    async fn call_tool_skips_when_agent_omits_credential_fields() {
+        use crate::secrets::CreateSecretParams;
+
         let store = make_test_secrets_store();
+        store
+            .create(
+                "test-user",
+                CreateSecretParams::new(
+                    crate::tools::mcp::config::T3N_DELEGATION_TOKEN_SECRET,
+                    &make_token_json(TEST_ORG_DID),
+                ),
+            )
+            .await
+            .expect("store delegation token");
 
-        let transport = make_gating_transport("getAgentDid", false);
-        let client = McpClient::new_with_transport(
-            crate::tools::mcp::config::T3N_MCP_SERVER_NAME_NORMALISED,
-            Arc::clone(&transport) as Arc<dyn McpTransport>,
-            None,
-            Some(store),
-            "test-user",
-            None,
-        );
+        let transport = make_capturing_transport("getAgentDid");
+        let client = make_t3n_client_with_store(Arc::clone(&transport), store);
 
-        // This must not return the "no delegation token configured" error.
         let result = client
             .call_tool("getAgentDid", serde_json::json!({}))
             .await
-            .expect("unflagged tool must succeed without a delegation token");
+            .expect("call should succeed without injection");
         assert!(!result.is_error);
+
+        let requests = transport.requests.lock().unwrap();
+        let call_req = requests
+            .iter()
+            .find(|r| r.method == "tools/call")
+            .expect("a tools/call request must have been forwarded");
+
+        let args = &call_req.params.as_ref().expect("params present")["arguments"];
+
+        assert!(
+            args.get("credential_jcs_b64u").is_none(),
+            "credential_jcs_b64u must NOT be injected when agent omits the field"
+        );
+        assert!(
+            args.get("user_sig_b64u").is_none(),
+            "user_sig_b64u must NOT be injected when agent omits the field"
+        );
+        assert!(
+            args.get("org_did").is_none(),
+            "org_did must NOT be injected when agent omits credential fields"
+        );
     }
 
-    /// A tool that declares `requiresDelegation: true` must fail closed with the
-    /// "no delegation token configured" error when no token is present, preserving
-    /// the existing fail-closed behaviour for tools that genuinely need a credential.
+    /// Agent supplies real-looking (but fabricated) values for both credential
+    /// fields → claw unconditionally overwrites them with the stored credential.
+    /// The agent cannot forge the credential data that reaches the sidecar.
     #[tokio::test]
-    async fn call_tool_flagged_tool_fails_closed_without_token() {
-        // No secret seeded.
-        let store = make_test_secrets_store();
+    async fn call_tool_overwrites_agent_supplied_value() {
+        use crate::secrets::CreateSecretParams;
 
-        let transport = make_gating_transport("someDelegatedTool", true);
-        let client = McpClient::new_with_transport(
-            crate::tools::mcp::config::T3N_MCP_SERVER_NAME_NORMALISED,
-            Arc::clone(&transport) as Arc<dyn McpTransport>,
-            None,
-            Some(store),
-            "test-user",
-            None,
+        let store = make_test_secrets_store();
+        store
+            .create(
+                "test-user",
+                CreateSecretParams::new(
+                    crate::tools::mcp::config::T3N_DELEGATION_TOKEN_SECRET,
+                    &make_token_json(TEST_ORG_DID),
+                ),
+            )
+            .await
+            .expect("store delegation token");
+
+        let transport = make_capturing_transport("runPayroll");
+        let client = make_t3n_client_with_store(Arc::clone(&transport), store);
+
+        // Agent supplies plausible-looking (but fabricated) credential values.
+        let result = client
+            .call_tool(
+                "runPayroll",
+                serde_json::json!({
+                    "cycle_id": "2025-01",
+                    "credential_jcs_b64u": "AAAA_forged_credential_AAAA",
+                    "user_sig_b64u": "BBBB_forged_sig_BBBB"
+                }),
+            )
+            .await
+            .expect("call must succeed — stored credential overwrites the forged values");
+        assert!(!result.is_error);
+
+        let requests = transport.requests.lock().unwrap();
+        let call_req = requests
+            .iter()
+            .find(|r| r.method == "tools/call")
+            .expect("a tools/call request must have been forwarded");
+
+        let args = &call_req.params.as_ref().expect("params present")["arguments"];
+
+        // The forwarded values must be the stored credential, not the agent's fabrications.
+        assert_eq!(
+            args["credential_jcs_b64u"],
+            make_credential_jcs_b64u(TEST_ORG_DID),
+            "stored credential must overwrite the agent-supplied forged value"
         );
+        assert_eq!(
+            args["user_sig_b64u"], "usig-value",
+            "stored user_sig must overwrite the agent-supplied forged value"
+        );
+        assert_ne!(
+            args["credential_jcs_b64u"], "AAAA_forged_credential_AAAA",
+            "forged credential must not reach the sidecar"
+        );
+    }
+
+    /// Agent supplies placeholder fields but no token is stored → claw hard-errors.
+    #[tokio::test]
+    async fn call_tool_hard_errors_when_agent_supplies_fields_but_no_token() {
+        let store = make_test_secrets_store();
+        // No token seeded.
+
+        let transport = make_capturing_transport("runPayroll");
+        let client = make_t3n_client_with_store(Arc::clone(&transport), store);
 
         let err = client
-            .call_tool("someDelegatedTool", serde_json::json!({}))
+            .call_tool(
+                "runPayroll",
+                serde_json::json!({
+                    "cycle_id": "2025-01",
+                    "credential_jcs_b64u": "__inject__",
+                    "user_sig_b64u": "__inject__"
+                }),
+            )
             .await
-            .expect_err("flagged tool must fail when delegation token is absent");
+            .expect_err("must fail when delegation token is absent but fields are supplied");
 
         let msg = err.to_string();
         assert!(
             msg.contains("no delegation token configured"),
-            "error must guide the user to configure their token: {msg}"
+            "error must guide the user to the setup form: {msg}"
         );
+    }
+
+    /// Agent omits both credential fields and no token is stored → call succeeds
+    /// because injection is not attempted. This is the direct-mode path.
+    #[tokio::test]
+    async fn call_tool_skips_with_no_token_when_agent_omits_fields() {
+        let store = make_test_secrets_store();
+        // No token seeded.
+
+        let transport = make_capturing_transport("getAgentDid");
+        let client = make_t3n_client_with_store(Arc::clone(&transport), store);
+
+        let result = client
+            .call_tool("getAgentDid", serde_json::json!({}))
+            .await
+            .expect("direct-mode call must succeed without a delegation token");
+        assert!(!result.is_error);
+    }
+
+    /// Agent supplies only `credential_jcs_b64u` (partial intent) → claw treats
+    /// the call as delegation intent and injects both fields from storage.
+    #[tokio::test]
+    async fn call_tool_treats_partial_field_presence_as_delegation_intent() {
+        use crate::secrets::CreateSecretParams;
+
+        let store = make_test_secrets_store();
+        store
+            .create(
+                "test-user",
+                CreateSecretParams::new(
+                    crate::tools::mcp::config::T3N_DELEGATION_TOKEN_SECRET,
+                    &make_token_json(TEST_ORG_DID),
+                ),
+            )
+            .await
+            .expect("store delegation token");
+
+        let transport = make_capturing_transport("runPayroll");
+        let client = make_t3n_client_with_store(Arc::clone(&transport), store);
+
+        // Only credential_jcs_b64u is supplied; user_sig_b64u is absent.
+        let result = client
+            .call_tool(
+                "runPayroll",
+                serde_json::json!({
+                    "cycle_id": "2025-01",
+                    "credential_jcs_b64u": "__inject__"
+                }),
+            )
+            .await
+            .expect("partial field presence must trigger injection and succeed");
+        assert!(!result.is_error);
+
+        let requests = transport.requests.lock().unwrap();
+        let call_req = requests
+            .iter()
+            .find(|r| r.method == "tools/call")
+            .expect("a tools/call request must have been forwarded");
+
+        let args = &call_req.params.as_ref().expect("params present")["arguments"];
+
+        assert_eq!(
+            args["credential_jcs_b64u"],
+            make_credential_jcs_b64u(TEST_ORG_DID),
+            "credential_jcs_b64u must be injected"
+        );
+        assert_eq!(
+            args["user_sig_b64u"], "usig-value",
+            "user_sig_b64u must be injected even when the agent omitted it"
+        );
+        assert_eq!(args["org_did"], TEST_ORG_DID, "org_did must be injected");
     }
 
     // ── McpToolAnnotations serde round-trips ─────────────────────────────────
