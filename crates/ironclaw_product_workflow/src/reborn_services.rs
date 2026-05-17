@@ -43,6 +43,12 @@ pub use types::{
 /// Stable WebUI-facing facade surface for beta Reborn routes.
 #[async_trait]
 pub trait RebornServicesApi: Send + Sync {
+    async fn create_thread(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiCreateThreadRequest,
+    ) -> Result<RebornCreateThreadResponse, RebornServicesError>;
+
     async fn submit_turn(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -102,6 +108,43 @@ impl RebornServices {
 
 #[async_trait]
 impl RebornServicesApi for RebornServices {
+    /// `requested_thread_id` makes the caller's choice authoritative.
+    /// Without it, `client_action_id` deterministically derives the thread id
+    /// so a retry of the same create maps back to the same thread. Conflicting
+    /// explicit ids submitted with the same client action are not reconciled
+    /// at this layer; the thread service decides.
+    async fn create_thread(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiCreateThreadRequest,
+    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+        let command = request.into_command(caller)?;
+        let WebUiInboundCommand::CreateThread {
+            caller,
+            client_action_id,
+            requested_thread_id,
+        } = command
+        else {
+            return Err(RebornServicesError::internal_invariant());
+        };
+        let thread_id =
+            requested_thread_id.unwrap_or_else(|| generated_thread_id(&caller, &client_action_id));
+        let scope = caller.turn_scope(thread_id.clone());
+        let thread_scope = thread_scope_from_turn_scope(&scope, Some(caller.user_id.clone()))?;
+        let thread = self
+            .thread_service
+            .ensure_thread(EnsureThreadRequest {
+                scope: thread_scope,
+                thread_id: Some(thread_id),
+                created_by_actor_id: caller.user_id.as_str().to_string(),
+                title: None,
+                metadata_json: Some(create_thread_metadata_json(&client_action_id)?),
+            })
+            .await
+            .map_err(map_thread_error)?;
+        Ok(RebornCreateThreadResponse { thread })
+    }
+
     async fn submit_turn(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -418,47 +461,6 @@ struct AcceptedWebUiMessage {
     thread_id: ThreadId,
     message_id: ThreadMessageId,
     reply_target_binding_id: String,
-}
-
-/// Optional create-thread helper for routes that want an explicit allocation
-/// before first turn submission.
-///
-/// When `requested_thread_id` is omitted, `client_action_id` deterministically
-/// replays the generated thread id. When callers provide an explicit thread id,
-/// that id is the thread identity; conflicting explicit ids for the same client
-/// action are not reconciled at this layer.
-impl RebornServices {
-    pub async fn create_thread(
-        &self,
-        caller: WebUiAuthenticatedCaller,
-        request: WebUiCreateThreadRequest,
-    ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
-        let command = request.into_command(caller)?;
-        let WebUiInboundCommand::CreateThread {
-            caller,
-            client_action_id,
-            requested_thread_id,
-        } = command
-        else {
-            return Err(RebornServicesError::internal_invariant());
-        };
-        let thread_id =
-            requested_thread_id.unwrap_or_else(|| generated_thread_id(&caller, &client_action_id));
-        let scope = caller.turn_scope(thread_id.clone());
-        let thread_scope = thread_scope_from_turn_scope(&scope, Some(caller.user_id.clone()))?;
-        let thread = self
-            .thread_service
-            .ensure_thread(EnsureThreadRequest {
-                scope: thread_scope,
-                thread_id: Some(thread_id),
-                created_by_actor_id: caller.user_id.as_str().to_string(),
-                title: None,
-                metadata_json: Some(create_thread_metadata_json(&client_action_id)?),
-            })
-            .await
-            .map_err(map_thread_error)?;
-        Ok(RebornCreateThreadResponse { thread })
-    }
 }
 
 /// Verify the actor owns the thread referenced by `scope` through the thread

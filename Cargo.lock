@@ -4970,6 +4970,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_webui_v2"
+version = "0.1.0"
+dependencies = [
+ "async-stream",
+ "async-trait",
+ "axum 0.8.9",
+ "chrono",
+ "futures",
+ "http 1.4.0",
+ "http-body-util",
+ "ironclaw_host_api",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "ironclaw_threads",
+ "ironclaw_turns",
+ "ironclaw_webui_v2",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower 0.5.3",
+ "tracing",
+]
+
+[[package]]
 name = "is-docker"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
