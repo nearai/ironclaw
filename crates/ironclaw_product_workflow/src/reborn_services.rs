@@ -118,7 +118,9 @@ impl RebornServicesApi for RebornServices {
             return Err(RebornServicesError::internal_invariant());
         };
 
-        let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
+        let resolved = self.resolve_webui_thread(scope, &actor).await?;
+        let scope = resolved.scope;
+        let thread_scope = resolved.thread_scope;
         let source_binding_id = webui_source_binding_id(&scope, &actor);
         let external_event_id = client_action_id.as_str().to_string();
 
@@ -166,17 +168,6 @@ impl RebornServicesApi for RebornServices {
                 }
             }
         } else {
-            self.thread_service
-                .ensure_thread(EnsureThreadRequest {
-                    scope: thread_scope.clone(),
-                    thread_id: Some(scope.thread_id.clone()),
-                    created_by_actor_id: actor.user_id.as_str().to_string(),
-                    title: None,
-                    metadata_json: None,
-                })
-                .await
-                .map_err(map_thread_error)?;
-
             let accepted = self
                 .thread_service
                 .accept_inbound_message(AcceptInboundMessageRequest {
@@ -273,16 +264,11 @@ impl RebornServicesApi for RebornServices {
         request: RebornTimelineRequest,
     ) -> Result<RebornTimelineResponse, RebornServicesError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
-        let scope = caller.turn_scope(thread_id.clone());
-        let thread_scope = thread_scope_from_turn_scope(&scope, Some(caller.user_id.clone()))?;
+        let actor = caller.actor();
         let history = self
-            .thread_service
-            .list_thread_history(ThreadHistoryRequest {
-                scope: thread_scope,
-                thread_id,
-            })
-            .await
-            .map_err(map_thread_error)?;
+            .resolve_webui_thread(caller.turn_scope(thread_id), &actor)
+            .await?
+            .history;
 
         Ok(RebornTimelineResponse {
             thread: history.thread,
@@ -297,13 +283,18 @@ impl RebornServicesApi for RebornServices {
         request: RebornStreamEventsRequest,
     ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
+        let actor = caller.actor();
+        let scope = self
+            .resolve_webui_thread(caller.turn_scope(thread_id), &actor)
+            .await?
+            .scope;
         let Some(event_stream) = &self.event_stream else {
             return Err(RebornServicesError::service_unavailable(false));
         };
         let events = event_stream
             .drain(ProjectionSubscriptionRequest {
-                actor: caller.actor(),
-                scope: caller.turn_scope(thread_id),
+                actor,
+                scope,
                 after_cursor: request.after_cursor,
             })
             .await
@@ -320,6 +311,8 @@ impl RebornServicesApi for RebornServices {
         let WebUiInboundCommand::CancelRun { request } = command else {
             return Err(RebornServicesError::internal_invariant());
         };
+        self.resolve_webui_thread(request.scope.clone(), &request.actor)
+            .await?;
         let response = self
             .turn_coordinator
             .cancel_run(request)
@@ -346,6 +339,7 @@ impl RebornServicesApi for RebornServices {
             return Err(RebornServicesError::internal_invariant());
         };
 
+        self.resolve_webui_thread(scope.clone(), &actor).await?;
         match resolution {
             WebUiGateResolution::Approved { .. } => {
                 let binding_id = webui_gate_binding_id(&scope, &gate_ref_string(&gate_ref));
@@ -397,6 +391,12 @@ struct AcceptedWebUiMessage {
     reply_target_binding_id: String,
 }
 
+struct ResolvedWebUiThread {
+    scope: TurnScope,
+    thread_scope: ThreadScope,
+    history: ironclaw_threads::ThreadHistory,
+}
+
 /// Optional create-thread helper for routes that want an explicit allocation
 /// before first turn submission.
 ///
@@ -435,6 +435,28 @@ impl RebornServices {
             .await
             .map_err(map_thread_error)?;
         Ok(RebornCreateThreadResponse { thread })
+    }
+
+    async fn resolve_webui_thread(
+        &self,
+        scope: TurnScope,
+        actor: &TurnActor,
+    ) -> Result<ResolvedWebUiThread, RebornServicesError> {
+        let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
+        let history = self
+            .thread_service
+            .list_thread_history(ThreadHistoryRequest {
+                scope: thread_scope.clone(),
+                thread_id: scope.thread_id.clone(),
+            })
+            .await
+            .map_err(map_thread_error)?;
+
+        Ok(ResolvedWebUiThread {
+            scope,
+            thread_scope,
+            history,
+        })
     }
 }
 
