@@ -78,6 +78,8 @@ const VIRTUAL_ROOTS: &[&str] = &[
     "/processes",
     "/authorization",
     "/outbound",
+    "/run-state",
+    "/approvals",
     "/tenant-shared",
     "/tenants",
 ];

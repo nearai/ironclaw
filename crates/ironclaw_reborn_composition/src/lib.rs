@@ -105,6 +105,8 @@ const PER_USER_ALIASES: &[&str] = &[
     "/secrets",
     "/authorization",
     "/outbound",
+    "/run-state",
+    "/approvals",
     "/engine",
 ];
 

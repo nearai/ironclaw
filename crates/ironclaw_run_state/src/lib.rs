@@ -3,9 +3,13 @@
 //! `ironclaw_run_state` stores the current lifecycle state for host-managed
 //! invocations. It is separate from runtime events: events are append-only
 //! history, while run state answers "what is this invocation waiting on now?".
-//! Feature-gated PostgreSQL and libSQL stores provide transactional durable
-//! backends for production composition; in-memory and filesystem stores remain
-//! useful for tests, local demos, and single-process profiles.
+//!
+//! Durable persistence is provided by [`FilesystemRunStateStore`] and
+//! [`FilesystemApprovalRequestStore`] over a
+//! [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). The
+//! `RootFilesystem` choice (libSQL-backed, PostgreSQL-backed, in-memory, or
+//! local-disk) is made at the filesystem layer — the consumer-store level no
+//! longer carries per-backend impls.
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod db;
@@ -23,11 +27,11 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RecordVersion,
-    RootFilesystem,
+    RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
     AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, HostApiError, InvocationId,
-    MissionId, ProjectId, ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
+    MissionId, ProjectId, ResourceScope, ScopedPath, TenantId, ThreadId, UserId,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -545,19 +549,29 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
 /// expected to be a backend error, not a routine condition.
 const FILESYSTEM_CAS_RETRIES: usize = 8;
 
-/// Filesystem-backed run-state store under resource-owner-scoped `/engine` paths.
-pub struct FilesystemRunStateStore<'a, F>
+/// Filesystem-backed run-state store under the `/run-state` mount alias.
+///
+/// Construct with a [`ScopedFilesystem`] over any [`RootFilesystem`]. The
+/// [`ScopedFilesystem`] resolves the `/run-state` alias to a
+/// tenant/user-scoped [`VirtualPath`](ironclaw_host_api::VirtualPath) per
+/// its [`MountView`](ironclaw_host_api::MountView) and enforces per-op ACL
+/// before any backend dispatch — so tenant isolation is structural rather
+/// than something this crate has to re-derive from `ResourceScope.tenant_id`
+/// / `user_id`. Within-tenant axes (agent/project/mission/thread) remain in
+/// the alias-relative path because they are not covered by the per-tenant
+/// `MountAlias`.
+pub struct FilesystemRunStateStore<F>
 where
     F: RootFilesystem,
 {
-    filesystem: &'a F,
+    filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<'a, F> FilesystemRunStateStore<'a, F>
+impl<F> FilesystemRunStateStore<F>
 where
     F: RootFilesystem,
 {
-    pub fn new(filesystem: &'a F) -> Self {
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self { filesystem }
     }
 
@@ -608,7 +622,7 @@ where
             mutate(&mut record);
             let entry = Self::record_entry(&record)?;
             match put_with_cas(
-                self.filesystem,
+                self.filesystem.as_ref(),
                 &path,
                 entry,
                 CasExpectation::Version(version),
@@ -628,7 +642,7 @@ where
 }
 
 #[async_trait]
-impl<F> RunStateStore for FilesystemRunStateStore<'_, F>
+impl<F> RunStateStore for FilesystemRunStateStore<F>
 where
     F: RootFilesystem,
 {
@@ -645,7 +659,14 @@ where
             error_kind: None,
         };
         let entry = Self::record_entry(&record)?;
-        match put_with_cas(self.filesystem, &path, entry, CasExpectation::Absent).await {
+        match put_with_cas(
+            self.filesystem.as_ref(),
+            &path,
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        {
             Ok(()) => Ok(record),
             Err(PutError::VersionMismatch) => Err(RunStateError::InvocationAlreadyExists {
                 invocation_id: record.invocation_id,
@@ -745,7 +766,11 @@ where
         let mut records = Vec::new();
         for entry in entries {
             if entry.name.ends_with(".json") {
-                let Some(versioned) = self.filesystem.get(&entry.path).await? else {
+                // `list_dir` returns post-resolution `VirtualPath`s; reconstruct
+                // the alias-relative `ScopedPath` so the follow-up `get` still
+                // runs through the per-op ACL.
+                let child = join_scoped(&root, &entry.name)?;
+                let Some(versioned) = self.filesystem.get(&child).await? else {
                     continue;
                 };
                 let record = deserialize::<RunRecord>(&versioned.entry.body)?;
@@ -759,19 +784,24 @@ where
     }
 }
 
-/// Filesystem-backed approval request store under resource-owner-scoped `/engine` paths.
-pub struct FilesystemApprovalRequestStore<'a, F>
+/// Filesystem-backed approval request store under the `/approvals` mount alias.
+///
+/// See [`FilesystemRunStateStore`] for the structural-tenant-isolation
+/// rationale; this store applies the same shape to approval-request records
+/// under a sibling mount alias so a single composition can wire run state
+/// and approvals to distinct alias targets while sharing one backend.
+pub struct FilesystemApprovalRequestStore<F>
 where
     F: RootFilesystem,
 {
-    filesystem: &'a F,
+    filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<'a, F> FilesystemApprovalRequestStore<'a, F>
+impl<F> FilesystemApprovalRequestStore<F>
 where
     F: RootFilesystem,
 {
-    pub fn new(filesystem: &'a F) -> Self {
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self { filesystem }
     }
 
@@ -821,7 +851,7 @@ where
             record.status = status;
             let entry = Self::record_entry(&record)?;
             match put_with_cas(
-                self.filesystem,
+                self.filesystem.as_ref(),
                 &path,
                 entry,
                 CasExpectation::Version(version),
@@ -841,7 +871,7 @@ where
 }
 
 #[async_trait]
-impl<F> ApprovalRequestStore for FilesystemApprovalRequestStore<'_, F>
+impl<F> ApprovalRequestStore for FilesystemApprovalRequestStore<F>
 where
     F: RootFilesystem,
 {
@@ -859,7 +889,14 @@ where
             status: ApprovalStatus::Pending,
         };
         let entry = Self::record_entry(&record)?;
-        match put_with_cas(self.filesystem, &path, entry, CasExpectation::Absent).await {
+        match put_with_cas(
+            self.filesystem.as_ref(),
+            &path,
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        {
             Ok(()) => Ok(record),
             Err(PutError::VersionMismatch) => Err(RunStateError::ApprovalRequestAlreadyExists {
                 request_id: record.request.id,
@@ -938,7 +975,12 @@ where
         let mut records = Vec::new();
         for entry in entries {
             if entry.name.ends_with(".json") {
-                let Some(versioned) = self.filesystem.get(&entry.path).await? else {
+                // See `FilesystemRunStateStore::records_for_scope` — `list_dir`
+                // returns post-resolution `VirtualPath`s; rebuild the
+                // alias-relative `ScopedPath` so the follow-up `get` runs
+                // through the per-op ACL.
+                let child = join_scoped(&root, &entry.name)?;
+                let Some(versioned) = self.filesystem.get(&child).await? else {
                     continue;
                 };
                 let record = deserialize::<ApprovalRecord>(&versioned.entry.body)?;
@@ -952,34 +994,98 @@ where
     }
 }
 
+// Path layout under the `/run-state` and `/approvals` mount aliases:
+//
+//     /run-state[/agents/<agent>][/projects/<project>][/missions/<mission>][/threads/<thread>]/runs/<invocation_id>.json
+//     /approvals[/agents/<agent>][/projects/<project>][/missions/<mission>][/threads/<thread>]/<request_id>.json
+//
+// Tenant + user identity moves into the caller's `MountView` per the
+// per-tenant `MountAlias` rewriting, so neither prefix is encoded in the
+// path itself. Within-tenant sub-scope axes (agent/project/mission/thread)
+// stay in the alias-relative path because they are within-tenant scoping
+// not covered by the per-tenant `MountAlias`.
+
+const RUN_STATE_PREFIX: &str = "/run-state";
+const APPROVALS_PREFIX: &str = "/approvals";
+
 fn run_record_path(
     scope: &ResourceScope,
     invocation_id: InvocationId,
-) -> Result<VirtualPath, RunStateError> {
-    VirtualPath::new(format!(
+) -> Result<ScopedPath, RunStateError> {
+    scoped_path(&format!(
         "{}/{invocation_id}.json",
-        run_records_root(scope)?.as_str()
+        run_records_root_string(scope)
     ))
-    .map_err(invalid_path)
 }
 
-fn run_records_root(scope: &ResourceScope) -> Result<VirtualPath, RunStateError> {
-    VirtualPath::new(format!("{}/runs", tenant_user_root(scope))).map_err(invalid_path)
+fn run_records_root(scope: &ResourceScope) -> Result<ScopedPath, RunStateError> {
+    scoped_path(&run_records_root_string(scope))
+}
+
+fn run_records_root_string(scope: &ResourceScope) -> String {
+    format!("{}/runs", scope_owner_alias_string(RUN_STATE_PREFIX, scope))
 }
 
 fn approval_record_path(
     scope: &ResourceScope,
     request_id: ApprovalRequestId,
-) -> Result<VirtualPath, RunStateError> {
-    VirtualPath::new(format!(
+) -> Result<ScopedPath, RunStateError> {
+    scoped_path(&format!(
         "{}/{request_id}.json",
-        approval_records_root(scope)?.as_str()
+        approval_records_root_string(scope)
     ))
-    .map_err(invalid_path)
 }
 
-fn approval_records_root(scope: &ResourceScope) -> Result<VirtualPath, RunStateError> {
-    VirtualPath::new(format!("{}/approvals", tenant_user_root(scope))).map_err(invalid_path)
+fn approval_records_root(scope: &ResourceScope) -> Result<ScopedPath, RunStateError> {
+    scoped_path(&approval_records_root_string(scope))
+}
+
+fn approval_records_root_string(scope: &ResourceScope) -> String {
+    scope_owner_alias_string(APPROVALS_PREFIX, scope)
+}
+
+/// Build the alias-relative owner prefix for a scope under the given mount
+/// alias. Tenant and user are intentionally absent — they live in the
+/// `MountView` the caller supplied. Sub-scope axes (agent/project/mission/
+/// thread) stay in the path so within-tenant cross-scope isolation still
+/// works for stores sharing one alias target.
+fn scope_owner_alias_string(prefix: &'static str, scope: &ResourceScope) -> String {
+    let mut base = String::from(prefix);
+    if let Some(agent_id) = &scope.agent_id {
+        base.push_str("/agents/");
+        base.push_str(agent_id.as_str());
+    }
+    if let Some(project_id) = &scope.project_id {
+        base.push_str("/projects/");
+        base.push_str(project_id.as_str());
+    }
+    if let Some(mission_id) = &scope.mission_id {
+        base.push_str("/missions/");
+        base.push_str(mission_id.as_str());
+    }
+    if let Some(thread_id) = &scope.thread_id {
+        base.push_str("/threads/");
+        base.push_str(thread_id.as_str());
+    }
+    base
+}
+
+fn scoped_path(raw: &str) -> Result<ScopedPath, RunStateError> {
+    ScopedPath::new(raw).map_err(invalid_path)
+}
+
+/// Join a leaf segment onto a [`ScopedPath`] prefix. Mirrors the engine /
+/// processes / secrets / outbound stores' `join_scoped` helper: `list_dir`
+/// returns post-resolution [`VirtualPath`](ironclaw_host_api::VirtualPath)s,
+/// but the follow-up `get` must run through the `ScopedFilesystem` so the
+/// per-op ACL is enforced — so callers strip the leaf name and rejoin it
+/// onto the original `ScopedPath` prefix.
+fn join_scoped(prefix: &ScopedPath, leaf: &str) -> Result<ScopedPath, RunStateError> {
+    scoped_path(&format!(
+        "{}/{}",
+        prefix.as_str().trim_end_matches('/'),
+        leaf
+    ))
 }
 
 type FilesystemRecordLock = Arc<tokio::sync::Mutex<()>>;
@@ -1002,7 +1108,7 @@ type FilesystemRecordLock = Arc<tokio::sync::Mutex<()>>;
 static FILESYSTEM_RECORD_LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
     OnceLock::new();
 
-fn filesystem_record_lock(path: &VirtualPath) -> FilesystemRecordLock {
+fn filesystem_record_lock(path: &ScopedPath) -> FilesystemRecordLock {
     let locks = FILESYSTEM_RECORD_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = locks
         .lock()
@@ -1021,27 +1127,6 @@ fn filesystem_record_lock(path: &VirtualPath) -> FilesystemRecordLock {
     let fresh: FilesystemRecordLock = Arc::new(tokio::sync::Mutex::new(()));
     guard.insert(key.to_string(), Arc::downgrade(&fresh));
     fresh
-}
-
-fn tenant_user_root(scope: &ResourceScope) -> String {
-    let mut base = format!(
-        "/engine/tenants/{}/users/{}",
-        scope.tenant_id.as_str(),
-        scope.user_id.as_str()
-    );
-    if let Some(agent_id) = &scope.agent_id {
-        base = format!("{base}/agents/{}", agent_id.as_str());
-    }
-    if let Some(project_id) = &scope.project_id {
-        base = format!("{base}/projects/{}", project_id.as_str());
-    }
-    if let Some(mission_id) = &scope.mission_id {
-        base = format!("{base}/missions/{}", mission_id.as_str());
-    }
-    if let Some(thread_id) = &scope.thread_id {
-        base = format!("{base}/threads/{}", thread_id.as_str());
-    }
-    base
 }
 
 fn invalid_path(error: HostApiError) -> RunStateError {
@@ -1100,8 +1185,8 @@ enum PutError {
 /// in-process lock map; cross-process callers fall back to the documented
 /// process-local limitation.
 async fn put_with_cas<F>(
-    filesystem: &F,
-    path: &VirtualPath,
+    filesystem: &ScopedFilesystem<F>,
+    path: &ScopedPath,
     entry: Entry,
     cas: CasExpectation,
 ) -> Result<(), PutError>
@@ -1153,10 +1238,7 @@ mod lock_map_tests {
 
     #[test]
     fn filesystem_record_lock_returns_same_arc_while_holders_alive() {
-        let path = VirtualPath::new(
-            "/engine/tenants/lockmap-share/users/u/projects/p/runs/share.json".to_string(),
-        )
-        .unwrap();
+        let path = ScopedPath::new("/run-state/projects/p/runs/share.json".to_string()).unwrap();
         let a = filesystem_record_lock(&path);
         let b = filesystem_record_lock(&path);
         assert!(
@@ -1172,14 +1254,8 @@ mod lock_map_tests {
         // first path's entry must no longer be reachable. Demonstrates
         // the map does not grow unboundedly with tenant/path churn
         // (audit finding F1).
-        let path = VirtualPath::new(
-            "/engine/tenants/lockmap-prune/users/u/projects/p/runs/prune.json".to_string(),
-        )
-        .unwrap();
-        let other = VirtualPath::new(
-            "/engine/tenants/lockmap-prune/users/u/projects/p/runs/other.json".to_string(),
-        )
-        .unwrap();
+        let path = ScopedPath::new("/run-state/projects/p/runs/prune.json".to_string()).unwrap();
+        let other = ScopedPath::new("/run-state/projects/p/runs/other.json".to_string()).unwrap();
 
         let arc = filesystem_record_lock(&path);
         assert!(

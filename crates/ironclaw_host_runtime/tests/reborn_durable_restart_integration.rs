@@ -332,20 +332,20 @@ type DurableHostRuntimeServices = HostRuntimeServices<
 
 struct DurableServices {
     services: DurableHostRuntimeServices,
-    run_state: Arc<FilesystemRunStateStore<'static, LocalFilesystem>>,
-    approval_requests: Arc<FilesystemApprovalRequestStore<'static, LocalFilesystem>>,
+    run_state: Arc<FilesystemRunStateStore<LocalFilesystem>>,
+    approval_requests: Arc<FilesystemApprovalRequestStore<LocalFilesystem>>,
     capability_leases: Arc<FilesystemCapabilityLeaseStore<LocalFilesystem>>,
     events: RebornEventStores,
 }
 
 async fn durable_services(engine_root: &Path, event_root: &Path) -> DurableServices {
     let event_stores = jsonl_event_stores(event_root).await;
-    let run_state_fs = leaked_engine_filesystem(engine_root);
-    let approval_fs = leaked_engine_filesystem(engine_root);
-    let lease_scoped_fs = scoped_engine_filesystem(engine_root);
-    let run_state = Arc::new(FilesystemRunStateStore::new(run_state_fs));
-    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(approval_fs));
-    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(lease_scoped_fs));
+    // All three filesystem-backed stores now take `Arc<ScopedFilesystem<F>>`
+    // (run_state migrated in commit 475588153; capability lease in 34e3c68cb).
+    let scoped_fs = scoped_engine_filesystem(engine_root);
+    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&scoped_fs)));
+    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(&scoped_fs)));
+    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped_fs)));
     let services = base_services(
         engine_root,
         event_stores.clone(),
@@ -426,10 +426,26 @@ fn durable_mount_view() -> MountView {
             VirtualPath::new("/authorization").unwrap(),
             MountPermissions::read_write_list_delete(),
         ),
+        MountGrant::new(
+            MountAlias::new("/run-state").unwrap(),
+            VirtualPath::new("/run-state").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/approvals").unwrap(),
+            VirtualPath::new("/approvals").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        ),
     ])
     .unwrap()
 }
 
+/// Build a fresh [`ScopedFilesystem`] over a [`LocalFilesystem`] rooted at
+/// `engine_root`. The restart contract spawns multiple service graphs against
+/// the same on-disk root, so each call here constructs a distinct
+/// `ScopedFilesystem` over a freshly-mounted `LocalFilesystem`; identity of
+/// the wrapping struct is irrelevant — durability lives on disk, and the
+/// per-path lock map is process-global by design.
 fn scoped_engine_filesystem(engine_root: &Path) -> Arc<ScopedFilesystem<LocalFilesystem>> {
     Arc::new(ScopedFilesystem::new(
         Arc::new(mounted_engine_filesystem(engine_root)),
@@ -447,10 +463,6 @@ fn mounted_engine_filesystem(engine_root: &Path) -> LocalFilesystem {
         )
         .unwrap();
     filesystem
-}
-
-fn leaked_engine_filesystem(engine_root: &Path) -> &'static LocalFilesystem {
-    Box::leak(Box::new(mounted_engine_filesystem(engine_root)))
 }
 
 async fn block_for_approval(

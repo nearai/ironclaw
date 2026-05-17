@@ -102,6 +102,8 @@ Frozen V1 canonical virtual roots (aligned with `storage-placement.md`):
 /processes
 /authorization
 /outbound
+/run-state
+/approvals
 /tenant-shared
 /tenants
 ```
@@ -124,6 +126,8 @@ Recommended meaning:
 | `/processes` | background-process records and result/output blobs (consumer-store mount alias under `ironclaw_processes`) |
 | `/authorization` | capability lease records (consumer-store mount alias under `ironclaw_authorization`) |
 | `/outbound` | outbound delivery policy/subscription/attempt records (consumer-store mount alias under `ironclaw_outbound`) |
+| `/run-state` | invocation-lifecycle run-state records (consumer-store mount alias under `ironclaw_run_state`) |
+| `/approvals` | approval-request lifecycle records (sibling consumer-store mount alias under `ironclaw_run_state`) |
 | `/tenant-shared` | data shared between users/agents in the same tenant; resolves to `/tenants/<tenant_id>/shared/...` per [scoped-filesystem-tenant-isolation](../../plans/2026-05-16-scoped-filesystem-tenant-isolation.md) |
 | `/tenants` | reserved root for tenant-scoped target subtrees written by the per-invocation `MountView` (`/tenants/<tenant_id>/users/<user_id>/<alias>/...`); not consumed directly by stores |
 
