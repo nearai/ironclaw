@@ -456,12 +456,26 @@ fn scoped_engine_filesystem(engine_root: &Path) -> Arc<ScopedFilesystem<LocalFil
 fn mounted_engine_filesystem(engine_root: &Path) -> LocalFilesystem {
     std::fs::create_dir_all(engine_root).unwrap();
     let mut filesystem = LocalFilesystem::new();
-    filesystem
-        .mount_local(
-            VirtualPath::new("/engine").unwrap(),
-            HostPath::from_path_buf(engine_root.to_path_buf()),
-        )
-        .unwrap();
+    // Backend mount for `/engine` plus the consumer-store virtual roots
+    // exposed via `durable_mount_view`. Each top-level root resolves to a
+    // sibling subdirectory under `engine_root` so durable-restart fixtures
+    // can reopen the same on-disk tree across service graphs.
+    for root in [
+        "/engine",
+        "/processes",
+        "/authorization",
+        "/run-state",
+        "/approvals",
+    ] {
+        let host_dir = engine_root.join(root.trim_start_matches('/'));
+        std::fs::create_dir_all(&host_dir).unwrap();
+        filesystem
+            .mount_local(
+                VirtualPath::new(root).unwrap(),
+                HostPath::from_path_buf(host_dir),
+            )
+            .unwrap();
+    }
     filesystem
 }
 
