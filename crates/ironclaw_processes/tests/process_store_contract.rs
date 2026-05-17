@@ -1649,6 +1649,86 @@ async fn filesystem_process_store_isolates_two_tenants_with_same_user_project_id
     );
 }
 
+/// Defense-in-depth regression for the tenant-isolation indexed
+/// projection (see
+/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md` —
+/// "What this gives us": `tenant_id` is projected alongside every
+/// `Entry::record`/`Entry::bytes` write so an admin-tier query can
+/// filter by tenant, and a path-rewriting bug surfaces as a
+/// query-time mismatch rather than silent cross-tenant leakage).
+///
+/// Writes a process record under tenant A's scope, then issues a raw
+/// `RootFilesystem::query` against the deliveries-equivalent records
+/// root with `Filter::Eq { key: "tenant_id", value: <tenant-a> }` —
+/// the record must be returned. A query for tenant B's id must
+/// return zero rows over the same backend prefix.
+#[tokio::test]
+async fn filesystem_process_store_writes_tenant_id_indexed_projection() {
+    use ironclaw_filesystem::{Filter, IndexKey, IndexValue, Page};
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let fs = scoped_processes_filesystem(
+        Arc::clone(&backend),
+        "/engine/tenants/tenant-a/users/alice/processes",
+    );
+    let store = FilesystemProcessStore::from_arc(Arc::clone(&fs));
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant-a", "alice");
+    store
+        .start(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    // Resolve the alias-relative records prefix to the backing
+    // [`VirtualPath`] through the same MountView the store uses, so the
+    // raw `RootFilesystem::query` below targets exactly the bytes the
+    // backend stored. The records root mirrors the in-store path
+    // builder (`/processes[/projects/<id>]/records`) — the sample scope
+    // carries `project_id = project1` but no agent/mission/thread.
+    let records_root = ironclaw_host_api::ScopedPath::new(format!(
+        "/processes/projects/{}/records",
+        scope.project_id.as_ref().unwrap().as_str()
+    ))
+    .unwrap();
+    let virtual_root = fs.mounts().resolve(&records_root).unwrap();
+
+    let tenant_key = IndexKey::new("tenant_id").unwrap();
+    let hit = backend
+        .query(
+            &virtual_root,
+            &Filter::Eq {
+                key: tenant_key.clone(),
+                value: IndexValue::Text(scope.tenant_id.as_str().to_string()),
+            },
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        hit.len(),
+        1,
+        "tenant_id projection must surface the record via Filter::Eq",
+    );
+
+    let miss = backend
+        .query(
+            &virtual_root,
+            &Filter::Eq {
+                key: tenant_key,
+                value: IndexValue::Text("tenant-b".to_string()),
+            },
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert!(
+        miss.is_empty(),
+        "tenant_id projection must NOT surface tenant-a's record under tenant-b query; got {} rows",
+        miss.len(),
+    );
+}
+
 enum UnownedTransition {
     Complete,
     Fail,
