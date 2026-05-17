@@ -1014,6 +1014,88 @@ async fn filesystem_capability_lease_store_isolates_two_tenants_with_same_user_p
     );
 }
 
+/// Defense-in-depth regression for the tenant-isolation indexed
+/// projection (see
+/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
+/// every `FilesystemCapabilityLeaseStore` lease write decorates its
+/// `Entry` with a `tenant_id` projection so an admin-tier query can
+/// filter explicitly by tenant and a path-rewriting bug surfaces as a
+/// query-time mismatch.
+///
+/// Issues a lease under tenant A's scope, then runs a raw
+/// `RootFilesystem::query` against the lease owner prefix with
+/// `Filter::Eq { key: "tenant_id", value: <tenant-a> }` and asserts a
+/// non-empty result; a query for a different tenant must return zero
+/// rows.
+#[tokio::test]
+async fn filesystem_capability_lease_store_writes_tenant_id_indexed_projection() {
+    use ironclaw_filesystem::{Filter, IndexKey, IndexValue, Page};
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = build_scoped_fs(
+        Arc::clone(&backend),
+        "/engine/tenants/tenant-a/users/alice/authorization",
+    );
+    let store = FilesystemCapabilityLeaseStore::new(&scoped);
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    store.issue(lease).await.unwrap();
+
+    // Resolve the alias-relative owner prefix through the same MountView
+    // the store uses so the raw `query` targets the bytes the backend
+    // stored. The lease owner prefix is `/authorization/leases/projects/<id>`
+    // for our fixture scope.
+    let owner_alias = ironclaw_host_api::ScopedPath::new(format!(
+        "/authorization/leases/projects/{}",
+        context.resource_scope.project_id.as_ref().unwrap().as_str()
+    ))
+    .unwrap();
+    let virtual_prefix = scoped.mounts().resolve(&owner_alias).unwrap();
+    let tenant_key = IndexKey::new("tenant_id").unwrap();
+    let tenant_id_str = context.resource_scope.tenant_id.as_str().to_string();
+
+    let hit = backend
+        .query(
+            &virtual_prefix,
+            &Filter::Eq {
+                key: tenant_key.clone(),
+                value: IndexValue::Text(tenant_id_str),
+            },
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !hit.is_empty(),
+        "tenant_id projection must surface the lease via Filter::Eq",
+    );
+
+    let miss = backend
+        .query(
+            &virtual_prefix,
+            &Filter::Eq {
+                key: tenant_key,
+                value: IndexValue::Text("tenant-z".to_string()),
+            },
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert!(
+        miss.is_empty(),
+        "tenant_id projection must NOT surface tenant1's lease under tenant-z query; got {} rows",
+        miss.len(),
+    );
+}
+
 #[tokio::test]
 async fn revoked_lease_no_longer_authorizes_dispatch() {
     let leases = InMemoryCapabilityLeaseStore::new();

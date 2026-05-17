@@ -21,8 +21,8 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FileType, FilesystemError, RecordVersion, RootFilesystem,
-    ScopedFilesystem,
+    CasExpectation, ContentType, Entry, FileType, FilesystemError, IndexKey, IndexKind, IndexName,
+    IndexSpec, IndexValue, RecordVersion, RootFilesystem, ScopedFilesystem,
 };
 
 /// Bounded retry budget for compare-and-swap loops on lease writes.
@@ -505,15 +505,33 @@ where
     ) -> Result<(), CapabilityLeaseError> {
         let path = lease_path(&lease.scope, lease.grant.id)?;
         let body = serialize_pretty(lease)?;
-        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        // Defense-in-depth: tag the entry with the tenant id so admin-tier
+        // queries can filter by tenant and a path-rewriting bug surfaces as a
+        // query-time mismatch rather than silent cross-tenant leakage. See
+        // docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md.
+        let entry = Entry::bytes(body)
+            .with_content_type(ContentType::json())
+            .with_indexed(
+                index_key_tenant_id(),
+                IndexValue::Text(lease.scope.tenant_id.as_str().to_string()),
+            );
+        ensure_tenant_id_index(self.filesystem, &lease_owner_prefix(&lease.scope)?).await?;
+        // Byte-only backends (LocalFilesystem) reject BOTH non-`Any` CAS
+        // AND entries with a populated `indexed` projection in a single
+        // `Unsupported` response. Strip the projection and downgrade CAS
+        // to `Any` so byte-only mounts stay writeable — the per-owner
+        // `mutation_lock` carries the ordering safety invariant on the
+        // fallback path, and the dropped tenant projection is best-effort
+        // (path-prefix scoping is the primary isolation boundary).
         match self.filesystem.put(&path, entry.clone(), expectation).await {
             Ok(_) => Ok(()),
-            Err(FilesystemError::Unsupported { .. })
-                if !matches!(expectation, CasExpectation::Any) =>
-            {
-                // Backend has no per-row versioning — degrade to the legacy
-                // single-instance contract under `mutation_lock`.
-                match self.filesystem.put(&path, entry, CasExpectation::Any).await {
+            Err(FilesystemError::Unsupported { .. }) => {
+                let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
+                match self
+                    .filesystem
+                    .put(&path, opaque, CasExpectation::Any)
+                    .await
+                {
                     Ok(_) => Ok(()),
                     Err(error) => Err(lease_persistence_error(error)),
                 }
@@ -596,12 +614,37 @@ where
         paths.dedup_by(|left, right| left.as_str() == right.as_str());
         let path = lease_index_path(scope)?;
         let body = serialize_pretty(&CapabilityLeaseIndex { paths })?;
-        let entry = Entry::bytes(body).with_content_type(ContentType::json());
-        self.filesystem
-            .put(&path, entry, CasExpectation::Any)
+        // Defense-in-depth tenant projection on the per-owner lease index;
+        // see `write_lease_raw` for the rationale and design plan.
+        let entry = Entry::bytes(body)
+            .with_content_type(ContentType::json())
+            .with_indexed(
+                index_key_tenant_id(),
+                IndexValue::Text(scope.tenant_id.as_str().to_string()),
+            );
+        ensure_tenant_id_index(self.filesystem, &lease_owner_prefix(scope)?).await?;
+        // Byte-only backends (LocalFilesystem) reject entries with a
+        // populated `indexed` projection. Fall back to the plain-bytes
+        // shape for those — the tenant projection is best-effort defense
+        // in depth, and dropping it on byte-only mounts is acceptable
+        // because the path-prefix scoping still routes tenant isolation
+        // structurally.
+        match self
+            .filesystem
+            .put(&path, entry.clone(), CasExpectation::Any)
             .await
-            .map(|_| ())
-            .map_err(lease_persistence_error)
+        {
+            Ok(_) => Ok(()),
+            Err(FilesystemError::Unsupported { .. }) => {
+                let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
+                self.filesystem
+                    .put(&path, opaque, CasExpectation::Any)
+                    .await
+                    .map(|_| ())
+                    .map_err(lease_persistence_error)
+            }
+            Err(error) => Err(lease_persistence_error(error)),
+        }
     }
 
     async fn index_lease_path(
@@ -1543,4 +1586,54 @@ fn lease_persistence_error(error: FilesystemError) -> CapabilityLeaseError {
 
 fn is_not_found(error: &FilesystemError) -> bool {
     matches!(error, FilesystemError::NotFound { .. })
+}
+
+// ── Indexed projections (defense in depth) ─────────────────────
+//
+// Path-prefix scoping via the caller's [`MountView`] is the primary
+// tenant-isolation boundary; the indexed `tenant_id` projection added on
+// every lease/index write is belt-and-suspenders so an admin-tier query
+// can filter explicitly by tenant, and a path-rewriting bug surfaces as
+// a query-time mismatch rather than silent cross-tenant leakage. See
+// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+
+/// Index key projected on every lease and lease-index entry. Production
+/// reads never go through this key directly — path-prefix scoping
+/// handles routing — but it is available for admin-tier queries.
+fn index_key_tenant_id() -> IndexKey {
+    IndexKey::new("tenant_id").unwrap_or_else(|_| {
+        unreachable!("authorization index key `tenant_id` must be a simple identifier")
+    })
+}
+
+fn index_name_authorization_tenant() -> IndexName {
+    IndexName::new("authorization_by_tenant").unwrap_or_else(|_| {
+        unreachable!(
+            "authorization index name `authorization_by_tenant` must be a simple identifier"
+        )
+    })
+}
+
+/// Declare the `tenant_id` exact-equality index on `prefix`, tolerating
+/// backends that don't materialize indexes (LocalFilesystem). Idempotent
+/// across the mount lifetime; mirrors the engine/processes stores'
+/// `ensure_*_index` shape so byte-only backends degrade gracefully
+/// instead of failing closed.
+async fn ensure_tenant_id_index<F>(
+    filesystem: &ScopedFilesystem<F>,
+    prefix: &ScopedPath,
+) -> Result<(), CapabilityLeaseError>
+where
+    F: RootFilesystem,
+{
+    let spec = IndexSpec::new(
+        index_name_authorization_tenant(),
+        vec![index_key_tenant_id()],
+        IndexKind::Exact,
+    );
+    match filesystem.ensure_index(prefix, &spec).await {
+        Ok(()) => Ok(()),
+        Err(FilesystemError::Unsupported { .. }) => Ok(()),
+        Err(error) => Err(lease_persistence_error(error)),
+    }
 }
