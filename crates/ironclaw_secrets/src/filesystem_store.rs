@@ -6,16 +6,27 @@
 //! fabric as the rest of Reborn (`ironclaw_processes`, `ironclaw_authorization`,
 //! `ironclaw_outbound`, `ironclaw_run_state`).
 //!
-//! Path layout, all under tenant/user/agent/project/mission/thread-scoped
-//! prefixes:
+//! All paths are alias-relative [`ScopedPath`] strings under the `/secrets`
+//! mount alias. Tenant and user isolation are enforced structurally by the
+//! caller-supplied [`MountView`](ironclaw_host_api::MountView): composition
+//! wires `/secrets` → `/tenants/<tenant_id>/users/<user_id>/secrets`, so
+//! storage code never has to encode or remember tenant/user identity. The
+//! agent/project sub-scope remains in the path because secrets are partitioned
+//! within a user's namespace by integration/project; the AAD (see
+//! [`filesystem_secret_aad`](crate::filesystem_secret_aad)) binds ciphertext
+//! to the same `(tenant, user, agent, project, handle)` tuple so cross-owner
+//! reads fail closed both at the path layer and via decryption.
 //!
-//! - `/secrets/<owner-prefix>/secrets/<handle>.json` — encrypted secret material
-//! - `/secrets/<owner-prefix>/secret-leases/<lease_id>.json` — active/consumed/
-//!   revoked/expired lease metadata
-//! - `/secrets/<owner-prefix>/credential-accounts/<account_id>.json` — credential
-//!   account records (encrypted target/extension metadata)
-//! - `/secrets/<owner-prefix>/credential-sessions/<session_id>.json` — credential
-//!   session records (encrypted session payload + use counter)
+//! Path layout (alias-relative):
+//!
+//! - `/secrets/agents/<agent>/projects/<project>/secrets/<handle>.json`
+//! - `/secrets/agents/<agent>/projects/<project>/secret-leases/<lease_id>.json`
+//! - `/secrets/agents/<agent>/projects/<project>/credential-accounts/<account_id>.json`
+//! - `/secrets/agents/<agent>/projects/<project>/credential-sessions/<session_id>.json`
+//!
+//! `agents/<agent>` and `projects/<project>` segments are omitted when the
+//! scope does not carry that field (mirroring the legacy
+//! `secret_owner_root` shape so existing AAD bindings remain valid).
 //!
 //! Encryption-at-rest currently lives **inside this store** rather than as a
 //! generic [`EncryptedBackend`] backend decorator. The
@@ -34,10 +45,12 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
-use ironclaw_filesystem::{CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem};
+use ironclaw_filesystem::{
+    CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem,
+};
 use ironclaw_host_api::{
-    AgentId, HostApiError, MissionId, ProjectId, ResourceScope, SecretHandle, ThreadId, Timestamp,
-    VirtualPath,
+    AgentId, HostApiError, MissionId, ProjectId, ResourceScope, ScopedPath, SecretHandle, ThreadId,
+    Timestamp,
 };
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -171,14 +184,19 @@ impl SerializableCredentialSession {
 
 /// Filesystem-backed [`SecretStore`].
 ///
-/// Construct with any [`RootFilesystem`]. Encryption is currently embedded
-/// (see the module docstring) and uses the same [`SecretsCrypto`] as the
-/// libSQL/Postgres backends.
+/// Construct with a [`ScopedFilesystem`] over any [`RootFilesystem`].
+/// Encryption is currently embedded (see the module docstring) and uses the
+/// same [`SecretsCrypto`] as the libSQL/Postgres backends. Tenant and user
+/// isolation are enforced by the caller's
+/// [`MountView`](ironclaw_host_api::MountView): the `/secrets` alias resolves
+/// to a per-tenant/per-user [`VirtualPath`](ironclaw_host_api::VirtualPath)
+/// before any backend dispatch, so two stores wrapping the same backend with
+/// different mounts cannot read each other's data.
 pub struct FilesystemSecretStore<F>
 where
     F: RootFilesystem,
 {
-    filesystem: Arc<F>,
+    filesystem: Arc<ScopedFilesystem<F>>,
     crypto: Arc<SecretsCrypto>,
     lease_ttl: Duration,
 }
@@ -187,7 +205,7 @@ impl<F> FilesystemSecretStore<F>
 where
     F: RootFilesystem,
 {
-    pub fn new(filesystem: Arc<F>, crypto: Arc<SecretsCrypto>) -> Self {
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>, crypto: Arc<SecretsCrypto>) -> Self {
         Self {
             filesystem,
             crypto,
@@ -196,7 +214,7 @@ where
     }
 
     pub fn with_lease_ttl(
-        filesystem: Arc<F>,
+        filesystem: Arc<ScopedFilesystem<F>>,
         crypto: Arc<SecretsCrypto>,
         lease_ttl: Duration,
     ) -> Self {
@@ -558,9 +576,13 @@ where
             if !entry.name.ends_with(".json") {
                 continue;
             }
+            // `list_dir` returned a `VirtualPath`; reconstruct the equivalent
+            // `ScopedPath` under our prefix so the per-op ACL on the follow-up
+            // `get` still runs against the caller's MountView.
+            let scoped_child = join_scoped_secret(&root, &entry.name)?;
             let Some(versioned) = self
                 .filesystem
-                .get(&entry.path)
+                .get(&scoped_child)
                 .await
                 .map_err(fs_to_secret_store_error)?
             else {
@@ -590,7 +612,7 @@ pub struct FilesystemCredentialBroker<F>
 where
     F: RootFilesystem,
 {
-    filesystem: Arc<F>,
+    filesystem: Arc<ScopedFilesystem<F>>,
     crypto: Arc<SecretsCrypto>,
 }
 
@@ -598,7 +620,7 @@ impl<F> FilesystemCredentialBroker<F>
 where
     F: RootFilesystem,
 {
-    pub fn new(filesystem: Arc<F>, crypto: Arc<SecretsCrypto>) -> Self {
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>, crypto: Arc<SecretsCrypto>) -> Self {
         Self { filesystem, crypto }
     }
 
@@ -710,9 +732,13 @@ where
             if !entry.name.ends_with(".json") {
                 continue;
             }
+            // `list_dir` returned a `VirtualPath`; reconstruct the equivalent
+            // `ScopedPath` under our prefix so the per-op ACL on the follow-up
+            // `get` still runs against the caller's MountView.
+            let scoped_child = join_scoped_broker(&root, &entry.name)?;
             let Some(versioned) = self
                 .filesystem
-                .get(&entry.path)
+                .get(&scoped_child)
                 .await
                 .map_err(fs_to_broker_error)?
             else {
@@ -869,74 +895,119 @@ where
 }
 
 // -- Paths ------------------------------------------------------------------
+//
+// All paths returned here are alias-relative [`ScopedPath`] strings under the
+// `/secrets` mount alias. Tenant and user identity are NOT encoded in the
+// path — the caller's [`MountView`] resolves `/secrets` to a
+// tenant/user-scoped [`VirtualPath`](ironclaw_host_api::VirtualPath) before
+// any backend dispatch, so two stores sharing one backend but constructed
+// with different MountViews cannot collide on identical (agent, project,
+// handle) tuples.
+//
+// The agent/project segments remain in the path because secrets are
+// partitioned within a user's namespace by integration/project; AAD
+// (`filesystem_secret_aad`) binds the same `(tenant, user, agent, project,
+// handle)` tuple so cross-owner reads fail closed both at the path layer and
+// at decrypt.
 
 fn secret_path(
     scope: &ResourceScope,
     handle: &SecretHandle,
-) -> Result<VirtualPath, SecretStoreError> {
-    VirtualPath::new(format!(
+) -> Result<ScopedPath, SecretStoreError> {
+    scoped_path_secret(&format!(
         "{}/secrets/{}.json",
-        secret_owner_root(scope),
+        secret_owner_alias(scope),
         handle.as_str()
     ))
-    .map_err(host_api_to_secret_store_error)
 }
 
 fn lease_path(
     scope: &ResourceScope,
     lease_id: SecretLeaseId,
-) -> Result<VirtualPath, SecretStoreError> {
-    VirtualPath::new(format!("{}/{lease_id}.json", lease_root(scope)?.as_str()))
-        .map_err(host_api_to_secret_store_error)
+) -> Result<ScopedPath, SecretStoreError> {
+    scoped_path_secret(&format!("{}/{lease_id}.json", lease_root(scope)?.as_str()))
 }
 
-fn lease_root(scope: &ResourceScope) -> Result<VirtualPath, SecretStoreError> {
-    VirtualPath::new(format!("{}/secret-leases", secret_owner_root(scope)))
-        .map_err(host_api_to_secret_store_error)
+fn lease_root(scope: &ResourceScope) -> Result<ScopedPath, SecretStoreError> {
+    scoped_path_secret(&format!("{}/secret-leases", secret_owner_alias(scope)))
 }
 
 fn credential_account_path(
     scope: &ResourceScope,
     account_id: &CredentialAccountId,
-) -> Result<VirtualPath, CredentialBrokerError> {
-    VirtualPath::new(format!(
+) -> Result<ScopedPath, CredentialBrokerError> {
+    scoped_path_broker(&format!(
         "{}/{}.json",
         credential_account_root(scope)?.as_str(),
         account_id.as_str()
     ))
-    .map_err(host_api_to_broker_error)
 }
 
-fn credential_account_root(scope: &ResourceScope) -> Result<VirtualPath, CredentialBrokerError> {
-    VirtualPath::new(format!("{}/credential-accounts", secret_owner_root(scope)))
-        .map_err(host_api_to_broker_error)
+fn credential_account_root(scope: &ResourceScope) -> Result<ScopedPath, CredentialBrokerError> {
+    scoped_path_broker(&format!(
+        "{}/credential-accounts",
+        secret_owner_alias(scope)
+    ))
 }
 
 fn credential_session_path(
     scope: &ResourceScope,
     session_id: CredentialSessionId,
-) -> Result<VirtualPath, CredentialBrokerError> {
-    VirtualPath::new(format!(
+) -> Result<ScopedPath, CredentialBrokerError> {
+    scoped_path_broker(&format!(
         "{}/credential-sessions/{}.json",
-        secret_owner_root(scope),
+        secret_owner_alias(scope),
         session_id.to_private_storage_string()
     ))
-    .map_err(host_api_to_broker_error)
 }
 
-fn secret_owner_root(scope: &ResourceScope) -> String {
-    let mut base = format!(
-        "/secrets/tenants/{}/users/{}",
-        scope.tenant_id.as_str(),
-        scope.user_id.as_str()
-    );
+/// Build the alias-relative owner prefix for a scope, starting from the
+/// `/secrets` mount alias. Tenant and user are intentionally absent — they
+/// live in the MountView the caller supplied.
+fn secret_owner_alias(scope: &ResourceScope) -> String {
+    let mut base = String::from("/secrets");
     if let Some(agent_id) = &scope.agent_id {
-        base = format!("{base}/agents/{}", agent_id.as_str());
+        base.push_str("/agents/");
+        base.push_str(agent_id.as_str());
     }
     if let Some(project_id) = &scope.project_id {
-        base = format!("{base}/projects/{}", project_id.as_str());
+        base.push_str("/projects/");
+        base.push_str(project_id.as_str());
     }
     base
+}
+
+fn scoped_path_secret(raw: &str) -> Result<ScopedPath, SecretStoreError> {
+    ScopedPath::new(raw).map_err(host_api_to_secret_store_error)
+}
+
+fn scoped_path_broker(raw: &str) -> Result<ScopedPath, CredentialBrokerError> {
+    ScopedPath::new(raw).map_err(host_api_to_broker_error)
+}
+
+/// Join a leaf segment onto a `ScopedPath` prefix. Mirrors the engine's
+/// `join_scoped` helper: `list_dir` returns
+/// [`VirtualPath`](ironclaw_host_api::VirtualPath) results (post-resolution),
+/// but the follow-up `get` must run through the `ScopedFilesystem` so the
+/// per-op ACL is enforced — so callers strip the leaf name and rejoin it
+/// onto the original `ScopedPath` prefix.
+fn join_scoped_secret(prefix: &ScopedPath, leaf: &str) -> Result<ScopedPath, SecretStoreError> {
+    scoped_path_secret(&format!(
+        "{}/{}",
+        prefix.as_str().trim_end_matches('/'),
+        leaf
+    ))
+}
+
+fn join_scoped_broker(
+    prefix: &ScopedPath,
+    leaf: &str,
+) -> Result<ScopedPath, CredentialBrokerError> {
+    scoped_path_broker(&format!(
+        "{}/{}",
+        prefix.as_str().trim_end_matches('/'),
+        leaf
+    ))
 }
 
 // -- Scope predicates -------------------------------------------------------
@@ -1005,7 +1076,7 @@ fn filesystem_secret_lock_for_lease(
     filesystem_secret_lock(key)
 }
 
-fn filesystem_session_lock(path: &VirtualPath) -> FilesystemRecordLock {
+fn filesystem_session_lock(path: &ScopedPath) -> FilesystemRecordLock {
     filesystem_secret_lock(format!("session|{}", path.as_str()))
 }
 
@@ -1048,13 +1119,13 @@ fn lock_or_recover<T>(mutex: &Mutex<HashMap<String, T>>) -> MutexGuard<'_, HashM
 /// caller's CAS retry loop can detect contention; we only intercept the
 /// specific `Unsupported` shape.
 async fn put_with_version_fallback<F>(
-    filesystem: &F,
-    path: &ironclaw_host_api::VirtualPath,
+    filesystem: &ScopedFilesystem<F>,
+    path: &ScopedPath,
     entry: Entry,
     cas: CasExpectation,
 ) -> Result<(), FilesystemError>
 where
-    F: RootFilesystem + ?Sized,
+    F: RootFilesystem,
 {
     match filesystem.put(path, entry.clone(), cas).await {
         Ok(_) => Ok(()),
@@ -1201,10 +1272,11 @@ mod tests {
     use std::sync::Arc;
 
     use chrono::Utc;
-    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
-        CapabilityId, ExtensionId, InvocationId, MissionId, NetworkMethod, ProjectId,
-        ResourceScope, SecretHandle, TenantId, ThreadId, UserId,
+        AgentId, CapabilityId, ExtensionId, InvocationId, MissionId, MountAlias, MountGrant,
+        MountPermissions, MountView, NetworkMethod, ProjectId, ResourceScope, SecretHandle,
+        TenantId, ThreadId, UserId, VirtualPath,
     };
     use secrecy::ExposeSecret;
     use serde_json::json;
@@ -1222,6 +1294,34 @@ mod tests {
             ))
             .expect("master key length is valid"),
         )
+    }
+
+    /// Build a `ScopedFilesystem` over `backend` whose `/secrets` alias
+    /// resolves to a tenant/user-scoped [`VirtualPath`] subtree. Tests pass
+    /// different `target_root` values to simulate distinct
+    /// (tenant, user) tuples sharing one underlying backend — exactly the
+    /// shape composition produces in production.
+    fn build_scoped_fs<B>(backend: Arc<B>, target_root: &str) -> Arc<ScopedFilesystem<B>>
+    where
+        B: RootFilesystem,
+    {
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/secrets").expect("alias"),
+            VirtualPath::new(target_root).expect("target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view");
+        Arc::new(ScopedFilesystem::new(backend, mounts))
+    }
+
+    /// Default test mount: `/secrets` → tenant-scoped target. Mirrors the
+    /// production composition shape (`/secrets` →
+    /// `/tenants/<tenant>/users/<user>/secrets`).
+    fn default_scoped_fs<B>(backend: Arc<B>) -> Arc<ScopedFilesystem<B>>
+    where
+        B: RootFilesystem,
+    {
+        build_scoped_fs(backend, "/secrets/tenants/test/users/test/secrets")
     }
 
     fn sample_scope(tenant: &str, user: &str) -> ResourceScope {
@@ -1263,7 +1363,8 @@ mod tests {
     #[tokio::test]
     async fn filesystem_secret_store_round_trips_material() {
         let fs = Arc::new(InMemoryBackend::new());
-        let store = FilesystemSecretStore::new(Arc::clone(&fs), test_crypto());
+        let scoped = default_scoped_fs(Arc::clone(&fs));
+        let store = FilesystemSecretStore::new(scoped, test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
 
@@ -1289,7 +1390,8 @@ mod tests {
     #[tokio::test]
     async fn filesystem_secret_store_encrypts_at_rest() {
         let fs = Arc::new(InMemoryBackend::new());
-        let store = FilesystemSecretStore::new(Arc::clone(&fs), test_crypto());
+        let scoped = default_scoped_fs(Arc::clone(&fs));
+        let store = FilesystemSecretStore::new(Arc::clone(&scoped), test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
 
@@ -1302,8 +1404,16 @@ mod tests {
             .await
             .unwrap();
 
-        let path = secret_path(&scope, &handle).unwrap();
-        let versioned = fs.get(&path).await.unwrap().expect("entry persisted");
+        // Resolve the alias-relative ScopedPath to its backing VirtualPath
+        // through the same MountView the store uses, so the at-rest check
+        // reads exactly the bytes the backend stored.
+        let scoped_path = secret_path(&scope, &handle).unwrap();
+        let virtual_path = scoped.mounts().resolve(&scoped_path).unwrap();
+        let versioned = fs
+            .get(&virtual_path)
+            .await
+            .unwrap()
+            .expect("entry persisted");
         let raw = String::from_utf8_lossy(&versioned.entry.body);
         assert!(
             !raw.contains("plaintext-sentinel-7e3d"),
@@ -1311,17 +1421,24 @@ mod tests {
         );
     }
 
+    /// Within a single store (one MountView, one tenant/user), distinct
+    /// project scopes still produce disjoint paths — `secret_owner_alias`
+    /// encodes the project segment under `/secrets/agents/.../projects/<id>`
+    /// — so a lease issued under project-A cannot be consumed under
+    /// project-B even though tenant/user agree.
     #[tokio::test]
-    async fn filesystem_secret_store_isolates_scopes() {
+    async fn filesystem_secret_store_isolates_projects_within_same_mount() {
         let fs = Arc::new(InMemoryBackend::new());
-        let store = FilesystemSecretStore::new(fs, test_crypto());
-        let tenant_a = sample_scope("tenant-a", "user-a");
-        let tenant_b = sample_scope("tenant-b", "user-a");
+        let store = FilesystemSecretStore::new(default_scoped_fs(fs), test_crypto());
+        let mut scope_project_a = sample_scope("tenant-a", "user-a");
+        scope_project_a.project_id = Some(ProjectId::new("project-a").unwrap());
+        let mut scope_project_b = scope_project_a.clone();
+        scope_project_b.project_id = Some(ProjectId::new("project-b").unwrap());
         let handle = SecretHandle::new("shared_name").unwrap();
 
         store
             .put(
-                tenant_a.clone(),
+                scope_project_a.clone(),
                 handle.clone(),
                 SecretMaterial::from("aaa"),
             )
@@ -1329,22 +1446,25 @@ mod tests {
             .unwrap();
         store
             .put(
-                tenant_b.clone(),
+                scope_project_b.clone(),
                 handle.clone(),
                 SecretMaterial::from("bbb"),
             )
             .await
             .unwrap();
 
-        let lease_a = store.lease_once(&tenant_a, &handle).await.unwrap();
-        let cross = store.consume(&tenant_b, lease_a.id).await.unwrap_err();
+        let lease_a = store.lease_once(&scope_project_a, &handle).await.unwrap();
+        let cross = store
+            .consume(&scope_project_b, lease_a.id)
+            .await
+            .unwrap_err();
         assert!(cross.is_unknown_lease());
     }
 
     #[tokio::test]
     async fn filesystem_secret_store_revoke_blocks_consume() {
         let fs = Arc::new(InMemoryBackend::new());
-        let store = FilesystemSecretStore::new(fs, test_crypto());
+        let store = FilesystemSecretStore::new(default_scoped_fs(fs), test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
         store
@@ -1371,7 +1491,7 @@ mod tests {
     #[tokio::test]
     async fn filesystem_secret_store_revoke_after_consume_is_idempotent() {
         let fs = Arc::new(InMemoryBackend::new());
-        let store = FilesystemSecretStore::new(fs, test_crypto());
+        let store = FilesystemSecretStore::new(default_scoped_fs(fs), test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
         store
@@ -1404,7 +1524,7 @@ mod tests {
     #[tokio::test]
     async fn filesystem_secret_store_revoke_is_idempotent_on_revoked() {
         let fs = Arc::new(InMemoryBackend::new());
-        let store = FilesystemSecretStore::new(fs, test_crypto());
+        let store = FilesystemSecretStore::new(default_scoped_fs(fs), test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
         store
@@ -1426,7 +1546,7 @@ mod tests {
     #[tokio::test]
     async fn filesystem_secret_store_missing_secret_does_not_create_lease() {
         let fs = Arc::new(InMemoryBackend::new());
-        let store = FilesystemSecretStore::new(fs, test_crypto());
+        let store = FilesystemSecretStore::new(default_scoped_fs(fs), test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("missing").unwrap();
 
@@ -1438,7 +1558,7 @@ mod tests {
     #[tokio::test]
     async fn filesystem_credential_broker_round_trips_account_and_session() {
         let fs = Arc::new(InMemoryBackend::new());
-        let broker = FilesystemCredentialBroker::new(Arc::clone(&fs), test_crypto());
+        let broker = FilesystemCredentialBroker::new(default_scoped_fs(fs), test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let account_id = CredentialAccountId::new("openai_prod").unwrap();
         let account = sample_account(
@@ -1501,7 +1621,8 @@ mod tests {
     #[tokio::test]
     async fn filesystem_credential_broker_account_at_rest_is_encrypted() {
         let fs = Arc::new(InMemoryBackend::new());
-        let broker = FilesystemCredentialBroker::new(Arc::clone(&fs), test_crypto());
+        let scoped = default_scoped_fs(Arc::clone(&fs));
+        let broker = FilesystemCredentialBroker::new(Arc::clone(&scoped), test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let account_id = CredentialAccountId::new("github_prod").unwrap();
         let mut account = sample_account(
@@ -1512,8 +1633,13 @@ mod tests {
         account.label = "leak-sentinel-92ab".to_string();
         broker.put_account(account).await.unwrap();
 
-        let path = credential_account_path(&scope, &account_id).unwrap();
-        let versioned = fs.get(&path).await.unwrap().expect("entry persisted");
+        let scoped_path = credential_account_path(&scope, &account_id).unwrap();
+        let virtual_path = scoped.mounts().resolve(&scoped_path).unwrap();
+        let versioned = fs
+            .get(&virtual_path)
+            .await
+            .unwrap()
+            .expect("entry persisted");
         let raw = String::from_utf8_lossy(&versioned.entry.body);
         assert!(
             !raw.contains("leak-sentinel-92ab"),
@@ -1636,7 +1762,8 @@ mod tests {
         // very next `put` (the consume's CAS write) hits a forced
         // VersionMismatch.
         let inner = StdArc::new(InMemoryBackend::new());
-        let bootstrap_store = FilesystemSecretStore::new(StdArc::clone(&inner), test_crypto());
+        let bootstrap_scoped = default_scoped_fs(StdArc::clone(&inner));
+        let bootstrap_store = FilesystemSecretStore::new(bootstrap_scoped, test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let handle = SecretHandle::new("api_key").unwrap();
         bootstrap_store
@@ -1649,12 +1776,18 @@ mod tests {
             .unwrap();
         let lease = bootstrap_store.lease_once(&scope, &handle).await.unwrap();
 
-        let lease_path_for_test = lease_path(&scope, lease.id).unwrap();
-        let racing = StdArc::new(VersionRacingBackend::new(
-            StdArc::clone(&inner),
-            lease_path_for_test,
-        ));
-        let racing_store = FilesystemSecretStore::new(StdArc::clone(&racing), test_crypto());
+        // The racing backend watches the post-resolution VirtualPath, so
+        // resolve the alias-relative ScopedPath through the same MountView
+        // shape composition uses in production.
+        let scoped_lease = lease_path(&scope, lease.id).unwrap();
+        let watched = bootstrap_store
+            .filesystem
+            .mounts()
+            .resolve(&scoped_lease)
+            .unwrap();
+        let racing = StdArc::new(VersionRacingBackend::new(StdArc::clone(&inner), watched));
+        let racing_scoped = default_scoped_fs(StdArc::clone(&racing));
+        let racing_store = FilesystemSecretStore::new(racing_scoped, test_crypto());
 
         let material = racing_store.consume(&scope, lease.id).await.unwrap();
         assert_eq!(material.expose_secret(), "super-secret-cas");
@@ -1671,8 +1804,8 @@ mod tests {
     #[tokio::test]
     async fn filesystem_broker_consume_session_use_retries_on_version_mismatch() {
         let inner = StdArc::new(InMemoryBackend::new());
-        let bootstrap_broker =
-            FilesystemCredentialBroker::new(StdArc::clone(&inner), test_crypto());
+        let bootstrap_scoped = default_scoped_fs(StdArc::clone(&inner));
+        let bootstrap_broker = FilesystemCredentialBroker::new(bootstrap_scoped, test_crypto());
         let scope = sample_scope("tenant-a", "user-a");
         let account_id = CredentialAccountId::new("openai_cas").unwrap();
         let account = sample_account(
@@ -1702,13 +1835,16 @@ mod tests {
             .await
             .unwrap();
         let correlation = session.correlation_id();
-        let session_path_for_test = credential_session_path(&scope, correlation).unwrap();
+        let scoped_session_path = credential_session_path(&scope, correlation).unwrap();
+        let watched = bootstrap_broker
+            .filesystem
+            .mounts()
+            .resolve(&scoped_session_path)
+            .unwrap();
 
-        let racing = StdArc::new(VersionRacingBackend::new(
-            StdArc::clone(&inner),
-            session_path_for_test,
-        ));
-        let racing_broker = FilesystemCredentialBroker::new(StdArc::clone(&racing), test_crypto());
+        let racing = StdArc::new(VersionRacingBackend::new(StdArc::clone(&inner), watched));
+        let racing_scoped = default_scoped_fs(StdArc::clone(&racing));
+        let racing_broker = FilesystemCredentialBroker::new(racing_scoped, test_crypto());
 
         racing_broker
             .consume_session_use(&scope, correlation, Utc::now())
@@ -1736,5 +1872,153 @@ mod tests {
             .await
             .unwrap_err();
         assert!(exceeded.is_use_limit_exceeded());
+    }
+
+    /// Regression for the ScopedFilesystem migration: two stores share one
+    /// [`InMemoryBackend`] but each is constructed with a [`MountView`]
+    /// whose `/secrets` alias resolves to a different tenant-scoped
+    /// [`VirtualPath`] subtree. Writing the same `(user_id, project_id,
+    /// handle)` tuple on tenant A's store must NOT make the secret visible
+    /// from tenant B's store. Before this migration, `FilesystemSecretStore`
+    /// held a raw `Arc<F: RootFilesystem>` and encoded tenant identity in
+    /// the path itself — any composition layer that forgot to prefix the
+    /// path with tenant would leak across tenants, with the type system
+    /// saying nothing. The structural fix routes every op through
+    /// `ScopedFilesystem`, so two MountViews over the same backend cannot
+    /// see each other's data.
+    #[tokio::test]
+    async fn filesystem_secret_store_isolates_two_tenants_with_same_user_project_ids() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let store_a = FilesystemSecretStore::new(
+            build_scoped_fs(
+                Arc::clone(&backend),
+                "/secrets/tenants/a/users/alice/secrets",
+            ),
+            test_crypto(),
+        );
+        let store_b = FilesystemSecretStore::new(
+            build_scoped_fs(
+                Arc::clone(&backend),
+                "/secrets/tenants/b/users/alice/secrets",
+            ),
+            test_crypto(),
+        );
+
+        // Identical `(user_id, project_id)` for both — the only thing
+        // keeping the two stores apart is the mount-time tenant prefix.
+        let scope_a = ResourceScope {
+            tenant_id: TenantId::new("tenant-a").unwrap(),
+            user_id: UserId::new("alice").unwrap(),
+            agent_id: None,
+            project_id: Some(ProjectId::new("project-1").unwrap()),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let scope_b = ResourceScope {
+            tenant_id: TenantId::new("tenant-b").unwrap(),
+            user_id: UserId::new("alice").unwrap(),
+            agent_id: None,
+            project_id: Some(ProjectId::new("project-1").unwrap()),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        };
+        let handle = SecretHandle::new("api_key").unwrap();
+
+        store_a
+            .put(
+                scope_a.clone(),
+                handle.clone(),
+                SecretMaterial::from("tenant-a-secret"),
+            )
+            .await
+            .unwrap();
+
+        // Tenant A sees its own secret.
+        assert!(
+            store_a.metadata(&scope_a, &handle).await.unwrap().is_some(),
+            "tenant A must see the secret it just wrote"
+        );
+
+        // Tenant B does NOT see tenant A's secret, despite identical
+        // (user_id, project_id, handle). Both metadata() and lease_once()
+        // must fail closed.
+        assert!(
+            store_b.metadata(&scope_b, &handle).await.unwrap().is_none(),
+            "tenant B must NOT see tenant A's secret (cross-tenant path leak)"
+        );
+        let cross = store_b.lease_once(&scope_b, &handle).await.unwrap_err();
+        assert!(
+            cross.is_unknown_secret(),
+            "tenant B lease_once must fail closed with UnknownSecret; got {cross:?}"
+        );
+
+        // Tenant B's own leases_for_scope is empty under (user, project)
+        // shared with tenant A.
+        let b_leases = store_b.leases_for_scope(&scope_b).await.unwrap();
+        assert!(
+            b_leases.is_empty(),
+            "tenant B leases_for_scope must be empty under shared (user, project); got {} leases",
+            b_leases.len()
+        );
+    }
+
+    /// Regression for the AAD-alignment bug fixed in `199137b57`: AAD binds
+    /// ciphertext to the *owner* scope (`tenant/user/agent/project`) only,
+    /// not the full invocation scope. Two reads issued under different
+    /// invocation/mission/thread ids but identical owner scope must
+    /// successfully decrypt the secret the first invocation wrote. Before
+    /// the AAD-alignment fix this failed with `DecryptionFailed` because
+    /// AAD bound mission/thread/invocation but the storage path bound only
+    /// the owner scope. The ScopedFilesystem migration preserves the
+    /// invariant: tenant/user move into the MountView, but agent/project
+    /// remain in both the path and the AAD, so cross-invocation reads
+    /// within one owner still round-trip cleanly.
+    #[tokio::test]
+    async fn filesystem_secret_store_aad_validates_cross_invocation_within_same_owner() {
+        let fs = Arc::new(InMemoryBackend::new());
+        let store = FilesystemSecretStore::new(default_scoped_fs(fs), test_crypto());
+
+        // Same tenant/user/agent/project across both invocations; only the
+        // invocation/mission/thread fields differ.
+        let writer_scope = ResourceScope {
+            tenant_id: TenantId::new("tenant-a").unwrap(),
+            user_id: UserId::new("user-a").unwrap(),
+            agent_id: Some(AgentId::new("agent-1").unwrap()),
+            project_id: Some(ProjectId::new("project-1").unwrap()),
+            mission_id: Some(MissionId::new("mission-write").unwrap()),
+            thread_id: Some(ThreadId::new("thread-write").unwrap()),
+            invocation_id: InvocationId::new(),
+        };
+        let mut reader_scope = writer_scope.clone();
+        reader_scope.mission_id = Some(MissionId::new("mission-read").unwrap());
+        reader_scope.thread_id = Some(ThreadId::new("thread-read").unwrap());
+        reader_scope.invocation_id = InvocationId::new();
+        assert_ne!(
+            writer_scope.invocation_id, reader_scope.invocation_id,
+            "test setup error: writer and reader invocations must differ"
+        );
+
+        let handle = SecretHandle::new("api_key").unwrap();
+        store
+            .put(
+                writer_scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("cross-invocation-secret"),
+            )
+            .await
+            .unwrap();
+
+        // The reader invocation issues its own lease under the same owner
+        // and must successfully decrypt — AAD binds owner scope only.
+        let lease = store.lease_once(&reader_scope, &handle).await.unwrap();
+        let material = store.consume(&reader_scope, lease.id).await.unwrap();
+        assert_eq!(
+            material.expose_secret(),
+            "cross-invocation-secret",
+            "AAD must bind owner scope only — cross-invocation reads under \
+             the same (tenant, user, agent, project) must succeed",
+        );
     }
 }
