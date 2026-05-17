@@ -855,19 +855,22 @@ impl McpClient {
         // it. The stored credential unconditionally overwrites any agent-supplied
         // values, so the trust decision is controlled by the server, not the agent.
         //
-        // If the agent sneaks credential fields into a non-delegating tool's arguments,
-        // those fields are forwarded as-is — the sidecar will reject or ignore them —
-        // and a warning is emitted so the anomaly is observable.
+        // For t3n-mcp tools that do NOT declare `requiresDelegation`, strip any
+        // credential fields the agent may have sneaked in — defence against
+        // prompt-injection forcing credentials onto an unintended tool. Arguments
+        // for every other MCP server pass through unchanged: other servers may
+        // legitimately use field names that collide with our delegation fields,
+        // and silently mutating their inputs would be a confusing footgun.
         let arguments = if self.server_name.as_str()
             == crate::tools::mcp::config::T3N_MCP_SERVER_NAME_NORMALISED
-            && self.tool_requires_delegation(name).await?
         {
-            self.inject_t3n_delegation_credential(arguments).await?
+            if self.tool_requires_delegation(name).await? {
+                self.inject_t3n_delegation_credential(arguments).await?
+            } else {
+                strip_delegation_fields_if_present(arguments)
+            }
         } else {
-            // Strip any credential fields the agent may have included for a tool that
-            // doesn't declare requiresDelegation — defence against prompt-injection
-            // forcing credentials into an unintended tool.
-            strip_delegation_fields_if_present(arguments)
+            arguments
         };
 
         let request = McpRequest::call_tool(self.next_request_id(), name, arguments);
@@ -3004,6 +3007,58 @@ mod tests {
             "user_sig must be injected when annotation is true, regardless of agent input"
         );
         assert_eq!(args["org_did"], TEST_ORG_DID, "org_did must be injected");
+    }
+
+    /// Non-t3n-mcp servers must pass arguments through untouched, even when the
+    /// agent's call happens to include fields whose names collide with our
+    /// delegation field names. A third-party server is free to define a tool
+    /// whose schema legitimately uses `credential_jcs_b64u` / `user_sig_b64u`,
+    /// and the t3-claw client must not silently mutate those calls.
+    #[tokio::test]
+    async fn call_tool_passes_through_arguments_for_non_t3n_server() {
+        let transport = make_capturing_transport("doThing", false);
+        let client = McpClient::new_with_transport(
+            "some_other_server",
+            Arc::clone(&transport) as Arc<dyn McpTransport>,
+            None,
+            None,
+            "test-user",
+            None,
+        );
+
+        let result = client
+            .call_tool(
+                "doThing",
+                serde_json::json!({
+                    "credential_jcs_b64u": "legitimate-value-for-this-server",
+                    "user_sig_b64u": "another-legitimate-value",
+                    "other": "preserved"
+                }),
+            )
+            .await
+            .expect("non-t3n call must succeed");
+        assert!(!result.is_error);
+
+        let requests = transport.requests.lock().unwrap();
+        let call_req = requests
+            .iter()
+            .find(|r| r.method == "tools/call")
+            .expect("a tools/call request must have been forwarded");
+
+        let args = &call_req.params.as_ref().expect("params present")["arguments"];
+
+        assert_eq!(
+            args["credential_jcs_b64u"], "legitimate-value-for-this-server",
+            "non-t3n server args must pass through untouched — no silent stripping"
+        );
+        assert_eq!(
+            args["user_sig_b64u"], "another-legitimate-value",
+            "non-t3n server args must pass through untouched — no silent stripping"
+        );
+        assert_eq!(
+            args["other"], "preserved",
+            "other caller-supplied fields must be preserved"
+        );
     }
 
     // ── McpToolAnnotations serde round-trips ─────────────────────────────────
