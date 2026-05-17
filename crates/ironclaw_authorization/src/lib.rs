@@ -22,6 +22,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FileType, FilesystemError, RecordVersion, RootFilesystem,
+    ScopedFilesystem,
 };
 
 /// Bounded retry budget for compare-and-swap loops on lease writes.
@@ -34,7 +35,7 @@ use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason,
     EffectKind, ExecutionContext, HostApiError, InvocationFingerprint, InvocationId, MissionId,
     NetworkPolicy, Obligation, Obligations, Principal, ProjectId, ResourceCeiling,
-    ResourceEstimate, ResourceScope, SandboxQuota, TenantId, ThreadId, UserId, VirtualPath,
+    ResourceEstimate, ResourceScope, SandboxQuota, ScopedPath, TenantId, ThreadId, UserId,
 };
 use ironclaw_trust::{AuthorityCeiling, TrustDecision};
 use serde::{Deserialize, Serialize};
@@ -400,12 +401,28 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
     }
 }
 
-/// Filesystem-backed capability lease store under resource-owner/invocation-scoped `/engine` paths.
+/// Filesystem-backed capability lease store under the `/authorization` mount
+/// alias.
+///
+/// Construct with a [`ScopedFilesystem`] over any
+/// [`RootFilesystem`] (typically a
+/// [`CompositeRootFilesystem`](ironclaw_filesystem::CompositeRootFilesystem)
+/// or the in-memory backend for tests). The [`ScopedFilesystem`] resolves
+/// the `/authorization` alias to a tenant/user-scoped
+/// [`VirtualPath`](ironclaw_host_api::VirtualPath) per its
+/// [`MountView`](ironclaw_host_api::MountView) and enforces per-op ACL
+/// before any backend dispatch — so tenant isolation is structural, not a
+/// convention this crate has to remember in its path builders.
+///
+/// The store keeps a `'a` borrow on the [`ScopedFilesystem`] (mirroring the
+/// pre-refactor `&'a F` shape) rather than reaching for `Arc`, so existing
+/// callers don't have to wrap the per-invocation view in an `Arc` just to
+/// hand it here.
 pub struct FilesystemCapabilityLeaseStore<'a, F>
 where
     F: RootFilesystem,
 {
-    filesystem: &'a F,
+    filesystem: &'a ScopedFilesystem<F>,
     mutation_locks: Mutex<HashMap<CapabilityLeaseOwnerKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -413,7 +430,7 @@ impl<'a, F> FilesystemCapabilityLeaseStore<'a, F>
 where
     F: RootFilesystem,
 {
-    pub fn new(filesystem: &'a F) -> Self {
+    pub fn new(filesystem: &'a ScopedFilesystem<F>) -> Self {
         Self {
             filesystem,
             mutation_locks: Mutex::new(HashMap::new()),
@@ -556,7 +573,7 @@ where
     async fn read_lease_index(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Option<Vec<VirtualPath>>, CapabilityLeaseError> {
+    ) -> Result<Option<Vec<ScopedPath>>, CapabilityLeaseError> {
         let path = lease_index_path(scope)?;
         let Some(versioned) = self
             .filesystem
@@ -573,7 +590,7 @@ where
     async fn write_lease_index(
         &self,
         scope: &ResourceScope,
-        mut paths: Vec<VirtualPath>,
+        mut paths: Vec<ScopedPath>,
     ) -> Result<(), CapabilityLeaseError> {
         paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         paths.dedup_by(|left, right| left.as_str() == right.as_str());
@@ -590,7 +607,7 @@ where
     async fn index_lease_path(
         &self,
         scope: &ResourceScope,
-        path: VirtualPath,
+        path: ScopedPath,
     ) -> Result<(), CapabilityLeaseError> {
         let mut paths = self.read_lease_index(scope).await?.unwrap_or_default();
         if !paths.iter().any(|existing| existing == &path) {
@@ -602,7 +619,7 @@ where
     async fn list_lease_paths_from_index_or_scan(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Vec<VirtualPath>, CapabilityLeaseError> {
+    ) -> Result<Vec<ScopedPath>, CapabilityLeaseError> {
         if let Some(paths) = self.read_lease_index(scope).await? {
             return Ok(paths);
         }
@@ -612,62 +629,72 @@ where
     async fn scan_lease_paths(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Vec<VirtualPath>, CapabilityLeaseError> {
-        let roots = self.list_invocation_roots(scope).await?;
+    ) -> Result<Vec<ScopedPath>, CapabilityLeaseError> {
+        let owner_prefix = lease_owner_prefix(scope)?;
+        let invocation_subdirs = self.list_subdir_names(&owner_prefix).await?;
         let mut paths = Vec::new();
-        for root in roots {
-            paths.extend(self.list_lease_files(&root).await?);
+        for subdir in invocation_subdirs {
+            let invocation_root = join_scoped(&owner_prefix, &subdir)?;
+            paths.extend(self.list_lease_files(&invocation_root).await?);
         }
         Ok(paths)
     }
 
-    async fn list_invocation_roots(
+    /// List the immediate child subdirectories of `prefix`, returning each
+    /// child's leaf name. Mirrors `FilesystemStore::list_subdir_names` in
+    /// `ironclaw_engine`: `list_dir` returns
+    /// [`VirtualPath`](ironclaw_host_api::VirtualPath) results because
+    /// resolution has already happened — we strip the leaf so callers can
+    /// rebuild a [`ScopedPath`] and let the per-op ACL fire again on the
+    /// follow-up read.
+    async fn list_subdir_names(
         &self,
-        scope: &ResourceScope,
-    ) -> Result<Vec<VirtualPath>, CapabilityLeaseError> {
-        let root = lease_tenant_user_root(scope)?;
-        let entries = match self.filesystem.list_dir(&root).await {
-            Ok(entries) => entries,
-            Err(error) if is_not_found(&error) => return Ok(Vec::new()),
-            Err(error) => return Err(lease_persistence_error(error)),
-        };
-        Ok(entries
-            .into_iter()
-            .filter(|entry| entry.file_type == FileType::Directory)
-            .map(|entry| entry.path)
-            .collect())
+        prefix: &ScopedPath,
+    ) -> Result<Vec<String>, CapabilityLeaseError> {
+        match self.filesystem.list_dir(prefix).await {
+            Ok(entries) => Ok(entries
+                .into_iter()
+                .filter(|entry| entry.file_type == FileType::Directory)
+                .map(|entry| entry.name)
+                .collect()),
+            Err(error) if is_not_found(&error) => Ok(Vec::new()),
+            Err(error) => Err(lease_persistence_error(error)),
+        }
     }
 
     async fn list_lease_files(
         &self,
-        root: &VirtualPath,
-    ) -> Result<Vec<VirtualPath>, CapabilityLeaseError> {
+        root: &ScopedPath,
+    ) -> Result<Vec<ScopedPath>, CapabilityLeaseError> {
         let entries = match self.filesystem.list_dir(root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(lease_persistence_error(error)),
         };
-        Ok(entries
-            .into_iter()
-            .filter(|entry| entry.file_type == FileType::File)
-            .map(|entry| entry.path)
-            .collect())
+        let mut out = Vec::new();
+        for entry in entries {
+            if entry.file_type != FileType::File {
+                continue;
+            }
+            // `list_dir` returned a `VirtualPath`; rebuild the equivalent
+            // `ScopedPath` under our prefix so the follow-up `get` re-runs
+            // the per-op ACL check.
+            out.push(join_scoped(root, &entry.name)?);
+        }
+        Ok(out)
     }
 
     async fn read_lease_file(
         &self,
-        path: &VirtualPath,
+        path: &ScopedPath,
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
         let versioned = self
             .filesystem
             .get(path)
             .await
             .map_err(lease_persistence_error)?
-            .ok_or_else(|| {
-                lease_persistence_error(FilesystemError::NotFound {
-                    path: path.clone(),
-                    operation: ironclaw_filesystem::FilesystemOperation::ReadFile,
-                })
+            .ok_or_else(|| CapabilityLeaseError::Persistence {
+                reason: format!("filesystem capability lease store: lease file missing: {path}"),
             })?;
         deserialize(&versioned.entry.body)
     }
@@ -845,7 +872,7 @@ impl CapabilityLeaseOwnerKey {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct CapabilityLeaseIndex {
-    paths: Vec<VirtualPath>,
+    paths: Vec<ScopedPath>,
 }
 
 /// Authorizer that combines request-scoped grants with active capability leases.
@@ -1395,57 +1422,86 @@ pub(crate) fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> b
         && left.thread_id == right.thread_id
 }
 
+// ── Lease path helpers ────────────────────────────────────────
+//
+// All helpers return [`ScopedPath`] strings under the `/authorization`
+// mount alias. The [`MountView`](ironclaw_host_api::MountView) granted by
+// composition resolves the alias to a tenant/user-scoped
+// [`VirtualPath`](ironclaw_host_api::VirtualPath) before any backend op —
+// so the within-tenant scope (agent/project/mission/thread/invocation)
+// stays in the path while the leading `tenants/<tenant_id>/users/<user_id>`
+// prefix is the MountView's responsibility, not this crate's.
+//
+// Layout:
+//
+// ```text
+// /authorization/leases/<within-tenant-scope>/<invocation_id>/<lease_id>.json
+// /authorization/leases/<within-tenant-scope>/_lease_index.json
+// ```
+//
+// where `<within-tenant-scope>` is `[agents/<agent_id>/][projects/<project_id>/][missions/<mission_id>/][threads/<thread_id>]`.
+
+const LEASES_PREFIX: &str = "/authorization/leases";
+
 fn lease_path(
     scope: &ResourceScope,
     lease_id: CapabilityGrantId,
-) -> Result<VirtualPath, CapabilityLeaseError> {
-    VirtualPath::new(format!(
-        "{}/{lease_id}.json",
-        lease_invocation_root(scope)?.as_str()
+) -> Result<ScopedPath, CapabilityLeaseError> {
+    ScopedPath::new(format!(
+        "{}/{}/{}/{lease_id}.json",
+        LEASES_PREFIX,
+        within_tenant_scope(scope),
+        scope.invocation_id,
     ))
     .map_err(lease_host_api_error)
 }
 
-fn lease_index_path(scope: &ResourceScope) -> Result<VirtualPath, CapabilityLeaseError> {
-    VirtualPath::new(format!(
-        "{}/_lease_index.json",
-        lease_tenant_user_root(scope)?.as_str()
+fn lease_index_path(scope: &ResourceScope) -> Result<ScopedPath, CapabilityLeaseError> {
+    ScopedPath::new(format!(
+        "{}/{}/_lease_index.json",
+        LEASES_PREFIX,
+        within_tenant_scope(scope),
     ))
     .map_err(lease_host_api_error)
 }
 
-fn lease_invocation_root(scope: &ResourceScope) -> Result<VirtualPath, CapabilityLeaseError> {
-    VirtualPath::new(format!(
-        "{}/{}",
-        lease_tenant_user_root(scope)?.as_str(),
-        scope.invocation_id
-    ))
-    .map_err(lease_host_api_error)
-}
-
-fn lease_tenant_user_root(scope: &ResourceScope) -> Result<VirtualPath, CapabilityLeaseError> {
-    VirtualPath::new(format!("{}/capability-leases", scoped_owner_root(scope)))
+fn lease_owner_prefix(scope: &ResourceScope) -> Result<ScopedPath, CapabilityLeaseError> {
+    ScopedPath::new(format!("{}/{}", LEASES_PREFIX, within_tenant_scope(scope),))
         .map_err(lease_host_api_error)
 }
 
-fn scoped_owner_root(scope: &ResourceScope) -> String {
-    let mut base = format!(
-        "/engine/tenants/{}/users/{}",
-        scope.tenant_id, scope.user_id
-    );
+/// Within-tenant path segment carrying the parts of the resource scope that
+/// are *not* the tenant/user identity (those move to the MountView). Always
+/// renders at least one segment (`scope`) so the lease prefix stays a
+/// non-empty directory the backend can `list_dir`.
+fn within_tenant_scope(scope: &ResourceScope) -> String {
+    let mut segments = Vec::new();
     if let Some(agent_id) = &scope.agent_id {
-        base = format!("{base}/agents/{agent_id}");
+        segments.push(format!("agents/{agent_id}"));
     }
     if let Some(project_id) = &scope.project_id {
-        base = format!("{base}/projects/{project_id}");
+        segments.push(format!("projects/{project_id}"));
     }
     if let Some(mission_id) = &scope.mission_id {
-        base = format!("{base}/missions/{mission_id}");
+        segments.push(format!("missions/{mission_id}"));
     }
     if let Some(thread_id) = &scope.thread_id {
-        base = format!("{base}/threads/{thread_id}");
+        segments.push(format!("threads/{thread_id}"));
     }
-    base
+    if segments.is_empty() {
+        "scope".to_string()
+    } else {
+        segments.join("/")
+    }
+}
+
+/// Join a leaf segment onto a [`ScopedPath`] prefix. Used when reconstructing
+/// a child path after `list_dir` (which returns
+/// [`VirtualPath`](ironclaw_host_api::VirtualPath)s) so the per-op ACL
+/// enforced by [`ScopedFilesystem`] still runs on the follow-up `get`.
+fn join_scoped(prefix: &ScopedPath, leaf: &str) -> Result<ScopedPath, CapabilityLeaseError> {
+    ScopedPath::new(format!("{}/{leaf}", prefix.as_str().trim_end_matches('/'),))
+        .map_err(lease_host_api_error)
 }
 
 fn serialize_pretty<T>(value: &T) -> Result<Vec<u8>, CapabilityLeaseError>
