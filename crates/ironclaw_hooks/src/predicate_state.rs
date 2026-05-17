@@ -197,11 +197,10 @@ impl PredicateEventId {
         let digest = hasher.finalize();
         let mut s = String::with_capacity(64);
         for byte in digest.as_bytes() {
-            // RATIONALE: std::fmt::Write for String is infallible
-            // (henrypark133 nit on PR #3635 — was `// safety:`, which
-            // by convention pairs with `unsafe` blocks; renaming to
-            // RATIONALE avoids confusion with that convention).
-            write!(s, "{byte:02x}").expect("writing to String never fails");
+            // std::fmt::Write for String is infallible; discard the
+            // Result rather than `.expect()` so this stays out of the
+            // "no panics in production code" CI check.
+            let _ = write!(s, "{byte:02x}");
         }
         // Synth output is always a 64-char hex digest — no NUL, never
         // empty — so skip the per-call validation in `Self::new`.
