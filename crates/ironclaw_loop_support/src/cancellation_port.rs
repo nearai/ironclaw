@@ -132,7 +132,47 @@ pub trait RunCancellationFactory: Send + Sync {
         run_id: TurnRunId,
     ) -> Result<RunCancellationHandle, AgentLoopHostError>;
 
+    /// Observe a `TurnRunWake` published by the turn coordinator.
+    ///
+    /// **Called synchronously on the wake publisher's thread** by
+    /// `CompositeTurnRunWakeNotifier` when the runtime composition wires a
+    /// cancellation factory into the coordinator's wake notifier. Implementations
+    /// MUST be non-blocking: no I/O, no awaits, no locks held across awaits, no
+    /// waiting on channels. Slow work here directly slows
+    /// `TurnCoordinator::cancel_run` and `submit_turn`. Default is a no-op.
     fn notify_run_wake(&self, _wake: &TurnRunWake) {}
+
+    fn product_live_cancellation_probe(&self) -> Option<Box<dyn ProductLiveCancellationProbe>> {
+        None
+    }
+
+    fn is_product_cancellation_observed(
+        &self,
+        _run_id: TurnRunId,
+    ) -> Result<bool, AgentLoopHostError> {
+        tracing::debug!(
+            "run cancellation factory does not observe product cancellation: default Ok(false) — factory is not product-live-capable"
+        );
+        Ok(false)
+    }
+}
+
+/// Executable product-path cancellation probe used to gate product-live runtime
+/// wiring. Implementations must exercise the same request/observe path product
+/// code uses for a retained run handle.
+///
+/// Probes are short-lived and self-contained: implementations MUST NOT retain
+/// probe handles in any shared map keyed by run id. The probe's lifetime ends
+/// when the verifier drops the `Box<dyn ProductLiveCancellationProbe>`; any
+/// state owned by the probe must be released by that point. This avoids growing
+/// the factory's run-handle map on every readiness check.
+pub trait ProductLiveCancellationProbe: Send + Sync {
+    fn request_cancellation(
+        &self,
+        reason_kind: LoopCancelReasonKind,
+    ) -> Result<(), AgentLoopHostError>;
+
+    fn is_cancellation_observed(&self) -> Result<bool, AgentLoopHostError>;
 }
 
 /// Runtime liveness contract for run cancellation observation.
@@ -147,6 +187,32 @@ pub enum RunCancellationObservationKind {
 impl RunCancellationObservationKind {
     pub fn is_live_capable(self) -> bool {
         matches!(self, Self::LiveCapable)
+    }
+}
+
+/// Product-live readiness evidence for a run cancellation source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProductLiveCancellationReadiness {
+    /// The source cannot be cancelled or observed from the product path.
+    Inert,
+    /// Product code retains per-run handles and can request or observe cancellation.
+    ExternallyControllable,
+}
+
+pub fn verify_product_live_cancellation_probe(
+    factory: &dyn RunCancellationFactory,
+) -> Result<ProductLiveCancellationReadiness, AgentLoopHostError> {
+    let Some(probe) = factory.product_live_cancellation_probe() else {
+        return Ok(ProductLiveCancellationReadiness::Inert);
+    };
+    if probe.is_cancellation_observed()? {
+        return Ok(ProductLiveCancellationReadiness::Inert);
+    }
+    probe.request_cancellation(LoopCancelReasonKind::UserRequested)?;
+    if probe.is_cancellation_observed()? {
+        Ok(ProductLiveCancellationReadiness::ExternallyControllable)
+    } else {
+        Ok(ProductLiveCancellationReadiness::Inert)
     }
 }
 
@@ -331,6 +397,44 @@ fn turn_state_error_to_host_error(_error: ironclaw_turns::TurnError) -> AgentLoo
         AgentLoopHostErrorKind::Unavailable,
         "turn state was unavailable while building cancellation handle",
     )
+}
+
+/// Fan-out `TurnRunWakeNotifier` that delivers each wake to a worker-side
+/// notifier (e.g. the runner wake sender) AND a `RunCancellationFactory`'s
+/// `notify_run_wake` observer so retained product run handles flip in lockstep
+/// with the worker wake.
+///
+/// This is the wiring required to drive end-to-end cancellation observation
+/// from `TurnCoordinator::cancel_run` alone: the coordinator publishes a single
+/// `TurnRunWake`, and both consumers see it.
+pub struct CompositeTurnRunWakeNotifier {
+    worker: Arc<dyn TurnRunWakeNotifier>,
+    cancellation_factory: Arc<dyn RunCancellationFactory>,
+}
+
+impl CompositeTurnRunWakeNotifier {
+    pub fn new(
+        worker: Arc<dyn TurnRunWakeNotifier>,
+        cancellation_factory: Arc<dyn RunCancellationFactory>,
+    ) -> Self {
+        Self {
+            worker,
+            cancellation_factory,
+        }
+    }
+}
+
+impl TurnRunWakeNotifier for CompositeTurnRunWakeNotifier {
+    fn notify_queued_run(
+        &self,
+        wake: TurnRunWake,
+    ) -> Result<(), ironclaw_turns::TurnRunWakeNotifyError> {
+        // Observe the wake on the cancellation factory FIRST so a retained
+        // product run handle reflects the new status before any worker task
+        // potentially terminates the run and clears local state.
+        self.cancellation_factory.notify_run_wake(&wake);
+        self.worker.notify_queued_run(wake)
+    }
 }
 
 /// Default factory used until the host runtime wires real cancel observation.

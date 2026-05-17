@@ -483,7 +483,7 @@ fn completion_generates_bash_script_without_reborn_home() {
 }
 
 #[test]
-fn run_initializes_minimal_runtime_shell_without_touching_v1_state() {
+fn run_reports_runtime_readiness_snapshot_without_touching_v1_state() {
     let temp = tempfile::tempdir().expect("tempdir");
     let reborn_home = temp.path().join("reborn-home");
     let home_dir = temp.path().join("home");
@@ -506,7 +506,7 @@ fn run_initializes_minimal_runtime_shell_without_touching_v1_state() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("IronClaw Reborn runtime shell"),
+        stdout.contains("IronClaw Reborn runtime readiness snapshot"),
         "stdout: {stdout}"
     );
     assert!(
@@ -516,16 +516,12 @@ fn run_initializes_minimal_runtime_shell_without_touching_v1_state() {
     assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
     assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
     assert!(
-        stdout.contains("driver_registry: initialized"),
-        "stdout: {stdout}"
-    );
-    assert!(
-        stdout.contains("runtime_shell: initialized"),
+        stdout.contains("local_runtime_shell_readiness: ready"),
         "stdout: {stdout}"
     );
     assert!(
         !reborn_home.exists(),
-        "minimal runtime shell should not create Reborn state directories"
+        "runtime readiness snapshot should not create Reborn state directories"
     );
     assert!(
         !home_dir.join(".ironclaw").exists(),

@@ -1,17 +1,20 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_host_api::{TenantId, ThreadId};
-use ironclaw_threads::InMemorySessionThreadService;
+use ironclaw_host_api::{AgentId, TenantId, ThreadId};
+use ironclaw_threads::{
+    AppendAssistantDraftRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
+    ThreadScope,
+};
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
     GetLoopCheckpointRequest, GetRunStateRequest, LoopBlocked, LoopBlockedKind, LoopCheckpointKind,
     LoopCheckpointRecord, LoopCheckpointStateRef, LoopCheckpointStore, LoopCompleted,
     LoopCompletionKind, LoopExit, LoopExitId, LoopFailed, LoopFailureKind, LoopGateRef,
-    LoopMessageRef, PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnRequest,
-    ResumeTurnResponse, RunProfileVersion, SanitizedFailure, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId,
-    TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    LoopMessageRef, LoopResultRef, PutLoopCheckpointRequest, ReplyTargetBindingRef,
+    ResumeTurnRequest, ResumeTurnResponse, RunProfileVersion, SanitizedFailure, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnCheckpointId, TurnError, TurnId, TurnLeaseToken,
+    TurnRunId, TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{CheckpointSchemaId, LoopDriverId},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -303,6 +306,95 @@ async fn thread_checkpoint_evidence_rejects_agentless_completion_refs_explicitly
 }
 
 #[tokio::test]
+async fn thread_checkpoint_evidence_accepts_result_refs_with_durable_reply_ref() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let turn_scope = TurnScope::new(
+        TenantId::new("tenant").expect("valid"),
+        Some(AgentId::new("agent").expect("valid")),
+        None,
+        ThreadId::new("thread").expect("valid"),
+    );
+    let thread_scope = ThreadScope {
+        tenant_id: turn_scope.tenant_id.clone(),
+        agent_id: turn_scope.agent_id.clone().expect("agent id"),
+        project_id: None,
+        owner_user_id: None,
+        mission_id: None,
+    };
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(turn_scope.thread_id.clone()),
+            created_by_actor_id: "user:test".to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    let run_id = TurnRunId::new();
+    let draft = thread_service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: thread_scope.clone(),
+            thread_id: turn_scope.thread_id.clone(),
+            turn_run_id: run_id.to_string(),
+            content: MessageContent::text("reply after tool"),
+        })
+        .await
+        .expect("draft");
+    thread_service
+        .finalize_assistant_message(
+            &thread_scope,
+            &turn_scope.thread_id,
+            draft.message_id,
+            MessageContent::text("reply after tool"),
+        )
+        .await
+        .expect("finalized");
+    let evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
+        thread_service,
+        Arc::new(ironclaw_turns::InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
+        Arc::new(PanicLoopCheckpointStore),
+        thread_scope,
+    );
+    let message_ref =
+        LoopMessageRef::new(format!("msg:{}", draft.message_id)).expect("valid message ref");
+    let result_ref = LoopResultRef::new("result:tool-output").expect("valid result ref");
+
+    let verified = evidence
+        .verify_completion_refs(CompletionEvidenceRequest {
+            scope: &turn_scope,
+            turn_id: TurnId::new(),
+            run_id,
+            reply_message_refs: &[message_ref],
+            result_refs: &[result_ref],
+        })
+        .await
+        .expect("completion evidence should verify durable reply refs");
+
+    assert!(verified);
+}
+
+#[tokio::test]
+async fn thread_checkpoint_evidence_rejects_result_only_completion_refs() {
+    let evidence = text_checkpoint_evidence(Arc::new(PanicLoopCheckpointStore));
+    let claimed = claimed_run();
+    let result_ref = LoopResultRef::new("result:tool-output").expect("valid result ref");
+
+    let verified = evidence
+        .verify_completion_refs(CompletionEvidenceRequest {
+            scope: &claimed.state.scope,
+            turn_id: claimed.state.turn_id,
+            run_id: claimed.state.run_id,
+            reply_message_refs: &[],
+            result_refs: &[result_ref],
+        })
+        .await
+        .expect("result-only completion should fail closed without checkpoint I/O");
+
+    assert!(!verified);
+}
+
+#[tokio::test]
 async fn applier_rejects_agentless_transcript_evidence_before_transition() {
     let transition = Arc::new(RecordingTransitionPort::new());
     let evidence = text_checkpoint_evidence(Arc::new(PanicLoopCheckpointStore));
@@ -317,6 +409,75 @@ async fn applier_rejects_agentless_transcript_evidence_before_transition() {
 
     assert!(matches!(err, TurnError::InvalidRequest { .. }));
     assert_eq!(transition.apply_count(), 0);
+}
+
+#[tokio::test]
+async fn thread_checkpoint_evidence_rejects_stored_thread_scope_mismatch() {
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    let requested_scope = TurnScope::new(
+        TenantId::new("tenant").expect("valid"),
+        Some(AgentId::new("agent-request").expect("valid")),
+        None,
+        ThreadId::new("thread").expect("valid"),
+    );
+    let stored_scope = ThreadScope {
+        tenant_id: requested_scope.tenant_id.clone(),
+        agent_id: AgentId::new("agent-stored").expect("valid"),
+        project_id: None,
+        owner_user_id: None,
+        mission_id: None,
+    };
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: stored_scope.clone(),
+            thread_id: Some(requested_scope.thread_id.clone()),
+            created_by_actor_id: "user:test".to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    let run_id = TurnRunId::new();
+    let draft = thread_service
+        .append_assistant_draft(AppendAssistantDraftRequest {
+            scope: stored_scope.clone(),
+            thread_id: requested_scope.thread_id.clone(),
+            turn_run_id: run_id.to_string(),
+            content: MessageContent::text("wrong-scope reply"),
+        })
+        .await
+        .expect("draft");
+    thread_service
+        .finalize_assistant_message(
+            &stored_scope,
+            &requested_scope.thread_id,
+            draft.message_id,
+            MessageContent::text("wrong-scope reply"),
+        )
+        .await
+        .expect("finalized");
+    let evidence = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
+        thread_service,
+        Arc::new(ironclaw_turns::InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
+        Arc::new(PanicLoopCheckpointStore),
+        stored_scope,
+    );
+    let message_ref =
+        LoopMessageRef::new(format!("msg:{}", draft.message_id)).expect("valid message ref");
+
+    let err = evidence
+        .verify_completion_refs(CompletionEvidenceRequest {
+            scope: &requested_scope,
+            turn_id: TurnId::new(),
+            run_id,
+            reply_message_refs: &[message_ref],
+            result_refs: &[],
+        })
+        .await
+        .expect_err("stored thread scope must match request scope before history is trusted");
+
+    assert!(matches!(err, TurnError::InvalidRequest { .. }));
+    assert!(err.to_string().contains("scope does not match"));
 }
 
 #[tokio::test]

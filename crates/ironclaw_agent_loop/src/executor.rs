@@ -229,7 +229,40 @@ impl CanonicalAgentLoopExecutor {
                 CancelCheck::Exit(exit) => return Ok(exit),
             };
 
-            let context_request = planner.context().plan_context_request(&state).await;
+            let surface_filter = planner.capability().filter(&state).await;
+            state = match self
+                .checkpoint_and_exit_if_cancelled_after_pending_input_ack(
+                    host,
+                    state,
+                    &mut pending_input_ack,
+                )
+                .await?
+            {
+                CancelCheck::Continue(state) => *state,
+                CancelCheck::Exit(exit) => return Ok(exit),
+            };
+            let mut surface = host
+                .visible_capabilities(VisibleCapabilityRequest)
+                .await
+                .map_err(|_| AgentLoopExecutorError::HostUnavailable {
+                    stage: HostStage::Capability,
+                })?;
+            apply_capability_filter(&mut surface, &surface_filter);
+            state.surface_version = Some(surface.version.clone());
+            state = match self
+                .checkpoint_and_exit_if_cancelled_after_pending_input_ack(
+                    host,
+                    state,
+                    &mut pending_input_ack,
+                )
+                .await?
+            {
+                CancelCheck::Continue(state) => *state,
+                CancelCheck::Exit(exit) => return Ok(exit),
+            };
+
+            let mut context_request = planner.context().plan_context_request(&state).await;
+            context_request.surface_version = Some(surface.version.clone());
             let prompt_mode = context_request.mode;
             state = match self
                 .checkpoint_and_exit_if_cancelled_after_pending_input_ack(
@@ -261,38 +294,6 @@ impl CanonicalAgentLoopExecutor {
                 },
             )
             .await;
-            state = match self
-                .checkpoint_and_exit_if_cancelled_after_pending_input_ack(
-                    host,
-                    state,
-                    &mut pending_input_ack,
-                )
-                .await?
-            {
-                CancelCheck::Continue(state) => *state,
-                CancelCheck::Exit(exit) => return Ok(exit),
-            };
-
-            let surface_filter = planner.capability().filter(&state).await;
-            state = match self
-                .checkpoint_and_exit_if_cancelled_after_pending_input_ack(
-                    host,
-                    state,
-                    &mut pending_input_ack,
-                )
-                .await?
-            {
-                CancelCheck::Continue(state) => *state,
-                CancelCheck::Exit(exit) => return Ok(exit),
-            };
-            let mut surface = host
-                .visible_capabilities(VisibleCapabilityRequest)
-                .await
-                .map_err(|_| AgentLoopExecutorError::HostUnavailable {
-                    stage: HostStage::Capability,
-                })?;
-            apply_capability_filter(&mut surface, &surface_filter);
-            state.surface_version = Some(surface.version.clone());
             state = match self
                 .checkpoint_and_exit_if_cancelled_after_pending_input_ack(
                     host,

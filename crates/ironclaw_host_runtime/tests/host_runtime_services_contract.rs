@@ -80,8 +80,9 @@ use ironclaw_trust::{
 use ironclaw_turns::LibSqlTurnStateStore;
 #[cfg(feature = "libsql")]
 use ironclaw_turns::{
-    AcceptedMessageRef, IdempotencyKey, ReplyTargetBindingRef, RunProfileRequest, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnScope, TurnStateStore,
+    AcceptedMessageRef, IdempotencyKey, InMemoryRunProfileResolver, ReplyTargetBindingRef,
+    RunProfileRequest, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnCoordinator, TurnScope, TurnStateStore,
 };
 use ironclaw_turns::{NoopTurnRunWakeNotifier, TurnRunWake, TurnRunWakeNotifier};
 use ironclaw_wasm::{
@@ -143,6 +144,13 @@ fn production_wiring_validation_rejects_missing_components_and_local_only_defaul
             ProductionWiringIssueKind::Missing
         ),
         "missing turn-state store should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RunProfileResolver,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing run-profile resolver should be reported: {report:?}"
     );
     assert!(
         report.contains(
@@ -749,6 +757,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     .with_libsql_turn_state_store(Arc::clone(&db))
     .await
     .unwrap()
+    .with_run_profile_resolver(Arc::new(InMemoryRunProfileResolver::default()))
     .with_turn_run_wake_notifier(Arc::clone(&notifier));
 
     let coordinator = services
@@ -769,6 +778,36 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     assert_eq!(state.run_id, run_id);
     assert_eq!(notifier.wakes().len(), 1);
     assert_eq!(notifier.wakes()[0].run_id, run_id);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_turn_coordinator_requires_explicit_run_profile_resolver() {
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("turn-coordinator-missing-resolver.db");
+    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_libsql_turn_state_store(Arc::clone(&db))
+    .await
+    .unwrap()
+    .with_turn_run_wake_notifier(Arc::new(RecordingTurnRunWakeNotifier::default()));
+
+    let report = match services.turn_coordinator_for_production() {
+        Ok(_) => panic!("production turn coordinator must fail closed without a resolver"),
+        Err(report) => report,
+    };
+    assert!(report.contains(
+        ProductionWiringComponent::RunProfileResolver,
+        ProductionWiringIssueKind::Missing
+    ));
 }
 
 #[test]

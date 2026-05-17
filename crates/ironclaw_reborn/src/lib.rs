@@ -13,6 +13,7 @@ mod model_routes;
 mod planned_driver;
 mod planned_driver_factory;
 pub mod production_readiness;
+mod runtime;
 mod text_loop_driver;
 pub mod turn_runner;
 
@@ -22,15 +23,16 @@ mod model_gateway;
 pub mod secrets;
 
 pub use app_loop_family::build_loop_family_registry;
+pub use ironclaw_loop_support::HostRuntimeLoopCapabilityPortFactory as HostRuntimeCapabilityPortFactory;
 pub use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileFilter,
     CapabilitySurfaceProfileResolver, HostRuntimeLoopCapabilityPort, LoopCapabilityInputResolver,
     LoopCapabilityResultWriter,
 };
 pub use loop_driver_host::{
-    HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, NoExtraLoopInputPort,
-    RebornLoopDriverHost, RebornLoopDriverHostError, RebornLoopDriverHostFactory,
-    RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
+    HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, LoopCapabilityPortFactory,
+    NoExtraLoopInputPort, RebornLoopDriverHost, RebornLoopDriverHostError,
+    RebornLoopDriverHostFactory, RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
 };
 pub use milestone_events::{DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink};
 #[cfg(feature = "root-llm-provider")]
@@ -53,5 +55,11 @@ pub use planned_driver_factory::{
     planned_driver_default_id, planned_driver_default_version, planned_driver_descriptor,
     register_default_planned_driver, register_default_planned_profile,
     register_default_text_only_driver,
+};
+pub use runtime::{
+    DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
+    ProductLiveRuntimeBuildError, ProductLiveRuntimeReadinessComponent,
+    RebornRuntimeLoopComposition, build_default_planned_runtime,
+    build_product_live_planned_runtime,
 };
 pub use text_loop_driver::{TextOnlyModelReplyDriver, TextOnlyModelReplyDriverConfig};

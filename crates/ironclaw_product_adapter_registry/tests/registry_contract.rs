@@ -1,72 +1,82 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use ironclaw_host_api::SecretHandle;
+use ironclaw_extensions::{MANIFEST_SCHEMA_VERSION, ManifestSource};
+use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle};
 use ironclaw_product_adapter_registry::{
-    InMemoryProductAdapterRegistryStore, ManifestHash, ProductAdapterActivationState,
-    ProductAdapterComponentRef, ProductAdapterCredentialBinding, ProductAdapterHealthSnapshot,
-    ProductAdapterInstallation, ProductAdapterManifest, ProductAdapterManifestRef,
-    ProductAdapterRegistryStore, RegistryError,
+    ExtensionActivationState, ExtensionCredentialBinding, ExtensionInstallation,
+    ExtensionInstallationId, ExtensionInstallationStore, ExtensionManifestRecord,
+    ExtensionManifestRef, InMemoryExtensionInstallationStore, ManifestHash, RegistryError,
+    list_enabled_product_adapter_entries,
 };
-use ironclaw_product_adapters::{
-    AdapterInstallationId, AuthRequirement, DeclaredEgressHost, DeclaredEgressTarget,
-    EgressCredentialHandle, ProductAdapterCapabilities, ProductAdapterHealth, ProductAdapterId,
-    ProductSurfaceKind, RedactedString,
-};
+use ironclaw_product_adapters::EgressCredentialHandle;
 
-fn adapter_id() -> ProductAdapterId {
-    ProductAdapterId::new("telegram-v2").unwrap()
+fn extension_id() -> ExtensionId {
+    ExtensionId::new("telegram-v2").unwrap()
 }
 
-fn installation_id(value: &str) -> AdapterInstallationId {
-    AdapterInstallationId::new(value).unwrap()
+fn installation_id() -> ExtensionInstallationId {
+    ExtensionInstallationId::new("acme-telegram-prod").unwrap()
 }
 
 fn credential(value: &str) -> EgressCredentialHandle {
     EgressCredentialHandle::new(value).unwrap()
 }
 
-fn host(value: &str) -> DeclaredEgressHost {
-    DeclaredEgressHost::new(value).unwrap()
+fn manifest_hash(value: &str) -> ManifestHash {
+    ManifestHash::new(value).unwrap()
 }
 
-fn secret_handle(value: &str) -> SecretHandle {
-    SecretHandle::new(format!("secret_{value}")).unwrap()
-}
+fn manifest(required_credential: &str, hash: &str) -> ExtensionManifestRecord {
+    let raw = format!(
+        r#"
+schema_version = "{schema}"
+id = "telegram-v2"
+name = "Telegram"
+version = "0.1.0"
+description = "Telegram product adapter"
+trust = "third_party"
 
-fn manifest() -> ProductAdapterManifest {
-    let telegram = credential("telegram_bot_token");
-    ProductAdapterManifest::new(
-        adapter_id(),
-        semver::Version::new(0, 1, 0),
-        ProductSurfaceKind::ExternalChannel,
-        ProductAdapterComponentRef::new("file://adapters/telegram-v2.wasm").unwrap(),
-        ProductAdapterCapabilities::external_channel_default(),
-        AuthRequirement::SharedSecretHeader {
-            header_name: "X-Telegram-Bot-Api-Secret-Token".to_string(),
-        },
-        vec![DeclaredEgressTarget::new(
-            host("api.telegram.org"),
-            Some(telegram.clone()),
-        )],
-        vec![telegram],
-        Some(ManifestHash::new("sha256:abc123").unwrap()),
+[runtime]
+kind = "wasm"
+module = "adapters/telegram-v2.wasm"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.inbound"
+
+[product_adapter.inbound]
+surface_kind = "external_channel"
+
+[product_adapter.inbound.auth]
+kind = "bearer_token"
+
+[product_adapter.inbound.capabilities]
+flags = ["inbound_messages"]
+
+[[product_adapter.inbound.required_credentials]]
+handle = "{required_credential}"
+"#,
+        schema = MANIFEST_SCHEMA_VERSION,
+    );
+    ExtensionManifestRecord::from_toml(
+        raw,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        Some(manifest_hash(hash)),
     )
     .unwrap()
 }
 
-fn installation(state: ProductAdapterActivationState) -> ProductAdapterInstallation {
-    ProductAdapterInstallation::new(
-        installation_id("acme-telegram-prod"),
-        adapter_id(),
+fn installation(state: ExtensionActivationState) -> ExtensionInstallation {
+    ExtensionInstallation::new(
+        installation_id(),
+        extension_id(),
         state,
-        ProductAdapterManifestRef::new(
-            adapter_id(),
-            Some(ManifestHash::new("sha256:abc123").unwrap()),
-        ),
-        vec![ProductAdapterCredentialBinding::new(
+        ExtensionManifestRef::new(extension_id(), Some(manifest_hash("sha256:abc123"))),
+        vec![ExtensionCredentialBinding::new(
             credential("telegram_bot_token"),
-            secret_handle("telegram-prod-bot-token"),
+            SecretHandle::new("secret_telegram_bot_token").unwrap(),
         )],
         Utc::now(),
     )
@@ -74,178 +84,118 @@ fn installation(state: ProductAdapterActivationState) -> ProductAdapterInstallat
 }
 
 #[tokio::test]
-async fn default_registry_has_no_enabled_installations() {
-    let store = InMemoryProductAdapterRegistryStore::default();
+async fn default_store_has_no_enabled_installations() {
+    let store = InMemoryExtensionInstallationStore::default();
 
     assert!(store.list_manifests().await.unwrap().is_empty());
-    assert!(store.list_installations().await.unwrap().is_empty());
     assert!(store.list_enabled_installations().await.unwrap().is_empty());
 }
 
 #[tokio::test]
-async fn installed_state_does_not_enable_runtime_traffic() {
-    let store = InMemoryProductAdapterRegistryStore::default();
-    store.upsert_manifest(manifest()).await.unwrap();
+async fn explicit_activation_surfaces_in_product_adapter_runtime_entries() {
+    let store = InMemoryExtensionInstallationStore::default();
     store
-        .upsert_installation(installation(ProductAdapterActivationState::Installed))
+        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
         .await
         .unwrap();
-
-    assert!(store.list_enabled_installations().await.unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn explicit_activation_makes_installation_enabled() {
-    let store = InMemoryProductAdapterRegistryStore::default();
-    store.upsert_manifest(manifest()).await.unwrap();
-    let id = installation_id("acme-telegram-prod");
     store
-        .upsert_installation(installation(ProductAdapterActivationState::Installed))
+        .upsert_installation(installation(ExtensionActivationState::Installed))
         .await
         .unwrap();
 
     store
-        .set_activation_state(&id, ProductAdapterActivationState::Enabled)
+        .set_activation_state(&installation_id(), ExtensionActivationState::Enabled)
         .await
         .unwrap();
 
     let enabled = store.list_enabled_installations().await.unwrap();
     assert_eq!(enabled.len(), 1);
-    assert_eq!(enabled[0].installation_id(), &id);
+
+    let entries = list_enabled_product_adapter_entries(&store).await.unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].adapter().adapter_id().as_str(),
+        "telegram-v2/inbound"
+    );
 }
 
 #[tokio::test]
-async fn no_op_activation_transition_does_not_update_timestamp() {
-    let store = InMemoryProductAdapterRegistryStore::default();
-    store.upsert_manifest(manifest()).await.unwrap();
-    let id = installation_id("acme-telegram-prod");
-    store
-        .upsert_installation(installation(ProductAdapterActivationState::Installed))
-        .await
-        .unwrap();
-    let before = store
-        .get_installation(&id)
-        .await
-        .unwrap()
-        .unwrap()
-        .updated_at();
+async fn non_product_adapter_extension_is_skipped_in_product_adapter_projection() {
+    let plain_raw = format!(
+        r#"
+schema_version = "{schema}"
+id = "plain-tool"
+name = "Plain Tool"
+version = "0.1.0"
+description = "No product adapter"
+trust = "third_party"
 
-    store
-        .set_activation_state(&id, ProductAdapterActivationState::Installed)
-        .await
-        .unwrap();
+[runtime]
+kind = "wasm"
+module = "wasm/plain.wasm"
 
-    let after = store
-        .get_installation(&id)
-        .await
-        .unwrap()
-        .unwrap()
-        .updated_at();
-    assert_eq!(before, after);
-}
+[[capabilities]]
+id = "plain-tool.do"
+description = "Do something"
+default_permission = "ask"
+visibility = "model"
+input_schema_ref = "schemas/in.json"
+output_schema_ref = "schemas/out.json"
+prompt_doc_ref = "prompts/do.md"
+"#,
+        schema = MANIFEST_SCHEMA_VERSION,
+    );
+    let plain_id = ExtensionId::new("plain-tool").unwrap();
+    let plain_manifest = ExtensionManifestRecord::from_toml(
+        plain_raw,
+        ManifestSource::InstalledLocal,
+        &ironclaw_host_api::HostPortCatalog::empty(),
+        Some(manifest_hash("sha256:plain")),
+    )
+    .unwrap();
+    let plain_install = ExtensionInstallation::new(
+        ExtensionInstallationId::new("plain-install").unwrap(),
+        plain_id.clone(),
+        ExtensionActivationState::Enabled,
+        ExtensionManifestRef::new(plain_id, Some(manifest_hash("sha256:plain"))),
+        vec![],
+        Utc::now(),
+    )
+    .unwrap();
 
-#[tokio::test]
-async fn arc_store_delegates_to_inner_store() {
-    let store = Arc::new(InMemoryProductAdapterRegistryStore::default());
-    store.upsert_manifest(manifest()).await.unwrap();
+    let store = InMemoryExtensionInstallationStore::default();
+    store.upsert_manifest(plain_manifest).await.unwrap();
+    store.upsert_installation(plain_install).await.unwrap();
 
-    assert_eq!(store.list_manifests().await.unwrap().len(), 1);
+    let pa_entries = list_enabled_product_adapter_entries(&store).await.unwrap();
+    assert!(
+        pa_entries.is_empty(),
+        "plain extension should not appear in product adapter entries"
+    );
 }
 
 #[tokio::test]
 async fn credential_binding_must_reference_declared_manifest_handle() {
-    let store = InMemoryProductAdapterRegistryStore::default();
-    store.upsert_manifest(manifest()).await.unwrap();
-    // Construction is the only public bindings-mutation path now —
-    // `set_credential_bindings` is crate-private so external callers cannot
-    // bypass the store's manifest re-validation by patching bindings on a
-    // get_installation snapshot. The invalid installation is built up front
-    // and upserted; the store rejects it on cross-manifest validation.
-    let invalid = ProductAdapterInstallation::new(
-        installation_id("acme-telegram-prod"),
-        adapter_id(),
-        ProductAdapterActivationState::Installed,
-        ProductAdapterManifestRef::new(
-            adapter_id(),
-            Some(ManifestHash::new("sha256:abc123").unwrap()),
-        ),
-        vec![ProductAdapterCredentialBinding::new(
+    let store = InMemoryExtensionInstallationStore::default();
+    store
+        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
+        .await
+        .unwrap();
+
+    let invalid = ExtensionInstallation::new(
+        installation_id(),
+        extension_id(),
+        ExtensionActivationState::Installed,
+        ExtensionManifestRef::new(extension_id(), Some(manifest_hash("sha256:abc123"))),
+        vec![ExtensionCredentialBinding::new(
             credential("slack_bot_token"),
-            secret_handle("slack-prod-bot-token"),
+            SecretHandle::new("secret_slack_bot_token").unwrap(),
         )],
         Utc::now(),
     )
     .unwrap();
 
     let err = store.upsert_installation(invalid).await.unwrap_err();
-    assert!(matches!(
-        err,
-        RegistryError::UndeclaredCredentialHandle { .. }
-    ));
-}
-
-#[test]
-fn duplicate_credential_bindings_rejected_at_construction() {
-    // With `set_credential_bindings` sealed to `pub(crate)`, the only public
-    // path that admits binding lists is `ProductAdapterInstallation::new`.
-    // The uniqueness invariant must trip there — there is no partial-update
-    // path left for an external caller to corrupt state through.
-    let err = ProductAdapterInstallation::new(
-        installation_id("acme-telegram-prod"),
-        adapter_id(),
-        ProductAdapterActivationState::Installed,
-        ProductAdapterManifestRef::new(
-            adapter_id(),
-            Some(ManifestHash::new("sha256:abc123").unwrap()),
-        ),
-        vec![
-            ProductAdapterCredentialBinding::new(
-                credential("telegram_bot_token"),
-                secret_handle("telegram-prod-bot-token"),
-            ),
-            ProductAdapterCredentialBinding::new(
-                credential("telegram_bot_token"),
-                secret_handle("telegram-prod-bot-token-shadow"),
-            ),
-        ],
-        Utc::now(),
-    )
-    .unwrap_err();
-
-    assert!(matches!(
-        err,
-        RegistryError::DuplicateCredentialBinding { .. }
-    ));
-}
-
-fn manifest_without_credential() -> ProductAdapterManifest {
-    ProductAdapterManifest::new(
-        adapter_id(),
-        semver::Version::new(0, 1, 1),
-        ProductSurfaceKind::ExternalChannel,
-        ProductAdapterComponentRef::new("file://adapters/telegram-v2.wasm").unwrap(),
-        ProductAdapterCapabilities::external_channel_default(),
-        AuthRequirement::BearerToken,
-        Vec::new(),
-        Vec::new(),
-        Some(ManifestHash::new("sha256:abc123").unwrap()),
-    )
-    .unwrap()
-}
-
-#[tokio::test]
-async fn upsert_manifest_rejects_when_existing_installation_binding_revoked() {
-    let store = InMemoryProductAdapterRegistryStore::default();
-    store.upsert_manifest(manifest()).await.unwrap();
-    store
-        .upsert_installation(installation(ProductAdapterActivationState::Enabled))
-        .await
-        .unwrap();
-
-    let err = store
-        .upsert_manifest(manifest_without_credential())
-        .await
-        .unwrap_err();
     assert!(matches!(
         err,
         RegistryError::UndeclaredCredentialHandle { .. }
@@ -254,186 +204,300 @@ async fn upsert_manifest_rejects_when_existing_installation_binding_revoked() {
 
 #[tokio::test]
 async fn manifest_hash_mismatch_is_rejected() {
-    let store = InMemoryProductAdapterRegistryStore::default();
-    store.upsert_manifest(manifest()).await.unwrap();
-    let invalid = ProductAdapterInstallation::new(
-        installation_id("acme-telegram-prod"),
-        adapter_id(),
-        ProductAdapterActivationState::Installed,
-        ProductAdapterManifestRef::new(
-            adapter_id(),
-            Some(ManifestHash::new("sha256:different").unwrap()),
-        ),
-        vec![ProductAdapterCredentialBinding::new(
-            credential("telegram_bot_token"),
-            secret_handle("telegram-prod-bot-token"),
-        )],
-        Utc::now(),
-    )
-    .unwrap();
+    let store = InMemoryExtensionInstallationStore::default();
+    store
+        .upsert_manifest(manifest("telegram_bot_token", "sha256:different"))
+        .await
+        .unwrap();
 
-    let err = store.upsert_installation(invalid).await.unwrap_err();
+    let err = store
+        .upsert_installation(installation(ExtensionActivationState::Installed))
+        .await
+        .unwrap_err();
     assert!(matches!(err, RegistryError::ManifestHashMismatch { .. }));
 }
 
 #[tokio::test]
-async fn egress_pairs_are_preserved_exactly() {
-    let telegram_handle = credential("telegram_bot_token");
-    let slack_handle = credential("slack_bot_token");
-    let manifest = ProductAdapterManifest::new(
-        adapter_id(),
-        semver::Version::new(0, 1, 0),
-        ProductSurfaceKind::ExternalChannel,
-        ProductAdapterComponentRef::new("file://adapters/telegram-v2.wasm").unwrap(),
-        ProductAdapterCapabilities::external_channel_default(),
-        AuthRequirement::BearerToken,
-        vec![
-            DeclaredEgressTarget::new(host("api.telegram.org"), Some(telegram_handle.clone())),
-            DeclaredEgressTarget::new(host("api.slack.com"), Some(slack_handle.clone())),
-        ],
-        vec![telegram_handle, slack_handle],
-        None,
-    )
-    .unwrap();
+async fn upsert_manifest_rejects_when_existing_installation_binding_revoked() {
+    let store = InMemoryExtensionInstallationStore::default();
+    store
+        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
+        .await
+        .unwrap();
+    store
+        .upsert_installation(installation(ExtensionActivationState::Enabled))
+        .await
+        .unwrap();
 
-    let pairs: Vec<(String, Option<String>)> = manifest
-        .declared_egress()
-        .iter()
-        .map(|target| {
-            (
-                target.host.as_str().to_string(),
-                target
-                    .credential_handle
-                    .as_ref()
-                    .map(|handle| handle.as_str().to_string()),
-            )
-        })
-        .collect();
-
-    assert_eq!(
-        pairs,
-        vec![
-            (
-                "api.telegram.org".to_string(),
-                Some("telegram_bot_token".to_string())
-            ),
-            (
-                "api.slack.com".to_string(),
-                Some("slack_bot_token".to_string())
-            )
-        ]
-    );
+    let err = store
+        .upsert_manifest(manifest("other_token", "sha256:abc123"))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        RegistryError::UndeclaredCredentialHandle { .. }
+    ));
 }
-
-// ---------------------------------------------------------------------------
-// Direct-deserialize bypass guards (security/correctness review fix 1).
-// `ProductAdapterManifest` / `ProductAdapterInstallation` no longer derive
-// `Deserialize`; their manual impls route through validating constructors so
-// cross-field invariants hold even for values reconstructed from a persisted
-// serialized blob.
-// ---------------------------------------------------------------------------
-
-const MANIFEST_JSON_DUPLICATE_CREDENTIALS: &str = r#"{
-    "adapter_id": "telegram-v2",
-    "version": "0.1.0",
-    "surface_kind": "external_channel",
-    "component_ref": "file://adapters/telegram-v2.wasm",
-    "capabilities": {"flags": ["inbound_messages"]},
-    "auth_requirement": {"bearer_token": null},
-    "declared_egress": [],
-    "required_credentials": ["telegram_bot_token", "telegram_bot_token"],
-    "manifest_hash": null
-}"#;
-
-#[test]
-fn manifest_deserialize_rejects_duplicate_credentials() {
-    let err = serde_json::from_str::<ProductAdapterManifest>(MANIFEST_JSON_DUPLICATE_CREDENTIALS)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("duplicate credential handle"),
-        "expected DuplicateCredentialHandle propagation, got: {err}"
-    );
-}
-
-const INSTALLATION_JSON_DUPLICATE_BINDINGS: &str = r#"{
-    "installation_id": "acme-telegram-prod",
-    "adapter_id": "telegram-v2",
-    "activation_state": "installed",
-    "manifest_ref": {
-        "adapter_id": "telegram-v2",
-        "manifest_hash": "sha256:abc123"
-    },
-    "credential_bindings": [
-        {"credential_handle": "telegram_bot_token", "secret_handle": "telegram_bot_token"},
-        {"credential_handle": "telegram_bot_token", "secret_handle": "telegram_bot_token_shadow"}
-    ],
-    "health": {"status": "healthy", "checked_at": null, "message": null},
-    "updated_at": "2026-05-13T20:00:00Z"
-}"#;
 
 #[test]
 fn installation_deserialize_rejects_duplicate_bindings() {
-    let err =
-        serde_json::from_str::<ProductAdapterInstallation>(INSTALLATION_JSON_DUPLICATE_BINDINGS)
-            .unwrap_err()
-            .to_string();
-    assert!(
-        err.contains("duplicate credential binding"),
-        "expected DuplicateCredentialBinding propagation, got: {err}"
-    );
+    let json = r#"
+{
+  "installation_id": "acme-telegram-prod",
+  "extension_id": "telegram-v2",
+  "activation_state": "installed",
+  "manifest_ref": { "extension_id": "telegram-v2", "manifest_hash": "sha256:abc123" },
+  "credential_bindings": [
+    { "credential_handle": "telegram_bot_token", "secret_handle": "secret_a" },
+    { "credential_handle": "telegram_bot_token", "secret_handle": "secret_b" }
+  ],
+  "health": { "status": "healthy", "message": null, "checked_at": "2026-01-01T00:00:00Z" },
+  "updated_at": "2026-01-01T00:00:00Z"
+}
+"#;
+    let err = serde_json::from_str::<ExtensionInstallation>(json).unwrap_err();
+    assert!(err.to_string().contains("duplicate credential binding"));
 }
 
-const INSTALLATION_JSON_MANIFEST_ADAPTER_MISMATCH: &str = r#"{
-    "installation_id": "acme-telegram-prod",
-    "adapter_id": "telegram-v2",
-    "activation_state": "installed",
-    "manifest_ref": {
-        "adapter_id": "slack-v2",
-        "manifest_hash": "sha256:abc123"
-    },
-    "credential_bindings": [],
-    "health": {"status": "healthy", "checked_at": null, "message": null},
-    "updated_at": "2026-05-13T20:00:00Z"
-}"#;
-
 #[test]
-fn installation_deserialize_rejects_manifest_adapter_mismatch() {
-    let err = serde_json::from_str::<ProductAdapterInstallation>(
-        INSTALLATION_JSON_MANIFEST_ADAPTER_MISMATCH,
+fn duplicate_credential_bindings_rejected_at_construction() {
+    let err = ExtensionInstallation::new(
+        installation_id(),
+        extension_id(),
+        ExtensionActivationState::Installed,
+        ExtensionManifestRef::new(extension_id(), Some(manifest_hash("sha256:abc123"))),
+        vec![
+            ExtensionCredentialBinding::new(
+                credential("telegram_bot_token"),
+                SecretHandle::new("secret_a").unwrap(),
+            ),
+            ExtensionCredentialBinding::new(
+                credential("telegram_bot_token"),
+                SecretHandle::new("secret_b").unwrap(),
+            ),
+        ],
+        Utc::now(),
     )
-    .unwrap_err()
-    .to_string();
+    .unwrap_err();
     assert!(
-        err.contains("does not match manifest adapter"),
-        "expected ManifestAdapterMismatch propagation, got: {err}"
+        matches!(err, RegistryError::DuplicateCredentialBinding { .. }),
+        "expected DuplicateCredentialBinding, got {err:?}"
     );
 }
 
 #[tokio::test]
-async fn health_update_redacts_message() {
-    let store = InMemoryProductAdapterRegistryStore::default();
-    store.upsert_manifest(manifest()).await.unwrap();
-    let id = installation_id("acme-telegram-prod");
+async fn no_op_activation_transition_does_not_update_timestamp() {
+    let store = InMemoryExtensionInstallationStore::default();
     store
-        .upsert_installation(installation(ProductAdapterActivationState::Enabled))
+        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
+        .await
+        .unwrap();
+    store
+        .upsert_installation(installation(ExtensionActivationState::Enabled))
         .await
         .unwrap();
 
+    let before = store
+        .get_installation(&installation_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let before_ts = before.updated_at();
+
+    // Set the same state again — should be a no-op.
     store
-        .update_health(
-            &id,
-            ProductAdapterHealthSnapshot::new(
-                ProductAdapterHealth::Degraded,
-                Some(Utc::now()),
-                Some(RedactedString::new("super-secret-token")),
+        .set_activation_state(&installation_id(), ExtensionActivationState::Enabled)
+        .await
+        .unwrap();
+
+    let after = store
+        .get_installation(&installation_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        before_ts,
+        after.updated_at(),
+        "no-op activation transition should not update timestamp"
+    );
+}
+
+#[tokio::test]
+async fn installed_state_does_not_surface_in_enabled_installations() {
+    let store = InMemoryExtensionInstallationStore::default();
+    store
+        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
+        .await
+        .unwrap();
+    store
+        .upsert_installation(installation(ExtensionActivationState::Installed))
+        .await
+        .unwrap();
+
+    let enabled = store.list_enabled_installations().await.unwrap();
+    assert!(
+        enabled.is_empty(),
+        "installed (not enabled) installation should not appear in list_enabled_installations"
+    );
+
+    let entries = list_enabled_product_adapter_entries(&store).await.unwrap();
+    assert!(
+        entries.is_empty(),
+        "installed (not enabled) installation should not appear in PA runtime entries"
+    );
+}
+
+#[tokio::test]
+async fn multiple_product_adapter_sections_all_surfaced() {
+    let raw = format!(
+        r#"
+schema_version = "{schema}"
+id = "multi-adapter"
+name = "Multi Adapter"
+version = "0.1.0"
+description = "Extension with two product adapter sections"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "adapters/multi.wasm"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.inbound"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "product_adapter.outbound"
+
+[product_adapter.inbound]
+surface_kind = "external_channel"
+
+[product_adapter.inbound.auth]
+kind = "bearer_token"
+
+[product_adapter.inbound.capabilities]
+flags = ["inbound_messages"]
+
+[[product_adapter.inbound.required_credentials]]
+handle = "inbound_token"
+
+[product_adapter.outbound]
+surface_kind = "external_channel"
+
+[product_adapter.outbound.auth]
+kind = "bearer_token"
+
+[product_adapter.outbound.capabilities]
+flags = ["external_final_reply_push"]
+
+[[product_adapter.outbound.required_credentials]]
+handle = "outbound_token"
+"#,
+        schema = MANIFEST_SCHEMA_VERSION,
+    );
+    let multi_id = ExtensionId::new("multi-adapter").unwrap();
+    let multi_manifest = ExtensionManifestRecord::from_toml(
+        raw,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        Some(manifest_hash("sha256:multi")),
+    )
+    .unwrap();
+    assert_eq!(
+        multi_manifest.product_adapters().len(),
+        2,
+        "manifest should project two product adapter sections"
+    );
+
+    let multi_install = ExtensionInstallation::new(
+        ExtensionInstallationId::new("multi-install").unwrap(),
+        multi_id.clone(),
+        ExtensionActivationState::Enabled,
+        ExtensionManifestRef::new(multi_id, Some(manifest_hash("sha256:multi"))),
+        vec![
+            ExtensionCredentialBinding::new(
+                credential("inbound_token"),
+                SecretHandle::new("secret_inbound").unwrap(),
             ),
-        )
+            ExtensionCredentialBinding::new(
+                credential("outbound_token"),
+                SecretHandle::new("secret_outbound").unwrap(),
+            ),
+        ],
+        Utc::now(),
+    )
+    .unwrap();
+
+    let store = InMemoryExtensionInstallationStore::default();
+    store.upsert_manifest(multi_manifest).await.unwrap();
+    store.upsert_installation(multi_install).await.unwrap();
+
+    let entries = list_enabled_product_adapter_entries(&store).await.unwrap();
+    assert_eq!(entries.len(), 2, "both PA sections should be surfaced");
+
+    let ids: Vec<_> = entries
+        .iter()
+        .map(|e| e.adapter().adapter_id().as_str().to_owned())
+        .collect();
+    assert!(ids.contains(&"multi-adapter/inbound".to_owned()));
+    assert!(ids.contains(&"multi-adapter/outbound".to_owned()));
+}
+
+#[tokio::test]
+async fn arc_store_delegation_works() {
+    let store = InMemoryExtensionInstallationStore::default();
+    let arc_store: Arc<dyn ExtensionInstallationStore> = Arc::new(store);
+    arc_store
+        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
+        .await
+        .unwrap();
+    arc_store
+        .upsert_installation(installation(ExtensionActivationState::Enabled))
         .await
         .unwrap();
 
-    let got = store.get_installation(&id).await.unwrap().unwrap();
-    let rendered = format!("{:?}", got.health());
-    assert!(rendered.contains("<redacted>"));
-    assert!(!rendered.contains("super-secret-token"));
+    let entries = list_enabled_product_adapter_entries(arc_store.as_ref())
+        .await
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+}
+
+#[tokio::test]
+async fn update_health_uses_redacted_string() {
+    use ironclaw_product_adapter_registry::{ExtensionHealthSnapshot, ExtensionHealthStatus};
+    use ironclaw_product_adapters::RedactedString;
+
+    let store = InMemoryExtensionInstallationStore::default();
+    store
+        .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))
+        .await
+        .unwrap();
+    store
+        .upsert_installation(installation(ExtensionActivationState::Enabled))
+        .await
+        .unwrap();
+
+    let health = ExtensionHealthSnapshot::new(
+        ExtensionHealthStatus::Degraded,
+        Some(RedactedString::new("timeout after 5s")),
+        Utc::now(),
+    );
+    store
+        .update_health(&installation_id(), health)
+        .await
+        .unwrap();
+
+    let inst = store
+        .get_installation(&installation_id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(inst.health().status(), ExtensionHealthStatus::Degraded);
+    // RedactedString Debug impl should redact the value.
+    let debug = format!("{:?}", inst.health().message().unwrap());
+    assert!(
+        !debug.contains("timeout after 5s"),
+        "RedactedString should redact the message in Debug output"
+    );
 }

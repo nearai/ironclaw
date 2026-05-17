@@ -806,7 +806,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
-            // Registry is a contracts-only Reborn crate. Runtime/dispatcher/engine
+            // Registry projects ProductAdapter host-api sections from the single
+            // Extension Manifest v2 and owns activation state. Runtime/dispatcher/engine
             // crates would invert ownership, secrets crates could expose raw
             // material instead of opaque handles, and v1 WASM/channel crates
             // would bypass the Reborn registry boundary.
@@ -820,7 +821,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_events",
-                "ironclaw_extensions",
                 "ironclaw_filesystem",
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",

@@ -2,18 +2,16 @@
 
 **Workstream:** WS-14 (follow-up; not in the skeleton WS-0..WS-8 set)
 **Crates touched:** `ironclaw_reborn` + `ironclaw_turns`
-**Depends on:** WS-7 (`PlannedDriver` adapter), WS-8 (skeleton green),
-**and hard-gated on all six parallel follow-ups**: WS-9
+**Depends on:** WS-7 (`PlannedDriver` adapter), WS-8 (skeleton green).
+**Coordinated after adapter contracts from:** WS-9
 ([capability-host-wiring](capability-host-wiring.md)), WS-10
 ([checkpoint-store-and-resume](checkpoint-store-and-resume.md)),
 WS-11 ([loop-input-port](loop-input-port.md)), WS-12
 ([loop-progress-port](loop-progress-port.md)), WS-13
 ([host-cancellation-accessor](host-cancellation-accessor.md)), and
 WS-15 ([prompt-context-assembly](prompt-context-assembly.md)).
-**Parallel with:** none for live-default cutover. WS-14 can be built
-after WS-9..WS-13 for opt-in smoke coverage, but the implicit default
-profile MUST NOT move to `PlannedDriver` until WS-15's concrete
-workspace identity source is also wired.
+**Feeds:** WS-16 ([live-runtime-wiring](live-runtime-wiring.md)) and
+WS-17 ([product-live-cutover](product-live-cutover.md)).
 **Master doc:** [`../agent-loop-skeleton.md`](../agent-loop-skeleton.md) §11–§12
 
 ---
@@ -45,24 +43,18 @@ WS-14 closes the loop:
 4. **Profile resolver entry** — a new builtin profile
    `reborn-planned-default` that resolves to the new driver, with a
    sensible default capability-surface profile id.
-5. **Implicit default cutover** — the no-profile submission path
-   resolves to `reborn-planned-default` once the live-default gate is
-   satisfied. This is the step that makes the planned loop the default
-   Reborn loop; without it, this brief is only an opt-in registration.
+5. **Implicit-default selector support** — expose the resolver hook or
+   constructor that lets a runtime composition choose
+   `reborn-planned-default` as the no-profile default. WS-16 consumes
+   that hook in the Reborn runtime; WS-17 consumes the WS-16
+   composition from the product path.
 6. **Coexistence** — `TextOnlyModelReplyDriver` stays registered for
    explicit legacy/profile-selected runs.
 
-This is the **live default end-to-end cutover through the framework**:
-the normal submitted-turn path (no explicit `RunProfileRequest`) uses
-the planned driver, the executor's canonical tick fires, the host
-adapters from WS-9 / WS-10 / WS-11 / WS-12 / WS-13 actually execute,
-WS-15 populates identity-file context, and `LoopExit::Completed`
-carries a real assistant message ref.
-
-The opt-in `reborn-planned-default` smoke can land before the cutover,
-but the PR that claims "planned driver is now the default Reborn loop"
-must include the implicit-default resolver change and the WS-15
-identity source.
+This is not the live default end-to-end cutover. WS-14 makes the
+planned driver and planned profile available. WS-16 proves the Reborn
+runtime can compose them with real adapters. WS-17 wires the normal
+product no-profile path to that composition.
 
 ## 2. Files
 
@@ -308,24 +300,24 @@ pub fn register_default_planned_profile(
 ```
 
 `InMemoryRunProfileResolver` is constructed from a registry plus an
-explicit implicit-default profile id; startup wiring (§3.6) builds
-the registry first, registers both the builtin profiles and the new
-`reborn-planned-default`, then wraps it in the resolver with
-`reborn-planned-default` as the no-profile fallback.
+explicit implicit-default profile id; WS-14 adds that construction
+path, and WS-16 decides where the planned default is used in runtime
+composition.
 
 ### 3.5 Coexistence with `TextOnlyModelReplyDriver`
 
 The TextOnly driver stays registered. Three resolution cases co-exist:
 
-- **Implicit no-profile request** — resolves to
-  `reborn-planned-default` after the live-default cutover. This is the
-  normal channel/gateway submission path when callers do not pass a
-  `RunProfileRequest`.
+- **Implicit no-profile request** — can resolve to
+  `reborn-planned-default` when a runtime composition chooses the
+  planned profile as its implicit default. WS-16 does this for the
+  Reborn runtime smoke; WS-17 does this for the normal product
+  channel/gateway submission path.
 - `interactive_default` (the existing builtin at
   [`crates/ironclaw_turns/src/run_profile/resolver.rs:210`](../../../crates/ironclaw_turns/src/run_profile/resolver.rs))
   → `reborn:text-only-model-reply` v1, no checkpoint schema. It stays
-  available only when explicitly requested by profile id; it is no
-  longer the implicit fallback once this live-default cutover lands.
+  available when explicitly requested by profile id; it is no longer
+  the implicit fallback inside the WS-16 planned runtime composition.
 - `reborn-planned-default` (this brief) → `reborn:planned-default` v1,
   `reborn:default-loop-v1` v1.
 
@@ -335,20 +327,20 @@ No collision risk.
 
 Migration policy is split:
 
-- **Live default:** the resolver's no-profile branch changes to
-  `reborn-planned-default`. This is the mandatory production cutover
-  for the default Reborn loop.
+- **Runtime planned default:** the resolver's no-profile branch can be
+  constructed with `reborn-planned-default`. WS-16 owns the runtime
+  composition that chooses it; WS-17 owns the product cutover.
 - **Named profiles:** callers that explicitly request another profile
   still get that profile. No automated shimming or environment-flag
   switch rewrites explicit requests.
 
-### 3.6 Startup wiring
+### 3.6 Runtime wiring handoff
 
-The brief documents the startup-time call sequence so a reviewer
-can trace the bring-up:
+The brief documents the composition call sequence that WS-16 consumes
+so a reviewer can trace the bring-up:
 
 ```rust
-// at IronClaw app startup (composition root)
+// inside the WS-16 Reborn runtime composition helper
 
 // Driver registry — register both drivers.
 let mut driver_registry = DriverRegistry::default();
@@ -367,8 +359,8 @@ let coordinator = TurnCoordinator::new(/* … */).with_resolver(resolver);
 let runner = TurnRunner::new(/* … */).with_registry(driver_registry);
 ```
 
-`planned_driver_config: PlannedDriverConfig` is composed at startup
-from the parallel-follow-up adapters:
+`planned_driver_config: PlannedDriverConfig` is composed by WS-16 from
+the follow-up adapters:
 
 - WS-9: `capability_host`, `surface_resolver`
 - WS-10: `checkpoint_state_store`, `checkpoint_metadata_store`
@@ -377,11 +369,10 @@ from the parallel-follow-up adapters:
 - WS-13: `cancellation_factory`
 - WS-15: `identity_source`, `identity_budget`
 
-WS-14's live-default hard-gate dependency on WS-9/10/11/12/13/15
-(declared in the header) means the brief assumes all config fields
-point at real adapters. `identity_source = None` is allowed only for
-pre-cutover opt-in smoke tests; it is not valid for the PR that moves
-the implicit default profile.
+WS-14 provides the registration and resolver helpers. WS-16 is the
+merge gate for proving those helpers work with real adapters.
+`identity_source = None` is allowed only for helper-level WS-14 tests;
+it is not valid for the WS-16 runtime smoke or WS-17 product cutover.
 
 ## 4. Composition diagram
 
@@ -445,54 +436,23 @@ Unit tests (in `crates/ironclaw_reborn`):
   — explicitly resolve `interactive_default` and assert it still maps
   to `reborn:text-only-model-reply`.
 
-Integration tests (the **hard-gate merge criterion** for WS-14, in
-`crates/ironclaw_reborn/tests/planned_driver_e2e.rs`):
+Integration tests (in `crates/ironclaw_reborn/tests/planned_driver_e2e.rs`):
 
-- `planned_driver_real_host_smoke` — composes the **real** adapters
-  from all six follow-ups (no mocks):
-  - WS-9: `HostRuntimeLoopCapabilityPort` over a test fixture
-    `CapabilityDispatcher` that registers one allowed tool
-    (`echo_payload`) returning a fixed result, plus
-    `CapabilitySurfaceProfileFilter` with that tool's id in the
-    allowlist.
-  - WS-10: `HostManagedLoopCheckpointPort` (extended with WS-10's
-    `load_checkpoint_payload`) over `InMemoryCheckpointStateStore` +
-    `InMemoryLoopCheckpointStore`.
-  - WS-11: `HostQueueLoopInputPort` over `InMemoryHostInputQueue`.
-  - WS-12: `HostManagedLoopProgressPort` (extended with WS-12's
-    match-expansion) routing into an in-memory `LoopHostMilestoneSink`
-    capturing milestones.
-  - WS-13: `RunStateLoopCancellationPort` over a never-fired
-    `RunCancellationHandle`.
-  - WS-15: concrete `WorkspaceIdentityContextSource` seeded with the
-    default identity files through the workspace primary scope.
-  Submits a turn under `reborn-planned-default` whose model emits
-  one capability call to `echo_payload` and then a reply.
-  Asserts:
-  - `LoopExit::Completed`
-  - `reply_message_refs.len() == 1`
-  - `result_refs.len() == 1`
-  - milestone sink captured a `LoopHostMilestoneKind::IterationStarted`
-    and a `LoopHostMilestoneKind::Completed`.
-- `planned_driver_real_host_cancellation` — same setup, but flip
-  the `RunCancellationHandle` after `BeforeSideEffect` checkpoint;
-  assert `LoopExit::Cancelled { reason_kind: UserRequested }` and
-  that `WS-10`'s `load_checkpoint_payload` against the `Final`
-  checkpoint resolves to a payload whose decoded
-  `LoopExecutionState.iteration == 0` (cancellation happened before
-  the iteration completed).
-- `planned_driver_live_default_smoke` — submits a turn without a
-  `RunProfileRequest`; asserts the resolved driver is
-  `reborn:planned-default`, the model receives leading identity
-  messages from WS-15's concrete workspace source, and the run exits
-  `LoopExit::Completed`.
+- `planned_driver_profile_smoke` — registers both drivers and the
+  planned profile, resolves `reborn-planned-default`, invokes
+  `PlannedDriver` through `TurnRunner`, and asserts a completed loop
+  with a reply ref. This may use in-memory ports and local test
+  fixtures; it does not claim product live readiness.
+- `planned_driver_no_profile_uses_configured_implicit_default` —
+  constructs the resolver with `reborn-planned-default` as the
+  implicit default and proves a no-profile request selects the planned
+  driver.
 - `planned_driver_text_only_profile_still_resolves_textonly` —
   regression guard: registering both drivers does not affect the
-  TextOnly profile's resolution.
+  TextOnly profile's explicit resolution.
 
-The real-host smoke tests cannot compile or pass until WS-9 / WS-10 /
-WS-11 / WS-12 / WS-13 / WS-15 are all merged. That is the
-live-default hard-gate.
+The real-host no-profile smoke moves to WS-16. The product-facing live
+cutover test moves to WS-17.
 
 ## 6. Out of scope (for this brief)
 
@@ -512,8 +472,8 @@ live-default hard-gate.
   and may ship under a new driver id.
 - **Schema migration from `reborn:default-loop-v1` → `v2`.** Strict
   schema match per WS-10 §6; v2 is a future PR.
-- **Running the live-default cutover without WS-15.** An opt-in
-  `reborn-planned-default` smoke may use `identity_source = None`;
-  the implicit-default cutover may not.
+- **Claiming runtime or product cutover without WS-15.** A WS-14
+  helper smoke may use `identity_source = None`; the WS-16 runtime
+  smoke and WS-17 product cutover may not.
 - **Tracing / OpenTelemetry beyond `RuntimeEvent`.** WS-12 ships the
   loop progress surface; metric exporters are sink-side concerns.

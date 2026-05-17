@@ -31,6 +31,9 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 [dev-dependencies]
+ironclaw_loop_support = { path = "../ironclaw_loop_support" }
+ironclaw_reborn = { path = "../ironclaw_reborn" }
 ironclaw_product_workflow = { path = ".", features = ["test-support"] }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", features = ["test-support", "host-auth-mint"] }
-tokio = { version = "1", features = ["macros", "rt", "sync"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
