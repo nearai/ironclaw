@@ -65,10 +65,9 @@ use crate::{
 };
 
 /// Maximum number of CAS retries before a multi-process write loop gives up
-/// and surfaces a transient backend error. Mirrors the bound used in
-/// `ironclaw_engine::store::filesystem` and `ironclaw_authorization` — three
-/// attempts is enough to absorb realistic contention without papering over
-/// pathological hot-spots that should be surfaced to the caller.
+/// and surfaces a transient backend error. Three attempts is enough to
+/// absorb realistic contention without papering over pathological hot-spots
+/// that should be surfaced to the caller.
 const CAS_RETRY_ATTEMPTS: usize = 3;
 
 // -- Serialized DTOs --------------------------------------------------------
@@ -390,8 +389,7 @@ where
         // otherwise both observe an `Active` lease, both decrypt, and both
         // overwrite the consumed marker. Re-read and retry on
         // `FilesystemError::VersionMismatch` so a concurrent consume from
-        // another process loses the race deterministically. Pattern mirrors
-        // `ironclaw_engine::store::filesystem::update_thread_state`.
+        // another process loses the race deterministically.
         let path = lease_path(scope, lease_id)?;
         for _ in 0..CAS_RETRY_ATTEMPTS {
             let Some(versioned) = self
@@ -882,7 +880,6 @@ where
         // load the current version, evaluate the use-limit condition, and
         // write the incremented counter with a CAS expectation. On
         // `VersionMismatch` we re-read, re-evaluate the condition, and retry.
-        // Pattern mirrors `ironclaw_engine::store::filesystem::update_thread_state`.
         for _ in 0..CAS_RETRY_ATTEMPTS {
             let Some(versioned) = self
                 .filesystem

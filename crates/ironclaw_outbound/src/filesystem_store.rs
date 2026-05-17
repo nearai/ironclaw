@@ -185,10 +185,9 @@ where
         let spec = IndexSpec::new(name, vec![delivery_scope_index_key()], IndexKind::Exact);
         match self.filesystem.ensure_index(&root, &spec).await {
             Ok(()) => Ok(()),
-            // Match the engine store's pattern (`ensure_exact_index` in
-            // `ironclaw_engine::store::filesystem`): backends without index
-            // support are still usable for reads/writes; the query path
-            // degrades on those mounts but does not fail closed.
+            // Backends without index support are still usable for
+            // reads/writes; the query path degrades on those mounts but does
+            // not fail closed.
             Err(FilesystemError::Unsupported { .. }) => Ok(()),
             Err(error) => Err(map_fs_error(error)),
         }

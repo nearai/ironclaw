@@ -4216,8 +4216,6 @@ dependencies = [
  "chrono",
  "cron",
  "ironclaw_common",
- "ironclaw_filesystem",
- "ironclaw_host_api",
  "ironclaw_skills",
  "monty",
  "pretty_assertions",

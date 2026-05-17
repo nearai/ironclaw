@@ -72,69 +72,12 @@ async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
     notification_policy_rejects_excessive_targets(&store).await;
 }
 
-#[cfg(feature = "libsql")]
-#[tokio::test]
-async fn libsql_persists_outbound_state_across_reopen() {
-    let (db_path, _dir) = libsql_db_path();
-    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let store = LibSqlOutboundStateStore::new(Arc::clone(&db));
-    store.run_migrations().await.unwrap();
-    durable_policy_subscription_delivery_flow(&store).await;
-
-    let reopened = LibSqlOutboundStateStore::new(db);
-    assert_reopened_state(&reopened).await;
-    subscription_ids_are_scoped_not_global(&reopened).await;
-    subscription_cursor_rejects_backward_advancement(&reopened).await;
-    delivery_status_rejects_inconsistent_failure_kind(&reopened).await;
-    notification_policy_rejects_excessive_targets(&reopened).await;
-}
-
-#[cfg(feature = "libsql")]
-#[tokio::test]
-async fn libsql_rejects_mismatched_subscription_scope_after_reopen() {
-    let (db_path, _dir) = libsql_db_path();
-    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let store = LibSqlOutboundStateStore::new(Arc::clone(&db));
-    store.run_migrations().await.unwrap();
-    seed_subscription(&store).await;
-
-    let reopened = LibSqlOutboundStateStore::new(db);
-    subscription_cursor_rejects_mismatched_scope(&reopened).await;
-    subscription_ids_are_scoped_not_global(&reopened).await;
-}
-
-#[cfg(feature = "postgres")]
-#[tokio::test]
-async fn postgres_persists_outbound_state_across_reopen_when_configured() {
-    let Some(pool) = postgres_pool().await else {
-        return;
-    };
-    let store = PostgresOutboundStateStore::new(pool.clone());
-    store.run_migrations().await.unwrap();
-    durable_policy_subscription_delivery_flow(&store).await;
-
-    let reopened = PostgresOutboundStateStore::new(pool);
-    assert_reopened_state(&reopened).await;
-    subscription_ids_are_scoped_not_global(&reopened).await;
-    subscription_cursor_rejects_backward_advancement(&reopened).await;
-    delivery_status_rejects_inconsistent_failure_kind(&reopened).await;
-    notification_policy_rejects_excessive_targets(&reopened).await;
-}
-
-#[cfg(feature = "postgres")]
-#[tokio::test]
-async fn postgres_rejects_mismatched_subscription_scope_after_reopen_when_configured() {
-    let Some(pool) = postgres_pool().await else {
-        return;
-    };
-    let store = PostgresOutboundStateStore::new(pool.clone());
-    store.run_migrations().await.unwrap();
-    seed_subscription(&store).await;
-
-    let reopened = PostgresOutboundStateStore::new(pool);
-    subscription_cursor_rejects_mismatched_scope(&reopened).await;
-    subscription_ids_are_scoped_not_global(&reopened).await;
-}
+// Legacy LibSqlOutboundStateStore / PostgresOutboundStateStore have been
+// deleted. The FilesystemOutboundStateStore over LibSqlRootFilesystem /
+// PostgresRootFilesystem (driven by the production `MountView`) replaces
+// them; durability across reopen is now a property of the
+// `RootFilesystem` backend, not of an outbound-specific persistence
+// implementation.
 
 async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateStore) {
     let scope = turn_scope();
@@ -332,43 +275,6 @@ async fn durable_policy_subscription_delivery_flow(store: &impl OutboundStateSto
     assert_eq!(policy_after_failure.targets.len(), 3);
 
     full_turn_scope_isolation(store, scope).await;
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-async fn assert_reopened_state(store: &impl OutboundStateStore) {
-    let final_plan = store
-        .plan_push_targets(OutboundPushTargetRequest {
-            scope: turn_scope(),
-            turn_run_id: Some(TurnRunId::new()),
-            reply_target: reply_ref("reply-default"),
-            kind: OutboundPushKind::FinalReply,
-            projection_ref: ProjectionUpdateRef::new("projection:after-reopen").unwrap(),
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        targets(&final_plan),
-        vec![reply_ref("reply-default"), reply_ref("reply-extra-final")]
-    );
-
-    let loaded = store
-        .load_subscription_cursor(LoadSubscriptionCursorRequest {
-            subscription_id: subscription_id(),
-            actor: actor(),
-            scope: projection_scope(),
-            thread_id: thread_id(),
-        })
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(loaded.runtime, EventCursor::new(42));
-
-    let deliveries = store.list_delivery_attempts(turn_scope()).await.unwrap();
-    assert_eq!(deliveries.len(), 1);
-    assert_eq!(
-        deliveries[0].failure_kind,
-        Some(DeliveryFailureKind::AuthorizationRevoked)
-    );
 }
 
 async fn seed_subscription(store: &impl OutboundStateStore) {
@@ -771,31 +677,6 @@ fn reply_ref(value: &str) -> ReplyTargetBindingRef {
 
 fn now() -> ironclaw_host_api::Timestamp {
     chrono::Utc::now()
-}
-
-#[cfg(feature = "libsql")]
-fn libsql_db_path() -> (String, tempfile::TempDir) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("outbound.db").to_string_lossy().to_string();
-    (path, dir)
-}
-
-#[cfg(feature = "postgres")]
-async fn postgres_pool() -> Option<deadpool_postgres::Pool> {
-    if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
-        return None;
-    }
-    let url = std::env::var("IRONCLAW_OUTBOUND_POSTGRES_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .ok()?;
-    let config = url.parse::<tokio_postgres::Config>().unwrap();
-    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-    Some(
-        deadpool_postgres::Pool::builder(manager)
-            .max_size(4)
-            .build()
-            .unwrap(),
-    )
 }
 
 // ── F4 — CAS retry / drain / backwards-race regression tests ─────────────

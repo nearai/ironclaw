@@ -684,8 +684,7 @@ where
     }
 
     /// List the immediate child subdirectories of `prefix`, returning each
-    /// child's leaf name. Mirrors `FilesystemStore::list_subdir_names` in
-    /// `ironclaw_engine`: `list_dir` returns
+    /// child's leaf name. `list_dir` returns
     /// [`VirtualPath`](ironclaw_host_api::VirtualPath) results because
     /// resolution has already happened — we strip the leaf so callers can
     /// rebuild a [`ScopedPath`] and let the per-op ACL fire again on the
