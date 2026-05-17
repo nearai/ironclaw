@@ -7,8 +7,6 @@ use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, FilesystemOperati
 use ironclaw_host_api::VirtualPath;
 
 use crate::metadata::MemoryWriteOptions;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use crate::path::validated_memory_relative_path;
 use crate::path::{
     MemoryDocumentPath, MemoryDocumentScope, memory_backend_unsupported, memory_error,
     memory_not_found, valid_memory_path,
@@ -17,17 +15,9 @@ use crate::search::{MemorySearchRequest, MemorySearchResult};
 
 mod filesystem;
 mod in_memory;
-#[cfg(feature = "libsql")]
-mod libsql;
-#[cfg(feature = "postgres")]
-mod postgres;
 
 pub use filesystem::FilesystemMemoryDocumentRepository;
 pub use in_memory::InMemoryMemoryDocumentRepository;
-#[cfg(feature = "libsql")]
-pub use libsql::LibSqlMemoryDocumentRepository;
-#[cfg(feature = "postgres")]
-pub use postgres::PostgresMemoryDocumentRepository;
 
 /// Result of an optimistic atomic append attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,29 +142,6 @@ pub(crate) fn scoped_memory_changed_by_key(scope: &MemoryDocumentScope) -> Strin
         );
     }
     scoped_memory_owner_key(scope)
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) fn scoped_memory_agent_id(scope: &MemoryDocumentScope) -> Option<&str> {
-    scope.agent_id()
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) fn db_path_for_memory_document(path: &MemoryDocumentPath) -> String {
-    path.relative_path().to_string()
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) fn memory_document_from_db_path(
-    scope: &MemoryDocumentScope,
-    db_path: &str,
-) -> Option<MemoryDocumentPath> {
-    validated_memory_relative_path(db_path.to_string())
-        .ok()
-        .map(|relative_path| MemoryDocumentPath {
-            scope: scope.clone(),
-            relative_path,
-        })
 }
 
 pub(crate) fn ensure_document_path_does_not_conflict(

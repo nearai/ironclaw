@@ -311,19 +311,6 @@ pub(crate) fn fuse_memory_search_results(
     fused
 }
 
-#[cfg(feature = "libsql")]
-pub(crate) fn escape_fts5_query(query: &str) -> Option<String> {
-    let phrases = query
-        .split_whitespace()
-        .map(|token| format!("\"{}\"", token.replace('"', "\"\"")))
-        .collect::<Vec<_>>();
-    if phrases.is_empty() {
-        None
-    } else {
-        Some(phrases.join(" "))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

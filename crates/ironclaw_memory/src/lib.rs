@@ -33,10 +33,6 @@ pub use indexer::{
 };
 pub use metadata::{CONFIG_FILE_NAME, DocumentMetadata, HygieneMetadata, MemoryWriteOptions};
 pub use path::{MemoryDocumentPath, MemoryDocumentScope};
-#[cfg(feature = "libsql")]
-pub use repo::LibSqlMemoryDocumentRepository;
-#[cfg(feature = "postgres")]
-pub use repo::PostgresMemoryDocumentRepository;
 pub use repo::{
     FilesystemMemoryDocumentRepository, InMemoryMemoryDocumentRepository, MemoryAppendOutcome,
     MemoryDocumentRepository,
