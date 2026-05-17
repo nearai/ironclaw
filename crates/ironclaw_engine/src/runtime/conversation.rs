@@ -930,6 +930,7 @@ mod tests {
                 ThreadConfig::default(),
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -997,6 +998,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
                 None,
                 None,
             )
@@ -1099,6 +1101,7 @@ mod tests {
                 ThreadConfig::default(),
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1149,6 +1152,7 @@ mod tests {
                 ThreadConfig::default(),
                 None,
                 None,
+                None,
             )
             .await
         });
@@ -1159,6 +1163,7 @@ mod tests {
                 project,
                 "user1",
                 ThreadConfig::default(),
+                None,
                 None,
                 None,
             )
@@ -1238,6 +1243,7 @@ mod tests {
                 ThreadConfig::default(),
                 None,
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -1278,6 +1284,7 @@ mod tests {
                 ThreadConfig::default(),
                 None,
                 Some(raw),
+                None,
             )
             .await
             .unwrap();
@@ -1340,6 +1347,7 @@ mod tests {
                 ThreadConfig::default(),
                 None,
                 Some(raw),
+                None,
             )
             .await
             .unwrap();
@@ -1386,6 +1394,7 @@ mod tests {
                 ThreadConfig::default(),
                 None,
                 Some(plain),
+                None,
             )
             .await
             .unwrap();
