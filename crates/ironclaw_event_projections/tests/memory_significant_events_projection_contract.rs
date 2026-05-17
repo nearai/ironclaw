@@ -5,16 +5,16 @@ use ironclaw_event_projections::{
     ProjectionScope, ReplayAuditProjectionService,
 };
 use ironclaw_events::{AuditSink, DurableAuditSink};
-use ironclaw_filesystem::RootFilesystem;
+use ironclaw_filesystem::{InMemoryBackend, RootFilesystem};
 use ironclaw_host_api::{
     AgentId, CorrelationId, InvocationId, MissionId, ProjectId, ResourceScope, TenantId, ThreadId,
     UserId, VirtualPath,
 };
 use ironclaw_memory::{
-    ChunkingMemoryDocumentIndexer, InMemoryMemoryDocumentRepository, MemoryBackend,
-    MemoryBackendCapabilities, MemoryBackendFilesystemAdapter, MemoryContext, MemoryDocumentPath,
-    MemoryDocumentScope, MemorySearchRequest, RebornLibSqlMemoryDocumentRepository,
-    RepositoryMemoryBackend, content_sha256,
+    ChunkingMemoryDocumentIndexer, FilesystemMemoryDocumentRepository,
+    InMemoryMemoryDocumentRepository, MemoryBackend, MemoryBackendCapabilities,
+    MemoryBackendFilesystemAdapter, MemoryContext, MemoryDocumentPath, MemoryDocumentScope,
+    MemorySearchRequest, RepositoryMemoryBackend, content_sha256,
 };
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornProfile, build_reborn_event_stores,
@@ -37,15 +37,8 @@ async fn memory_write_index_and_search_project_metadata_only_from_jsonl_audit_lo
     let audit_sink: Arc<dyn AuditSink> = Arc::new(DurableAuditSink::new(Arc::clone(&audit_log)));
     let memory_events = Arc::new(DurableMemoryAuditSink::new(audit_sink));
 
-    let memory_db_dir = tempfile::tempdir().unwrap();
-    let memory_db = Arc::new(
-        libsql::Builder::new_local(memory_db_dir.path().join("reborn-memory.db"))
-            .build()
-            .await
-            .unwrap(),
-    );
-    let repository = Arc::new(RebornLibSqlMemoryDocumentRepository::new(memory_db));
-    repository.run_migrations().await.unwrap();
+    let memory_filesystem = Arc::new(InMemoryBackend::new());
+    let repository = Arc::new(FilesystemMemoryDocumentRepository::new(memory_filesystem));
 
     let indexer = Arc::new(
         ChunkingMemoryDocumentIndexer::new(Arc::clone(&repository))
