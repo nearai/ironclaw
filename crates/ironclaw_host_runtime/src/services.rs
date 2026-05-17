@@ -31,7 +31,7 @@ use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime};
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId, DispatchError,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
@@ -55,15 +55,9 @@ use ironclaw_resources::PostgresResourceGovernorStore;
 use ironclaw_resources::{InMemoryResourceGovernor, ResourceGovernor};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_resources::{PersistentResourceGovernor, ResourceError};
-#[cfg(feature = "libsql")]
-use ironclaw_run_state::LibSqlRunStateApprovalStore;
-#[cfg(feature = "postgres")]
-use ironclaw_run_state::PostgresRunStateApprovalStore;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_run_state::RunStateError;
 use ironclaw_run_state::{
-    ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
-    RunStateApprovalStore, RunStateStore,
+    ApprovalRequestStore, FilesystemApprovalRequestStore, FilesystemRunStateStore,
+    InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateApprovalStore, RunStateStore,
 };
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::{InMemorySecretStore, SecretStore};
@@ -760,28 +754,41 @@ where
         self
     }
 
-    /// Builds and attaches the libSQL transactional combined run-state and
-    /// approval-request store for production/shared callers.
-    #[cfg(feature = "libsql")]
-    pub async fn with_libsql_run_state_approval_store(
+    /// Builds and attaches filesystem-backed run-state and approval-request
+    /// stores over the supplied [`ScopedFilesystem`].
+    ///
+    /// Production composition wires both `/run-state` and `/approvals` mount
+    /// aliases on the same [`ScopedFilesystem`], so a single handle is enough
+    /// to construct both stores: each takes its alias-relative subtree
+    /// through the shared `MountView`. The backend choice
+    /// (`LibSqlRootFilesystem`, `PostgresRootFilesystem`,
+    /// `InMemoryBackend`, …) happens at the `RootFilesystem` layer, not here.
+    ///
+    /// Replaces the legacy `with_libsql_run_state_approval_store` /
+    /// `with_postgres_run_state_approval_store` builders (deleted along with
+    /// the corresponding per-backend `Filesystem*Store` siblings — see
+    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`).
+    ///
+    /// Unlike the deleted SQL combined store this wiring does NOT carry an
+    /// atomic `save_pending_and_block_approval` transition: filesystem
+    /// stores ship as two independent records under distinct mount aliases.
+    /// Callers fall back to the two-step
+    /// `ApprovalRequestStore::save_pending` then
+    /// `RunStateStore::block_approval` path in
+    /// `ironclaw_capabilities::host`. Production composition should layer a
+    /// transactional wrapper (or accept the two-step semantics) when
+    /// cross-record atomicity matters.
+    pub fn with_filesystem_run_state<FsBackend>(
         self,
-        db: Arc<libsql::Database>,
-    ) -> Result<Self, RunStateError> {
-        let store = Arc::new(LibSqlRunStateApprovalStore::new(db));
-        store.run_migrations().await?;
-        Ok(self.with_run_state_approval_store(store))
-    }
-
-    /// Builds and attaches the PostgreSQL transactional combined run-state and
-    /// approval-request store for production/shared callers.
-    #[cfg(feature = "postgres")]
-    pub async fn with_postgres_run_state_approval_store(
-        self,
-        pool: deadpool_postgres::Pool,
-    ) -> Result<Self, RunStateError> {
-        let store = Arc::new(PostgresRunStateApprovalStore::new(pool));
-        store.run_migrations().await?;
-        Ok(self.with_run_state_approval_store(store))
+        scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
+    ) -> Self
+    where
+        FsBackend: RootFilesystem + 'static,
+    {
+        let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&scoped_filesystem)));
+        let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(scoped_filesystem));
+        self.with_run_state(run_state)
+            .with_approval_requests(approval_requests)
     }
 
     pub fn with_capability_leases<T>(mut self, capability_leases: Arc<T>) -> Self

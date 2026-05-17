@@ -277,8 +277,7 @@ async fn build_libsql_production(
     .await?
     .with_reborn_event_store_config(profile.to_event_store_profile(), event_store)
     .await?
-    .with_libsql_run_state_approval_store(Arc::clone(&db))
-    .await?
+    .with_filesystem_run_state(scoped_filesystem)
     .with_libsql_turn_state_store(db)
     .await?
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
@@ -342,8 +341,7 @@ async fn build_postgres_production(
     .await?
     .with_reborn_event_store_config(profile.to_event_store_profile(), event_store)
     .await?
-    .with_postgres_run_state_approval_store(pool.clone())
-    .await?
+    .with_filesystem_run_state(scoped_filesystem)
     .with_postgres_turn_state_store(pool)
     .await?
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);

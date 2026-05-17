@@ -11,14 +11,6 @@
 //! local-disk) is made at the filesystem layer — the consumer-store level no
 //! longer carries per-backend impls.
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-mod db;
-
-#[cfg(feature = "libsql")]
-pub use db::{LibSqlApprovalRequestStore, LibSqlRunStateApprovalStore, LibSqlRunStateStore};
-#[cfg(feature = "postgres")]
-pub use db::{PostgresApprovalRequestStore, PostgresRunStateApprovalStore, PostgresRunStateStore};
-
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},

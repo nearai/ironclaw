@@ -333,8 +333,7 @@ where
     .with_capability_leases(capability_leases)
     .with_secret_store(Arc::clone(&secret_store))
     .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
-    .with_libsql_run_state_approval_store(Arc::clone(&config.database))
-    .await?
+    .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
     .with_libsql_turn_state_store(Arc::clone(&config.database))
     .await?
     .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
@@ -397,8 +396,7 @@ where
     .with_capability_leases(capability_leases)
     .with_secret_store(Arc::clone(&secret_store))
     .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
-    .with_postgres_run_state_approval_store(config.pool.clone())
-    .await?
+    .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
     .with_postgres_turn_state_store(config.pool.clone())
     .await?
     .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
