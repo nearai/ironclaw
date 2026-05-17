@@ -2,7 +2,9 @@
 
 **Date:** 2026-05-16
 **Owner:** TBD
-**Status:** in-flight (engine migration in PR #3679; remaining consumer crates tracked here)
+**Status:** consumer-store migration shipped in PR #3679; per-invocation
+composition wiring (HostRuntimeServices factory) is the remaining
+follow-up — see "Open Question 1".
 
 ## Why
 
@@ -172,13 +174,31 @@ invocation in composition) handles tenant prefixing and ACL.
 
 | Crate | Status | PR |
 |---|---|---|
-| `ironclaw_engine` | **In flight** — converting FilesystemStore + paths + tests | #3679 |
-| `ironclaw_processes` | Deferred — drop manual tenant prefixing, take ScopedFilesystem | follow-up |
-| `ironclaw_secrets` | Deferred — same | follow-up |
-| `ironclaw_outbound` | Deferred — same | follow-up |
-| `ironclaw_authorization` | Deferred — same | follow-up |
-| `ironclaw_reborn_composition` | **In flight** — `invocation_mount_view` helper, wire engine | #3679 |
-| `MountPermissions` helpers | Add `read_write_list_delete()`, `read_only_list()` to `ironclaw_host_api::mount` | #3679 |
+| `ironclaw_engine` | **Done** — FilesystemStore takes `Arc<ScopedFilesystem<F>>`; paths return `ScopedPath`; cross-tenant isolation regression test | #3679 (ac8e677f9) |
+| `ironclaw_processes` | **Done** — drops manual `/engine/tenants/.../users/...` prefixing; `ScopedFilesystem` does the rewriting | #3679 (81664dd29) |
+| `ironclaw_secrets` | **Done** — drops manual `/secrets/tenants/.../users/...` prefixing; AAD owner-scope aligned with path | #3679 (4ae56769b) |
+| `ironclaw_outbound` | **Done** — paths alias-relative under `/outbound`; tenant_id moves to MountView | #3679 (6ecca195d) |
+| `ironclaw_authorization` | **Done** — drops manual tenant prefix; CAS-Version retry + Unsupported→Any fallback preserved | #3679 (5e7688d3b) |
+| `ironclaw_reborn_composition` | **Done** — wires `default_singleton_mount_view()` for long-lived composition; `invocation_mount_view(scope)` helper available for per-invocation construction | #3679 (c60ff0af5) |
+| `MountPermissions::read_write_list_delete()` helper | **Done** — `ironclaw_host_api::mount` | #3679 (0a51286d1) |
+| `/tenant-shared` and `/system` mount aliases | **Done** — wired in both `default_singleton_mount_view` and `invocation_mount_view`; `read_only()` permissions on `/system` | #3679 |
+
+## Composition entry points
+
+Two public helpers in `ironclaw_reborn_composition`:
+
+- `default_singleton_mount_view()` — the long-lived single-tenant
+  default. Every consumer alias resolves to a top-level VirtualPath
+  root (`/processes` → `/processes`). Production composition uses this
+  today. Cross-tenant isolation in single-tenant deployments comes
+  from there being only one tenant; in multi-tenant deployments it
+  comes from constructing a per-invocation view (next).
+- `invocation_mount_view(scope: &ResourceScope)` (pub) — rewrites
+  every per-user alias to `/tenants/<tenant>/users/<user>/<alias>`.
+  Used by per-request handlers that build tenant-scoped consumer
+  stores via `wrap_scoped_for_invocation`. Tests cover the rewriting
+  contract and prove two scopes with the same `user_id` produce
+  disjoint target paths.
 
 ## Tests required
 

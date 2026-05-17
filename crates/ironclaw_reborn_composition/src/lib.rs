@@ -99,25 +99,103 @@ pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
 /// that points each alias to a tenant/user-scoped subtree of the same
 /// underlying [`RootFilesystem`] — see
 /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+/// Per-user-owner consumer aliases (each mount gets full r/w/l/d).
+/// Kept as a constant so both [`default_singleton_mount_view`] and
+/// [`invocation_mount_view`] can share the alias list — adding a new
+/// consumer crate is a single-line change here.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+const PER_USER_ALIASES: &[&str] = &[
+    "/processes",
+    "/secrets",
+    "/authorization",
+    "/outbound",
+    "/engine",
+];
+
+/// Single-tenant default [`MountView`] used by long-lived production
+/// composition. Every consumer-store alias resolves to a top-level
+/// [`VirtualPath`] root (`/processes` → `/processes`) — no tenant
+/// rewriting, just permission scoping and an alias→VirtualPath layer.
+///
+/// Use [`invocation_mount_view`] instead when constructing per-request
+/// services that need cross-tenant isolation. The current long-lived
+/// composition holds one set of consumer stores for the whole process
+/// lifetime, which is correct for single-tenant deployments and a
+/// known follow-up for multi-tenant ones (see
+/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`
+/// "Open Question 1").
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn default_singleton_mount_view() -> Result<MountView, ironclaw_host_api::HostApiError> {
-    let aliases: &[(&str, &str)] = &[
-        ("/processes", "/processes"),
-        ("/secrets", "/secrets"),
-        ("/authorization", "/authorization"),
-        ("/outbound", "/outbound"),
-        ("/engine", "/engine"),
-    ];
-    let grants = aliases
-        .iter()
-        .map(|(alias, target)| {
-            Ok(MountGrant::new(
-                MountAlias::new(*alias)?,
-                VirtualPath::new(*target)?,
-                MountPermissions::read_write_list_delete(),
-            ))
-        })
-        .collect::<Result<Vec<_>, ironclaw_host_api::HostApiError>>()?;
+    let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 2);
+    for alias in PER_USER_ALIASES {
+        grants.push(MountGrant::new(
+            MountAlias::new(*alias)?,
+            VirtualPath::new(*alias)?,
+            MountPermissions::read_write_list_delete(),
+        ));
+    }
+    // `/tenant-shared`: shared between users/agents in the same tenant.
+    // In the singleton (non-tenant) view it points to a fixed root with
+    // read+write+list (no delete — tenants can mutate but not erase).
+    grants.push(MountGrant::new(
+        MountAlias::new("/tenant-shared")?,
+        VirtualPath::new("/tenant-shared")?,
+        MountPermissions::read_write(),
+    ));
+    // `/system`: globally readable system data (capability defs, system
+    // prompts, …). Read-only at the ACL layer; writes are rejected by
+    // `ScopedFilesystem` before any backend dispatch.
+    grants.push(MountGrant::new(
+        MountAlias::new("/system")?,
+        VirtualPath::new("/system")?,
+        MountPermissions::read_only(),
+    ));
+    MountView::new(grants)
+}
+
+/// Per-invocation [`MountView`] that rewrites consumer-store aliases to
+/// `/tenants/<tenant>/users/<user>/<alias>` virtual paths.
+///
+/// Used by request handlers that need to construct tenant-scoped
+/// consumer stores. The returned view, fed to
+/// [`ScopedFilesystem::new`], makes every consumer crate's `put`/`get`
+/// land under a tenant/user-private subtree of the same underlying
+/// [`RootFilesystem`] — cross-tenant isolation is structural rather
+/// than a convention.
+///
+/// `/tenant-shared` resolves to `/tenants/<tenant>/shared` (full
+/// per-tenant r/w/l), `/system` to `/system` (globally read-only).
+///
+/// The single-tenant production composition uses
+/// [`default_singleton_mount_view`] instead.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub fn invocation_mount_view(
+    scope: &ResourceScope,
+) -> Result<MountView, ironclaw_host_api::HostApiError> {
+    let tenant_user_prefix = format!(
+        "/tenants/{}/users/{}",
+        scope.tenant_id.as_str(),
+        scope.user_id.as_str()
+    );
+    let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 2);
+    for alias in PER_USER_ALIASES {
+        let target = format!("{tenant_user_prefix}{alias}");
+        grants.push(MountGrant::new(
+            MountAlias::new(*alias)?,
+            VirtualPath::new(target)?,
+            MountPermissions::read_write_list_delete(),
+        ));
+    }
+    grants.push(MountGrant::new(
+        MountAlias::new("/tenant-shared")?,
+        VirtualPath::new(format!("/tenants/{}/shared", scope.tenant_id.as_str()))?,
+        MountPermissions::read_write(),
+    ));
+    grants.push(MountGrant::new(
+        MountAlias::new("/system")?,
+        VirtualPath::new("/system")?,
+        MountPermissions::read_only(),
+    ));
     MountView::new(grants)
 }
 
@@ -129,6 +207,25 @@ where
     F: RootFilesystem,
 {
     let view = default_singleton_mount_view()?;
+    Ok(Arc::new(ScopedFilesystem::new(root, view)))
+}
+
+/// Wrap `root` in a per-invocation [`ScopedFilesystem`] that resolves
+/// consumer-store aliases under `/tenants/<tenant>/users/<user>/…`.
+///
+/// Counterpart to [`wrap_scoped`] for request handlers that have a
+/// `ResourceScope` in hand and need a tenant-isolated filesystem view.
+/// The single underlying [`RootFilesystem`] is shared; per-tenant
+/// separation comes from the rewritten target paths in the view.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+pub fn wrap_scoped_for_invocation<F>(
+    root: Arc<F>,
+    scope: &ResourceScope,
+) -> Result<Arc<ScopedFilesystem<F>>, ironclaw_host_api::HostApiError>
+where
+    F: RootFilesystem,
+{
+    let view = invocation_mount_view(scope)?;
     Ok(Arc::new(ScopedFilesystem::new(root, view)))
 }
 
@@ -415,5 +512,103 @@ impl SecretStore for SharedSecretStore {
         scope: &ResourceScope,
     ) -> Result<Vec<SecretLease>, SecretStoreError> {
         self.inner.leases_for_scope(scope).await
+    }
+}
+
+#[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
+mod mount_view_tests {
+    use super::*;
+    use ironclaw_host_api::{
+        AgentId, InvocationId, MissionId, ProjectId, ScopedPath, TenantId, ThreadId, UserId,
+    };
+
+    fn sample_scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("tenant-a").unwrap(),
+            user_id: UserId::new("user-1").unwrap(),
+            agent_id: Some(AgentId::new("agent-x").unwrap()),
+            project_id: Some(ProjectId::new("project-y").unwrap()),
+            mission_id: Some(MissionId::new("mission-w").unwrap()),
+            thread_id: Some(ThreadId::new("thread-z").unwrap()),
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    fn other_tenant_scope() -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new("tenant-b").unwrap(),
+            ..sample_scope()
+        }
+    }
+
+    #[test]
+    fn default_singleton_mount_view_has_all_consumer_aliases() {
+        let view = default_singleton_mount_view().unwrap();
+        // Per-user aliases.
+        for alias in PER_USER_ALIASES {
+            let resolved = view
+                .resolve(&ScopedPath::new(format!("{alias}/foo")).unwrap())
+                .unwrap();
+            assert_eq!(resolved.as_str(), &format!("{alias}/foo"));
+        }
+        // Shared/system carve-outs are present.
+        view.resolve(&ScopedPath::new("/tenant-shared/foo").unwrap())
+            .unwrap();
+        view.resolve(&ScopedPath::new("/system/foo").unwrap())
+            .unwrap();
+    }
+
+    #[test]
+    fn invocation_mount_view_rewrites_per_user_aliases_to_tenant_user_paths() {
+        let scope = sample_scope();
+        let view = invocation_mount_view(&scope).unwrap();
+        for alias in PER_USER_ALIASES {
+            let resolved = view
+                .resolve(&ScopedPath::new(format!("{alias}/foo")).unwrap())
+                .unwrap();
+            assert_eq!(
+                resolved.as_str(),
+                &format!(
+                    "/tenants/{}/users/{}{alias}/foo",
+                    scope.tenant_id.as_str(),
+                    scope.user_id.as_str()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn invocation_mount_view_isolates_tenants_with_same_user() {
+        let view_a = invocation_mount_view(&sample_scope()).unwrap();
+        let view_b = invocation_mount_view(&other_tenant_scope()).unwrap();
+        let path = ScopedPath::new("/engine/threads/x").unwrap();
+        let a = view_a.resolve(&path).unwrap();
+        let b = view_b.resolve(&path).unwrap();
+        assert_ne!(a.as_str(), b.as_str());
+        assert!(a.as_str().contains("tenant-a"));
+        assert!(b.as_str().contains("tenant-b"));
+    }
+
+    #[test]
+    fn invocation_mount_view_routes_tenant_shared_to_tenant_root() {
+        let scope = sample_scope();
+        let view = invocation_mount_view(&scope).unwrap();
+        let resolved = view
+            .resolve(&ScopedPath::new("/tenant-shared/foo").unwrap())
+            .unwrap();
+        assert_eq!(
+            resolved.as_str(),
+            &format!("/tenants/{}/shared/foo", scope.tenant_id.as_str())
+        );
+    }
+
+    #[test]
+    fn invocation_mount_view_routes_system_globally() {
+        let scope = sample_scope();
+        let view = invocation_mount_view(&scope).unwrap();
+        let resolved = view
+            .resolve(&ScopedPath::new("/system/foo").unwrap())
+            .unwrap();
+        assert_eq!(resolved.as_str(), "/system/foo");
     }
 }

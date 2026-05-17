@@ -63,9 +63,7 @@ impl fmt::Display for MountAlias {
 
 const VIRTUAL_ROOTS: &[&str] = &[
     "/engine",
-    "/system/settings",
-    "/system/extensions",
-    "/system/skills",
+    "/system",
     "/users",
     "/projects",
     "/memory",
@@ -73,6 +71,13 @@ const VIRTUAL_ROOTS: &[&str] = &[
     "/tmp",
     "/secrets",
     "/events",
+    // Consumer-store roots (migrated to `ScopedFilesystem` per
+    // `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
+    "/processes",
+    "/authorization",
+    "/outbound",
+    "/tenant-shared",
+    "/tenants",
 ];
 
 /// Common raw host-path prefixes rejected before scoped-path normalization.
