@@ -190,6 +190,44 @@ invocation in composition) handles tenant prefixing and ACL.
 | `MountPermissions::read_write_list_delete()` helper | **Done** — `ironclaw_host_api::mount` | #3679 (0a51286d1) |
 | `/tenant-shared` and `/system` mount aliases | **Done** — wired in both `default_singleton_mount_view` and `invocation_mount_view`; `read_only()` permissions on `/system` | #3679 |
 
+## Legacy per-backend store cleanup
+
+The universal-FS dispatch design says backend choice should be at the
+`RootFilesystem` layer, not at the consumer-store layer. The legacy
+per-backend `Filesystem*Store` siblings (`LibSql*Store`,
+`Postgres*Store`) are vestigial and should be deleted.
+
+| Crate | Legacy stores | Status |
+|---|---|---|
+| `ironclaw_outbound` | `LibSqlOutboundStateStore`, `PostgresOutboundStateStore` | **Deleted** in PR #3679 (`d4bf7b3c2`) — no production callers, contract tests removed because durability across reopen is now a `RootFilesystem` property. |
+| `ironclaw_secrets` | `LibSqlSecretsStore`, `PostgresSecretsStore` | **Pending** — composition's `build_libsql_secret_store` / `build_postgres_secret_store` still wire them to handle migrations + master-key decryptability check. Switching requires reproducing those startup checks against the `FilesystemSecretStore` (essentially: store a sentinel encrypted blob at construction, decrypt it after, fail closed on master-key mismatch). |
+| `ironclaw_authorization` | `LibSqlCapabilityLeaseStore`, `PostgresCapabilityLeaseStore` | **Pending** — composition wires the SQL versions via `Arc<dyn CapabilityLeaseStore>`. Switching requires `FilesystemCapabilityLeaseStore` to move from `&'a ScopedFilesystem<F>` to `Arc<ScopedFilesystem<F>>` so it can fit `Arc<dyn ...>`. |
+| `ironclaw_run_state` | `LibSqlRunStateStore`, `PostgresRunStateStore`, `LibSqlApprovalRequestStore`, `PostgresApprovalRequestStore` | **Pending** — run_state itself hasn't migrated to `ScopedFilesystem` yet; needs the same shape as the other migrated consumers before the SQL versions can be deleted. Composition's `with_libsql_run_state_approval_store` / `with_postgres_run_state_approval_store` builder methods on `HostRuntimeServices` are the wiring touchpoint. |
+
+The remaining three cleanups are each independent and each requires
+~200-400 lines (migration + composition rewiring + deleting the SQL
+impl + updating tests that exercise the SQL store directly). They are
+best tackled as focused follow-up PRs rather than piling onto #3679.
+
+## Trait collapse (further follow-up)
+
+After the legacy stores are gone, each consumer crate would have
+exactly one `XxxStore` impl (`Filesystem*Store`). At that point the
+`XxxStore` trait is purely a type-erasure wrapper used by
+`HostRuntimeServices` to hold `Arc<dyn XxxStore>` without taking on
+additional generic parameters. Collapsing the trait means:
+
+- Renaming `FilesystemXxxStore<F>` → `XxxStore<F>` (concrete struct).
+- Deleting the trait.
+- Threading `F` (or each store's concrete type) through
+  `HostRuntimeServices` as additional generic parameters, OR using
+  `Arc<dyn Any>` style erasure that doesn't require the trait.
+
+This is genuinely the design endpoint but it widens type signatures
+across `host_runtime`, `capabilities`, `obligations`, and `production`
+significantly. It's a deeper structural change than the legacy
+deletion above and deserves its own focused PR.
+
 ## Composition entry points
 
 Two public helpers in `ironclaw_reborn_composition`:
