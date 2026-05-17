@@ -5,12 +5,43 @@ use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_filesystem::{
     BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError, Filter,
-    InMemoryBackend, IndexSpec, Page, RecordVersion, RootFilesystem, VersionedEntry,
+    InMemoryBackend, IndexSpec, Page, RecordVersion, RootFilesystem, ScopedFilesystem,
+    VersionedEntry,
 };
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId, VirtualPath};
+use ironclaw_host_api::{
+    AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId, ThreadId,
+    UserId, VirtualPath,
+};
 use ironclaw_outbound::*;
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use tokio::sync::Mutex;
+
+/// Build a `ScopedFilesystem<F>` with full read/write/list/delete permissions
+/// on the `/outbound` alias, mapped to a distinct tenant-scoped
+/// [`VirtualPath`] subtree. Tests can pass in a different `target_root` to
+/// simulate multiple tenants sharing one underlying backend
+/// (`filesystem_outbound_store_isolates_two_tenants_*` below).
+fn build_scoped_fs<F: RootFilesystem>(
+    backend: Arc<F>,
+    target_root: &str,
+) -> Arc<ScopedFilesystem<F>> {
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/outbound").expect("alias"),
+        VirtualPath::new(target_root).expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    Arc::new(ScopedFilesystem::new(backend, mounts))
+}
+
+fn build_outbound_store_for_backend(
+    backend: Arc<InMemoryBackend>,
+) -> FilesystemOutboundStateStore<InMemoryBackend> {
+    FilesystemOutboundStateStore::new(build_scoped_fs(
+        backend,
+        "/engine/tenants/test/users/test/outbound",
+    ))
+}
 
 #[tokio::test]
 async fn in_memory_defaults_policy_progress_opt_in_and_subscription_scope() {
@@ -32,7 +63,7 @@ async fn filesystem_store_satisfies_outbound_contract_on_in_memory_backend() {
     // this would be a libSQL- or Postgres-backed RootFilesystem, or an
     // HSM-decorated mount, with no consumer-side code change.
     let backend = std::sync::Arc::new(ironclaw_filesystem::InMemoryBackend::new());
-    let store = FilesystemOutboundStateStore::new(backend);
+    let store = build_outbound_store_for_backend(backend);
     durable_policy_subscription_delivery_flow(&store).await;
     subscription_cursor_rejects_mismatched_scope(&store).await;
     subscription_ids_are_scoped_not_global(&store).await;
@@ -895,14 +926,21 @@ impl RootFilesystem for VersionRacingBackend {
 async fn advance_subscription_cursor_retries_through_cas_conflict() {
     let inner = Arc::new(InMemoryBackend::new());
     let racing = Arc::new(VersionRacingBackend::new(Arc::clone(&inner)));
-    let store = FilesystemOutboundStateStore::new(Arc::clone(&racing));
+    let store = FilesystemOutboundStateStore::new(build_scoped_fs(
+        Arc::clone(&racing),
+        "/engine/tenants/test/users/test/outbound",
+    ));
     seed_subscription(&store).await;
 
     // Arm one injected conflict on the next put to any subscription path.
     // The store's read returns version v1; we inject `VersionMismatch` on
     // the first put, forcing the retry loop to re-read, re-validate
     // progression, and put again with the new version — which succeeds.
-    racing.arm("/engine/outbound/subscriptions/", 1).await;
+    // The injected prefix matches the resolved VirtualPath the
+    // ScopedFilesystem produces for the `/outbound/subscriptions/...` alias.
+    racing
+        .arm("/engine/tenants/test/users/test/outbound/subscriptions/", 1)
+        .await;
 
     let cursor = ProjectionCursor::for_scope(projection_scope(), EventCursor::new(101));
     store
@@ -942,7 +980,7 @@ async fn advance_subscription_cursor_retries_through_cas_conflict() {
 #[tokio::test]
 async fn concurrent_backwards_race_rejected_after_winner_advances() {
     let backend = Arc::new(InMemoryBackend::new());
-    let store = FilesystemOutboundStateStore::new(Arc::clone(&backend));
+    let store = build_outbound_store_for_backend(Arc::clone(&backend));
     seed_subscription(&store).await;
 
     // Winner advances first to cursor=100.
@@ -995,7 +1033,7 @@ async fn concurrent_backwards_race_rejected_after_winner_advances() {
 #[tokio::test]
 async fn list_delivery_attempts_drains_more_than_page_max_limit() {
     let backend = Arc::new(InMemoryBackend::new());
-    let store = FilesystemOutboundStateStore::new(backend);
+    let store = build_outbound_store_for_backend(backend);
 
     let scope = turn_scope();
     let candidate_template = || OutboundPushCandidate {
@@ -1033,5 +1071,128 @@ async fn list_delivery_attempts_drains_more_than_page_max_limit() {
         drained.len(),
         total,
         "drain loop must return every delivery, including rows past Page::MAX_LIMIT",
+    );
+}
+
+/// Regression test mirroring the engine-store
+/// `filesystem_store_isolates_two_tenants_with_same_user_project_ids`
+/// shape: the outbound store must enforce tenant isolation through the
+/// [`ScopedFilesystem`] mount permission boundary, not assume path strings
+/// inside outbound code already encode tenant identity.
+///
+/// Two stores share one [`InMemoryBackend`] but are constructed with
+/// different [`MountView`]s — each one resolves the `/outbound` alias to a
+/// distinct tenant-scoped [`VirtualPath`] subtree. Writing the same
+/// `(user_id, project_id, thread_id)` tuple on store A must NOT make the
+/// delivery / policy visible from store B. Before the migration to
+/// `Arc<ScopedFilesystem<F>>`, the outbound store spoke raw `VirtualPath`s
+/// directly to a `RootFilesystem` and threaded tenant identity into the
+/// hash key only — any composition layer that forgot to also discriminate
+/// by tenant in the path would leak across tenants; this test fails closed
+/// if that ever regresses.
+#[tokio::test]
+async fn filesystem_outbound_store_isolates_two_tenants_with_same_user_project_ids() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store_a = FilesystemOutboundStateStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        "/engine/tenants/a/users/alice/outbound",
+    ));
+    let store_b = FilesystemOutboundStateStore::new(build_scoped_fs(
+        Arc::clone(&backend),
+        "/engine/tenants/b/users/alice/outbound",
+    ));
+
+    // Identical `(agent_id, project_id, thread_id)` for both stores — the
+    // only thing that should keep them apart is the mount-time tenant
+    // prefix. The TurnScope still carries each store's own tenant_id so
+    // policy/cursor lookups validate end-to-end.
+    let shared_agent = AgentId::new("agent-shared").unwrap();
+    let shared_project = ProjectId::new("project-shared").unwrap();
+    let shared_thread = ThreadId::new("thread-shared").unwrap();
+    let scope_a = TurnScope::new(
+        TenantId::new("tenant-a").unwrap(),
+        Some(shared_agent.clone()),
+        Some(shared_project.clone()),
+        shared_thread.clone(),
+    );
+    let scope_b = TurnScope::new(
+        TenantId::new("tenant-b").unwrap(),
+        Some(shared_agent),
+        Some(shared_project),
+        shared_thread,
+    );
+
+    let target = reply_ref("reply-tenant-isolation");
+    store_a
+        .put_thread_notification_policy(ThreadNotificationPolicy {
+            scope: scope_a.clone(),
+            targets: vec![ThreadNotificationTarget {
+                target: target.clone(),
+                final_replies: true,
+                progress: true,
+            }],
+        })
+        .await
+        .unwrap();
+
+    // Tenant A sees its own policy.
+    let policy_a = store_a
+        .load_thread_notification_policy(scope_a.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        policy_a.targets.len(),
+        1,
+        "tenant A must see the policy it just wrote",
+    );
+
+    // Tenant B does NOT see tenant A's policy and falls back to the
+    // default-for-scope, despite sharing (agent_id, project_id, thread_id).
+    let policy_b = store_b
+        .load_thread_notification_policy(scope_b.clone())
+        .await
+        .unwrap();
+    assert!(
+        policy_b.targets.is_empty(),
+        "tenant B must NOT see tenant A's policy (cross-tenant leak)",
+    );
+
+    // Delivery attempts also isolate by mount prefix: record an attempt on
+    // tenant A and verify tenant B's `list_delivery_attempts` for the
+    // matching scope is empty even though the backend is shared.
+    let delivery_id = OutboundDeliveryId::new();
+    store_a
+        .record_delivery_attempt(OutboundDeliveryAttempt {
+            delivery_id,
+            scope: scope_a.clone(),
+            candidate: OutboundPushCandidate {
+                tenant_id: scope_a.tenant_id.clone(),
+                agent_id: scope_a.agent_id.clone(),
+                project_id: scope_a.project_id.clone(),
+                thread_id: scope_a.thread_id.clone(),
+                turn_run_id: Some(TurnRunId::new()),
+                target,
+                kind: OutboundPushKind::FinalReply,
+                projection_ref: ProjectionUpdateRef::new("projection:tenant-isolation").unwrap(),
+                requires_reply_target_revalidation: true,
+            },
+            status: OutboundDeliveryStatus::Pending,
+            attempted_at: now(),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+
+    let a_deliveries = store_a.list_delivery_attempts(scope_a).await.unwrap();
+    assert_eq!(
+        a_deliveries.len(),
+        1,
+        "tenant A must see the delivery it just recorded",
+    );
+    let b_deliveries = store_b.list_delivery_attempts(scope_b).await.unwrap();
+    assert!(
+        b_deliveries.is_empty(),
+        "tenant B list_delivery_attempts must be empty under shared (agent, project, thread) — got {} rows",
+        b_deliveries.len(),
     );
 }

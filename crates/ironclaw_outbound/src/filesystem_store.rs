@@ -1,22 +1,31 @@
 //! Filesystem-backed [`OutboundStateStore`] implementation.
 //!
-//! Persists outbound metadata under a fixed virtual-path tree
-//! (`/engine/outbound/...`) using the unified
-//! [`RootFilesystem`](ironclaw_filesystem::RootFilesystem) surface. Adding
-//! this alongside the SQL backends gives every operator the option of
+//! Persists outbound metadata under a fixed [`ScopedPath`] tree rooted at the
+//! `/outbound` mount alias, using the unified
+//! [`RootFilesystem`](ironclaw_filesystem::RootFilesystem) surface accessed
+//! through a [`ScopedFilesystem`]. The [`MountView`](ironclaw_host_api::MountView)
+//! wired by composition resolves `/outbound` to a tenant/user-scoped
+//! [`VirtualPath`](ironclaw_host_api::VirtualPath) (e.g.
+//! `/tenants/<tenant_id>/users/<user_id>/outbound`) and enforces per-grant ACL
+//! before any backend dispatch — so tenant isolation is structural rather than
+//! a convention this code has to remember.
+//!
+//! Adding this alongside the SQL backends gives every operator the option of
 //! mounting outbound state on the universal filesystem fabric (libSQL,
 //! Postgres, in-memory, or HSM-decorated) without reaching back into a
 //! per-crate driver.
 //!
-//! Per-record paths:
-//! - `/engine/outbound/policies/<thread-scope-key>.json` — thread
-//!   notification policy keyed by `(tenant, agent?, project?, thread)`.
-//! - `/engine/outbound/subscriptions/<subscription-key>.json` — projection
+//! Per-record paths (alias-relative under `/outbound`):
+//! - `/outbound/policies/<thread-scope-key>.json` — thread notification
+//!   policy keyed by `(tenant, agent?, project?, thread)`.
+//! - `/outbound/subscriptions/<subscription-key>.json` — projection
 //!   subscription cursor keyed by `(subscription_id, actor, scope, thread)`.
 //!   The key is a deterministic hash so the path doesn't leak the actor on
 //!   list operations.
-//! - `/engine/outbound/deliveries/<delivery_id>.json` — delivery attempt
-//!   keyed by `delivery_id`.
+//! - `/outbound/deliveries/<delivery_id>.json` — delivery attempt keyed by
+//!   `delivery_id`. An indexed `scope` projection allows
+//!   `list_delivery_attempts(scope)` to filter within the tenant-scoped
+//!   subtree without materializing every row.
 
 use std::sync::Arc;
 
@@ -24,9 +33,9 @@ use async_trait::async_trait;
 use ironclaw_event_projections::{ProjectionCursor, ProjectionScope};
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
-    IndexSpec, IndexValue, Page, RootFilesystem, VersionedEntry,
+    IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
-use ironclaw_host_api::{ThreadId, VirtualPath};
+use ironclaw_host_api::{ScopedPath, ThreadId};
 use ironclaw_turns::{TurnActor, TurnScope};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -54,32 +63,36 @@ const MAX_CAS_RETRIES: usize = 5;
 /// hash of `(tenant, agent?, project?, thread)` — the same key
 /// [`thread_scope_key`] computes for policy paths — so backends without
 /// composite-index support can serve `list_delivery_attempts(scope)` with a
-/// single equality lookup (audit finding F2).
+/// single equality lookup (audit finding F2). The `tenant_id` itself moves
+/// into the path prefix via the [`ScopedFilesystem`] mount, so this index is
+/// only ever used to discriminate within an already tenant-scoped subtree.
 const DELIVERY_SCOPE_INDEX_KEY: &str = "scope";
 const DELIVERY_SCOPE_INDEX_NAME: &str = "outbound_delivery_scope";
-const DELIVERIES_ROOT: &str = "/engine/outbound/deliveries";
+const DELIVERIES_ROOT: &str = "/outbound/deliveries";
 
-/// Filesystem-backed outbound store. Construct with any
-/// [`RootFilesystem`] implementation (libSQL, Postgres, in-memory, …) — the
-/// store doesn't care which.
+/// Filesystem-backed outbound store. Construct with a [`ScopedFilesystem`]
+/// over any [`RootFilesystem`] implementation (libSQL, Postgres, in-memory,
+/// HSM-decorated, …) — the store doesn't care which. Tenant isolation is
+/// enforced by the [`MountView`](ironclaw_host_api::MountView) the
+/// composition layer hands the scoped filesystem at construction time.
 pub struct FilesystemOutboundStateStore<F>
 where
     F: RootFilesystem,
 {
-    filesystem: Arc<F>,
+    filesystem: Arc<ScopedFilesystem<F>>,
 }
 
 impl<F> FilesystemOutboundStateStore<F>
 where
     F: RootFilesystem,
 {
-    pub fn new(filesystem: Arc<F>) -> Self {
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self { filesystem }
     }
 
     async fn put_json<T: Serialize>(
         &self,
-        path: &VirtualPath,
+        path: &ScopedPath,
         value: &T,
         cas: CasExpectation,
     ) -> Result<(), OutboundError> {
@@ -90,10 +103,13 @@ where
 
     /// Like [`put_json`] but additionally projects an indexed scope value so
     /// backends with index support can answer `query(Filter::Eq { scope })`
-    /// without materializing every delivery row (audit finding F2).
+    /// without materializing every delivery row (audit finding F2). The
+    /// `tenant_id` lives in the [`ScopedFilesystem`] mount prefix, not in
+    /// this index value — the index discriminates between scopes _within_ a
+    /// tenant-scoped subtree.
     async fn put_delivery_attempt_indexed(
         &self,
-        path: &VirtualPath,
+        path: &ScopedPath,
         attempt: &OutboundDeliveryAttempt,
         cas: CasExpectation,
     ) -> Result<(), OutboundError> {
@@ -116,7 +132,7 @@ where
     /// new filesystem stores.
     async fn put_with_byte_fallback(
         &self,
-        path: &VirtualPath,
+        path: &ScopedPath,
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<(), OutboundError> {
@@ -159,7 +175,7 @@ where
     /// back as [`CasExpectation::Version`] to detect concurrent writers.
     async fn get_versioned_json<T: for<'de> serde::Deserialize<'de>>(
         &self,
-        path: &VirtualPath,
+        path: &ScopedPath,
     ) -> Result<Option<(T, VersionedEntry)>, OutboundError> {
         let Some(versioned) = self.filesystem.get(path).await.map_err(map_fs_error)? else {
             return Ok(None);
@@ -171,7 +187,7 @@ where
 
     async fn get_json<T: for<'de> serde::Deserialize<'de>>(
         &self,
-        path: &VirtualPath,
+        path: &ScopedPath,
     ) -> Result<Option<T>, OutboundError> {
         Ok(self
             .get_versioned_json::<T>(path)
@@ -429,10 +445,9 @@ where
     }
 }
 
-fn policy_path(scope: &TurnScope) -> Result<VirtualPath, OutboundError> {
+fn policy_path(scope: &TurnScope) -> Result<ScopedPath, OutboundError> {
     let key = thread_scope_key(scope);
-    VirtualPath::new(format!("/engine/outbound/policies/{key}.json"))
-        .map_err(|_| OutboundError::Backend)
+    ScopedPath::new(format!("/outbound/policies/{key}.json")).map_err(|_| OutboundError::Backend)
 }
 
 fn subscription_path(
@@ -440,7 +455,7 @@ fn subscription_path(
     actor: &TurnActor,
     scope: &ProjectionScope,
     thread_id: &ThreadId,
-) -> Result<VirtualPath, OutboundError> {
+) -> Result<ScopedPath, OutboundError> {
     #[derive(Serialize)]
     struct SubscriptionIdentity<'a> {
         subscription_id: &'a ProjectionSubscriptionId,
@@ -458,17 +473,17 @@ fn subscription_path(
     let mut hasher = Sha256::new();
     hasher.update(serialized.as_bytes());
     let digest = hex::encode(hasher.finalize());
-    VirtualPath::new(format!("/engine/outbound/subscriptions/{digest}.json"))
+    ScopedPath::new(format!("/outbound/subscriptions/{digest}.json"))
         .map_err(|_| OutboundError::Backend)
 }
 
-fn delivery_path(delivery_id: &OutboundDeliveryId) -> Result<VirtualPath, OutboundError> {
-    VirtualPath::new(format!("/engine/outbound/deliveries/{delivery_id}.json"))
+fn delivery_path(delivery_id: &OutboundDeliveryId) -> Result<ScopedPath, OutboundError> {
+    ScopedPath::new(format!("/outbound/deliveries/{delivery_id}.json"))
         .map_err(|_| OutboundError::Backend)
 }
 
-fn deliveries_root() -> Result<VirtualPath, OutboundError> {
-    VirtualPath::new(DELIVERIES_ROOT).map_err(|_| OutboundError::Backend)
+fn deliveries_root() -> Result<ScopedPath, OutboundError> {
+    ScopedPath::new(DELIVERIES_ROOT).map_err(|_| OutboundError::Backend)
 }
 
 fn delivery_scope_index_key() -> IndexKey {
