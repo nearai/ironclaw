@@ -152,6 +152,8 @@ impl std::fmt::Debug for PreparedModule {
     }
 }
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 /// WASM tool runtime.
 ///
 /// Manages the Wasmtime engine and a cache of prepared modules.
@@ -162,6 +164,8 @@ pub struct WasmToolRuntime {
     config: WasmRuntimeConfig,
     /// Cache of prepared modules by name.
     modules: RwLock<HashMap<String, Arc<PreparedModule>>>,
+    /// Whether the epoch ticker thread has been started.
+    ticker_started: AtomicBool,
 }
 
 impl WasmToolRuntime {
@@ -189,14 +193,6 @@ impl WasmToolRuntime {
         // Disable debug info in production for smaller modules
         wasmtime_config.debug_info(false);
 
-        // Enable persistent compilation cache. Wasmtime serializes compiled native
-        // code to disk (~/.cache/wasmtime by default), so subsequent startups
-        // deserialize instead of recompiling — typically 10-50x faster.
-        //
-        // On Windows, each Engine gets its own cache subdirectory to avoid
-        // OS error 33 (ERROR_LOCK_VIOLATION) when multiple engines share the
-        // default cache and Windows holds exclusive locks on memory-mapped
-        // files. See #448.
         if let Err(e) =
             enable_compilation_cache(&mut wasmtime_config, "tools", config.cache_dir.as_deref())
         {
@@ -207,30 +203,68 @@ impl WasmToolRuntime {
             WasmError::EngineCreationFailed(format!("Failed to create Wasmtime engine: {}", e))
         })?;
 
-        // Spawn a background thread that periodically increments the engine's
-        // epoch counter. Without this, epoch_deadline_trap() never fires and
-        // WASM modules can spin indefinitely even with a deadline set.
-        let ticker_engine = engine.clone();
-        std::thread::Builder::new()
-            .name("wasm-epoch-ticker".into())
-            .spawn(move || {
-                loop {
-                    std::thread::sleep(EPOCH_TICK_INTERVAL);
-                    ticker_engine.increment_epoch();
-                }
-            })
-            .map_err(|e| {
-                WasmError::EngineCreationFailed(format!(
-                    "Failed to spawn epoch ticker thread: {}",
-                    e
-                ))
-            })?;
+        // Note: Ticker thread spawning moved to ensure_ticker_started()
+        // to support lazy initialization in high-density deployments.
 
         Ok(Self {
             engine,
             config,
             modules: RwLock::new(HashMap::new()),
+            ticker_started: AtomicBool::new(false),
         })
+    }
+
+    /// Ensure the epoch ticker thread is running.
+    ///
+    /// Called lazily before any WASM preparation or execution.
+    fn ensure_ticker_started(&self) {
+        let ticker_engine = self.engine.clone();
+        self.try_start_ticker(move || {
+            std::thread::Builder::new()
+                .name("wasm-epoch-ticker".into())
+                .spawn(move || {
+                    loop {
+                        std::thread::sleep(EPOCH_TICK_INTERVAL);
+                        ticker_engine.increment_epoch();
+                    }
+                })
+                .map(|_| ())
+        });
+    }
+
+    /// Inner state-management helper for [`ensure_ticker_started`].
+    ///
+    /// The `ticker_started` flag is only set to `true` after the spawn
+    /// succeeds — on spawn failure we reset the flag so a subsequent
+    /// caller can retry. Without this, a transient spawn error (e.g.
+    /// hitting the OS thread limit in a dense deployment) would
+    /// permanently disable epoch advancement and silently defeat WASM
+    /// timeout traps.
+    ///
+    /// Factored out so tests can inject a failing spawner.
+    fn try_start_ticker<F>(&self, spawn: F)
+    where
+        F: FnOnce() -> std::io::Result<()>,
+    {
+        // Claim the "I'm spawning" slot. If another caller already
+        // claimed it, the ticker is either running or mid-spawn;
+        // either way we're done.
+        if self
+            .ticker_started
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        match spawn() {
+            Ok(_) => tracing::debug!("Lazy WASM epoch ticker started"),
+            Err(e) => {
+                tracing::error!("Failed to spawn WASM epoch ticker thread: {}", e);
+                // Release the claim so a subsequent caller can retry.
+                self.ticker_started.store(false, Ordering::SeqCst);
+            }
+        }
     }
 
     /// Get the Wasmtime engine.
@@ -253,6 +287,9 @@ impl WasmToolRuntime {
         wasm_bytes: &[u8],
         limits: Option<ResourceLimits>,
     ) -> Result<Arc<PreparedModule>, WasmError> {
+        // Ensure ticker is running before we prepare any code that might use it
+        self.ensure_ticker_started();
+
         // Check if already prepared
         if let Some(module) = self.modules.read().await.get(name) {
             return Ok(Arc::clone(module));
@@ -356,6 +393,7 @@ impl std::fmt::Debug for WasmToolRuntime {
 mod tests {
     use crate::tools::wasm::limits::ResourceLimits;
     use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
+    use std::sync::atomic::Ordering;
 
     #[test]
     fn test_runtime_config_default() {
@@ -453,6 +491,57 @@ mod tests {
         assert!(dir_a.exists());
         assert!(dir_b.exists());
         assert_ne!(dir_a, dir_b);
+    }
+
+    #[test]
+    fn test_lazy_ticker_initialization() {
+        let config = WasmRuntimeConfig::for_testing();
+        let runtime = WasmToolRuntime::new(config).expect("runtime should init");
+
+        // Before preparation, ticker should not be started
+        assert!(
+            !runtime.ticker_started.load(Ordering::SeqCst),
+            "ticker should be idle at startup"
+        );
+
+        // After an internal call to ensure_ticker_started (which is called by prepare)
+        runtime.ensure_ticker_started();
+
+        // Ticker should now be started
+        assert!(
+            runtime.ticker_started.load(Ordering::SeqCst),
+            "ticker should be started after use"
+        );
+    }
+
+    /// Regression: when the ticker thread fails to spawn (e.g. OS thread
+    /// limit hit in a dense deployment), `ticker_started` must be reset
+    /// to `false` so a subsequent call can retry. Otherwise epoch
+    /// advancement stays disabled forever and WASM timeout traps no
+    /// longer fire. Reported by chatgpt-codex-connector on PR #2418.
+    #[test]
+    fn test_ticker_state_resets_on_spawn_failure() {
+        let config = WasmRuntimeConfig::for_testing();
+        let runtime = WasmToolRuntime::new(config).expect("runtime should init");
+
+        // Simulate a failing spawn.
+        let fail = || -> std::io::Result<()> {
+            Err(std::io::Error::other("simulated thread spawn failure"))
+        };
+        runtime.try_start_ticker(fail);
+
+        assert!(
+            !runtime.ticker_started.load(Ordering::SeqCst),
+            "ticker_started must be reset to false after a failed spawn so the next caller can retry",
+        );
+
+        // A subsequent call with a successful spawner must succeed and
+        // leave the flag set.
+        runtime.try_start_ticker(|| Ok(()));
+        assert!(
+            runtime.ticker_started.load(Ordering::SeqCst),
+            "ticker_started must be set after a successful retry",
+        );
     }
 
     /// The WASM runtime (Wasmtime engine) must initialise successfully even
