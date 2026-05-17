@@ -576,6 +576,7 @@ pub struct Settings {
 
     // Step 5: Embeddings
     pub embeddings: EmbeddingsSettings,      // enabled, provider, model
+    pub image: ImageSettings,                // enabled, base_url, image/vision models
 
     // Step 6: Channels
     pub tunnel: TunnelSettings,              // provider, public_url

@@ -860,19 +860,19 @@ impl ToolRegistry {
         &self,
         api_base_url: String,
         api_key: String,
-        gen_model: String,
+        model: String,
         base_dir: Option<std::path::PathBuf>,
     ) {
         use crate::tools::builtin::{ImageEditTool, ImageGenerateTool};
         self.register_sync(Arc::new(ImageGenerateTool::new(
             api_base_url.clone(),
             api_key.clone(),
-            gen_model.clone(),
+            model.clone(),
         )));
         self.register_sync(Arc::new(ImageEditTool::new(
             api_base_url,
             api_key,
-            gen_model,
+            model,
             base_dir,
         )));
         tracing::debug!("Registered 2 image tools (generate, edit)");
