@@ -334,7 +334,7 @@ struct DurableServices {
     services: DurableHostRuntimeServices,
     run_state: Arc<FilesystemRunStateStore<'static, LocalFilesystem>>,
     approval_requests: Arc<FilesystemApprovalRequestStore<'static, LocalFilesystem>>,
-    capability_leases: Arc<FilesystemCapabilityLeaseStore<'static, LocalFilesystem>>,
+    capability_leases: Arc<FilesystemCapabilityLeaseStore<LocalFilesystem>>,
     events: RebornEventStores,
 }
 
@@ -342,7 +342,7 @@ async fn durable_services(engine_root: &Path, event_root: &Path) -> DurableServi
     let event_stores = jsonl_event_stores(event_root).await;
     let run_state_fs = leaked_engine_filesystem(engine_root);
     let approval_fs = leaked_engine_filesystem(engine_root);
-    let lease_scoped_fs = leaked_scoped_engine_filesystem(engine_root);
+    let lease_scoped_fs = scoped_engine_filesystem(engine_root);
     let run_state = Arc::new(FilesystemRunStateStore::new(run_state_fs));
     let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(approval_fs));
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(lease_scoped_fs));
@@ -430,14 +430,11 @@ fn durable_mount_view() -> MountView {
     .unwrap()
 }
 
-fn leaked_scoped_engine_filesystem(
-    engine_root: &Path,
-) -> &'static ScopedFilesystem<LocalFilesystem> {
-    let scoped = ScopedFilesystem::new(
+fn scoped_engine_filesystem(engine_root: &Path) -> Arc<ScopedFilesystem<LocalFilesystem>> {
+    Arc::new(ScopedFilesystem::new(
         Arc::new(mounted_engine_filesystem(engine_root)),
         durable_mount_view(),
-    );
-    Box::leak(Box::new(scoped))
+    ))
 }
 
 fn mounted_engine_filesystem(engine_root: &Path) -> LocalFilesystem {

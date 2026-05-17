@@ -5,14 +5,6 @@
 //! runtime internals. The first slices implement grant- and lease-backed gates
 //! for capability dispatch.
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-mod db;
-
-#[cfg(feature = "libsql")]
-pub use db::LibSqlCapabilityLeaseStore;
-#[cfg(feature = "postgres")]
-pub use db::PostgresCapabilityLeaseStore;
-
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, MutexGuard},
@@ -414,23 +406,26 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
 /// before any backend dispatch — so tenant isolation is structural, not a
 /// convention this crate has to remember in its path builders.
 ///
-/// The store keeps a `'a` borrow on the [`ScopedFilesystem`] (mirroring the
-/// pre-refactor `&'a F` shape) rather than reaching for `Arc`, so existing
-/// callers don't have to wrap the per-invocation view in an `Arc` just to
-/// hand it here.
-pub struct FilesystemCapabilityLeaseStore<'a, F>
+/// Construct via [`FilesystemCapabilityLeaseStore::new`] with an
+/// `Arc<ScopedFilesystem<F>>`. The `Arc` shape matches the sibling
+/// filesystem-backed stores (`FilesystemSecretStore`,
+/// `FilesystemOutboundStateStore`, `FilesystemProcessStore`) and lets
+/// composition hold this store as `Arc<dyn CapabilityLeaseStore>` without
+/// erasing the lifetime parameter that an `&'a ScopedFilesystem<F>` would
+/// otherwise pin.
+pub struct FilesystemCapabilityLeaseStore<F>
 where
     F: RootFilesystem,
 {
-    filesystem: &'a ScopedFilesystem<F>,
+    filesystem: Arc<ScopedFilesystem<F>>,
     mutation_locks: Mutex<HashMap<CapabilityLeaseOwnerKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
-impl<'a, F> FilesystemCapabilityLeaseStore<'a, F>
+impl<F> FilesystemCapabilityLeaseStore<F>
 where
     F: RootFilesystem,
 {
-    pub fn new(filesystem: &'a ScopedFilesystem<F>) -> Self {
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
             filesystem,
             mutation_locks: Mutex::new(HashMap::new()),
@@ -515,7 +510,7 @@ where
                 index_key_tenant_id(),
                 IndexValue::Text(lease.scope.tenant_id.as_str().to_string()),
             );
-        ensure_tenant_id_index(self.filesystem, &lease_owner_prefix(&lease.scope)?).await?;
+        ensure_tenant_id_index(&self.filesystem, &lease_owner_prefix(&lease.scope)?).await?;
         // Byte-only backends (LocalFilesystem) reject BOTH non-`Any` CAS
         // AND entries with a populated `indexed` projection in a single
         // `Unsupported` response. Strip the projection and downgrade CAS
@@ -622,7 +617,7 @@ where
                 index_key_tenant_id(),
                 IndexValue::Text(scope.tenant_id.as_str().to_string()),
             );
-        ensure_tenant_id_index(self.filesystem, &lease_owner_prefix(scope)?).await?;
+        ensure_tenant_id_index(&self.filesystem, &lease_owner_prefix(scope)?).await?;
         // Byte-only backends (LocalFilesystem) reject entries with a
         // populated `indexed` projection. Fall back to the plain-bytes
         // shape for those — the tenant projection is best-effort defense
@@ -743,7 +738,7 @@ where
 }
 
 #[async_trait]
-impl<F> CapabilityLeaseStore for FilesystemCapabilityLeaseStore<'_, F>
+impl<F> CapabilityLeaseStore for FilesystemCapabilityLeaseStore<F>
 where
     F: RootFilesystem,
 {

@@ -24,7 +24,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_authorization::CapabilityLeaseError;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_authorization::GrantAuthorizer;
+use ironclaw_authorization::{FilesystemCapabilityLeaseStore, GrantAuthorizer};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_extensions::ExtensionRegistry;
 #[cfg(feature = "libsql")]
@@ -318,10 +318,9 @@ where
     resource_store.run_migrations().await?;
     let governor = Arc::new(PersistentResourceGovernor::new(resource_store));
 
-    let capability_leases = Arc::new(ironclaw_authorization::LibSqlCapabilityLeaseStore::new(
-        Arc::clone(&config.database),
-    ));
-    capability_leases.run_migrations().await?;
+    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
 
     let services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),
@@ -382,10 +381,9 @@ where
     resource_store.run_migrations().await?;
     let governor = Arc::new(PersistentResourceGovernor::new(resource_store));
 
-    let capability_leases = Arc::new(ironclaw_authorization::PostgresCapabilityLeaseStore::new(
-        config.pool.clone(),
-    ));
-    capability_leases.run_migrations().await?;
+    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
 
     let services = HostRuntimeServices::new(
         Arc::new(ExtensionRegistry::new()),

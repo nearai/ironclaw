@@ -14,7 +14,6 @@ publish = false
 default = []
 libsql = [
     "dep:libsql",
-    "ironclaw_authorization/libsql",
     "ironclaw_filesystem/libsql",
     "ironclaw_host_runtime/libsql",
     "ironclaw_reborn_event_store/libsql",
@@ -25,7 +24,6 @@ libsql = [
 ]
 postgres = [
     "dep:deadpool-postgres",
-    "ironclaw_authorization/postgres",
     "ironclaw_filesystem/postgres",
     "ironclaw_host_runtime/postgres",
     "ironclaw_reborn_event_store/postgres",
