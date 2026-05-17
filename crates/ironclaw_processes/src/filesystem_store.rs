@@ -1,12 +1,24 @@
 //! Filesystem-backed process and process-result stores.
 //!
-//! Records are stored as JSON under the exact resource-owner path
-//! `tenants/<tenant>/users/<user>[/agents/<agent>][/projects/<project>][/missions/<mission>][/threads/<thread>]/`,
-//! split into:
+//! Records live under the `/processes` mount alias on a
+//! [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). The paths in
+//! this module are alias-relative [`ScopedPath`] strings — at every op the
+//! [`ScopedFilesystem`] resolves the alias against its caller-supplied
+//! [`MountView`](ironclaw_host_api::MountView) and enforces per-grant ACL
+//! before backend dispatch. The composition layer wires the alias to a
+//! tenant/user-scoped [`VirtualPath`](ironclaw_host_api::VirtualPath), so
+//! tenant isolation is structural rather than something this crate must
+//! re-derive from `ResourceScope.tenant_id`/`user_id`.
 //!
-//! - `processes/<process_id>.json` — lifecycle records ([`FilesystemProcessStore`])
-//! - `process-results/<process_id>.json` — terminal result metadata
-//! - `process-outputs/<process_id>/output.json` — large/sensitive output bodies
+//! Within the alias, sub-scope (`agent_id`, `project_id`, `mission_id`,
+//! `thread_id`) is still encoded in the path so a single tenant/user can
+//! own multiple agent/project/mission/thread cells:
+//!
+//! ```text
+//! /processes[/agents/<agent>][/projects/<project>][/missions/<mission>][/threads/<thread>]/records/<process_id>.json
+//! /processes[/agents/<agent>][/projects/<project>][/missions/<mission>][/threads/<thread>]/results/<process_id>.json
+//! /processes[/agents/<agent>][/projects/<project>][/missions/<mission>][/threads/<thread>]/outputs/<process_id>/output.json
+//! ```
 //!
 //! All path/serde helpers are private to this module since they are tied to
 //! the on-disk layout above.
@@ -17,9 +29,9 @@ use async_trait::async_trait;
 use ironclaw_events::sanitize_error_kind;
 use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
-    IndexSpec, IndexValue, Page, RootFilesystem,
+    IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem,
 };
-use ironclaw_host_api::{ProcessId, ResourceScope, VirtualPath};
+use ironclaw_host_api::{ProcessId, ResourceScope, ScopedPath, VirtualPath};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::Mutex as AsyncMutex;
@@ -29,35 +41,25 @@ use crate::types::{
     ProcessStatus, ProcessStore, ensure_status_transition, invalid_path, same_scope_owner,
 };
 
-pub(crate) enum FilesystemHandle<'a, F>
+/// Filesystem-backed [`ProcessStore`].
+///
+/// Construct with a [`ScopedFilesystem`] over any [`RootFilesystem`] —
+/// typically a composite root in production or the in-memory backend in
+/// tests. The [`ScopedFilesystem`] enforces the caller's
+/// [`MountView`](ironclaw_host_api::MountView) per-operation ACL and
+/// resolves the `/processes` alias to a tenant-scoped
+/// [`VirtualPath`](ironclaw_host_api::VirtualPath) before any backend
+/// dispatch — so tenant isolation is structural, not a convention this
+/// crate has to remember.
+pub struct FilesystemProcessStore<F>
 where
     F: RootFilesystem,
 {
-    Borrowed(&'a F),
-    Shared(Arc<F>),
-}
-
-impl<F> FilesystemHandle<'_, F>
-where
-    F: RootFilesystem,
-{
-    fn as_ref(&self) -> &F {
-        match self {
-            Self::Borrowed(filesystem) => filesystem,
-            Self::Shared(filesystem) => filesystem.as_ref(),
-        }
-    }
-}
-
-pub struct FilesystemProcessStore<'a, F>
-where
-    F: RootFilesystem,
-{
-    filesystem: FilesystemHandle<'a, F>,
+    filesystem: Arc<ScopedFilesystem<F>>,
     transition_lock: AsyncMutex<()>,
 }
 
-impl<'a, F> FilesystemProcessStore<'a, F>
+impl<F> FilesystemProcessStore<F>
 where
     F: RootFilesystem,
 {
@@ -69,23 +71,22 @@ where
     /// concurrently against the same on-disk root is unsupported and will
     /// race on the JSON record files. Construct the store once and share via
     /// `Arc` (see [`from_arc`](Self::from_arc)).
-    pub fn new(filesystem: &'a F) -> Self {
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
-            filesystem: FilesystemHandle::Borrowed(filesystem),
+            filesystem,
             transition_lock: AsyncMutex::new(()),
         }
     }
 
-    /// Construct an owned (`'static`) variant from a shared filesystem handle.
+    /// Convenience constructor mirroring [`new`](Self::new) — kept so call
+    /// sites that previously held an [`Arc<ScopedFilesystem<F>>`] separately
+    /// from a borrow can continue to use the same shape.
     ///
     /// The same single-instance invariant from [`new`](Self::new) applies:
     /// share the resulting store via `Arc` rather than constructing multiple
     /// instances pointed at the same root.
-    pub fn from_arc(filesystem: Arc<F>) -> FilesystemProcessStore<'static, F> {
-        FilesystemProcessStore {
-            filesystem: FilesystemHandle::Shared(filesystem),
-            transition_lock: AsyncMutex::new(()),
-        }
+    pub fn from_arc(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+        Self::new(filesystem)
     }
 
     async fn write_record(&self, record: &ProcessRecord) -> Result<(), ProcessError> {
@@ -93,46 +94,46 @@ where
         let body = serialize_pretty(record)?;
         self.ensure_indexes(&record.scope).await?;
         let entry = process_record_entry(body, record);
-        put_with_byte_fallback(self.filesystem.as_ref(), &path, entry, CasExpectation::Any).await?;
+        put_with_byte_fallback(&self.filesystem, &path, entry, CasExpectation::Any).await?;
         Ok(())
     }
 
-    /// Declare the indexed-projection fields on the per-owner `processes/`
+    /// Declare the indexed-projection fields on the per-owner `records/`
     /// prefix so `records_for_scope` can use a native `query` filter.
     /// Tolerates `Unsupported` for byte-only backends (e.g. LocalFilesystem)
     /// so the existing list+get fallback path is still reachable.
     async fn ensure_indexes(&self, scope: &ResourceScope) -> Result<(), ProcessError> {
         let prefix = process_records_root(scope)?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("processes_by_tenant"),
             index_key_tenant_id(),
         )
         .await?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("processes_by_user"),
             index_key_user_id(),
         )
         .await?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("processes_by_status"),
             index_key_status(),
         )
         .await?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("processes_by_extension"),
             index_key_extension_id(),
         )
         .await?;
         ensure_exact_index(
-            self.filesystem.as_ref(),
+            &self.filesystem,
             &prefix,
             index_name("processes_by_parent"),
             index_key_parent_process_id(),
@@ -152,7 +153,7 @@ where
     ///
     /// Backends without versioning (LocalFilesystem) return version `0`
     /// for every read and reject `CasExpectation::Version` with
-    /// `Unsupported`; for those, `put_with_byte_fallback_versioned` falls
+    /// `Unsupported`; for those, [`put_with_byte_fallback`] falls
     /// through to `CasExpectation::Any` so the existing single-instance
     /// guarantee from `transition_lock` carries the safety invariant.
     async fn update_status(
@@ -165,7 +166,7 @@ where
         let _guard = self.transition_lock.lock().await;
         for _ in 0..MAX_CAS_RETRIES {
             let path = process_record_path(scope, process_id)?;
-            let Some(versioned) = self.filesystem.as_ref().get(&path).await? else {
+            let Some(versioned) = self.filesystem.get(&path).await? else {
                 return Err(ProcessError::UnknownProcess { process_id });
             };
             let mut record = deserialize::<ProcessRecord>(&versioned.entry.body)?;
@@ -180,7 +181,7 @@ where
             let body = serialize_pretty(&record)?;
             let entry = process_record_entry(body, &record);
             match put_with_byte_fallback(
-                self.filesystem.as_ref(),
+                &self.filesystem,
                 &path,
                 entry,
                 CasExpectation::Version(versioned.version),
@@ -206,9 +207,9 @@ where
 const MAX_CAS_RETRIES: usize = 5;
 
 #[async_trait]
-impl<F> ProcessStore for FilesystemProcessStore<'_, F>
+impl<F> ProcessStore for FilesystemProcessStore<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + 'static,
 {
     async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
         let _guard = self.transition_lock.lock().await;
@@ -218,7 +219,7 @@ where
         // transition_lock per the single-instance invariant in this struct's
         // docstring. A future migration can switch to `CasExpectation::Absent`
         // once every backend in production exposes native put.
-        if self.filesystem.as_ref().get(&path).await?.is_some() {
+        if self.filesystem.get(&path).await?.is_some() {
             return Err(ProcessError::ProcessAlreadyExists {
                 process_id: start.process_id,
             });
@@ -281,7 +282,7 @@ where
         process_id: ProcessId,
     ) -> Result<Option<ProcessRecord>, ProcessError> {
         let path = process_record_path(scope, process_id)?;
-        let Some(versioned) = self.filesystem.as_ref().get(&path).await? else {
+        let Some(versioned) = self.filesystem.get(&path).await? else {
             return Ok(None);
         };
         let record = deserialize::<ProcessRecord>(&versioned.entry.body)?;
@@ -299,12 +300,17 @@ where
     ) -> Result<Vec<ProcessRecord>, ProcessError> {
         let root = process_records_root(scope)?;
         // Try the indexed query path first. The `tenant_id` + `user_id`
-        // pair narrows backend-side to the same owner the path encodes,
-        // and the post-query `same_scope_owner` check guards the
-        // remaining sub-scope (agent/project/mission/thread) axes that
-        // are not in the index spec yet. Backends without index support
-        // (LocalFilesystem) return `Unsupported` and we fall back to the
-        // legacy list+get scan so behaviour is identical.
+        // pair is still projected onto each record so a backend serving
+        // a shared root (e.g. tests reusing one InMemoryBackend across
+        // mount views) can distinguish records. With the ScopedFilesystem
+        // refactor the path itself already encodes tenant/user via the
+        // MountView, but the indexed projection stays as belt-and-braces
+        // — backends that share storage across MountViews must still
+        // produce the right rows. The post-query `same_scope_owner`
+        // check guards the remaining sub-scope (agent/project/mission/
+        // thread) axes that are not in the index spec yet. Backends
+        // without index support (LocalFilesystem) return `Unsupported`
+        // and we fall back to the legacy list+get scan.
         self.ensure_indexes(scope).await?;
         let filter = Filter::And(vec![
             Filter::Eq {
@@ -316,7 +322,7 @@ where
                 value: IndexValue::Text(scope.user_id.as_str().to_string()),
             },
         ]);
-        match query_all_records(self.filesystem.as_ref(), &root, &filter).await {
+        match query_all_records(&self.filesystem, &root, &filter).await {
             Ok(records) => {
                 let mut filtered = records
                     .into_iter()
@@ -333,7 +339,7 @@ where
     }
 }
 
-impl<F> FilesystemProcessStore<'_, F>
+impl<F> FilesystemProcessStore<F>
 where
     F: RootFilesystem,
 {
@@ -344,32 +350,39 @@ where
     async fn records_for_scope_via_list(
         &self,
         scope: &ResourceScope,
-        root: &VirtualPath,
+        root: &ScopedPath,
     ) -> Result<Vec<ProcessRecord>, ProcessError> {
-        let entries = match self.filesystem.as_ref().list_dir(root).await {
+        let entries = match self.filesystem.list_dir(root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
         };
         let mut records = Vec::new();
         for entry in entries {
-            if entry.name.ends_with(".json") {
-                // Reviewer (PR #3666) flagged: a `get` returning `None` after
-                // `list_dir` enumerated the path indicates a race or backend
-                // inconsistency. Returning a partial process list silently
-                // hides this; surface it as `NotFound` so callers see the
-                // same failure shape they got with the legacy `read_file`
-                // path.
-                let Some(versioned) = self.filesystem.as_ref().get(&entry.path).await? else {
-                    return Err(ProcessError::Filesystem(format!(
-                        "process record listed but missing at {}",
-                        entry.path
-                    )));
-                };
-                let record = deserialize::<ProcessRecord>(&versioned.entry.body)?;
-                if same_scope_owner(&record.scope, scope) {
-                    records.push(record);
-                }
+            if !entry.name.ends_with(".json") {
+                continue;
+            }
+            // `list_dir` returns `VirtualPath`s because resolution has
+            // already happened. We reconstruct the child as a
+            // [`ScopedPath`] under the same alias-relative prefix so the
+            // per-op ACL still runs on the follow-up `get` (mirrors the
+            // engine store's `list_subdir_names` shape).
+            let scoped_child = join_scoped(root, &entry.name)?;
+            // Reviewer (PR #3666) flagged: a `get` returning `None` after
+            // `list_dir` enumerated the path indicates a race or backend
+            // inconsistency. Returning a partial process list silently
+            // hides this; surface it as a filesystem error so callers see
+            // the same failure shape they got with the legacy `read_file`
+            // path.
+            let Some(versioned) = self.filesystem.get(&scoped_child).await? else {
+                return Err(ProcessError::Filesystem(format!(
+                    "process record listed but missing at {}",
+                    scoped_child.as_str()
+                )));
+            };
+            let record = deserialize::<ProcessRecord>(&versioned.entry.body)?;
+            if same_scope_owner(&record.scope, scope) {
+                records.push(record);
             }
         }
         records.sort_by_key(|record| record.process_id.as_uuid());
@@ -377,27 +390,25 @@ where
     }
 }
 
-pub struct FilesystemProcessResultStore<'a, F>
+pub struct FilesystemProcessResultStore<F>
 where
     F: RootFilesystem,
 {
-    filesystem: FilesystemHandle<'a, F>,
+    filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<'a, F> FilesystemProcessResultStore<'a, F>
+impl<F> FilesystemProcessResultStore<F>
 where
     F: RootFilesystem,
 {
-    pub fn new(filesystem: &'a F) -> Self {
-        Self {
-            filesystem: FilesystemHandle::Borrowed(filesystem),
-        }
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+        Self { filesystem }
     }
 
-    pub fn from_arc(filesystem: Arc<F>) -> FilesystemProcessResultStore<'static, F> {
-        FilesystemProcessResultStore {
-            filesystem: FilesystemHandle::Shared(filesystem),
-        }
+    /// Convenience constructor mirroring [`new`](Self::new); preserved so
+    /// existing call sites (composition factories, tests) keep their shape.
+    pub fn from_arc(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+        Self::new(filesystem)
     }
 
     async fn write_result(&self, record: &ProcessResultRecord) -> Result<(), ProcessError> {
@@ -405,7 +416,6 @@ where
         let body = serialize_pretty(record)?;
         let entry = Entry::bytes(body).with_content_type(ContentType::json());
         self.filesystem
-            .as_ref()
             .put(&path, entry, CasExpectation::Any)
             .await?;
         Ok(())
@@ -424,10 +434,19 @@ where
         // backwards-compatible with any caller that uses `read_file`.
         let entry = Entry::bytes(body).with_content_type(ContentType::json());
         self.filesystem
-            .as_ref()
             .put(&path, entry, CasExpectation::Any)
             .await?;
-        Ok(path)
+        // The on-disk `output_ref` recorded in the result record must be a
+        // [`VirtualPath`] (it is part of the wire surface of
+        // [`ProcessResultRecord`]) — resolve the alias through the
+        // caller's MountView so the value persisted matches the
+        // resolution any future reader would see for the same scope.
+        let virtual_path = self
+            .filesystem
+            .mounts()
+            .resolve(&path)
+            .map_err(invalid_path)?;
+        Ok(virtual_path)
     }
 
     async fn store_result(
@@ -453,19 +472,19 @@ where
 }
 
 #[async_trait]
-impl<F> ProcessResultStore for FilesystemProcessResultStore<'_, F>
+impl<F> ProcessResultStore for FilesystemProcessResultStore<F>
 where
-    F: RootFilesystem,
+    F: RootFilesystem + 'static,
 {
     /// Persist a successful terminal record and its output blob.
     ///
     /// Writes happen in two steps (`write_output` then `write_result`); if
     /// the second write fails, the output blob at
-    /// `process-outputs/<process_id>/output.json` is left on disk as an
+    /// `outputs/<process_id>/output.json` is left on disk as an
     /// orphan. Cleanup of orphaned output blobs is the caller's responsibility
     /// (typically swept during operator-initiated reconciliation rather than
     /// inline, since orphans are observable via missing
-    /// `process-results/<process_id>.json`).
+    /// `results/<process_id>.json`).
     async fn complete(
         &self,
         scope: &ResourceScope,
@@ -516,7 +535,7 @@ where
         process_id: ProcessId,
     ) -> Result<Option<ProcessResultRecord>, ProcessError> {
         let path = process_result_path(scope, process_id)?;
-        let Some(versioned) = self.filesystem.as_ref().get(&path).await? else {
+        let Some(versioned) = self.filesystem.get(&path).await? else {
             return Ok(None);
         };
         let record = deserialize::<ProcessResultRecord>(&versioned.entry.body)?;
@@ -542,93 +561,119 @@ where
         let Some(output_ref) = record.output_ref else {
             return Ok(None);
         };
-        let expected_output_ref = process_output_path(scope, process_id)?;
-        if output_ref != expected_output_ref {
+        // The stored `output_ref` is a tenant-scoped [`VirtualPath`]; we
+        // compare it against the resolved view of the path the current
+        // scope would produce, so a forged record whose `output_ref`
+        // points at a sibling tenant/scope's blob is rejected before any
+        // read. After the match passes, we read the blob through the
+        // scoped path (going through the per-op ACL) rather than the raw
+        // `VirtualPath` so backends with stricter scopes still apply
+        // their checks.
+        let expected_scoped = process_output_path(scope, process_id)?;
+        let expected_virtual = self
+            .filesystem
+            .mounts()
+            .resolve(&expected_scoped)
+            .map_err(invalid_path)?;
+        if output_ref != expected_virtual {
             return Err(invalid_stored_record(format!(
                 "process result output ref {} does not match expected {}",
                 output_ref.as_str(),
-                expected_output_ref.as_str()
+                expected_virtual.as_str()
             )));
         }
-        let Some(versioned) = self.filesystem.as_ref().get(&output_ref).await? else {
+        let Some(versioned) = self.filesystem.get(&expected_scoped).await? else {
             return Ok(None);
         };
         deserialize::<Value>(&versioned.entry.body).map(Some)
     }
 }
 
+// ── Paths ──────────────────────────────────────────────────────
+//
+// Every path returned here is alias-relative to the `/processes` mount
+// alias on the caller's [`ScopedFilesystem`]. The leading tenant/user
+// segment that the legacy implementation hand-formatted into the path
+// is gone: the MountView's `/processes -> /tenants/<tenant>/users/<user>/processes`
+// grant supplies it at every op. Sub-scope axes (agent/project/mission/
+// thread) remain in the alias-relative path because they are *within*-
+// tenant scoping and are not covered by the per-tenant MountAlias.
+
+const PROCESSES_PREFIX: &str = "/processes";
+
 fn process_record_path(
     scope: &ResourceScope,
     process_id: ProcessId,
-) -> Result<VirtualPath, ProcessError> {
-    VirtualPath::new(format!(
+) -> Result<ScopedPath, ProcessError> {
+    scoped_path(&format!(
         "{}/{process_id}.json",
-        process_records_root(scope)?.as_str()
+        process_records_root_string(scope)
     ))
-    .map_err(invalid_path)
 }
 
-fn process_records_root(scope: &ResourceScope) -> Result<VirtualPath, ProcessError> {
-    VirtualPath::new(format!("{}/processes", resource_owner_root(scope))).map_err(invalid_path)
+fn process_records_root(scope: &ResourceScope) -> Result<ScopedPath, ProcessError> {
+    scoped_path(&process_records_root_string(scope))
+}
+
+fn process_records_root_string(scope: &ResourceScope) -> String {
+    format!("{}/records", scope_owner_root_string(scope))
 }
 
 fn process_result_path(
     scope: &ResourceScope,
     process_id: ProcessId,
-) -> Result<VirtualPath, ProcessError> {
-    VirtualPath::new(format!(
-        "{}/{process_id}.json",
-        process_results_root(scope)?.as_str()
+) -> Result<ScopedPath, ProcessError> {
+    scoped_path(&format!(
+        "{}/results/{process_id}.json",
+        scope_owner_root_string(scope)
     ))
-    .map_err(invalid_path)
-}
-
-fn process_results_root(scope: &ResourceScope) -> Result<VirtualPath, ProcessError> {
-    VirtualPath::new(format!("{}/process-results", resource_owner_root(scope)))
-        .map_err(invalid_path)
 }
 
 fn process_output_path(
     scope: &ResourceScope,
     process_id: ProcessId,
-) -> Result<VirtualPath, ProcessError> {
-    VirtualPath::new(format!(
-        "{}/output.json",
-        process_outputs_root(scope, process_id)?.as_str()
+) -> Result<ScopedPath, ProcessError> {
+    scoped_path(&format!(
+        "{}/outputs/{process_id}/output.json",
+        scope_owner_root_string(scope)
     ))
-    .map_err(invalid_path)
 }
 
-fn process_outputs_root(
-    scope: &ResourceScope,
-    process_id: ProcessId,
-) -> Result<VirtualPath, ProcessError> {
-    VirtualPath::new(format!(
-        "{}/process-outputs/{process_id}",
-        resource_owner_root(scope)
-    ))
-    .map_err(invalid_path)
-}
-
-fn resource_owner_root(scope: &ResourceScope) -> String {
-    let mut base = format!(
-        "/engine/tenants/{}/users/{}",
-        scope.tenant_id.as_str(),
-        scope.user_id.as_str()
-    );
+/// Build the alias-relative prefix for a given sub-scope under
+/// `/processes`. The tenant/user prefix is supplied by the caller's
+/// MountView at op time and intentionally absent here.
+fn scope_owner_root_string(scope: &ResourceScope) -> String {
+    let mut base = String::from(PROCESSES_PREFIX);
     if let Some(agent_id) = &scope.agent_id {
-        base = format!("{base}/agents/{}", agent_id.as_str());
+        base.push_str("/agents/");
+        base.push_str(agent_id.as_str());
     }
     if let Some(project_id) = &scope.project_id {
-        base = format!("{base}/projects/{}", project_id.as_str());
+        base.push_str("/projects/");
+        base.push_str(project_id.as_str());
     }
     if let Some(mission_id) = &scope.mission_id {
-        base = format!("{base}/missions/{}", mission_id.as_str());
+        base.push_str("/missions/");
+        base.push_str(mission_id.as_str());
     }
     if let Some(thread_id) = &scope.thread_id {
-        base = format!("{base}/threads/{}", thread_id.as_str());
+        base.push_str("/threads/");
+        base.push_str(thread_id.as_str());
     }
     base
+}
+
+fn scoped_path(raw: &str) -> Result<ScopedPath, ProcessError> {
+    ScopedPath::new(raw).map_err(invalid_path)
+}
+
+/// Join a leaf segment onto a [`ScopedPath`] prefix. Used when
+/// reconstructing a child path after `list_dir` (which returns
+/// [`VirtualPath`]s) so the per-op ACL check still runs on the follow-up
+/// `get` — mirrors the engine store's `join_scoped` helper.
+fn join_scoped(prefix: &ScopedPath, leaf: &str) -> Result<ScopedPath, ProcessError> {
+    let joined = format!("{}/{}", prefix.as_str().trim_end_matches('/'), leaf);
+    ScopedPath::new(joined).map_err(invalid_path)
 }
 
 fn ensure_process_record_matches(
@@ -734,19 +779,21 @@ fn process_status_label(status: ProcessStatus) -> &'static str {
 /// `put` with a fallback to an opaque (byte-only) entry on `Unsupported`.
 ///
 /// Backends that don't yet implement records (LocalFilesystem with no
-/// sidecar metadata) reject `kind = Some(_)` or any non-empty
-/// `indexed` projection. We try the indexed write first so SQL and
-/// in-memory backends get the projection, then retry with the same body
-/// stripped of metadata so the legacy byte-only path keeps working
-/// during the consumer migration.
+/// sidecar metadata) reject `kind = Some(_)` or any non-`Any` CAS
+/// expectation. We try the indexed write first so SQL and in-memory
+/// backends get the projection, then retry with the same body stripped
+/// of metadata and the CAS downgraded to `Any` so the legacy byte-only
+/// path keeps working during the consumer migration. The single-instance
+/// `transition_lock` on the caller carries the ordering safety
+/// invariant that CAS would otherwise provide.
 async fn put_with_byte_fallback<F>(
-    filesystem: &F,
-    path: &VirtualPath,
+    filesystem: &ScopedFilesystem<F>,
+    path: &ScopedPath,
     entry: Entry,
     cas: CasExpectation,
 ) -> Result<(), FilesystemError>
 where
-    F: RootFilesystem + ?Sized,
+    F: RootFilesystem,
 {
     match filesystem.put(path, entry.clone(), cas).await {
         Ok(_) => Ok(()),
@@ -754,9 +801,7 @@ where
             // Byte-only backends (LocalFilesystem) reject BOTH record-shaped
             // entries AND non-`Any` CAS in a single `Unsupported` response.
             // Strip the record metadata and downgrade the CAS expectation to
-            // `Any` so the legacy byte-only path stays writeable. The
-            // single-instance `transition_lock` on the caller carries the
-            // ordering safety invariant that CAS would otherwise provide.
+            // `Any` so the legacy byte-only path stays writeable.
             let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
             filesystem
                 .put(path, opaque, CasExpectation::Any)
@@ -772,13 +817,13 @@ where
 /// `ensure_exact_index` shape so backends without index support degrade
 /// to the list+get fallback path instead of failing closed.
 async fn ensure_exact_index<F>(
-    filesystem: &F,
-    prefix: &VirtualPath,
+    filesystem: &ScopedFilesystem<F>,
+    prefix: &ScopedPath,
     name: IndexName,
     key: IndexKey,
 ) -> Result<(), ProcessError>
 where
-    F: RootFilesystem + ?Sized,
+    F: RootFilesystem,
 {
     let spec = IndexSpec::new(name, vec![key], IndexKind::Exact);
     match filesystem.ensure_index(prefix, &spec).await {
@@ -791,12 +836,12 @@ where
 /// Drain a paginated `query` against `prefix` with `filter`, materializing
 /// every matched [`ProcessRecord`].
 async fn query_all_records<F>(
-    filesystem: &F,
-    prefix: &VirtualPath,
+    filesystem: &ScopedFilesystem<F>,
+    prefix: &ScopedPath,
     filter: &Filter,
 ) -> Result<Vec<ProcessRecord>, FilesystemError>
 where
-    F: RootFilesystem + ?Sized,
+    F: RootFilesystem,
 {
     let mut out = Vec::new();
     let mut offset: u64 = 0;
