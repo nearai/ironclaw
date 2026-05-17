@@ -39,9 +39,9 @@ use ironclaw_turns::{
         LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView, LoopModelMessage,
         LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptBundle,
         LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptPort, LoopRunContext,
-        LoopTranscriptPort, ParentLoopOutput, PromptMode, PromptSkillContextMetadata,
-        ProviderToolCallReference, ProviderToolDefinition, SkillVisibility, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopTranscriptPort, ParentLoopOutput, PersonalContextPolicy, PromptMode,
+        PromptSkillContextMetadata, ProviderToolCallReference, ProviderToolDefinition,
+        SkillVisibility, UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use tracing_test::traced_test;
@@ -343,6 +343,74 @@ async fn context_port_caches_identity_candidates_per_prompt_mode() {
         "identity file TOOLS.md available"
     );
     assert_eq!(source.load_calls(), 2);
+}
+
+#[tokio::test]
+async fn context_port_excludes_personal_identity_by_default_policy() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticIdentityContextSource::new(vec![
+        trusted_identity(
+            "AGENTS.md",
+            "stable identity",
+            IdentityApplicability::Always,
+        ),
+        personal_identity("USER.md", "private user profile"),
+    ]));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_identity_context_source(source);
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bundle.identity_messages.len(), 1);
+    assert_eq!(
+        bundle.identity_messages[0].safe_summary,
+        "identity file AGENTS.md available"
+    );
+}
+
+#[tokio::test]
+async fn context_port_includes_personal_identity_when_profile_allows_it() {
+    let fixture = ThreadFixture::new().await;
+    let mut run_context = fixture.run_context.clone();
+    run_context.resolved_run_profile.personal_context_policy = PersonalContextPolicy::Allowed;
+    let source = Arc::new(StaticIdentityContextSource::new(vec![personal_identity(
+        "USER.md",
+        "private user profile",
+    )]));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        16,
+    )
+    .with_identity_context_source(source);
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bundle.identity_messages.len(), 1);
+    assert_eq!(
+        bundle.identity_messages[0].safe_summary,
+        "identity file USER.md available"
+    );
 }
 
 #[tokio::test]
@@ -2393,6 +2461,14 @@ fn trusted_identity(
             content.len(),
         ),
         content.to_string(),
+    )
+}
+
+fn personal_identity(name: &str, content: &str) -> (HostIdentityContextCandidate, String) {
+    trusted_identity(
+        name,
+        content,
+        IdentityApplicability::OnPersonalContextAllowed,
     )
 }
 

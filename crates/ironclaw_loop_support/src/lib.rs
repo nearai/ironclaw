@@ -206,8 +206,9 @@ where
                             .map_err(HostIdentityContextBuildError::into_host_error)
                     })
                     .await?;
-                identity_context::build_identity_messages_from_candidates(
+                identity_context::build_identity_messages_for_run(
                     candidates,
+                    &self.run_context,
                     mode,
                     self.identity_budget,
                 )?

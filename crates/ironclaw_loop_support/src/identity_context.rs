@@ -3,7 +3,8 @@ use ironclaw_memory::DEFAULT_PROMPT_PROTECTED_PATHS;
 use ironclaw_turns::{
     LoopMessageRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, LoopContextMessage, LoopRunContext, PromptMode,
+        AgentLoopHostError, AgentLoopHostErrorKind, LoopContextMessage, LoopRunContext,
+        PersonalContextPolicy, PromptMode,
     },
 };
 use thiserror::Error;
@@ -90,6 +91,7 @@ pub enum IdentityTrustLevel {
 pub enum IdentityApplicability {
     Always,
     OnCodeAct,
+    OnPersonalContextAllowed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,7 +157,7 @@ pub enum HostIdentityContextBuildError {
     UnknownIdentityFile,
     #[error("identity context path is invalid")]
     InvalidIdentityFile,
-    /// Reserved for a future hard-limit mode. Currently, `build_identity_messages_from_candidates`
+    /// Reserved for a future hard-limit mode. Currently, `build_identity_messages_for_run`
     /// truncates silently on budget overflow rather than returning this error.
     #[error("identity context budget exceeded")]
     ContextBudgetExceeded,
@@ -189,10 +191,49 @@ pub async fn build_identity_messages(
         .load_identity_candidates(run_context, mode)
         .await
         .map_err(HostIdentityContextBuildError::into_host_error)?;
-    build_identity_messages_from_candidates(&candidates, mode, budget)
+    build_identity_messages_for_run(&candidates, run_context, mode, budget)
 }
 
-pub fn build_identity_messages_from_candidates(
+fn filter_identity_candidates_for_run(
+    candidates: &[HostIdentityContextCandidate],
+    run_context: &LoopRunContext,
+) -> Vec<HostIdentityContextCandidate> {
+    candidates
+        .iter()
+        .filter(|candidate| identity_candidate_allowed_for_run(candidate, run_context))
+        .cloned()
+        .collect()
+}
+
+fn identity_candidate_allowed_for_run(
+    candidate: &HostIdentityContextCandidate,
+    run_context: &LoopRunContext,
+) -> bool {
+    match candidate.applies_when {
+        IdentityApplicability::Always | IdentityApplicability::OnCodeAct => true,
+        IdentityApplicability::OnPersonalContextAllowed => {
+            match run_context.resolved_run_profile.personal_context_policy {
+                PersonalContextPolicy::Excluded => false,
+                PersonalContextPolicy::Allowed => true,
+            }
+        }
+    }
+}
+
+pub fn build_identity_messages_for_run(
+    candidates: &[HostIdentityContextCandidate],
+    run_context: &LoopRunContext,
+    mode: PromptMode,
+    budget: IdentityBudget,
+) -> Result<Vec<LoopContextMessage>, AgentLoopHostError> {
+    build_identity_messages_from_candidates(
+        &filter_identity_candidates_for_run(candidates, run_context),
+        mode,
+        budget,
+    )
+}
+
+fn build_identity_messages_from_candidates(
     candidates: &[HostIdentityContextCandidate],
     mode: PromptMode,
     budget: IdentityBudget,
@@ -239,6 +280,7 @@ fn applies(applicability: IdentityApplicability, mode: PromptMode) -> bool {
     match applicability {
         IdentityApplicability::Always => true,
         IdentityApplicability::OnCodeAct => mode == PromptMode::CodeAct,
+        IdentityApplicability::OnPersonalContextAllowed => true,
     }
 }
 

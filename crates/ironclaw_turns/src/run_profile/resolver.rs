@@ -18,7 +18,7 @@ use super::{
         LoopDriverId, ModelProfileId, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
         RunProfileSourceLayer, RunProfileSourceRef, RunnerPoolId, SchedulingClass,
     },
-    snapshot::ResolvedRunProfile,
+    snapshot::{PersonalContextPolicy, ResolvedRunProfile},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,6 +189,7 @@ pub struct RunProfileDefinition {
     cancellation_policy: CancellationPolicy,
     checkpoint_policy: CheckpointPolicy,
     resource_budget_policy: ResourceBudgetPolicy,
+    personal_context_policy: PersonalContextPolicy,
     runtime_constraints: RuntimeProfileConstraints,
     runner_pool_id: Option<RunnerPoolId>,
     scheduling_class: SchedulingClass,
@@ -214,6 +215,11 @@ impl RunProfileDefinition {
         definition
     }
 
+    pub fn with_personal_context_policy(mut self, policy: PersonalContextPolicy) -> Self {
+        self.personal_context_policy = policy;
+        self
+    }
+
     fn resolve(&self, request: &RunProfileResolutionRequest) -> ResolvedRunProfile {
         let mut provenance = provenance_for(self, request);
         let resource_budget_policy = self.resolve_resource_budget_policy(request, &mut provenance);
@@ -232,6 +238,7 @@ impl RunProfileDefinition {
             cancellation_policy: self.cancellation_policy.clone(),
             checkpoint_policy: self.checkpoint_policy.clone(),
             resource_budget_policy,
+            personal_context_policy: self.personal_context_policy,
             runtime_constraints: self.runtime_constraints.clone(),
             runner_pool_id: self.runner_pool_id.clone(),
             scheduling_class: self.scheduling_class.clone(),
@@ -313,6 +320,7 @@ fn interactive_profile() -> RunProfileDefinition {
             max_model_calls: 32,
             max_capability_invocations: 64,
         },
+        personal_context_policy: PersonalContextPolicy::Excluded,
         runtime_constraints: RuntimeProfileConstraints {
             allow_raw_runtime_backend_selection: false,
             allow_broad_capability_surface: false,
@@ -366,6 +374,7 @@ fn long_running_mission_profile() -> RunProfileDefinition {
             max_model_calls: 256,
             max_capability_invocations: 1024,
         },
+        personal_context_policy: PersonalContextPolicy::Excluded,
         runtime_constraints: RuntimeProfileConstraints {
             allow_raw_runtime_backend_selection: false,
             allow_broad_capability_surface: false,
@@ -452,6 +461,7 @@ fn fingerprint_for(
     update(definition.model_profile_id.as_str());
     update(definition.capability_surface_profile_id.as_str());
     update(definition.context_profile_id.as_str());
+    update(definition.personal_context_policy.as_str());
     update_bool(definition.steering_policy.allow_steering, &mut update);
     update_bool(definition.steering_policy.allow_interrupt, &mut update);
     update_bool(

@@ -3,6 +3,7 @@ use ironclaw_turns::{
     InMemoryRunProfileResolver, ModelProfileId, PrivilegedRunProfileDimension, RunProfileId,
     RunProfileRequest, RunProfileRequestAuthority, RunProfileResolutionError,
     RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
+    run_profile::{PersonalContextPolicy, ResolvedRunProfile},
 };
 
 #[test]
@@ -44,6 +45,10 @@ async fn default_interactive_profile_resolves_stable_driver_and_redacted_snapsho
         "interactive_tools"
     );
     assert_eq!(snapshot.context_profile_id.as_str(), "interactive_context");
+    assert_eq!(
+        snapshot.personal_context_policy,
+        PersonalContextPolicy::Excluded
+    );
     assert!(snapshot.steering_policy.allow_steering);
     assert!(!snapshot.steering_policy.allow_driver_specific_nudges);
     assert_eq!(snapshot.provenance.sources.len(), 1);
@@ -53,6 +58,26 @@ async fn default_interactive_profile_resolves_stable_driver_and_redacted_snapsho
     assert!(!wire.contains("api_key"));
     assert!(!wire.contains("raw_config"));
     assert!(!wire.contains("RuntimeDispatcher"));
+}
+
+#[tokio::test]
+async fn resolved_profile_deserializes_old_payload_with_personal_context_excluded() {
+    let resolver = InMemoryRunProfileResolver::default();
+    let snapshot = resolver
+        .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+        .await
+        .unwrap();
+    let mut wire = serde_json::to_value(snapshot).unwrap();
+    wire.as_object_mut()
+        .unwrap()
+        .remove("personal_context_policy");
+
+    let decoded: ResolvedRunProfile = serde_json::from_value(wire).unwrap();
+
+    assert_eq!(
+        decoded.personal_context_policy,
+        PersonalContextPolicy::Excluded
+    );
 }
 
 #[tokio::test]
