@@ -302,6 +302,10 @@ mod tests {
 
         assert_eq!(snapshot.profile_id.as_str(), PLANNED_DEFAULT_PROFILE_ID);
         assert_eq!(snapshot.loop_driver.id.as_str(), PLANNED_DRIVER_DEFAULT_ID);
+        assert_eq!(
+            snapshot.personal_context_policy,
+            PersonalContextPolicy::Allowed
+        );
     }
 
     #[tokio::test]

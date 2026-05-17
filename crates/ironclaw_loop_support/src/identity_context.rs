@@ -260,6 +260,8 @@ fn applies(applicability: IdentityApplicability, mode: PromptMode) -> bool {
     match applicability {
         IdentityApplicability::Always => true,
         IdentityApplicability::OnCodeAct => mode == PromptMode::CodeAct,
+        // Personal-context applicability is policy-only today. Add a combined
+        // variant if a future personal directive must also be mode-specific.
         IdentityApplicability::OnPersonalContextAllowed => true,
     }
 }

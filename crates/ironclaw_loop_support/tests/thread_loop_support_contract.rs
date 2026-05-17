@@ -346,7 +346,7 @@ async fn context_port_caches_identity_candidates_per_prompt_mode() {
 }
 
 #[tokio::test]
-async fn context_port_excludes_personal_identity_by_default_policy() {
+async fn context_port_defense_gate_excludes_personal_identity_from_host_source_by_default_policy() {
     let fixture = ThreadFixture::new().await;
     let source = Arc::new(StaticIdentityContextSource::new(vec![
         trusted_identity(
