@@ -1196,3 +1196,91 @@ async fn filesystem_outbound_store_isolates_two_tenants_with_same_user_project_i
         b_deliveries.len(),
     );
 }
+
+/// Defense-in-depth regression for the tenant-isolation indexed
+/// projection (see
+/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
+/// every `FilesystemOutboundStateStore` write decorates its `Entry`
+/// with a `tenant_id` projection so an admin-tier query can filter
+/// explicitly by tenant and a path-rewriting bug surfaces as a
+/// query-time mismatch.
+///
+/// Records a delivery attempt under tenant A's scope, then issues a
+/// raw `RootFilesystem::query` against `/outbound/deliveries` with
+/// `Filter::Eq { key: "tenant_id", value: <tenant-a> }` and asserts the
+/// record is returned; a query for a different tenant must return zero
+/// rows.
+#[tokio::test]
+async fn filesystem_outbound_store_writes_tenant_id_indexed_projection() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = build_scoped_fs(
+        Arc::clone(&backend),
+        "/engine/tenants/tenant-outbound/users/user-outbound/outbound",
+    );
+    let store = FilesystemOutboundStateStore::new(Arc::clone(&scoped));
+    let scope = turn_scope();
+    let delivery_id = OutboundDeliveryId::new();
+    store
+        .record_delivery_attempt(OutboundDeliveryAttempt {
+            delivery_id,
+            scope: scope.clone(),
+            candidate: OutboundPushCandidate {
+                tenant_id: scope.tenant_id.clone(),
+                agent_id: scope.agent_id.clone(),
+                project_id: scope.project_id.clone(),
+                thread_id: scope.thread_id.clone(),
+                turn_run_id: Some(TurnRunId::new()),
+                target: reply_ref("reply-projection-test"),
+                kind: OutboundPushKind::FinalReply,
+                projection_ref: ProjectionUpdateRef::new("projection:tenant-index").unwrap(),
+                requires_reply_target_revalidation: true,
+            },
+            status: OutboundDeliveryStatus::Pending,
+            attempted_at: now(),
+            failure_kind: None,
+        })
+        .await
+        .unwrap();
+
+    // Resolve the alias-relative deliveries prefix to the backing
+    // VirtualPath through the same MountView the store uses, so the raw
+    // query targets exactly the bytes the backend stored.
+    let deliveries_prefix =
+        ironclaw_host_api::ScopedPath::new("/outbound/deliveries".to_string()).unwrap();
+    let virtual_prefix = scoped.mounts().resolve(&deliveries_prefix).unwrap();
+    let tenant_key = ironclaw_filesystem::IndexKey::new("tenant_id").unwrap();
+
+    let hit = backend
+        .query(
+            &virtual_prefix,
+            &Filter::Eq {
+                key: tenant_key.clone(),
+                value: ironclaw_filesystem::IndexValue::Text(scope.tenant_id.as_str().to_string()),
+            },
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        hit.len(),
+        1,
+        "tenant_id projection must surface the delivery via Filter::Eq",
+    );
+
+    let miss = backend
+        .query(
+            &virtual_prefix,
+            &Filter::Eq {
+                key: tenant_key,
+                value: ironclaw_filesystem::IndexValue::Text("tenant-b".to_string()),
+            },
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert!(
+        miss.is_empty(),
+        "tenant_id projection must NOT surface tenant-outbound's delivery under tenant-b query; got {} rows",
+        miss.len(),
+    );
+}

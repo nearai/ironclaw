@@ -35,7 +35,7 @@ use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
     IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
-use ironclaw_host_api::{ScopedPath, ThreadId};
+use ironclaw_host_api::{ScopedPath, TenantId, ThreadId};
 use ironclaw_turns::{TurnActor, TurnScope};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -70,6 +70,17 @@ const DELIVERY_SCOPE_INDEX_KEY: &str = "scope";
 const DELIVERY_SCOPE_INDEX_NAME: &str = "outbound_delivery_scope";
 const DELIVERIES_ROOT: &str = "/outbound/deliveries";
 
+/// Indexed projection key for the tenant id, written alongside every
+/// outbound write as a defense-in-depth measure beyond path-prefix
+/// scoping. See `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`
+/// — path-prefix scoping is the primary isolation boundary; this
+/// projection lets admin-tier queries filter explicitly by tenant and
+/// turns a path-rewriting bug into a query-time mismatch.
+const TENANT_ID_INDEX_KEY: &str = "tenant_id";
+const TENANT_ID_INDEX_NAME: &str = "outbound_by_tenant";
+const POLICIES_ROOT: &str = "/outbound/policies";
+const SUBSCRIPTIONS_ROOT: &str = "/outbound/subscriptions";
+
 /// Filesystem-backed outbound store. Construct with a [`ScopedFilesystem`]
 /// over any [`RootFilesystem`] implementation (libSQL, Postgres, in-memory,
 /// HSM-decorated, …) — the store doesn't care which. Tenant isolation is
@@ -94,10 +105,17 @@ where
         &self,
         path: &ScopedPath,
         value: &T,
+        tenant: &TenantId,
         cas: CasExpectation,
     ) -> Result<(), OutboundError> {
         let body = serde_json::to_vec(value).map_err(|_| OutboundError::Serialization)?;
-        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        // Defense-in-depth: tag the entry with the tenant id so admin-tier
+        // queries can filter by tenant and a path-rewriting bug surfaces as
+        // a query-time mismatch rather than silent cross-tenant leakage.
+        // See docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md.
+        let entry = Entry::bytes(body)
+            .with_content_type(ContentType::json())
+            .with_indexed(tenant_id_index_key(), tenant_id_index_value(tenant));
         self.put_with_byte_fallback(path, entry, cas).await
     }
 
@@ -119,6 +137,12 @@ where
             .with_indexed(
                 delivery_scope_index_key(),
                 delivery_scope_index_value(&attempt.scope),
+            )
+            // Defense-in-depth tenant projection — see `put_json` and
+            // `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+            .with_indexed(
+                tenant_id_index_key(),
+                tenant_id_index_value(&attempt.scope.tenant_id),
             );
         self.put_with_byte_fallback(path, entry, cas).await
     }
@@ -170,6 +194,21 @@ where
         }
     }
 
+    /// Declare the `tenant_id` exact-equality index on `root`. Mirrors
+    /// [`Self::ensure_delivery_scope_index`] but for the defense-in-depth
+    /// tenant projection — see
+    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+    /// Idempotent across the mount lifetime; tolerates byte-only backends.
+    async fn ensure_tenant_id_index(&self, root: &ScopedPath) -> Result<(), OutboundError> {
+        let name = IndexName::new(TENANT_ID_INDEX_NAME).map_err(|_| OutboundError::Backend)?;
+        let spec = IndexSpec::new(name, vec![tenant_id_index_key()], IndexKind::Exact);
+        match self.filesystem.ensure_index(root, &spec).await {
+            Ok(()) => Ok(()),
+            Err(FilesystemError::Unsupported { .. }) => Ok(()),
+            Err(error) => Err(map_fs_error(error)),
+        }
+    }
+
     /// Read the current versioned entry at `path` and decode its body as `T`.
     /// Returns the parsed value alongside the version token that can be passed
     /// back as [`CasExpectation::Version`] to detect concurrent writers.
@@ -207,11 +246,13 @@ where
     ) -> Result<(), OutboundError> {
         validate_policy(&policy)?;
         let path = policy_path(&policy.scope)?;
+        self.ensure_tenant_id_index(&policies_root()?).await?;
         // Notification policy puts are blind overwrites — the caller owns the
         // full policy and there is no read-then-write progression invariant to
         // protect. `CasExpectation::Any` is correct here; the read-then-write
         // paths below carry their own version expectations (audit finding F1).
-        self.put_json(&path, &policy, CasExpectation::Any).await
+        self.put_json(&path, &policy, &policy.scope.tenant_id, CasExpectation::Any)
+            .await
     }
 
     async fn load_thread_notification_policy(
@@ -236,6 +277,7 @@ where
             &record.scope,
             &record.thread_id,
         )?;
+        self.ensure_tenant_id_index(&subscriptions_root()?).await?;
         // CAS retry loop (audit finding F1): a concurrent writer could insert
         // or update the same subscription record between our read and put,
         // racing the "cursor must not move backwards" check. Re-read on
@@ -255,7 +297,10 @@ where
             if let Some(existing) = existing.as_ref() {
                 validate_subscription_identity(existing, &record)?;
             }
-            match self.put_json(&path, &record, cas).await {
+            match self
+                .put_json(&path, &record, &record.scope.stream.tenant_id, cas)
+                .await
+            {
                 Ok(()) => return Ok(()),
                 Err(OutboundError::CasConflict) => continue,
                 Err(error) => return Err(error),
@@ -291,6 +336,7 @@ where
             &request.cursor.scope,
             &request.thread_id,
         )?;
+        self.ensure_tenant_id_index(&subscriptions_root()?).await?;
         // CAS retry loop (audit finding F1): the audit specifically calls
         // this out as the load-bearing site for the "cursor must not move
         // backwards" invariant. On every retry we re-read the existing
@@ -309,7 +355,12 @@ where
             validate_advance_request(&record, &request)?;
             record.cursor = Some(request.cursor.clone());
             match self
-                .put_json(&path, &record, CasExpectation::Version(versioned.version))
+                .put_json(
+                    &path,
+                    &record,
+                    &record.scope.stream.tenant_id,
+                    CasExpectation::Version(versioned.version),
+                )
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -326,6 +377,7 @@ where
     ) -> Result<(), OutboundError> {
         validate_delivery_attempt(&attempt)?;
         self.ensure_delivery_scope_index().await?;
+        self.ensure_tenant_id_index(&deliveries_root()?).await?;
         let path = delivery_path(&attempt.delivery_id)?;
         // CAS retry loop (audit finding F1): two concurrent writers racing the
         // same `delivery_id` (e.g. an at-least-once orchestrator retry firing
@@ -484,6 +536,33 @@ fn delivery_path(delivery_id: &OutboundDeliveryId) -> Result<ScopedPath, Outboun
 
 fn deliveries_root() -> Result<ScopedPath, OutboundError> {
     ScopedPath::new(DELIVERIES_ROOT).map_err(|_| OutboundError::Backend)
+}
+
+fn policies_root() -> Result<ScopedPath, OutboundError> {
+    ScopedPath::new(POLICIES_ROOT).map_err(|_| OutboundError::Backend)
+}
+
+fn subscriptions_root() -> Result<ScopedPath, OutboundError> {
+    ScopedPath::new(SUBSCRIPTIONS_ROOT).map_err(|_| OutboundError::Backend)
+}
+
+fn tenant_id_index_key() -> IndexKey {
+    // safety: `TENANT_ID_INDEX_KEY` is the constant identifier `"tenant_id"`,
+    // a simple `[A-Za-z_][A-Za-z0-9_]*` identifier — `IndexKey::new`
+    // cannot fail on this input.
+    static KEY: std::sync::OnceLock<IndexKey> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| match IndexKey::new(TENANT_ID_INDEX_KEY) {
+        Ok(key) => key,
+        Err(_) => unreachable!(
+            "TENANT_ID_INDEX_KEY must satisfy IndexKey::new grammar — \
+             update the constant or grammar"
+        ),
+    })
+    .clone()
+}
+
+fn tenant_id_index_value(tenant: &TenantId) -> IndexValue {
+    IndexValue::Text(tenant.as_str().to_string())
 }
 
 fn delivery_scope_index_key() -> IndexKey {
