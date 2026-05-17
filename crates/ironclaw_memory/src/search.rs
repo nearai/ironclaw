@@ -202,7 +202,6 @@ impl MemorySearchResult {
     }
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[derive(Debug, Clone)]
 pub(crate) struct RankedMemorySearchResult {
     pub(crate) path: MemoryDocumentPath,
@@ -210,7 +209,6 @@ pub(crate) struct RankedMemorySearchResult {
     pub(crate) rank: u32,
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) fn fuse_memory_search_results(
     full_text_results: Vec<RankedMemorySearchResult>,
     vector_results: Vec<RankedMemorySearchResult>,
@@ -326,7 +324,7 @@ pub(crate) fn escape_fts5_query(query: &str) -> Option<String> {
     }
 }
 
-#[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::path::MemoryDocumentPath;

@@ -4238,7 +4238,6 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_memory",
  "ironclaw_reborn_event_store",
- "libsql",
  "serde",
  "serde_json",
  "tempfile",

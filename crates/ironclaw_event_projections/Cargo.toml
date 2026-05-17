@@ -16,9 +16,8 @@ thiserror = "2"
 [dev-dependencies]
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
-ironclaw_memory = { path = "../ironclaw_memory", features = ["libsql"] }
+ironclaw_memory = { path = "../ironclaw_memory" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
-libsql = { version = "0.6", default-features = false, features = ["core", "replication", "remote", "tls"] }
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }
