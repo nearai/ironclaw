@@ -46,7 +46,8 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, RootFilesystem, ScopedFilesystem,
+    CasExpectation, ContentType, Entry, FilesystemError, IndexKey, IndexKind, IndexName, IndexSpec,
+    IndexValue, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
     AgentId, HostApiError, MissionId, ProjectId, ResourceScope, ScopedPath, SecretHandle, ThreadId,
@@ -249,7 +250,11 @@ where
     async fn write_secret(&self, secret: &StoredSecret) -> Result<(), SecretStoreError> {
         let path = secret_path(&secret.scope, &secret.handle)?;
         let body = serialize_secret(secret)?;
-        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        let entry = tag_entry_with_tenant(
+            Entry::bytes(body).with_content_type(ContentType::json()),
+            &secret.scope,
+        );
+        ensure_tenant_id_index_secret(&self.filesystem, &secret_owner_root(&secret.scope)?).await?;
         self.filesystem
             .put(&path, entry, CasExpectation::Any)
             .await
@@ -260,7 +265,11 @@ where
     async fn write_lease(&self, lease: &StoredLease) -> Result<(), SecretStoreError> {
         let path = lease_path(&lease.scope, lease.lease_id)?;
         let body = serialize_secret(lease)?;
-        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        let entry = tag_entry_with_tenant(
+            Entry::bytes(body).with_content_type(ContentType::json()),
+            &lease.scope,
+        );
+        ensure_tenant_id_index_secret(&self.filesystem, &lease_root(&lease.scope)?).await?;
         self.filesystem
             .put(&path, entry, CasExpectation::Any)
             .await
@@ -420,7 +429,10 @@ where
                         // raced us we'll observe Expired on the next read
                         // and return the same error to the caller.
                         let body = serialize_secret(&lease)?;
-                        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+                        let entry = tag_entry_with_tenant(
+                            Entry::bytes(body).with_content_type(ContentType::json()),
+                            &lease.scope,
+                        );
                         match put_with_version_fallback(
                             &*self.filesystem,
                             &path,
@@ -453,7 +465,10 @@ where
 
             lease.status = SecretLeaseStatus::Consumed;
             let body = serialize_secret(&lease)?;
-            let entry = Entry::bytes(body).with_content_type(ContentType::json());
+            let entry = tag_entry_with_tenant(
+                Entry::bytes(body).with_content_type(ContentType::json()),
+                &lease.scope,
+            );
             match put_with_version_fallback(
                 &*self.filesystem,
                 &path,
@@ -529,7 +544,10 @@ where
                 lease.status = SecretLeaseStatus::Revoked;
             }
             let body = serialize_secret(&lease)?;
-            let entry = Entry::bytes(body).with_content_type(ContentType::json());
+            let entry = tag_entry_with_tenant(
+                Entry::bytes(body).with_content_type(ContentType::json()),
+                &lease.scope,
+            );
             match put_with_version_fallback(
                 &*self.filesystem,
                 &path,
@@ -681,7 +699,12 @@ where
         };
         let path = credential_account_path(&account.scope, &account.id)?;
         let body = serialize_credential(&stored)?;
-        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        let entry = tag_entry_with_tenant(
+            Entry::bytes(body).with_content_type(ContentType::json()),
+            &account.scope,
+        );
+        ensure_tenant_id_index_broker(&self.filesystem, &credential_account_root(&account.scope)?)
+            .await?;
         self.filesystem
             .put(&path, entry, CasExpectation::Any)
             .await
@@ -779,7 +802,12 @@ where
         };
         let path = credential_session_path(session.scope(), session.correlation_id())?;
         let body = serialize_credential(&stored)?;
-        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        let entry = tag_entry_with_tenant(
+            Entry::bytes(body).with_content_type(ContentType::json()),
+            session.scope(),
+        );
+        ensure_tenant_id_index_broker(&self.filesystem, &credential_session_root(session.scope())?)
+            .await?;
         self.filesystem
             .put(&path, entry, CasExpectation::Any)
             .await
@@ -874,7 +902,10 @@ where
             ensure_stored_session_usable(&wire, stored.uses, session_id, now)?;
             stored.uses += 1;
             let body = serialize_credential(&stored)?;
-            let entry = Entry::bytes(body).with_content_type(ContentType::json());
+            let entry = tag_entry_with_tenant(
+                Entry::bytes(body).with_content_type(ContentType::json()),
+                scope,
+            );
             match put_with_version_fallback(
                 &*self.filesystem,
                 &path,
@@ -930,6 +961,21 @@ fn lease_path(
 
 fn lease_root(scope: &ResourceScope) -> Result<ScopedPath, SecretStoreError> {
     scoped_path_secret(&format!("{}/secret-leases", secret_owner_alias(scope)))
+}
+
+/// Alias-relative root prefix for the `secrets/` subdirectory under a
+/// given owner scope. Used as the `prefix` argument to
+/// [`ScopedFilesystem::ensure_index`] so the `tenant_id` projection is
+/// declared on the same subtree the corresponding writes land in.
+fn secret_owner_root(scope: &ResourceScope) -> Result<ScopedPath, SecretStoreError> {
+    scoped_path_secret(&format!("{}/secrets", secret_owner_alias(scope)))
+}
+
+fn credential_session_root(scope: &ResourceScope) -> Result<ScopedPath, CredentialBrokerError> {
+    scoped_path_broker(&format!(
+        "{}/credential-sessions",
+        secret_owner_alias(scope)
+    ))
 }
 
 fn credential_account_path(
@@ -1252,6 +1298,86 @@ where
 
 fn is_not_found(error: &FilesystemError) -> bool {
     matches!(error, FilesystemError::NotFound { .. })
+}
+
+// ── Indexed projections (defense in depth) ─────────────────────
+//
+// Path-prefix scoping via the caller's [`MountView`] is the primary
+// tenant-isolation boundary; the indexed `tenant_id` projection here is
+// belt-and-suspenders so an admin-tier query can filter explicitly by
+// tenant, and a path-rewriting bug surfaces as a query-time mismatch
+// rather than silent cross-tenant leakage. See
+// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+
+/// Index key under which the tenant id is projected on every secret /
+/// credential record write. Production secrets/credentials never read by
+/// this key directly — path-prefix scoping handles routing — but it is
+/// available for admin-tier queries and as a defense-in-depth shield
+/// against MountView misconfiguration.
+fn index_key_tenant_id() -> IndexKey {
+    IndexKey::new("tenant_id").unwrap_or_else(|_| {
+        unreachable!("secrets index key `tenant_id` must be a simple identifier")
+    })
+}
+
+fn index_name_secrets_tenant() -> IndexName {
+    IndexName::new("secrets_by_tenant").unwrap_or_else(|_| {
+        unreachable!("secrets index name `secrets_by_tenant` must be a simple identifier")
+    })
+}
+
+/// Decorate `entry` with a `tenant_id` indexed projection scoped to
+/// `scope.tenant_id`. Callers compose this with the existing
+/// `with_content_type` decoration so encrypted-at-rest bodies still
+/// carry the defense-in-depth tenant axis.
+fn tag_entry_with_tenant(entry: Entry, scope: &ResourceScope) -> Entry {
+    entry.with_indexed(
+        index_key_tenant_id(),
+        IndexValue::Text(scope.tenant_id.as_str().to_string()),
+    )
+}
+
+/// Declare the `tenant_id` exact-equality index on `prefix`, tolerating
+/// backends that don't materialize indexes (LocalFilesystem). Idempotent
+/// across the mount lifetime; mirrors the engine/processes stores'
+/// `ensure_*_index` shape so byte-only backends degrade gracefully
+/// instead of failing closed.
+async fn ensure_tenant_id_index_secret<F>(
+    filesystem: &ScopedFilesystem<F>,
+    prefix: &ScopedPath,
+) -> Result<(), SecretStoreError>
+where
+    F: RootFilesystem,
+{
+    let spec = IndexSpec::new(
+        index_name_secrets_tenant(),
+        vec![index_key_tenant_id()],
+        IndexKind::Exact,
+    );
+    match filesystem.ensure_index(prefix, &spec).await {
+        Ok(()) => Ok(()),
+        Err(FilesystemError::Unsupported { .. }) => Ok(()),
+        Err(error) => Err(fs_to_secret_store_error(error)),
+    }
+}
+
+async fn ensure_tenant_id_index_broker<F>(
+    filesystem: &ScopedFilesystem<F>,
+    prefix: &ScopedPath,
+) -> Result<(), CredentialBrokerError>
+where
+    F: RootFilesystem,
+{
+    let spec = IndexSpec::new(
+        index_name_secrets_tenant(),
+        vec![index_key_tenant_id()],
+        IndexKind::Exact,
+    );
+    match filesystem.ensure_index(prefix, &spec).await {
+        Ok(()) => Ok(()),
+        Err(FilesystemError::Unsupported { .. }) => Ok(()),
+        Err(error) => Err(fs_to_broker_error(error)),
+    }
 }
 
 // Light scrubber: drops anything that looks like an absolute host path. The
@@ -2019,6 +2145,79 @@ mod tests {
             "cross-invocation-secret",
             "AAD must bind owner scope only — cross-invocation reads under \
              the same (tenant, user, agent, project) must succeed",
+        );
+    }
+
+    /// Defense-in-depth regression for the tenant-isolation indexed
+    /// projection (see
+    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
+    /// every secret/lease/account/session write decorates its `Entry`
+    /// with a `tenant_id` projection so an admin-tier query can filter
+    /// explicitly by tenant and a path-rewriting bug surfaces as a
+    /// query-time mismatch.
+    ///
+    /// Writes a secret under tenant A's scope, then issues a raw
+    /// `RootFilesystem::query` against the secrets prefix with
+    /// `Filter::Eq { key: "tenant_id", value: <tenant-a> }` and asserts
+    /// the record is returned. Querying for a different tenant must
+    /// return zero rows.
+    #[tokio::test]
+    async fn filesystem_secret_store_writes_tenant_id_indexed_projection() {
+        use ironclaw_filesystem::{Filter, IndexKey, IndexValue, Page};
+
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = default_scoped_fs(Arc::clone(&backend));
+        let store = FilesystemSecretStore::new(Arc::clone(&scoped), test_crypto());
+        let scope = sample_scope("tenant-a", "alice");
+        let handle = SecretHandle::new("api_key").unwrap();
+        store
+            .put(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("indexed-projection-secret"),
+            )
+            .await
+            .unwrap();
+
+        // Resolve the alias-relative secrets prefix to the backing
+        // VirtualPath via the same MountView the store uses so the raw
+        // query targets exactly the bytes the backend stored.
+        let prefix = secret_owner_root(&scope).unwrap();
+        let virtual_prefix = scoped.mounts().resolve(&prefix).unwrap();
+        let tenant_key = IndexKey::new("tenant_id").unwrap();
+
+        let hit = backend
+            .query(
+                &virtual_prefix,
+                &Filter::Eq {
+                    key: tenant_key.clone(),
+                    value: IndexValue::Text(scope.tenant_id.as_str().to_string()),
+                },
+                Page::new(0, Page::MAX_LIMIT),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            hit.len(),
+            1,
+            "tenant_id projection must surface the secret via Filter::Eq",
+        );
+
+        let miss = backend
+            .query(
+                &virtual_prefix,
+                &Filter::Eq {
+                    key: tenant_key,
+                    value: IndexValue::Text("tenant-b".to_string()),
+                },
+                Page::new(0, Page::MAX_LIMIT),
+            )
+            .await
+            .unwrap();
+        assert!(
+            miss.is_empty(),
+            "tenant_id projection must NOT surface tenant-a's secret under tenant-b query; got {} rows",
+            miss.len(),
         );
     }
 }
