@@ -4827,6 +4827,7 @@ dependencies = [
  "async-trait",
  "deadpool-postgres",
  "futures",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
  "libsql",
  "serde",

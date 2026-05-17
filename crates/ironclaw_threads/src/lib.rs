@@ -1,14 +1,16 @@
 //! Canonical session thread and transcript contracts for IronClaw Reborn.
 //!
 //! This crate owns the contract-first boundary for canonical Reborn threads and
-//! transcript history. It provides an in-memory service for semantic tests and
-//! feature-gated PostgreSQL/libSQL services for durable Reborn composition.
+//! transcript history. It provides an in-memory service for semantic tests, a
+//! filesystem-backed durable service routed through `ironclaw_filesystem`, and
+//! feature-gated PostgreSQL/libSQL services for legacy Reborn composition.
 #![warn(unreachable_pub)]
 
 mod contract;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod db;
 mod error;
+mod filesystem_service;
 mod identifiers;
 mod in_memory;
 mod service;
@@ -17,6 +19,7 @@ mod service;
 pub use db::LibSqlSessionThreadService;
 #[cfg(feature = "postgres")]
 pub use db::PostgresSessionThreadService;
+pub use filesystem_service::FilesystemSessionThreadService;
 
 pub use contract::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,

@@ -107,6 +107,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/outbound",
     "/run-state",
     "/approvals",
+    "/threads",
     "/engine",
 ];
 
