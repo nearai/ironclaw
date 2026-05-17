@@ -245,7 +245,7 @@ impl DurableLoopHostMilestoneSink {
             // Checkpoint durability is owned by LoopCheckpointPort::write_checkpoint; the
             // CheckpointCreated runtime-event milestone is emitted there with the authoritative
             // durable payload. The CheckpointWritten progress event is an advisory echo only —
-            // emitting it here would create a duplicate weaker record. WS-10 resume must rely
+            // emitting it here would create a duplicate weaker record. Resume must rely
             // on the checkpoint-port milestone, NOT this progress echo.
             // Similarly, PromptBundleBuilt is emitted by LoopPromptPort with richer context.
             LoopHostMilestoneKind::IterationStarted { .. }

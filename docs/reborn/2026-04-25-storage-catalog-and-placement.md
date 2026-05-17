@@ -1,6 +1,13 @@
 # Reborn Storage Catalog and Placement Plan
 
-**Status:** Implementation planning note
+**Status:** Superseded on 2026-05-14 by
+`docs/reborn/2026-05-14-universal-fs-dispatch.md`. The
+"bytes mount; typed stays typed" boundary documented below was correct
+only while the filesystem trait was bytes-only. The 2026-05-14 ADR widens
+`RootFilesystem` to carry typed records, CAS, queries, and indexes
+natively, so structured stores (secrets, leases, processes, events) now
+*do* run on the same mount fabric as files. Retained below for historical
+context.
 **Date:** 2026-04-25
 **Related contracts:** `contracts/filesystem.md`, `contracts/secrets.md`, `contracts/processes.md`, `contracts/events-projections.md`
 

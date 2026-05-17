@@ -4,6 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use ironclaw_host_api::{CapabilityId, ExtensionId, RuntimeKind, ThreadId};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -593,6 +594,12 @@ pub trait LoopRunInfoPort: Send + Sync {
 pub struct LoopContextRequest {
     pub after: Option<LoopInputCursor>,
     pub limit: usize,
+    #[serde(default = "default_prompt_mode")]
+    pub mode: PromptMode,
+}
+
+fn default_prompt_mode() -> PromptMode {
+    PromptMode::TextOnly
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -611,8 +618,6 @@ pub struct LoopContextMessage {
     /// `None` means "summary-only entry; prompt port MUST NOT resolve content —
     /// use `safe_summary` verbatim instead." Mirrors the
     /// `SkillTrustLevel::Installed` carrying `prompt_content: None` pattern.
-    /// See `docs/reborn/agent-loop-briefs/prompt-context-assembly.md` §3.2 for
-    /// the upstream invariant this enforces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_ref: Option<LoopMessageRef>,
     pub role: String,
@@ -1062,11 +1067,10 @@ pub struct VisibleCapabilitySurface {
 
 /// Concurrency hint for a capability surfaced to an agent loop driver.
 ///
-/// Derived at the adapter boundary in WS-9 (`HostRuntimeLoopCapabilityPort::visible_capabilities`)
-/// from the underlying `CapabilityDescriptor.effects` Vec. The lower-layer
-/// `CapabilityDescriptor` is NOT modified; `effects` remains the source of
-/// truth and the hint is a computed projection. See WS-9 §3.2a for the
-/// per-`EffectKind` mapping table.
+/// Derived at the adapter boundary from the underlying
+/// `CapabilityDescriptor.effects` Vec. The lower-layer `CapabilityDescriptor`
+/// is NOT modified; `effects` remains the source of truth and the hint is a
+/// computed projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConcurrencyHint {
@@ -1146,7 +1150,7 @@ pub struct CapabilityResultMessage {
     pub safe_summary: String,
     /// Host hint that this completed capability result should end the loop
     /// naturally after the current batch. Defaults to false for compatibility
-    /// with pre-WS-6 hosts.
+    /// with older hosts.
     #[serde(default)]
     pub terminate_hint: bool,
 }
@@ -1427,8 +1431,7 @@ pub struct LoadedCheckpointPayload {
 /// [`LoopCheckpointPort::checkpoint`] with the resulting state ref.
 ///
 /// The two-step write keeps byte-storage and metadata-write responsibilities
-/// cleanly split. See `docs/reborn/agent-loop-briefs/state-and-checkpoints.md`
-/// §2 for the rationale and WS-10 for the read-side counterpart.
+/// cleanly split.
 ///
 /// `kind` is required so adapters that bridge to
 /// `CheckpointStateStore::put_checkpoint_state` can persist the correct kind
@@ -1483,9 +1486,9 @@ pub trait LoopCheckpointPort: Send + Sync {
     /// can reference. The default impl fails closed; concrete impls live in
     /// `ironclaw_loop_support` and wrap the host's `CheckpointStateStore`.
     ///
-    /// The executor's `checkpoint(...)` helper (WS-6 §3.4) calls this method
-    /// before invoking `LoopCheckpointPort::checkpoint(...)` so the metadata
-    /// write references a payload that's already durably stored.
+    /// The executor's checkpoint helper calls this method before invoking
+    /// `LoopCheckpointPort::checkpoint(...)` so the metadata write references
+    /// a payload that's already durably stored.
     async fn stage_checkpoint_payload(
         &self,
         _request: StageCheckpointPayloadRequest,
@@ -1607,6 +1610,34 @@ pub trait LoopProgressPort: Send + Sync {
     async fn emit_loop_progress(&self, event: LoopProgressEvent) -> Result<(), AgentLoopHostError>;
 }
 
+/// Per-run cancellation observation point.
+///
+/// The canonical executor consults this between strategy calls. The method is
+/// intentionally synchronous and non-blocking: implementations should expose a
+/// cheap snapshot, usually backed by an atomic flag plus immutable signal data.
+///
+/// **Cancellation is cooperative and boundary-observation only — it is not
+/// preempted across in-flight host calls.** `build_prompt_bundle`,
+/// `stream_model`, and `invoke_capability` are awaited to completion before
+/// the next observation point is reached. A stuck model stream or long-running
+/// capability call will not observe cancellation until control returns to the
+/// executor. Implementations of those host methods that need finer-grained
+/// cancellation must integrate their own abort signal internally; this port
+/// only covers the between-call boundaries that the executor controls.
+pub trait LoopCancellationPort: Send + Sync {
+    /// Returns `Some(signal)` once cancellation has been requested for this run.
+    ///
+    /// Implementations must be idempotent across reads. After the request fires,
+    /// repeated calls must keep returning the same signal.
+    fn observe_cancellation(&self) -> Option<LoopCancellationSignal>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopCancellationSignal {
+    pub reason_kind: LoopCancelReasonKind,
+    pub requested_at: DateTime<Utc>,
+}
+
 pub trait AgentLoopDriverHost:
     LoopRunInfoPort
     + LoopContextPort
@@ -1617,6 +1648,7 @@ pub trait AgentLoopDriverHost:
     + LoopTranscriptPort
     + LoopCheckpointPort
     + LoopProgressPort
+    + LoopCancellationPort
     + Send
     + Sync
 {
@@ -1632,6 +1664,7 @@ impl<T> AgentLoopDriverHost for T where
         + LoopTranscriptPort
         + LoopCheckpointPort
         + LoopProgressPort
+        + LoopCancellationPort
         + Send
         + Sync
 {

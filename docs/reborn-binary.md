@@ -198,7 +198,8 @@ Expected fields include:
 - `profile`
 - `v1_state: not-used`
 - `driver_registry: initialized`
-- `runtime_shell: initialized`
+- `local_runtime_shell_readiness: ready`
+- `planned_default_profile: available`
 
 ### `skills list`
 

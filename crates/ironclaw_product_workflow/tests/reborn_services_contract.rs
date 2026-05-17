@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductOutboundEnvelope, ProjectionStream, ProjectionSubscriptionRequest,
     ProtocolAuthFailure,
@@ -15,12 +15,20 @@ use ironclaw_product_workflow::{
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiInboundValidationCode, WebUiResolveGateRequest, WebUiSendMessageRequest,
 };
-use ironclaw_threads::{InMemorySessionThreadService, MessageStatus, SessionThreadService};
+use ironclaw_threads::{
+    AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
+    AppendAssistantDraftRequest, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
+    InMemorySessionThreadService, LoadContextWindowRequest, MessageContent, MessageStatus,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    UpdateAssistantDraftRequest,
+};
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
-    ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError, TurnId,
-    TurnRunId, TurnRunState, TurnStatus,
+    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
+    GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
+    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator,
+    TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
 };
 use serde_json::json;
 
@@ -37,12 +45,36 @@ fn run_id_string() -> String {
     "3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18".to_string()
 }
 
+/// Establish thread ownership for `caller` under `thread_id` so subsequent
+/// `cancel_run` / `resolve_gate` calls pass the `assert_thread_owned_by`
+/// check. Goes through `submit_turn` because that is the only public path
+/// that calls `ensure_thread` with the actor pinned as `owner_user_id`.
+async fn setup_owned_thread(
+    services: &RebornServices,
+    owner: WebUiAuthenticatedCaller,
+    thread_id: &str,
+) {
+    services
+        .submit_turn(
+            owner,
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": format!("setup-{thread_id}"),
+                "thread_id": thread_id,
+                "content": "seed",
+            }))
+            .expect("setup request"),
+        )
+        .await
+        .expect("setup submit succeeds");
+}
+
 #[derive(Default)]
 struct FakeTurnCoordinator {
     submissions: Mutex<Vec<SubmitTurnRequest>>,
     cancellations: Mutex<Vec<CancelRunRequest>>,
     resumptions: Mutex<Vec<ResumeTurnRequest>>,
     submit_error: Mutex<Option<TurnError>>,
+    parked_gate_ref: Mutex<Option<GateRef>>,
 }
 
 impl FakeTurnCoordinator {
@@ -51,6 +83,14 @@ impl FakeTurnCoordinator {
             submit_error: Mutex::new(Some(error)),
             ..Self::default()
         }
+    }
+
+    /// Programs `get_run_state` to return this gate as the run's currently
+    /// parked gate. Needed by tests that exercise `resolve_gate` denied/
+    /// cancelled paths now that `RebornServices` verifies the run is parked
+    /// on the supplied gate before issuing cancellation.
+    fn set_parked_gate(&self, gate_ref: GateRef) {
+        *self.parked_gate_ref.lock().expect("lock") = Some(gate_ref);
     }
 
     fn submission_count(&self) -> usize {
@@ -120,6 +160,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
     }
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        let gate_ref = self.parked_gate_ref.lock().expect("lock").clone();
         Ok(TurnRunState {
             scope: request.scope,
             turn_id: TurnId::new(),
@@ -134,7 +175,7 @@ impl TurnCoordinator for FakeTurnCoordinator {
             resolved_model_route: None,
             received_at: Utc::now(),
             checkpoint_id: None,
-            gate_ref: None,
+            gate_ref,
             failure: None,
             event_cursor: EventCursor(17),
         })
@@ -152,6 +193,111 @@ impl ProjectionStream for AuthFailureProjectionStream {
         Err(ProductAdapterError::Authentication(
             ProtocolAuthFailure::SignatureMismatch,
         ))
+    }
+}
+
+/// Stub thread service whose `list_thread_history` always returns
+/// `ThreadScopeMismatch`. Used to lock in the contract that ownership probes
+/// remap that variant to NotFound, since the current backends happen to return
+/// `UnknownThread` for the same condition. All other methods panic — none of
+/// the cancel_run / resolve_gate paths under test should reach them.
+struct ScopeMismatchThreadStub;
+
+#[async_trait]
+impl SessionThreadService for ScopeMismatchThreadStub {
+    async fn list_thread_history(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<ThreadHistory, SessionThreadError> {
+        Err(SessionThreadError::ThreadScopeMismatch {
+            thread_id: request.thread_id,
+        })
+    }
+
+    async fn ensure_thread(
+        &self,
+        _request: EnsureThreadRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        panic!("ScopeMismatchThreadStub::ensure_thread should not be reached")
+    }
+
+    async fn accept_inbound_message(
+        &self,
+        _request: AcceptInboundMessageRequest,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        panic!("ScopeMismatchThreadStub::accept_inbound_message should not be reached")
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        _request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        panic!("ScopeMismatchThreadStub::replay_accepted_inbound_message should not be reached")
+    }
+
+    async fn mark_message_submitted(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _turn_id: String,
+        _turn_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("ScopeMismatchThreadStub::mark_message_submitted should not be reached")
+    }
+
+    async fn mark_message_deferred_busy(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("ScopeMismatchThreadStub::mark_message_deferred_busy should not be reached")
+    }
+
+    async fn append_assistant_draft(
+        &self,
+        _request: AppendAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("ScopeMismatchThreadStub::append_assistant_draft should not be reached")
+    }
+
+    async fn update_assistant_draft(
+        &self,
+        _request: UpdateAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("ScopeMismatchThreadStub::update_assistant_draft should not be reached")
+    }
+
+    async fn finalize_assistant_message(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _content: MessageContent,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("ScopeMismatchThreadStub::finalize_assistant_message should not be reached")
+    }
+
+    async fn redact_message(
+        &self,
+        _request: RedactMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("ScopeMismatchThreadStub::redact_message should not be reached")
+    }
+
+    async fn load_context_window(
+        &self,
+        _request: LoadContextWindowRequest,
+    ) -> Result<ContextWindow, SessionThreadError> {
+        panic!("ScopeMismatchThreadStub::load_context_window should not be reached")
+    }
+
+    async fn create_summary_artifact(
+        &self,
+        _request: CreateSummaryArtifactRequest,
+    ) -> Result<SummaryArtifact, SessionThreadError> {
+        panic!("ScopeMismatchThreadStub::create_summary_artifact should not be reached")
     }
 }
 
@@ -376,6 +522,7 @@ async fn cancel_run_uses_turn_facade_and_stable_response() {
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
+    setup_owned_thread(&services, caller(), "thread-alpha").await;
 
     let response = services
         .cancel_run(
@@ -404,6 +551,7 @@ async fn approved_gate_resolution_resumes_turn() {
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
+    setup_owned_thread(&services, caller(), "thread-alpha").await;
 
     let response = services
         .resolve_gate(
@@ -468,6 +616,8 @@ async fn denied_gate_resolution_cancels_run() {
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
+    setup_owned_thread(&services, caller(), "thread-alpha").await;
+    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
 
     let response = services
         .resolve_gate(
@@ -486,6 +636,208 @@ async fn denied_gate_resolution_cancels_run() {
 
     assert!(matches!(response, RebornResolveGateResponse::Cancelled(_)));
     assert_eq!(coordinator.cancellation_count(), 1);
+}
+
+// Regression: cancel_run must reject when the authenticated user does not own
+// the thread. TurnScope only carries (tenant, agent, project, thread_id), so
+// without this check any caller sharing an agent scope could cancel another
+// user's run by guessing the run_id.
+#[tokio::test]
+async fn cancel_run_rejects_cross_user_access() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    let alice = caller();
+    setup_owned_thread(&services, alice.clone(), "thread-alice").await;
+
+    // Bob shares Alice's (tenant, agent, project) scope and guesses her thread.
+    let bob = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("user-bob").expect("user"),
+        alice.agent_id.clone(),
+        alice.project_id.clone(),
+    );
+
+    let err = services
+        .cancel_run(
+            bob,
+            serde_json::from_value::<WebUiCancelRunRequest>(json!({
+                "client_action_id": "cancel-cross",
+                "thread_id": "thread-alice",
+                "run_id": run_id_string(),
+                "reason": "user_requested"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("cross-user cancel must be rejected");
+
+    // 404 rather than 403 so the existence of Alice's thread is not leaked.
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+    assert_eq!(
+        coordinator.cancellation_count(),
+        0,
+        "turn coordinator must NOT be called for cross-user cancel"
+    );
+}
+
+// Regression: the ownership probe must collapse `ThreadScopeMismatch` and
+// `UnknownThread` into the same NotFound response. Current backends return
+// `UnknownThread` for `list_thread_history` scope mismatches, but the contract
+// also permits `ThreadScopeMismatch`; if a future backend change starts
+// emitting it, the default `map_thread_error` path would surface 409 Conflict
+// instead, signalling to attackers that the thread exists under a different
+// owner. Lock in the explicit remap by driving cancel_run through a stub that
+// always returns `ThreadScopeMismatch`.
+#[tokio::test]
+async fn cancel_run_remaps_thread_scope_mismatch_to_not_found() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(Arc::new(ScopeMismatchThreadStub), coordinator.clone());
+
+    let err = services
+        .cancel_run(
+            caller(),
+            serde_json::from_value::<WebUiCancelRunRequest>(json!({
+                "client_action_id": "cancel-scope-mismatch",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "reason": "user_requested"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("scope mismatch must surface as NotFound");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+    assert_eq!(
+        coordinator.cancellation_count(),
+        0,
+        "turn coordinator must NOT be called when ownership probe fails"
+    );
+}
+
+// Regression: resolve_gate must reject when the authenticated user does not
+// own the thread, for both the approve→resume path and the deny/cancel path.
+#[tokio::test]
+async fn resolve_gate_rejects_cross_user_access() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    let alice = caller();
+    setup_owned_thread(&services, alice.clone(), "thread-alice").await;
+    coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
+
+    let bob = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("user-bob").expect("user"),
+        alice.agent_id.clone(),
+        alice.project_id.clone(),
+    );
+
+    let err = services
+        .resolve_gate(
+            bob,
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-cross",
+                "thread_id": "thread-alice",
+                "run_id": run_id_string(),
+                "gate_ref": "gate-alpha",
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("cross-user gate resolution must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+    assert_eq!(
+        coordinator.cancellation_count(),
+        0,
+        "turn coordinator must NOT be called for cross-user resolve"
+    );
+}
+
+// Regression: cancel_run is not gate-aware, so without a parked-on-gate check
+// a denied/cancelled resolution carrying a stale or attacker-supplied gate_ref
+// would cancel any non-terminal run with the matching run_id. Mismatched gate
+// must produce Conflict and cancel_run must never be invoked.
+#[tokio::test]
+async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    setup_owned_thread(&services, caller(), "thread-alpha").await;
+    // The run is parked on `gate-current`, but the browser supplies `gate-stale`.
+    coordinator.set_parked_gate(GateRef::new("gate-current").expect("gate"));
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-stale",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate-stale",
+                "resolution": "denied"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("stale gate_ref must produce Conflict, not silent cancel");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.status_code, 409);
+    assert_eq!(
+        coordinator.cancellation_count(),
+        0,
+        "cancel_run must NOT be called for stale gate_ref"
+    );
+}
+
+// Regression: `Approved { always: true }` requests a persistent approval which
+// this facade cannot honor (no approval-policy port). Reject as Unavailable
+// instead of silently downgrading to one-shot.
+#[tokio::test]
+async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    setup_owned_thread(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .resolve_gate(
+            caller(),
+            serde_json::from_value::<WebUiResolveGateRequest>(json!({
+                "client_action_id": "gate-always",
+                "thread_id": "thread-alpha",
+                "run_id": run_id_string(),
+                "gate_ref": "gate-alpha",
+                "resolution": "approved",
+                "always": true,
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("persistent approval must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.status_code, 503);
+    assert_eq!(
+        coordinator.resumption_count(),
+        0,
+        "resume_turn must NOT be called for unsupported persistent approval"
+    );
 }
 
 #[test]

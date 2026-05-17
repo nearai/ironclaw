@@ -74,9 +74,10 @@ pub use run_profile::{
     LoopCheckpointStateRef, LoopDriverId, MemoryPromptContextRequest, MemoryPromptContextService,
     ModelProfileId, PrivilegedRunProfileDimension, RedactedRunProfileProvenance,
     RedactedRunProfileSource, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
-    RunClassId, RunProfileFingerprint, RunProfileRequestAuthority, RunProfileResolutionError,
-    RunProfileResolutionRequest, RunProfileResolver, RunProfileSourceLayer, RunProfileSourceRef,
-    RunnerPoolId, RuntimeProfileConstraints, SchedulingClass, SteeringPolicy,
+    RunClassId, RunProfileFingerprint, RunProfileRegistryError, RunProfileRequestAuthority,
+    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver,
+    RunProfileSourceLayer, RunProfileSourceRef, RunnerPoolId, RuntimeProfileConstraints,
+    SchedulingClass, SteeringPolicy,
 };
 pub use scope::{TurnActor, TurnScope};
 pub use status::{

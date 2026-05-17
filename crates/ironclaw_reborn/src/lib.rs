@@ -11,7 +11,9 @@ pub mod loop_exit_applier;
 mod milestone_events;
 mod model_routes;
 mod planned_driver;
+mod planned_driver_factory;
 pub mod production_readiness;
+mod runtime;
 mod text_loop_driver;
 pub mod turn_runner;
 
@@ -21,6 +23,7 @@ mod model_gateway;
 pub mod secrets;
 
 pub use app_loop_family::build_loop_family_registry;
+pub use ironclaw_loop_support::HostRuntimeLoopCapabilityPortFactory as HostRuntimeCapabilityPortFactory;
 pub use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileFilter,
     CapabilitySurfaceProfileResolver, HostRuntimeLoopCapabilityPort, LoopCapabilityInputResolver,
@@ -28,9 +31,9 @@ pub use ironclaw_loop_support::{
 };
 pub use loop_driver_host::{
     DEFAULT_HOOK_CAPABILITY_INPUT_MAX_BYTES, HookCapabilityInputResolverAdapter,
-    HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, NoExtraLoopInputPort,
-    RebornLoopDriverHost, RebornLoopDriverHostError, RebornLoopDriverHostFactory,
-    RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
+    HostManagedLoopCheckpointPort, HostManagedLoopProgressPort, LoopCapabilityPortFactory,
+    NoExtraLoopInputPort, RebornLoopDriverHost, RebornLoopDriverHostError,
+    RebornLoopDriverHostFactory, RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
 };
 pub use milestone_events::{DurableLoopHostMilestoneScope, DurableLoopHostMilestoneSink};
 #[cfg(feature = "root-llm-provider")]
@@ -44,4 +47,20 @@ pub use model_routes::{
     ResolvedModelRouteSnapshot, StaticModelRouteResolver,
 };
 pub use planned_driver::PlannedDriver;
+pub use planned_driver_factory::{
+    DefaultPlannedDriverBuild, DefaultPlannedDriverRegistrationError, PLANNED_DEFAULT_PROFILE_ID,
+    PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID, PLANNED_DRIVER_CHECKPOINT_SCHEMA_VERSION,
+    PLANNED_DRIVER_DEFAULT_ID, PLANNED_DRIVER_DEFAULT_VERSION, default_planned_driver,
+    default_planned_run_profile_resolver, planned_default_profile_id,
+    planned_driver_checkpoint_schema_id, planned_driver_checkpoint_schema_version,
+    planned_driver_default_id, planned_driver_default_version, planned_driver_descriptor,
+    register_default_planned_driver, register_default_planned_profile,
+    register_default_text_only_driver,
+};
+pub use runtime::{
+    DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
+    ProductLiveRuntimeBuildError, ProductLiveRuntimeReadinessComponent,
+    RebornRuntimeLoopComposition, build_default_planned_runtime,
+    build_product_live_planned_runtime,
+};
 pub use text_loop_driver::{TextOnlyModelReplyDriver, TextOnlyModelReplyDriverConfig};

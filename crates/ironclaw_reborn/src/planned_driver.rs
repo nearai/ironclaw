@@ -36,6 +36,25 @@ pub struct PlannedDriver {
 }
 
 impl PlannedDriver {
+    pub fn from_family_with_descriptor(
+        family: Arc<LoopFamily>,
+        executor: Arc<CanonicalAgentLoopExecutor>,
+        descriptor: AgentLoopDriverDescriptor,
+    ) -> Result<Self, AgentLoopDriverError> {
+        if descriptor.checkpoint_schema_id.is_none()
+            || descriptor.checkpoint_schema_version.is_none()
+        {
+            return Err(AgentLoopDriverError::InvalidRequest {
+                reason: "planned driver descriptor must carry a checkpoint schema".to_string(),
+            });
+        }
+        Ok(Self {
+            descriptor,
+            family,
+            executor,
+        })
+    }
+
     pub fn from_family(
         driver_id: LoopDriverId,
         family: Arc<LoopFamily>,
@@ -290,14 +309,14 @@ mod tests {
             AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef,
             BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome,
             CapabilityInvocation, CapabilityOutcome, CheckpointSchemaId, FinalizeAssistantMessage,
-            LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCapabilityPort,
-            LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle,
-            LoopContextPort, LoopContextRequest, LoopDriverId, LoopInputAckToken, LoopInputBatch,
-            LoopInputCursor, LoopInputPort, LoopModelPort, LoopModelRequest, LoopModelResponse,
-            LoopProgressEvent, LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest,
-            LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopTranscriptPort,
-            StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
-            VisibleCapabilitySurface,
+            LoadCheckpointPayloadRequest, LoadedCheckpointPayload, LoopCancellationPort,
+            LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointPort, LoopCheckpointRequest,
+            LoopCheckpointStateRef, LoopContextBundle, LoopContextPort, LoopContextRequest,
+            LoopDriverId, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputPort,
+            LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent,
+            LoopProgressPort, LoopPromptBundle, LoopPromptBundleRequest, LoopPromptPort,
+            LoopRunContext, LoopRunInfoPort, LoopTranscriptPort, StageCheckpointPayloadRequest,
+            UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
         },
     };
     use std::sync::Mutex;
@@ -314,7 +333,9 @@ mod tests {
         );
         assert_eq!(
             descriptor.checkpoint_schema_id,
-            Some(CheckpointSchemaId::new(CHECKPOINT_SCHEMA_ID).expect("valid"))
+            Some(
+                CheckpointSchemaId::new(crate::PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID).expect("valid")
+            )
         );
         assert_eq!(
             descriptor.checkpoint_schema_version,
@@ -675,6 +696,12 @@ mod tests {
     impl LoopRunInfoPort for ResumePayloadHost {
         fn run_context(&self) -> &LoopRunContext {
             self.inner.run_context()
+        }
+    }
+
+    impl LoopCancellationPort for ResumePayloadHost {
+        fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
+            self.inner.observe_cancellation()
         }
     }
 

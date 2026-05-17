@@ -1843,6 +1843,28 @@ fn obligation_label(obligation: &Obligation) -> Option<&'static str> {
     }
 }
 
+/// **Finding H2 — compile-time regression guard.**
+///
+/// The original H2 claim was that `RuntimeSecretInjectionStore`'s
+/// `HashMap<_, RuntimeSecretInjectionEntry>` would bitwise-copy plaintext out
+/// of the old bucket array on rehash and free it without zeroization. On
+/// closer inspection that does *not* happen, because `SecretMaterial =
+/// secrecy::SecretBox<str>`: the rehash moves a `Box<str>` pointer plus the
+/// `Instant`, while the actual buffer stays at its original heap address
+/// until `SecretBox::drop` zeroizes it.
+///
+/// The protection is real but depends on the staged entry's `material` field
+/// being a `ZeroizeOnDrop` carrier. If it ever swaps to a non-zeroizing type
+/// (plain `String`, `Vec<u8>`, etc.), the bitwise-copy concern returns. This
+/// `const _: fn(...) = ...` references the field through a
+/// `ZeroizeOnDrop`-bounded helper, so the swap is rejected at compile time
+/// rather than only failing a test run. The function is never called — only
+/// type-checked.
+const _: fn(&RuntimeSecretInjectionEntry) = |entry| {
+    fn require_zeroize_on_drop<T: ?Sized + secrecy::zeroize::ZeroizeOnDrop>(_: &T) {}
+    require_zeroize_on_drop(&entry.material);
+};
+
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, time::Duration};

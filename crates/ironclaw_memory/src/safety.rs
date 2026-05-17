@@ -150,7 +150,7 @@ impl Default for PromptProtectedPathRegistry {
     }
 }
 
-const DEFAULT_PROMPT_PROTECTED_PATHS: &[&str] = &[
+pub const DEFAULT_PROMPT_PROTECTED_PATHS: &[&str] = &[
     "SOUL.md",
     "AGENTS.md",
     "USER.md",

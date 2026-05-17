@@ -749,7 +749,81 @@ fn reborn_runtime_http_egress_has_single_network_boundary() {
     );
 }
 
+#[test]
+fn reborn_product_api_crates_do_not_bind_http_ingress() {
+    let forbidden = [
+        ForbiddenRebornIngressUse {
+            pattern: "tokio::net::TcpListener::bind",
+            reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "std::net::TcpListener::bind",
+            reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "TcpListener::bind",
+            reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "axum::serve",
+            reason: "Reborn product/API crates must not own server lifecycle",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "hyper::Server",
+            reason: "Reborn product/API crates must not own server lifecycle",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "Server::bind",
+            reason: "Reborn product/API crates must not own server lifecycle",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "axum_server::bind",
+            reason: "Reborn product/API crates must not own server lifecycle",
+        },
+    ];
+
+    let root = workspace_root();
+    let reborn_product_api_src_roots = [
+        "crates/ironclaw_reborn/src",
+        "crates/ironclaw_reborn_cli/src",
+        "crates/ironclaw_reborn_composition/src",
+        "crates/ironclaw_reborn_config/src",
+        "crates/ironclaw_reborn_event_store/src",
+        "crates/ironclaw_reborn_api/src",
+        "crates/ironclaw_product_adapters/src",
+        "crates/ironclaw_product_adapter_registry/src",
+        "crates/ironclaw_product_workflow/src",
+        "crates/ironclaw_wasm_product_adapters/src",
+        "crates/ironclaw_telegram_v2_adapter/src",
+        "crates/ironclaw_outbound/src",
+        "crates/ironclaw_conversations/src",
+        "crates/ironclaw_turns/src",
+        "crates/ironclaw_threads/src",
+        "crates/ironclaw_loop_support/src",
+    ];
+
+    let mut violations = Vec::new();
+    for relative_root in reborn_product_api_src_roots {
+        let dir = root.join(relative_root);
+        if !dir.exists() {
+            continue;
+        }
+        collect_forbidden_reborn_ingress_uses(&dir, &root, &forbidden, &mut violations);
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Reborn HTTP ingress must be host-owned; product/API crates may expose descriptors or route fragments but must not bind/serve listeners:\n{}",
+        violations.join("\n")
+    );
+}
+
 struct ForbiddenRuntimeNetworkUse {
+    pattern: &'static str,
+    reason: &'static str,
+}
+
+struct ForbiddenRebornIngressUse {
     pattern: &'static str,
     reason: &'static str,
 }
@@ -806,7 +880,8 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
-            // Registry is a contracts-only Reborn crate. Runtime/dispatcher/engine
+            // Registry projects ProductAdapter host-api sections from the single
+            // Extension Manifest v2 and owns activation state. Runtime/dispatcher/engine
             // crates would invert ownership, secrets crates could expose raw
             // material instead of opaque handles, and v1 WASM/channel crates
             // would bypass the Reborn registry boundary.
@@ -820,7 +895,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_engine",
                 "ironclaw_events",
-                "ironclaw_extensions",
                 "ironclaw_filesystem",
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
@@ -1575,6 +1649,43 @@ fn collect_forbidden_runtime_network_uses(
         let path = entry.path();
         if path.is_dir() {
             collect_forbidden_runtime_network_uses(&path, root, forbidden, violations);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        for (line_number, line) in contents.lines().enumerate() {
+            for rule in forbidden {
+                if line.contains(rule.pattern) {
+                    let relative = path.strip_prefix(root).unwrap_or(&path);
+                    violations.push(format!(
+                        "{}:{} contains `{}` ({})",
+                        relative.display(),
+                        line_number + 1,
+                        rule.pattern,
+                        rule.reason
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn collect_forbidden_reborn_ingress_uses(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    forbidden: &[ForbiddenRebornIngressUse],
+    violations: &mut Vec<String>,
+) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| panic!("failed to read dir entry: {error}"));
+        let path = entry.path();
+        if path.is_dir() {
+            collect_forbidden_reborn_ingress_uses(&path, root, forbidden, violations);
             continue;
         }
         if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {

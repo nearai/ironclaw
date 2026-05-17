@@ -437,14 +437,13 @@ pub enum LoopFailureKind {
     DriverBug,
     InterruptedUnexpectedly,
     /// Emitted by `DefaultStopConditionStrategy` when repetition or
-    /// repeated-same-error escapes fire. See agent-loop-skeleton.md §10.
+    /// repeated-same-error escapes fire.
     NoProgressDetected,
     /// Emitted when a `CapabilityOutcome::Denied` reaches the recovery path
     /// with no further retry possible. Distinct from `CapabilityProtocolError`
     /// so the no-progress detector can count repeated denials without
     /// conflating them with transport faults. Hook-induced denials (via the
-    /// middleware composition seam — see master doc §9.1 scenario A)
-    /// accumulate through this variant. See agent-loop-skeleton.md §9, §10.
+    /// middleware composition seam) accumulate through this variant.
     PolicyDenied,
 }
 

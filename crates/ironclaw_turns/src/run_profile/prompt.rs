@@ -245,6 +245,7 @@ where
             .load_loop_context(LoopContextRequest {
                 after: request.context_cursor.clone(),
                 limit: self.message_limit(&request),
+                mode: request.mode,
             })
             .await?;
         let identity_message_count = context.identity_messages.len() as u32;

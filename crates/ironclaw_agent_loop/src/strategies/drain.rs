@@ -26,9 +26,6 @@ fn assert_input_drain_strategy_object_safe(_: &dyn InputDrainStrategy) {}
 /// Returns `(drain_steering: true, drain_followup: true)` from the two hook
 /// points: steering before each model call, followup before otherwise
 /// stopping.
-///
-/// See `docs/reborn/agent-loop-skeleton.md` §6 ("The nine strategies" →
-/// `InputDrainStrategy`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultInputDrainStrategy;
 

@@ -48,8 +48,8 @@ use ironclaw_hooks::sink::{
 };
 use ironclaw_host_api::{AgentId, CapabilityId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
-    HostManagedModelError, HostManagedModelGateway, HostManagedModelRequest,
-    HostManagedModelResponse,
+    AlwaysAliveRunCancellationFactory, HostManagedModelError, HostManagedModelGateway,
+    HostManagedModelRequest, HostManagedModelResponse,
 };
 use ironclaw_reborn::{
     LoopCapabilityInputResolver, RebornLoopDriverHostFactory, RebornLoopDriverHostRequest,
@@ -61,7 +61,7 @@ use ironclaw_threads::{
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CheckpointStateStore, EventCursor, InMemoryCheckpointStateStore,
-    InMemoryLoopCheckpointStore, InMemoryRunProfileResolver, LoopResultRef,
+    InMemoryLoopCheckpointStore, InMemoryRunProfileResolver, InMemoryTurnStateStore, LoopResultRef,
     PutCheckpointStateRequest, ReplyTargetBindingRef, RunProfileId, RunProfileResolutionRequest,
     RunProfileResolver, RunProfileVersion, SourceBindingRef, TurnLeaseToken, TurnRunId,
     TurnRunnerId, TurnScope, TurnStatus,
@@ -393,6 +393,7 @@ fn selective_deny_dispatcher(target: &str) -> Arc<HookDispatcher> {
 struct Fixture {
     thread_service: Arc<InMemorySessionThreadService>,
     checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
+    turn_state_store: Arc<InMemoryTurnStateStore>,
     loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
     milestone_sink: Arc<InMemoryLoopHostMilestoneSink>,
     gateway: Arc<UnusedGateway>,
@@ -406,6 +407,7 @@ impl Fixture {
     async fn new() -> Self {
         let thread_service = Arc::new(InMemorySessionThreadService::default());
         let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
+        let turn_state_store = Arc::new(InMemoryTurnStateStore::default());
         let loop_checkpoint_store = Arc::new(InMemoryLoopCheckpointStore::default());
         let milestone_sink = Arc::new(InMemoryLoopHostMilestoneSink::default());
         let gateway = Arc::new(UnusedGateway);
@@ -491,6 +493,7 @@ impl Fixture {
         Self {
             thread_service,
             checkpoint_state_store,
+            turn_state_store,
             loop_checkpoint_store,
             milestone_sink,
             gateway,
@@ -508,6 +511,7 @@ impl Fixture {
             self.thread_scope.clone(),
             Arc::clone(&self.gateway),
             Arc::clone(&self.checkpoint_state_store) as _,
+            Arc::clone(&self.turn_state_store) as _,
             Arc::clone(&self.loop_checkpoint_store) as _,
             Arc::clone(&self.milestone_sink) as _,
             TextOnlyLoopHostConfig {
@@ -515,6 +519,7 @@ impl Fixture {
                 require_model_route_snapshot: false,
             },
         )
+        .with_cancellation_factory(Arc::new(AlwaysAliveRunCancellationFactory))
     }
 
     fn request(&self) -> RebornLoopDriverHostRequest {

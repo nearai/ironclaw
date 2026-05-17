@@ -25,8 +25,8 @@ use async_trait::async_trait;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::FilesystemError;
 use ironclaw_filesystem::{
-    BackendCapabilities, BackendId, BackendKind, CompositeRootFilesystem, ContentKind, IndexPolicy,
-    MountDescriptor, RootFilesystem, StorageClass,
+    BackendCapabilities, BackendId, BackendKind, Capability, CompositeRootFilesystem, ContentKind,
+    IndexPolicy, MountDescriptor, RootFilesystem, StorageClass,
 };
 use ironclaw_host_api::VirtualPath;
 use ironclaw_memory::{
@@ -56,15 +56,13 @@ fn memory_mount_descriptor() -> MountDescriptor {
         storage_class: StorageClass::FileContent,
         content_kind: ContentKind::MemoryDocument,
         index_policy: IndexPolicy::FullTextAndVector,
-        capabilities: BackendCapabilities {
-            read: true,
-            write: true,
-            list: true,
-            stat: true,
-            indexed: true,
-            embedded: true,
-            ..BackendCapabilities::default()
-        },
+        capabilities: BackendCapabilities::empty()
+            .with(Capability::Read)
+            .with(Capability::Write)
+            .with(Capability::List)
+            .with(Capability::Stat)
+            .with(Capability::IndexFts)
+            .with(Capability::IndexVector),
     }
 }
 

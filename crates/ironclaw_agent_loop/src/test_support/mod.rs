@@ -21,14 +21,15 @@ use ironclaw_turns::{
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
         CapabilitySurfaceProfileId, CapabilitySurfaceVersion, CheckpointPolicy, CheckpointSchemaId,
         ConcurrencyClass, ConcurrencyHint, ContextProfileId, FinalizeAssistantMessage,
-        LoopCheckpointKind, LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle,
-        LoopContextRequest, LoopDriverId, LoopInput, LoopInputAck, LoopInputAckToken,
-        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelRequest,
-        LoopModelResponse, LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef,
-        LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk,
-        ParentLoopOutput, RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
-        ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
-        SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
+        LoopCancellationPort, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
+        LoopCheckpointStateRef, LoopContextBundle, LoopContextRequest, LoopDriverId, LoopInput,
+        LoopInputAck, LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken,
+        LoopModelMessage, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopPromptBundle,
+        LoopPromptBundleRef, LoopPromptBundleRequest, LoopRunContext, LoopRunInfoPort,
+        ModelProfileId, ModelStreamChunk, ParentLoopOutput, RedactedRunProfileProvenance,
+        ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier, RunClassId,
+        RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
+        StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
         VisibleCapabilitySurface,
     },
 };
@@ -53,6 +54,7 @@ pub struct MockAgentLoopDriverHost {
     fail_prompt_with: Mutex<Option<AgentLoopHostErrorKind>>,
     fail_model_with: Mutex<Option<AgentLoopHostErrorKind>>,
     acked_tokens: Mutex<Vec<LoopInputAckToken>>,
+    cancellation: Mutex<Option<LoopCancellationSignal>>,
 }
 
 impl MockAgentLoopDriverHost {
@@ -91,6 +93,7 @@ pub struct MockAgentLoopDriverHostBuilder {
     visible_capabilities: Vec<CapabilityDescriptorView>,
     fail_prompt_with: Option<AgentLoopHostErrorKind>,
     fail_model_with: Option<AgentLoopHostErrorKind>,
+    cancellation: Option<LoopCancellationSignal>,
 }
 
 impl MockAgentLoopDriverHostBuilder {
@@ -105,6 +108,7 @@ impl MockAgentLoopDriverHostBuilder {
             )],
             fail_prompt_with: None,
             fail_model_with: None,
+            cancellation: None,
         }
     }
 
@@ -138,6 +142,12 @@ impl MockAgentLoopDriverHostBuilder {
         self
     }
 
+    /// Sets the cancellation signal returned by the host accessor.
+    pub fn cancellation_signal(mut self, signal: LoopCancellationSignal) -> Self {
+        self.cancellation = Some(signal);
+        self
+    }
+
     /// Builds the host and its shared checkpoint recorder.
     pub fn build(self) -> (MockAgentLoopDriverHost, Arc<CheckpointRecorder>) {
         let checkpoints = Arc::new(CheckpointRecorder::default());
@@ -152,6 +162,7 @@ impl MockAgentLoopDriverHostBuilder {
                 fail_prompt_with: Mutex::new(self.fail_prompt_with),
                 fail_model_with: Mutex::new(self.fail_model_with),
                 acked_tokens: Mutex::new(Vec::new()),
+                cancellation: Mutex::new(self.cancellation),
             },
             checkpoints,
         )
@@ -715,6 +726,12 @@ impl ironclaw_turns::run_profile::LoopProgressPort for MockAgentLoopDriverHost {
         _event: LoopProgressEvent,
     ) -> Result<(), AgentLoopHostError> {
         Ok(())
+    }
+}
+
+impl LoopCancellationPort for MockAgentLoopDriverHost {
+    fn observe_cancellation(&self) -> Option<LoopCancellationSignal> {
+        lock_or_panic(&self.cancellation).clone()
     }
 }
 
