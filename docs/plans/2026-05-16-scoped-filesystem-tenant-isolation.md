@@ -161,7 +161,14 @@ invocation in composition) handles tenant prefixing and ACL.
 - **Defense in depth:** every consumer's `put` carries a `tenant_id`
   indexed projection (alongside the path-prefix scope) so an
   admin-tier query can filter and a path-rewriting bug surfaces as
-  a query-time mismatch.
+  a query-time mismatch. **Scope:** this projection applies to
+  `ironclaw_processes`, `ironclaw_secrets`, `ironclaw_outbound`,
+  and `ironclaw_authorization`. `ironclaw_engine` is deliberately
+  excluded — its `Store` trait is single-tenant-by-construction
+  (per Open Question 2 below; the engine never sees `tenant_id`
+  internally), so it relies on path-prefix scoping alone and has
+  no `ResourceScope` available at write sites to drive the
+  projection.
 - **Read-only carve-out:** the `/system` mount has `read_only` perms.
   Engine and other consumers reading capability definitions or
   system prompts go through the same `ScopedFilesystem`; writes are
