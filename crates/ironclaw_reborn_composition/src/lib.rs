@@ -108,6 +108,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/run-state",
     "/approvals",
     "/threads",
+    "/conversations",
     "/engine",
 ];
 

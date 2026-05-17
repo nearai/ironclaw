@@ -104,7 +104,11 @@ Frozen V1 canonical virtual roots (aligned with `storage-placement.md`):
 /outbound
 /run-state
 /approvals
+<<<<<<< HEAD
 /threads
+=======
+/conversations
+>>>>>>> a46edd88c (refactor(conversations): enforce tenant isolation via ScopedFilesystem in FilesystemConversationStateStore)
 /tenant-shared
 /tenants
 ```
@@ -129,7 +133,11 @@ Recommended meaning:
 | `/outbound` | outbound delivery policy/subscription/attempt records (consumer-store mount alias under `ironclaw_outbound`) |
 | `/run-state` | invocation-lifecycle run-state records (consumer-store mount alias under `ironclaw_run_state`) |
 | `/approvals` | approval-request lifecycle records (sibling consumer-store mount alias under `ironclaw_run_state`) |
+<<<<<<< HEAD
 | `/threads` | canonical session-thread and transcript records (consumer-store mount alias under `ironclaw_threads`) |
+=======
+| `/conversations` | conversation binding and session-thread state records (consumer-store mount alias under `ironclaw_conversations`) |
+>>>>>>> a46edd88c (refactor(conversations): enforce tenant isolation via ScopedFilesystem in FilesystemConversationStateStore)
 | `/tenant-shared` | data shared between users/agents in the same tenant; resolves to `/tenants/<tenant_id>/shared/...` per [scoped-filesystem-tenant-isolation](../../plans/2026-05-16-scoped-filesystem-tenant-isolation.md) |
 | `/tenants` | reserved root for tenant-scoped target subtrees written by the per-invocation `MountView` (`/tenants/<tenant_id>/users/<user_id>/<alias>/...`); not consumed directly by stores |
 
