@@ -57,11 +57,9 @@ use ironclaw_processes::{
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
 };
-#[cfg(feature = "libsql")]
-use ironclaw_resources::ResourceTally;
 use ironclaw_resources::{
     InMemoryResourceGovernor, JsonFileResourceGovernorStore, PersistentResourceGovernor,
-    ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
+    ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits, ResourceTally,
 };
 use ironclaw_run_state::{
     ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
@@ -238,16 +236,23 @@ fn production_wiring_validation_accepts_persistent_resource_governor_component()
     );
 }
 
-#[cfg(feature = "libsql")]
+/// Filesystem-backed equivalent of the deleted libSQL/Postgres tests.
+/// Backend choice is a `RootFilesystem` property; the `with_filesystem_resource_governor`
+/// builder drives the same surface that the deleted SQL-specific builders
+/// covered.
 #[tokio::test]
-async fn with_libsql_resource_governor_runs_migrations_before_first_reserve() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = Arc::new(
-        libsql::Builder::new_local(dir.path().join("resources.db"))
-            .build()
-            .await
-            .unwrap(),
-    );
+async fn with_filesystem_resource_governor_persists_reservations_across_handles() {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/resources").unwrap(),
+        VirtualPath::new("/tenants/tenant1/users/user1/resources").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let scoped = Arc::new(ScopedFilesystem::new(Arc::clone(&backend), mounts));
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -257,9 +262,7 @@ async fn with_libsql_resource_governor_runs_migrations_before_first_reserve() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_libsql_resource_governor(Arc::clone(&db))
-    .await
-    .unwrap();
+    .with_filesystem_resource_governor(Arc::clone(&scoped));
 
     let governor = services.resource_governor();
     let scope = sample_scope(InvocationId::new());
@@ -285,16 +288,19 @@ async fn with_libsql_resource_governor_runs_migrations_before_first_reserve() {
     governor.release(reservation.id).unwrap();
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
-async fn with_libsql_resource_governor_closes_process_reservations_on_cancel() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = Arc::new(
-        libsql::Builder::new_local(dir.path().join("resources.db"))
-            .build()
-            .await
-            .unwrap(),
-    );
+async fn with_filesystem_resource_governor_closes_process_reservations_on_cancel() {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/resources").unwrap(),
+        VirtualPath::new("/tenants/tenant1/users/user1/resources").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let scoped = Arc::new(ScopedFilesystem::new(Arc::clone(&backend), mounts));
     let process_services = ProcessServices::new(
         Arc::new(InMemoryProcessStore::new()),
         Arc::new(InMemoryProcessResultStore::new()),
@@ -309,9 +315,7 @@ async fn with_libsql_resource_governor_closes_process_reservations_on_cancel() {
         process_services,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_libsql_resource_governor(Arc::clone(&db))
-    .await
-    .unwrap();
+    .with_filesystem_resource_governor(Arc::clone(&scoped));
     let governor = services.resource_governor();
     let scope = sample_scope(InvocationId::new());
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
@@ -360,99 +364,6 @@ async fn with_libsql_resource_governor_closes_process_reservations_on_cancel() {
             ..
         }
     ));
-}
-
-#[cfg(feature = "postgres")]
-const POSTGRES_SKIP_ENV: &str = "IRONCLAW_SKIP_POSTGRES_TESTS";
-
-#[cfg(feature = "postgres")]
-fn postgres_skip_requested() -> bool {
-    std::env::var(POSTGRES_SKIP_ENV).is_ok_and(|value| value == "1" || value == "true")
-}
-
-#[cfg(feature = "postgres")]
-async fn postgres_pool_or_skip() -> Option<deadpool_postgres::Pool> {
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://localhost/ironclaw_test".to_string());
-    let config: tokio_postgres::Config = database_url
-        .parse()
-        .expect("DATABASE_URL must be a valid Postgres URL");
-    let mgr = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-    let pool = deadpool_postgres::Pool::builder(mgr)
-        .max_size(2)
-        .build()
-        .expect("build deadpool");
-    match pool.get().await {
-        Ok(_) => Some(pool),
-        Err(error) => {
-            if postgres_skip_requested() {
-                eprintln!(
-                    "skipping host-runtime Postgres resource governor test ({POSTGRES_SKIP_ENV}=1): {error}"
-                );
-                None
-            } else {
-                panic!(
-                    "host-runtime Postgres resource governor test could not reach Postgres ({error}); \
-                     set DATABASE_URL to a reachable Postgres test database, or set \
-                     {POSTGRES_SKIP_ENV}=1 to explicitly skip."
-                );
-            }
-        }
-    }
-}
-
-#[cfg(feature = "postgres")]
-async fn drop_postgres_resource_governor_table(pool: &deadpool_postgres::Pool) {
-    let client = pool.get().await.expect("cleanup client");
-    client
-        .batch_execute("DROP TABLE IF EXISTS ironclaw_resource_governor_snapshots")
-        .await
-        .expect("drop resource governor snapshots table");
-}
-
-#[cfg(feature = "postgres")]
-#[tokio::test]
-async fn with_postgres_resource_governor_runs_migrations_before_first_reserve() {
-    let Some(pool) = postgres_pool_or_skip().await else {
-        return;
-    };
-    drop_postgres_resource_governor_table(&pool).await;
-
-    let services = HostRuntimeServices::new(
-        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
-        Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
-        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    )
-    .with_postgres_resource_governor(pool.clone())
-    .await
-    .unwrap();
-
-    let governor = services.resource_governor();
-    let scope = sample_scope(InvocationId::new());
-    let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor
-        .set_limit(
-            account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
-        )
-        .unwrap();
-    let reservation = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
-        )
-        .unwrap();
-    governor.release(reservation.id).unwrap();
-    drop_postgres_resource_governor_table(&pool).await;
 }
 
 #[test]

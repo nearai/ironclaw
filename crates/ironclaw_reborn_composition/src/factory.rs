@@ -273,8 +273,7 @@ async fn build_libsql_production(
     .with_trust_policy(production_wiring.trust_policy)
     .with_capability_leases(leases)
     .with_secret_store(secret_store)
-    .with_libsql_resource_governor(Arc::clone(&db))
-    .await?
+    .with_filesystem_resource_governor(Arc::clone(&scoped_filesystem))
     .with_reborn_event_store_config(profile.to_event_store_profile(), event_store)
     .await?
     .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
@@ -336,8 +335,7 @@ async fn build_postgres_production(
     .with_trust_policy(production_wiring.trust_policy)
     .with_capability_leases(leases)
     .with_secret_store(secret_store)
-    .with_postgres_resource_governor(pool.clone())
-    .await?
+    .with_filesystem_resource_governor(Arc::clone(&scoped_filesystem))
     .with_reborn_event_store_config(profile.to_event_store_profile(), event_store)
     .await?
     .with_filesystem_run_state(Arc::clone(&scoped_filesystem))

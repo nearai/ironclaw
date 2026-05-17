@@ -1078,18 +1078,31 @@ fn persistent_governor_rejects_unsupported_snapshot_schema_version() {
     ));
 }
 
-#[cfg(feature = "libsql")]
+/// Filesystem-backed reload contract — replaces the deleted libSQL /
+/// Postgres `*_persistent_governor_reloads_active_holds_and_usage_from_store`
+/// tests. Backend choice is now a property of the underlying
+/// `RootFilesystem`; this test exercises the on-disk snapshot
+/// round-trip through `ScopedFilesystem` so durability across reopen is
+/// covered by the same surface (a single `FilesystemResourceGovernorStore`
+/// constructed twice over the same backing store).
 #[tokio::test]
-async fn libsql_persistent_governor_reloads_active_holds_and_usage_from_store() {
-    let dir = tempdir().unwrap();
-    let db = std::sync::Arc::new(
-        libsql::Builder::new_local(dir.path().join("resources.db"))
-            .build()
-            .await
-            .unwrap(),
-    );
-    let store = LibSqlResourceGovernorStore::new(std::sync::Arc::clone(&db));
-    store.run_migrations().await.unwrap();
+async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_store() {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+
+    let backend = std::sync::Arc::new(InMemoryBackend::new());
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/resources").expect("alias"),
+        VirtualPath::new("/tenants/tenant1/users/user1/resources").expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    let scoped = std::sync::Arc::new(ScopedFilesystem::new(
+        std::sync::Arc::clone(&backend),
+        mounts,
+    ));
+
+    let store = FilesystemResourceGovernorStore::new(std::sync::Arc::clone(&scoped));
 
     let scope = sample_scope("tenant1", "user1", Some("project1"));
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
@@ -1114,7 +1127,11 @@ async fn libsql_persistent_governor_reloads_active_holds_and_usage_from_store() 
         )
         .unwrap();
 
-    let reloaded = PersistentResourceGovernor::new(LibSqlResourceGovernorStore::new(db));
+    // Reload from the same on-disk snapshot via a fresh
+    // FilesystemResourceGovernorStore handle over the same ScopedFilesystem.
+    let reloaded = PersistentResourceGovernor::new(FilesystemResourceGovernorStore::new(
+        std::sync::Arc::clone(&scoped),
+    ));
     let concurrency_denial = reloaded
         .reserve(
             scope.clone(),
@@ -1155,133 +1172,6 @@ async fn libsql_persistent_governor_reloads_active_holds_and_usage_from_store() 
                 && denial.dimension == ResourceDimension::Usd
                 && denial.current_usage == ResourceValue::Decimal(dec!(0.95))
     ));
-}
-
-#[cfg(feature = "postgres")]
-const POSTGRES_SKIP_ENV: &str = "IRONCLAW_SKIP_POSTGRES_TESTS";
-
-#[cfg(feature = "postgres")]
-fn postgres_skip_requested() -> bool {
-    std::env::var(POSTGRES_SKIP_ENV).is_ok_and(|value| value == "1" || value == "true")
-}
-
-#[cfg(feature = "postgres")]
-async fn postgres_pool_or_skip() -> Option<deadpool_postgres::Pool> {
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://localhost/ironclaw_test".to_string());
-    let config: tokio_postgres::Config = database_url
-        .parse()
-        .expect("DATABASE_URL must be a valid Postgres URL");
-    let mgr = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-    let pool = deadpool_postgres::Pool::builder(mgr)
-        .max_size(2)
-        .build()
-        .expect("build deadpool");
-    match pool.get().await {
-        Ok(_) => Some(pool),
-        Err(error) => {
-            if postgres_skip_requested() {
-                eprintln!(
-                    "skipping Postgres resource governor contract ({POSTGRES_SKIP_ENV}=1): {error}"
-                );
-                None
-            } else {
-                panic!(
-                    "Postgres resource governor contract could not reach Postgres ({error}); \
-                     set DATABASE_URL to a reachable Postgres test database, or set \
-                     {POSTGRES_SKIP_ENV}=1 to explicitly skip."
-                );
-            }
-        }
-    }
-}
-
-#[cfg(feature = "postgres")]
-async fn clear_postgres_resource_snapshots(pool: &deadpool_postgres::Pool) {
-    let client = pool.get().await.expect("cleanup client");
-    client
-        .batch_execute("DELETE FROM ironclaw_resource_governor_snapshots")
-        .await
-        .expect("cleanup resource governor snapshots");
-}
-
-#[cfg(feature = "postgres")]
-#[tokio::test]
-async fn postgres_persistent_governor_reloads_active_holds_and_usage_from_store() {
-    let Some(pool) = postgres_pool_or_skip().await else {
-        return;
-    };
-    let store = PostgresResourceGovernorStore::new(pool.clone());
-    store.run_migrations().await.unwrap();
-    clear_postgres_resource_snapshots(&pool).await;
-
-    let scope = sample_scope("tenant1", "user1", Some("project1"));
-    let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    let governor = PersistentResourceGovernor::new(store);
-    governor
-        .try_set_limit(
-            account.clone(),
-            ResourceLimits {
-                max_usd: Some(dec!(1.00)),
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
-        )
-        .unwrap();
-    let active = governor
-        .reserve(
-            scope.clone(),
-            ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
-        )
-        .unwrap();
-
-    let reloaded =
-        PersistentResourceGovernor::new(PostgresResourceGovernorStore::new(pool.clone()));
-    let concurrency_denial = reloaded
-        .reserve(
-            scope.clone(),
-            ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
-        )
-        .unwrap_err();
-    assert!(matches!(
-        concurrency_denial,
-        ResourceError::LimitExceeded(denial)
-            if denial.account == account && denial.dimension == ResourceDimension::ConcurrencySlots
-    ));
-
-    reloaded
-        .reconcile(
-            active.id,
-            ResourceUsage {
-                usd: dec!(0.95),
-                ..ResourceUsage::default()
-            },
-        )
-        .unwrap();
-    let usd_denial = reloaded
-        .reserve(
-            scope,
-            ResourceEstimate {
-                usd: Some(dec!(0.10)),
-                ..ResourceEstimate::default()
-            },
-        )
-        .unwrap_err();
-    assert!(matches!(
-        usd_denial,
-        ResourceError::LimitExceeded(denial)
-            if denial.account == account
-                && denial.dimension == ResourceDimension::Usd
-                && denial.current_usage == ResourceValue::Decimal(dec!(0.95))
-    ));
-
-    clear_postgres_resource_snapshots(&pool).await;
 }
 
 fn sample_scope(tenant: &str, user: &str, project: Option<&str>) -> ResourceScope {

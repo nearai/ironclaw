@@ -107,6 +107,7 @@ Frozen V1 canonical virtual roots (aligned with `storage-placement.md`):
 /threads
 /conversations
 /turns
+/resources
 /tenant-shared
 /tenants
 ```
@@ -134,6 +135,7 @@ Recommended meaning:
 | `/threads` | canonical session-thread and transcript records (consumer-store mount alias under `ironclaw_threads`) |
 | `/conversations` | conversation binding and session-thread state records (consumer-store mount alias under `ironclaw_conversations`) |
 | `/turns` | turn-coordination persistence snapshot (consumer-store mount alias under `ironclaw_turns`) |
+| `/resources` | resource-governor reservation/usage snapshots (consumer-store mount alias under `ironclaw_resources`) |
 | `/tenant-shared` | data shared between users/agents in the same tenant; resolves to `/tenants/<tenant_id>/shared/...` per [scoped-filesystem-tenant-isolation](../../plans/2026-05-16-scoped-filesystem-tenant-isolation.md) |
 | `/tenants` | reserved root for tenant-scoped target subtrees written by the per-invocation `MountView` (`/tenants/<tenant_id>/users/<user_id>/<alias>/...`); not consumed directly by stores |
 

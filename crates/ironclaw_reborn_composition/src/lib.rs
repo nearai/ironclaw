@@ -46,13 +46,9 @@ use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore, P
 use ironclaw_reborn_event_store::RebornEventStoreError;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_reborn_event_store::{RebornEventStoreConfig, RebornProfile};
-#[cfg(feature = "libsql")]
-use ironclaw_resources::LibSqlResourceGovernorStore;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_resources::PersistentResourceGovernor;
-#[cfg(feature = "postgres")]
-use ironclaw_resources::PostgresResourceGovernorStore;
 use ironclaw_resources::ResourceError;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_resources::{FilesystemResourceGovernorStore, PersistentResourceGovernor};
 use ironclaw_run_state::RunStateError;
 use ironclaw_secrets::SecretError;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -70,7 +66,7 @@ use thiserror::Error;
 #[cfg(feature = "libsql")]
 pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
     LibSqlRootFilesystem,
-    PersistentResourceGovernor<LibSqlResourceGovernorStore>,
+    PersistentResourceGovernor<FilesystemResourceGovernorStore<LibSqlRootFilesystem>>,
     FilesystemProcessStore<LibSqlRootFilesystem>,
     FilesystemProcessResultStore<LibSqlRootFilesystem>,
 >;
@@ -78,7 +74,7 @@ pub type LibSqlProductionHostRuntimeServices = HostRuntimeServices<
 #[cfg(feature = "postgres")]
 pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
     PostgresRootFilesystem,
-    PersistentResourceGovernor<PostgresResourceGovernorStore>,
+    PersistentResourceGovernor<FilesystemResourceGovernorStore<PostgresRootFilesystem>>,
     FilesystemProcessStore<PostgresRootFilesystem>,
     FilesystemProcessResultStore<PostgresRootFilesystem>,
 >;
@@ -110,6 +106,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/threads",
     "/conversations",
     "/turns",
+    "/resources",
     "/engine",
 ];
 
@@ -316,8 +313,7 @@ where
         build_filesystem_secret_store(Arc::clone(&scoped_filesystem), config.secret_master_key)
             .await?;
 
-    let resource_store = LibSqlResourceGovernorStore::new(Arc::clone(&config.database));
-    resource_store.run_migrations().await?;
+    let resource_store = FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem));
     let governor = Arc::new(PersistentResourceGovernor::new(resource_store));
 
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
@@ -378,8 +374,7 @@ where
         build_filesystem_secret_store(Arc::clone(&scoped_filesystem), config.secret_master_key)
             .await?;
 
-    let resource_store = PostgresResourceGovernorStore::new(config.pool.clone());
-    resource_store.run_migrations().await?;
+    let resource_store = FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem));
     let governor = Arc::new(PersistentResourceGovernor::new(resource_store));
 
     let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(

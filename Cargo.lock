@@ -4692,6 +4692,7 @@ version = "0.1.0"
 dependencies = [
  "deadpool-postgres",
  "fs2",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
  "libsql",
  "rust_decimal",

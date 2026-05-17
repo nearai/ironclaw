@@ -48,13 +48,10 @@ use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
     build_reborn_event_stores,
 };
-#[cfg(feature = "libsql")]
-use ironclaw_resources::LibSqlResourceGovernorStore;
-#[cfg(feature = "postgres")]
-use ironclaw_resources::PostgresResourceGovernorStore;
-use ironclaw_resources::{InMemoryResourceGovernor, ResourceGovernor};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_resources::{PersistentResourceGovernor, ResourceError};
+use ironclaw_resources::{
+    FilesystemResourceGovernorStore, InMemoryResourceGovernor, PersistentResourceGovernor,
+    ResourceGovernor,
+};
 use ironclaw_run_state::{
     ApprovalRequestStore, FilesystemApprovalRequestStore, FilesystemRunStateStore,
     InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateApprovalStore, RunStateStore,
@@ -554,7 +551,6 @@ where
         self.with_root_filesystem(filesystem)
     }
 
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     fn with_resource_governor<T>(self, governor: Arc<T>) -> HostRuntimeServices<F, T, S, R>
     where
         T: ResourceGovernor + 'static,
@@ -636,30 +632,26 @@ where
         }
     }
 
-    #[cfg(feature = "libsql")]
-    pub async fn with_libsql_resource_governor(
+    /// Replace the in-memory governor with a filesystem-backed
+    /// [`PersistentResourceGovernor`] over the supplied
+    /// [`ScopedFilesystem`]. Backend choice (libSQL, Postgres, in-memory,
+    /// local disk) is a property of the underlying
+    /// [`RootFilesystem`](ironclaw_filesystem::RootFilesystem); see
+    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+    pub fn with_filesystem_resource_governor<FsBackend>(
         self,
-        db: Arc<libsql::Database>,
-    ) -> Result<
-        HostRuntimeServices<F, PersistentResourceGovernor<LibSqlResourceGovernorStore>, S, R>,
-        ResourceError,
-    > {
-        let store = LibSqlResourceGovernorStore::new(db);
-        store.run_migrations().await?;
-        Ok(self.with_resource_governor(Arc::new(PersistentResourceGovernor::new(store))))
-    }
-
-    #[cfg(feature = "postgres")]
-    pub async fn with_postgres_resource_governor(
-        self,
-        pool: deadpool_postgres::Pool,
-    ) -> Result<
-        HostRuntimeServices<F, PersistentResourceGovernor<PostgresResourceGovernorStore>, S, R>,
-        ResourceError,
-    > {
-        let store = PostgresResourceGovernorStore::new(pool);
-        store.run_migrations().await?;
-        Ok(self.with_resource_governor(Arc::new(PersistentResourceGovernor::new(store))))
+        scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
+    ) -> HostRuntimeServices<
+        F,
+        PersistentResourceGovernor<FilesystemResourceGovernorStore<FsBackend>>,
+        S,
+        R,
+    >
+    where
+        FsBackend: RootFilesystem + 'static,
+    {
+        let store = FilesystemResourceGovernorStore::new(scoped_filesystem);
+        self.with_resource_governor(Arc::new(PersistentResourceGovernor::new(store)))
     }
 
     pub fn resource_governor(&self) -> Arc<G> {
