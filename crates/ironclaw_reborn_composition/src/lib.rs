@@ -54,15 +54,11 @@ use ironclaw_resources::PersistentResourceGovernor;
 use ironclaw_resources::PostgresResourceGovernorStore;
 use ironclaw_resources::ResourceError;
 use ironclaw_run_state::RunStateError;
-#[cfg(feature = "libsql")]
-use ironclaw_secrets::LibSqlSecretsStore;
-#[cfg(feature = "postgres")]
-use ironclaw_secrets::PostgresSecretsStore;
 use ironclaw_secrets::SecretError;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::{
-    ScopedSecretsStoreAdapter, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata,
-    SecretStore, SecretStoreError, SecretsCrypto,
+    FilesystemSecretStore, SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore,
+    SecretStoreError, SecretsCrypto,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_trust::TrustPolicy;
@@ -305,14 +301,15 @@ where
     TPolicy: TrustPolicy + 'static,
     TWake: TurnRunWakeNotifier + 'static,
 {
-    let secret_store =
-        build_libsql_secret_store(Arc::clone(&config.database), config.secret_master_key).await?;
-
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
     filesystem.run_migrations().await?;
 
     let scoped_filesystem = wrap_scoped(Arc::clone(&filesystem))?;
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
+
+    let secret_store =
+        build_filesystem_secret_store(Arc::clone(&scoped_filesystem), config.secret_master_key)
+            .await?;
 
     let resource_store = LibSqlResourceGovernorStore::new(Arc::clone(&config.database));
     resource_store.run_migrations().await?;
@@ -368,14 +365,15 @@ where
     TPolicy: TrustPolicy + 'static,
     TWake: TurnRunWakeNotifier + 'static,
 {
-    let secret_store =
-        build_postgres_secret_store(config.pool.clone(), config.secret_master_key).await?;
-
     let filesystem = Arc::new(PostgresRootFilesystem::new(config.pool.clone()));
     filesystem.run_migrations().await?;
 
     let scoped_filesystem = wrap_scoped(Arc::clone(&filesystem))?;
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
+
+    let secret_store =
+        build_filesystem_secret_store(Arc::clone(&scoped_filesystem), config.secret_master_key)
+            .await?;
 
     let resource_store = PostgresResourceGovernorStore::new(config.pool.clone());
     resource_store.run_migrations().await?;
@@ -417,29 +415,29 @@ where
     Ok(services)
 }
 
-#[cfg(feature = "libsql")]
-async fn build_libsql_secret_store(
-    database: Arc<libsql::Database>,
+/// Build the per-process [`SecretStore`] over the shared
+/// [`ScopedFilesystem`].
+///
+/// Backend selection is now a property of the underlying
+/// [`RootFilesystem`] (libSQL/Postgres/in-memory), not of the secret store
+/// itself — see "Legacy per-backend store cleanup" in
+/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`. The
+/// startup readiness check
+/// ([`FilesystemSecretStore::verify_can_decrypt_existing_secrets`])
+/// preserves the same fail-loud-on-master-key-mismatch contract the deleted
+/// libSQL/Postgres backends carried.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn build_filesystem_secret_store<F>(
+    scoped_filesystem: Arc<ScopedFilesystem<F>>,
     master_key: Option<SecretMaterial>,
-) -> Result<Arc<SharedSecretStore>, RebornCompositionError> {
+) -> Result<Arc<SharedSecretStore>, RebornCompositionError>
+where
+    F: RootFilesystem + 'static,
+{
     let crypto = secrets_crypto(master_key)?;
-    let backend = Arc::new(LibSqlSecretsStore::new(database, crypto));
-    backend.run_migrations().await?;
-    backend.verify_can_decrypt_existing_secrets().await?;
-    let store: Arc<dyn SecretStore> = Arc::new(ScopedSecretsStoreAdapter::new(backend));
-    Ok(Arc::new(SharedSecretStore::new(store)))
-}
-
-#[cfg(feature = "postgres")]
-async fn build_postgres_secret_store(
-    pool: deadpool_postgres::Pool,
-    master_key: Option<SecretMaterial>,
-) -> Result<Arc<SharedSecretStore>, RebornCompositionError> {
-    let crypto = secrets_crypto(master_key)?;
-    let backend = Arc::new(PostgresSecretsStore::new(pool, crypto));
-    backend.run_migrations().await?;
-    backend.verify_can_decrypt_existing_secrets().await?;
-    let store: Arc<dyn SecretStore> = Arc::new(ScopedSecretsStoreAdapter::new(backend));
+    let store = FilesystemSecretStore::new(scoped_filesystem, crypto);
+    store.verify_can_decrypt_existing_secrets().await?;
+    let store: Arc<dyn SecretStore> = Arc::new(store);
     Ok(Arc::new(SharedSecretStore::new(store)))
 }
 

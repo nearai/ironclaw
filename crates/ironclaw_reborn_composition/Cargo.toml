@@ -19,7 +19,6 @@ libsql = [
     "ironclaw_reborn_event_store/libsql",
     "ironclaw_resources/libsql",
     "ironclaw_run_state/libsql",
-    "ironclaw_secrets/libsql",
     "ironclaw_turns/libsql",
 ]
 postgres = [
@@ -29,7 +28,6 @@ postgres = [
     "ironclaw_reborn_event_store/postgres",
     "ironclaw_resources/postgres",
     "ironclaw_run_state/postgres",
-    "ironclaw_secrets/postgres",
     "ironclaw_turns/postgres",
 ]
 

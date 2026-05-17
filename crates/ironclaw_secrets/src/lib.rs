@@ -8,15 +8,9 @@
 #![warn(unreachable_pub)]
 
 mod crypto;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-mod db;
 mod filesystem_store;
 mod legacy_store;
 
-#[cfg(feature = "libsql")]
-pub use db::{LibSqlCredentialStore, LibSqlSecretsStore};
-#[cfg(feature = "postgres")]
-pub use db::{PostgresCredentialStore, PostgresSecretsStore};
 pub use filesystem_store::{FilesystemCredentialBroker, FilesystemSecretStore};
 
 use std::collections::HashMap;

@@ -31,4 +31,3 @@ pub use types::{
     ThreadNotificationTarget, ThreadProjectionAccessClaim, ThreadProjectionAccessGrant,
     ThreadProjectionAccessRequest, UpdateDeliveryStatusRequest, ValidatedReplyTargetBinding,
 };
-
