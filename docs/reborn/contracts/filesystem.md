@@ -99,6 +99,11 @@ Frozen V1 canonical virtual roots (aligned with `storage-placement.md`):
 /tmp
 /secrets
 /events
+/processes
+/authorization
+/outbound
+/tenant-shared
+/tenants
 ```
 
 Recommended meaning:
@@ -116,6 +121,11 @@ Recommended meaning:
 | `/tmp` | process/invocation-local temporary data |
 | `/secrets` | encrypted secret records and redacted secret projections only |
 | `/events` | durable event/audit append log and projections |
+| `/processes` | background-process records and result/output blobs (consumer-store mount alias under `ironclaw_processes`) |
+| `/authorization` | capability lease records (consumer-store mount alias under `ironclaw_authorization`) |
+| `/outbound` | outbound delivery policy/subscription/attempt records (consumer-store mount alias under `ironclaw_outbound`) |
+| `/tenant-shared` | data shared between users/agents in the same tenant; resolves to `/tenants/<tenant_id>/shared/...` per [scoped-filesystem-tenant-isolation](../../plans/2026-05-16-scoped-filesystem-tenant-isolation.md) |
+| `/tenants` | reserved root for tenant-scoped target subtrees written by the per-invocation `MountView` (`/tenants/<tenant_id>/users/<user_id>/<alias>/...`); not consumed directly by stores |
 
 Extension-visible workspace-style names should be scoped aliases such as:
 

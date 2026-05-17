@@ -139,6 +139,11 @@ not bypass domain invariants by mutating primitive storage rows directly.
 | `/tmp` | ephemeral runtime temp backend | scoped filesystem | no | Process/invocation-local temporary data. |
 | `/secrets` | typed encrypted secret repository | secret APIs only; optional redacted projection | no | No generic listing of secret material/source records. |
 | `/events` | durable event/audit append log + projections | event/projection APIs; optional export | no | Events are append/projection records, not mutable files. |
+| `/processes` | typed process-lifecycle repository routed through `ironclaw_filesystem` (records, results, outputs) | process APIs | no | Consumer mount alias for `ironclaw_processes`; alias-relative under the per-invocation `MountView`. |
+| `/authorization` | typed capability-lease repository routed through `ironclaw_filesystem` | lease APIs | no | Consumer mount alias for `ironclaw_authorization`; alias-relative under the per-invocation `MountView`. |
+| `/outbound` | typed outbound-delivery repository routed through `ironclaw_filesystem` (policies, subscriptions, attempts) | outbound APIs | indexed scope projection | Consumer mount alias for `ironclaw_outbound`; alias-relative under the per-invocation `MountView`. |
+| `/tenant-shared` | per-tenant shared mount; resolves to `/tenants/<tenant_id>/shared/...` under the per-invocation `MountView` | scoped filesystem | no | Data shared between users/agents in the same tenant. |
+| `/tenants` | reserved root for tenant-scoped target subtrees written by the per-invocation `MountView` | scoped filesystem | no | Not a consumer-visible alias; only consumed at the mount-table layer by the rewritten `VirtualPath` targets (`/tenants/<tenant_id>/users/<user_id>/<alias>/...`). |
 
 ---
 

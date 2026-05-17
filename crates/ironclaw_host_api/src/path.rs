@@ -63,7 +63,9 @@ impl fmt::Display for MountAlias {
 
 const VIRTUAL_ROOTS: &[&str] = &[
     "/engine",
-    "/system",
+    "/system/settings",
+    "/system/extensions",
+    "/system/skills",
     "/users",
     "/projects",
     "/memory",

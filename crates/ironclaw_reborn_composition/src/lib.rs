@@ -142,14 +142,19 @@ pub(crate) fn default_singleton_mount_view() -> Result<MountView, ironclaw_host_
         VirtualPath::new("/tenant-shared")?,
         MountPermissions::read_write(),
     ));
-    // `/system`: globally readable system data (capability defs, system
-    // prompts, …). Read-only at the ACL layer; writes are rejected by
-    // `ScopedFilesystem` before any backend dispatch.
-    grants.push(MountGrant::new(
-        MountAlias::new("/system")?,
-        VirtualPath::new("/system")?,
-        MountPermissions::read_only(),
-    ));
+    // `/system/{settings,extensions,skills}`: globally readable system data.
+    // Each subroot is exposed as its own alias (rather than a unified
+    // `/system` mount) because `VirtualPath` reserves the three canonical
+    // subroots — see `docs/reborn/contracts/storage-placement.md`. ACL is
+    // read-only at the `ScopedFilesystem` layer; writes are rejected
+    // before any backend dispatch.
+    for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
+        grants.push(MountGrant::new(
+            MountAlias::new(system_subroot)?,
+            VirtualPath::new(system_subroot)?,
+            MountPermissions::read_only(),
+        ));
+    }
     MountView::new(grants)
 }
 
@@ -191,11 +196,13 @@ pub fn invocation_mount_view(
         VirtualPath::new(format!("/tenants/{}/shared", scope.tenant_id.as_str()))?,
         MountPermissions::read_write(),
     ));
-    grants.push(MountGrant::new(
-        MountAlias::new("/system")?,
-        VirtualPath::new("/system")?,
-        MountPermissions::read_only(),
-    ));
+    for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
+        grants.push(MountGrant::new(
+            MountAlias::new(system_subroot)?,
+            VirtualPath::new(system_subroot)?,
+            MountPermissions::read_only(),
+        ));
+    }
     MountView::new(grants)
 }
 
@@ -551,11 +558,13 @@ mod mount_view_tests {
                 .unwrap();
             assert_eq!(resolved.as_str(), &format!("{alias}/foo"));
         }
-        // Shared/system carve-outs are present.
+        // Shared carve-out + the three canonical /system subroots.
         view.resolve(&ScopedPath::new("/tenant-shared/foo").unwrap())
             .unwrap();
-        view.resolve(&ScopedPath::new("/system/foo").unwrap())
-            .unwrap();
+        for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
+            view.resolve(&ScopedPath::new(format!("{system_subroot}/foo")).unwrap())
+                .unwrap();
+        }
     }
 
     #[test]
@@ -606,9 +615,15 @@ mod mount_view_tests {
     fn invocation_mount_view_routes_system_globally() {
         let scope = sample_scope();
         let view = invocation_mount_view(&scope).unwrap();
-        let resolved = view
-            .resolve(&ScopedPath::new("/system/foo").unwrap())
-            .unwrap();
-        assert_eq!(resolved.as_str(), "/system/foo");
+        // Each canonical /system subroot is exposed as its own
+        // read-only alias and resolves to the same VirtualPath
+        // regardless of tenant — system data is global, not
+        // per-tenant.
+        for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
+            let resolved = view
+                .resolve(&ScopedPath::new(format!("{system_subroot}/foo")).unwrap())
+                .unwrap();
+            assert_eq!(resolved.as_str(), &format!("{system_subroot}/foo"));
+        }
     }
 }
