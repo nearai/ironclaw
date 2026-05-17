@@ -194,17 +194,6 @@ pub async fn build_identity_messages(
     build_identity_messages_for_run(&candidates, run_context, mode, budget)
 }
 
-fn filter_identity_candidates_for_run(
-    candidates: &[HostIdentityContextCandidate],
-    run_context: &LoopRunContext,
-) -> Vec<HostIdentityContextCandidate> {
-    candidates
-        .iter()
-        .filter(|candidate| identity_candidate_allowed_for_run(candidate, run_context))
-        .cloned()
-        .collect()
-}
-
 fn identity_candidate_allowed_for_run(
     candidate: &HostIdentityContextCandidate,
     run_context: &LoopRunContext,
@@ -226,21 +215,12 @@ pub fn build_identity_messages_for_run(
     mode: PromptMode,
     budget: IdentityBudget,
 ) -> Result<Vec<LoopContextMessage>, AgentLoopHostError> {
-    build_identity_messages_from_candidates(
-        &filter_identity_candidates_for_run(candidates, run_context),
-        mode,
-        budget,
-    )
-}
-
-fn build_identity_messages_from_candidates(
-    candidates: &[HostIdentityContextCandidate],
-    mode: PromptMode,
-    budget: IdentityBudget,
-) -> Result<Vec<LoopContextMessage>, AgentLoopHostError> {
     let mut out = Vec::with_capacity(candidates.len());
     let mut used = 0u32;
     for candidate in candidates {
+        if !identity_candidate_allowed_for_run(candidate, run_context) {
+            continue;
+        }
         if !applies(candidate.applies_when, mode) {
             continue;
         }

@@ -196,7 +196,7 @@ pub fn default_planned_run_profile_resolver()
 mod tests {
     use ironclaw_turns::{
         RunProfileRequest, RunProfileResolutionRequest, RunProfileResolver,
-        run_profile::LoopDriverId,
+        run_profile::{LoopDriverId, PersonalContextPolicy},
     };
 
     use super::*;
