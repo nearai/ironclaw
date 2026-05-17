@@ -23,7 +23,12 @@ libsql-secrets = [
 # Opt-in because the restart coverage opens real libSQL-backed turn/thread stores.
 # Keep separate from `libsql-secrets` so local `cargo test -p ironclaw_reborn`
 # stays fast, while CI can exercise process-restart persistence explicitly.
-libsql-restart-tests = ["dep:libsql", "ironclaw_threads/libsql", "ironclaw_turns/libsql"]
+libsql-restart-tests = [
+    "dep:libsql",
+    "dep:ironclaw_filesystem",
+    "ironclaw_filesystem/libsql",
+    "ironclaw_turns/libsql",
+]
 
 [dependencies]
 async-trait = "0.1"

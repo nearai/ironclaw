@@ -879,8 +879,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
                 .await
                 .unwrap(),
         );
-        let thread_service = ironclaw_threads::LibSqlSessionThreadService::new(thread_db);
-        thread_service.run_migrations().await.unwrap();
+        let thread_service = build_libsql_thread_service(thread_db).await;
         let turn_store = ironclaw_turns::LibSqlTurnStateStore::new(turn_db);
         turn_store.run_migrations().await.unwrap();
         thread_service
@@ -955,8 +954,7 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
             .await
             .unwrap(),
     );
-    let thread_service = Arc::new(ironclaw_threads::LibSqlSessionThreadService::new(thread_db));
-    thread_service.run_migrations().await.unwrap();
+    let thread_service = Arc::new(build_libsql_thread_service(thread_db).await);
     let turn_store = Arc::new(ironclaw_turns::LibSqlTurnStateStore::new(turn_db));
     turn_store.run_migrations().await.unwrap();
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
@@ -1051,6 +1049,35 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
             && message.content.as_deref() == Some("model says hi")
             && message.turn_run_id.as_deref() == Some(expected_run_id.as_str())
     }));
+}
+
+/// Build the libSQL-backed [`FilesystemSessionThreadService`] used by the
+/// restart test. The same `libsql::Database` handle drives the underlying
+/// [`LibSqlRootFilesystem`]; reopening the database file from a sibling
+/// process (or reconstructing it across a process-restart, as this test
+/// simulates) exposes the same records through a fresh
+/// `FilesystemSessionThreadService` instance. The `/threads` mount alias
+/// resolves to a fixed top-level `VirtualPath` for the test; production
+/// composition routes the alias through the per-invocation
+/// [`MountView`](ironclaw_host_api::MountView) so tenant isolation is
+/// structural rather than something this test has to thread through paths.
+#[cfg(feature = "libsql-restart-tests")]
+async fn build_libsql_thread_service(
+    db: Arc<libsql::Database>,
+) -> ironclaw_threads::FilesystemSessionThreadService<ironclaw_filesystem::LibSqlRootFilesystem> {
+    use ironclaw_filesystem::{LibSqlRootFilesystem, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions};
+
+    let fs = LibSqlRootFilesystem::new(db);
+    fs.run_migrations().await.unwrap();
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/threads").unwrap(),
+        VirtualPath::new("/threads").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let scoped = Arc::new(ScopedFilesystem::new(Arc::new(fs), mounts));
+    ironclaw_threads::FilesystemSessionThreadService::new(scoped)
 }
 
 #[tokio::test]
