@@ -12,6 +12,7 @@ mod coordinator;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 mod db;
 pub mod events;
+mod filesystem_store;
 mod ids;
 pub mod loop_exit;
 mod memory;
@@ -48,6 +49,7 @@ pub use events::{
     TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService,
     TurnEventProjectionSnapshot, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
 };
+pub use filesystem_store::FilesystemTurnStateStore;
 pub use ids::{
     AcceptedMessageRef, GateRef, IdempotencyKey, LoopDiagnosticRef, LoopExitId, LoopGateRef,
     LoopMessageRef, LoopResultRef, LoopUsageSummaryRef, ReplyTargetBindingRef, RunProfileId,

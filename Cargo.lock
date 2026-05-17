@@ -4872,6 +4872,7 @@ dependencies = [
  "chrono",
  "deadpool-postgres",
  "hex",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
  "libsql",
  "serde",
