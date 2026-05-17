@@ -55,6 +55,7 @@ use ironclaw_host_api::{
 };
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 
 use crate::{
     CredentialAccount, CredentialAccountId, CredentialAccountStatus, CredentialAccountStore,
@@ -62,6 +63,7 @@ use crate::{
     DEFAULT_SECRET_LEASE_TTL_SECONDS, SecretError, SecretLease, SecretLeaseId, SecretLeaseStatus,
     SecretMaterial, SecretMetadata, SecretStore, SecretStoreError, SecretsCrypto,
     credential_account_aad, credential_session_aad, filesystem_secret_aad,
+    secret_store_key_check_aad,
 };
 
 /// Maximum number of CAS retries before a multi-process write loop gives up
@@ -69,6 +71,22 @@ use crate::{
 /// absorb realistic contention without papering over pathological hot-spots
 /// that should be surfaced to the caller.
 const CAS_RETRY_ATTEMPTS: usize = 3;
+
+/// Fixed sentinel plaintext written by
+/// [`FilesystemSecretStore::verify_can_decrypt_existing_secrets`]. Mirrors
+/// the libSQL/Postgres `SECRET_STORE_KEY_CHECK_PLAINTEXT` so an operator who
+/// rotates a master key sees the same fail-loud-on-mismatch contract on every
+/// backend.
+const FILESYSTEM_KEY_CHECK_PLAINTEXT: &[u8] = b"reborn-secret-store-key-check-v1";
+
+/// Alias-relative path of the master-key readiness sentinel. The file lives
+/// at the `/secrets` mount root (no tenant/agent subscoping) because the
+/// check is process-level: a single sentinel proves the composition's master
+/// key can round-trip ciphertext against the same `RootFilesystem` mounted at
+/// `/secrets`. Tenant isolation for actual secret material is structural via
+/// the caller's [`MountView`](ironclaw_host_api::MountView); the sentinel is
+/// not secret material.
+const KEY_CHECK_PATH: &str = "/secrets/_master_key_check.json";
 
 // -- Serialized DTOs --------------------------------------------------------
 //
@@ -124,6 +142,17 @@ struct StoredSession {
     encrypted_payload: Vec<u8>,
     key_salt: Vec<u8>,
     uses: u64,
+}
+
+/// Master-key readiness sentinel. Encrypted under
+/// [`secret_store_key_check_aad`]; the plaintext is
+/// [`FILESYSTEM_KEY_CHECK_PLAINTEXT`]. Stored at [`KEY_CHECK_PATH`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredKeyCheck {
+    encrypted_value: Vec<u8>,
+    key_salt: Vec<u8>,
+    created_at: Timestamp,
+    updated_at: Timestamp,
 }
 
 // CredentialSession is intentionally not `Serialize`/`Deserialize` (its fields
@@ -223,6 +252,109 @@ where
             crypto,
             lease_ttl,
         }
+    }
+
+    /// Fail-loud master-key readiness check.
+    ///
+    /// On first run: encrypts a fixed sentinel plaintext
+    /// ([`FILESYSTEM_KEY_CHECK_PLAINTEXT`]) under [`secret_store_key_check_aad`]
+    /// and writes it to [`KEY_CHECK_PATH`]. On every subsequent run: reads the
+    /// sentinel back and verifies it decrypts to the same plaintext. A
+    /// mismatch — operator rotated the master key, copy-pasted a different
+    /// key, lost their keychain entry — fails with
+    /// [`SecretError::DecryptionFailed`] before any other secret operation
+    /// can return a wrong plaintext.
+    ///
+    /// This mirrors the libSQL/Postgres `verify_can_decrypt_existing_secrets`
+    /// contract (see git history for the deleted
+    /// `LibSqlSecretsStore::verify_can_decrypt_existing_secrets`) so the
+    /// startup-readiness shape is backend-independent.
+    ///
+    /// Composition must call this exactly once at process startup, between
+    /// constructing the store and exposing it to the runtime.
+    pub async fn verify_can_decrypt_existing_secrets(&self) -> Result<(), SecretError> {
+        let path = key_check_path()?;
+        let aad = secret_store_key_check_aad();
+        let existing = self
+            .filesystem
+            .get(&path)
+            .await
+            .map_err(filesystem_to_secret_error)?;
+        if let Some(versioned) = existing {
+            let stored: StoredKeyCheck = serde_json::from_slice(&versioned.entry.body)
+                .map_err(|error| SecretError::Database(error.to_string()))?;
+            let decrypted = self
+                .crypto
+                .decrypt(&stored.encrypted_value, &stored.key_salt, &aad)?;
+            // Constant-time compare against the fixed sentinel mirrors
+            // `db.rs::verify_secret_store_key_check` (deleted alongside this
+            // method's port). The sentinel is a compile-time string so the
+            // practical timing-oracle risk is low; the constant-time path is
+            // kept defense-in-depth and consistent with F1/F3 from the
+            // 2026-05 audit.
+            let matches: bool = ConstantTimeEq::ct_eq(
+                decrypted.expose().as_bytes(),
+                FILESYSTEM_KEY_CHECK_PLAINTEXT,
+            )
+            .into();
+            if !matches {
+                return Err(SecretError::DecryptionFailed(
+                    "secret store key check mismatch".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        // First-run bootstrap: encrypt the sentinel under the current crypto
+        // and write it. A `CasExpectation::Any` write is correct: if a
+        // concurrent process wins the create race, we read the winner back
+        // and verify it decrypts under our key. Either we agree on the
+        // master key (`Ok(())`) or we fail loud at decrypt
+        // (`DecryptionFailed`) — exactly the libSQL bootstrap shape.
+        let (encrypted_value, key_salt) =
+            self.crypto.encrypt(FILESYSTEM_KEY_CHECK_PLAINTEXT, &aad)?;
+        let now = Utc::now();
+        let stored = StoredKeyCheck {
+            encrypted_value,
+            key_salt,
+            created_at: now,
+            updated_at: now,
+        };
+        let body = serde_json::to_vec(&stored)
+            .map_err(|error| SecretError::Database(error.to_string()))?;
+        let entry = Entry::bytes(body).with_content_type(ContentType::json());
+        self.filesystem
+            .put(&path, entry, CasExpectation::Any)
+            .await
+            .map_err(filesystem_to_secret_error)?;
+        // Re-read to confirm: under contention another process may have
+        // written a sentinel encrypted with a different master key, in which
+        // case our own decrypt below fails closed.
+        let Some(versioned) = self
+            .filesystem
+            .get(&path)
+            .await
+            .map_err(filesystem_to_secret_error)?
+        else {
+            return Err(SecretError::Database(
+                "secret store key check missing after bootstrap".to_string(),
+            ));
+        };
+        let stored: StoredKeyCheck = serde_json::from_slice(&versioned.entry.body)
+            .map_err(|error| SecretError::Database(error.to_string()))?;
+        let decrypted = self
+            .crypto
+            .decrypt(&stored.encrypted_value, &stored.key_salt, &aad)?;
+        let matches: bool = ConstantTimeEq::ct_eq(
+            decrypted.expose().as_bytes(),
+            FILESYSTEM_KEY_CHECK_PLAINTEXT,
+        )
+        .into();
+        if !matches {
+            return Err(SecretError::DecryptionFailed(
+                "secret store key check mismatch".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     async fn read_secret(
@@ -1022,6 +1154,24 @@ fn secret_owner_alias(scope: &ResourceScope) -> String {
 
 fn scoped_path_secret(raw: &str) -> Result<ScopedPath, SecretStoreError> {
     ScopedPath::new(raw).map_err(host_api_to_secret_store_error)
+}
+
+/// Alias-relative path of the master-key readiness sentinel. Errors are
+/// surfaced as [`SecretError::Database`] so [`verify_can_decrypt_existing_secrets`]
+/// can return them unchanged.
+fn key_check_path() -> Result<ScopedPath, SecretError> {
+    ScopedPath::new(KEY_CHECK_PATH).map_err(|error| SecretError::Database(error.to_string()))
+}
+
+/// Map filesystem errors raised by the master-key sentinel I/O into
+/// [`SecretError`]. The sentinel path itself contains no host filesystem
+/// detail; [`FilesystemError`] variants carry [`VirtualPath`]/[`ScopedPath`]
+/// references only, so this preserves the no-host-path-leak guardrail.
+fn filesystem_to_secret_error(error: FilesystemError) -> SecretError {
+    SecretError::Database(format!(
+        "secret store key check filesystem error: {}",
+        sanitize_error_kind(error.to_string())
+    ))
 }
 
 fn scoped_path_broker(raw: &str) -> Result<ScopedPath, CredentialBrokerError> {
@@ -2216,5 +2366,82 @@ mod tests {
             "tenant_id projection must NOT surface tenant-a's secret under tenant-b query; got {} rows",
             miss.len(),
         );
+    }
+
+    fn wrong_crypto() -> Arc<SecretsCrypto> {
+        Arc::new(
+            SecretsCrypto::new(SecretMaterial::from(
+                "abcdef0123456789abcdef0123456789".to_string(),
+            ))
+            .expect("alt master key length is valid"),
+        )
+    }
+
+    /// First-run bootstrap: an empty store with no sentinel must accept the
+    /// readiness check and install the sentinel. Calling it again with the
+    /// same crypto must keep accepting (steady-state path reads the existing
+    /// sentinel).
+    #[tokio::test]
+    async fn filesystem_secret_store_verify_can_decrypt_existing_secrets_bootstraps_on_first_run() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = default_scoped_fs(Arc::clone(&backend));
+        let store = FilesystemSecretStore::new(Arc::clone(&scoped), test_crypto());
+
+        store.verify_can_decrypt_existing_secrets().await.unwrap();
+        // Idempotent: a second call must observe the sentinel and accept it
+        // without re-bootstrapping.
+        store.verify_can_decrypt_existing_secrets().await.unwrap();
+    }
+
+    /// Steady-state mismatch: an operator who rotates the master key (or
+    /// pastes the wrong one on restart) must hit `DecryptionFailed` before
+    /// the store can return any wrong plaintext. The sentinel never appears
+    /// in the error.
+    #[tokio::test]
+    async fn filesystem_secret_store_verify_can_decrypt_existing_secrets_rejects_wrong_key() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = default_scoped_fs(Arc::clone(&backend));
+        let bootstrap_store = FilesystemSecretStore::new(Arc::clone(&scoped), test_crypto());
+        bootstrap_store
+            .verify_can_decrypt_existing_secrets()
+            .await
+            .unwrap();
+
+        let losing_store = FilesystemSecretStore::new(scoped, wrong_crypto());
+        let error = losing_store
+            .verify_can_decrypt_existing_secrets()
+            .await
+            .expect_err("wrong master key must fail the sentinel check");
+        assert!(
+            matches!(error, SecretError::DecryptionFailed(_)),
+            "expected DecryptionFailed; got {error:?}"
+        );
+        assert!(
+            !format!("{error:?}").contains("reborn-secret-store-key-check-v1"),
+            "sentinel plaintext must not leak through error formatting",
+        );
+    }
+
+    /// Verifies isolation between tenant subtrees: each MountView resolves
+    /// `/secrets` to its own VirtualPath prefix, so the sentinel under one
+    /// tenant cannot satisfy the readiness check for another tenant whose
+    /// composition runs with a different master key. This is the same
+    /// structural protection the runtime relies on for actual secret
+    /// material — see `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+    #[tokio::test]
+    async fn filesystem_secret_store_verify_can_decrypt_existing_secrets_isolates_per_mount() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let tenant_a = build_scoped_fs(Arc::clone(&backend), "/secrets/tenants/a/users/x/secrets");
+        let tenant_b = build_scoped_fs(Arc::clone(&backend), "/secrets/tenants/b/users/x/secrets");
+
+        let store_a = FilesystemSecretStore::new(tenant_a, test_crypto());
+        store_a.verify_can_decrypt_existing_secrets().await.unwrap();
+
+        // Tenant B's composition uses a different master key entirely. The
+        // mount points at a different VirtualPath subtree, so tenant A's
+        // sentinel is invisible — the bootstrap path runs cleanly under
+        // tenant B's key.
+        let store_b = FilesystemSecretStore::new(tenant_b, wrong_crypto());
+        store_b.verify_can_decrypt_existing_secrets().await.unwrap();
     }
 }
