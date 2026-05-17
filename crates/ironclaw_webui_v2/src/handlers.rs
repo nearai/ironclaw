@@ -17,16 +17,18 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornResolveGateResponse,
-    RebornServicesApi, RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    RebornServicesApi, RebornServicesErrorCode, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::WebUiV2HttpError;
 use crate::router::WebUiV2State;
@@ -78,12 +80,22 @@ const SSE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 /// to keep proxies from closing the idle connection.
 const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 
+/// HTTP header the browser's `EventSource` sends on auto-reconnect to
+/// resume an SSE stream. The value is the `id:` of the last successfully
+/// delivered event; for this surface the handler sets that to the JSON-
+/// serialized projection cursor.
+const LAST_EVENT_ID_HEADER: &str = "last-event-id";
+
 /// `GET /api/webchat/v2/threads/{thread_id}/events`
 ///
 /// Server-Sent Events stream. Each event carries one
 /// [`ProductOutboundEnvelope`] as JSON with the projection cursor as the
-/// SSE `id` so the browser can resume via the standard `Last-Event-ID`
-/// header on reconnect.
+/// SSE `id` so the browser can resume from the last delivered event.
+///
+/// Resume cursor precedence: `Last-Event-ID` header (sent automatically
+/// by the browser's `EventSource` on reconnect) wins over the
+/// `?after_cursor=...` query parameter. Both are optional — first
+/// connects pass neither and start from the projection origin.
 ///
 /// Until the facade gains a true subscription API, the handler drains and
 /// polls in a loop. Drain-only semantics are documented on
@@ -95,10 +107,16 @@ pub async fn stream_events(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(thread_id): Path<String>,
+    headers: HeaderMap,
     Query(query): Query<StreamEventsQuery>,
 ) -> impl IntoResponse {
     let services = state.services().clone();
-    let stream = build_sse_stream(services, caller, thread_id, query.after_cursor);
+    let initial_cursor = headers
+        .get(LAST_EVENT_ID_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+        .or(query.after_cursor);
+    let stream = build_sse_stream(services, caller, thread_id, initial_cursor);
     Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE_INTERVAL))
 }
 
@@ -109,6 +127,15 @@ pub async fn stream_events(
 pub struct StreamEventsQuery {
     #[serde(default)]
     pub after_cursor: Option<String>,
+}
+
+/// Redacted SSE error payload. Defined as a typed struct (not built with
+/// `serde_json::json!`) so the `Serialize` derive is total — serialization
+/// cannot fail on a tagged enum + bool, so there is no fallback branch.
+#[derive(Debug, Clone, Serialize)]
+struct SseErrorPayload {
+    error: RebornServicesErrorCode,
+    retryable: bool,
 }
 
 fn build_sse_stream(
@@ -158,12 +185,14 @@ fn build_sse_stream(
                         error = ?error,
                         "facade rejected SSE drain; closing stream",
                     );
-                    let payload = serde_json::to_string(&serde_json::json!({
-                        "error": error.code,
-                        "retryable": error.retryable,
-                    }))
-                    .unwrap_or_else(|_| "{\"error\":\"internal\"}".to_string());
-                    yield Ok(Event::default().event("error").data(payload));
+                    let payload = SseErrorPayload {
+                        error: error.code,
+                        retryable: error.retryable,
+                    };
+                    yield Ok(Event::default()
+                        .event("error")
+                        .json_data(payload)
+                        .expect("SseErrorPayload is a tagged enum + bool with derived Serialize; cannot fail")); // safety: typed struct with derived Serialize on serde-compatible fields only
                     return;
                 }
             }

@@ -429,6 +429,71 @@ async fn stream_events_emits_sse_content_type_and_drains_facade() {
 }
 
 #[tokio::test]
+async fn stream_events_last_event_id_header_takes_precedence_over_query() {
+    // Two distinct, parseable cursors so the precedence is observable in
+    // the captured RebornStreamEventsRequest — if a future refactor flips
+    // the `.or()` order, the facade will see cursor-B and this test fails.
+    let header_cursor =
+        ironclaw_product_adapters::ProjectionCursor::new("cursor-from-header").expect("cursor");
+    let query_cursor =
+        ironclaw_product_adapters::ProjectionCursor::new("cursor-from-query").expect("cursor");
+    let header_json = serde_json::to_string(&header_cursor).expect("serialize header cursor");
+    let query_json = serde_json::to_string(&query_cursor).expect("serialize query cursor");
+    let query_encoded = url_encode(&query_json);
+
+    let services = Arc::new(StubServices::default());
+    let signal = services.stream_events_signal();
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!(
+                    "/api/webchat/v2/threads/thread-x/events?after_cursor={query_encoded}"
+                ))
+                .header("Last-Event-ID", header_json)
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let _poll = tokio::spawn(async move {
+        let _ = body.frame().await;
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), signal.notified())
+        .await
+        .expect("stream_events must be called within 2s after the body is polled");
+
+    let calls = services.stream_events_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1, "facade.stream_events called exactly once");
+    assert_eq!(
+        calls[0].after_cursor.as_ref(),
+        Some(&header_cursor),
+        "Last-Event-ID header must win over ?after_cursor= query param"
+    );
+}
+
+fn url_encode(value: &str) -> String {
+    // Minimal application/x-www-form-urlencoded helper: percent-encode every
+    // byte that is not an unreserved character per RFC 3986. Avoids pulling
+    // in a urlencoding dep just for one test value.
+    let mut out = String::with_capacity(value.len() * 3);
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+#[tokio::test]
 async fn missing_caller_extension_returns_500() {
     // No `Extension(caller)` layer — exercises the failure mode if host
     // composition forgets to run the bearer middleware.

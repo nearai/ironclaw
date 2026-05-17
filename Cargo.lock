@@ -4976,7 +4976,6 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum 0.8.9",
- "chrono",
  "futures",
  "http 1.4.0",
  "http-body-util",

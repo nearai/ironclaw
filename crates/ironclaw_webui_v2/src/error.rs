@@ -9,7 +9,9 @@
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
-use ironclaw_product_workflow::{RebornServicesError, RebornServicesErrorCode};
+use ironclaw_product_workflow::{
+    RebornServicesError, RebornServicesErrorCode, WebUiInboundValidationCode,
+};
 use serde::Serialize;
 
 /// HTTP-shaped error response wrapping a [`RebornServicesError`].
@@ -23,6 +25,10 @@ pub struct WebUiV2HttpError(RebornServicesError);
 impl WebUiV2HttpError {
     pub fn into_response_parts(self) -> (StatusCode, WebUiV2HttpErrorBody) {
         let status = StatusCode::from_u16(self.0.status_code).unwrap_or_else(|_| {
+            // Defensive: every call site in `ironclaw_product_workflow` builds
+            // status codes from a fixed table (400/401/403/404/409/429/500/503).
+            // If a future variant introduces a non-HTTP code, log loudly and
+            // fall back to 500 rather than poisoning the response.
             tracing::error!(
                 target = "ironclaw_webui_v2::error",
                 status_code = self.0.status_code,
@@ -34,12 +40,7 @@ impl WebUiV2HttpError {
             error: self.0.code,
             retryable: self.0.retryable,
             field: self.0.field.clone(),
-            validation_code: self.0.validation_code.map(|code| {
-                serde_json::to_value(code)
-                    .ok()
-                    .and_then(|v| v.as_str().map(str::to_string))
-                    .unwrap_or_default()
-            }),
+            validation_code: self.0.validation_code,
         };
         (status, body)
     }
@@ -59,6 +60,10 @@ impl IntoResponse for WebUiV2HttpError {
 }
 
 /// Wire shape of an HTTP error returned by a WebChat v2 handler.
+///
+/// `validation_code` is the typed enum from `ironclaw_product_workflow`; it
+/// serializes as snake_case (e.g. `"missing_field"`) via its own `Serialize`
+/// impl, so this struct does not perform any fallible string conversion.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WebUiV2HttpErrorBody {
     pub error: RebornServicesErrorCode,
@@ -66,5 +71,5 @@ pub struct WebUiV2HttpErrorBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub validation_code: Option<String>,
+    pub validation_code: Option<WebUiInboundValidationCode>,
 }

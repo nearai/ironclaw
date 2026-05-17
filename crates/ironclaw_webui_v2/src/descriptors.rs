@@ -7,9 +7,8 @@
 
 use ironclaw_host_api::ingress::{
     AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
-    IngressAuthScheme, IngressJustification, IngressPolicy, IngressPolicyParts,
-    IngressRouteDescriptor, ListenerClass, RateLimitPolicy, RateLimitScope, StreamingMode,
-    WebSocketOriginPolicy,
+    IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor, ListenerClass,
+    RateLimitPolicy, RateLimitScope, StreamingMode, WebSocketOriginPolicy,
 };
 use ironclaw_host_api::{IngressScopeSource, NetworkMethod};
 use std::num::{NonZeroU32, NonZeroU64};
@@ -140,7 +139,7 @@ fn descriptor(
     policy: IngressPolicy,
 ) -> IngressRouteDescriptor {
     IngressRouteDescriptor::new(route_id.to_string(), method, pattern.to_string(), policy)
-        .expect("webui v2 route descriptor must validate at startup")
+        .expect("webui v2 route descriptor must validate at startup") // safety: route_id/pattern are crate-local literals known to satisfy IngressRouteId / IngressRoutePattern; policy is constructed by sibling helpers that validate their own inputs
 }
 
 fn mutation_policy(
@@ -161,7 +160,7 @@ fn mutation_policy(
         audit,
         effect_path,
     })
-    .expect("webui v2 mutation policy must validate")
+    .expect("webui v2 mutation policy must validate") // safety: all parts are crate-local constants; the combination (LocalGateway + bearer required + AuthenticatedCaller + None streaming) is a permitted shape, locked in by the descriptor contract test
 }
 
 fn read_policy(
@@ -182,7 +181,7 @@ fn read_policy(
         audit,
         effect_path,
     })
-    .expect("webui v2 read policy must validate")
+    .expect("webui v2 read policy must validate") // safety: streaming is either None or Sse (both permitted with bearer + AuthenticatedCaller); other parts are crate-local constants
 }
 
 fn bearer_required() -> IngressAuthPolicy {
@@ -195,7 +194,7 @@ fn body_limit_kib(kib: u64) -> BodyLimitPolicy {
     let bytes = kib
         .checked_mul(1024)
         .and_then(NonZeroU64::new)
-        .expect("body limit must be non-zero");
+        .expect("body limit must be non-zero"); // safety: all call sites pass crate-local positive constants (4, 16, 1024); overflow at u64 * 1024 is impossible for these
     BodyLimitPolicy::Limited { max_bytes: bytes }
 }
 
@@ -215,16 +214,7 @@ fn stream_rate_limit() -> RateLimitPolicy {
 fn rate_limit_per_caller(max: u32, window_secs: u32) -> RateLimitPolicy {
     RateLimitPolicy::Limited {
         scope: RateLimitScope::PerCaller,
-        max_requests: NonZeroU32::new(max).expect("max_requests must be non-zero"),
-        window_seconds: NonZeroU32::new(window_secs).expect("window_seconds must be non-zero"),
+        max_requests: NonZeroU32::new(max).expect("max_requests must be non-zero"), // safety: all call sites pass crate-local positive constants (12, 60, 120)
+        window_seconds: NonZeroU32::new(window_secs).expect("window_seconds must be non-zero"), // safety: all call sites pass crate-local positive constants (60)
     }
-}
-
-#[allow(dead_code)]
-fn streaming_justification() -> IngressJustification {
-    IngressJustification::new(
-        "streaming",
-        "WebChat v2 SSE feed delivers projection events to the browser",
-    )
-    .expect("streaming justification text must validate")
 }

@@ -46,7 +46,6 @@ ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = 
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tower = { version = "0.5", features = ["util"] }
 http = "1"
