@@ -2112,8 +2112,8 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
 }
 
 // Identity source is now required by the `DefaultPlannedRuntimeParts` type
-// signature (WS-16), so the previous fail-closed runtime gate is enforced at
-// compile time. The dynamic gate test has been retired alongside the dead
+// signature, so the previous fail-closed runtime gate is enforced at compile
+// time. The dynamic gate test has been retired alongside the dead
 // `is_none()` check; the "builds when all required adapters are present" test
 // below still proves the happy-path readiness contract.
 
@@ -2178,9 +2178,9 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
     assert_eq!(resolved.profile_id.as_str(), "reborn-planned-default");
 }
 
-/// Build a fully-populated `DefaultPlannedRuntimeParts` for the WS-17
-/// product-live readiness gate tests. Callers below override individual
-/// fields with `None` to assert the fail-closed branch fires.
+/// Build a fully-populated `DefaultPlannedRuntimeParts` for product-live
+/// readiness gate tests. Callers below override individual fields with `None`
+/// to assert the fail-closed branch fires.
 async fn product_live_parts_for_gate_test(
     thread_label: &'static str,
 ) -> DefaultPlannedRuntimeParts<

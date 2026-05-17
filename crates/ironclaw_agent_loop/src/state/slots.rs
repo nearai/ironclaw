@@ -15,8 +15,7 @@ pub struct ModelStrategyState {
 ///
 /// Semantics: the retry budget is *not* durable across resume — on rehydration
 /// from a `BeforeSideEffect` checkpoint, counters reset to 0 so a fresh
-/// retry budget is granted post-resume. See master doc §10 for the
-/// retry-budget durability note.
+/// retry budget is granted post-resume.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RecoveryStrategyState {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -33,9 +32,7 @@ impl RecoveryStrategyState {
     /// incremented by one (saturating at `u32::MAX`).
     ///
     /// Used by `DefaultRecoveryStrategy` when classifying a fresh error so
-    /// the next retry/abort decision sees the updated attempt count. See
-    /// `docs/reborn/agent-loop-skeleton.md` §6 ("RecoveryStrategy") and §10
-    /// ("Production-safe escape" — per-error retry budget).
+    /// the next retry/abort decision sees the updated attempt count.
     pub fn with_incremented_attempts_for(&self, class: RecoveryAttemptClass) -> Self {
         let mut attempts_by_class = self.attempts_by_class.clone();
         attempts_by_class.insert(class, self.attempts_for(class).saturating_add(1));
@@ -85,11 +82,6 @@ pub struct StopStrategyState {
     pub last_batch_total: u32,
 }
 
-/// Persistent state owned by `GateHandlingStrategy`. Empty in the skeleton;
-/// future families may track gate fingerprints (for resume correlation),
-/// per-gate-kind counters, or other gate-relevant bookkeeping here without
-/// touching Stop-strategy state.
+/// Persistent state owned by `GateHandlingStrategy`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct GateStrategyState {
-    // skeleton: empty. WS-2 may extend when DefaultGateHandlingStrategy needs it.
-}
+pub struct GateStrategyState {}

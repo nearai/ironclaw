@@ -11,8 +11,6 @@ use crate::state::LoopExecutionState;
 /// The host is the source of truth for the catalog and applies its own
 /// scope/grant/auth filters AFTER the strategy filter; the strategy can only
 /// narrow, never expand.
-///
-/// See `docs/reborn/agent-loop-skeleton.md` section 6.
 #[async_trait]
 pub(crate) trait CapabilityStrategy: Send + Sync {
     async fn filter(&self, state: &LoopExecutionState) -> CapabilityFilter;
@@ -26,9 +24,6 @@ fn _assert_object_safe(_: &dyn CapabilityStrategy) {}
 /// The host applies its own scope/grant/auth filters on top — this default
 /// strategy declines to filter further, leaving capability visibility entirely
 /// to the host's authoritative policy.
-///
-/// See `docs/reborn/agent-loop-skeleton.md` §6 ("The nine strategies" →
-/// `CapabilityStrategy`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DefaultCapabilityStrategy;
 

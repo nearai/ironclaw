@@ -67,14 +67,14 @@ where
     pub cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     pub input_queue: Option<Arc<dyn HostInputQueue>>,
-    /// Required by the WS-14 planned-driver brief for the WS-16 runtime smoke
-    /// and WS-17 product cutover. `None` is only acceptable for helper-level
-    /// WS-14 unit tests; live composition must always supply identity context.
+    /// Required by live planned-runtime composition. Helper-level tests may use
+    /// a no-op implementation, but the type signature always requires a valid
+    /// identity context source.
     pub identity_context_source: Arc<dyn HostIdentityContextSource>,
-    /// WS-17 product-live readiness extensions. `RebornLoopDriverHostFactory`
-    /// defaults these to no-op implementations so legacy WS-14 helper tests
-    /// keep compiling. `build_product_live_planned_runtime` fails closed when
-    /// any of them is `None`, matching the cancellation/identity contract.
+    /// Product-live readiness extensions. `RebornLoopDriverHostFactory`
+    /// defaults these to no-op implementations so helper tests keep compiling.
+    /// `build_product_live_planned_runtime` fails closed when any of them is
+    /// `None`, matching the cancellation/identity contract.
     pub model_policy_guard: Option<Arc<dyn LoopModelPolicyGuard>>,
     pub model_budget_accountant: Option<Arc<dyn LoopModelBudgetAccountant>>,
     pub safety_context: Option<InstructionSafetyContext>,

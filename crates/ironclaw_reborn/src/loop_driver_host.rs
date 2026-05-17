@@ -19,12 +19,10 @@ use crate::driver_registry::{DriverRequirements, LoopDriverRegistryKey, Requirem
 use crate::model_routes::{ModelRouteError, ModelRouteResolver, ModelSlot};
 use crate::text_loop_driver::{TEXT_ONLY_DRIVER_ID, TEXT_ONLY_DRIVER_VERSION};
 
-// Pre-WS-14 text-only driver key used by `is_text_only_driver_key`'s
-// fail-closed allowlist. Kept alongside the WS-7 `TEXT_ONLY_DRIVER_ID` so
-// legacy registry entries still resolve through the text-only host path.
-// Retire once no callers register or persist the `lightweight_loop` key —
-// after the WS-17 product cutover and any downstream migrations are
-// confirmed complete.
+// Legacy text-only driver key used by `is_text_only_driver_key`'s fail-closed
+// allowlist. Kept alongside `TEXT_ONLY_DRIVER_ID` so legacy registry entries
+// still resolve through the text-only host path. Retire once no callers
+// register or persist the `lightweight_loop` key.
 const LEGACY_TEXT_ONLY_DRIVER_ID: &str = "lightweight_loop";
 const LEGACY_TEXT_ONLY_DRIVER_VERSION: u64 = 1;
 const LEGACY_TEXT_ONLY_CHECKPOINT_SCHEMA_ID: &str = "interactive_checkpoint_v1";
@@ -263,10 +261,9 @@ where
         self
     }
 
-    // Note: the WS-11 brief specifies input_queue on PlannedDriverConfig; the implementation
-    // puts it here on RebornLoopDriverHostFactory instead, which is the factory pattern already
-    // used for capability/context ports. PlannedDriver delegates fully to the host for
-    // input port construction. This deviation is intentional; update the brief if keeping.
+    // Queue ownership follows the same factory used for capability/context
+    // ports. PlannedDriver delegates fully to the host for input port
+    // construction.
     pub fn with_input_queue(mut self, queue: Arc<dyn HostInputQueue>) -> Self {
         self.input_queue = Some(queue);
         self
