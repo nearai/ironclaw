@@ -522,6 +522,11 @@ pub(crate) fn inject_credential(
             // URL placeholder replacement is handled by channel/tool wrappers
             // that substitute {PLACEHOLDER} values in templated strings.
         }
+        // Signing variants are intentionally not injected here. Signatures
+        // are computed host-side in the dedicated signer path
+        // (`wrapper::inject_host_credentials`) after the request body is
+        // assembled, so the secret never enters static header/query/url
+        // placement and the WASM tool never sees key material.
         CredentialLocation::HmacSignedHeader { .. }
         | CredentialLocation::Eip712SignedHeader { .. }
         | CredentialLocation::Nep413SignedHeader { .. }

@@ -429,12 +429,19 @@ impl StoreData {
                 .then_with(|| a.secret_name.cmp(&b.secret_name))
         });
 
+        // A fresh timestamp and 256-bit nonce are minted per request. The
+        // host does not track used nonces or enforce timestamp monotonicity:
+        // replay resistance is delegated to the destination venue's API,
+        // which is the system of record for nonce/timestamp acceptance.
         let timestamp_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let mut nonce_bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
+
+        let mut signed_headers: HashMap<String, (crate::secrets::SignerClassification, String)> =
+            HashMap::new();
 
         for cred in matches_for_request {
             for (key, value) in &cred.headers {
@@ -502,8 +509,32 @@ impl StoreData {
 
                 match result {
                     Ok(extra) => {
+                        let incoming = signing.classification();
                         for (k, v) in extra.headers {
-                            headers.insert(k, v);
+                            let decision = match signed_headers.get(&k) {
+                                None => HeaderPrecedence::UseIncoming,
+                                Some((existing, _)) => header_precedence(*existing, incoming),
+                            };
+                            match decision {
+                                HeaderPrecedence::UseIncoming => {
+                                    if signed_headers.contains_key(&k) {
+                                        tracing::warn!(
+                                            "signing header '{k}' collision: {incoming:?} signer supersedes a lower-classification signer"
+                                        );
+                                    }
+                                    signed_headers.insert(k, (incoming, v));
+                                }
+                                HeaderPrecedence::KeepExisting => {
+                                    tracing::warn!(
+                                        "signing header '{k}' collision: keeping higher-classification signer over {incoming:?}"
+                                    );
+                                }
+                                HeaderPrecedence::Ambiguous => {
+                                    return Err(format!(
+                                        "ambiguous signing header collision on '{k}': two {incoming:?}-classification signers target it for this request; refusing to sign"
+                                    ));
+                                }
+                            }
                         }
                         if let Err(error) = apply_body_mutations(body, &extra.body_mutations) {
                             return Err(format!(
@@ -517,6 +548,10 @@ impl StoreData {
                     }
                 }
             }
+        }
+
+        for (name, (_, value)) in signed_headers {
+            headers.insert(name, value);
         }
         Ok(())
     }
@@ -532,11 +567,7 @@ impl StoreData {
             return Ok(());
         };
         let classification = signing.classification();
-        let rank = |c: crate::secrets::SignerClassification| match c {
-            crate::secrets::SignerClassification::Low => 0u8,
-            crate::secrets::SignerClassification::Medium => 1,
-            crate::secrets::SignerClassification::High => 2,
-        };
+        let rank = classification_rank;
         if rank(classification) < rank(self.gate_floor) {
             return Ok(());
         }
@@ -570,6 +601,32 @@ impl StoreData {
                 cred.secret_name
             )),
         }
+    }
+}
+
+fn classification_rank(c: crate::secrets::SignerClassification) -> u8 {
+    match c {
+        crate::secrets::SignerClassification::Low => 0,
+        crate::secrets::SignerClassification::Medium => 1,
+        crate::secrets::SignerClassification::High => 2,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeaderPrecedence {
+    UseIncoming,
+    KeepExisting,
+    Ambiguous,
+}
+
+fn header_precedence(
+    existing: crate::secrets::SignerClassification,
+    incoming: crate::secrets::SignerClassification,
+) -> HeaderPrecedence {
+    match classification_rank(incoming).cmp(&classification_rank(existing)) {
+        std::cmp::Ordering::Greater => HeaderPrecedence::UseIncoming,
+        std::cmp::Ordering::Less => HeaderPrecedence::KeepExisting,
+        std::cmp::Ordering::Equal => HeaderPrecedence::Ambiguous,
     }
 }
 
@@ -3026,6 +3083,7 @@ fn needs_content_length_zero(method: &str, headers: &HashMap<String, String>) ->
 
 #[cfg(test)]
 mod tests {
+    use super::{HeaderPrecedence, classification_rank, header_precedence};
     use std::collections::HashMap;
     use std::net::SocketAddr;
     use std::sync::{Arc, Mutex};
@@ -4649,6 +4707,41 @@ mod tests {
         );
 
         assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn header_precedence_higher_classification_wins_both_orders() {
+        use crate::secrets::SignerClassification::{High, Low, Medium};
+        assert_eq!(
+            header_precedence(Low, Medium),
+            HeaderPrecedence::UseIncoming
+        );
+        assert_eq!(
+            header_precedence(Medium, Low),
+            HeaderPrecedence::KeepExisting
+        );
+        assert_eq!(header_precedence(Low, High), HeaderPrecedence::UseIncoming);
+        assert_eq!(
+            header_precedence(High, Medium),
+            HeaderPrecedence::KeepExisting
+        );
+        assert_eq!(header_precedence(Medium, High), HeaderPrecedence::UseIncoming);
+        assert_eq!(header_precedence(High, Low), HeaderPrecedence::KeepExisting);
+    }
+
+    #[test]
+    fn header_precedence_equal_classification_is_fail_closed_ambiguous() {
+        use crate::secrets::SignerClassification::{High, Low, Medium};
+        assert_eq!(header_precedence(Low, Low), HeaderPrecedence::Ambiguous);
+        assert_eq!(header_precedence(Medium, Medium), HeaderPrecedence::Ambiguous);
+        assert_eq!(header_precedence(High, High), HeaderPrecedence::Ambiguous);
+    }
+
+    #[test]
+    fn classification_rank_orders_low_below_medium_below_high() {
+        use crate::secrets::SignerClassification::{High, Low, Medium};
+        assert!(classification_rank(Low) < classification_rank(Medium));
+        assert!(classification_rank(Medium) < classification_rank(High));
     }
 
     #[test]
