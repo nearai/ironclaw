@@ -1,31 +1,292 @@
 //! Durable product workflow [`IdempotencyLedger`] storage adapters.
 
-use chrono::{DateTime, Duration, Utc};
+#![cfg_attr(
+    not(any(feature = "libsql", feature = "postgres")),
+    allow(dead_code, unused_imports)
+)]
 
+use std::sync::Arc;
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use async_trait::async_trait;
+use chrono::{DateTime, Duration, Utc};
+#[cfg(feature = "libsql")]
+use ironclaw_filesystem::LibSqlRootFilesystem;
+#[cfg(feature = "postgres")]
+use ironclaw_filesystem::PostgresRootFilesystem;
+use ironclaw_filesystem::{
+    CasExpectation, Entry, FilesystemError, IndexKey, IndexValue, RecordKind, RecordVersion,
+    RootFilesystem,
+};
+use ironclaw_host_api::VirtualPath;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_product_workflow::IdempotencyLedger;
 use ironclaw_product_workflow::{
-    ActionFingerprintKey, ActionPhase, IdempotencyDecision, IdempotencyLedger,
-    ProductInboundAction, ProductWorkflowError,
+    ActionFingerprintKey, ActionPhase, IdempotencyDecision, ProductInboundAction,
+    ProductWorkflowError,
 };
 
 const DEFAULT_IN_FLIGHT_LEASE: Duration = Duration::seconds(60);
+const DEFAULT_LEDGER_ROOT: &str = "/engine/product_workflow/idempotency/actions";
+const ACTION_RECORD_KIND: &str = "product_workflow_action";
 
-const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS reborn_product_workflow_actions (
-    adapter_id TEXT NOT NULL,
-    installation_id TEXT NOT NULL,
-    source_binding_key TEXT NOT NULL,
-    external_event_id TEXT NOT NULL,
-    action_id TEXT NOT NULL,
-    phase TEXT NOT NULL,
-    received_at TEXT NOT NULL,
-    settled_at TEXT,
-    payload TEXT NOT NULL,
-    PRIMARY KEY (adapter_id, installation_id, source_binding_key, external_event_id)
-);
+struct FilesystemIdempotencyLedger {
+    filesystem: Arc<dyn RootFilesystem>,
+    root: String,
+    in_flight_lease: Duration,
+}
 
-CREATE INDEX IF NOT EXISTS idx_reborn_product_workflow_actions_phase
-    ON reborn_product_workflow_actions(phase, received_at);
-"#;
+impl FilesystemIdempotencyLedger {
+    fn new(filesystem: Arc<dyn RootFilesystem>) -> Self {
+        Self::with_in_flight_lease(filesystem, DEFAULT_IN_FLIGHT_LEASE)
+    }
+
+    fn with_in_flight_lease(
+        filesystem: Arc<dyn RootFilesystem>,
+        in_flight_lease: Duration,
+    ) -> Self {
+        Self {
+            filesystem,
+            root: DEFAULT_LEDGER_ROOT.to_string(),
+            in_flight_lease,
+        }
+    }
+
+    fn with_root(
+        filesystem: Arc<dyn RootFilesystem>,
+        root: VirtualPath,
+        in_flight_lease: Duration,
+    ) -> Self {
+        Self {
+            filesystem,
+            root: root.as_str().to_string(),
+            in_flight_lease,
+        }
+    }
+
+    async fn begin_or_replay(
+        &self,
+        fingerprint: ActionFingerprintKey,
+        received_at: DateTime<Utc>,
+    ) -> Result<IdempotencyDecision, ProductWorkflowError> {
+        let path = action_path(&self.root, &fingerprint)?;
+        let action = ProductInboundAction::begin(fingerprint, received_at);
+        match self
+            .filesystem
+            .put(&path, entry_for_action(&action)?, CasExpectation::Absent)
+            .await
+        {
+            Ok(_) => return Ok(IdempotencyDecision::New(action)),
+            Err(FilesystemError::VersionMismatch { .. }) => {}
+            Err(error) => return Err(filesystem_error("reserve action", error)),
+        }
+
+        loop {
+            let Some((prior, version)) = load_action(self.filesystem.as_ref(), &path).await? else {
+                return Err(transient("idempotency ledger conflict row disappeared"));
+            };
+            if prior.is_terminal() {
+                return Ok(IdempotencyDecision::Replay(prior));
+            }
+            if fresh_in_flight(&prior, received_at, self.in_flight_lease) {
+                return Err(in_flight_error());
+            }
+
+            let replacement = ProductInboundAction::begin(prior.fingerprint.clone(), received_at);
+            match self
+                .filesystem
+                .put(
+                    &path,
+                    entry_for_action(&replacement)?,
+                    CasExpectation::Version(version),
+                )
+                .await
+            {
+                Ok(_) => return Ok(IdempotencyDecision::New(replacement)),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(filesystem_error("reclaim action", error)),
+            }
+        }
+    }
+
+    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+        let path = action_path(&self.root, &action.fingerprint)?;
+        loop {
+            let Some((current, version)) = load_action(self.filesystem.as_ref(), &path).await?
+            else {
+                return Err(transient(
+                    "idempotency reservation missing before terminal settle",
+                ));
+            };
+            if current.is_terminal() {
+                if current.action_id == action.action_id {
+                    return Ok(());
+                }
+                return Err(transient(
+                    "idempotency reservation was superseded before terminal settle",
+                ));
+            }
+            if current.action_id != action.action_id {
+                return Err(transient(
+                    "idempotency reservation was superseded before terminal settle",
+                ));
+            }
+
+            match self
+                .filesystem
+                .put(
+                    &path,
+                    entry_for_action(&action)?,
+                    CasExpectation::Version(version),
+                )
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(filesystem_error("settle action", error)),
+            }
+        }
+    }
+
+    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+        let path = action_path(&self.root, &action.fingerprint)?;
+        loop {
+            let Some((current, version)) = load_action(self.filesystem.as_ref(), &path).await?
+            else {
+                return Ok(());
+            };
+            if current.is_terminal() || current.action_id != action.action_id {
+                return Ok(());
+            }
+
+            let mut released = current;
+            released.received_at = expired_received_at(released.received_at, self.in_flight_lease);
+            match self
+                .filesystem
+                .put(
+                    &path,
+                    entry_for_action(&released)?,
+                    CasExpectation::Version(version),
+                )
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(error) => return Err(filesystem_error("release action", error)),
+            }
+        }
+    }
+}
+
+/// libSQL-backed product workflow idempotency ledger using the shared
+/// SQL filesystem backend for persistence.
+#[cfg(feature = "libsql")]
+pub struct RebornLibSqlIdempotencyLedger {
+    inner: FilesystemIdempotencyLedger,
+}
+
+#[cfg(feature = "libsql")]
+impl RebornLibSqlIdempotencyLedger {
+    pub fn new(filesystem: Arc<LibSqlRootFilesystem>) -> Self {
+        Self {
+            inner: FilesystemIdempotencyLedger::new(filesystem),
+        }
+    }
+
+    pub fn with_in_flight_lease(
+        filesystem: Arc<LibSqlRootFilesystem>,
+        in_flight_lease: Duration,
+    ) -> Self {
+        Self {
+            inner: FilesystemIdempotencyLedger::with_in_flight_lease(filesystem, in_flight_lease),
+        }
+    }
+
+    pub fn with_root(
+        filesystem: Arc<LibSqlRootFilesystem>,
+        root: VirtualPath,
+        in_flight_lease: Duration,
+    ) -> Self {
+        Self {
+            inner: FilesystemIdempotencyLedger::with_root(filesystem, root, in_flight_lease),
+        }
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[async_trait]
+impl IdempotencyLedger for RebornLibSqlIdempotencyLedger {
+    async fn begin_or_replay(
+        &self,
+        fingerprint: ActionFingerprintKey,
+        received_at: DateTime<Utc>,
+    ) -> Result<IdempotencyDecision, ProductWorkflowError> {
+        self.inner.begin_or_replay(fingerprint, received_at).await
+    }
+
+    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+        self.inner.settle(action).await
+    }
+
+    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+        self.inner.release(action).await
+    }
+}
+
+/// PostgreSQL-backed product workflow idempotency ledger using the shared
+/// SQL filesystem backend for persistence.
+#[cfg(feature = "postgres")]
+pub struct RebornPostgresIdempotencyLedger {
+    inner: FilesystemIdempotencyLedger,
+}
+
+#[cfg(feature = "postgres")]
+impl RebornPostgresIdempotencyLedger {
+    pub fn new(filesystem: Arc<PostgresRootFilesystem>) -> Self {
+        Self {
+            inner: FilesystemIdempotencyLedger::new(filesystem),
+        }
+    }
+
+    pub fn with_in_flight_lease(
+        filesystem: Arc<PostgresRootFilesystem>,
+        in_flight_lease: Duration,
+    ) -> Self {
+        Self {
+            inner: FilesystemIdempotencyLedger::with_in_flight_lease(filesystem, in_flight_lease),
+        }
+    }
+
+    pub fn with_root(
+        filesystem: Arc<PostgresRootFilesystem>,
+        root: VirtualPath,
+        in_flight_lease: Duration,
+    ) -> Self {
+        Self {
+            inner: FilesystemIdempotencyLedger::with_root(filesystem, root, in_flight_lease),
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[async_trait]
+impl IdempotencyLedger for RebornPostgresIdempotencyLedger {
+    async fn begin_or_replay(
+        &self,
+        fingerprint: ActionFingerprintKey,
+        received_at: DateTime<Utc>,
+    ) -> Result<IdempotencyDecision, ProductWorkflowError> {
+        self.inner.begin_or_replay(fingerprint, received_at).await
+    }
+
+    async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+        self.inner.settle(action).await
+    }
+
+    async fn release(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
+        self.inner.release(action).await
+    }
+}
 
 fn transient(reason: impl Into<String>) -> ProductWorkflowError {
     ProductWorkflowError::Transient {
@@ -34,25 +295,12 @@ fn transient(reason: impl Into<String>) -> ProductWorkflowError {
 }
 
 fn durable_error(operation: &'static str, error: impl std::fmt::Display) -> ProductWorkflowError {
-    tracing::error!(%error, operation, "product workflow idempotency ledger backend failed");
+    tracing::error!(%error, operation, "product workflow idempotency ledger failed");
     transient(format!("idempotency ledger failed to {operation}"))
 }
 
-fn to_json(action: &ProductInboundAction) -> Result<String, ProductWorkflowError> {
-    serde_json::to_string(action).map_err(|error| durable_error("serialize action", error))
-}
-
-fn from_json(payload: &str) -> Result<ProductInboundAction, ProductWorkflowError> {
-    serde_json::from_str(payload).map_err(|error| durable_error("deserialize action", error))
-}
-
-fn phase_label(phase: ActionPhase) -> &'static str {
-    match phase {
-        ActionPhase::Received => "received",
-        ActionPhase::Dispatched => "dispatched",
-        ActionPhase::Settled => "settled",
-        ActionPhase::DeduplicatedReplay => "deduplicated_replay",
-    }
+fn filesystem_error(operation: &'static str, error: FilesystemError) -> ProductWorkflowError {
+    durable_error(operation, error)
 }
 
 fn fresh_in_flight(
@@ -67,572 +315,97 @@ fn in_flight_error() -> ProductWorkflowError {
     transient("idempotency fingerprint already in flight; retry after recovery lease")
 }
 
-#[cfg(feature = "libsql")]
-mod libsql_impl {
-    use std::sync::Arc;
+fn expired_received_at(received_at: DateTime<Utc>, lease: Duration) -> DateTime<Utc> {
+    received_at - lease - Duration::seconds(1)
+}
 
-    use async_trait::async_trait;
-    use libsql::params;
-
-    use super::*;
-    use tokio::sync::OnceCell;
-
-    /// libSQL-backed product workflow idempotency ledger.
-    pub struct RebornLibSqlIdempotencyLedger {
-        db: Arc<libsql::Database>,
-        in_flight_lease: Duration,
-        migrations: OnceCell<()>,
-    }
-
-    impl RebornLibSqlIdempotencyLedger {
-        pub fn new(db: Arc<libsql::Database>) -> Self {
-            Self::with_in_flight_lease(db, DEFAULT_IN_FLIGHT_LEASE)
-        }
-
-        pub fn with_in_flight_lease(db: Arc<libsql::Database>, in_flight_lease: Duration) -> Self {
-            Self {
-                db,
-                in_flight_lease,
-                migrations: OnceCell::new(),
-            }
-        }
-
-        pub async fn run_migrations(&self) -> Result<(), ProductWorkflowError> {
-            self.migrations
-                .get_or_try_init(|| async { self.run_migrations_uncached().await })
-                .await
-                .copied()
-        }
-
-        async fn run_migrations_uncached(&self) -> Result<(), ProductWorkflowError> {
-            let conn = self.connect().await?;
-            conn.execute_batch(SCHEMA)
-                .await
-                .map(|_| ())
-                .map_err(|error| durable_error("run migrations", error))
-        }
-
-        async fn connect(&self) -> Result<libsql::Connection, ProductWorkflowError> {
-            let conn = self
-                .db
-                .connect()
-                .map_err(|error| durable_error("connect", error))?;
-            conn.query("PRAGMA busy_timeout = 5000", ())
-                .await
-                .map_err(|error| durable_error("configure busy timeout", error))?;
-            Ok(conn)
-        }
-
-        async fn begin_immediate(&self) -> Result<libsql::Connection, ProductWorkflowError> {
-            let conn = self.connect().await?;
-            conn.execute("BEGIN IMMEDIATE", ())
-                .await
-                .map_err(|error| durable_error("begin transaction", error))?;
-            Ok(conn)
-        }
-    }
-
-    #[async_trait]
-    impl IdempotencyLedger for RebornLibSqlIdempotencyLedger {
-        async fn begin_or_replay(
-            &self,
-            fingerprint: ActionFingerprintKey,
-            received_at: DateTime<Utc>,
-        ) -> Result<IdempotencyDecision, ProductWorkflowError> {
-            self.run_migrations().await?;
-            let conn = self.begin_immediate().await?;
-            let result =
-                begin_or_replay_in_conn(&conn, fingerprint, received_at, self.in_flight_lease)
-                    .await;
-            finish_transaction(&conn, result).await
-        }
-
-        async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
-            self.run_migrations().await?;
-            let conn = self.begin_immediate().await?;
-            let result = settle_in_conn(&conn, action).await;
-            finish_transaction(&conn, result).await
-        }
-
-        async fn release(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
-            self.run_migrations().await?;
-            let conn = self.begin_immediate().await?;
-            let result = release_in_conn(&conn, action).await;
-            finish_transaction(&conn, result).await
-        }
-    }
-
-    async fn begin_or_replay_in_conn(
-        conn: &libsql::Connection,
-        fingerprint: ActionFingerprintKey,
-        received_at: DateTime<Utc>,
-        in_flight_lease: Duration,
-    ) -> Result<IdempotencyDecision, ProductWorkflowError> {
-        let action = ProductInboundAction::begin(fingerprint.clone(), received_at);
-        let inserted = insert_action(conn, &action, "INSERT OR IGNORE").await?;
-        if inserted == 1 {
-            return Ok(IdempotencyDecision::New(action));
-        }
-
-        let Some(prior) = load_action(conn, &fingerprint).await? else {
-            return Err(transient("idempotency ledger conflict row disappeared"));
-        };
-        if prior.is_terminal() {
-            return Ok(IdempotencyDecision::Replay(prior));
-        }
-        if fresh_in_flight(&prior, received_at, in_flight_lease) {
-            return Err(in_flight_error());
-        }
-
-        update_action(conn, &action).await?;
-        Ok(IdempotencyDecision::New(action))
-    }
-
-    async fn settle_in_conn(
-        conn: &libsql::Connection,
-        action: ProductInboundAction,
-    ) -> Result<(), ProductWorkflowError> {
-        let Some(current) = load_action(conn, &action.fingerprint).await? else {
-            return Err(transient(
-                "idempotency reservation missing before terminal settle",
-            ));
-        };
-        if current.is_terminal() {
-            if current.action_id == action.action_id {
-                return Ok(());
-            }
-            return Err(transient(
-                "idempotency reservation was superseded before terminal settle",
-            ));
-        }
-        if current.action_id != action.action_id {
-            return Err(transient(
-                "idempotency reservation was superseded before terminal settle",
-            ));
-        }
-        update_action(conn, &action).await
-    }
-
-    async fn release_in_conn(
-        conn: &libsql::Connection,
-        action: ProductInboundAction,
-    ) -> Result<(), ProductWorkflowError> {
-        conn.execute(
-            "DELETE FROM reborn_product_workflow_actions
-             WHERE adapter_id = ?1
-               AND installation_id = ?2
-               AND source_binding_key = ?3
-               AND external_event_id = ?4
-               AND action_id = ?5
-               AND phase NOT IN (?6, ?7)",
-            params![
-                action.fingerprint.adapter_id.as_str(),
-                action.fingerprint.installation_id.as_str(),
-                action.fingerprint.source_binding_key.as_str(),
-                action.fingerprint.external_event_id.as_str(),
-                action.action_id.to_string(),
-                phase_label(ActionPhase::Settled),
-                phase_label(ActionPhase::DeduplicatedReplay),
-            ],
-        )
+async fn load_action(
+    filesystem: &dyn RootFilesystem,
+    path: &VirtualPath,
+) -> Result<Option<(ProductInboundAction, RecordVersion)>, ProductWorkflowError> {
+    let Some(entry) = filesystem
+        .get(path)
         .await
-        .map_err(|error| durable_error("release action", error))?;
-        Ok(())
-    }
+        .map_err(|error| filesystem_error("load action", error))?
+    else {
+        return Ok(None);
+    };
+    let action = entry
+        .entry
+        .parse_json()
+        .map_err(|error| durable_error("deserialize action", error))?;
+    Ok(Some((action, entry.version)))
+}
 
-    async fn load_action(
-        conn: &libsql::Connection,
-        fingerprint: &ActionFingerprintKey,
-    ) -> Result<Option<ProductInboundAction>, ProductWorkflowError> {
-        let mut rows = conn
-            .query(
-                "SELECT payload FROM reborn_product_workflow_actions
-                 WHERE adapter_id = ?1
-                   AND installation_id = ?2
-                   AND source_binding_key = ?3
-                   AND external_event_id = ?4",
-                params![
-                    fingerprint.adapter_id.as_str(),
-                    fingerprint.installation_id.as_str(),
-                    fingerprint.source_binding_key.as_str(),
-                    fingerprint.external_event_id.as_str(),
-                ],
-            )
-            .await
-            .map_err(|error| durable_error("load action", error))?;
-        let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| durable_error("read action", error))?
-        else {
-            return Ok(None);
-        };
-        let payload = row
-            .get::<String>(0)
-            .map_err(|error| durable_error("read action payload", error))?;
-        Ok(Some(from_json(&payload)?))
-    }
-
-    async fn insert_action(
-        conn: &libsql::Connection,
-        action: &ProductInboundAction,
-        insert_prefix: &str,
-    ) -> Result<u64, ProductWorkflowError> {
-        let payload = to_json(action)?;
-        conn.execute(
-            &format!(
-                "{insert_prefix} INTO reborn_product_workflow_actions
-                 (adapter_id, installation_id, source_binding_key, external_event_id,
-                  action_id, phase, received_at, settled_at, payload)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
-            ),
-            params![
-                action.fingerprint.adapter_id.as_str(),
-                action.fingerprint.installation_id.as_str(),
-                action.fingerprint.source_binding_key.as_str(),
-                action.fingerprint.external_event_id.as_str(),
-                action.action_id.to_string(),
-                phase_label(action.phase),
-                action.received_at.to_rfc3339(),
-                action.settled_at.map(|value| value.to_rfc3339()),
-                payload,
-            ],
+fn entry_for_action(action: &ProductInboundAction) -> Result<Entry, ProductWorkflowError> {
+    let payload =
+        serde_json::to_value(action).map_err(|error| durable_error("serialize action", error))?;
+    let kind = RecordKind::new(ACTION_RECORD_KIND)
+        .map_err(|error| durable_error("construct action record kind", error))?;
+    let entry = Entry::record(kind, &payload)
+        .map_err(|error| durable_error("serialize action entry", error))?
+        .with_indexed(
+            index_key("adapter_id")?,
+            text(action.fingerprint.adapter_id.as_str()),
         )
-        .await
-        .map_err(|error| durable_error("insert action", error))
-    }
-
-    async fn update_action(
-        conn: &libsql::Connection,
-        action: &ProductInboundAction,
-    ) -> Result<(), ProductWorkflowError> {
-        let payload = to_json(action)?;
-        conn.execute(
-            "UPDATE reborn_product_workflow_actions
-             SET action_id = ?5, phase = ?6, received_at = ?7, settled_at = ?8, payload = ?9
-             WHERE adapter_id = ?1
-               AND installation_id = ?2
-               AND source_binding_key = ?3
-               AND external_event_id = ?4",
-            params![
-                action.fingerprint.adapter_id.as_str(),
-                action.fingerprint.installation_id.as_str(),
-                action.fingerprint.source_binding_key.as_str(),
-                action.fingerprint.external_event_id.as_str(),
-                action.action_id.to_string(),
-                phase_label(action.phase),
-                action.received_at.to_rfc3339(),
-                action.settled_at.map(|value| value.to_rfc3339()),
-                payload,
-            ],
+        .with_indexed(
+            index_key("installation_id")?,
+            text(action.fingerprint.installation_id.as_str()),
         )
-        .await
-        .map_err(|error| durable_error("update action", error))?;
-        Ok(())
-    }
+        .with_indexed(
+            index_key("source_binding_key")?,
+            text(action.fingerprint.source_binding_key.as_str()),
+        )
+        .with_indexed(
+            index_key("external_event_id")?,
+            text(action.fingerprint.external_event_id.as_str()),
+        )
+        .with_indexed(index_key("phase")?, text(phase_label(action.phase)))
+        .with_indexed(
+            index_key("received_at_ms")?,
+            IndexValue::I64(action.received_at.timestamp_millis()),
+        );
+    Ok(entry)
+}
 
-    async fn finish_transaction<T>(
-        conn: &libsql::Connection,
-        result: Result<T, ProductWorkflowError>,
-    ) -> Result<T, ProductWorkflowError> {
-        match result {
-            Ok(value) => {
-                conn.execute("COMMIT", ())
-                    .await
-                    .map_err(|error| durable_error("commit transaction", error))?;
-                Ok(value)
-            }
-            Err(error) => {
-                if let Err(rollback_error) = conn.execute("ROLLBACK", ()).await {
-                    tracing::warn!(
-                        %rollback_error,
-                        "product workflow idempotency ledger failed to rollback libSQL transaction"
-                    );
-                }
-                Err(error)
-            }
-        }
+fn index_key(value: &'static str) -> Result<IndexKey, ProductWorkflowError> {
+    IndexKey::new(value).map_err(|error| durable_error("construct action index key", error))
+}
+
+fn text(value: &str) -> IndexValue {
+    IndexValue::Text(value.to_string())
+}
+
+fn phase_label(phase: ActionPhase) -> &'static str {
+    match phase {
+        ActionPhase::Received => "received",
+        ActionPhase::Dispatched => "dispatched",
+        ActionPhase::Settled => "settled",
+        ActionPhase::DeduplicatedReplay => "deduplicated_replay",
     }
 }
 
-#[cfg(feature = "postgres")]
-mod postgres_impl {
-    use async_trait::async_trait;
-
-    use super::*;
-    use tokio::sync::OnceCell;
-
-    /// PostgreSQL-backed product workflow idempotency ledger.
-    pub struct RebornPostgresIdempotencyLedger {
-        pool: deadpool_postgres::Pool,
-        in_flight_lease: Duration,
-        migrations: OnceCell<()>,
-    }
-
-    impl RebornPostgresIdempotencyLedger {
-        pub fn new(pool: deadpool_postgres::Pool) -> Self {
-            Self::with_in_flight_lease(pool, DEFAULT_IN_FLIGHT_LEASE)
-        }
-
-        pub fn with_in_flight_lease(
-            pool: deadpool_postgres::Pool,
-            in_flight_lease: Duration,
-        ) -> Self {
-            Self {
-                pool,
-                in_flight_lease,
-                migrations: OnceCell::new(),
-            }
-        }
-
-        pub async fn run_migrations(&self) -> Result<(), ProductWorkflowError> {
-            self.migrations
-                .get_or_try_init(|| async { self.run_migrations_uncached().await })
-                .await
-                .copied()
-        }
-
-        async fn run_migrations_uncached(&self) -> Result<(), ProductWorkflowError> {
-            let client = self.client().await?;
-            client
-                .batch_execute(SCHEMA)
-                .await
-                .map_err(|error| durable_error("run migrations", error))
-        }
-
-        async fn client(&self) -> Result<deadpool_postgres::Object, ProductWorkflowError> {
-            self.pool
-                .get()
-                .await
-                .map_err(|error| durable_error("connect", error))
-        }
-    }
-
-    #[async_trait]
-    impl IdempotencyLedger for RebornPostgresIdempotencyLedger {
-        async fn begin_or_replay(
-            &self,
-            fingerprint: ActionFingerprintKey,
-            received_at: DateTime<Utc>,
-        ) -> Result<IdempotencyDecision, ProductWorkflowError> {
-            self.run_migrations().await?;
-            let mut client = self.client().await?;
-            let txn = client
-                .transaction()
-                .await
-                .map_err(|error| durable_error("begin transaction", error))?;
-            let result =
-                begin_or_replay_in_txn(&txn, fingerprint, received_at, self.in_flight_lease).await;
-            finish_transaction(txn, result).await
-        }
-
-        async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
-            self.run_migrations().await?;
-            let mut client = self.client().await?;
-            let txn = client
-                .transaction()
-                .await
-                .map_err(|error| durable_error("begin transaction", error))?;
-            let result = settle_in_txn(&txn, action).await;
-            finish_transaction(txn, result).await
-        }
-
-        async fn release(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
-            self.run_migrations().await?;
-            let mut client = self.client().await?;
-            let txn = client
-                .transaction()
-                .await
-                .map_err(|error| durable_error("begin transaction", error))?;
-            let result = release_in_txn(&txn, action).await;
-            finish_transaction(txn, result).await
-        }
-    }
-
-    async fn begin_or_replay_in_txn(
-        txn: &deadpool_postgres::Transaction<'_>,
-        fingerprint: ActionFingerprintKey,
-        received_at: DateTime<Utc>,
-        in_flight_lease: Duration,
-    ) -> Result<IdempotencyDecision, ProductWorkflowError> {
-        let action = ProductInboundAction::begin(fingerprint.clone(), received_at);
-        let inserted = insert_action(txn, &action).await?;
-        if inserted == 1 {
-            return Ok(IdempotencyDecision::New(action));
-        }
-
-        let Some(prior) = load_action_for_update(txn, &fingerprint).await? else {
-            return Err(transient("idempotency ledger conflict row disappeared"));
-        };
-        if prior.is_terminal() {
-            return Ok(IdempotencyDecision::Replay(prior));
-        }
-        if fresh_in_flight(&prior, received_at, in_flight_lease) {
-            return Err(in_flight_error());
-        }
-
-        update_action(txn, &action).await?;
-        Ok(IdempotencyDecision::New(action))
-    }
-
-    async fn settle_in_txn(
-        txn: &deadpool_postgres::Transaction<'_>,
-        action: ProductInboundAction,
-    ) -> Result<(), ProductWorkflowError> {
-        let Some(current) = load_action_for_update(txn, &action.fingerprint).await? else {
-            return Err(transient(
-                "idempotency reservation missing before terminal settle",
-            ));
-        };
-        if current.is_terminal() {
-            if current.action_id == action.action_id {
-                return Ok(());
-            }
-            return Err(transient(
-                "idempotency reservation was superseded before terminal settle",
-            ));
-        }
-        if current.action_id != action.action_id {
-            return Err(transient(
-                "idempotency reservation was superseded before terminal settle",
-            ));
-        }
-        update_action(txn, &action).await
-    }
-
-    async fn release_in_txn(
-        txn: &deadpool_postgres::Transaction<'_>,
-        action: ProductInboundAction,
-    ) -> Result<(), ProductWorkflowError> {
-        txn.execute(
-            "DELETE FROM reborn_product_workflow_actions
-             WHERE adapter_id = $1
-               AND installation_id = $2
-               AND source_binding_key = $3
-               AND external_event_id = $4
-               AND action_id = $5
-               AND phase NOT IN ($6, $7)",
-            &[
-                &action.fingerprint.adapter_id.as_str(),
-                &action.fingerprint.installation_id.as_str(),
-                &action.fingerprint.source_binding_key.as_str(),
-                &action.fingerprint.external_event_id.as_str(),
-                &action.action_id.to_string(),
-                &phase_label(ActionPhase::Settled),
-                &phase_label(ActionPhase::DeduplicatedReplay),
-            ],
-        )
-        .await
-        .map_err(|error| durable_error("release action", error))?;
-        Ok(())
-    }
-
-    async fn load_action_for_update(
-        txn: &deadpool_postgres::Transaction<'_>,
-        fingerprint: &ActionFingerprintKey,
-    ) -> Result<Option<ProductInboundAction>, ProductWorkflowError> {
-        let row = txn
-            .query_opt(
-                "SELECT payload FROM reborn_product_workflow_actions
-                 WHERE adapter_id = $1
-                   AND installation_id = $2
-                   AND source_binding_key = $3
-                   AND external_event_id = $4
-                 FOR UPDATE",
-                &[
-                    &fingerprint.adapter_id.as_str(),
-                    &fingerprint.installation_id.as_str(),
-                    &fingerprint.source_binding_key.as_str(),
-                    &fingerprint.external_event_id.as_str(),
-                ],
-            )
-            .await
-            .map_err(|error| durable_error("load action", error))?;
-        row.map(|row| from_json(row.get::<_, &str>(0))).transpose()
-    }
-
-    async fn insert_action(
-        txn: &deadpool_postgres::Transaction<'_>,
-        action: &ProductInboundAction,
-    ) -> Result<u64, ProductWorkflowError> {
-        let payload = to_json(action)?;
-        txn.execute(
-            "INSERT INTO reborn_product_workflow_actions
-             (adapter_id, installation_id, source_binding_key, external_event_id,
-              action_id, phase, received_at, settled_at, payload)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-             ON CONFLICT (adapter_id, installation_id, source_binding_key, external_event_id)
-             DO NOTHING",
-            &[
-                &action.fingerprint.adapter_id.as_str(),
-                &action.fingerprint.installation_id.as_str(),
-                &action.fingerprint.source_binding_key.as_str(),
-                &action.fingerprint.external_event_id.as_str(),
-                &action.action_id.to_string(),
-                &phase_label(action.phase),
-                &action.received_at.to_rfc3339(),
-                &action.settled_at.map(|value| value.to_rfc3339()),
-                &payload,
-            ],
-        )
-        .await
-        .map_err(|error| durable_error("insert action", error))
-    }
-
-    async fn update_action(
-        txn: &deadpool_postgres::Transaction<'_>,
-        action: &ProductInboundAction,
-    ) -> Result<(), ProductWorkflowError> {
-        let payload = to_json(action)?;
-        txn.execute(
-            "UPDATE reborn_product_workflow_actions
-             SET action_id = $5, phase = $6, received_at = $7, settled_at = $8, payload = $9
-             WHERE adapter_id = $1
-               AND installation_id = $2
-               AND source_binding_key = $3
-               AND external_event_id = $4",
-            &[
-                &action.fingerprint.adapter_id.as_str(),
-                &action.fingerprint.installation_id.as_str(),
-                &action.fingerprint.source_binding_key.as_str(),
-                &action.fingerprint.external_event_id.as_str(),
-                &action.action_id.to_string(),
-                &phase_label(action.phase),
-                &action.received_at.to_rfc3339(),
-                &action.settled_at.map(|value| value.to_rfc3339()),
-                &payload,
-            ],
-        )
-        .await
-        .map_err(|error| durable_error("update action", error))?;
-        Ok(())
-    }
-
-    async fn finish_transaction<T>(
-        txn: deadpool_postgres::Transaction<'_>,
-        result: Result<T, ProductWorkflowError>,
-    ) -> Result<T, ProductWorkflowError> {
-        match result {
-            Ok(value) => {
-                txn.commit()
-                    .await
-                    .map_err(|error| durable_error("commit transaction", error))?;
-                Ok(value)
-            }
-            Err(error) => {
-                if let Err(rollback_error) = txn.rollback().await {
-                    tracing::warn!(
-                        %rollback_error,
-                        "product workflow idempotency ledger failed to rollback PostgreSQL transaction"
-                    );
-                }
-                Err(error)
-            }
-        }
-    }
+fn action_path(
+    root: &str,
+    fingerprint: &ActionFingerprintKey,
+) -> Result<VirtualPath, ProductWorkflowError> {
+    let path = format!(
+        "{}/{}/{}/{}/{}.json",
+        root.trim_end_matches('/'),
+        hex_component(fingerprint.adapter_id.as_str()),
+        hex_component(fingerprint.installation_id.as_str()),
+        hex_component(fingerprint.source_binding_key.as_str()),
+        hex_component(fingerprint.external_event_id.as_str())
+    );
+    VirtualPath::new(path).map_err(|error| durable_error("construct action path", error))
 }
 
-#[cfg(feature = "libsql")]
-pub use libsql_impl::RebornLibSqlIdempotencyLedger;
-#[cfg(feature = "postgres")]
-pub use postgres_impl::RebornPostgresIdempotencyLedger;
+fn hex_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value.as_bytes() {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}

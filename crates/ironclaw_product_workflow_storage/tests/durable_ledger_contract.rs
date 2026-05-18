@@ -6,6 +6,10 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{Duration, Utc};
+#[cfg(feature = "libsql")]
+use ironclaw_filesystem::LibSqlRootFilesystem;
+#[cfg(feature = "postgres")]
+use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalEventId, ProductAdapterId, ProductInboundAck,
 };
@@ -38,13 +42,19 @@ fn unique_suffix(name: &str) -> String {
 }
 
 #[cfg(feature = "libsql")]
-async fn libsql_db(path: &str) -> Arc<libsql::Database> {
-    Arc::new(
+async fn libsql_filesystem(path: &str) -> Arc<LibSqlRootFilesystem> {
+    let db = Arc::new(
         libsql::Builder::new_local(path)
             .build()
             .await
             .expect("build libsql db"),
-    )
+    );
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem
+        .run_migrations()
+        .await
+        .expect("run libsql filesystem migrations");
+    filesystem
 }
 
 async fn assert_settled_action_survives_reopen_and_replays(
@@ -195,8 +205,8 @@ async fn libsql_settled_action_survives_reopen_and_replays() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("workflow-ledger.db");
     let db_path = db_path.display().to_string();
-    let ledger = RebornLibSqlIdempotencyLedger::new(libsql_db(&db_path).await);
-    let reopened = RebornLibSqlIdempotencyLedger::new(libsql_db(&db_path).await);
+    let ledger = RebornLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path).await);
+    let reopened = RebornLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path).await);
 
     assert_settled_action_survives_reopen_and_replays(&ledger, &reopened, "libsql-settled-replay")
         .await;
@@ -208,7 +218,7 @@ async fn libsql_in_flight_action_blocks_until_lease_expires() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("workflow-ledger.db");
     let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
-        libsql_db(&db_path.display().to_string()).await,
+        libsql_filesystem(&db_path.display().to_string()).await,
         Duration::seconds(10),
     );
     assert_in_flight_action_blocks_until_lease_expires(&ledger, "libsql-lease").await;
@@ -220,7 +230,7 @@ async fn libsql_release_allows_retry_without_waiting_for_lease() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("workflow-ledger.db");
     let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
-        libsql_db(&db_path.display().to_string()).await,
+        libsql_filesystem(&db_path.display().to_string()).await,
         Duration::seconds(60),
     );
     assert_release_allows_retry_without_waiting_for_lease(&ledger, "libsql-release").await;
@@ -233,11 +243,11 @@ async fn libsql_duplicate_reservation_contention_serializes() {
     let db_path = dir.path().join("workflow-ledger.db");
     let db_path = db_path.display().to_string();
     let first = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
-        libsql_db(&db_path).await,
+        libsql_filesystem(&db_path).await,
         Duration::seconds(10),
     );
     let second = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
-        libsql_db(&db_path).await,
+        libsql_filesystem(&db_path).await,
         Duration::seconds(10),
     );
 
@@ -250,7 +260,7 @@ async fn libsql_superseded_reservation_cannot_settle() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("workflow-ledger.db");
     let ledger = RebornLibSqlIdempotencyLedger::with_in_flight_lease(
-        libsql_db(&db_path.display().to_string()).await,
+        libsql_filesystem(&db_path.display().to_string()).await,
         Duration::seconds(10),
     );
 
@@ -260,11 +270,11 @@ async fn libsql_superseded_reservation_cannot_settle() {
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_settled_action_survives_reopen_and_replays_when_configured() {
-    let Some(pool) = postgres_pool().await else {
+    let Some(filesystem) = postgres_filesystem().await else {
         return;
     };
-    let ledger = RebornPostgresIdempotencyLedger::new(pool.clone());
-    let reopened = RebornPostgresIdempotencyLedger::new(pool);
+    let ledger = RebornPostgresIdempotencyLedger::new(Arc::clone(&filesystem));
+    let reopened = RebornPostgresIdempotencyLedger::new(filesystem);
 
     assert_settled_action_survives_reopen_and_replays(
         &ledger,
@@ -277,10 +287,11 @@ async fn postgres_settled_action_survives_reopen_and_replays_when_configured() {
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_in_flight_action_blocks_until_lease_expires_when_configured() {
-    let Some(pool) = postgres_pool().await else {
+    let Some(filesystem) = postgres_filesystem().await else {
         return;
     };
-    let ledger = RebornPostgresIdempotencyLedger::with_in_flight_lease(pool, Duration::seconds(10));
+    let ledger =
+        RebornPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(10));
 
     assert_in_flight_action_blocks_until_lease_expires(&ledger, &unique_suffix("postgres-lease"))
         .await;
@@ -289,10 +300,11 @@ async fn postgres_in_flight_action_blocks_until_lease_expires_when_configured() 
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_release_allows_retry_without_waiting_for_lease_when_configured() {
-    let Some(pool) = postgres_pool().await else {
+    let Some(filesystem) = postgres_filesystem().await else {
         return;
     };
-    let ledger = RebornPostgresIdempotencyLedger::with_in_flight_lease(pool, Duration::seconds(60));
+    let ledger =
+        RebornPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(60));
 
     assert_release_allows_retry_without_waiting_for_lease(
         &ledger,
@@ -304,12 +316,15 @@ async fn postgres_release_allows_retry_without_waiting_for_lease_when_configured
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_duplicate_reservation_contention_serializes_when_configured() {
-    let Some(pool) = postgres_pool().await else {
+    let Some(filesystem) = postgres_filesystem().await else {
         return;
     };
-    let first =
-        RebornPostgresIdempotencyLedger::with_in_flight_lease(pool.clone(), Duration::seconds(10));
-    let second = RebornPostgresIdempotencyLedger::with_in_flight_lease(pool, Duration::seconds(10));
+    let first = RebornPostgresIdempotencyLedger::with_in_flight_lease(
+        Arc::clone(&filesystem),
+        Duration::seconds(10),
+    );
+    let second =
+        RebornPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(10));
 
     assert_duplicate_reservation_contention_serializes(
         &first,
@@ -322,17 +337,18 @@ async fn postgres_duplicate_reservation_contention_serializes_when_configured() 
 #[cfg(feature = "postgres")]
 #[tokio::test]
 async fn postgres_superseded_reservation_cannot_settle_when_configured() {
-    let Some(pool) = postgres_pool().await else {
+    let Some(filesystem) = postgres_filesystem().await else {
         return;
     };
-    let ledger = RebornPostgresIdempotencyLedger::with_in_flight_lease(pool, Duration::seconds(10));
+    let ledger =
+        RebornPostgresIdempotencyLedger::with_in_flight_lease(filesystem, Duration::seconds(10));
 
     assert_superseded_reservation_cannot_settle(&ledger, &unique_suffix("postgres-superseded"))
         .await;
 }
 
 #[cfg(feature = "postgres")]
-async fn postgres_pool() -> Option<deadpool_postgres::Pool> {
+async fn postgres_filesystem() -> Option<Arc<PostgresRootFilesystem>> {
     let url = match std::env::var("IRONCLAW_PRODUCT_WORKFLOW_POSTGRES_URL") {
         Ok(url) => url,
         Err(_) => {
@@ -360,5 +376,12 @@ async fn postgres_pool() -> Option<deadpool_postgres::Pool> {
         );
         return None;
     }
-    Some(pool)
+    let filesystem = Arc::new(PostgresRootFilesystem::new(pool));
+    if let Err(error) = filesystem.run_migrations().await {
+        eprintln!(
+            "skipping postgres product workflow ledger contract: filesystem migrations failed ({error})"
+        );
+        return None;
+    }
+    Some(filesystem)
 }
