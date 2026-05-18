@@ -10,17 +10,22 @@ use ironclaw_event_streams::{
     AllowAllProjectionAccessPolicy, EventStreamManager, InMemoryProjectionStreamAdmissionPolicy,
     InMemoryProjectionUpdateSource, LagReason, NoExposureProjectionRedactionValidator,
     ProductProjectionEnvelope, ProjectionAccessPolicy, ProjectionAccessRequest,
-    ProjectionFetchRequest, ProjectionStreamError, ProjectionStreamItem, ProjectionStreamLimits,
-    ProjectionSubscribeRequest, ProjectionTarget, ProjectionViewClass,
+    ProjectionFetchRequest, ProjectionLiveUpdateRequest, ProjectionRedactionValidator,
+    ProjectionStreamError, ProjectionStreamItem, ProjectionStreamLimits,
+    ProjectionSubscribeRequest, ProjectionTarget, ProjectionUpdateSource, ProjectionViewClass,
     PushCandidatesForUpdateRequest, SubscriberCapabilities, keep_alive_item,
 };
 use ironclaw_events::{EventCursor, EventStreamKey, ReadScope};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, InvocationId, ProjectId, RuntimeKind, TenantId, ThreadId, UserId,
+    CapabilityId, ExtensionId, InvocationId, MissionId, ProjectId, RuntimeKind, TenantId, ThreadId,
+    UserId,
 };
 use ironclaw_outbound::{
-    InMemoryOutboundStateStore, OutboundPushKind, OutboundStateStore, ProjectionUpdateRef,
-    ThreadNotificationPolicy, ThreadNotificationTarget,
+    AdvanceSubscriptionCursorRequest, InMemoryOutboundStateStore, LoadSubscriptionCursorRequest,
+    OutboundDeliveryAttempt, OutboundError, OutboundPushKind, OutboundPushPlan,
+    OutboundPushTargetRequest, OutboundStateStore, ProjectionSubscriptionRecord,
+    ProjectionUpdateRef, ThreadNotificationPolicy, ThreadNotificationTarget,
+    UpdateDeliveryStatusRequest,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnScope};
 use tokio::time::{Duration, timeout};
@@ -44,22 +49,22 @@ async fn authorized_subscription_without_cursor_emits_snapshot_then_ordered_upda
     manager
         .update_source
         .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
-            &scope, 2, 3,
+            &scope, 11, 11,
         )))
         .expect("publish live update");
 
     let second = subscription.next().await.expect("live update");
     match second {
         ProjectionStreamItem::Update(ProductProjectionEnvelope::ThreadUpdates(replay)) => {
-            assert_eq!(replay.updates[0].cursor, EventCursor::new(2));
-            assert_eq!(replay.next_cursor.runtime, EventCursor::new(3));
+            assert_eq!(replay.updates[0].cursor, EventCursor::new(11));
+            assert_eq!(replay.next_cursor.runtime, EventCursor::new(11));
         }
         other => panic!("expected thread update, got {other:?}"),
     }
 }
 
 #[tokio::test]
-async fn valid_cursor_emits_current_snapshot_plus_replayed_updates() {
+async fn valid_cursor_emits_only_replayed_updates() {
     let scope = projection_scope("thread-a");
     let manager = manager(scope.clone());
 
@@ -71,13 +76,10 @@ async fn valid_cursor_emits_current_snapshot_plus_replayed_updates() {
         .await
         .expect("authorized resume");
 
-    assert!(matches!(
-        subscription.next().await,
-        Some(ProjectionStreamItem::Snapshot(_))
-    ));
     match subscription.next().await.expect("replayed update") {
         ProjectionStreamItem::Update(ProductProjectionEnvelope::ThreadUpdates(replay)) => {
             assert_eq!(replay.updates[0].kind, TimelineEntryKind::DispatchSucceeded);
+            assert_eq!(replay.next_cursor.runtime, EventCursor::new(3));
         }
         other => panic!("expected replayed update, got {other:?}"),
     }
@@ -100,6 +102,51 @@ async fn fetch_snapshot_returns_authorized_product_snapshot() {
         }
         other => panic!("expected thread snapshot, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn fetch_snapshot_denied_before_projection_call() {
+    let scope = projection_scope("thread-a");
+    let projection = Arc::new(FakeProjectionService::new(scope.clone()));
+    let access = Arc::new(DenyingAccessPolicy::default());
+    let manager = EventStreamManager::new(
+        Arc::clone(&projection),
+        Arc::clone(&access),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let error = manager
+        .fetch_snapshot(fetch_request(scope))
+        .await
+        .expect_err("access denial");
+
+    assert!(matches!(error, ProjectionStreamError::AccessDenied));
+    assert_eq!(access.calls(), 1);
+    assert_eq!(projection.calls(), Vec::<&'static str>::new());
+}
+
+#[tokio::test]
+async fn fetch_snapshot_rejects_projection_scope_mismatch() {
+    let requested = projection_scope("thread-a");
+    let returned = projection_scope("thread-b");
+    let manager = EventStreamManager::new(
+        Arc::new(ScopeMismatchProjectionService::new(returned)),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let error = manager
+        .fetch_snapshot(fetch_request(requested))
+        .await
+        .expect_err("scope mismatch");
+
+    assert!(matches!(error, ProjectionStreamError::AccessDenied));
 }
 
 #[tokio::test]
@@ -171,12 +218,12 @@ async fn stale_cursor_after_valid_access_rebases_to_fresh_snapshot() {
 }
 
 #[tokio::test]
-async fn foreign_cursor_rebases_without_echoing_foreign_cursor() {
+async fn foreign_cursor_is_rejected_as_authority_failure() {
     let requested_scope = projection_scope("thread-a");
     let foreign_scope = projection_scope("thread-b");
     let manager = manager(requested_scope.clone());
 
-    let mut subscription = manager
+    let error = manager
         .subscribe(subscribe_request(
             requested_scope,
             Some(ProjectionCursor::for_scope(
@@ -185,14 +232,33 @@ async fn foreign_cursor_rebases_without_echoing_foreign_cursor() {
             )),
         ))
         .await
-        .expect("authorized subscription");
+        .expect_err("foreign cursor rejected");
 
-    match subscription.next().await.expect("rebase item") {
-        ProjectionStreamItem::RebaseRequired { rebased_from, .. } => {
-            assert_eq!(rebased_from, None);
-        }
-        other => panic!("expected safe rebase item, got {other:?}"),
-    }
+    assert!(matches!(error, ProjectionStreamError::AccessDenied));
+}
+
+#[tokio::test]
+async fn valid_resume_rejects_projection_scope_mismatch() {
+    let requested = projection_scope("thread-a");
+    let returned = projection_scope("thread-b");
+    let manager = EventStreamManager::new(
+        Arc::new(ScopeMismatchProjectionService::new(returned)),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let error = manager
+        .subscribe(subscribe_request(
+            requested.clone(),
+            Some(ProjectionCursor::for_scope(requested, EventCursor::new(1))),
+        ))
+        .await
+        .expect_err("scope mismatch");
+
+    assert!(matches!(error, ProjectionStreamError::AccessDenied));
 }
 
 #[tokio::test]
@@ -281,7 +347,118 @@ async fn stream_admission_denial_is_structured_and_product_safe() {
 }
 
 #[tokio::test]
+async fn dropping_subscription_releases_admission_permit() {
+    let scope = projection_scope("thread-a");
+    let manager = EventStreamManager::new(
+        Arc::new(FakeProjectionService::new(scope.clone())),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::new(
+            ProjectionStreamLimits {
+                per_tenant: 1,
+                per_actor: 1,
+                per_scope: 1,
+                global: 1,
+            },
+        )),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let first = manager
+        .subscribe(subscribe_request(scope.clone(), None))
+        .await
+        .expect("first subscription admitted");
+    assert!(matches!(
+        manager
+            .subscribe(subscribe_request(scope.clone(), None))
+            .await,
+        Err(ProjectionStreamError::AdmissionDenied)
+    ));
+
+    drop(first);
+
+    let _replacement = manager
+        .subscribe(subscribe_request(scope, None))
+        .await
+        .expect("replacement subscription admitted after drop");
+}
+
+#[tokio::test]
 async fn redaction_gate_blocks_sentinel_payloads_at_stream_boundary() {
+    let scope = projection_scope("thread-a");
+    let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
+    let manager = TestManager {
+        inner: EventStreamManager::new(
+            Arc::new(FakeProjectionService::new(scope.clone())),
+            Arc::new(AllowAllProjectionAccessPolicy),
+            Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+            Arc::clone(&source),
+            Arc::new(RejectLiveUpdateRedactionValidator),
+            Arc::new(InMemoryOutboundStateStore::default()),
+        ),
+        update_source: Arc::clone(&source),
+    };
+    let mut subscription = manager
+        .subscribe(subscribe_request(scope.clone(), None))
+        .await
+        .expect("authorized subscription");
+    assert!(matches!(
+        subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+
+    source
+        .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
+            &scope, 11, 11,
+        )))
+        .expect("publish unsafe payload");
+
+    match subscription.next().await.expect("redaction marker") {
+        ProjectionStreamItem::Lagged { reason, .. } => {
+            assert_eq!(reason, LagReason::RedactionBlocked);
+        }
+        other => panic!("expected redaction lag marker, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn repeated_snapshot_subscriptions_reuse_redaction_validation_decision() {
+    let scope = projection_scope("thread-a");
+    let validator = Arc::new(CountingRedactionValidator::default());
+    let manager = EventStreamManager::new(
+        Arc::new(FakeProjectionService::new(scope.clone())),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::clone(&validator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let mut first = manager
+        .subscribe(subscribe_request(scope.clone(), None))
+        .await
+        .expect("first subscription");
+    assert!(matches!(
+        first.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+    drop(first);
+
+    let mut second = manager
+        .subscribe(subscribe_request(scope, None))
+        .await
+        .expect("second subscription");
+    assert!(matches!(
+        second.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+
+    assert_eq!(validator.calls(), 1);
+}
+
+#[tokio::test]
+async fn product_thread_subscription_blocks_debug_live_updates() {
     let scope = projection_scope("thread-a");
     let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
     let manager = manager_with_source(scope.clone(), Arc::clone(&source));
@@ -298,16 +475,121 @@ async fn redaction_gate_blocks_sentinel_payloads_at_stream_boundary() {
         .publish(ProductProjectionEnvelope::Debug(
             ironclaw_event_streams::DebugProjectionPayload {
                 cursor: ProjectionCursor::for_scope(scope, EventCursor::new(11)),
-                redacted_summary: "SECRET_SENTINEL_sk_live".to_string(),
+                redacted_summary: "redacted".to_string(),
             },
         ))
-        .expect("publish unsafe payload");
+        .expect("publish debug payload");
 
-    match subscription.next().await.expect("redaction marker") {
+    match subscription.next().await.expect("access marker") {
         ProjectionStreamItem::Lagged { reason, .. } => {
-            assert_eq!(reason, LagReason::RedactionBlocked);
+            assert_eq!(reason, LagReason::AccessBlocked);
         }
-        other => panic!("expected redaction lag marker, got {other:?}"),
+        other => panic!("expected access lag marker, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn subscription_ignores_live_updates_from_other_scope() {
+    let scope = projection_scope("thread-a");
+    let foreign_scope = projection_scope("thread-b");
+    let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
+    let manager = manager_with_source(scope.clone(), Arc::clone(&source));
+    let mut subscription = manager
+        .subscribe(subscribe_request(scope.clone(), None))
+        .await
+        .expect("authorized subscription");
+    assert!(matches!(
+        subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+
+    source
+        .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
+            &foreign_scope,
+            11,
+            11,
+        )))
+        .expect("publish foreign update");
+    source
+        .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
+            &scope, 12, 12,
+        )))
+        .expect("publish matching update");
+
+    match subscription.next().await.expect("matching update") {
+        ProjectionStreamItem::Update(ProductProjectionEnvelope::ThreadUpdates(replay)) => {
+            assert_eq!(replay.next_cursor.scope, scope);
+            assert_eq!(replay.next_cursor.runtime, EventCursor::new(12));
+        }
+        other => panic!("expected matching update, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn slow_subscriber_gets_backpressure_lag_marker() {
+    let scope = projection_scope("thread-a");
+    let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
+    let manager = manager_with_source(scope.clone(), Arc::clone(&source));
+    let mut subscription = manager
+        .subscribe(ProjectionSubscribeRequest {
+            capabilities: SubscriberCapabilities { buffer_capacity: 1 },
+            ..subscribe_request(scope.clone(), None)
+        })
+        .await
+        .expect("authorized subscription");
+
+    source
+        .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
+            &scope, 11, 11,
+        )))
+        .expect("publish update");
+
+    assert!(matches!(
+        subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+    match subscription.next().await.expect("backpressure marker") {
+        ProjectionStreamItem::Lagged { reason, .. } => {
+            assert_eq!(reason, LagReason::SubscriberBackpressure);
+        }
+        other => panic!("expected backpressure marker, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn live_subscription_registered_before_snapshot_prevents_gap() {
+    let scope = projection_scope("thread-a");
+    let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
+    let manager = EventStreamManager::new(
+        Arc::new(SnapshotPublishingProjectionService::new(
+            scope.clone(),
+            Arc::clone(&source),
+        )),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::clone(&source),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let mut subscription = manager
+        .subscribe(subscribe_request(scope.clone(), None))
+        .await
+        .expect("authorized subscription");
+
+    assert!(matches!(
+        subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+    match subscription
+        .next()
+        .await
+        .expect("live update from snapshot race")
+    {
+        ProjectionStreamItem::Update(ProductProjectionEnvelope::ThreadUpdates(replay)) => {
+            assert_eq!(replay.next_cursor.runtime, EventCursor::new(11));
+        }
+        other => panic!("expected captured live update, got {other:?}"),
     }
 }
 
@@ -356,6 +638,102 @@ async fn push_candidates_are_separate_from_subscriptions_and_policy_gated() {
         .expect("progress candidates");
     assert_eq!(progress.len(), 1);
     assert_eq!(progress[0].target, reply_target("reply-progress"));
+}
+
+#[tokio::test]
+async fn push_candidates_maps_outbound_store_failures() {
+    let scope = turn_scope("thread-a");
+    for (kind, expected) in [
+        (
+            FailingOutboundKind::AccessDenied,
+            ProjectionStreamError::AccessDenied,
+        ),
+        (
+            FailingOutboundKind::InvalidRequest,
+            ProjectionStreamError::InvalidRequest {
+                reason: "bad request",
+            },
+        ),
+        (
+            FailingOutboundKind::Backend,
+            ProjectionStreamError::Outbound,
+        ),
+    ] {
+        let manager = EventStreamManager::new(
+            Arc::new(FakeProjectionService::new(projection_scope("thread-a"))),
+            Arc::new(AllowAllProjectionAccessPolicy),
+            Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+            Arc::new(InMemoryProjectionUpdateSource::new(8)),
+            Arc::new(NoExposureProjectionRedactionValidator),
+            Arc::new(FailingOutboundStore { kind }),
+        );
+
+        let actual = manager
+            .push_candidates_for_update(push_request(&scope, OutboundPushKind::Progress))
+            .await
+            .expect_err("mapped outbound error");
+
+        assert_same_error_kind(actual, expected);
+    }
+}
+
+#[tokio::test]
+async fn unsupported_view_target_returns_invalid_request() {
+    let scope = projection_scope("thread-a");
+    let manager = manager(scope.clone());
+    let error = manager
+        .subscribe(ProjectionSubscribeRequest {
+            view: ProjectionViewClass::ProductMission,
+            target: ProjectionTarget::Mission {
+                mission_id: MissionId::new("mission-a").unwrap(),
+            },
+            ..subscribe_request(scope, None)
+        })
+        .await
+        .expect_err("unsupported first-slice view");
+
+    assert!(matches!(
+        error,
+        ProjectionStreamError::InvalidRequest { .. }
+    ));
+}
+
+#[tokio::test]
+async fn zero_subscription_buffer_capacity_is_clamped_to_one() {
+    let scope = projection_scope("thread-a");
+    let manager = manager(scope.clone());
+    let mut subscription = manager
+        .subscribe(ProjectionSubscribeRequest {
+            capabilities: SubscriberCapabilities { buffer_capacity: 0 },
+            ..subscribe_request(scope, None)
+        })
+        .await
+        .expect("zero capacity clamped");
+
+    assert!(matches!(
+        subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+}
+
+#[tokio::test]
+async fn oversized_subscription_buffer_capacity_is_rejected() {
+    let scope = projection_scope("thread-a");
+    let manager = manager(scope.clone());
+    let error = manager
+        .subscribe(ProjectionSubscribeRequest {
+            capabilities: SubscriberCapabilities {
+                buffer_capacity: usize::MAX,
+            },
+            ..subscribe_request(scope, None)
+        })
+        .await
+        .expect_err("oversized buffer rejected");
+
+    assert!(matches!(
+        error,
+        ProjectionStreamError::InvalidRequest { .. }
+    ));
 }
 
 #[test]
@@ -431,15 +809,15 @@ impl CountingUpdateSource {
 }
 
 #[async_trait]
-impl ironclaw_event_streams::ProjectionUpdateSource for CountingUpdateSource {
+impl ProjectionUpdateSource for CountingUpdateSource {
     async fn subscribe(
         &self,
-        _request: ironclaw_event_streams::ProjectionLiveUpdateRequest,
+        request: ProjectionLiveUpdateRequest,
     ) -> Result<tokio::sync::broadcast::Receiver<ProductProjectionEnvelope>, ProjectionStreamError>
     {
         *self.calls.lock().unwrap() += 1;
         Ok(InMemoryProjectionUpdateSource::new(1)
-            .subscribe(_request)
+            .subscribe(request)
             .await?)
     }
 }
@@ -485,6 +863,201 @@ impl EventProjectionService for FakeProjectionService {
             });
         }
         Ok(replay(&request.scope, 2, 3))
+    }
+}
+
+struct ScopeMismatchProjectionService {
+    scope: ProjectionScope,
+}
+
+impl ScopeMismatchProjectionService {
+    fn new(scope: ProjectionScope) -> Self {
+        Self { scope }
+    }
+}
+
+#[async_trait]
+impl EventProjectionService for ScopeMismatchProjectionService {
+    async fn snapshot(
+        &self,
+        _request: ProjectionRequest,
+    ) -> Result<ProjectionSnapshot, ProjectionError> {
+        Ok(snapshot(&self.scope, 10))
+    }
+
+    async fn updates(
+        &self,
+        _request: ProjectionRequest,
+    ) -> Result<ProjectionReplay, ProjectionError> {
+        Ok(replay(&self.scope, 2, 3))
+    }
+}
+
+struct SnapshotPublishingProjectionService {
+    scope: ProjectionScope,
+    source: Arc<InMemoryProjectionUpdateSource>,
+}
+
+impl SnapshotPublishingProjectionService {
+    fn new(scope: ProjectionScope, source: Arc<InMemoryProjectionUpdateSource>) -> Self {
+        Self { scope, source }
+    }
+}
+
+#[async_trait]
+impl EventProjectionService for SnapshotPublishingProjectionService {
+    async fn snapshot(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionSnapshot, ProjectionError> {
+        self.source
+            .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
+                &self.scope,
+                11,
+                11,
+            )))
+            .expect("publish race update");
+        Ok(snapshot(&request.scope, 10))
+    }
+
+    async fn updates(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionReplay, ProjectionError> {
+        Ok(replay(&request.scope, 2, 3))
+    }
+}
+
+struct RejectLiveUpdateRedactionValidator;
+
+impl ProjectionRedactionValidator for RejectLiveUpdateRedactionValidator {
+    fn validate(&self, envelope: &ProductProjectionEnvelope) -> Result<(), ProjectionStreamError> {
+        match envelope {
+            ProductProjectionEnvelope::ThreadUpdates(_) => Err(ProjectionStreamError::Redaction),
+            _ => Ok(()),
+        }
+    }
+}
+
+#[derive(Default)]
+struct CountingRedactionValidator {
+    calls: Mutex<usize>,
+}
+
+impl CountingRedactionValidator {
+    fn calls(&self) -> usize {
+        *self.calls.lock().unwrap()
+    }
+}
+
+impl ProjectionRedactionValidator for CountingRedactionValidator {
+    fn validate(&self, _envelope: &ProductProjectionEnvelope) -> Result<(), ProjectionStreamError> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FailingOutboundKind {
+    AccessDenied,
+    InvalidRequest,
+    Backend,
+}
+
+struct FailingOutboundStore {
+    kind: FailingOutboundKind,
+}
+
+impl FailingOutboundStore {
+    fn error(&self) -> OutboundError {
+        match self.kind {
+            FailingOutboundKind::AccessDenied => OutboundError::AccessDenied,
+            FailingOutboundKind::InvalidRequest => OutboundError::InvalidRequest {
+                reason: "bad request",
+            },
+            FailingOutboundKind::Backend => OutboundError::Backend,
+        }
+    }
+}
+
+#[async_trait]
+impl OutboundStateStore for FailingOutboundStore {
+    async fn put_thread_notification_policy(
+        &self,
+        _policy: ThreadNotificationPolicy,
+    ) -> Result<(), OutboundError> {
+        Err(self.error())
+    }
+
+    async fn load_thread_notification_policy(
+        &self,
+        _scope: TurnScope,
+    ) -> Result<ThreadNotificationPolicy, OutboundError> {
+        Err(self.error())
+    }
+
+    async fn plan_push_targets(
+        &self,
+        _request: OutboundPushTargetRequest,
+    ) -> Result<OutboundPushPlan, OutboundError> {
+        Err(self.error())
+    }
+
+    async fn upsert_subscription(
+        &self,
+        _record: ProjectionSubscriptionRecord,
+    ) -> Result<(), OutboundError> {
+        Err(self.error())
+    }
+
+    async fn load_subscription_cursor(
+        &self,
+        _request: LoadSubscriptionCursorRequest,
+    ) -> Result<Option<ProjectionCursor>, OutboundError> {
+        Err(self.error())
+    }
+
+    async fn advance_subscription_cursor(
+        &self,
+        _request: AdvanceSubscriptionCursorRequest,
+    ) -> Result<(), OutboundError> {
+        Err(self.error())
+    }
+
+    async fn record_delivery_attempt(
+        &self,
+        _attempt: OutboundDeliveryAttempt,
+    ) -> Result<(), OutboundError> {
+        Err(self.error())
+    }
+
+    async fn update_delivery_status(
+        &self,
+        _request: UpdateDeliveryStatusRequest,
+    ) -> Result<(), OutboundError> {
+        Err(self.error())
+    }
+
+    async fn list_delivery_attempts(
+        &self,
+        _scope: TurnScope,
+    ) -> Result<Vec<OutboundDeliveryAttempt>, OutboundError> {
+        Err(self.error())
+    }
+}
+
+fn assert_same_error_kind(actual: ProjectionStreamError, expected: ProjectionStreamError) {
+    match (actual, expected) {
+        (ProjectionStreamError::AccessDenied, ProjectionStreamError::AccessDenied)
+        | (ProjectionStreamError::AdmissionDenied, ProjectionStreamError::AdmissionDenied)
+        | (ProjectionStreamError::Source, ProjectionStreamError::Source)
+        | (ProjectionStreamError::Redaction, ProjectionStreamError::Redaction)
+        | (ProjectionStreamError::Outbound, ProjectionStreamError::Outbound) => {}
+        (
+            ProjectionStreamError::InvalidRequest { reason: actual },
+            ProjectionStreamError::InvalidRequest { reason: expected },
+        ) => assert_eq!(actual, expected),
+        (actual, expected) => panic!("expected {expected:?}, got {actual:?}"),
     }
 }
 

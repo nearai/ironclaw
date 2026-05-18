@@ -22,11 +22,16 @@ use ironclaw_outbound::{
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
+
+mod error;
+
+pub use error::ProjectionStreamError;
 
 const DEFAULT_SUBSCRIPTION_BUFFER: usize = 16;
 const MIN_SUBSCRIPTION_BUFFER: usize = 1;
+const MAX_SUBSCRIPTION_BUFFER: usize = 128;
+const MAX_VALIDATION_CACHE_ENTRIES: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionFetchRequest {
@@ -68,8 +73,13 @@ impl Default for SubscriberCapabilities {
 }
 
 impl SubscriberCapabilities {
-    fn bounded_buffer_capacity(&self) -> usize {
-        self.buffer_capacity.max(MIN_SUBSCRIPTION_BUFFER)
+    fn bounded_buffer_capacity(&self) -> Result<usize, ProjectionStreamError> {
+        if self.buffer_capacity > MAX_SUBSCRIPTION_BUFFER {
+            return Err(ProjectionStreamError::InvalidRequest {
+                reason: "projection subscription buffer capacity exceeds host maximum",
+            });
+        }
+        Ok(self.buffer_capacity.max(MIN_SUBSCRIPTION_BUFFER))
     }
 }
 
@@ -126,6 +136,7 @@ pub enum LagReason {
     SourceLagged,
     SubscriberBackpressure,
     RedactionBlocked,
+    AccessBlocked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,22 +208,6 @@ impl ProjectionSubscription {
     pub async fn next(&mut self) -> Option<ProjectionStreamItem> {
         self.receiver.recv().await
     }
-}
-
-#[derive(Debug, Error)]
-pub enum ProjectionStreamError {
-    #[error("projection stream request rejected: {reason}")]
-    InvalidRequest { reason: &'static str },
-    #[error("projection stream access denied")]
-    AccessDenied,
-    #[error("projection stream admission denied")]
-    AdmissionDenied,
-    #[error("projection stream source failed")]
-    Source,
-    #[error("projection stream payload failed redaction validation")]
-    Redaction,
-    #[error("projection stream outbound policy failed")]
-    Outbound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -462,6 +457,54 @@ pub struct EventStreamManager {
     update_source: Arc<dyn ProjectionUpdateSource>,
     redaction_validator: Arc<dyn ProjectionRedactionValidator>,
     outbound_store: Arc<dyn OutboundStateStore>,
+    validation_cache: ProjectionValidationCache,
+}
+
+#[derive(Clone, Default)]
+struct ProjectionValidationCache {
+    decisions: Arc<Mutex<HashMap<String, bool>>>,
+}
+
+impl ProjectionValidationCache {
+    fn validate(
+        &self,
+        validator: &dyn ProjectionRedactionValidator,
+        envelope: &ProductProjectionEnvelope,
+    ) -> Result<(), ProjectionStreamError> {
+        let key = validation_cache_key(envelope);
+        if let Some(allowed) = self
+            .decisions
+            .lock()
+            .map_err(|_| ProjectionStreamError::Source)?
+            .get(&key)
+            .copied()
+        {
+            return if allowed {
+                Ok(())
+            } else {
+                Err(ProjectionStreamError::Redaction)
+            };
+        }
+
+        let allowed = match validator.validate(envelope) {
+            Ok(()) => true,
+            Err(ProjectionStreamError::Redaction) => false,
+            Err(error) => return Err(error),
+        };
+        let mut decisions = self
+            .decisions
+            .lock()
+            .map_err(|_| ProjectionStreamError::Source)?;
+        if decisions.len() >= MAX_VALIDATION_CACHE_ENTRIES {
+            decisions.clear();
+        }
+        decisions.insert(key, allowed);
+        if allowed {
+            Ok(())
+        } else {
+            Err(ProjectionStreamError::Redaction)
+        }
+    }
 }
 
 impl EventStreamManager {
@@ -488,6 +531,7 @@ impl EventStreamManager {
             update_source,
             redaction_validator,
             outbound_store,
+            validation_cache: ProjectionValidationCache::default(),
         }
     }
 
@@ -506,6 +550,7 @@ impl EventStreamManager {
             update_source,
             redaction_validator,
             outbound_store,
+            validation_cache: ProjectionValidationCache::default(),
         }
     }
 
@@ -524,14 +569,16 @@ impl EventStreamManager {
         let snapshot = self
             .projection
             .snapshot(ProjectionRequest {
-                scope: request.scope,
+                scope: request.scope.clone(),
                 after: None,
                 limit: request.limit,
             })
             .await
             .map_err(map_projection_error)?;
         let envelope = ProductProjectionEnvelope::ThreadSnapshot(snapshot);
-        self.redaction_validator.validate(&envelope)?;
+        validate_stream_envelope(&envelope, request.view, &request.target, &request.scope)?;
+        self.validation_cache
+            .validate(self.redaction_validator.as_ref(), &envelope)?;
         Ok(ProjectionFetchResponse {
             cursor: envelope.cursor(),
             snapshot: envelope,
@@ -561,27 +608,36 @@ impl EventStreamManager {
             })
             .await?;
 
-        let mut initial_items = Vec::new();
-        let snapshot = self
-            .projection
-            .snapshot(ProjectionRequest {
+        let live = self
+            .update_source
+            .subscribe(ProjectionLiveUpdateRequest {
+                actor: request.actor.clone(),
                 scope: request.scope.clone(),
-                after: None,
-                limit: request.limit,
+                view: request.view,
+                target: request.target.clone(),
             })
-            .await
-            .map_err(map_projection_error)?;
-        let snapshot_envelope = ProductProjectionEnvelope::ThreadSnapshot(snapshot);
-        self.redaction_validator.validate(&snapshot_envelope)?;
+            .await?;
 
-        match request.after_cursor.clone() {
-            None => initial_items.push(ProjectionStreamItem::Snapshot(snapshot_envelope.clone())),
+        let mut initial_items = Vec::new();
+        let live_floor_cursor = match request.after_cursor.clone() {
+            None => {
+                let snapshot_envelope = self
+                    .snapshot_envelope(&request.scope, request.limit)
+                    .await?;
+                validate_stream_envelope(
+                    &snapshot_envelope,
+                    request.view,
+                    &request.target,
+                    &request.scope,
+                )?;
+                self.validation_cache
+                    .validate(self.redaction_validator.as_ref(), &snapshot_envelope)?;
+                let cursor = snapshot_envelope.cursor();
+                initial_items.push(ProjectionStreamItem::Snapshot(snapshot_envelope));
+                cursor
+            }
             Some(cursor) if cursor.scope != request.scope => {
-                initial_items.push(ProjectionStreamItem::RebaseRequired {
-                    snapshot_cursor: snapshot_envelope.cursor(),
-                    snapshot: Box::new(snapshot_envelope.clone()),
-                    rebased_from: None,
-                });
+                return Err(ProjectionStreamError::AccessDenied);
             }
             Some(cursor) => match self
                 .projection
@@ -593,41 +649,59 @@ impl EventStreamManager {
                 .await
             {
                 Ok(replay) => {
-                    initial_items.push(ProjectionStreamItem::Snapshot(snapshot_envelope.clone()));
                     let update_envelope = ProductProjectionEnvelope::ThreadUpdates(replay);
-                    self.redaction_validator.validate(&update_envelope)?;
+                    validate_stream_envelope(
+                        &update_envelope,
+                        request.view,
+                        &request.target,
+                        &request.scope,
+                    )?;
+                    self.validation_cache
+                        .validate(self.redaction_validator.as_ref(), &update_envelope)?;
+                    let cursor = update_envelope.cursor();
                     initial_items.push(ProjectionStreamItem::Update(update_envelope));
+                    cursor
                 }
                 Err(ProjectionError::RebaseRequired { .. }) => {
+                    let snapshot_envelope = self
+                        .snapshot_envelope(&request.scope, request.limit)
+                        .await?;
+                    validate_stream_envelope(
+                        &snapshot_envelope,
+                        request.view,
+                        &request.target,
+                        &request.scope,
+                    )?;
+                    self.validation_cache
+                        .validate(self.redaction_validator.as_ref(), &snapshot_envelope)?;
+                    let snapshot_cursor = snapshot_envelope.cursor();
                     initial_items.push(ProjectionStreamItem::RebaseRequired {
-                        snapshot_cursor: snapshot_envelope.cursor(),
-                        snapshot: Box::new(snapshot_envelope.clone()),
-                        rebased_from: Some(cursor),
+                        snapshot_cursor: snapshot_cursor.clone(),
+                        snapshot: Box::new(snapshot_envelope),
+                        rebased_from: Some(cursor.clone()),
                     });
+                    snapshot_cursor
                 }
                 Err(error) => return Err(map_projection_error(error)),
             },
-        }
+        };
 
-        let live = self
-            .update_source
-            .subscribe(ProjectionLiveUpdateRequest {
-                actor: request.actor,
-                scope: request.scope.clone(),
-                view: request.view,
-                target: request.target,
-            })
-            .await?;
-        let capacity = request.capabilities.bounded_buffer_capacity();
+        let capacity = request.capabilities.bounded_buffer_capacity()?;
         let (sender, receiver) = mpsc::channel(capacity);
         let redaction_validator = Arc::clone(&self.redaction_validator);
+        let validation_cache = self.validation_cache.clone();
         tokio::spawn(forward_subscription_items(
             sender,
             initial_items,
             live,
-            request.scope,
-            snapshot_envelope.cursor(),
-            redaction_validator,
+            SubscriptionForwardContext {
+                scope: request.scope,
+                view: request.view,
+                target: request.target,
+                live_floor_cursor,
+                redaction_validator,
+                validation_cache,
+            },
         ));
         Ok(ProjectionSubscription {
             receiver,
@@ -668,6 +742,22 @@ impl EventStreamManager {
             })
             .await
     }
+
+    async fn snapshot_envelope(
+        &self,
+        scope: &ProjectionScope,
+        limit: usize,
+    ) -> Result<ProductProjectionEnvelope, ProjectionStreamError> {
+        self.projection
+            .snapshot(ProjectionRequest {
+                scope: scope.clone(),
+                after: None,
+                limit,
+            })
+            .await
+            .map(ProductProjectionEnvelope::ThreadSnapshot)
+            .map_err(map_projection_error)
+    }
 }
 
 impl std::fmt::Debug for EventStreamManager {
@@ -680,17 +770,25 @@ impl std::fmt::Debug for EventStreamManager {
             .field("update_source", &"<projection_update_source>")
             .field("redaction_validator", &"<projection_redaction_validator>")
             .field("outbound_store", &"<outbound_state_store>")
+            .field("validation_cache", &"<projection_validation_cache>")
             .finish()
     }
+}
+
+struct SubscriptionForwardContext {
+    scope: ProjectionScope,
+    view: ProjectionViewClass,
+    target: ProjectionTarget,
+    live_floor_cursor: ProjectionCursor,
+    redaction_validator: Arc<dyn ProjectionRedactionValidator>,
+    validation_cache: ProjectionValidationCache,
 }
 
 async fn forward_subscription_items(
     sender: mpsc::Sender<ProjectionStreamItem>,
     initial_items: Vec<ProjectionStreamItem>,
     mut live: broadcast::Receiver<ProductProjectionEnvelope>,
-    scope: ProjectionScope,
-    snapshot_cursor: ProjectionCursor,
-    redaction_validator: Arc<dyn ProjectionRedactionValidator>,
+    context: SubscriptionForwardContext,
 ) {
     for item in initial_items {
         if sender.send(item).await.is_err() {
@@ -701,37 +799,86 @@ async fn forward_subscription_items(
     loop {
         match live.recv().await {
             Ok(envelope) => {
-                if envelope.scope() != &scope {
+                if envelope.scope() != &context.scope {
                     continue;
                 }
-                if redaction_validator.validate(&envelope).is_err() {
+                if envelope.cursor().runtime <= context.live_floor_cursor.runtime {
+                    continue;
+                }
+                if validate_stream_envelope(
+                    &envelope,
+                    context.view,
+                    &context.target,
+                    &context.scope,
+                )
+                .is_err()
+                {
                     let _ = sender
                         .send(ProjectionStreamItem::Lagged {
-                            reason: LagReason::RedactionBlocked,
-                            snapshot_cursor: snapshot_cursor.clone(),
+                            reason: LagReason::AccessBlocked,
+                            snapshot_cursor: context.live_floor_cursor.clone(),
                         })
                         .await;
                     return;
                 }
-                if sender
-                    .send(ProjectionStreamItem::Update(envelope))
-                    .await
+                if context
+                    .validation_cache
+                    .validate(context.redaction_validator.as_ref(), &envelope)
                     .is_err()
                 {
+                    let _ = sender
+                        .send(ProjectionStreamItem::Lagged {
+                            reason: LagReason::RedactionBlocked,
+                            snapshot_cursor: context.live_floor_cursor.clone(),
+                        })
+                        .await;
                     return;
+                }
+                match sender.try_send(ProjectionStreamItem::Update(envelope)) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        let _ = sender
+                            .send(ProjectionStreamItem::Lagged {
+                                reason: LagReason::SubscriberBackpressure,
+                                snapshot_cursor: context.live_floor_cursor.clone(),
+                            })
+                            .await;
+                        return;
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => return,
                 }
             }
             Err(broadcast::error::RecvError::Lagged(_)) => {
                 let _ = sender
                     .send(ProjectionStreamItem::Lagged {
                         reason: LagReason::SourceLagged,
-                        snapshot_cursor: snapshot_cursor.clone(),
+                        snapshot_cursor: context.live_floor_cursor.clone(),
                     })
                     .await;
                 return;
             }
             Err(broadcast::error::RecvError::Closed) => return,
         }
+    }
+}
+
+fn validate_stream_envelope(
+    envelope: &ProductProjectionEnvelope,
+    view: ProjectionViewClass,
+    target: &ProjectionTarget,
+    scope: &ProjectionScope,
+) -> Result<(), ProjectionStreamError> {
+    if envelope.scope() != scope {
+        return Err(ProjectionStreamError::AccessDenied);
+    }
+    match (view, target, envelope) {
+        (
+            ProjectionViewClass::ProductThread,
+            ProjectionTarget::Thread { thread_id },
+            ProductProjectionEnvelope::ThreadSnapshot(_)
+            | ProductProjectionEnvelope::ThreadUpdates(_),
+        ) if scope.read_scope.thread_id.as_ref() == Some(thread_id) => Ok(()),
+        _ => Err(ProjectionStreamError::AccessDenied),
     }
 }
 
@@ -785,6 +932,20 @@ fn map_outbound_error(error: OutboundError) -> ProjectionStreamError {
 
 fn scope_key(scope: &ProjectionScope, target: &ProjectionTarget) -> String {
     format!("{scope:?}:{target:?}")
+}
+
+fn validation_cache_key(envelope: &ProductProjectionEnvelope) -> String {
+    let variant = match envelope {
+        ProductProjectionEnvelope::ThreadSnapshot(_) => "thread_snapshot",
+        ProductProjectionEnvelope::ThreadUpdates(_) => "thread_updates",
+        ProductProjectionEnvelope::DeliveryStatus(_) => "delivery_status",
+        ProductProjectionEnvelope::Debug(_) => "debug",
+    };
+    format!(
+        "{variant}:{:?}:{}",
+        envelope.scope(),
+        envelope.cursor().runtime.as_u64()
+    )
 }
 
 fn count(map: &HashMap<String, usize>, key: &str) -> usize {
