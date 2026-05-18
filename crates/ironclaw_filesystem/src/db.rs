@@ -133,9 +133,39 @@ pub(crate) fn system_time_from_unix_seconds(seconds: i64) -> Option<SystemTime> 
     Some(UNIX_EPOCH + Duration::from_secs(seconds as u64))
 }
 
+/// Build a [`FilesystemError::BackendInfrastructure`] for a failure that
+/// happens outside any caller-supplied path scope (pool acquisition,
+/// `run_migrations`, pragma setup, schema bootstrapping). The previous
+/// `valid_engine_path()` helper returned a `/engine` placeholder so the
+/// path-bearing [`FilesystemError::Backend`] variant could be used; that
+/// placeholder masked which subsystem actually failed, so a real failure
+/// reported a fictional path. Backends now use this helper instead, and
+/// the variant explicitly omits `path`.
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-pub(crate) fn valid_engine_path() -> VirtualPath {
-    VirtualPath::new("/engine").unwrap_or_else(|_| unreachable!("literal virtual path is valid"))
+pub(crate) fn infrastructure_error(
+    operation: FilesystemOperation,
+    reason: impl Into<String>,
+) -> FilesystemError {
+    FilesystemError::BackendInfrastructure {
+        operation,
+        reason: reason.into(),
+    }
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) fn infrastructure_pg_error(
+    operation: FilesystemOperation,
+    error: tokio_postgres::Error,
+) -> FilesystemError {
+    infrastructure_error(operation, error.to_string())
+}
+
+#[cfg(feature = "libsql")]
+pub(crate) fn infrastructure_libsql_error(
+    operation: FilesystemOperation,
+    error: libsql::Error,
+) -> FilesystemError {
+    infrastructure_error(operation, error.to_string())
 }
 
 /// Build a deterministic SQL index identifier from a mount prefix + spec
@@ -151,16 +181,24 @@ pub(crate) fn sql_index_name(prefix: &str, name: &str) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     let raw = format!("idx_rfs_{prefix_clean}_{name}");
-    if raw.len() > 62 {
-        let cutoff = raw
-            .char_indices()
-            .nth(62)
-            .map(|(i, _)| i)
-            .unwrap_or(raw.len());
-        raw[..cutoff].to_string()
-    } else {
-        raw
+    if raw.len() <= 62 {
+        return raw;
     }
+    // PR #3679 review fix: distinct long inputs must map to distinct
+    // identifiers. Append a stable blake3 suffix before truncating so
+    // `CREATE ... IF NOT EXISTS` cannot silently reuse the wrong index.
+    let hash = blake3::hash(raw.as_bytes());
+    let hash_hex = hash.to_hex();
+    let suffix = format!("_{}", &hash_hex.as_str()[..8]);
+    let keep = 62usize.saturating_sub(suffix.len());
+    let cutoff = raw
+        .char_indices()
+        .nth(keep)
+        .map(|(i, _)| i)
+        .unwrap_or(raw.len());
+    let mut out = raw[..cutoff].to_string();
+    out.push_str(&suffix);
+    out
 }
 
 /// Escape a LIKE pattern that already contains a trailing `%` wildcard
@@ -220,4 +258,37 @@ pub(crate) fn record_version_from_i64(
             path: path.clone(),
             raw,
         })
+}
+
+/// Convert a u64 [`RecordVersion`] value into the i64 SQL binding both
+/// backends use. Audit finding F6: the prior `expected.get() as i64` cast
+/// silently wraps for `RecordVersion` values ≥ 2^63 (a corrupt or
+/// future-large version), producing a negative bind parameter that the
+/// `WHERE version = ?` clause would never match. Surface
+/// `CorruptRecordVersion` instead of letting the write silently
+/// VersionMismatch.
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+pub(crate) fn record_version_to_i64(
+    path: &VirtualPath,
+    version: crate::RecordVersion,
+) -> Result<i64, FilesystemError> {
+    i64::try_from(version.get()).map_err(|_| FilesystemError::CorruptRecordVersion {
+        path: path.clone(),
+        raw: version.get() as i64,
+    })
+}
+
+/// Convert a u64 [`Page::offset`](crate::Page::offset) into the i64 SQL
+/// binding both backends use. Audit finding F6: `page.offset as i64`
+/// wraps for offsets ≥ 2^63, producing a negative `OFFSET` that SQLite
+/// rejects with a cryptic backend error and Postgres rejects loudly but
+/// without naming what overflowed. Surface a typed `Backend` error
+/// naming the operation and value instead.
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+pub(crate) fn page_offset_to_i64(path: &VirtualPath, offset: u64) -> Result<i64, FilesystemError> {
+    i64::try_from(offset).map_err(|_| FilesystemError::Backend {
+        path: path.clone(),
+        operation: FilesystemOperation::Query,
+        reason: format!("page offset {offset} exceeds backend i64 range"),
+    })
 }

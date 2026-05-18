@@ -260,3 +260,134 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
         | ProductWorkflowError::DuplicateAction { .. } => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_product_adapters::{ProductInboundAck, ProductInboundPayload};
+    use ironclaw_turns::{AcceptedMessageRef, AdmissionRejection, TurnRunId};
+
+    use super::*;
+
+    #[test]
+    fn dispatch_kind_from_ack_uses_submitted_or_active_run_ids() {
+        let submitted_run_id = TurnRunId::new();
+        let accepted = ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid ref"),
+            submitted_run_id,
+        };
+        assert_eq!(
+            dispatch_kind_from_ack(&accepted, &ProductInboundPayload::NoOp).expect("kind"),
+            ActionDispatchKind::UserMessageTurn {
+                run_id: submitted_run_id
+            }
+        );
+
+        let active_run_id = TurnRunId::new();
+        let deferred = ProductInboundAck::DeferredBusy {
+            accepted_message_ref: AcceptedMessageRef::new("msg:deferred").expect("valid ref"),
+            active_run_id,
+        };
+        assert_eq!(
+            dispatch_kind_from_ack(&deferred, &ProductInboundPayload::NoOp).expect("kind"),
+            ActionDispatchKind::UserMessageTurn {
+                run_id: active_run_id
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_ack_for_error_settles_command_and_unsupported_actions() {
+        let command = terminal_ack_for_error(&ProductWorkflowError::CommandRoutingUnavailable {
+            command: "help".to_string(),
+        })
+        .expect("command routing failure is terminal");
+        assert!(matches!(
+            command,
+            ProductInboundAck::Rejected(rejection)
+                if rejection.kind == ProductRejectionKind::PolicyDenied
+                    && rejection.disposition()
+                        == ironclaw_product_adapters::ProductRejectionDisposition::Permanent
+        ));
+
+        let unsupported = terminal_ack_for_error(&ProductWorkflowError::UnsupportedActionKind {
+            kind: "auth_resolution".to_string(),
+        })
+        .expect("unsupported action is terminal");
+        assert!(matches!(
+            unsupported,
+            ProductInboundAck::Rejected(rejection)
+                if rejection.kind == ProductRejectionKind::PolicyDenied
+                    && rejection.disposition()
+                        == ironclaw_product_adapters::ProductRejectionDisposition::Permanent
+        ));
+    }
+
+    #[test]
+    fn terminal_ack_for_error_maps_non_retryable_turn_categories() {
+        let unauthorized = terminal_ack_for_error(&ProductWorkflowError::TurnSubmissionFailed {
+            error: TurnError::Unauthorized,
+        })
+        .expect("unauthorized turn failure is terminal");
+        assert!(matches!(
+            unauthorized,
+            ProductInboundAck::Rejected(rejection)
+                if rejection.kind == ProductRejectionKind::AccessDenied
+        ));
+
+        let missing_scope = terminal_ack_for_error(&ProductWorkflowError::TurnSubmissionFailed {
+            error: TurnError::ScopeNotFound,
+        })
+        .expect("scope-not-found turn failure is terminal");
+        assert!(matches!(
+            missing_scope,
+            ProductInboundAck::Rejected(rejection)
+                if rejection.kind == ProductRejectionKind::BindingRequired
+        ));
+
+        let admission_policy =
+            terminal_ack_for_error(&ProductWorkflowError::TurnSubmissionFailed {
+                error: TurnError::AdmissionRejected(AdmissionRejection::new(
+                    AdmissionRejectionReason::Policy,
+                )),
+            })
+            .expect("policy admission failure is terminal");
+        assert!(matches!(
+            admission_policy,
+            ProductInboundAck::Rejected(rejection)
+                if rejection.kind == ProductRejectionKind::AccessDenied
+        ));
+    }
+
+    #[test]
+    fn terminal_ack_for_error_keeps_retryable_paths_unsettled() {
+        assert!(
+            terminal_ack_for_error(&ProductWorkflowError::BindingResolutionFailed {
+                reason: "binding backend unavailable".to_string(),
+            })
+            .is_none()
+        );
+        assert!(
+            terminal_ack_for_error(&ProductWorkflowError::Transient {
+                reason: "ledger timeout".to_string(),
+            })
+            .is_none()
+        );
+        assert!(
+            terminal_ack_for_error(&ProductWorkflowError::TurnSubmissionFailed {
+                error: TurnError::Unavailable {
+                    reason: "turn store unavailable".to_string(),
+                },
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn terminal_success_ack_excludes_deferred_busy() {
+        assert!(is_terminal_success_ack(&ProductInboundAck::NoOp));
+        assert!(!is_terminal_success_ack(&ProductInboundAck::DeferredBusy {
+            accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("valid ref"),
+            active_run_id: TurnRunId::new(),
+        }));
+    }
+}

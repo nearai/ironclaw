@@ -779,10 +779,19 @@ impl<'de> Deserialize<'de> for CapabilitySurfaceVersion {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopModelCapabilityView {
+    /// Final capability IDs visible to this model call after the loop driver has
+    /// applied its strategy to the host-owned capability surface.
+    pub visible_capability_ids: Vec<CapabilityId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopModelRequest {
     pub messages: Vec<LoopModelMessage>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
     pub model_preference: Option<ModelProfileId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_view: Option<LoopModelCapabilityView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -838,6 +847,8 @@ pub struct LoopPromptBundleRequest {
     pub mode: PromptMode,
     pub context_cursor: Option<LoopInputCursor>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_view: Option<LoopModelCapabilityView>,
     pub checkpoint_state_ref: Option<LoopCheckpointStateRef>,
     pub max_messages: Option<u32>,
     #[serde(default)]
@@ -1046,6 +1057,34 @@ pub struct CapabilityCallCandidate {
     pub surface_version: CapabilitySurfaceVersion,
     pub capability_id: CapabilityId,
     pub input_ref: CapabilityInputRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_replay: Option<ProviderToolCallReplay>,
+}
+
+/// Provider-originated tool-call metadata needed to replay tool results back to the same provider.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderToolCallReplay {
+    /// Provider identity selected by the host route.
+    pub provider_id: String,
+    /// Concrete provider model selected by the host route.
+    pub provider_model_id: String,
+    /// Provider turn grouping token for reconstructing assistant tool calls.
+    pub provider_turn_id: String,
+    /// Provider call id referenced by the matching tool result.
+    pub provider_call_id: String,
+    /// Provider-facing tool name advertised to the model.
+    pub provider_tool_name: String,
+    /// Provider-facing tool arguments captured from the model tool call.
+    pub arguments: serde_json::Value,
+    /// Provider response-level reasoning attached to the tool-call batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_reasoning: Option<String>,
+    /// Provider call-level reasoning attached to this tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    /// Opaque provider thought-signature metadata, not an IronClaw auth signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 #[async_trait]
@@ -1090,6 +1129,76 @@ pub struct CapabilityDescriptorView {
     pub safe_name: String,
     pub safe_description: String,
     pub concurrency_hint: ConcurrencyHint,
+    #[serde(default)]
+    pub parameters_schema: serde_json::Value,
+}
+
+/// Provider-facing tool definition derived from a visible IronClaw capability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderToolDefinition {
+    /// Canonical IronClaw capability id backing this provider tool.
+    pub capability_id: CapabilityId,
+    /// Provider-safe tool name sent to the model.
+    pub name: String,
+    /// Provider-safe tool description sent to the model.
+    pub description: String,
+    /// JSON object schema for provider tool arguments.
+    pub parameters: serde_json::Value,
+}
+
+/// Tool call emitted by a provider-backed model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderToolCall {
+    /// Provider identity selected by the host route.
+    pub provider_id: String,
+    /// Concrete provider model selected by the host route.
+    pub provider_model_id: String,
+    /// Provider turn grouping token for reconstructing assistant tool calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    /// Provider call id referenced by the matching tool result.
+    pub id: String,
+    /// Provider-facing tool name returned by the model.
+    pub name: String,
+    /// Provider-facing tool arguments returned by the model.
+    pub arguments: serde_json::Value,
+    /// Provider response-level reasoning attached to the tool-call batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_reasoning: Option<String>,
+    /// Provider call-level reasoning attached to this tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    /// Opaque provider thought-signature metadata, not an IronClaw auth signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+}
+
+/// Durable reference to provider tool-call metadata for tool-result replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderToolCallReference {
+    /// Provider identity selected by the host route.
+    pub provider_id: String,
+    /// Concrete provider model selected by the host route.
+    pub provider_model_id: String,
+    /// Provider turn grouping token for reconstructing assistant tool calls.
+    pub provider_turn_id: String,
+    /// Provider call id referenced by the matching tool result.
+    pub provider_call_id: String,
+    /// Provider-facing tool name returned by the model.
+    pub provider_tool_name: String,
+    /// Canonical IronClaw capability id backing this provider tool.
+    pub capability_id: CapabilityId,
+    /// Provider-facing tool arguments returned by the model.
+    pub arguments: serde_json::Value,
+    /// Provider response-level reasoning attached to the tool-call batch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_reasoning: Option<String>,
+    /// Provider call-level reasoning attached to this tool call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    /// Opaque provider thought-signature metadata, not an IronClaw auth signature.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1339,6 +1448,24 @@ impl<'de> Deserialize<'de> for CapabilityFailureKind {
 
 #[async_trait]
 pub trait LoopCapabilityPort: Send + Sync {
+    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        Ok(Vec::new())
+    }
+
+    fn validate_provider_tool_call(
+        &self,
+        _tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        Ok(())
+    }
+
+    async fn register_provider_tool_call(
+        &self,
+        _tool_call: ProviderToolCall,
+    ) -> Result<CapabilityCallCandidate, AgentLoopHostError> {
+        Err(unsupported_host_method("register_provider_tool_call"))
+    }
+
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
@@ -1375,6 +1502,8 @@ pub struct FinalizeAssistantMessage {
 pub struct AppendCapabilityResultRef {
     pub result_ref: LoopResultRef,
     pub safe_summary: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_call: Option<ProviderToolCallReference>,
 }
 
 #[async_trait]

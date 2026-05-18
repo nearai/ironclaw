@@ -6,7 +6,10 @@ use std::sync::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::*;
-use ironclaw_filesystem::{DirEntry, FileStat, FilesystemError, LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{
+    DirEntry, FileStat, FilesystemError, InMemoryBackend, LocalFilesystem, RootFilesystem,
+    ScopedFilesystem,
+};
 use ironclaw_host_api::*;
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 
@@ -682,11 +685,11 @@ async fn filesystem_lease_store_persists_and_reloads_issued_leases() {
     let lease = CapabilityLease::new(context.resource_scope.clone(), grant);
     let lease_id = lease.grant.id;
 
-    FilesystemCapabilityLeaseStore::new(&fs)
+    FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
         .issue(lease.clone())
         .await
         .unwrap();
-    let reloaded = FilesystemCapabilityLeaseStore::new(&fs);
+    let reloaded = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
 
     assert_eq!(
         reloaded.get(&context.resource_scope, lease_id).await,
@@ -705,10 +708,19 @@ async fn filesystem_lease_store_persists_and_reloads_issued_leases() {
 
 #[tokio::test]
 async fn filesystem_lease_store_lists_from_owner_index_without_scanning_invocation_roots() {
-    let fs = CountingFilesystem::new(engine_filesystem());
+    // Wrap the underlying [`LocalFilesystem`] in a [`CountingFilesystem`]
+    // so we can assert that `leases_for_scope` reads the owner index
+    // rather than fanning out to `list_dir` per invocation. The
+    // [`ScopedFilesystem`] layer on top binds the `/authorization` alias
+    // to a tenant/user-scoped target — same as `engine_filesystem()`.
+    let counting = Arc::new(CountingFilesystem::new(local_filesystem_with_engine_mount()));
+    let fs = build_scoped_fs(
+        Arc::clone(&counting),
+        "/engine/tenants/test/users/test/authorization",
+    );
     let context = execution_context(CapabilitySet::default());
     let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
-    let store = FilesystemCapabilityLeaseStore::new(&fs);
+    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
     let mut expected = Vec::new();
 
     for _ in 0..3 {
@@ -725,7 +737,7 @@ async fn filesystem_lease_store_lists_from_owner_index_without_scanning_invocati
         store.issue(lease).await.unwrap();
     }
 
-    fs.reset_list_dir_calls();
+    counting.reset_list_dir_calls();
     let leases = store.leases_for_scope(&context.resource_scope).await;
 
     let mut actual = leases
@@ -736,7 +748,7 @@ async fn filesystem_lease_store_lists_from_owner_index_without_scanning_invocati
     expected.sort_by_key(|lease_id| lease_id.as_uuid());
     assert_eq!(actual, expected);
     assert_eq!(
-        fs.list_dir_calls(),
+        counting.list_dir_calls(),
         0,
         "indexed lease listing should not scan every invocation directory"
     );
@@ -763,7 +775,7 @@ async fn filesystem_lease_store_persists_revoke_claim_and_consume() {
     let mut lease = CapabilityLease::new(context.resource_scope.clone(), grant);
     lease.invocation_fingerprint = Some(fingerprint.clone());
     let lease_id = lease.grant.id;
-    let store = FilesystemCapabilityLeaseStore::new(&fs);
+    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
     store.issue(lease).await.unwrap();
 
     let claimed = store
@@ -772,7 +784,7 @@ async fn filesystem_lease_store_persists_revoke_claim_and_consume() {
         .unwrap();
     assert_eq!(claimed.status, CapabilityLeaseStatus::Claimed);
     assert_eq!(
-        FilesystemCapabilityLeaseStore::new(&fs)
+        FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
             .get(&context.resource_scope, lease_id)
             .await
             .unwrap()
@@ -780,20 +792,20 @@ async fn filesystem_lease_store_persists_revoke_claim_and_consume() {
         CapabilityLeaseStatus::Claimed
     );
 
-    let consumed = FilesystemCapabilityLeaseStore::new(&fs)
+    let consumed = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
         .consume(&context.resource_scope, lease_id)
         .await
         .unwrap();
     assert_eq!(consumed.status, CapabilityLeaseStatus::Consumed);
     assert_eq!(consumed.grant.constraints.max_invocations, Some(0));
 
-    let revoked = FilesystemCapabilityLeaseStore::new(&fs)
+    let revoked = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
         .revoke(&context.resource_scope, lease_id)
         .await
         .unwrap();
     assert_eq!(revoked.status, CapabilityLeaseStatus::Revoked);
     assert_eq!(
-        FilesystemCapabilityLeaseStore::new(&fs)
+        FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
             .get(&context.resource_scope, lease_id)
             .await
             .unwrap()
@@ -824,7 +836,7 @@ async fn filesystem_fingerprinted_lease_cannot_be_consumed_before_claim() {
     );
     lease.invocation_fingerprint = Some(fingerprint);
     let lease_id = lease.grant.id;
-    let store = FilesystemCapabilityLeaseStore::new(&fs);
+    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
     store.issue(lease).await.unwrap();
 
     let err = store
@@ -837,7 +849,7 @@ async fn filesystem_fingerprinted_lease_cannot_be_consumed_before_claim() {
         CapabilityLeaseError::UnclaimedFingerprintLease { lease_id: id } if id == lease_id
     ));
     assert_eq!(
-        FilesystemCapabilityLeaseStore::new(&fs)
+        FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
             .get(&context.resource_scope, lease_id)
             .await
             .unwrap()
@@ -868,21 +880,21 @@ async fn filesystem_fingerprinted_lease_without_invocation_limit_is_consumed_aft
     );
     lease.invocation_fingerprint = Some(fingerprint.clone());
     let lease_id = lease.grant.id;
-    let store = FilesystemCapabilityLeaseStore::new(&fs);
+    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
     store.issue(lease).await.unwrap();
 
     store
         .claim(&context.resource_scope, lease_id, &fingerprint)
         .await
         .unwrap();
-    let consumed = FilesystemCapabilityLeaseStore::new(&fs)
+    let consumed = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
         .consume(&context.resource_scope, lease_id)
         .await
         .unwrap();
 
     assert_eq!(consumed.status, CapabilityLeaseStatus::Consumed);
     assert!(matches!(
-        FilesystemCapabilityLeaseStore::new(&fs)
+        FilesystemCapabilityLeaseStore::new(Arc::clone(&fs))
             .claim(&context.resource_scope, lease_id, &fingerprint)
             .await
             .unwrap_err(),
@@ -909,7 +921,7 @@ async fn filesystem_lease_store_is_tenant_user_invocation_scoped() {
         ),
     );
     let lease_id = lease.grant.id;
-    let store = FilesystemCapabilityLeaseStore::new(&fs);
+    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&fs));
     store.issue(lease.clone()).await.unwrap();
 
     assert_eq!(store.get(&other_invocation_scope, lease_id).await, None);
@@ -920,6 +932,169 @@ async fn filesystem_lease_store_is_tenant_user_invocation_scoped() {
     assert_eq!(
         store.get(&context.resource_scope, lease_id).await,
         Some(lease)
+    );
+}
+
+/// Regression test for the systemic finding tracked in
+/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`:
+/// `FilesystemCapabilityLeaseStore` must enforce tenant isolation through
+/// the [`ScopedFilesystem`] mount permission boundary, not by hand-rolling
+/// `/engine/tenants/<tenant_id>/users/<user_id>/...` prefixes inside its
+/// path builders.
+///
+/// Two stores share one [`InMemoryBackend`] but are constructed with
+/// different [`MountView`]s — each resolves the `/authorization` alias to
+/// a distinct tenant-scoped [`VirtualPath`] subtree. Issuing a lease on
+/// tenant A under a `(user_id, project_id, invocation_id)` scope that
+/// tenant B *also* uses must NOT make that lease visible from tenant B.
+/// Before the migration to `&ScopedFilesystem<F>`, the store hand-coded
+/// the tenant + user prefix into every path string, so any composition
+/// layer that wrapped the backend without remembering to re-prefix would
+/// leak across tenants with the type system saying nothing — this test
+/// fails closed if that ever regresses.
+#[tokio::test]
+async fn filesystem_capability_lease_store_isolates_two_tenants_with_same_user_project_ids() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped_a = build_scoped_fs(
+        Arc::clone(&backend),
+        "/engine/tenants/a/users/alice/authorization",
+    );
+    let scoped_b = build_scoped_fs(
+        Arc::clone(&backend),
+        "/engine/tenants/b/users/alice/authorization",
+    );
+    let store_a = FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped_a));
+    let store_b = FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped_b));
+
+    // Build a context whose `(user_id, project_id, invocation_id)` triple
+    // is reused verbatim across tenants. After the mount-view migration
+    // these identifiers no longer appear in the in-store path string
+    // (modulo project_id for the within-tenant subtree); cross-tenant
+    // routing is the MountView's responsibility.
+    let context_a = execution_context(CapabilitySet::default());
+    let mut context_b = context_a.clone();
+    // Same user/project/invocation; the only thing that should distinguish
+    // the two stores is the mount-time tenant prefix wired by composition.
+    context_b.tenant_id = TenantId::new("tenant-b-unused").unwrap();
+    context_b.resource_scope.tenant_id = context_b.tenant_id.clone();
+
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let lease = CapabilityLease::new(
+        context_a.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context_a.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    let lease_id = lease.grant.id;
+    store_a.issue(lease.clone()).await.unwrap();
+
+    // Tenant A sees its own lease.
+    assert_eq!(
+        store_a.get(&context_a.resource_scope, lease_id).await,
+        Some(lease),
+        "tenant A must see the lease it just issued",
+    );
+
+    // Tenant B must NOT see tenant A's lease, even when looking up the
+    // identical `(user_id, project_id, invocation_id)` scope from
+    // tenant A's request.
+    assert_eq!(
+        store_b.get(&context_a.resource_scope, lease_id).await,
+        None,
+        "tenant B must NOT see tenant A's lease (cross-tenant leak)",
+    );
+    assert!(
+        store_b
+            .leases_for_scope(&context_a.resource_scope)
+            .await
+            .is_empty(),
+        "tenant B leases_for_scope under (user, project, invocation) shared with tenant A must be empty",
+    );
+}
+
+/// Defense-in-depth regression for the tenant-isolation indexed
+/// projection (see
+/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`):
+/// every `FilesystemCapabilityLeaseStore` lease write decorates its
+/// `Entry` with a `tenant_id` projection so an admin-tier query can
+/// filter explicitly by tenant and a path-rewriting bug surfaces as a
+/// query-time mismatch.
+///
+/// Issues a lease under tenant A's scope, then runs a raw
+/// `RootFilesystem::query` against the lease owner prefix with
+/// `Filter::Eq { key: "tenant_id", value: <tenant-a> }` and asserts a
+/// non-empty result; a query for a different tenant must return zero
+/// rows.
+#[tokio::test]
+async fn filesystem_capability_lease_store_writes_tenant_id_indexed_projection() {
+    use ironclaw_filesystem::{Filter, IndexKey, IndexValue, Page};
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = build_scoped_fs(
+        Arc::clone(&backend),
+        "/engine/tenants/tenant-a/users/alice/authorization",
+    );
+    let store = FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped));
+    let context = execution_context(CapabilitySet::default());
+    let descriptor = descriptor(CapabilityId::new("echo.say").unwrap());
+    let lease = CapabilityLease::new(
+        context.resource_scope.clone(),
+        grant_for(
+            descriptor.id.clone(),
+            Principal::Extension(context.extension_id.clone()),
+            vec![EffectKind::DispatchCapability],
+        ),
+    );
+    store.issue(lease).await.unwrap();
+
+    // Resolve the alias-relative owner prefix through the same MountView
+    // the store uses so the raw `query` targets the bytes the backend
+    // stored. The lease owner prefix is `/authorization/leases/projects/<id>`
+    // for our fixture scope.
+    let owner_alias = ironclaw_host_api::ScopedPath::new(format!(
+        "/authorization/leases/projects/{}",
+        context.resource_scope.project_id.as_ref().unwrap().as_str()
+    ))
+    .unwrap();
+    let virtual_prefix = scoped
+        .resolve(&context.resource_scope, &owner_alias)
+        .unwrap();
+    let tenant_key = IndexKey::new("tenant_id").unwrap();
+    let tenant_id_str = context.resource_scope.tenant_id.as_str().to_string();
+
+    let hit = backend
+        .query(
+            &virtual_prefix,
+            &Filter::Eq {
+                key: tenant_key.clone(),
+                value: IndexValue::Text(tenant_id_str),
+            },
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !hit.is_empty(),
+        "tenant_id projection must surface the lease via Filter::Eq",
+    );
+
+    let miss = backend
+        .query(
+            &virtual_prefix,
+            &Filter::Eq {
+                key: tenant_key,
+                value: IndexValue::Text("tenant-z".to_string()),
+            },
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert!(
+        miss.is_empty(),
+        "tenant_id projection must NOT surface tenant1's lease under tenant-z query; got {} rows",
+        miss.len(),
     );
 }
 
@@ -1008,6 +1183,27 @@ impl RootFilesystem for CountingFilesystem {
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.inner.create_dir_all(path).await
     }
+
+    // After PR #3659 the trait default `get`/`put` are `Unsupported`.
+    // Forward to the inner LocalFilesystem (which implements them
+    // natively) so this counting wrapper keeps participating in the
+    // unified surface used by FilesystemCapabilityLeaseStore's read_lease
+    // / write_lease / read_lease_index / write_lease_index ops.
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: ironclaw_filesystem::Entry,
+        cas: ironclaw_filesystem::CasExpectation,
+    ) -> Result<ironclaw_filesystem::RecordVersion, FilesystemError> {
+        self.inner.put(path, entry, cas).await
+    }
+
+    async fn get(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, FilesystemError> {
+        self.inner.get(path).await
+    }
 }
 
 fn trust_decision(
@@ -1065,7 +1261,16 @@ fn timestamp(value: &str) -> Timestamp {
     serde_json::from_value(serde_json::Value::String(value.to_string())).unwrap()
 }
 
-fn engine_filesystem() -> LocalFilesystem {
+fn engine_filesystem() -> Arc<ScopedFilesystem<LocalFilesystem>> {
+    build_scoped_fs(
+        Arc::new(local_filesystem_with_engine_mount()),
+        "/engine/tenants/test/users/test/authorization",
+    )
+}
+
+/// Build a [`LocalFilesystem`] with a temp directory mounted at `/engine`
+/// so tests can target paths beneath it via `ScopedFilesystem`.
+fn local_filesystem_with_engine_mount() -> LocalFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
     let engine_root = storage.join("engine");
     std::fs::create_dir_all(&engine_root).unwrap();
@@ -1076,6 +1281,25 @@ fn engine_filesystem() -> LocalFilesystem {
     )
     .unwrap();
     fs
+}
+
+/// Build a [`ScopedFilesystem`] that mounts the `/authorization` alias onto
+/// `target_root` (a tenant/user-scoped subtree of the underlying backend)
+/// with full read/write/list/delete permissions. Multiple stores can share
+/// one backend by passing different `target_root` values — that's how the
+/// tenant-isolation regression test below constructs two disjoint
+/// `FilesystemCapabilityLeaseStore`s over a single `InMemoryBackend`.
+fn build_scoped_fs<F>(backend: Arc<F>, target_root: &str) -> Arc<ScopedFilesystem<F>>
+where
+    F: RootFilesystem,
+{
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/authorization").expect("alias"),
+        VirtualPath::new(target_root).expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
 
 fn execution_context(grants: CapabilitySet) -> ExecutionContext {

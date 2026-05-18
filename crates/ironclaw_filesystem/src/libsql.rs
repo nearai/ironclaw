@@ -4,16 +4,18 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
 
+use crate::backend::EventRecord;
 use crate::db::{
     child_path_like_pattern, direct_children, directory_append_error, directory_write_error,
-    escape_like_literal, escape_like_with_trailing_wildcard, is_not_found, libsql_db_error,
-    not_found, record_version_from_i64, sql_index_name, system_time_from_unix_seconds,
-    valid_engine_path, virtual_path_prefixes,
+    escape_like_literal, escape_like_with_trailing_wildcard, infrastructure_libsql_error,
+    is_not_found, libsql_db_error, not_found, page_offset_to_i64, record_version_from_i64,
+    record_version_to_i64, sql_index_name, system_time_from_unix_seconds, virtual_path_prefixes,
 };
+use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
-    BackendCapabilities, CasExpectation, ContentType, DirEntry, Entry, FileStat, FileType,
-    FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexSpec, IndexValue, Page,
-    RecordKind, RecordVersion, RootFilesystem, VersionedEntry,
+    BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
+    FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexSpec,
+    IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
 };
 
 #[cfg(feature = "libsql")]
@@ -30,35 +32,46 @@ impl LibSqlRootFilesystem {
 
     pub async fn run_migrations(&self) -> Result<(), FilesystemError> {
         let conn = self.connect().await?;
-        conn.execute_batch(LIBSQL_ROOT_FILESYSTEM_SCHEMA)
-            .await
-            .map_err(|error| {
-                libsql_db_error(
-                    valid_engine_path(),
-                    FilesystemOperation::CreateDirAll,
-                    error,
-                )
-            })?;
-        ensure_libsql_root_is_dir_column(&conn).await?;
-        ensure_libsql_records_columns(&conn).await?;
-        ensure_libsql_index_specs_table(&conn).await?;
-        Ok(())
+        // Wrap every step in a single SQLite transaction so a mid-migration
+        // crash can't leave concurrent readers observing a half-migrated
+        // schema (e.g. `is_dir` column present but `version` missing). SQLite
+        // supports transactional DDL — CREATE TABLE, CREATE INDEX, and
+        // ALTER TABLE ADD COLUMN all participate in BEGIN/COMMIT.
+        //
+        // `BEGIN IMMEDIATE` acquires the write lock up front so two
+        // concurrent processes attempting first-time migration serialise
+        // rather than both racing the pragma checks.
+        conn.execute("BEGIN IMMEDIATE", ()).await.map_err(|error| {
+            infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error)
+        })?;
+        let result = run_libsql_migrations_inner(&conn).await;
+        match result {
+            Ok(()) => conn
+                .execute("COMMIT", ())
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error)
+                }),
+            Err(err) => {
+                // Best-effort rollback. If ROLLBACK itself fails (e.g. the
+                // connection is already aborted) we still surface the
+                // original migration error to the caller — `_` is the
+                // documented pattern for unwinding here. SQLite auto-rolls-
+                // back on connection close as a final safety net.
+                let _ = conn.execute("ROLLBACK", ()).await;
+                Err(err)
+            }
+        }
     }
 
     async fn connect(&self) -> Result<libsql::Connection, FilesystemError> {
-        let conn = self
-            .db
-            .connect()
-            .map_err(|error| FilesystemError::Backend {
-                path: valid_engine_path(),
-                operation: FilesystemOperation::Stat,
-                reason: error.to_string(),
-            })?;
+        let conn = self.db.connect().map_err(|error| {
+            crate::db::infrastructure_error(FilesystemOperation::Stat, error.to_string())
+        })?;
         conn.query("PRAGMA busy_timeout = 5000", ())
             .await
-            .map_err(|error| {
-                libsql_db_error(valid_engine_path(), FilesystemOperation::Stat, error)
-            })?;
+            .map_err(|error| infrastructure_libsql_error(FilesystemOperation::Stat, error))?;
         Ok(conn)
     }
 }
@@ -68,9 +81,14 @@ impl LibSqlRootFilesystem {
 impl RootFilesystem for LibSqlRootFilesystem {
     fn capabilities(&self) -> BackendCapabilities {
         // sql_typical covers read/write/append/list/stat/delete/records/query
-        // /IndexExact/IndexPrefix/CAS. Events stay off until the append/tail
-        // backend port lands; IndexFts/Vector ditto.
+        // /IndexExact/IndexPrefix/CAS. The append/tail backing table is in
+        // place so Events is on; FTS5 is built into libSQL and a brute-force
+        // cosine ranker for vectors is implemented in Rust, so IndexFts and
+        // IndexVector are advertised here too.
         BackendCapabilities::sql_typical()
+            .with(Capability::Events)
+            .with(Capability::IndexFts)
+            .with(Capability::IndexVector)
     }
 
     async fn put(
@@ -134,7 +152,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
             }
             CasExpectation::Version(expected) => {
                 let conn = self.connect().await?;
-                let expected_raw = expected.get() as i64;
+                let expected_raw = record_version_to_i64(path, expected)?;
                 let rows = conn
                     .execute(
                         r#"
@@ -268,17 +286,18 @@ impl RootFilesystem for LibSqlRootFilesystem {
         path: &VirtualPath,
         spec: &IndexSpec,
     ) -> Result<(), FilesystemError> {
-        // Only Exact and Prefix index kinds are supported on the SQL backends
-        // in this port. FTS / Vector live behind their own follow-up port.
+        // Exact/Prefix create a SQLite expression index over the indexed JSON
+        // projection. Fts creates an FTS5 virtual table mirroring the
+        // indexed text key on this prefix, kept in sync by AFTER INSERT/
+        // UPDATE/DELETE triggers. Vector { dim } records the dimension in
+        // the spec catalog; storage uses IndexValue::Bytes in the indexed
+        // projection and brute-force cosine on query (the libSQL vector
+        // extension is unreliable across builds).
         let kind_str = match &spec.kind {
             IndexKind::Exact => "exact".to_string(),
             IndexKind::Prefix => "prefix".to_string(),
-            IndexKind::Fts | IndexKind::Vector { .. } => {
-                return Err(FilesystemError::Unsupported {
-                    path: path.clone(),
-                    operation: FilesystemOperation::EnsureIndex,
-                });
-            }
+            IndexKind::Fts => "fts".to_string(),
+            IndexKind::Vector { dim } => format!("vector:{dim}"),
         };
         if spec.keys.is_empty() {
             return Err(FilesystemError::IndexConflict {
@@ -359,18 +378,155 @@ impl RootFilesystem for LibSqlRootFilesystem {
         drop(rows);
 
         let index_name = sql_index_name(path.as_str(), spec.name.as_str());
-        let expressions: Vec<String> = spec
-            .keys
-            .iter()
-            .map(|k| format!("json_extract(indexed, '$.{}')", k.as_str()))
-            .collect();
-        let ddl = format!(
-            "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries ({})",
-            expressions.join(", ")
-        );
-        conn.execute(&ddl, ()).await.map_err(|error| {
-            libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
-        })?;
+        match &spec.kind {
+            IndexKind::Exact | IndexKind::Prefix => {
+                let expressions: Vec<String> = spec
+                    .keys
+                    .iter()
+                    .map(|k| format!("json_extract(indexed, '$.{}')", k.as_str()))
+                    .collect();
+                let ddl = format!(
+                    "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries ({})",
+                    expressions.join(", ")
+                );
+                conn.execute(&ddl, ()).await.map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+            }
+            IndexKind::Fts => {
+                // FTS indexes need exactly one text key; the FTS5 vtable has
+                // one shadow column per indexed key, but the filter surface
+                // currently exposes Fts { key, query } as single-keyed.
+                if spec.keys.len() != 1 {
+                    return Err(FilesystemError::IndexConflict {
+                        path: path.clone(),
+                        name: spec.name.clone(),
+                        reason: crate::IndexConflictReason::SpecMismatch,
+                    });
+                }
+                let fts_key = spec.keys[0].as_str();
+                let path_prefix = path.as_str();
+                // Defense in depth: the FTS5 sync triggers below splice the
+                // mount-prefix path directly into DDL string literals because
+                // SQLite's trigger language has no parameter binding. The
+                // standard `'`-doubling escape is correct, but a path that
+                // legitimately reaches here with any non-identifier character
+                // is suspicious and we refuse to emit DDL for it. Accept only
+                // characters that are unambiguously safe in a string literal
+                // (`[A-Za-z0-9_/.-]`). `VirtualPath` validation rejects NUL,
+                // control chars, backslashes, and `..`, but does not (today)
+                // reject `'`, `"`, `;`, or other punctuation. This check is
+                // narrower than VirtualPath's and keeps the DDL emitter
+                // self-contained.
+                if !path_prefix
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '/' | '.' | '-'))
+                {
+                    return Err(FilesystemError::Backend {
+                        path: path.clone(),
+                        operation: FilesystemOperation::EnsureIndex,
+                        reason: "FTS index path contains characters outside \
+                                 [A-Za-z0-9_/.-]; refusing to emit DDL"
+                            .to_string(),
+                    });
+                }
+                let trailing_prefix = format!("{}/", path_prefix.trim_end_matches('/'));
+                let trailing_pattern =
+                    escape_like_with_trailing_wildcard(&format!("{trailing_prefix}%"));
+                // After the identifier-safe check above, `'`-doubling is a
+                // belt-and-suspenders safety net; the input cannot contain
+                // `'` so the replace is a no-op on valid inputs.
+                let exact_path_lit = path_prefix.replace('\'', "''");
+                let trailing_pattern_lit = trailing_pattern.replace('\'', "''");
+                // FTS5 vtable: stores (path, text). We mirror per-mount-
+                // prefix so different prefixes (with different keys) don't
+                // collide on a single FTS table.
+                let fts_table = format!("{index_name}_fts");
+                let create_vtab = format!(
+                    "CREATE VIRTUAL TABLE IF NOT EXISTS {fts_table} \
+                     USING fts5(path UNINDEXED, content)"
+                );
+                conn.execute(&create_vtab, ()).await.map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+                // Triggers keep the FTS table in sync with entries whose
+                // path is within this prefix. They extract the indexed
+                // text via json_extract; non-text values fall through as
+                // empty strings (FTS5 won't match them).
+                let trigger_insert = format!(
+                    "CREATE TRIGGER IF NOT EXISTS {index_name}_ai \
+                     AFTER INSERT ON root_filesystem_entries \
+                     WHEN new.is_dir = 0 \
+                       AND (new.path = '{exact_path_lit}' OR new.path LIKE '{trailing_pattern_lit}' ESCAPE '!') \
+                     BEGIN \
+                       INSERT INTO {fts_table}(path, content) \
+                       VALUES (new.path, COALESCE(json_extract(new.indexed, '$.{fts_key}'), '')); \
+                     END"
+                );
+                conn.execute(&trigger_insert, ()).await.map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+                let trigger_update = format!(
+                    "CREATE TRIGGER IF NOT EXISTS {index_name}_au \
+                     AFTER UPDATE ON root_filesystem_entries \
+                     WHEN new.is_dir = 0 \
+                       AND (new.path = '{exact_path_lit}' OR new.path LIKE '{trailing_pattern_lit}' ESCAPE '!') \
+                     BEGIN \
+                       DELETE FROM {fts_table} WHERE path = old.path; \
+                       INSERT INTO {fts_table}(path, content) \
+                       VALUES (new.path, COALESCE(json_extract(new.indexed, '$.{fts_key}'), '')); \
+                     END"
+                );
+                conn.execute(&trigger_update, ()).await.map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+                let trigger_delete = format!(
+                    "CREATE TRIGGER IF NOT EXISTS {index_name}_ad \
+                     AFTER DELETE ON root_filesystem_entries \
+                     WHEN old.is_dir = 0 \
+                       AND (old.path = '{exact_path_lit}' OR old.path LIKE '{trailing_pattern_lit}' ESCAPE '!') \
+                     BEGIN \
+                       DELETE FROM {fts_table} WHERE path = old.path; \
+                     END"
+                );
+                conn.execute(&trigger_delete, ()).await.map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+                // Backfill any rows present before the index was declared.
+                let backfill = format!(
+                    "INSERT INTO {fts_table}(path, content) \
+                     SELECT path, COALESCE(json_extract(indexed, '$.{fts_key}'), '') \
+                     FROM root_filesystem_entries \
+                     WHERE is_dir = 0 \
+                       AND (path = ?1 OR path LIKE ?2 ESCAPE '!') \
+                       AND NOT EXISTS \
+                           (SELECT 1 FROM {fts_table} WHERE {fts_table}.path = root_filesystem_entries.path)"
+                );
+                conn.execute(
+                    &backfill,
+                    libsql::params![path_prefix, trailing_pattern.clone()],
+                )
+                .await
+                .map_err(|error| {
+                    libsql_db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+            }
+            IndexKind::Vector { dim } => {
+                // Storage shape: IndexValue::Bytes under the indexed key.
+                // The vector dim was recorded in the spec catalog above so
+                // re-declaration with a different dim is rejected as a
+                // SpecMismatch. No per-row table or index is created; the
+                // brute-force ranker scans entries in this prefix at
+                // query time. Validate dim > 0 here as a guardrail.
+                if *dim == 0 {
+                    return Err(FilesystemError::IndexConflict {
+                        path: path.clone(),
+                        name: spec.name.clone(),
+                        reason: crate::IndexConflictReason::SpecMismatch,
+                    });
+                }
+            }
+        }
         Ok(())
     }
 
@@ -380,6 +536,19 @@ impl RootFilesystem for LibSqlRootFilesystem {
         filter: &Filter,
         page: Page,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        // Vector-nearest is a top-k ranking operation; evaluate by scanning
+        // the candidate set in this prefix and ranking by cosine in Rust.
+        if let Filter::VectorNearest {
+            key,
+            embedding,
+            limit,
+        } = filter
+        {
+            return self
+                .vector_nearest_query(path, key, embedding, *limit)
+                .await;
+        }
+        let fts_tables = self.discover_fts_tables_for_filter(path, filter).await?;
         let mut params: Vec<libsql::Value> = vec![libsql::Value::Text(path.as_str().to_string())];
         let prefix_pattern = format!("{}/%", path.as_str());
         params.push(libsql::Value::Text(escape_like_with_trailing_wildcard(
@@ -387,7 +556,7 @@ impl RootFilesystem for LibSqlRootFilesystem {
         )));
 
         let mut conditions = String::new();
-        translate_filter(path, filter, &mut conditions, &mut params)?;
+        translate_filter(path, filter, &mut conditions, &mut params, &fts_tables)?;
 
         let mut sql = String::from(
             "SELECT path, contents, content_type, kind, indexed, version \
@@ -399,10 +568,18 @@ impl RootFilesystem for LibSqlRootFilesystem {
             sql.push_str(&conditions);
         }
         sql.push_str(" ORDER BY path LIMIT ? OFFSET ?");
-        params.push(libsql::Value::Integer(
-            page.limit.min(crate::Page::MAX_LIMIT) as i64,
-        ));
-        params.push(libsql::Value::Integer(page.offset as i64));
+        // `page.limit` is `u32` and clamped to `Page::MAX_LIMIT` (1024),
+        // so the i64 cast is bounded and safe. `page.offset` is `u64`
+        // and is user-supplied — guard with `try_from` so values ≥ 2^63
+        // surface a typed `Backend` error instead of wrapping to a
+        // negative OFFSET. (Audit finding F6.)
+        params.push(libsql::Value::Integer(i64::from(
+            page.limit.min(crate::Page::MAX_LIMIT),
+        )));
+        params.push(libsql::Value::Integer(page_offset_to_i64(
+            path,
+            page.offset,
+        )?));
 
         let conn = self.connect().await?;
         let mut rows = conn
@@ -616,6 +793,84 @@ impl RootFilesystem for LibSqlRootFilesystem {
         Ok(())
     }
 
+    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
+        let conn = self.connect().await?;
+        // INTEGER PRIMARY KEY AUTOINCREMENT assigns a fresh monotonic id per
+        // insert. We capture the assigned id via last_insert_rowid() under
+        // the same connection so concurrent writers don't observe each
+        // other's rowids — libsql's per-connection model gives us that
+        // for free.
+        conn.execute(
+            r#"
+            INSERT INTO root_filesystem_events (path, payload, created_at)
+            VALUES (?1, ?2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            "#,
+            libsql::params![path.as_str(), libsql::Value::Blob(payload)],
+        )
+        .await
+        .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
+        let mut rows = conn
+            .query("SELECT last_insert_rowid()", ())
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?
+            .ok_or_else(|| FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::Append,
+                reason: "last_insert_rowid returned no row after insert".to_string(),
+            })?;
+        let seq_raw: i64 = row
+            .get(0)
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Append, error))?;
+        seq_no_from_i64(path, seq_raw, FilesystemOperation::Append)
+    }
+
+    async fn tail(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        let conn = self.connect().await?;
+        let from_raw = i64::try_from(from.get()).map_err(|_| FilesystemError::Backend {
+            path: path.clone(),
+            operation: FilesystemOperation::Tail,
+            reason: "tail cursor exceeds i64".to_string(),
+        })?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT seq, payload
+                FROM root_filesystem_events
+                WHERE path = ?1 AND seq > ?2
+                ORDER BY seq ASC
+                "#,
+                libsql::params![path.as_str(), from_raw],
+            )
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Tail, error))?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Tail, error))?
+        {
+            let seq_raw: i64 = row
+                .get(0)
+                .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Tail, error))?;
+            let payload: Vec<u8> = row
+                .get(1)
+                .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Tail, error))?;
+            out.push(EventRecord {
+                seq: seq_no_from_i64(path, seq_raw, FilesystemOperation::Tail)?,
+                payload,
+            });
+        }
+        Ok(out)
+    }
+
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let conn = self.connect().await?;
         let transaction = conn.transaction().await.map_err(|error| {
@@ -666,6 +921,20 @@ impl RootFilesystem for LibSqlRootFilesystem {
     }
 }
 
+/// Body of `run_migrations` extracted so the outer caller can wrap the
+/// whole sequence in BEGIN IMMEDIATE / COMMIT with one rollback path.
+#[cfg(feature = "libsql")]
+async fn run_libsql_migrations_inner(conn: &libsql::Connection) -> Result<(), FilesystemError> {
+    conn.execute_batch(LIBSQL_ROOT_FILESYSTEM_SCHEMA)
+        .await
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?;
+    ensure_libsql_root_is_dir_column(conn).await?;
+    ensure_libsql_records_columns(conn).await?;
+    ensure_libsql_index_specs_table(conn).await?;
+    ensure_libsql_events_table(conn).await?;
+    Ok(())
+}
+
 #[cfg(feature = "libsql")]
 async fn ensure_libsql_root_is_dir_column(
     conn: &libsql::Connection,
@@ -676,23 +945,11 @@ async fn ensure_libsql_root_is_dir_column(
             (),
         )
         .await
-        .map_err(|error| {
-            libsql_db_error(
-                valid_engine_path(),
-                FilesystemOperation::CreateDirAll,
-                error,
-            )
-        })?;
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?;
     if rows
         .next()
         .await
-        .map_err(|error| {
-            libsql_db_error(
-                valid_engine_path(),
-                FilesystemOperation::CreateDirAll,
-                error,
-            )
-        })?
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?
         .is_some()
     {
         return Ok(());
@@ -702,13 +959,7 @@ async fn ensure_libsql_root_is_dir_column(
         (),
     )
     .await
-    .map_err(|error| {
-        libsql_db_error(
-            valid_engine_path(),
-            FilesystemOperation::CreateDirAll,
-            error,
-        )
-    })?;
+    .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?;
     Ok(())
 }
 
@@ -814,6 +1065,189 @@ impl LibSqlRootFilesystem {
             .is_some())
     }
 
+    /// Resolve every FTS index name covering `path` whose first key is
+    /// referenced by `filter`. Returns a map from index-key (the JSON
+    /// indexed-projection key) to the FTS5 vtable name created by
+    /// `ensure_index`. Used by the WHERE-clause translator.
+    async fn discover_fts_tables_for_filter(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+    ) -> Result<std::collections::HashMap<String, String>, FilesystemError> {
+        let mut keys: Vec<String> = Vec::new();
+        collect_fts_keys(filter, &mut keys);
+        if keys.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+        let conn = self.connect().await?;
+        let mut out = std::collections::HashMap::new();
+        // Scan the spec catalog for FTS specs whose prefix is path or any
+        // ancestor (so callers may declare the index on a higher prefix
+        // and query a child path).
+        let candidate_prefixes = ancestor_prefixes(path.as_str());
+        let placeholders: Vec<String> = (1..=candidate_prefixes.len())
+            .map(|i| format!("?{i}"))
+            .collect();
+        let sql = format!(
+            "SELECT prefix, name, keys FROM root_filesystem_index_specs \
+             WHERE kind = 'fts' AND prefix IN ({})",
+            placeholders.join(", ")
+        );
+        let params: Vec<libsql::Value> = candidate_prefixes
+            .iter()
+            .map(|p| libsql::Value::Text(p.clone()))
+            .collect();
+        let mut rows = conn
+            .query(&sql, params)
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?
+        {
+            let prefix: String = row.get(0).map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let name: String = row.get(1).map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let keys_json: String = row.get(2).map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let parsed_keys: Vec<String> =
+                serde_json::from_str(&keys_json).map_err(|_| FilesystemError::Backend {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Query,
+                    reason: "corrupt index spec keys".to_string(),
+                })?;
+            let Some(first_key) = parsed_keys.first() else {
+                continue;
+            };
+            if !keys.iter().any(|k| k == first_key) {
+                continue;
+            }
+            // First match wins; if the caller declared multiple FTS
+            // indexes for the same key on overlapping prefixes the most
+            // specific (longest matching prefix) wins because the
+            // candidate_prefixes list is ordered most-specific-first
+            // below.
+            out.entry(first_key.clone())
+                .or_insert_with(|| format!("{}_fts", sql_index_name(&prefix, &name)));
+        }
+        Ok(out)
+    }
+
+    /// Brute-force cosine over candidates under `path` whose indexed
+    /// projection has an `IndexValue::Bytes` value at `key` decoded as a
+    /// little-endian f32 buffer of any non-zero length matching the query
+    /// embedding's length. Returns the top `limit` results.
+    ///
+    /// Two-phase to bound memory on large prefixes (review feedback on
+    /// the unified-FS rework): first SELECT `(path, indexed, version)`
+    /// for every candidate, rank by cosine in Rust, then `get()` the
+    /// top-k entries to materialize bodies. Rows that don't survive
+    /// the cutoff never have their `contents` blob loaded.
+    async fn vector_nearest_query(
+        &self,
+        path: &VirtualPath,
+        key: &IndexKey,
+        embedding: &[f32],
+        limit: u32,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let conn = self.connect().await?;
+        let prefix_pattern = format!("{}/%", path.as_str());
+        let escaped = escape_like_with_trailing_wildcard(&prefix_pattern);
+        let sql = "SELECT path, indexed, version \
+                   FROM root_filesystem_entries \
+                   WHERE is_dir = 0 AND (path = ?1 OR path LIKE ?2 ESCAPE '!')";
+        let mut rows = conn
+            .query(sql, libsql::params![path.as_str(), escaped.clone()])
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?;
+        let mut ranked: Vec<(VirtualPath, RecordVersion, f32)> = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Query, error))?
+        {
+            let row_path: String = row.get(0).map_err(|error| {
+                libsql_db_error(path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let row_path = VirtualPath::new(row_path)?;
+            let indexed_raw: String = row.get(1).map_err(|error| {
+                libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let version_raw: i64 = row.get(2).map_err(|error| {
+                libsql_db_error(row_path.clone(), FilesystemOperation::Query, error)
+            })?;
+            let indexed: BTreeMap<IndexKey, IndexValue> = if indexed_raw.is_empty() {
+                BTreeMap::new()
+            } else {
+                serde_json::from_str(&indexed_raw).map_err(|_| {
+                    FilesystemError::DeserializeIndexed {
+                        path: row_path.clone(),
+                        operation: FilesystemOperation::Query,
+                    }
+                })?
+            };
+            let Some(IndexValue::Bytes(bytes)) = indexed.get(key) else {
+                continue;
+            };
+            let Some(vec) = decode_embedding_blob(bytes) else {
+                continue;
+            };
+            let Some(score) = cosine_similarity(embedding, &vec) else {
+                continue;
+            };
+            let version = record_version_from_i64(&row_path, version_raw)?;
+            ranked.push((row_path, version, score));
+        }
+        // Sort by descending cosine score, then ascending path for a stable
+        // tie-breaker so equal-score rows truncate deterministically across
+        // runs and across backends. The in-memory reference uses the same
+        // tie-breaker; this keeps cross-backend behavior aligned.
+        ranked.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.as_str().cmp(b.0.as_str()))
+        });
+        ranked.truncate(limit as usize);
+        // Materialize bodies only for the top-k. Drop the streaming
+        // iterator + connection so each `get()` claims its own
+        // connection via the pool helper.
+        drop(rows);
+        drop(conn);
+        self.materialize_ranked(ranked).await
+    }
+
+    /// Phase-2 of [`vector_nearest_query`]: load full [`VersionedEntry`]
+    /// bodies for the ranked-and-truncated candidate set.
+    ///
+    /// A path that disappears between phase-1 ranking and phase-2 `get` is
+    /// silently dropped from the result — the search "fails open" so a
+    /// concurrent delete doesn't blow up an in-flight query. Pulled out
+    /// of `vector_nearest_query` to give the concurrent-delete branch a
+    /// deterministic test seam (otherwise we'd need to time a delete
+    /// between the phase-1 SELECT and phase-2 `get` from outside the
+    /// function, which the runtime gives no control over).
+    pub(crate) async fn materialize_ranked(
+        &self,
+        ranked: Vec<(VirtualPath, RecordVersion, f32)>,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let mut out = Vec::with_capacity(ranked.len());
+        for (row_path, _version, _score) in ranked {
+            let Some(versioned) = self.get(&row_path).await? else {
+                // Concurrent delete between the ranking SELECT and
+                // the body fetch — skip rather than error so the
+                // search doesn't blow up on a race.
+                continue;
+            };
+            out.push(versioned);
+        }
+        Ok(out)
+    }
+
     async fn current_version(
         &self,
         path: &VirtualPath,
@@ -902,10 +1336,31 @@ async fn ensure_libsql_records_columns(conn: &libsql::Connection) -> Result<(), 
 async fn ensure_libsql_index_specs_table(conn: &libsql::Connection) -> Result<(), FilesystemError> {
     conn.execute_batch(LIBSQL_INDEX_SPECS_SCHEMA)
         .await
-        .map_err(|error| {
-            libsql_db_error(valid_engine_path(), FilesystemOperation::EnsureIndex, error)
-        })?;
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::EnsureIndex, error))?;
     Ok(())
+}
+
+#[cfg(feature = "libsql")]
+async fn ensure_libsql_events_table(conn: &libsql::Connection) -> Result<(), FilesystemError> {
+    conn.execute_batch(LIBSQL_EVENTS_SCHEMA)
+        .await
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::Append, error))?;
+    Ok(())
+}
+
+#[cfg(feature = "libsql")]
+fn seq_no_from_i64(
+    path: &VirtualPath,
+    raw: i64,
+    operation: FilesystemOperation,
+) -> Result<SeqNo, FilesystemError> {
+    u64::try_from(raw)
+        .map(SeqNo::from_backend)
+        .map_err(|_| FilesystemError::Backend {
+            path: path.clone(),
+            operation,
+            reason: format!("event seq {raw} is not representable"),
+        })
 }
 
 /// Translate a [`Filter`] tree into a libsql WHERE-clause fragment.
@@ -923,6 +1378,7 @@ fn translate_filter(
     filter: &Filter,
     out: &mut String,
     params: &mut Vec<libsql::Value>,
+    fts_tables: &std::collections::HashMap<String, String>,
 ) -> Result<(), FilesystemError> {
     match filter {
         Filter::All => {
@@ -958,6 +1414,17 @@ fn translate_filter(
             Ok(())
         }
         Filter::Range { key, lo, hi } => {
+            // Mixed-variant bounds (e.g. `lo: I64(0)`, `hi: Text("x")`) have
+            // no meaningful BETWEEN — reject closed rather than fall back to
+            // lexicographic comparison. Matches the in-memory backend's
+            // `discriminant(lo) == discriminant(hi)` requirement and keeps
+            // cross-backend semantics aligned.
+            if std::mem::discriminant(lo) != std::mem::discriminant(hi) {
+                return Err(FilesystemError::Unsupported {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Query,
+                });
+            }
             // PR #3659 review fix: guard the comparison with a JSON-type
             // check so a row whose stored value at `$.{key}` is a different
             // variant (e.g. text under a numeric range) does NOT participate
@@ -966,17 +1433,43 @@ fn translate_filter(
             // entirely on a cast failure.
             let lo_idx = bind_index_value(path, lo, params)?;
             let hi_idx = bind_index_value(path, hi, params)?;
-            let expected_json_type = index_value_json_type(lo);
+            let json_type_guard = index_value_json_type_guard(key, lo);
             out.push_str(&format!(
-                "(json_type(indexed, '$.{}') = '{expected_json_type}' \
+                "({json_type_guard} \
                  AND json_extract(indexed, '$.{}') BETWEEN ?{lo_idx} AND ?{hi_idx})",
-                key.as_str(),
                 key.as_str(),
             ));
             Ok(())
         }
-        Filter::And(children) => translate_compound(path, children, " AND ", "TRUE", out, params),
-        Filter::Or(children) => translate_compound(path, children, " OR ", "FALSE", out, params),
+        Filter::Fts { key, query } => {
+            let Some(fts_table) = fts_tables.get(key.as_str()) else {
+                return Err(FilesystemError::Unsupported {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Query,
+                });
+            };
+            params.push(libsql::Value::Text(query.clone()));
+            out.push_str(&format!(
+                "(path IN (SELECT path FROM {fts_table} WHERE {fts_table} MATCH ?{}))",
+                params.len()
+            ));
+            Ok(())
+        }
+        Filter::VectorNearest { .. } => Err(FilesystemError::Unsupported {
+            // VectorNearest is evaluated by the top-level `query` method,
+            // not inside the WHERE fragment. Reaching the translator
+            // means a caller composed it inside an And/Or — which would
+            // throw away the ranking. Surface as Unsupported so the
+            // caller restructures the query.
+            path: path.clone(),
+            operation: FilesystemOperation::Query,
+        }),
+        Filter::And(children) => {
+            translate_compound(path, children, " AND ", "TRUE", out, params, fts_tables)
+        }
+        Filter::Or(children) => {
+            translate_compound(path, children, " OR ", "FALSE", out, params, fts_tables)
+        }
     }
 }
 
@@ -988,6 +1481,7 @@ fn translate_compound(
     empty_identity: &str,
     out: &mut String,
     params: &mut Vec<libsql::Value>,
+    fts_tables: &std::collections::HashMap<String, String>,
 ) -> Result<(), FilesystemError> {
     if children.is_empty() {
         out.push_str(empty_identity);
@@ -1001,10 +1495,46 @@ fn translate_compound(
         // Recurse: every child now produces a non-empty fragment thanks to
         // the `Filter::All -> TRUE` rule, so we don't need the prior
         // "skip empty" branch that broke `Or([])`/`And([All])`.
-        translate_filter(path, child, out, params)?;
+        translate_filter(path, child, out, params, fts_tables)?;
     }
     out.push(')');
     Ok(())
+}
+
+#[cfg(feature = "libsql")]
+fn collect_fts_keys(filter: &Filter, out: &mut Vec<String>) {
+    match filter {
+        Filter::Fts { key, .. } => {
+            let k = key.as_str().to_string();
+            if !out.contains(&k) {
+                out.push(k);
+            }
+        }
+        Filter::And(children) | Filter::Or(children) => {
+            for child in children {
+                collect_fts_keys(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// All ancestor paths of `path`, **most specific first**, ending at `/`.
+/// Used to find an FTS index declared on a higher prefix that should still
+/// cover descendant queries.
+#[cfg(feature = "libsql")]
+fn ancestor_prefixes(path: &str) -> Vec<String> {
+    let mut out = vec![path.trim_end_matches('/').to_string()];
+    let mut cur = path.trim_end_matches('/').to_string();
+    while let Some(idx) = cur.rfind('/') {
+        if idx == 0 {
+            out.push("/".to_string());
+            break;
+        }
+        cur.truncate(idx);
+        out.push(cur.clone());
+    }
+    out
 }
 
 #[cfg(feature = "libsql")]
@@ -1028,18 +1558,27 @@ fn bind_index_value(
     Ok(params.len())
 }
 
-/// Maps an [`IndexValue`] variant to the corresponding SQLite `json_type`
-/// discriminator string. Used to guard `Filter::Range` so cross-variant
-/// stored values don't participate in BETWEEN comparisons (PR #3659 review
-/// fix).
+/// Build a `json_type(indexed, '$.{key}')`-shaped guard expression that
+/// admits only rows whose stored value at `$.{key}` is the same JSON shape
+/// as `value`. Used to guard `Filter::Range` so cross-variant stored values
+/// don't participate in BETWEEN comparisons (PR #3659 review fix).
+///
+/// SQLite's `json_type` returns the literal strings `"true"` / `"false"` for
+/// JSON booleans rather than `"boolean"`, so the bool guard checks for
+/// either. A prior version emitted `= 'integer'` for `IndexValue::Bool`,
+/// which never matched a stored boolean and silently dropped every row.
 #[cfg(feature = "libsql")]
-fn index_value_json_type(value: &IndexValue) -> &'static str {
+fn index_value_json_type_guard(key: &IndexKey, value: &IndexValue) -> String {
+    let key = key.as_str();
     match value {
-        IndexValue::Text(_) => "text",
-        IndexValue::I64(_) => "integer",
-        // SQLite's json_type returns "true" / "false" for booleans, not "boolean".
-        IndexValue::Bool(_) => "integer", // we encode bools as 0/1 integers above
-        IndexValue::Bytes(_) => "text",
+        IndexValue::Text(_) => format!("json_type(indexed, '$.{key}') = 'text'"),
+        IndexValue::I64(_) => format!("json_type(indexed, '$.{key}') = 'integer'"),
+        IndexValue::Bool(_) => {
+            format!("json_type(indexed, '$.{key}') IN ('true', 'false')")
+        }
+        // Bytes can't reach this code: `bind_index_value` rejects Bytes
+        // bounds with Unsupported before the guard is built.
+        IndexValue::Bytes(_) => format!("json_type(indexed, '$.{key}') = 'text'"),
     }
 }
 
@@ -1055,34 +1594,18 @@ async fn add_column_if_missing(
             libsql::params![column],
         )
         .await
-        .map_err(|error| {
-            libsql_db_error(
-                valid_engine_path(),
-                FilesystemOperation::CreateDirAll,
-                error,
-            )
-        })?;
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?;
     if rows
         .next()
         .await
-        .map_err(|error| {
-            libsql_db_error(
-                valid_engine_path(),
-                FilesystemOperation::CreateDirAll,
-                error,
-            )
-        })?
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?
         .is_some()
     {
         return Ok(());
     }
-    conn.execute(ddl, ()).await.map_err(|error| {
-        libsql_db_error(
-            valid_engine_path(),
-            FilesystemOperation::CreateDirAll,
-            error,
-        )
-    })?;
+    conn.execute(ddl, ())
+        .await
+        .map_err(|error| infrastructure_libsql_error(FilesystemOperation::CreateDirAll, error))?;
     Ok(())
 }
 
@@ -1109,3 +1632,84 @@ CREATE TABLE IF NOT EXISTS root_filesystem_index_specs (
     PRIMARY KEY (prefix, name)
 );
 "#;
+
+#[cfg(feature = "libsql")]
+const LIBSQL_EVENTS_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS root_filesystem_events (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT NOT NULL,
+    payload BLOB NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+CREATE INDEX IF NOT EXISTS idx_root_filesystem_events_path_seq
+    ON root_filesystem_events(path, seq);
+"#;
+
+#[cfg(test)]
+mod tests {
+    //! Deterministic regression tests for libSQL behaviours that aren't
+    //! easily exercised from the integration test surface (`tests/`),
+    //! either because they need `pub(crate)` seams or because they
+    //! manipulate state between internal phases. Cross-backend
+    //! contract tests live in `tests/db_root_filesystem_contract.rs`;
+    //! tests here cover internals that the integration surface can't
+    //! reach.
+
+    use super::*;
+    use crate::{CasExpectation, Entry, RecordKind};
+    use ironclaw_host_api::VirtualPath;
+
+    async fn fresh_backend() -> (LibSqlRootFilesystem, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("vector-test.db");
+        let db = std::sync::Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+        let fs = LibSqlRootFilesystem::new(db);
+        fs.run_migrations().await.unwrap();
+        (fs, dir)
+    }
+
+    /// Drive the phase-2 materialize step directly with a synthesised
+    /// ranked candidate list that includes a path which no longer exists
+    /// in the backend. Locks in the "fail open on concurrent delete"
+    /// branch in `vector_nearest_query` — between phase-1 ranking and
+    /// the phase-2 `get`, a row may have been deleted by another writer;
+    /// the query must skip that row rather than fail. We can't time a
+    /// real concurrent delete from outside the function, so the
+    /// extracted `materialize_ranked` seam stands in for it.
+    #[tokio::test]
+    async fn materialize_ranked_silently_skips_missing_paths() {
+        let (fs, _dir) = fresh_backend().await;
+        let present = VirtualPath::new("/memory/present").unwrap();
+        let missing = VirtualPath::new("/memory/never_inserted").unwrap();
+
+        // Only `present` is inserted — `missing` never exists in the DB,
+        // which is exactly the state phase-2 sees if `missing` was ranked
+        // in phase 1 but deleted before the get() call.
+        let kind = RecordKind::new("chunk").unwrap();
+        let entry = Entry::record(kind, &serde_json::json!({})).unwrap();
+        fs.put(&present, entry, CasExpectation::Absent)
+            .await
+            .unwrap();
+
+        let ranked = vec![
+            (present.clone(), RecordVersion::from_backend(1), 0.9_f32),
+            (missing.clone(), RecordVersion::from_backend(1), 0.5_f32),
+        ];
+        let out = fs.materialize_ranked(ranked).await.unwrap();
+        // The missing row is dropped silently; the present row survives.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].path, present);
+    }
+
+    /// Companion to the test above: materialize_ranked must surface
+    /// non-NotFound errors (anything other than the get-returns-None
+    /// branch) rather than swallowing them. Empty ranked list short-
+    /// circuits to an empty result without touching the DB — verify
+    /// no implicit work happens for a no-op call.
+    #[tokio::test]
+    async fn materialize_ranked_empty_input_returns_empty_output() {
+        let (fs, _dir) = fresh_backend().await;
+        let out = fs.materialize_ranked(Vec::new()).await.unwrap();
+        assert!(out.is_empty());
+    }
+}

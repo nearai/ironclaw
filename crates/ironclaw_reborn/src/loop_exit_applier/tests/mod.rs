@@ -2,10 +2,6 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, TenantId, ThreadId};
-#[cfg(feature = "libsql-restart-tests")]
-use ironclaw_threads::LibSqlSessionThreadService;
-#[cfg(feature = "postgres-thread-tests")]
-use ironclaw_threads::PostgresSessionThreadService;
 use ironclaw_threads::{
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, EnsureThreadRequest,
     InMemorySessionThreadService, MessageContent, MessageKind, MessageStatus, SessionThreadService,
@@ -515,46 +511,12 @@ async fn thread_checkpoint_evidence_accepts_result_only_completion_with_durable_
     assert!(verified);
 }
 
-#[cfg(feature = "libsql-restart-tests")]
-#[tokio::test]
-async fn libsql_thread_checkpoint_evidence_verifies_result_ref_after_reopen() {
-    let (db_path, _dir) = libsql_thread_db_path();
-    let db = Arc::new(
-        libsql::Builder::new_local(db_path.clone())
-            .build()
-            .await
-            .expect("libsql db"),
-    );
-    let service = LibSqlSessionThreadService::new(Arc::clone(&db));
-    service.run_migrations().await.expect("migrations");
-    let evidence = create_durable_tool_result(service, "libsql-evidence").await;
-
-    drop(db);
-
-    let reopened_db = Arc::new(
-        libsql::Builder::new_local(db_path)
-            .build()
-            .await
-            .expect("reopened libsql db"),
-    );
-    let reopened = Arc::new(LibSqlSessionThreadService::new(reopened_db));
-    assert_durable_tool_result_verifies(reopened, evidence).await;
-}
-
-#[cfg(feature = "postgres-thread-tests")]
-#[tokio::test]
-async fn postgres_thread_checkpoint_evidence_verifies_result_ref_after_reopen_when_configured() {
-    let Some(pool) = postgres_pool().await else {
-        return;
-    };
-    let service = PostgresSessionThreadService::new(pool.clone());
-    service.run_migrations().await.expect("migrations");
-    let label = format!("pg-evidence-{}", unique_suffix());
-    let evidence = create_durable_tool_result(service, &label).await;
-
-    let reopened = Arc::new(PostgresSessionThreadService::new(pool));
-    assert_durable_tool_result_verifies(reopened, evidence).await;
-}
+// `libsql_thread_checkpoint_evidence_verifies_result_ref_after_reopen` and
+// `postgres_thread_checkpoint_evidence_verifies_result_ref_after_reopen_when_configured`
+// have been removed alongside the legacy `LibSqlSessionThreadService` and
+// `PostgresSessionThreadService` consumer-store backends; durable restart
+// coverage now lives in `ironclaw_filesystem` where the libSQL/Postgres
+// `RootFilesystem` backends own that contract.
 
 #[tokio::test]
 async fn thread_checkpoint_evidence_rejects_tool_result_message_as_reply_ref() {
@@ -751,6 +713,7 @@ async fn thread_checkpoint_evidence_rejects_wrong_run_and_malformed_result_ref_r
             turn_id: None,
             turn_run_id: Some(expected_run_id.to_string()),
             tool_result_ref: Some(malformed_result.as_str().to_string()),
+            tool_result_provider_call: None,
             content: Some("not-json".to_string()),
             redaction_ref: None,
         });
@@ -766,6 +729,7 @@ async fn thread_checkpoint_evidence_rejects_wrong_run_and_malformed_result_ref_r
             turn_id: None,
             turn_run_id: Some(expected_run_id.to_string()),
             tool_result_ref: Some(unsafe_summary_result.as_str().to_string()),
+            tool_result_provider_call: None,
             content: Some(format!(
                 r#"{{"version":1,"result_ref":"{}","safe_summary":"raw tool input includes secret"}}"#,
                 unsafe_summary_result.as_str()
@@ -963,88 +927,6 @@ fn text_checkpoint_evidence(
     )
 }
 
-#[cfg(any(feature = "libsql-restart-tests", feature = "postgres-thread-tests"))]
-struct DurableToolResultEvidence {
-    thread_scope: ThreadScope,
-    turn_scope: TurnScope,
-    run_id: TurnRunId,
-    result_ref: LoopResultRef,
-}
-
-#[cfg(any(feature = "libsql-restart-tests", feature = "postgres-thread-tests"))]
-async fn create_durable_tool_result<S>(thread_service: S, label: &str) -> DurableToolResultEvidence
-where
-    S: SessionThreadService,
-{
-    let turn_scope = TurnScope::new(
-        TenantId::new(format!("tenant-{label}")).expect("valid tenant"),
-        Some(AgentId::new(format!("agent-{label}")).expect("valid agent")),
-        None,
-        ThreadId::new(format!("thread-{label}")).expect("valid thread"),
-    );
-    let thread_scope = ThreadScope {
-        tenant_id: turn_scope.tenant_id.clone(),
-        agent_id: turn_scope.agent_id.clone().expect("agent id"),
-        project_id: None,
-        owner_user_id: None,
-        mission_id: None,
-    };
-    thread_service
-        .ensure_thread(EnsureThreadRequest {
-            scope: thread_scope.clone(),
-            thread_id: Some(turn_scope.thread_id.clone()),
-            created_by_actor_id: "user:test".to_string(),
-            title: None,
-            metadata_json: None,
-        })
-        .await
-        .expect("thread");
-    let run_id = TurnRunId::new();
-    let result_ref =
-        LoopResultRef::new(format!("result:{label}.tool-output")).expect("valid result ref");
-    append_tool_result_reference(
-        &thread_service,
-        thread_scope.clone(),
-        turn_scope.thread_id.clone(),
-        run_id,
-        result_ref.clone(),
-    )
-    .await;
-    DurableToolResultEvidence {
-        thread_scope,
-        turn_scope,
-        run_id,
-        result_ref,
-    }
-}
-
-#[cfg(any(feature = "libsql-restart-tests", feature = "postgres-thread-tests"))]
-async fn assert_durable_tool_result_verifies<S>(
-    thread_service: Arc<S>,
-    evidence: DurableToolResultEvidence,
-) where
-    S: SessionThreadService + ?Sized + Send + Sync,
-{
-    let verifier = ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
-        thread_service,
-        Arc::new(ironclaw_turns::InMemoryTurnStateStore::default()) as Arc<dyn TurnStateStore>,
-        Arc::new(PanicLoopCheckpointStore),
-        evidence.thread_scope,
-    );
-    let verified = verifier
-        .verify_completion_refs(CompletionEvidenceRequest {
-            scope: &evidence.turn_scope,
-            turn_id: TurnId::new(),
-            run_id: evidence.run_id,
-            reply_message_refs: &[],
-            result_refs: &[evidence.result_ref],
-        })
-        .await
-        .expect("durable evidence verification should run");
-
-    assert!(verified);
-}
-
 async fn append_tool_result_reference<S>(
     thread_service: &S,
     thread_scope: ThreadScope,
@@ -1062,57 +944,10 @@ where
             turn_run_id: run_id.to_string(),
             result_ref: result_ref.as_str().to_string(),
             safe_summary: ToolResultSafeSummary::new("tool completed").expect("safe summary"),
+            provider_call: None,
         })
         .await
         .expect("tool result reference")
-}
-
-#[cfg(feature = "libsql-restart-tests")]
-fn libsql_thread_db_path() -> (String, tempfile::TempDir) {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = dir.path().join("threads.db");
-    (db_path.to_string_lossy().into_owned(), dir)
-}
-
-#[cfg(feature = "postgres-thread-tests")]
-async fn postgres_pool() -> Option<deadpool_postgres::Pool> {
-    let url = std::env::var("IRONCLAW_THREADS_POSTGRES_URL")
-        .or_else(|_| std::env::var("DATABASE_URL"))
-        .unwrap_or_else(|_| "postgres://localhost/ironclaw_test".to_string());
-    let config: tokio_postgres::Config =
-        url.parse().expect("thread postgres test URL must be valid");
-    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-    let pool = deadpool_postgres::Pool::builder(manager)
-        .max_size(8)
-        .build()
-        .expect("postgres pool");
-    match pool.get().await {
-        Ok(_) => Some(pool),
-        Err(error) if skip_postgres_requested() => {
-            eprintln!(
-                "skipping postgres evidence contract (IRONCLAW_SKIP_POSTGRES_TESTS=1): {error}"
-            );
-            None
-        }
-        Err(error) => panic!(
-            "postgres evidence contract could not reach Postgres ({error}); set \
-             IRONCLAW_THREADS_POSTGRES_URL or DATABASE_URL, or set \
-             IRONCLAW_SKIP_POSTGRES_TESTS=1 to explicitly skip."
-        ),
-    }
-}
-
-#[cfg(feature = "postgres-thread-tests")]
-fn skip_postgres_requested() -> bool {
-    std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok_and(|value| value == "1" || value == "true")
-}
-
-#[cfg(feature = "postgres-thread-tests")]
-fn unique_suffix() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system time")
-        .as_nanos()
 }
 
 struct StaticTurnStateStore {

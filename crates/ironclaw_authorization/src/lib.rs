@@ -5,14 +5,6 @@
 //! runtime internals. The first slices implement grant- and lease-backed gates
 //! for capability dispatch.
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-mod db;
-
-#[cfg(feature = "libsql")]
-pub use db::LibSqlCapabilityLeaseStore;
-#[cfg(feature = "postgres")]
-pub use db::PostgresCapabilityLeaseStore;
-
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, MutexGuard},
@@ -20,12 +12,22 @@ use std::{
 
 use async_trait::async_trait;
 use chrono::Utc;
-use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
+use ironclaw_filesystem::{
+    CasExpectation, ContentType, Entry, FileType, FilesystemError, IndexKey, IndexKind, IndexName,
+    IndexSpec, IndexValue, RecordVersion, RootFilesystem, ScopedFilesystem,
+};
+
+/// Bounded retry budget for compare-and-swap loops on lease writes.
+///
+/// Each iteration re-reads the current row version and rewrites with
+/// `CasExpectation::Version(_)`; a multi-process race that loses the
+/// CAS retries until either it wins or this budget is exhausted.
+const CAS_RETRY_ATTEMPTS: usize = 3;
 use ironclaw_host_api::{
     AgentId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId, Decision, DenyReason,
     EffectKind, ExecutionContext, HostApiError, InvocationFingerprint, InvocationId, MissionId,
     NetworkPolicy, Obligation, Obligations, Principal, ProjectId, ResourceCeiling,
-    ResourceEstimate, ResourceScope, SandboxQuota, TenantId, ThreadId, UserId, VirtualPath,
+    ResourceEstimate, ResourceScope, SandboxQuota, ScopedPath, TenantId, ThreadId, UserId,
 };
 use ironclaw_trust::{AuthorityCeiling, TrustDecision};
 use serde::{Deserialize, Serialize};
@@ -208,6 +210,18 @@ pub enum CapabilityLeaseError {
     },
     #[error("capability lease persistence error: {reason}")]
     Persistence { reason: String },
+    /// Internal CAS-loop signal: the lease record was updated between our
+    /// read and write. Surfaces only inside the retry loop and is converted
+    /// to [`CasExhausted`] if the budget is exhausted; callers will not see
+    /// this variant escape the public API.
+    #[doc(hidden)]
+    #[error("capability lease version mismatch (internal retry signal)")]
+    VersionMismatch,
+    /// CAS retry budget exhausted: too many concurrent writers contended on
+    /// the same lease row. Callers should treat this as transient and may
+    /// retry at a higher level.
+    #[error("capability lease compare-and-swap retry budget exhausted")]
+    CasExhausted,
 }
 
 /// Store of active/revoked capability leases.
@@ -379,20 +393,39 @@ impl CapabilityLeaseStore for InMemoryCapabilityLeaseStore {
     }
 }
 
-/// Filesystem-backed capability lease store under resource-owner/invocation-scoped `/engine` paths.
-pub struct FilesystemCapabilityLeaseStore<'a, F>
+/// Filesystem-backed capability lease store under the `/authorization` mount
+/// alias.
+///
+/// Construct with a [`ScopedFilesystem`] over any
+/// [`RootFilesystem`] (typically a
+/// [`CompositeRootFilesystem`](ironclaw_filesystem::CompositeRootFilesystem)
+/// or the in-memory backend for tests). The [`ScopedFilesystem`] resolves
+/// the `/authorization` alias to a tenant/user-scoped
+/// [`VirtualPath`](ironclaw_host_api::VirtualPath) per its
+/// [`MountView`](ironclaw_host_api::MountView) and enforces per-op ACL
+/// before any backend dispatch — so tenant isolation is structural, not a
+/// convention this crate has to remember in its path builders.
+///
+/// Construct via [`FilesystemCapabilityLeaseStore::new`] with an
+/// `Arc<ScopedFilesystem<F>>`. The `Arc` shape matches the sibling
+/// filesystem-backed stores (`FilesystemSecretStore`,
+/// `FilesystemOutboundStateStore`, `FilesystemProcessStore`) and lets
+/// composition hold this store as `Arc<dyn CapabilityLeaseStore>` without
+/// erasing the lifetime parameter that an `&'a ScopedFilesystem<F>` would
+/// otherwise pin.
+pub struct FilesystemCapabilityLeaseStore<F>
 where
     F: RootFilesystem,
 {
-    filesystem: &'a F,
+    filesystem: Arc<ScopedFilesystem<F>>,
     mutation_locks: Mutex<HashMap<CapabilityLeaseOwnerKey, Arc<tokio::sync::Mutex<()>>>>,
 }
 
-impl<'a, F> FilesystemCapabilityLeaseStore<'a, F>
+impl<F> FilesystemCapabilityLeaseStore<F>
 where
     F: RootFilesystem,
 {
-    pub fn new(filesystem: &'a F) -> Self {
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self {
             filesystem,
             mutation_locks: Mutex::new(HashMap::new()),
@@ -414,57 +447,214 @@ where
         scope: &ResourceScope,
         lease_id: CapabilityGrantId,
     ) -> Result<Option<CapabilityLease>, CapabilityLeaseError> {
+        Ok(self
+            .read_lease_versioned(scope, lease_id)
+            .await?
+            .map(|(lease, _)| lease))
+    }
+
+    /// Read the lease together with its current backend record version.
+    ///
+    /// Used by the mutation paths (`revoke`, `claim`, `consume`) to drive a
+    /// `CasExpectation::Version` write, so a concurrent writer from another
+    /// process fails the CAS instead of clobbering this transition.
+    async fn read_lease_versioned(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+    ) -> Result<Option<(CapabilityLease, RecordVersion)>, CapabilityLeaseError> {
         let path = lease_path(scope, lease_id)?;
-        let bytes = match self.filesystem.read_file(&path).await {
-            Ok(bytes) => bytes,
-            Err(error) if is_not_found(&error) => return Ok(None),
-            Err(error) => return Err(lease_persistence_error(error)),
+        let Some(versioned) = self
+            .filesystem
+            .get(scope, &path)
+            .await
+            .map_err(lease_persistence_error)?
+        else {
+            return Ok(None);
         };
-        deserialize(&bytes).map(Some)
+        let lease: CapabilityLease = deserialize(&versioned.entry.body)?;
+        Ok(Some((lease, versioned.version)))
+    }
+
+    /// Write the lease with the given CAS expectation.
+    ///
+    /// `CasExpectation::Version(_)` is the canonical path used by the mutation
+    /// flows below — a `VersionMismatch` from the backend signals that a
+    /// concurrent writer modified the same row, and the caller's retry loop
+    /// re-reads and tries again. `CasExpectation::Any` remains in use only
+    /// from the issue path, which is paired with the per-owner
+    /// [`mutation_lock`] and writes a freshly-generated lease id that no
+    /// other writer can collide with.
+    /// Write the lease through the backend with the given CAS expectation.
+    ///
+    /// Backends that don't track per-row versions (e.g. `LocalFilesystem`)
+    /// reject `CasExpectation::Version(_)` with `Unsupported`. For those,
+    /// fall back to `CasExpectation::Any` and carry the safety invariant
+    /// via the per-owner `mutation_lock` — same trade-off documented on
+    /// `FilesystemCapabilityLeaseStore` and matched by sibling crates'
+    /// fallback shape (`ironclaw_processes::put_with_byte_fallback`).
+    async fn write_lease_raw(
+        &self,
+        lease: &CapabilityLease,
+        expectation: CasExpectation,
+    ) -> Result<(), CapabilityLeaseError> {
+        let path = lease_path(&lease.scope, lease.grant.id)?;
+        let body = serialize_pretty(lease)?;
+        // Defense-in-depth: tag the entry with the tenant id so admin-tier
+        // queries can filter by tenant and a path-rewriting bug surfaces as a
+        // query-time mismatch rather than silent cross-tenant leakage. See
+        // docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md.
+        let entry = Entry::bytes(body)
+            .with_content_type(ContentType::json())
+            .with_indexed(
+                index_key_tenant_id(),
+                IndexValue::Text(lease.scope.tenant_id.as_str().to_string()),
+            );
+        ensure_tenant_id_index(
+            &self.filesystem,
+            &lease.scope,
+            &lease_owner_prefix(&lease.scope)?,
+        )
+        .await?;
+        // Byte-only backends (LocalFilesystem) reject BOTH non-`Any` CAS
+        // AND entries with a populated `indexed` projection in a single
+        // `Unsupported` response. Strip the projection and downgrade CAS
+        // to `Any` so byte-only mounts stay writeable — the per-owner
+        // `mutation_lock` carries the ordering safety invariant on the
+        // fallback path, and the dropped tenant projection is best-effort
+        // (path-prefix scoping is the primary isolation boundary).
+        match self
+            .filesystem
+            .put(&lease.scope, &path, entry.clone(), expectation)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(FilesystemError::Unsupported { .. }) => {
+                let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
+                match self
+                    .filesystem
+                    .put(&lease.scope, &path, opaque, CasExpectation::Any)
+                    .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(error) => Err(lease_persistence_error(error)),
+                }
+            }
+            Err(error) => Err(lease_persistence_error(error)),
+        }
     }
 
     async fn write_lease(&self, lease: &CapabilityLease) -> Result<(), CapabilityLeaseError> {
-        let path = lease_path(&lease.scope, lease.grant.id)?;
-        let bytes = serialize_pretty(lease)?;
-        self.filesystem
-            .write_file(&path, &bytes)
-            .await
-            .map_err(lease_persistence_error)
+        // Issue path only — see `update_lease_cas` for the mutation pattern.
+        // The per-owner mutation lock + fresh-id invariant in `issue` makes
+        // the CAS race unreachable for first-write of a brand-new lease id.
+        self.write_lease_raw(lease, CasExpectation::Any).await
+    }
+
+    /// Read-modify-write a lease under compare-and-swap.
+    ///
+    /// Reads the current row (and its [`RecordVersion`]), hands the
+    /// deserialized lease to `mutate`, writes the result back with
+    /// `CasExpectation::Version(_)`, and retries up to
+    /// [`CAS_RETRY_ATTEMPTS`] times on `FilesystemError::VersionMismatch`.
+    /// A missing lease maps to [`CapabilityLeaseError::UnknownLease`].
+    ///
+    /// This closes the multi-process race documented on
+    /// [`FilesystemCapabilityLeaseStore`]: even with a shared backend root,
+    /// a concurrent writer that updates the lease between our read and
+    /// write fails our CAS, we re-read, and re-apply the mutation against
+    /// the new state. Net effect is last-writer-wins among logically
+    /// concurrent transitions, with no silent clobber.
+    async fn update_lease_cas<M>(
+        &self,
+        scope: &ResourceScope,
+        lease_id: CapabilityGrantId,
+        mut mutate: M,
+    ) -> Result<CapabilityLease, CapabilityLeaseError>
+    where
+        M: FnMut(&mut CapabilityLease) -> Result<(), CapabilityLeaseError>,
+    {
+        for _ in 0..CAS_RETRY_ATTEMPTS {
+            let Some((mut lease, version)) = self.read_lease_versioned(scope, lease_id).await?
+            else {
+                return Err(CapabilityLeaseError::UnknownLease { lease_id });
+            };
+            mutate(&mut lease)?;
+            match self
+                .write_lease_raw(&lease, CasExpectation::Version(version))
+                .await
+            {
+                Ok(()) => return Ok(lease),
+                Err(CapabilityLeaseError::VersionMismatch) => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(CapabilityLeaseError::CasExhausted)
     }
 
     async fn read_lease_index(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Option<Vec<VirtualPath>>, CapabilityLeaseError> {
+    ) -> Result<Option<Vec<ScopedPath>>, CapabilityLeaseError> {
         let path = lease_index_path(scope)?;
-        let bytes = match self.filesystem.read_file(&path).await {
-            Ok(bytes) => bytes,
-            Err(error) if is_not_found(&error) => return Ok(None),
-            Err(error) => return Err(lease_persistence_error(error)),
+        let Some(versioned) = self
+            .filesystem
+            .get(scope, &path)
+            .await
+            .map_err(lease_persistence_error)?
+        else {
+            return Ok(None);
         };
-        let index: CapabilityLeaseIndex = deserialize(&bytes)?;
+        let index: CapabilityLeaseIndex = deserialize(&versioned.entry.body)?;
         Ok(Some(index.paths))
     }
 
     async fn write_lease_index(
         &self,
         scope: &ResourceScope,
-        mut paths: Vec<VirtualPath>,
+        mut paths: Vec<ScopedPath>,
     ) -> Result<(), CapabilityLeaseError> {
         paths.sort_by(|left, right| left.as_str().cmp(right.as_str()));
         paths.dedup_by(|left, right| left.as_str() == right.as_str());
         let path = lease_index_path(scope)?;
-        let bytes = serialize_pretty(&CapabilityLeaseIndex { paths })?;
-        self.filesystem
-            .write_file(&path, &bytes)
+        let body = serialize_pretty(&CapabilityLeaseIndex { paths })?;
+        // Defense-in-depth tenant projection on the per-owner lease index;
+        // see `write_lease_raw` for the rationale and design plan.
+        let entry = Entry::bytes(body)
+            .with_content_type(ContentType::json())
+            .with_indexed(
+                index_key_tenant_id(),
+                IndexValue::Text(scope.tenant_id.as_str().to_string()),
+            );
+        ensure_tenant_id_index(&self.filesystem, scope, &lease_owner_prefix(scope)?).await?;
+        // Byte-only backends (LocalFilesystem) reject entries with a
+        // populated `indexed` projection. Fall back to the plain-bytes
+        // shape for those — the tenant projection is best-effort defense
+        // in depth, and dropping it on byte-only mounts is acceptable
+        // because the path-prefix scoping still routes tenant isolation
+        // structurally.
+        match self
+            .filesystem
+            .put(scope, &path, entry.clone(), CasExpectation::Any)
             .await
-            .map_err(lease_persistence_error)
+        {
+            Ok(_) => Ok(()),
+            Err(FilesystemError::Unsupported { .. }) => {
+                let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
+                self.filesystem
+                    .put(scope, &path, opaque, CasExpectation::Any)
+                    .await
+                    .map(|_| ())
+                    .map_err(lease_persistence_error)
+            }
+            Err(error) => Err(lease_persistence_error(error)),
+        }
     }
 
     async fn index_lease_path(
         &self,
         scope: &ResourceScope,
-        path: VirtualPath,
+        path: ScopedPath,
     ) -> Result<(), CapabilityLeaseError> {
         let mut paths = self.read_lease_index(scope).await?.unwrap_or_default();
         if !paths.iter().any(|existing| existing == &path) {
@@ -476,7 +666,7 @@ where
     async fn list_lease_paths_from_index_or_scan(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Vec<VirtualPath>, CapabilityLeaseError> {
+    ) -> Result<Vec<ScopedPath>, CapabilityLeaseError> {
         if let Some(paths) = self.read_lease_index(scope).await? {
             return Ok(paths);
         }
@@ -486,63 +676,81 @@ where
     async fn scan_lease_paths(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Vec<VirtualPath>, CapabilityLeaseError> {
-        let roots = self.list_invocation_roots(scope).await?;
+    ) -> Result<Vec<ScopedPath>, CapabilityLeaseError> {
+        let owner_prefix = lease_owner_prefix(scope)?;
+        let invocation_subdirs = self.list_subdir_names(scope, &owner_prefix).await?;
         let mut paths = Vec::new();
-        for root in roots {
-            paths.extend(self.list_lease_files(&root).await?);
+        for subdir in invocation_subdirs {
+            let invocation_root = join_scoped(&owner_prefix, &subdir)?;
+            paths.extend(self.list_lease_files(scope, &invocation_root).await?);
         }
         Ok(paths)
     }
 
-    async fn list_invocation_roots(
+    /// List the immediate child subdirectories of `prefix`, returning each
+    /// child's leaf name. `list_dir` returns
+    /// [`VirtualPath`](ironclaw_host_api::VirtualPath) results because
+    /// resolution has already happened — we strip the leaf so callers can
+    /// rebuild a [`ScopedPath`] and let the per-op ACL fire again on the
+    /// follow-up read.
+    async fn list_subdir_names(
         &self,
         scope: &ResourceScope,
-    ) -> Result<Vec<VirtualPath>, CapabilityLeaseError> {
-        let root = lease_tenant_user_root(scope)?;
-        let entries = match self.filesystem.list_dir(&root).await {
-            Ok(entries) => entries,
-            Err(error) if is_not_found(&error) => return Ok(Vec::new()),
-            Err(error) => return Err(lease_persistence_error(error)),
-        };
-        Ok(entries
-            .into_iter()
-            .filter(|entry| entry.file_type == FileType::Directory)
-            .map(|entry| entry.path)
-            .collect())
+        prefix: &ScopedPath,
+    ) -> Result<Vec<String>, CapabilityLeaseError> {
+        match self.filesystem.list_dir(scope, prefix).await {
+            Ok(entries) => Ok(entries
+                .into_iter()
+                .filter(|entry| entry.file_type == FileType::Directory)
+                .map(|entry| entry.name)
+                .collect()),
+            Err(error) if is_not_found(&error) => Ok(Vec::new()),
+            Err(error) => Err(lease_persistence_error(error)),
+        }
     }
 
     async fn list_lease_files(
         &self,
-        root: &VirtualPath,
-    ) -> Result<Vec<VirtualPath>, CapabilityLeaseError> {
-        let entries = match self.filesystem.list_dir(root).await {
+        scope: &ResourceScope,
+        root: &ScopedPath,
+    ) -> Result<Vec<ScopedPath>, CapabilityLeaseError> {
+        let entries = match self.filesystem.list_dir(scope, root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(lease_persistence_error(error)),
         };
-        Ok(entries
-            .into_iter()
-            .filter(|entry| entry.file_type == FileType::File)
-            .map(|entry| entry.path)
-            .collect())
+        let mut out = Vec::new();
+        for entry in entries {
+            if entry.file_type != FileType::File {
+                continue;
+            }
+            // `list_dir` returned a `VirtualPath`; rebuild the equivalent
+            // `ScopedPath` under our prefix so the follow-up `get` re-runs
+            // the per-op ACL check.
+            out.push(join_scoped(root, &entry.name)?);
+        }
+        Ok(out)
     }
 
     async fn read_lease_file(
         &self,
-        path: &VirtualPath,
+        scope: &ResourceScope,
+        path: &ScopedPath,
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
-        let bytes = self
+        let versioned = self
             .filesystem
-            .read_file(path)
+            .get(scope, path)
             .await
-            .map_err(lease_persistence_error)?;
-        deserialize(&bytes)
+            .map_err(lease_persistence_error)?
+            .ok_or_else(|| CapabilityLeaseError::Persistence {
+                reason: format!("filesystem capability lease store: lease file missing: {path}"),
+            })?;
+        deserialize(&versioned.entry.body)
     }
 }
 
 #[async_trait]
-impl<F> CapabilityLeaseStore for FilesystemCapabilityLeaseStore<'_, F>
+impl<F> CapabilityLeaseStore for FilesystemCapabilityLeaseStore<F>
 where
     F: RootFilesystem,
 {
@@ -562,13 +770,13 @@ where
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
         let lock = self.mutation_lock(scope);
         let _guard = lock.lock().await;
-        let mut lease = self
-            .read_lease(scope, lease_id)
-            .await?
-            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
-        lease.status = CapabilityLeaseStatus::Revoked;
-        self.write_lease(&lease).await?;
-        Ok(lease)
+        // CAS-Version retry: a concurrent claim/consume from another process
+        // must not be clobbered. Idempotent on already-Revoked leases.
+        self.update_lease_cas(scope, lease_id, |lease| {
+            lease.status = CapabilityLeaseStatus::Revoked;
+            Ok(())
+        })
+        .await
     }
 
     async fn get(
@@ -587,14 +795,16 @@ where
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
         let lock = self.mutation_lock(scope);
         let _guard = lock.lock().await;
-        let mut lease = self
-            .read_lease(scope, lease_id)
-            .await?
-            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
-        ensure_claimable(&lease, invocation_fingerprint)?;
-        lease.status = CapabilityLeaseStatus::Claimed;
-        self.write_lease(&lease).await?;
-        Ok(lease)
+        // CAS-Version retry: a concurrent claim/consume/revoke must not
+        // race past `ensure_claimable`. Re-validate inside the loop so a
+        // race that flips status (e.g. another claimant got there first)
+        // surfaces as the proper typed error rather than a clobber.
+        self.update_lease_cas(scope, lease_id, |lease| {
+            ensure_claimable(lease, invocation_fingerprint)?;
+            lease.status = CapabilityLeaseStatus::Claimed;
+            Ok(())
+        })
+        .await
     }
 
     async fn consume(
@@ -604,29 +814,32 @@ where
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
         let lock = self.mutation_lock(scope);
         let _guard = lock.lock().await;
-        let mut lease = self
-            .read_lease(scope, lease_id)
-            .await?
-            .ok_or(CapabilityLeaseError::UnknownLease { lease_id })?;
-        let was_claimed = lease.status == CapabilityLeaseStatus::Claimed;
-        ensure_consumable(&lease)?;
-        if lease.invocation_fingerprint.is_some() {
-            if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
-                *remaining = 0;
-            }
-            lease.status = CapabilityLeaseStatus::Consumed;
-        } else if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
-            *remaining -= 1;
-            if *remaining == 0 {
+        // CAS-Version retry: one-shot fingerprinted leases MUST NOT be
+        // consumable twice. Without CAS, two processes can both read
+        // Active/Claimed, both consume, and both succeed — granting double
+        // authority. The retry re-evaluates `ensure_consumable` against
+        // the latest version so the loser sees `InactiveLease`.
+        self.update_lease_cas(scope, lease_id, |lease| {
+            let was_claimed = lease.status == CapabilityLeaseStatus::Claimed;
+            ensure_consumable(lease)?;
+            if lease.invocation_fingerprint.is_some() {
+                if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
+                    *remaining = 0;
+                }
                 lease.status = CapabilityLeaseStatus::Consumed;
+            } else if let Some(remaining) = lease.grant.constraints.max_invocations.as_mut() {
+                *remaining -= 1;
+                if *remaining == 0 {
+                    lease.status = CapabilityLeaseStatus::Consumed;
+                } else if was_claimed {
+                    lease.status = CapabilityLeaseStatus::Active;
+                }
             } else if was_claimed {
                 lease.status = CapabilityLeaseStatus::Active;
             }
-        } else if was_claimed {
-            lease.status = CapabilityLeaseStatus::Active;
-        }
-        self.write_lease(&lease).await?;
-        Ok(lease)
+            Ok(())
+        })
+        .await
     }
 
     async fn leases_for_scope(&self, scope: &ResourceScope) -> Vec<CapabilityLease> {
@@ -635,7 +848,7 @@ where
         };
         let mut leases = Vec::new();
         for path in paths {
-            if let Ok(lease) = self.read_lease_file(&path).await {
+            if let Ok(lease) = self.read_lease_file(scope, &path).await {
                 leases.push(lease);
             }
         }
@@ -708,7 +921,7 @@ impl CapabilityLeaseOwnerKey {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct CapabilityLeaseIndex {
-    paths: Vec<VirtualPath>,
+    paths: Vec<ScopedPath>,
 }
 
 /// Authorizer that combines request-scoped grants with active capability leases.
@@ -1258,57 +1471,86 @@ pub(crate) fn same_scope_owner(left: &ResourceScope, right: &ResourceScope) -> b
         && left.thread_id == right.thread_id
 }
 
+// ── Lease path helpers ────────────────────────────────────────
+//
+// All helpers return [`ScopedPath`] strings under the `/authorization`
+// mount alias. The [`MountView`](ironclaw_host_api::MountView) granted by
+// composition resolves the alias to a tenant/user-scoped
+// [`VirtualPath`](ironclaw_host_api::VirtualPath) before any backend op —
+// so the within-tenant scope (agent/project/mission/thread/invocation)
+// stays in the path while the leading `tenants/<tenant_id>/users/<user_id>`
+// prefix is the MountView's responsibility, not this crate's.
+//
+// Layout:
+//
+// ```text
+// /authorization/leases/<within-tenant-scope>/<invocation_id>/<lease_id>.json
+// /authorization/leases/<within-tenant-scope>/_lease_index.json
+// ```
+//
+// where `<within-tenant-scope>` is `[agents/<agent_id>/][projects/<project_id>/][missions/<mission_id>/][threads/<thread_id>]`.
+
+const LEASES_PREFIX: &str = "/authorization/leases";
+
 fn lease_path(
     scope: &ResourceScope,
     lease_id: CapabilityGrantId,
-) -> Result<VirtualPath, CapabilityLeaseError> {
-    VirtualPath::new(format!(
-        "{}/{lease_id}.json",
-        lease_invocation_root(scope)?.as_str()
+) -> Result<ScopedPath, CapabilityLeaseError> {
+    ScopedPath::new(format!(
+        "{}/{}/{}/{lease_id}.json",
+        LEASES_PREFIX,
+        within_tenant_scope(scope),
+        scope.invocation_id,
     ))
     .map_err(lease_host_api_error)
 }
 
-fn lease_index_path(scope: &ResourceScope) -> Result<VirtualPath, CapabilityLeaseError> {
-    VirtualPath::new(format!(
-        "{}/_lease_index.json",
-        lease_tenant_user_root(scope)?.as_str()
+fn lease_index_path(scope: &ResourceScope) -> Result<ScopedPath, CapabilityLeaseError> {
+    ScopedPath::new(format!(
+        "{}/{}/_lease_index.json",
+        LEASES_PREFIX,
+        within_tenant_scope(scope),
     ))
     .map_err(lease_host_api_error)
 }
 
-fn lease_invocation_root(scope: &ResourceScope) -> Result<VirtualPath, CapabilityLeaseError> {
-    VirtualPath::new(format!(
-        "{}/{}",
-        lease_tenant_user_root(scope)?.as_str(),
-        scope.invocation_id
-    ))
-    .map_err(lease_host_api_error)
-}
-
-fn lease_tenant_user_root(scope: &ResourceScope) -> Result<VirtualPath, CapabilityLeaseError> {
-    VirtualPath::new(format!("{}/capability-leases", scoped_owner_root(scope)))
+fn lease_owner_prefix(scope: &ResourceScope) -> Result<ScopedPath, CapabilityLeaseError> {
+    ScopedPath::new(format!("{}/{}", LEASES_PREFIX, within_tenant_scope(scope),))
         .map_err(lease_host_api_error)
 }
 
-fn scoped_owner_root(scope: &ResourceScope) -> String {
-    let mut base = format!(
-        "/engine/tenants/{}/users/{}",
-        scope.tenant_id, scope.user_id
-    );
+/// Within-tenant path segment carrying the parts of the resource scope that
+/// are *not* the tenant/user identity (those move to the MountView). Always
+/// renders at least one segment (`scope`) so the lease prefix stays a
+/// non-empty directory the backend can `list_dir`.
+fn within_tenant_scope(scope: &ResourceScope) -> String {
+    let mut segments = Vec::new();
     if let Some(agent_id) = &scope.agent_id {
-        base = format!("{base}/agents/{agent_id}");
+        segments.push(format!("agents/{agent_id}"));
     }
     if let Some(project_id) = &scope.project_id {
-        base = format!("{base}/projects/{project_id}");
+        segments.push(format!("projects/{project_id}"));
     }
     if let Some(mission_id) = &scope.mission_id {
-        base = format!("{base}/missions/{mission_id}");
+        segments.push(format!("missions/{mission_id}"));
     }
     if let Some(thread_id) = &scope.thread_id {
-        base = format!("{base}/threads/{thread_id}");
+        segments.push(format!("threads/{thread_id}"));
     }
-    base
+    if segments.is_empty() {
+        "scope".to_string()
+    } else {
+        segments.join("/")
+    }
+}
+
+/// Join a leaf segment onto a [`ScopedPath`] prefix. Used when reconstructing
+/// a child path after `list_dir` (which returns
+/// [`VirtualPath`](ironclaw_host_api::VirtualPath)s) so the per-op ACL
+/// enforced by [`ScopedFilesystem`] still runs on the follow-up `get`.
+fn join_scoped(prefix: &ScopedPath, leaf: &str) -> Result<ScopedPath, CapabilityLeaseError> {
+    ScopedPath::new(format!("{}/{leaf}", prefix.as_str().trim_end_matches('/'),))
+        .map_err(lease_host_api_error)
 }
 
 fn serialize_pretty<T>(value: &T) -> Result<Vec<u8>, CapabilityLeaseError>
@@ -1336,6 +1578,13 @@ fn lease_host_api_error(error: HostApiError) -> CapabilityLeaseError {
 }
 
 fn lease_persistence_error(error: FilesystemError) -> CapabilityLeaseError {
+    // Preserve the typed `VersionMismatch` signal so the CAS retry loop in
+    // `update_lease_cas` can detect and retry. Every other backend error
+    // collapses into the opaque `Persistence` variant — the redacted
+    // `FilesystemError::Display` is safe to surface across a tenant boundary.
+    if matches!(error, FilesystemError::VersionMismatch { .. }) {
+        return CapabilityLeaseError::VersionMismatch;
+    }
     CapabilityLeaseError::Persistence {
         reason: error.to_string(),
     }
@@ -1343,4 +1592,55 @@ fn lease_persistence_error(error: FilesystemError) -> CapabilityLeaseError {
 
 fn is_not_found(error: &FilesystemError) -> bool {
     matches!(error, FilesystemError::NotFound { .. })
+}
+
+// ── Indexed projections (defense in depth) ─────────────────────
+//
+// Path-prefix scoping via the caller's [`MountView`] is the primary
+// tenant-isolation boundary; the indexed `tenant_id` projection added on
+// every lease/index write is belt-and-suspenders so an admin-tier query
+// can filter explicitly by tenant, and a path-rewriting bug surfaces as
+// a query-time mismatch rather than silent cross-tenant leakage. See
+// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+
+/// Index key projected on every lease and lease-index entry. Production
+/// reads never go through this key directly — path-prefix scoping
+/// handles routing — but it is available for admin-tier queries.
+fn index_key_tenant_id() -> IndexKey {
+    IndexKey::new("tenant_id").unwrap_or_else(|_| {
+        unreachable!("authorization index key `tenant_id` must be a simple identifier")
+    })
+}
+
+fn index_name_authorization_tenant() -> IndexName {
+    IndexName::new("authorization_by_tenant").unwrap_or_else(|_| {
+        unreachable!(
+            "authorization index name `authorization_by_tenant` must be a simple identifier"
+        )
+    })
+}
+
+/// Declare the `tenant_id` exact-equality index on `prefix`, tolerating
+/// backends that don't materialize indexes (LocalFilesystem). Idempotent
+/// across the mount lifetime; mirrors the engine/processes stores'
+/// `ensure_*_index` shape so byte-only backends degrade gracefully
+/// instead of failing closed.
+async fn ensure_tenant_id_index<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    prefix: &ScopedPath,
+) -> Result<(), CapabilityLeaseError>
+where
+    F: RootFilesystem,
+{
+    let spec = IndexSpec::new(
+        index_name_authorization_tenant(),
+        vec![index_key_tenant_id()],
+        IndexKind::Exact,
+    );
+    match filesystem.ensure_index(scope, prefix, &spec).await {
+        Ok(()) => Ok(()),
+        Err(FilesystemError::Unsupported { .. }) => Ok(()),
+        Err(error) => Err(lease_persistence_error(error)),
+    }
 }

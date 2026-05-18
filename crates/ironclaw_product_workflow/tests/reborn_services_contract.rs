@@ -18,12 +18,13 @@ use ironclaw_product_workflow::{
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextWindow,
+    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
-    LoadContextWindowRequest, MessageContent, MessageStatus, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageStatus,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor,
@@ -353,6 +354,13 @@ impl SessionThreadService for ScopeMismatchThreadStub {
         _request: LoadContextWindowRequest,
     ) -> Result<ContextWindow, SessionThreadError> {
         panic!("ScopeMismatchThreadStub::load_context_window should not be reached")
+    }
+
+    async fn load_context_messages(
+        &self,
+        _request: LoadContextMessagesRequest,
+    ) -> Result<ContextMessages, SessionThreadError> {
+        panic!("ScopeMismatchThreadStub::load_context_messages should not be reached")
     }
 
     async fn create_summary_artifact(

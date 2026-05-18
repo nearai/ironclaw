@@ -3,11 +3,15 @@ use std::sync::Arc;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::LocalFilesystem;
-use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
+use ironclaw_host_api::{EffectKind, PackageId};
+use ironclaw_host_runtime::{
+    CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
+    builtin_first_party_handlers, builtin_first_party_package,
+};
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
-use ironclaw_trust::HostTrustPolicy;
+use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
 use ironclaw_turns::{DefaultTurnCoordinator, InMemoryTurnStateStore};
@@ -103,14 +107,15 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let turn_state = Arc::new(InMemoryTurnStateStore::default());
 
     let services = HostRuntimeServices::new(
-        Arc::new(ExtensionRegistry::new()),
+        Arc::new(local_dev_extension_registry()?),
         Arc::new(filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_trust_policy(Arc::new(HostTrustPolicy::empty()))
+    .with_first_party_capabilities(Arc::new(local_dev_first_party_handlers()?))
+    .with_trust_policy(Arc::new(local_dev_first_party_trust_policy()?))
     .with_run_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_turn_state(Arc::clone(&turn_state));
@@ -124,6 +129,48 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         host_runtime: Some(host_runtime),
         turn_coordinator: Some(turn_coordinator),
         readiness: readiness_for(input.profile, true, true),
+    })
+}
+
+fn local_dev_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(
+            builtin_first_party_package().map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("built-in first-party package is invalid: {error}"),
+            })?,
+        )
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: format!("built-in first-party registry is invalid: {error}"),
+        })?;
+    Ok(registry)
+}
+
+fn local_dev_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
+    builtin_first_party_handlers().map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("built-in first-party handlers are invalid: {error}"),
+    })
+}
+
+fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildError> {
+    HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries(vec![
+        AdminEntry::for_local_manifest(
+            PackageId::new("builtin").map_err(|error| RebornBuildError::InvalidConfig {
+                reason: format!("built-in first-party package id is invalid: {error}"),
+            })?,
+            "/system/extensions/builtin/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::first_party(),
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+            ],
+            None,
+        ),
+    ]))])
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: format!("built-in first-party trust policy is invalid: {error}"),
     })
 }
 
@@ -249,26 +296,25 @@ async fn build_libsql_production(
     auth_token: Option<ironclaw_secrets::SecretMaterial>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
 ) -> Result<RebornServices, RebornBuildError> {
-    use ironclaw_authorization::LibSqlCapabilityLeaseStore;
+    use ironclaw_authorization::FilesystemCapabilityLeaseStore;
     use ironclaw_filesystem::LibSqlRootFilesystem;
-    use ironclaw_secrets::{LibSqlSecretsStore, ScopedSecretsStoreAdapter};
+    use ironclaw_secrets::FilesystemSecretStore;
 
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
     filesystem.run_migrations().await?;
 
-    let leases = Arc::new(LibSqlCapabilityLeaseStore::new(Arc::clone(&db)));
-    leases.run_migrations().await?;
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
+    let leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
+
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
 
     let secret_crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(secret_master_key)?);
-    let legacy_secret_store = Arc::new(LibSqlSecretsStore::new(
-        Arc::clone(&db),
+    let secret_store = Arc::new(FilesystemSecretStore::new(
+        Arc::clone(&scoped_filesystem),
         Arc::clone(&secret_crypto),
     ));
-    legacy_secret_store.run_migrations().await?;
-    legacy_secret_store
-        .verify_can_decrypt_existing_secrets()
-        .await?;
-    let secret_store = Arc::new(ScopedSecretsStoreAdapter::new(legacy_secret_store));
 
     let event_store = ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql {
         path_or_url,
@@ -280,20 +326,17 @@ async fn build_libsql_production(
         Arc::clone(&filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::filesystem(Arc::clone(&filesystem)),
+        ProcessServices::filesystem(Arc::clone(&scoped_filesystem)),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
     .with_trust_policy(production_wiring.trust_policy)
     .with_capability_leases(leases)
     .with_secret_store(secret_store)
-    .with_libsql_resource_governor(Arc::clone(&db))
-    .await?
+    .with_filesystem_resource_governor(Arc::clone(&scoped_filesystem))
     .with_reborn_event_store_config(profile.to_event_store_profile(), event_store)
     .await?
-    .with_libsql_run_state_approval_store(Arc::clone(&db))
-    .await?
-    .with_libsql_turn_state_store(db)
-    .await?
+    .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
+    .with_filesystem_turn_state_store(scoped_filesystem)
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
 
@@ -318,23 +361,25 @@ async fn build_postgres_production(
     url: ironclaw_secrets::SecretMaterial,
     secret_master_key: ironclaw_secrets::SecretMaterial,
 ) -> Result<RebornServices, RebornBuildError> {
-    use ironclaw_authorization::PostgresCapabilityLeaseStore;
+    use ironclaw_authorization::FilesystemCapabilityLeaseStore;
     use ironclaw_filesystem::PostgresRootFilesystem;
-    use ironclaw_secrets::{PostgresSecretsStore, ScopedSecretsStoreAdapter};
+    use ironclaw_secrets::FilesystemSecretStore;
 
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem.run_migrations().await?;
 
-    let leases = Arc::new(PostgresCapabilityLeaseStore::new(pool.clone()));
-    leases.run_migrations().await?;
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
+    let leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
+
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
 
     let secret_crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(secret_master_key)?);
-    let legacy_secret_store = Arc::new(PostgresSecretsStore::new(pool.clone(), secret_crypto));
-    legacy_secret_store.run_migrations().await?;
-    legacy_secret_store
-        .verify_can_decrypt_existing_secrets()
-        .await?;
-    let secret_store = Arc::new(ScopedSecretsStoreAdapter::new(legacy_secret_store));
+    let secret_store = Arc::new(FilesystemSecretStore::new(
+        Arc::clone(&scoped_filesystem),
+        Arc::clone(&secret_crypto),
+    ));
 
     let event_store = ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url };
 
@@ -343,20 +388,17 @@ async fn build_postgres_production(
         Arc::clone(&filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
-        ProcessServices::filesystem(Arc::clone(&filesystem)),
+        ProcessServices::filesystem(Arc::clone(&scoped_filesystem)),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
     .with_trust_policy(production_wiring.trust_policy)
     .with_capability_leases(leases)
     .with_secret_store(secret_store)
-    .with_postgres_resource_governor(pool.clone())
-    .await?
+    .with_filesystem_resource_governor(Arc::clone(&scoped_filesystem))
     .with_reborn_event_store_config(profile.to_event_store_profile(), event_store)
     .await?
-    .with_postgres_run_state_approval_store(pool.clone())
-    .await?
-    .with_postgres_turn_state_store(pool)
-    .await?
+    .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
+    .with_filesystem_turn_state_store(scoped_filesystem)
     .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
 

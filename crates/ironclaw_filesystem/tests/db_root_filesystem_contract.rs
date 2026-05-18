@@ -6,8 +6,9 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::{
-    CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation, Filter, IndexKey,
-    IndexKind, IndexName, IndexSpec, IndexValue, LibSqlRootFilesystem, Page, RecordKind,
+    Capability, CasExpectation, Entry, FileType, FilesystemError, FilesystemOperation, Filter,
+    IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, LibSqlRootFilesystem, Page, RecordKind,
+    SeqNo,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_host_api::VirtualPath;
@@ -230,6 +231,107 @@ fn postgres_root_filesystem_implements_root_filesystem_contract() {
 }
 
 #[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_root_filesystem_migration_failure_surfaces_infrastructure_variant() {
+    // Audit finding F1: backend connect/migration paths used to wrap
+    // every infrastructure error in `FilesystemError::Backend` with a
+    // fabricated `/engine` path. The path was always a lie — there is
+    // no caller-supplied path in scope at migration time. Verify the
+    // new `BackendInfrastructure` variant is what surfaces when the
+    // backend's bootstrap path fails.
+    //
+    // Trigger a real migration failure by pre-populating the DB with a
+    // table whose schema collides with what the migration expects to
+    // add (`is_dir` column with an incompatible non-default-able CHECK
+    // constraint that conflicts with the `ALTER` the migration runs).
+    let db_dir = tempfile::tempdir().unwrap();
+    let db_path = db_dir.path().join("root-filesystem.db");
+    let raw_db = std::sync::Arc::new(libsql::Builder::new_local(&db_path).build().await.unwrap());
+    let conn = raw_db.connect().unwrap();
+    // Pre-create a table that prevents `CREATE TABLE root_filesystem_entries`
+    // from being clean: the migration's CREATE IF NOT EXISTS is fine, but
+    // the subsequent `ALTER TABLE ... ADD COLUMN is_dir INTEGER NOT NULL`
+    // requires a default. Pre-existing rows without that column will
+    // satisfy the default; but inserting an incompatible row first makes
+    // the column add fail.
+    conn.execute(
+        "CREATE TABLE root_filesystem_entries (path TEXT PRIMARY KEY, contents BLOB NOT NULL DEFAULT X'')",
+        (),
+    )
+    .await
+    .unwrap();
+    // Lock the file by removing write permissions so the migration's
+    // ALTER paths fail outright. On platforms where chmod is honoured
+    // (unix), this surfaces a libsql write error from the migration.
+    drop(conn);
+    drop(raw_db);
+    let mut perms = std::fs::metadata(&db_path).unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o444);
+        std::fs::set_permissions(&db_path, perms).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        perms.set_readonly(true);
+        std::fs::set_permissions(&db_path, perms).unwrap();
+    }
+
+    let locked_db =
+        std::sync::Arc::new(libsql::Builder::new_local(&db_path).build().await.unwrap());
+    let filesystem = LibSqlRootFilesystem::new(locked_db);
+    let err = filesystem.run_migrations().await.unwrap_err();
+    assert!(
+        matches!(err, FilesystemError::BackendInfrastructure { .. }),
+        "expected BackendInfrastructure, got {err:?}"
+    );
+    // Display must NOT mention the fictional `/engine` placeholder
+    // (previous behavior leaked it everywhere).
+    let display = err.to_string();
+    assert!(
+        !display.contains("/engine"),
+        "infrastructure error must not fabricate a virtual path: {display}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_query_page_offset_overflow_surfaces_typed_error() {
+    // Audit finding F6: `page.offset as i64` previously truncate-wrapped
+    // values ≥ 2^63 into a negative SQLite OFFSET, which produced a
+    // cryptic backend error or (worse) silently returned an empty page.
+    // Surface a typed `Backend` error naming the operation and value.
+    let filesystem = libsql_root().await;
+    let path = VirtualPath::new("/engine/tenants/t1/users/u1/file.txt").unwrap();
+    filesystem.write_file(&path, b"hello").await.unwrap();
+
+    let err = filesystem
+        .query(
+            &VirtualPath::new("/engine/tenants/t1/users/u1").unwrap(),
+            &Filter::All,
+            Page {
+                offset: u64::MAX,
+                limit: 1,
+            },
+        )
+        .await
+        .unwrap_err();
+    match &err {
+        FilesystemError::Backend {
+            operation, reason, ..
+        } => {
+            assert_eq!(*operation, FilesystemOperation::Query);
+            assert!(
+                reason.contains("page offset"),
+                "expected reason to name the overflow, got {reason}"
+            );
+        }
+        other => panic!("expected Backend error, got {other:?}"),
+    }
+}
+
+#[cfg(feature = "libsql")]
 struct TestLibSqlRootFilesystem {
     filesystem: LibSqlRootFilesystem,
     _dir: tempfile::TempDir,
@@ -400,16 +502,201 @@ async fn libsql_ensure_index_is_idempotent_and_conflict_aware() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
-async fn libsql_ensure_index_rejects_fts_and_vector_kinds() {
+async fn libsql_ensure_index_accepts_fts_kind_and_filter_matches_text() {
+    // FTS5 vtable + sync triggers are created at declaration time, and
+    // existing rows are backfilled. After the index is declared, a
+    // Filter::Fts query against the same key finds matching documents.
     let filesystem = libsql_root().await;
     let prefix = VirtualPath::new("/memory").unwrap();
+    let kind = RecordKind::new("chunk").unwrap();
+    let content = IndexKey::new("content").unwrap();
+    // Insert before declaring the index so backfill kicks in.
+    for (path, body) in [
+        ("/memory/a", "the quick brown fox jumps"),
+        ("/memory/b", "the lazy dog sleeps"),
+        ("/memory/c", "a brown bear naps in the woods"),
+    ] {
+        let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(content.clone(), IndexValue::Text(body.into()));
+        filesystem
+            .put(
+                &VirtualPath::new(path).unwrap(),
+                entry,
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    }
     let spec = IndexSpec::new(
-        IndexName::new("by_chunk").unwrap(),
-        vec![IndexKey::new("chunk_id").unwrap()],
+        IndexName::new("by_content").unwrap(),
+        vec![content.clone()],
         IndexKind::Fts,
     );
-    let err = filesystem.ensure_index(&prefix, &spec).await.unwrap_err();
-    assert!(matches!(err, FilesystemError::Unsupported { .. }));
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+    // Redeclaration is idempotent.
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+
+    let results = filesystem
+        .query(
+            &prefix,
+            &Filter::Fts {
+                key: content,
+                query: "brown".into(),
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 2);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_fts_filter_picks_up_inserts_through_triggers() {
+    // After ensure_index, inserting a new row through put() updates the
+    // FTS5 shadow table via the AFTER INSERT trigger.
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/memory/triggered").unwrap();
+    let kind = RecordKind::new("chunk").unwrap();
+    let content = IndexKey::new("content").unwrap();
+
+    let spec = IndexSpec::new(
+        IndexName::new("by_content_trig").unwrap(),
+        vec![content.clone()],
+        IndexKind::Fts,
+    );
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+
+    let entry = Entry::record(kind, &serde_json::json!({}))
+        .unwrap()
+        .with_indexed(content.clone(), IndexValue::Text("emerald city".into()));
+    filesystem
+        .put(
+            &VirtualPath::new("/memory/triggered/x").unwrap(),
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+    let results = filesystem
+        .query(
+            &prefix,
+            &Filter::Fts {
+                key: content,
+                query: "emerald".into(),
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_ensure_index_fts_rejects_path_with_sql_metacharacters() {
+    // Regression: the FTS5 sync triggers splice the mount-prefix path
+    // directly into DDL string literals (no parameter binding available in
+    // SQLite trigger bodies). VirtualPath rejects NUL/control/backslash/`..`
+    // but currently allows `'`, `"`, `;`, etc. We refuse to emit DDL when
+    // the path contains anything outside [A-Za-z0-9_/.-] so a path crafted
+    // to escape the literal cannot reach a CREATE TRIGGER statement.
+    let filesystem = libsql_root().await;
+    let injection_path = VirtualPath::new("/memory/'; DROP TABLE root_filesystem_entries; --")
+        .expect("VirtualPath::new accepts single-quote; DDL emitter must reject it");
+    let content = IndexKey::new("content").unwrap();
+    let spec = IndexSpec::new(
+        IndexName::new("by_content_inject").unwrap(),
+        vec![content],
+        IndexKind::Fts,
+    );
+    let err = filesystem
+        .ensure_index(&injection_path, &spec)
+        .await
+        .unwrap_err();
+    match err {
+        FilesystemError::Backend {
+            operation, reason, ..
+        } => {
+            assert_eq!(operation, FilesystemOperation::EnsureIndex);
+            assert!(
+                reason.contains("[A-Za-z0-9_/.-]"),
+                "expected identifier-safe rejection, got: {reason}"
+            );
+        }
+        other => panic!("expected Backend error, got: {other:?}"),
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_vector_index_round_trips_and_ranks_by_cosine() {
+    // IndexKind::Vector is accepted at declaration; storage shape is
+    // IndexValue::Bytes (LE-encoded f32s) in the indexed projection;
+    // VectorNearest ranks the candidate set by cosine and returns top-k.
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/memory/vec").unwrap();
+    let kind = RecordKind::new("chunk").unwrap();
+    let embedding_key = IndexKey::new("embedding").unwrap();
+
+    let spec = IndexSpec::new(
+        IndexName::new("by_vec").unwrap(),
+        vec![embedding_key.clone()],
+        IndexKind::Vector { dim: 3 },
+    );
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+    // Re-declaration is idempotent.
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+    // A conflicting dim is rejected.
+    let conflict = IndexSpec::new(
+        IndexName::new("by_vec").unwrap(),
+        vec![embedding_key.clone()],
+        IndexKind::Vector { dim: 4 },
+    );
+    let err = filesystem
+        .ensure_index(&prefix, &conflict)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FilesystemError::IndexConflict { .. }));
+
+    let blob = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|f| f.to_le_bytes()).collect() };
+    for (path, vec) in [
+        ("/memory/vec/A", vec![1.0_f32, 0.0, 0.0]),
+        ("/memory/vec/B", vec![0.9, 0.1, 0.0]),
+        ("/memory/vec/C", vec![0.0, 0.0, 1.0]),
+    ] {
+        let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(embedding_key.clone(), IndexValue::Bytes(blob(&vec)));
+        filesystem
+            .put(
+                &VirtualPath::new(path).unwrap(),
+                entry,
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    }
+    let results = filesystem
+        .query(
+            &prefix,
+            &Filter::VectorNearest {
+                key: embedding_key.clone(),
+                embedding: vec![1.0, 0.0, 0.0],
+                limit: 2,
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 2);
+    // /memory/vec/A is closest (identical vector).
+    assert_eq!(
+        results[0].entry.indexed.get(&embedding_key),
+        Some(&IndexValue::Bytes(blob(&[1.0, 0.0, 0.0])))
+    );
 }
 
 #[cfg(feature = "libsql")]
@@ -627,6 +914,174 @@ async fn libsql_query_prefix_filter_literal_percent_is_not_a_wildcard() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn libsql_query_range_on_bool_finds_matching_rows() {
+    // Regression test for the libSQL Range/Bool bug: SQLite's `json_type`
+    // returns the literal strings `"true"` / `"false"` for JSON booleans
+    // (not `"boolean"`/`"integer"`). A prior `json_type = 'integer'`
+    // guard never matched and silently dropped every bool row. The fix
+    // recognises both string variants; this test locks it in so a future
+    // refactor of `index_value_json_type_guard` can't regress.
+    let filesystem = libsql_root().await;
+    let kind = RecordKind::new("flag").unwrap();
+    let flag_key = IndexKey::new("enabled").unwrap();
+    let prefix = VirtualPath::new("/secrets/leases/bool_range").unwrap();
+    for (path, enabled) in [
+        ("/secrets/leases/bool_range/T", true),
+        ("/secrets/leases/bool_range/F", false),
+    ] {
+        let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(flag_key.clone(), IndexValue::Bool(enabled));
+        filesystem
+            .put(
+                &VirtualPath::new(path).unwrap(),
+                entry,
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    }
+    // Range covering the full bool space — both rows must match.
+    let results = filesystem
+        .query(
+            &prefix,
+            &Filter::Range {
+                key: flag_key.clone(),
+                lo: IndexValue::Bool(false),
+                hi: IndexValue::Bool(true),
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        2,
+        "libSQL Range on Bool must return both rows; prior bug dropped them"
+    );
+
+    // Single-value range — only `true` row matches.
+    let only_true = filesystem
+        .query(
+            &prefix,
+            &Filter::Range {
+                key: flag_key,
+                lo: IndexValue::Bool(true),
+                hi: IndexValue::Bool(true),
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(only_true.len(), 1);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_query_range_rejects_mixed_variant_bounds() {
+    // Mixed-variant bounds (e.g. I64 lo + Text hi) used to silently fall
+    // through to a lexicographic-on-text comparison that returned the
+    // wrong rows. After the discriminant guard they're rejected with
+    // Unsupported, matching the in-memory backend's
+    // `discriminant(lo) == discriminant(hi)` requirement.
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/secrets/leases/mixed").unwrap();
+    let err = filesystem
+        .query(
+            &prefix,
+            &Filter::Range {
+                key: IndexKey::new("k").unwrap(),
+                lo: IndexValue::I64(0),
+                hi: IndexValue::Text("z".into()),
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            FilesystemError::Unsupported {
+                operation: FilesystemOperation::Query,
+                ..
+            }
+        ),
+        "expected Unsupported for mixed-variant Range bounds, got {err:?}"
+    );
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_vector_nearest_stable_tie_break_on_equal_cosine() {
+    // Regression test for the tie-breaker fix: equal-cosine candidates
+    // used to truncate non-deterministically because the SQL backends
+    // omitted the secondary path comparator. Two identical embeddings
+    // under different paths must now sort by path ascending and the
+    // top-1 truncation must always pick the lex-smaller path.
+    let filesystem = libsql_root().await;
+    let prefix = VirtualPath::new("/memory/tie_break").unwrap();
+    let kind = RecordKind::new("chunk").unwrap();
+    let embedding_key = IndexKey::new("embedding").unwrap();
+    let spec = IndexSpec::new(
+        IndexName::new("by_vec_tie").unwrap(),
+        vec![embedding_key.clone()],
+        IndexKind::Vector { dim: 3 },
+    );
+    filesystem.ensure_index(&prefix, &spec).await.unwrap();
+    let blob: Vec<u8> = [1.0_f32, 0.0, 0.0]
+        .iter()
+        .flat_map(|f| f.to_le_bytes())
+        .collect();
+    for leaf in ["zz", "aa", "mm"] {
+        let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+            .unwrap()
+            .with_indexed(embedding_key.clone(), IndexValue::Bytes(blob.clone()));
+        filesystem
+            .put(
+                &VirtualPath::new(format!("/memory/tie_break/{leaf}")).unwrap(),
+                entry,
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+    }
+    // Three identical embeddings; the top-1 truncation must always pick
+    // `aa` (lex-smallest) because the tie-breaker sorts by path.
+    let top_one = filesystem
+        .query(
+            &prefix,
+            &Filter::VectorNearest {
+                key: embedding_key.clone(),
+                embedding: vec![1.0, 0.0, 0.0],
+                limit: 1,
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(top_one.len(), 1);
+    assert_eq!(top_one[0].path.as_str(), "/memory/tie_break/aa");
+
+    // Top-2 picks `aa` then `mm` deterministically.
+    let top_two = filesystem
+        .query(
+            &prefix,
+            &Filter::VectorNearest {
+                key: embedding_key,
+                embedding: vec![1.0, 0.0, 0.0],
+                limit: 2,
+            },
+            Page::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(top_two.len(), 2);
+    assert_eq!(top_two[0].path.as_str(), "/memory/tie_break/aa");
+    assert_eq!(top_two[1].path.as_str(), "/memory/tie_break/mm");
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn libsql_query_paginates_results() {
     let filesystem = libsql_root().await;
     let kind = RecordKind::new("lease").unwrap();
@@ -676,6 +1131,76 @@ async fn libsql_query_paginates_results() {
 }
 
 #[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_append_and_tail_assigns_monotonic_seqno() {
+    let filesystem = libsql_root().await;
+    let log = VirtualPath::new("/events/engine").unwrap();
+
+    let s1 = filesystem.append(&log, b"a".to_vec()).await.unwrap();
+    let s2 = filesystem.append(&log, b"b".to_vec()).await.unwrap();
+    let s3 = filesystem.append(&log, b"c".to_vec()).await.unwrap();
+    assert!(s1 < s2 && s2 < s3);
+
+    // tail-from-zero returns every record in order.
+    let from_zero = filesystem.tail(&log, SeqNo::ZERO).await.unwrap();
+    assert_eq!(from_zero.len(), 3);
+    assert_eq!(from_zero[0].payload, b"a".to_vec());
+    assert_eq!(from_zero[1].payload, b"b".to_vec());
+    assert_eq!(from_zero[2].payload, b"c".to_vec());
+    assert_eq!(from_zero[0].seq, s1);
+    assert_eq!(from_zero[2].seq, s3);
+
+    // tail-from-N skips earlier records (exclusive).
+    let from_first = filesystem.tail(&log, s1).await.unwrap();
+    assert_eq!(from_first.len(), 2);
+    assert_eq!(from_first[0].seq, s2);
+    assert_eq!(from_first[1].seq, s3);
+
+    // tail-from-last returns nothing.
+    let from_last = filesystem.tail(&log, s3).await.unwrap();
+    assert!(from_last.is_empty());
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_append_distinct_paths_share_global_seq_but_are_isolated_on_tail() {
+    // Each path's tail returns only its own records, even though the
+    // underlying `INTEGER PRIMARY KEY AUTOINCREMENT` assigns global seqs.
+    // What matters at the trait surface is that `tail(path, from)` filters
+    // by path and that seqs are monotonic per path.
+    let filesystem = libsql_root().await;
+    let a = VirtualPath::new("/events/engine/a").unwrap();
+    let b = VirtualPath::new("/events/engine/b").unwrap();
+
+    let a1 = filesystem.append(&a, b"a1".to_vec()).await.unwrap();
+    let b1 = filesystem.append(&b, b"b1".to_vec()).await.unwrap();
+    let a2 = filesystem.append(&a, b"a2".to_vec()).await.unwrap();
+
+    let tail_a = filesystem.tail(&a, SeqNo::ZERO).await.unwrap();
+    let tail_b = filesystem.tail(&b, SeqNo::ZERO).await.unwrap();
+
+    assert_eq!(tail_a.len(), 2);
+    assert_eq!(tail_a[0].seq, a1);
+    assert_eq!(tail_a[1].seq, a2);
+    assert_eq!(tail_a[0].payload, b"a1".to_vec());
+    assert_eq!(tail_a[1].payload, b"a2".to_vec());
+
+    assert_eq!(tail_b.len(), 1);
+    assert_eq!(tail_b[0].seq, b1);
+    assert_eq!(tail_b[0].payload, b"b1".to_vec());
+
+    // Per-path seq is monotonic.
+    assert!(a1 < a2);
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_capabilities_advertise_events() {
+    let filesystem = libsql_root().await;
+    assert!(filesystem.capabilities().has(Capability::Events));
+}
+
+#[cfg(feature = "libsql")]
 async fn libsql_root() -> TestLibSqlRootFilesystem {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("root-filesystem.db");
@@ -701,7 +1226,11 @@ async fn libsql_root() -> TestLibSqlRootFilesystem {
 #[cfg(feature = "postgres")]
 mod postgres_tests {
     use super::*;
-    use ironclaw_filesystem::PostgresRootFilesystem;
+    use ironclaw_filesystem::{
+        Capability, CasExpectation, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
+        IndexSpec, IndexValue, Page, PostgresRootFilesystem, RecordKind, SeqNo,
+    };
+    use ironclaw_host_api::VirtualPath;
 
     async fn postgres_pool() -> Option<deadpool_postgres::Pool> {
         if std::env::var("IRONCLAW_SKIP_POSTGRES_TESTS").is_ok() {
@@ -949,6 +1478,92 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    async fn postgres_query_range_rejects_mixed_variant_bounds() {
+        // Mixed-variant bounds used to silently lex-compare on text and
+        // return the wrong rows. The discriminant guard now rejects them
+        // with Unsupported on Postgres just like the in-memory and libSQL
+        // backends, keeping cross-backend semantics aligned.
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let prefix_path = VirtualPath::new(&prefix).unwrap();
+        let err = fs
+            .query(
+                &prefix_path,
+                &Filter::Range {
+                    key: IndexKey::new("k").unwrap(),
+                    lo: IndexValue::I64(0),
+                    hi: IndexValue::Text("z".into()),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                FilesystemError::Unsupported {
+                    operation: FilesystemOperation::Query,
+                    ..
+                }
+            ),
+            "expected Unsupported for mixed-variant Range bounds, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_vector_nearest_stable_tie_break_on_equal_cosine() {
+        // Equal-cosine candidates must truncate deterministically.
+        // Mirrors the libSQL tie-break test so cross-backend behavior
+        // stays aligned with the in-memory reference (which has carried
+        // the secondary `path.cmp` tie-breaker since the original
+        // implementation).
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let prefix_path = VirtualPath::new(&prefix).unwrap();
+        let kind = RecordKind::new("chunk").unwrap();
+        let embedding_key = IndexKey::new("embedding").unwrap();
+        let spec = IndexSpec::new(
+            IndexName::new("by_vec_tie").unwrap(),
+            vec![embedding_key.clone()],
+            IndexKind::Vector { dim: 3 },
+        );
+        fs.ensure_index(&prefix_path, &spec).await.unwrap();
+        let blob: Vec<u8> = [1.0_f32, 0.0, 0.0]
+            .iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+        for leaf in ["zz", "aa", "mm"] {
+            let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+                .unwrap()
+                .with_indexed(embedding_key.clone(), IndexValue::Bytes(blob.clone()));
+            fs.put(&vpath(&prefix, leaf), entry, CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+        let top_one = fs
+            .query(
+                &prefix_path,
+                &Filter::VectorNearest {
+                    key: embedding_key,
+                    embedding: vec![1.0, 0.0, 0.0],
+                    limit: 1,
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(top_one.len(), 1);
+        // The lex-smallest path among the three identical embeddings wins.
+        assert!(
+            top_one[0].path.as_str().ends_with("/aa"),
+            "expected /aa to win lex tie-break, got {}",
+            top_one[0].path
+        );
+    }
+
+    #[tokio::test]
     async fn postgres_query_prefix_filter_literal_percent_is_not_a_wildcard() {
         // PR #3661 reviewer: literal `tenant:%` must not become a wildcard.
         let Some((fs, prefix)) = postgres_root().await else {
@@ -1023,6 +1638,151 @@ mod postgres_tests {
     }
 
     #[tokio::test]
+    async fn postgres_fts_index_filter_finds_documents_by_token() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let prefix_path = VirtualPath::new(&prefix).unwrap();
+        let kind = RecordKind::new("chunk").unwrap();
+        let content = IndexKey::new("content").unwrap();
+        let spec = IndexSpec::new(
+            IndexName::new("by_content").unwrap(),
+            vec![content.clone()],
+            IndexKind::Fts,
+        );
+        fs.ensure_index(&prefix_path, &spec).await.unwrap();
+        // Redeclaration is idempotent.
+        fs.ensure_index(&prefix_path, &spec).await.unwrap();
+        for (leaf, body) in [
+            ("a", "the quick brown fox jumps"),
+            ("b", "the lazy dog sleeps"),
+            ("c", "a brown bear naps"),
+        ] {
+            let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+                .unwrap()
+                .with_indexed(content.clone(), IndexValue::Text(body.into()));
+            fs.put(&vpath(&prefix, leaf), entry, CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+        let results = fs
+            .query(
+                &prefix_path,
+                &Filter::Fts {
+                    key: content,
+                    query: "brown".into(),
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn postgres_fts_index_predicate_is_scoped_to_declaring_prefix() {
+        // Audit finding F4: the Postgres GIN FTS index used to be
+        // global over root_filesystem_entries. libsql FTS5 vtables are
+        // declared per-mount-prefix, so cross-backend parity required a
+        // partial index gated on `path LIKE '<prefix>/%' OR path =
+        // '<prefix>'`. Verify the DDL emits the predicate by reading
+        // it back from pg_indexes.
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let prefix_path = VirtualPath::new(&prefix).unwrap();
+        let content = IndexKey::new("content").unwrap();
+        let spec = IndexSpec::new(
+            IndexName::new("by_content_scoped").unwrap(),
+            vec![content.clone()],
+            IndexKind::Fts,
+        );
+        fs.ensure_index(&prefix_path, &spec).await.unwrap();
+
+        // Use a fresh client; we don't have direct access to the pool
+        // through `fs`, so re-derive it from the same env vars.
+        let pool = postgres_pool().await.expect("pool available");
+        let client = pool.get().await.unwrap();
+        let row = client
+            .query_one(
+                "SELECT indexdef FROM pg_indexes \
+                 WHERE schemaname = current_schema() \
+                   AND tablename = 'root_filesystem_entries' \
+                   AND indexname LIKE 'idx_rfs_%' \
+                 ORDER BY indexname DESC LIMIT 1",
+                &[],
+            )
+            .await
+            .expect("at least one rfs index visible");
+        let indexdef: String = row.get("indexdef");
+        assert!(
+            indexdef.contains(prefix.as_str()),
+            "GIN FTS index DDL must include the declaring prefix as a partial-index \
+             predicate, got: {indexdef}"
+        );
+        assert!(
+            indexdef.contains("WHERE") || indexdef.to_lowercase().contains("where"),
+            "GIN FTS index DDL must be a partial index, got: {indexdef}"
+        );
+    }
+
+    #[tokio::test]
+    async fn postgres_vector_index_ranks_by_cosine_brute_force() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let prefix_path = VirtualPath::new(&prefix).unwrap();
+        let kind = RecordKind::new("chunk").unwrap();
+        let embedding_key = IndexKey::new("embedding").unwrap();
+        let spec = IndexSpec::new(
+            IndexName::new("by_vec").unwrap(),
+            vec![embedding_key.clone()],
+            IndexKind::Vector { dim: 3 },
+        );
+        fs.ensure_index(&prefix_path, &spec).await.unwrap();
+        // Re-declaration with a different dim is rejected.
+        let conflict = IndexSpec::new(
+            IndexName::new("by_vec").unwrap(),
+            vec![embedding_key.clone()],
+            IndexKind::Vector { dim: 4 },
+        );
+        let err = fs.ensure_index(&prefix_path, &conflict).await.unwrap_err();
+        assert!(matches!(err, FilesystemError::IndexConflict { .. }));
+
+        let blob = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|f| f.to_le_bytes()).collect() };
+        for (leaf, vec) in [
+            ("A", vec![1.0_f32, 0.0, 0.0]),
+            ("B", vec![0.9, 0.1, 0.0]),
+            ("C", vec![0.0, 0.0, 1.0]),
+        ] {
+            let entry = Entry::record(kind.clone(), &serde_json::json!({}))
+                .unwrap()
+                .with_indexed(embedding_key.clone(), IndexValue::Bytes(blob(&vec)));
+            fs.put(&vpath(&prefix, leaf), entry, CasExpectation::Absent)
+                .await
+                .unwrap();
+        }
+        let results = fs
+            .query(
+                &prefix_path,
+                &Filter::VectorNearest {
+                    key: embedding_key.clone(),
+                    embedding: vec![1.0, 0.0, 0.0],
+                    limit: 2,
+                },
+                Page::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 2);
+        // First result must be the identical vector (A).
+        assert_eq!(
+            results[0].entry.indexed.get(&embedding_key),
+            Some(&IndexValue::Bytes(blob(&[1.0, 0.0, 0.0])))
+        );
+    }
+
+    #[tokio::test]
     async fn postgres_write_file_after_put_resets_record_metadata_and_bumps_version() {
         let Some((fs, prefix)) = postgres_root().await else {
             return;
@@ -1048,5 +1808,75 @@ mod postgres_tests {
         assert!(got.entry.indexed.is_empty());
         assert_eq!(got.entry.body, b"opaque");
         assert!(got.version > v1);
+    }
+
+    #[tokio::test]
+    async fn postgres_append_and_tail_assigns_monotonic_seqno() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        // Per-test unique log path (under `/secrets/leases` as a known
+        // VirtualPath root) so concurrent runs against a shared DB don't
+        // see each other's events.
+        let log = VirtualPath::new(format!("{prefix}/events_log")).unwrap();
+
+        let s1 = fs.append(&log, b"a".to_vec()).await.unwrap();
+        let s2 = fs.append(&log, b"b".to_vec()).await.unwrap();
+        let s3 = fs.append(&log, b"c".to_vec()).await.unwrap();
+        assert!(s1 < s2 && s2 < s3);
+
+        // tail-from-zero returns every record in order, with correct payloads.
+        let from_zero = fs.tail(&log, SeqNo::ZERO).await.unwrap();
+        assert_eq!(from_zero.len(), 3);
+        assert_eq!(from_zero[0].payload, b"a".to_vec());
+        assert_eq!(from_zero[1].payload, b"b".to_vec());
+        assert_eq!(from_zero[2].payload, b"c".to_vec());
+        assert_eq!(from_zero[0].seq, s1);
+        assert_eq!(from_zero[2].seq, s3);
+
+        // tail-from-N skips earlier records (exclusive).
+        let from_first = fs.tail(&log, s1).await.unwrap();
+        assert_eq!(from_first.len(), 2);
+        assert_eq!(from_first[0].seq, s2);
+        assert_eq!(from_first[1].seq, s3);
+
+        // tail-from-last returns nothing.
+        assert!(fs.tail(&log, s3).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn postgres_append_distinct_paths_are_isolated_on_tail() {
+        let Some((fs, prefix)) = postgres_root().await else {
+            return;
+        };
+        let a = VirtualPath::new(format!("{prefix}/events_a")).unwrap();
+        let b = VirtualPath::new(format!("{prefix}/events_b")).unwrap();
+
+        let a1 = fs.append(&a, b"a1".to_vec()).await.unwrap();
+        let _ = fs.append(&b, b"b1".to_vec()).await.unwrap();
+        let a2 = fs.append(&a, b"a2".to_vec()).await.unwrap();
+
+        let tail_a = fs.tail(&a, SeqNo::ZERO).await.unwrap();
+        let tail_b = fs.tail(&b, SeqNo::ZERO).await.unwrap();
+
+        assert_eq!(tail_a.len(), 2);
+        assert_eq!(tail_a[0].seq, a1);
+        assert_eq!(tail_a[1].seq, a2);
+        assert_eq!(tail_a[0].payload, b"a1".to_vec());
+        assert_eq!(tail_a[1].payload, b"a2".to_vec());
+
+        assert_eq!(tail_b.len(), 1);
+        assert_eq!(tail_b[0].payload, b"b1".to_vec());
+
+        // Per-path seq is monotonic even though the BIGSERIAL is shared.
+        assert!(a1 < a2);
+    }
+
+    #[tokio::test]
+    async fn postgres_capabilities_advertise_events() {
+        let Some((fs, _prefix)) = postgres_root().await else {
+            return;
+        };
+        assert!(fs.capabilities().has(Capability::Events));
     }
 }

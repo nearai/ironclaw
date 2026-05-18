@@ -11,7 +11,7 @@ use ironclaw_events::{
     DurableAuditSink, DurableEventSink, EventStreamKey, ReadScope, RuntimeEventKind,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, HostRuntime, HostRuntimeServices, RuntimeCapabilityOutcome,
@@ -319,33 +319,33 @@ async fn jsonl_event_and_audit_replay_survive_reopen_without_raw_sentinels() {
 }
 
 type DurableProcessServices = ProcessServices<
-    FilesystemProcessStore<'static, LocalFilesystem>,
-    FilesystemProcessResultStore<'static, LocalFilesystem>,
+    FilesystemProcessStore<LocalFilesystem>,
+    FilesystemProcessResultStore<LocalFilesystem>,
 >;
 
 type DurableHostRuntimeServices = HostRuntimeServices<
     LocalFilesystem,
     InMemoryResourceGovernor,
-    FilesystemProcessStore<'static, LocalFilesystem>,
-    FilesystemProcessResultStore<'static, LocalFilesystem>,
+    FilesystemProcessStore<LocalFilesystem>,
+    FilesystemProcessResultStore<LocalFilesystem>,
 >;
 
 struct DurableServices {
     services: DurableHostRuntimeServices,
-    run_state: Arc<FilesystemRunStateStore<'static, LocalFilesystem>>,
-    approval_requests: Arc<FilesystemApprovalRequestStore<'static, LocalFilesystem>>,
-    capability_leases: Arc<FilesystemCapabilityLeaseStore<'static, LocalFilesystem>>,
+    run_state: Arc<FilesystemRunStateStore<LocalFilesystem>>,
+    approval_requests: Arc<FilesystemApprovalRequestStore<LocalFilesystem>>,
+    capability_leases: Arc<FilesystemCapabilityLeaseStore<LocalFilesystem>>,
     events: RebornEventStores,
 }
 
 async fn durable_services(engine_root: &Path, event_root: &Path) -> DurableServices {
     let event_stores = jsonl_event_stores(event_root).await;
-    let run_state_fs = leaked_engine_filesystem(engine_root);
-    let approval_fs = leaked_engine_filesystem(engine_root);
-    let lease_fs = leaked_engine_filesystem(engine_root);
-    let run_state = Arc::new(FilesystemRunStateStore::new(run_state_fs));
-    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(approval_fs));
-    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(lease_fs));
+    // All three filesystem-backed stores now take `Arc<ScopedFilesystem<F>>`
+    // (run_state migrated in commit 475588153; capability lease in 34e3c68cb).
+    let scoped_fs = scoped_engine_filesystem(engine_root);
+    let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&scoped_fs)));
+    let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(Arc::clone(&scoped_fs)));
+    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(&scoped_fs)));
     let services = base_services(
         engine_root,
         event_stores.clone(),
@@ -403,23 +403,80 @@ async fn jsonl_event_stores(event_root: &Path) -> RebornEventStores {
 }
 
 fn filesystem_process_services(engine_root: &Path) -> DurableProcessServices {
-    ProcessServices::filesystem(Arc::new(mounted_engine_filesystem(engine_root)))
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(mounted_engine_filesystem(engine_root)),
+        durable_mount_view(),
+    ));
+    ProcessServices::filesystem(scoped)
+}
+
+/// Mount view granting the migrated consumer crates full per-user-owner
+/// permissions on their canonical aliases. Test-only: production
+/// composition (`ironclaw_reborn_composition::default_singleton_mount_view`)
+/// has the equivalent shape but is `pub(crate)`.
+fn durable_mount_view() -> MountView {
+    MountView::new(vec![
+        MountGrant::new(
+            MountAlias::new("/processes").unwrap(),
+            VirtualPath::new("/processes").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/authorization").unwrap(),
+            VirtualPath::new("/authorization").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/run-state").unwrap(),
+            VirtualPath::new("/run-state").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        ),
+        MountGrant::new(
+            MountAlias::new("/approvals").unwrap(),
+            VirtualPath::new("/approvals").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        ),
+    ])
+    .unwrap()
+}
+
+/// Build a fresh [`ScopedFilesystem`] over a [`LocalFilesystem`] rooted at
+/// `engine_root`. The restart contract spawns multiple service graphs against
+/// the same on-disk root, so each call here constructs a distinct
+/// `ScopedFilesystem` over a freshly-mounted `LocalFilesystem`; identity of
+/// the wrapping struct is irrelevant — durability lives on disk, and the
+/// per-path lock map is process-global by design.
+fn scoped_engine_filesystem(engine_root: &Path) -> Arc<ScopedFilesystem<LocalFilesystem>> {
+    Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::new(mounted_engine_filesystem(engine_root)),
+        durable_mount_view(),
+    ))
 }
 
 fn mounted_engine_filesystem(engine_root: &Path) -> LocalFilesystem {
     std::fs::create_dir_all(engine_root).unwrap();
     let mut filesystem = LocalFilesystem::new();
+    // Backend mount for `/engine` plus the consumer-store virtual roots
+    // exposed via `durable_mount_view`. Each top-level root resolves to a
+    // sibling subdirectory under `engine_root` so durable-restart fixtures
+    // can reopen the same on-disk tree across service graphs.
+    for root in [
+        "/engine",
+        "/processes",
+        "/authorization",
+        "/run-state",
+        "/approvals",
+    ] {
+        let host_dir = engine_root.join(root.trim_start_matches('/'));
+        std::fs::create_dir_all(&host_dir).unwrap();
+        filesystem
+            .mount_local(
+                VirtualPath::new(root).unwrap(),
+                HostPath::from_path_buf(host_dir),
+            )
+            .unwrap();
+    }
     filesystem
-        .mount_local(
-            VirtualPath::new("/engine").unwrap(),
-            HostPath::from_path_buf(engine_root.to_path_buf()),
-        )
-        .unwrap();
-    filesystem
-}
-
-fn leaked_engine_filesystem(engine_root: &Path) -> &'static LocalFilesystem {
-    Box::leak(Box::new(mounted_engine_filesystem(engine_root)))
 }
 
 async fn block_for_approval(

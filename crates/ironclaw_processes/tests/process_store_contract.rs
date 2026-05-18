@@ -10,7 +10,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_filesystem::{
-    DirEntry, FileStat, FilesystemError, FilesystemOperation, LocalFilesystem, RootFilesystem,
+    DirEntry, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend, LocalFilesystem,
+    RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
@@ -492,7 +493,7 @@ async fn process_host_kill_does_not_cancel_other_tenant_process() {
 
 #[tokio::test]
 async fn background_process_manager_can_use_owned_filesystem_store() {
-    let filesystem = Arc::new(engine_filesystem());
+    let filesystem = engine_filesystem();
     let store = Arc::new(FilesystemProcessStore::from_arc(filesystem));
     let executor = Arc::new(CountingExecutor::success());
     let manager = BackgroundProcessManager::new(store.clone(), executor);
@@ -511,7 +512,7 @@ async fn background_process_manager_can_use_owned_filesystem_store() {
 #[tokio::test]
 async fn filesystem_process_store_rejects_terminal_status_overwrite() {
     let fs = engine_filesystem();
-    let store = FilesystemProcessStore::new(&fs);
+    let store = FilesystemProcessStore::new(Arc::clone(&fs));
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
@@ -1317,7 +1318,7 @@ async fn process_result_lookup_is_resource_scope_scoped() {
 #[tokio::test]
 async fn filesystem_process_result_store_persists_under_resource_scope() {
     let fs = engine_filesystem();
-    let store = FilesystemProcessResultStore::new(&fs);
+    let store = FilesystemProcessResultStore::new(Arc::clone(&fs));
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
@@ -1329,7 +1330,7 @@ async fn filesystem_process_result_store_persists_under_resource_scope() {
         .await
         .unwrap();
 
-    let reloaded = FilesystemProcessResultStore::new(&fs)
+    let reloaded = FilesystemProcessResultStore::new(Arc::clone(&fs))
         .get(&scope, process_id)
         .await
         .unwrap()
@@ -1338,45 +1339,38 @@ async fn filesystem_process_result_store_persists_under_resource_scope() {
     assert_eq!(reloaded.output, None);
     assert_eq!(
         reloaded.output_ref,
-        Some(
-            VirtualPath::new(format!(
-                "{}/process-outputs/{}/output.json",
-                stored_process_owner_root(&scope),
-                process_id
-            ))
-            .unwrap()
-        )
+        Some(stored_process_output_path(&scope, process_id)),
     );
     assert_eq!(
-        FilesystemProcessResultStore::new(&fs)
+        FilesystemProcessResultStore::new(Arc::clone(&fs))
             .output(&scope, process_id)
             .await
             .unwrap(),
         Some(serde_json::json!({"ok": true}))
     );
     assert!(
-        FilesystemProcessResultStore::new(&fs)
+        FilesystemProcessResultStore::new(Arc::clone(&fs))
             .get(&other_scope, process_id)
             .await
             .unwrap()
             .is_none()
     );
     assert!(
-        FilesystemProcessResultStore::new(&fs)
+        FilesystemProcessResultStore::new(Arc::clone(&fs))
             .output(&other_scope, process_id)
             .await
             .unwrap()
             .is_none()
     );
     assert!(
-        FilesystemProcessResultStore::new(&fs)
+        FilesystemProcessResultStore::new(Arc::clone(&fs))
             .get(&other_project, process_id)
             .await
             .unwrap()
             .is_none()
     );
     assert!(
-        FilesystemProcessResultStore::new(&fs)
+        FilesystemProcessResultStore::new(Arc::clone(&fs))
             .output(&other_project, process_id)
             .await
             .unwrap()
@@ -1386,7 +1380,7 @@ async fn filesystem_process_result_store_persists_under_resource_scope() {
 
 #[tokio::test]
 async fn background_process_manager_stores_filesystem_output_ref() {
-    let fs = Arc::new(engine_filesystem());
+    let fs = engine_filesystem();
     let store = Arc::new(InMemoryProcessStore::new());
     let result_store = Arc::new(FilesystemProcessResultStore::from_arc(fs));
     let manager =
@@ -1416,8 +1410,11 @@ async fn background_process_manager_stores_filesystem_output_ref() {
 
 #[tokio::test]
 async fn filesystem_process_store_propagates_backend_errors_that_mention_not_found() {
-    let fs = BackendErrorFilesystem;
-    let store = FilesystemProcessStore::new(&fs);
+    let fs = scoped_processes_filesystem(
+        Arc::new(BackendErrorFilesystem),
+        &default_mount_target_string(),
+    );
+    let store = FilesystemProcessStore::new(fs);
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
@@ -1433,7 +1430,7 @@ async fn filesystem_process_store_propagates_backend_errors_that_mention_not_fou
 #[tokio::test]
 async fn filesystem_process_store_rejects_record_id_mismatches() {
     let fs = engine_filesystem();
-    let store = FilesystemProcessStore::new(&fs);
+    let store = FilesystemProcessStore::new(Arc::clone(&fs));
     let invocation_id = InvocationId::new();
     let requested_process_id = ProcessId::new();
     let stored_process_id = ProcessId::new();
@@ -1441,9 +1438,14 @@ async fn filesystem_process_store_rejects_record_id_mismatches() {
     let mut forged = process_record(stored_process_id, invocation_id, scope.clone());
     forged.status = ProcessStatus::Completed;
 
-    fs.write_file(
-        &stored_process_record_path(&scope, requested_process_id),
-        &serde_json::to_vec_pretty(&forged).unwrap(),
+    // Inject a forged record at the alias-relative ScopedPath for
+    // `requested_process_id`. Going through the scoped filesystem (vs.
+    // a raw `write_file`) keeps the test honest about the actual on-disk
+    // surface the store will read from.
+    fs.write_bytes(
+        &scope,
+        &scoped_record_path(&scope, requested_process_id),
+        serde_json::to_vec_pretty(&forged).unwrap(),
     )
     .await
     .unwrap();
@@ -1456,7 +1458,7 @@ async fn filesystem_process_store_rejects_record_id_mismatches() {
 #[tokio::test]
 async fn filesystem_process_result_store_rejects_unexpected_output_refs() {
     let fs = engine_filesystem();
-    let store = FilesystemProcessResultStore::new(&fs);
+    let store = FilesystemProcessResultStore::new(Arc::clone(&fs));
     let owner_invocation_id = InvocationId::new();
     let owner_process_id = ProcessId::new();
     let owner_scope = sample_scope(owner_invocation_id, "tenant1", "user1");
@@ -1472,6 +1474,9 @@ async fn filesystem_process_result_store_rejects_unexpected_output_refs() {
         )
         .await
         .unwrap();
+    // Forged record whose `output_ref` points at a *different* on-disk
+    // location than the owner's expected output path. The store must
+    // reject the read instead of dereferencing the forged ref.
     let forged = ProcessResultRecord {
         process_id: owner_process_id,
         scope: owner_scope.clone(),
@@ -1480,9 +1485,10 @@ async fn filesystem_process_result_store_rejects_unexpected_output_refs() {
         output_ref: Some(stored_process_output_path(&other_scope, other_process_id)),
         error_kind: None,
     };
-    fs.write_file(
-        &stored_process_result_path(&owner_scope, owner_process_id),
-        &serde_json::to_vec_pretty(&forged).unwrap(),
+    fs.write_bytes(
+        &owner_scope,
+        &scoped_result_path(&owner_scope, owner_process_id),
+        serde_json::to_vec_pretty(&forged).unwrap(),
     )
     .await
     .unwrap();
@@ -1498,7 +1504,7 @@ async fn filesystem_process_result_store_rejects_unexpected_output_refs() {
 #[tokio::test]
 async fn filesystem_process_store_persists_under_resource_scope_engine_processes() {
     let fs = engine_filesystem();
-    let store = FilesystemProcessStore::new(&fs);
+    let store = FilesystemProcessStore::new(Arc::clone(&fs));
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
     let scope = sample_scope(invocation_id, "tenant1", "user1");
@@ -1509,19 +1515,219 @@ async fn filesystem_process_store_persists_under_resource_scope_engine_processes
         .unwrap();
     store.complete(&scope, process_id).await.unwrap();
 
-    let reloaded = FilesystemProcessStore::new(&fs)
+    let reloaded = FilesystemProcessStore::new(Arc::clone(&fs))
         .get(&scope, process_id)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(reloaded.status, ProcessStatus::Completed);
     assert_eq!(
-        FilesystemProcessStore::new(&fs)
+        FilesystemProcessStore::new(Arc::clone(&fs))
             .records_for_scope(&scope)
             .await
             .unwrap()
             .len(),
         1
+    );
+}
+
+#[tokio::test]
+async fn filesystem_process_store_records_for_scope_uses_index_on_record_backend() {
+    // Drive `records_for_scope` against the in-memory backend (which
+    // supports `query` over indexed projections) so the indexed path
+    // exercised by SQL backends is covered. With the ScopedFilesystem
+    // refactor, tenant/user isolation lives in the MountView (not the
+    // path), so this test focuses on the *within-tenant* sub-scope
+    // discrimination that does still live in the path: separate
+    // `project_id` cells must not bleed into each other through the
+    // indexed query path, even though they share one `/processes` mount.
+    let backend = Arc::new(InMemoryBackend::new());
+    let fs = scoped_processes_filesystem(Arc::clone(&backend), &default_mount_target_string());
+    let store = FilesystemProcessStore::from_arc(fs);
+    let invocation_id = InvocationId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+    let other_project_scope =
+        sample_scope_with_project(invocation_id, "tenant1", "user1", "project2");
+
+    let mine_a = ProcessId::new();
+    let mine_b = ProcessId::new();
+    let other_project = ProcessId::new();
+    store
+        .start(process_start(mine_a, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+    store
+        .start(process_start(mine_b, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+    store
+        .start(process_start(
+            other_project,
+            invocation_id,
+            other_project_scope.clone(),
+        ))
+        .await
+        .unwrap();
+
+    let mine = store.records_for_scope(&scope).await.unwrap();
+    let mut got: Vec<ProcessId> = mine.iter().map(|record| record.process_id).collect();
+    got.sort_by_key(|id| id.as_uuid());
+    let mut expected = vec![mine_a, mine_b];
+    expected.sort_by_key(|id| id.as_uuid());
+    assert_eq!(got, expected);
+
+    let theirs = store.records_for_scope(&other_project_scope).await.unwrap();
+    assert_eq!(theirs.len(), 1);
+    assert_eq!(theirs[0].process_id, other_project);
+}
+
+/// Regression test for the tenant-isolation invariant: two
+/// `FilesystemProcessStore`s sharing one backend but constructed with
+/// different `MountView`s (i.e. different tenant/user mount targets)
+/// must not see each other's records, even though their request scopes
+/// share `user_id` / `project_id` / `agent_id` and the alias-relative
+/// path is identical.
+///
+/// Before the migration to `Arc<ScopedFilesystem<F>>`, the store
+/// hand-formatted `tenant_id`/`user_id` into the path string — so any
+/// composition layer that forgot to do that (or did it differently in
+/// one place) would silently share storage across tenants. With the
+/// ScopedFilesystem refactor, the MountView resolves the leading
+/// segment, and the type system makes it impossible for the store to
+/// reach across mounts.
+#[tokio::test]
+async fn filesystem_process_store_isolates_two_tenants_with_same_user_project_ids() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let store_a = FilesystemProcessStore::from_arc(scoped_processes_filesystem(
+        Arc::clone(&backend),
+        "/engine/tenants/a/users/alice/processes",
+    ));
+    let store_b = FilesystemProcessStore::from_arc(scoped_processes_filesystem(
+        Arc::clone(&backend),
+        "/engine/tenants/b/users/alice/processes",
+    ));
+
+    // Identical scope across both stores — the only thing separating them
+    // is the mount-time tenant prefix on each store's MountView.
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant-a", "alice");
+    store_a
+        .start(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    // Tenant A sees its own record.
+    assert!(
+        store_a
+            .get(&scope, process_id)
+            .await
+            .expect("store_a get succeeds")
+            .is_some(),
+        "tenant A must see the record it just wrote",
+    );
+
+    // Tenant B does NOT see tenant A's record, despite the identical
+    // request scope and process id.
+    assert!(
+        store_b
+            .get(&scope, process_id)
+            .await
+            .expect("store_b get succeeds")
+            .is_none(),
+        "tenant B must NOT see tenant A's record (cross-tenant leak)",
+    );
+
+    // Tenant B's records_for_scope must be empty under the shared
+    // request scope.
+    let b_records = store_b
+        .records_for_scope(&scope)
+        .await
+        .expect("store_b records_for_scope succeeds");
+    assert!(
+        b_records.is_empty(),
+        "tenant B records_for_scope must be empty under shared scope; got {} records",
+        b_records.len(),
+    );
+}
+
+/// Defense-in-depth regression for the tenant-isolation indexed
+/// projection (see
+/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md` —
+/// "What this gives us": `tenant_id` is projected alongside every
+/// `Entry::record`/`Entry::bytes` write so an admin-tier query can
+/// filter by tenant, and a path-rewriting bug surfaces as a
+/// query-time mismatch rather than silent cross-tenant leakage).
+///
+/// Writes a process record under tenant A's scope, then issues a raw
+/// `RootFilesystem::query` against the deliveries-equivalent records
+/// root with `Filter::Eq { key: "tenant_id", value: <tenant-a> }` —
+/// the record must be returned. A query for tenant B's id must
+/// return zero rows over the same backend prefix.
+#[tokio::test]
+async fn filesystem_process_store_writes_tenant_id_indexed_projection() {
+    use ironclaw_filesystem::{Filter, IndexKey, IndexValue, Page};
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let fs = scoped_processes_filesystem(
+        Arc::clone(&backend),
+        "/engine/tenants/tenant-a/users/alice/processes",
+    );
+    let store = FilesystemProcessStore::from_arc(Arc::clone(&fs));
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant-a", "alice");
+    store
+        .start(process_start(process_id, invocation_id, scope.clone()))
+        .await
+        .unwrap();
+
+    // Resolve the alias-relative records prefix to the backing
+    // [`VirtualPath`] through the same MountView the store uses, so the
+    // raw `RootFilesystem::query` below targets exactly the bytes the
+    // backend stored. The records root mirrors the in-store path
+    // builder (`/processes[/projects/<id>]/records`) — the sample scope
+    // carries `project_id = project1` but no agent/mission/thread.
+    let records_root = ironclaw_host_api::ScopedPath::new(format!(
+        "/processes/projects/{}/records",
+        scope.project_id.as_ref().unwrap().as_str()
+    ))
+    .unwrap();
+    let virtual_root = fs.resolve(&scope, &records_root).unwrap();
+
+    let tenant_key = IndexKey::new("tenant_id").unwrap();
+    let hit = backend
+        .query(
+            &virtual_root,
+            &Filter::Eq {
+                key: tenant_key.clone(),
+                value: IndexValue::Text(scope.tenant_id.as_str().to_string()),
+            },
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        hit.len(),
+        1,
+        "tenant_id projection must surface the record via Filter::Eq",
+    );
+
+    let miss = backend
+        .query(
+            &virtual_root,
+            &Filter::Eq {
+                key: tenant_key,
+                value: IndexValue::Text("tenant-b".to_string()),
+            },
+            Page::new(0, Page::MAX_LIMIT),
+        )
+        .await
+        .unwrap();
+    assert!(
+        miss.is_empty(),
+        "tenant_id projection must NOT surface tenant-a's record under tenant-b query; got {} rows",
+        miss.len(),
     );
 }
 
@@ -1872,6 +2078,19 @@ impl RootFilesystem for BackendErrorFilesystem {
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
         Err(backend_error(path, FilesystemOperation::Stat))
+    }
+
+    // After the PR #3666 fix that breaks the put/write_file recursion, the
+    // trait's default `get` is `Unsupported`. A test backend that wants to
+    // fault-inject through the unified read path has to override `get`
+    // explicitly — same shape that `LocalFilesystem` adopts in its native
+    // impl. Mirroring the same fault here keeps the consumer test
+    // exercising the "backend error mentions not_found" propagation.
+    async fn get(
+        &self,
+        path: &VirtualPath,
+    ) -> Result<Option<ironclaw_filesystem::VersionedEntry>, FilesystemError> {
+        Err(backend_error(path, FilesystemOperation::ReadFile))
     }
 }
 
@@ -2285,36 +2504,44 @@ fn process_estimate() -> ResourceEstimate {
     }
 }
 
-fn stored_process_record_path(scope: &ResourceScope, process_id: ProcessId) -> VirtualPath {
-    VirtualPath::new(format!(
-        "{}/processes/{process_id}.json",
-        stored_process_owner_root(scope)
-    ))
-    .unwrap()
-}
+// ── Test path layout ───────────────────────────────────────────
+//
+// After the FilesystemProcessStore refactor onto `ScopedFilesystem`, the
+// on-disk path layout is alias-relative: `/processes/...` is the alias
+// and the caller's `MountView` resolves the leading segment to a
+// tenant/user-scoped target. The test fixtures below construct a
+// canonical MountView pointing the `/processes` alias at
+// `/engine/tenants/<tenant>/users/<user>/processes` so existing tests
+// that drive the store across multiple scope objects (different
+// `tenant_id`/`user_id`) still exercise the post-read
+// `same_scope_owner` check — even though the on-disk record lives at
+// the *mount's* tenant/user, not the request scope's.
 
-fn stored_process_result_path(scope: &ResourceScope, process_id: ProcessId) -> VirtualPath {
-    VirtualPath::new(format!(
-        "{}/process-results/{process_id}.json",
-        stored_process_owner_root(scope)
-    ))
-    .unwrap()
+/// Canonical `/processes` mount target for the default test scope
+/// (`tenant1` / `user1`). Tests that drive cross-tenant filtering via
+/// the in-record `scope` field rely on this default — see
+/// [`engine_filesystem`].
+const DEFAULT_TEST_MOUNT_TENANT: &str = "tenant1";
+const DEFAULT_TEST_MOUNT_USER: &str = "user1";
+
+fn default_mount_target_string() -> String {
+    format!("/engine/tenants/{DEFAULT_TEST_MOUNT_TENANT}/users/{DEFAULT_TEST_MOUNT_USER}/processes")
 }
 
 fn stored_process_output_path(scope: &ResourceScope, process_id: ProcessId) -> VirtualPath {
     VirtualPath::new(format!(
-        "{}/process-outputs/{process_id}/output.json",
+        "{}/outputs/{process_id}/output.json",
         stored_process_owner_root(scope)
     ))
     .unwrap()
 }
 
+/// Resolved on-disk root for the default test mount. Tenant/user come
+/// from the *mount* (always `tenant1`/`user1` in this fixture); the
+/// scope's sub-axes (agent/project/mission/thread) come from the
+/// request scope.
 fn stored_process_owner_root(scope: &ResourceScope) -> String {
-    let mut base = format!(
-        "/engine/tenants/{}/users/{}",
-        scope.tenant_id.as_str(),
-        scope.user_id.as_str()
-    );
+    let mut base = default_mount_target_string();
     if let Some(agent_id) = &scope.agent_id {
         base = format!("{base}/agents/{}", agent_id.as_str());
     }
@@ -2330,7 +2557,12 @@ fn stored_process_owner_root(scope: &ResourceScope) -> String {
     base
 }
 
-fn engine_filesystem() -> LocalFilesystem {
+/// Build a `Arc<ScopedFilesystem<LocalFilesystem>>` over a fresh tempdir
+/// mounted at `/engine`, with the `/processes` alias resolving to the
+/// default tenant1/user1 target. Tests that need a different mount
+/// target (e.g. cross-tenant isolation tests) construct a
+/// `ScopedFilesystem` directly with their own `MountView`.
+fn engine_filesystem() -> Arc<ScopedFilesystem<LocalFilesystem>> {
     let storage = tempfile::tempdir().unwrap().keep();
     let mut fs = LocalFilesystem::new();
     fs.mount_local(
@@ -2338,7 +2570,72 @@ fn engine_filesystem() -> LocalFilesystem {
         HostPath::from_path_buf(storage),
     )
     .unwrap();
-    fs
+    let backend = Arc::new(fs);
+    scoped_processes_filesystem(backend, &default_mount_target_string())
+}
+
+/// Wrap a raw `RootFilesystem` backend in a `ScopedFilesystem` granting
+/// full read/write/list/delete on the `/processes` alias mapped to
+/// `target_root`. Used both by the default fixture above and by the
+/// cross-tenant isolation regression tests below that need to wire two
+/// different mount targets over one shared backend.
+fn scoped_processes_filesystem<F>(backend: Arc<F>, target_root: &str) -> Arc<ScopedFilesystem<F>>
+where
+    F: RootFilesystem,
+{
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/processes").expect("alias"),
+        VirtualPath::new(target_root).expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
+}
+
+/// Alias-relative [`ScopedPath`] for a lifecycle record. Used by tests
+/// that inject a forged record body via the scoped filesystem so the
+/// production code path is still exercised on the read side.
+fn scoped_record_path(scope: &ResourceScope, process_id: ProcessId) -> ScopedPath {
+    ScopedPath::new(format!(
+        "{}/records/{process_id}.json",
+        alias_relative_owner_root(scope)
+    ))
+    .expect("scoped record path")
+}
+
+/// Alias-relative [`ScopedPath`] for a result record (sibling helper of
+/// [`scoped_record_path`]).
+fn scoped_result_path(scope: &ResourceScope, process_id: ProcessId) -> ScopedPath {
+    ScopedPath::new(format!(
+        "{}/results/{process_id}.json",
+        alias_relative_owner_root(scope)
+    ))
+    .expect("scoped result path")
+}
+
+/// Build the alias-relative `/processes/...` owner prefix for a request
+/// scope. Mirrors the production `scope_owner_root_string` in
+/// `filesystem_store.rs` but lives in test code so a drift between
+/// production and fixture path layouts shows up as a test failure.
+fn alias_relative_owner_root(scope: &ResourceScope) -> String {
+    let mut base = String::from("/processes");
+    if let Some(agent_id) = &scope.agent_id {
+        base.push_str("/agents/");
+        base.push_str(agent_id.as_str());
+    }
+    if let Some(project_id) = &scope.project_id {
+        base.push_str("/projects/");
+        base.push_str(project_id.as_str());
+    }
+    if let Some(mission_id) = &scope.mission_id {
+        base.push_str("/missions/");
+        base.push_str(mission_id.as_str());
+    }
+    if let Some(thread_id) = &scope.thread_id {
+        base.push_str("/threads/");
+        base.push_str(thread_id.as_str());
+    }
+    base
 }
 
 fn sample_scope_with_agent(

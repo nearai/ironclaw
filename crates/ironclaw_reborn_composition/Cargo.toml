@@ -24,29 +24,24 @@ root-llm-provider = [
 ]
 libsql = [
     "dep:libsql",
-    "ironclaw_authorization/libsql",
     "ironclaw_filesystem/libsql",
     "ironclaw_host_runtime/libsql",
     "ironclaw_reborn_event_store/libsql",
     "ironclaw_resources/libsql",
     "ironclaw_run_state/libsql",
-    "ironclaw_secrets/libsql",
-    "ironclaw_turns/libsql",
 ]
 postgres = [
     "dep:deadpool-postgres",
-    "ironclaw_authorization/postgres",
     "ironclaw_filesystem/postgres",
     "ironclaw_host_runtime/postgres",
     "ironclaw_reborn_event_store/postgres",
     "ironclaw_resources/postgres",
     "ironclaw_run_state/postgres",
-    "ironclaw_secrets/postgres",
-    "ironclaw_turns/postgres",
 ]
 
 [dependencies]
 async-trait = "0.1"
+chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
@@ -67,7 +62,6 @@ ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
-chrono = "0.4"
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -78,6 +72,7 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+ironclaw_threads = { path = "../ironclaw_threads" }
 tempfile = "3"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 tokio = { version = "1", features = ["macros", "rt", "time"] }

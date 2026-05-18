@@ -47,8 +47,8 @@ use ironclaw_turns::{
         LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort, LoopPromptBundle,
         LoopPromptBundleAuthority, LoopPromptBundleRequest, LoopPromptPort, LoopRunContext,
         LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, NoOpBudgetAccountant,
-        NoOpPolicyGuard, StageCheckpointPayloadRequest, UpdateAssistantDraft,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        NoOpPolicyGuard, ProviderToolCall, ProviderToolDefinition, StageCheckpointPayloadRequest,
+        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
     runner::ClaimedTurnRun,
 };
@@ -154,6 +154,24 @@ impl SurfaceTrackingLoopCapabilityPort {
 
 #[async_trait]
 impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
+    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        self.inner.tool_definitions()
+    }
+
+    fn validate_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        self.inner.validate_provider_tool_call(tool_call)
+    }
+
+    async fn register_provider_tool_call(
+        &self,
+        tool_call: ProviderToolCall,
+    ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
+        self.inner.register_provider_tool_call(tool_call).await
+    }
+
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,
@@ -411,6 +429,7 @@ where
                 instruction_materialization_store: Some(Arc::clone(
                     &instruction_materialization_store,
                 )),
+                capabilities: Some(Arc::clone(&capabilities)),
                 prompt_authority,
             },
         ));
@@ -525,6 +544,7 @@ where
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
+    capabilities: Option<Arc<dyn LoopCapabilityPort>>,
     prompt_authority: LoopPromptBundleAuthority,
 }
 
@@ -540,6 +560,7 @@ where
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
+    capabilities: Option<Arc<dyn LoopCapabilityPort>>,
     prompt_authority: LoopPromptBundleAuthority,
 }
 
@@ -557,6 +578,7 @@ where
             skill_context_source: config.skill_context_source,
             identity_context_source: config.identity_context_source,
             instruction_materialization_store: config.instruction_materialization_store,
+            capabilities: config.capabilities,
             prompt_authority: config.prompt_authority,
         }
     }
@@ -588,6 +610,9 @@ where
         }
         if let Some(store) = self.instruction_materialization_store.as_ref() {
             model_port = model_port.with_instruction_materialization_store(Arc::clone(store));
+        }
+        if let Some(capabilities) = self.capabilities.as_ref() {
+            model_port = model_port.with_capability_port(Arc::clone(capabilities));
         }
         model_port
             .stream_model(request.request)
@@ -696,6 +721,26 @@ impl LoopModelPort for RebornLoopDriverHost {
 
 #[async_trait]
 impl LoopCapabilityPort for RebornLoopDriverHost {
+    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        self.capabilities.tool_definitions()
+    }
+
+    fn validate_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        self.capabilities.validate_provider_tool_call(tool_call)
+    }
+
+    async fn register_provider_tool_call(
+        &self,
+        tool_call: ProviderToolCall,
+    ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
+        self.capabilities
+            .register_provider_tool_call(tool_call)
+            .await
+    }
+
     async fn visible_capabilities(
         &self,
         request: VisibleCapabilityRequest,

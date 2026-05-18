@@ -178,6 +178,8 @@ pub(crate) fn capability_lease_error_kind(error: &CapabilityLeaseError) -> &'sta
         CapabilityLeaseError::FingerprintMismatch { .. } => "FingerprintMismatch",
         CapabilityLeaseError::InactiveLease { .. } => "InactiveLease",
         CapabilityLeaseError::Persistence { .. } => "Persistence",
+        CapabilityLeaseError::VersionMismatch => "VersionMismatch",
+        CapabilityLeaseError::CasExhausted => "CasExhausted",
     }
 }
 

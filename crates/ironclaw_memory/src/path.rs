@@ -325,6 +325,27 @@ pub(crate) fn validated_memory_relative_path(value: String) -> Result<String, Ho
                 .to_string(),
         });
     }
+    // PR #3679 review fix (finding #5): the repository writes metadata for
+    // document `foo` at `foo.meta`, chunks under `foo.chunks/<n>.json`, and
+    // version archives under `foo.versions/<n>.json`. Without this check a
+    // legal user document literally named `foo.meta` (or any segment
+    // ending in `.chunks` / `.versions`) would share the backend path with
+    // those sidecars, so writing metadata for `foo` would overwrite the
+    // document `foo.meta` with JSON bytes. Reject the reserved suffixes at
+    // path validation so the sidecar/document namespaces stay disjoint.
+    for segment in value.split('/') {
+        if segment.ends_with(".meta")
+            || segment.ends_with(".chunks")
+            || segment.ends_with(".versions")
+        {
+            return Err(HostApiError::InvalidPath {
+                value,
+                reason:
+                    "memory document path segments must not end with `.meta`, `.chunks`, or `.versions` (reserved for sidecars)"
+                        .to_string(),
+            });
+        }
+    }
     Ok(value)
 }
 
@@ -401,4 +422,44 @@ pub(crate) fn valid_memory_path() -> VirtualPath {
     MEMORY_PATH
         .get_or_init(|| VirtualPath::new("/memory").expect("/memory is a registered VIRTUAL_ROOT")) // safety: `/memory` is a registered VIRTUAL_ROOT.
         .clone()
+}
+
+#[cfg(test)]
+mod path_validation_tests {
+    use super::validated_memory_relative_path;
+
+    /// PR #3679 review fix (finding #5): legal user document paths must
+    /// not collide with the repository's sidecar suffix namespace.
+    #[test]
+    fn rejects_path_segments_ending_in_reserved_sidecar_suffixes() {
+        for reserved in [
+            "foo.meta",
+            "subdir/foo.meta",
+            "data.chunks",
+            "data.chunks/inner",
+            "history.versions",
+            "history.versions/2",
+        ] {
+            let err = validated_memory_relative_path(reserved.to_string()).expect_err(reserved);
+            let msg = format!("{err}");
+            assert!(
+                msg.contains(".meta") || msg.contains(".chunks") || msg.contains(".versions"),
+                "expected reserved-suffix rejection in error: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_non_reserved_paths_with_dots_in_names() {
+        for ok in [
+            "foo.md",
+            "subdir/foo.txt",
+            "metadata-foo",
+            "chunks-of-bread",
+            "version-1.txt",
+        ] {
+            validated_memory_relative_path(ok.to_string())
+                .expect("non-reserved path must be accepted");
+        }
+    }
 }

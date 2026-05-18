@@ -59,6 +59,7 @@ impl ContextStrategy for DefaultContextStrategy {
             checkpoint_state_ref: None,
             max_messages: Some(self.max_messages.max(1)),
             inline_messages: Vec::new(),
+            capability_view: None,
         }
     }
 }

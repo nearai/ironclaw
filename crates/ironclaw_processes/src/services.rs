@@ -17,7 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::FutureExt;
 use ironclaw_events::sanitize_error_kind;
-use ironclaw_filesystem::RootFilesystem;
+use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ProcessId, ResourceReservation, ResourceScope};
 
 use crate::cancellation::ProcessCancellationRegistry;
@@ -147,12 +147,11 @@ impl ProcessServices<InMemoryProcessStore, InMemoryProcessResultStore> {
     }
 }
 
-impl<F>
-    ProcessServices<FilesystemProcessStore<'static, F>, FilesystemProcessResultStore<'static, F>>
+impl<F> ProcessServices<FilesystemProcessStore<F>, FilesystemProcessResultStore<F>>
 where
     F: RootFilesystem + 'static,
 {
-    pub fn filesystem(filesystem: Arc<F>) -> Self {
+    pub fn filesystem(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self::new(
             Arc::new(FilesystemProcessStore::from_arc(Arc::clone(&filesystem))),
             Arc::new(FilesystemProcessResultStore::from_arc(filesystem)),
