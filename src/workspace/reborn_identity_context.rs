@@ -6,7 +6,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_loop_support::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
-    HostIdentityMessageContent, IdentityApplicability, IdentityFileName, identity_message_ref,
+    HostIdentityMessageContent, IdentityApplicability, IdentityFileName,
+    identity_applicability_allowed_for_run, identity_message_ref,
 };
 use ironclaw_memory::DEFAULT_PROMPT_PROTECTED_PATHS;
 use ironclaw_turns::{
@@ -31,7 +32,13 @@ const PERSONAL_IDENTITY_PATHS: &[&str] = &[paths::USER, paths::ASSISTANT_DIRECTI
 #[derive(Clone)]
 pub struct WorkspaceIdentityContextSource {
     workspace: Arc<Workspace>,
-    loaded_identity_content: Arc<RwLock<HashMap<LoopMessageRef, HostIdentityMessageContent>>>,
+    loaded_identity_content: Arc<RwLock<HashMap<LoopMessageRef, CachedIdentityMessageContent>>>,
+}
+
+#[derive(Clone)]
+struct CachedIdentityMessageContent {
+    content: HostIdentityMessageContent,
+    applies_when: IdentityApplicability,
 }
 
 impl WorkspaceIdentityContextSource {
@@ -90,9 +97,12 @@ impl WorkspaceIdentityContextSource {
             .map_err(|_| HostIdentityContextBuildError::Internal)?
             .insert(
                 message_ref.clone(),
-                HostIdentityMessageContent {
-                    name: name.clone(),
-                    content,
+                CachedIdentityMessageContent {
+                    content: HostIdentityMessageContent {
+                        name: name.clone(),
+                        content,
+                    },
+                    applies_when,
                 },
             );
         Ok(Some(HostIdentityContextCandidate::new_trusted(
@@ -139,13 +149,22 @@ impl HostIdentityContextSource for WorkspaceIdentityContextSource {
 
     async fn resolve_identity_message_content(
         &self,
-        _run_context: &LoopRunContext,
+        run_context: &LoopRunContext,
         message_ref: &LoopMessageRef,
     ) -> Result<Option<HostIdentityMessageContent>, HostIdentityContextBuildError> {
-        self.loaded_identity_content
+        let cached = self
+            .loaded_identity_content
             .read()
-            .map_err(|_| HostIdentityContextBuildError::Internal)
-            .map(|loaded| loaded.get(message_ref).cloned())
+            .map_err(|_| HostIdentityContextBuildError::Internal)?
+            .get(message_ref)
+            .cloned();
+        let Some(cached) = cached else {
+            return Ok(None);
+        };
+        if !identity_applicability_allowed_for_run(cached.applies_when, run_context) {
+            return Err(HostIdentityContextBuildError::PolicyDenied);
+        }
+        Ok(Some(cached.content))
     }
 }
 
@@ -297,6 +316,45 @@ mod tests {
             candidates.iter().all(|candidate| candidate.applies_when
                 == IdentityApplicability::OnPersonalContextAllowed)
         );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn workspace_identity_context_denies_cached_personal_ref_when_policy_excludes() {
+        let test_db = test_db().await;
+        let workspace = Arc::new(Workspace::new_with_db("primary", test_db.db.clone()));
+        workspace
+            .write(paths::USER, "private user profile")
+            .await
+            .unwrap();
+
+        let source = WorkspaceIdentityContextSource::new(workspace);
+        let mut allowed_context = run_context().await;
+        allowed_context.resolved_run_profile.personal_context_policy =
+            PersonalContextPolicy::Allowed;
+        let candidates = source
+            .load_identity_candidates(&allowed_context, PromptMode::TextOnly)
+            .await
+            .unwrap();
+        let user_ref = candidates
+            .iter()
+            .find(|candidate| candidate.name.as_str() == paths::USER)
+            .and_then(|candidate| candidate.message_ref.clone())
+            .expect("user identity ref loaded");
+
+        let allowed_content = source
+            .resolve_identity_message_content(&allowed_context, &user_ref)
+            .await
+            .unwrap()
+            .expect("allowed personal identity content");
+        assert!(allowed_content.content.contains("private user profile"));
+
+        let excluded_context = run_context().await;
+        let error = source
+            .resolve_identity_message_content(&excluded_context, &user_ref)
+            .await
+            .unwrap_err();
+        assert_eq!(error, HostIdentityContextBuildError::PolicyDenied);
     }
 
     #[cfg(feature = "libsql")]

@@ -157,6 +157,8 @@ pub enum HostIdentityContextBuildError {
     UnknownIdentityFile,
     #[error("identity context path is invalid")]
     InvalidIdentityFile,
+    #[error("identity context denied by run policy")]
+    PolicyDenied,
     /// Reserved for a future hard-limit mode. Currently, `build_identity_messages_for_run`
     /// truncates silently on budget overflow rather than returning this error.
     #[error("identity context budget exceeded")]
@@ -171,7 +173,7 @@ impl HostIdentityContextBuildError {
     pub fn into_host_error(self) -> AgentLoopHostError {
         let kind = match self {
             Self::SourceUnavailable => AgentLoopHostErrorKind::Unavailable,
-            Self::UnknownIdentityFile | Self::InvalidIdentityFile => {
+            Self::UnknownIdentityFile | Self::InvalidIdentityFile | Self::PolicyDenied => {
                 AgentLoopHostErrorKind::PolicyDenied
             }
             Self::ContextBudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
@@ -194,11 +196,11 @@ pub async fn build_identity_messages(
     build_identity_messages_for_run(&candidates, run_context, mode, budget)
 }
 
-fn identity_candidate_allowed_for_run(
-    candidate: &HostIdentityContextCandidate,
+pub fn identity_applicability_allowed_for_run(
+    applicability: IdentityApplicability,
     run_context: &LoopRunContext,
 ) -> bool {
-    match candidate.applies_when {
+    match applicability {
         IdentityApplicability::Always | IdentityApplicability::OnCodeAct => true,
         IdentityApplicability::OnPersonalContextAllowed => {
             match run_context.resolved_run_profile.personal_context_policy {
@@ -218,7 +220,7 @@ pub fn build_identity_messages_for_run(
     let mut out = Vec::with_capacity(candidates.len());
     let mut used = 0u32;
     for candidate in candidates {
-        if !identity_candidate_allowed_for_run(candidate, run_context) {
+        if !identity_applicability_allowed_for_run(candidate.applies_when, run_context) {
             continue;
         }
         if !applies(candidate.applies_when, mode) {

@@ -884,6 +884,38 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
 }
 
 #[tokio::test]
+async fn model_port_rejects_policy_denied_identity_ref_before_gateway_call() {
+    let fixture = ThreadFixture::new().await;
+    let name = IdentityFileName::new("USER.md").unwrap();
+    let messages = vec![LoopModelMessage {
+        role: "system".to_string(),
+        content_ref: identity_message_ref(&name, "private user profile").unwrap(),
+    }];
+    issue_prompt_grant(&fixture.run_context, &messages);
+    let gateway = Arc::new(RecordingGateway::reply("should not be called"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_identity_context_source(Arc::new(PolicyDeniedIdentityContextSource));
+
+    let error = model_port
+        .stream_model(LoopModelRequest {
+            messages,
+            surface_version: None,
+            model_preference: None,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert!(gateway.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn prompt_port_records_installed_skill_trust_metadata_without_prompt_payload() {
     let fixture = ThreadFixture::new().await;
     let source = Arc::new(StaticSkillContextSource::new(vec![
@@ -2442,6 +2474,27 @@ impl HostIdentityContextSource for StaticIdentityContextSource {
         message_ref: &LoopMessageRef,
     ) -> Result<Option<HostIdentityMessageContent>, HostIdentityContextBuildError> {
         Ok(self.content_by_ref.get(message_ref.as_str()).cloned())
+    }
+}
+
+struct PolicyDeniedIdentityContextSource;
+
+#[async_trait]
+impl HostIdentityContextSource for PolicyDeniedIdentityContextSource {
+    async fn load_identity_candidates(
+        &self,
+        _run_context: &LoopRunContext,
+        _mode: PromptMode,
+    ) -> Result<Vec<HostIdentityContextCandidate>, HostIdentityContextBuildError> {
+        Ok(Vec::new())
+    }
+
+    async fn resolve_identity_message_content(
+        &self,
+        _run_context: &LoopRunContext,
+        _message_ref: &LoopMessageRef,
+    ) -> Result<Option<HostIdentityMessageContent>, HostIdentityContextBuildError> {
+        Err(HostIdentityContextBuildError::PolicyDenied)
     }
 }
 

@@ -39,7 +39,8 @@ pub use capability_surface_filter::{
 pub use identity_context::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostIdentityMessageContent, IdentityApplicability, IdentityBudget, IdentityFileName,
-    IdentityTrustLevel, build_identity_messages, identity_message_ref,
+    IdentityTrustLevel, build_identity_messages, identity_applicability_allowed_for_run,
+    identity_message_ref,
 };
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
