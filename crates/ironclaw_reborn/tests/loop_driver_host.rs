@@ -2753,6 +2753,7 @@ async fn text_only_host_prompt_rejects_inline_messages() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            capability_view: None,
             inline_messages: vec![LoopInlineMessage {
                 role: LoopInlineMessageRole::User,
                 safe_body: LoopSafeSummary::new("safe inline nudge").unwrap(),
