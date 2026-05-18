@@ -201,7 +201,12 @@ where
         // Conversation state is a single process-wide singleton record;
         // route through the system scope.
         let scope = ResourceScope::system();
-        let Some(versioned) = self.filesystem.get(&scope, &path).await.map_err(filesystem_error)? else {
+        let Some(versioned) = self
+            .filesystem
+            .get(&scope, &path)
+            .await
+            .map_err(filesystem_error)?
+        else {
             return Ok(PersistedConversationState {
                 state: InMemoryState::default(),
                 revision: 0,
@@ -232,7 +237,11 @@ where
         let scope = ResourceScope::system();
 
         for _ in 0..FILESYSTEM_CAS_RETRIES {
-            let current = self.filesystem.get(&scope, &path).await.map_err(filesystem_error)?;
+            let current = self
+                .filesystem
+                .get(&scope, &path)
+                .await
+                .map_err(filesystem_error)?;
             let cas = match &current {
                 None if expected_revision == 0 => CasExpectation::Absent,
                 None => {

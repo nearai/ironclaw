@@ -204,7 +204,12 @@ where
         scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<Option<(T, VersionedEntry)>, OutboundError> {
-        let Some(versioned) = self.filesystem.get(scope, path).await.map_err(map_fs_error)? else {
+        let Some(versioned) = self
+            .filesystem
+            .get(scope, path)
+            .await
+            .map_err(map_fs_error)?
+        else {
             return Ok(None);
         };
         let parsed = serde_json::from_slice(&versioned.entry.body)

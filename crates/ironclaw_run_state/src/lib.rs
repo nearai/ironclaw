@@ -653,9 +653,9 @@ where
         };
         let entry = Self::record_entry(&record)?;
         match put_with_cas(
-                self.filesystem.as_ref(),
-                &record.scope,
-                &path,
+            self.filesystem.as_ref(),
+            &record.scope,
+            &path,
             entry,
             CasExpectation::Absent,
         )
@@ -885,9 +885,9 @@ where
         };
         let entry = Self::record_entry(&record)?;
         match put_with_cas(
-                self.filesystem.as_ref(),
-                &record.scope,
-                &path,
+            self.filesystem.as_ref(),
+            &record.scope,
+            &path,
             entry,
             CasExpectation::Absent,
         )

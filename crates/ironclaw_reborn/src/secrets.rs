@@ -94,10 +94,10 @@ pub async fn check_libsql_reborn_secret_store_health(
 ///
 /// Requires explicit operator-provided master key material. The returned store
 /// is a [`FilesystemSecretStore`] over the libSQL-backed [`RootFilesystem`];
-/// the underlying `RootFilesystem` schema migration has run and the
-/// master-key readiness sentinel
-/// ([`FilesystemSecretStore::verify_can_decrypt_existing_secrets`]) has been
-/// verified before this returns.
+/// the underlying `RootFilesystem` schema migration has run before this
+/// returns. The FS-stored master-key sentinel was removed alongside the
+/// tenant-aware `ScopedFilesystem` rework — master-key correctness is now
+/// verified on first per-tenant decrypt op (see PR #3679).
 pub async fn build_libsql_reborn_secret_store(
     config: RebornLibSqlSecretStoreConfig,
 ) -> Result<Arc<dyn SecretStore>, RebornSecretStoreError> {
@@ -116,10 +116,6 @@ pub async fn build_libsql_reborn_secret_store(
     let scoped = reborn_singleton_secret_mount(filesystem)
         .map_err(|_| RebornSecretStoreError::BackendUnavailable)?;
     let store = FilesystemSecretStore::new(scoped, crypto);
-    store
-        .verify_can_decrypt_existing_secrets()
-        .await
-        .map_err(map_existing_secret_decryptability_error)?;
     Ok(Arc::new(store))
 }
 
@@ -138,14 +134,7 @@ where
         VirtualPath::new("/secrets")?,
         MountPermissions::read_write_list_delete(),
     )])?;
-    Ok(Arc::new(ScopedFilesystem::new(filesystem, view)))
-}
-
-fn map_existing_secret_decryptability_error(error: SecretError) -> RebornSecretStoreError {
-    match error {
-        SecretError::InvalidMasterKey
-        | SecretError::DecryptionFailed(_)
-        | SecretError::InvalidUtf8 => RebornSecretStoreError::InvalidMasterKey,
-        _ => RebornSecretStoreError::BackendUnavailable,
-    }
+    Ok(Arc::new(ScopedFilesystem::with_fixed_view(
+        filesystem, view,
+    )))
 }

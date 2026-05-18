@@ -138,7 +138,11 @@ where
         thread_id: &ThreadId,
     ) -> Result<Option<(StoredThreadRecord, RecordVersion)>, SessionThreadError> {
         let path = thread_record_path(scope, thread_id)?;
-        let Some(versioned) = self.filesystem.get(&scope.to_resource_scope(), &path).await? else {
+        let Some(versioned) = self
+            .filesystem
+            .get(&scope.to_resource_scope(), &path)
+            .await?
+        else {
             return Ok(None);
         };
         let record = deserialize::<StoredThreadRecord>(&versioned.entry.body)?;
@@ -155,7 +159,11 @@ where
         message_id: ThreadMessageId,
     ) -> Result<Option<(ThreadMessageRecord, RecordVersion)>, SessionThreadError> {
         let path = message_record_path(scope, thread_id, message_id)?;
-        let Some(versioned) = self.filesystem.get(&scope.to_resource_scope(), &path).await? else {
+        let Some(versioned) = self
+            .filesystem
+            .get(&scope.to_resource_scope(), &path)
+            .await?
+        else {
             return Ok(None);
         };
         let record = deserialize::<ThreadMessageRecord>(&versioned.entry.body)?;
@@ -171,7 +179,11 @@ where
         thread_id: &ThreadId,
     ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
         let root = messages_root(scope, thread_id)?;
-        let entries = match self.filesystem.list_dir(&scope.to_resource_scope(), &root).await {
+        let entries = match self
+            .filesystem
+            .list_dir(&scope.to_resource_scope(), &root)
+            .await
+        {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -186,7 +198,11 @@ where
             // runs through the per-op ACL (mirrors the run-state /
             // processes store `join_scoped` shape).
             let child = join_scoped(&root, &entry.name)?;
-            let Some(versioned) = self.filesystem.get(&scope.to_resource_scope(), &child).await? else {
+            let Some(versioned) = self
+                .filesystem
+                .get(&scope.to_resource_scope(), &child)
+                .await?
+            else {
                 continue;
             };
             let record = deserialize::<ThreadMessageRecord>(&versioned.entry.body)?;
@@ -204,7 +220,11 @@ where
         thread_id: &ThreadId,
     ) -> Result<Vec<SummaryArtifact>, SessionThreadError> {
         let root = summaries_root(scope, thread_id)?;
-        let entries = match self.filesystem.list_dir(&scope.to_resource_scope(), &root).await {
+        let entries = match self
+            .filesystem
+            .list_dir(&scope.to_resource_scope(), &root)
+            .await
+        {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -215,7 +235,11 @@ where
                 continue;
             }
             let child = join_scoped(&root, &entry.name)?;
-            let Some(versioned) = self.filesystem.get(&scope.to_resource_scope(), &child).await? else {
+            let Some(versioned) = self
+                .filesystem
+                .get(&scope.to_resource_scope(), &child)
+                .await?
+            else {
                 continue;
             };
             let record = deserialize::<SummaryArtifact>(&versioned.entry.body)?;
@@ -391,9 +415,9 @@ where
         let entry = Self::thread_entry(&stored)?;
         let resource_scope = record.scope.to_resource_scope();
         match put_with_cas(
-                self.filesystem.as_ref(),
-                &resource_scope,
-                &path,
+            self.filesystem.as_ref(),
+            &resource_scope,
+            &path,
             entry,
             CasExpectation::Absent,
         )
@@ -432,7 +456,11 @@ where
         if let Some(idempotency_key) = InboundIdempotencyKey::from_request(&request) {
             let record_key = idempotency_record_key(&idempotency_key)?;
             let path = idempotency_record_path(&record_key)?;
-            if let Some(versioned) = self.filesystem.get(&request.scope.to_resource_scope(), &path).await? {
+            if let Some(versioned) = self
+                .filesystem
+                .get(&request.scope.to_resource_scope(), &path)
+                .await?
+            {
                 let record = deserialize::<InboundIdempotencyRecord>(&versioned.entry.body)?;
                 if record.thread_id != request.thread_id {
                     return Err(SessionThreadError::IdempotentReplayThreadMismatch {
@@ -519,7 +547,12 @@ where
             // (binding, event, thread, message) — equivalent to the
             // legacy in-memory HashMap upsert.
             self.filesystem
-                .put(&request.scope.to_resource_scope(), &path, entry, CasExpectation::Any)
+                .put(
+                    &request.scope.to_resource_scope(),
+                    &path,
+                    entry,
+                    CasExpectation::Any,
+                )
                 .await?;
         }
 
@@ -659,9 +692,9 @@ where
         let path = message_record_path(&request.scope, &request.thread_id, message.message_id)?;
         let entry = Self::message_entry(&message)?;
         match put_with_cas(
-                self.filesystem.as_ref(),
-                &request.scope.to_resource_scope(),
-                &path,
+            self.filesystem.as_ref(),
+            &request.scope.to_resource_scope(),
+            &path,
             entry,
             CasExpectation::Absent,
         )
@@ -969,9 +1002,9 @@ where
         let path = summary_record_path(&request.scope, &request.thread_id, artifact.summary_id)?;
         let entry = Self::summary_entry(&artifact)?;
         match put_with_cas(
-                self.filesystem.as_ref(),
-                &request.scope.to_resource_scope(),
-                &path,
+            self.filesystem.as_ref(),
+            &request.scope.to_resource_scope(),
+            &path,
             entry,
             CasExpectation::Absent,
         )

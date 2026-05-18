@@ -78,8 +78,7 @@ impl ResourceScope {
 
     /// True iff this scope is the system sentinel (see [`Self::system`]).
     pub fn is_system(&self) -> bool {
-        self.tenant_id.as_str() == SYSTEM_RESERVED_ID
-            && self.user_id.as_str() == SYSTEM_RESERVED_ID
+        self.tenant_id.as_str() == SYSTEM_RESERVED_ID && self.user_id.as_str() == SYSTEM_RESERVED_ID
     }
 }
 

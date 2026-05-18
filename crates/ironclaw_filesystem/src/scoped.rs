@@ -158,7 +158,8 @@ where
         prefix: &ScopedPath,
     ) -> Result<Box<dyn StorageTxn>, FilesystemError> {
         let view = self.mount_view(scope)?;
-        let virtual_path = resolve_with_permission_view(&view, prefix, FilesystemOperation::BeginTxn)?;
+        let virtual_path =
+            resolve_with_permission_view(&view, prefix, FilesystemOperation::BeginTxn)?;
         let inner = self.root.begin(&virtual_path).await?;
         let permissions = view.resolve_with_grant(prefix)?.1.permissions.clone();
         Ok(Box::new(ScopedStorageTxn {

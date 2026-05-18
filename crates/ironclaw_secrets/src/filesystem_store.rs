@@ -237,7 +237,6 @@ where
     // wrong key surfaces on the first per-tenant decrypt op rather than at
     // startup. See PR #3679 / 2026-05-16 design discussion.
 
-
     async fn read_secret(
         &self,
         scope: &ResourceScope,
@@ -286,12 +285,8 @@ where
             Entry::bytes(body).with_content_type(ContentType::json()),
             &lease.scope,
         );
-        ensure_tenant_id_index_secret(
-            &self.filesystem,
-            &lease.scope,
-            &lease_root(&lease.scope)?,
-        )
-        .await?;
+        ensure_tenant_id_index_secret(&self.filesystem, &lease.scope, &lease_root(&lease.scope)?)
+            .await?;
         self.filesystem
             .put(&lease.scope, &path, entry, CasExpectation::Any)
             .await
@@ -492,10 +487,10 @@ where
                 &lease.scope,
             );
             match put_with_version_fallback(
-                            &*self.filesystem,
-                            &lease.scope,
-                            &path,
-                            entry,
+                &*self.filesystem,
+                &lease.scope,
+                &path,
+                entry,
                 CasExpectation::Version(versioned.version),
             )
             .await
@@ -572,10 +567,10 @@ where
                 &lease.scope,
             );
             match put_with_version_fallback(
-                            &*self.filesystem,
-                            &lease.scope,
-                            &path,
-                            entry,
+                &*self.filesystem,
+                &lease.scope,
+                &path,
+                entry,
                 CasExpectation::Version(versioned.version),
             )
             .await
@@ -938,10 +933,10 @@ where
                 scope,
             );
             match put_with_version_fallback(
-                            &*self.filesystem,
-                            scope,
-                            &path,
-                            entry,
+                &*self.filesystem,
+                scope,
+                &path,
+                entry,
                 CasExpectation::Version(versioned.version),
             )
             .await

@@ -440,8 +440,7 @@ mod path_validation_tests {
             "history.versions",
             "history.versions/2",
         ] {
-            let err = validated_memory_relative_path(reserved.to_string())
-                .expect_err(reserved);
+            let err = validated_memory_relative_path(reserved.to_string()).expect_err(reserved);
             let msg = format!("{err}");
             assert!(
                 msg.contains(".meta") || msg.contains(".chunks") || msg.contains(".versions"),

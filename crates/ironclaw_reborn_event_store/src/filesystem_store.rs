@@ -114,7 +114,11 @@ where
         let path = stream_path(StreamKind::Runtime, stream)?;
         let records = self
             .fs
-            .tail(&ResourceScope::system(), &path, SeqNo::from_backend(after.as_u64()))
+            .tail(
+                &ResourceScope::system(),
+                &path,
+                SeqNo::from_backend(after.as_u64()),
+            )
             .await
             .map_err(map_filesystem_tail_error)?;
 
@@ -134,7 +138,11 @@ where
             // after, i.e. a foreign-future cursor.
             let probe = self
                 .fs
-                .tail(&ResourceScope::system(), &path, SeqNo::from_backend(after.as_u64().saturating_sub(1)))
+                .tail(
+                    &ResourceScope::system(),
+                    &path,
+                    SeqNo::from_backend(after.as_u64().saturating_sub(1)),
+                )
                 .await
                 .map_err(map_filesystem_tail_error)?;
             if probe.is_empty() {
@@ -259,7 +267,11 @@ where
         let path = stream_path(StreamKind::Audit, stream)?;
         let records = self
             .fs
-            .tail(&ResourceScope::system(), &path, SeqNo::from_backend(after.as_u64()))
+            .tail(
+                &ResourceScope::system(),
+                &path,
+                SeqNo::from_backend(after.as_u64()),
+            )
             .await
             .map_err(map_filesystem_tail_error)?;
 
@@ -275,7 +287,11 @@ where
             // after, i.e. a foreign-future cursor.
             let probe = self
                 .fs
-                .tail(&ResourceScope::system(), &path, SeqNo::from_backend(after.as_u64().saturating_sub(1)))
+                .tail(
+                    &ResourceScope::system(),
+                    &path,
+                    SeqNo::from_backend(after.as_u64().saturating_sub(1)),
+                )
                 .await
                 .map_err(map_filesystem_tail_error)?;
             if probe.is_empty() {
