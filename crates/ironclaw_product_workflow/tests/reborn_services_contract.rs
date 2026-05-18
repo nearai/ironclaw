@@ -49,6 +49,37 @@ fn run_id_string() -> String {
     "3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18".to_string()
 }
 
+fn thread_scope_for(caller: &WebUiAuthenticatedCaller) -> ThreadScope {
+    ThreadScope {
+        tenant_id: caller.tenant_id.clone(),
+        agent_id: caller.agent_id.clone().expect("agent id"),
+        project_id: caller.project_id.clone(),
+        owner_user_id: Some(caller.user_id.clone()),
+        mission_id: None,
+    }
+}
+
+fn legacy_webui_source_binding_id_for(
+    caller: &WebUiAuthenticatedCaller,
+    thread_id: &str,
+) -> String {
+    format!(
+        "{}{}{}{}{}",
+        segment("surface", "webui"),
+        segment("tenant", caller.tenant_id.as_str()),
+        segment(
+            "agent",
+            caller.agent_id.as_ref().map(AgentId::as_str).unwrap_or("")
+        ),
+        segment("thread", thread_id),
+        segment("actor", caller.user_id.as_str())
+    )
+}
+
+fn segment(name: &str, value: &str) -> String {
+    format!("{name}:{}:{value};", value.len())
+}
+
 /// Establish thread ownership for `caller` under `thread_id` so subsequent
 /// `cancel_run` / `resolve_gate` calls pass the `assert_thread_owned_by`
 /// check. Goes through `submit_turn` because that is the only public path
@@ -437,6 +468,142 @@ async fn duplicate_submit_replays_prior_handoff_without_second_submission() {
         RebornSubmitTurnResponse::AlreadySubmitted { .. }
     ));
     assert_eq!(coordinator.submission_count(), 1);
+}
+
+#[tokio::test]
+async fn same_thread_retry_replays_legacy_submitted_message_after_binding_key_change() {
+    let caller = caller();
+    let thread_scope = thread_scope_for(&caller);
+    let thread_id = ThreadId::new("thread-alpha").expect("valid thread");
+    let legacy_binding_id = legacy_webui_source_binding_id_for(&caller, thread_id.as_str());
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    let accepted = thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: caller.user_id.as_str().to_string(),
+            source_binding_id: Some(legacy_binding_id.clone()),
+            reply_target_binding_id: Some(legacy_binding_id),
+            external_event_id: Some("send-legacy-submitted".to_string()),
+            content: MessageContent::text("hello once"),
+        })
+        .await
+        .expect("accepted");
+    let run_id = TurnRunId::new();
+    thread_service
+        .mark_message_submitted(
+            &thread_scope,
+            &thread_id,
+            accepted.message_id,
+            "turn-legacy".to_string(),
+            run_id.to_string(),
+        )
+        .await
+        .expect("submitted");
+
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(thread_service.clone(), coordinator.clone());
+
+    let replayed = services
+        .submit_turn(
+            caller,
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-legacy-submitted",
+                "thread_id": "thread-alpha",
+                "content": "hello once"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("legacy submit replays");
+
+    let RebornSubmitTurnResponse::AlreadySubmitted {
+        thread_id: replayed_thread_id,
+        run_id: replayed_run_id,
+        ..
+    } = replayed
+    else {
+        panic!("expected already submitted replay");
+    };
+    assert_eq!(replayed_thread_id, thread_id);
+    assert_eq!(replayed_run_id, run_id);
+    assert_eq!(coordinator.submission_count(), 0);
+}
+
+#[tokio::test]
+async fn same_thread_retry_reuses_legacy_accepted_message_without_creating_duplicate() {
+    let caller = caller();
+    let thread_scope = thread_scope_for(&caller);
+    let thread_id = ThreadId::new("thread-alpha").expect("valid thread");
+    let legacy_binding_id = legacy_webui_source_binding_id_for(&caller, thread_id.as_str());
+    let thread_service = Arc::new(InMemorySessionThreadService::default());
+    thread_service
+        .ensure_thread(EnsureThreadRequest {
+            scope: thread_scope.clone(),
+            thread_id: Some(thread_id.clone()),
+            created_by_actor_id: caller.user_id.as_str().to_string(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .expect("thread");
+    let accepted = thread_service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: thread_scope.clone(),
+            thread_id: thread_id.clone(),
+            actor_id: caller.user_id.as_str().to_string(),
+            source_binding_id: Some(legacy_binding_id.clone()),
+            reply_target_binding_id: Some(legacy_binding_id),
+            external_event_id: Some("send-legacy-accepted".to_string()),
+            content: MessageContent::text("hello once"),
+        })
+        .await
+        .expect("accepted");
+
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(thread_service.clone(), coordinator.clone());
+
+    let response = services
+        .submit_turn(
+            caller.clone(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-legacy-accepted",
+                "thread_id": "thread-alpha",
+                "content": "hello once"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("legacy accepted submit");
+
+    assert!(matches!(
+        response,
+        RebornSubmitTurnResponse::Submitted { .. }
+    ));
+    assert_eq!(coordinator.submission_count(), 1);
+
+    let timeline = services
+        .get_timeline(
+            caller,
+            RebornTimelineRequest {
+                thread_id: thread_id.as_str().to_string(),
+            },
+        )
+        .await
+        .expect("timeline");
+    assert_eq!(timeline.messages.len(), 1);
+    assert_eq!(timeline.messages[0].message_id, accepted.message_id);
+    assert_eq!(timeline.messages[0].status, MessageStatus::Submitted);
 }
 
 #[tokio::test]
