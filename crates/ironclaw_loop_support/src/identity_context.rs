@@ -100,6 +100,12 @@ pub struct HostIdentityMessageContent {
     pub content: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityMessageBuildOutcome {
+    pub messages: Vec<LoopContextMessage>,
+    pub admitted_personal_context_paths: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdentityBudget {
     pub token_ceiling: u32,
@@ -217,7 +223,17 @@ pub fn build_identity_messages_for_run(
     mode: PromptMode,
     budget: IdentityBudget,
 ) -> Result<Vec<LoopContextMessage>, AgentLoopHostError> {
+    Ok(build_identity_messages_for_run_detailed(candidates, run_context, mode, budget)?.messages)
+}
+
+pub fn build_identity_messages_for_run_detailed(
+    candidates: &[HostIdentityContextCandidate],
+    run_context: &LoopRunContext,
+    mode: PromptMode,
+    budget: IdentityBudget,
+) -> Result<IdentityMessageBuildOutcome, AgentLoopHostError> {
     let mut out = Vec::with_capacity(candidates.len());
+    let mut admitted_personal_context_paths = Vec::new();
     let mut used = 0u32;
     for candidate in candidates {
         if !identity_applicability_allowed_for_run(candidate.applies_when, run_context) {
@@ -231,13 +247,19 @@ pub fn build_identity_messages_for_run(
             break;
         }
         used = used.saturating_add(cost);
+        if candidate.applies_when == IdentityApplicability::OnPersonalContextAllowed {
+            admitted_personal_context_paths.push(candidate.name.as_str().to_string());
+        }
         out.push(LoopContextMessage {
             message_ref: candidate.message_ref.clone(),
             role: LOOP_SYSTEM_ROLE.to_string(),
             safe_summary: candidate.safe_summary.clone(),
         });
     }
-    Ok(out)
+    Ok(IdentityMessageBuildOutcome {
+        messages: out,
+        admitted_personal_context_paths,
+    })
 }
 
 pub fn identity_message_ref(

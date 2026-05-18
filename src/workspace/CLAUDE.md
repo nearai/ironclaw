@@ -5,7 +5,8 @@ Owns persistent workspace memory and file-like project/user context.
 ## Agent-loop boundary
 
 - `reborn_identity_context.rs` is the workspace-owned reader for stable identity
-  files exposed to Reborn prompt context.
+  files and policy-gated personal identity files exposed to Reborn prompt
+  context.
 - Workspace may read and summarize identity files through narrow source traits.
 - Prompt bundle assembly, strategy decisions, driver execution, and model calls
   stay outside this directory.
@@ -24,8 +25,8 @@ Owns persistent workspace memory and file-like project/user context.
 - Add a new file when a workspace-backed source has its own trust, scope, or
   summarization rules.
 - Reuse existing workspace read/search APIs before adding a side path.
-- Keep identity-context code narrow: stable identity file discovery, read, safe
-  summary, and trust classification.
+- Keep identity-context code narrow: identity file discovery, primary-scope
+  read, policy applicability, safe summary, and trust classification.
 
 ## Common mistakes
 

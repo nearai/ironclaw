@@ -153,7 +153,14 @@ admin/system run
 Kernel-mediated prompt safety rules:
 
 - identity/system-prompt files are primary-scope only;
+- `USER.md` and `context/assistant-directives.md` are personal context and are
+  excluded unless the resolved run profile explicitly allows personal context;
+- when personal context is admitted, the loop emits safe observability metadata
+  such as source count and source names, never raw file content;
 - group chat must not receive personal memory/profile context unless explicit policy allows it;
+- `HEARTBEAT.md` is not part of the default planned or interactive loop prompt
+  prefix; routine, mission, or proactive profiles must own any volatile
+  heartbeat injection semantics;
 - writes to prompt-injected files are guarded by prompt-injection write-safety policy;
 - assembled prompts are not emitted in events/audit by default;
 - prompt read/build failures are explicit turn failures unless a contract marks a missing optional doc as ignorable;
@@ -245,8 +252,11 @@ Transport-specific auth/webhook checks happen before the turn is accepted.
 - shipped and custom loops both send privileged effects through `CapabilityHost` only;
 - trust class alone does not let a loop bypass grants, mounts, leases, obligations, or resource policy;
 - approval-blocked turn resumes with exact invocation fingerprint;
-- group chat prompt excludes personal memory/profile docs;
+- group chat prompt excludes personal memory/profile docs unless the resolved
+  run profile explicitly allows them;
 - primary identity docs are not read from secondary scopes;
+- personal-context inclusion emits safe source metadata and does not expose raw
+  `USER.md` or assistant-directive content;
 - prompt-injected file writes are scanned or fail closed regardless of loop implementation;
 - cancellation propagates to process/capability work;
 - durable event cursor can replay turn progress after reconnect;

@@ -39,8 +39,8 @@ pub use capability_surface_filter::{
 pub use identity_context::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostIdentityMessageContent, IdentityApplicability, IdentityBudget, IdentityFileName,
-    IdentityTrustLevel, build_identity_messages, identity_applicability_allowed_for_run,
-    identity_message_ref,
+    IdentityMessageBuildOutcome, IdentityTrustLevel, build_identity_messages,
+    identity_applicability_allowed_for_run, identity_message_ref,
 };
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
@@ -68,7 +68,8 @@ use ironclaw_turns::{
         CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome,
         CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
         LoopCapabilityPort, LoopContextBundle, LoopContextMessage, LoopContextPort,
-        LoopContextRequest, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor,
+        LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
+        LoopInputCursor,
         LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
         LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
         LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
@@ -93,6 +94,7 @@ where
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     identity_budget: IdentityBudget,
     identity_candidates: Arc<IdentityCandidateCache>,
+    milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
 }
 
 struct IdentityCandidateCache {
@@ -135,6 +137,7 @@ where
             identity_context_source: None,
             identity_budget: IdentityBudget::default(),
             identity_candidates: Arc::new(IdentityCandidateCache::new()),
+            milestone_sink: None,
         }
     }
 
@@ -153,6 +156,11 @@ where
 
     pub fn with_identity_budget(mut self, budget: IdentityBudget) -> Self {
         self.identity_budget = budget;
+        self
+    }
+
+    pub fn with_milestone_sink(mut self, sink: Arc<dyn LoopHostMilestoneSink>) -> Self {
+        self.milestone_sink = Some(sink);
         self
     }
 }
@@ -207,12 +215,15 @@ where
                             .map_err(HostIdentityContextBuildError::into_host_error)
                     })
                     .await?;
-                identity_context::build_identity_messages_for_run(
+                let outcome = identity_context::build_identity_messages_for_run_detailed(
                     candidates,
                     &self.run_context,
                     mode,
                     self.identity_budget,
-                )?
+                )?;
+                self.publish_personal_context_admitted(&outcome.admitted_personal_context_paths)
+                    .await?;
+                outcome.messages
             }
             None => Vec::new(),
         };
@@ -228,6 +239,62 @@ where
             memory_snippets: Vec::new(),
         })
     }
+}
+
+impl<S> ThreadBackedLoopContextPort<S>
+where
+    S: SessionThreadService + ?Sized + Send + Sync,
+{
+    async fn publish_personal_context_admitted(
+        &self,
+        admitted_paths: &[String],
+    ) -> Result<(), AgentLoopHostError> {
+        if admitted_paths.is_empty() {
+            return Ok(());
+        }
+        let Some(milestone_sink) = self.milestone_sink.as_ref() else {
+            return Ok(());
+        };
+        let summary = personal_context_admitted_summary(admitted_paths)?;
+        LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(milestone_sink))
+            .driver_note(LoopDriverNoteKind::Context, summary)
+            .await
+    }
+}
+
+fn personal_context_admitted_summary(
+    admitted_paths: &[String],
+) -> Result<LoopSafeSummary, AgentLoopHostError> {
+    let source_labels = admitted_paths
+        .iter()
+        .map(|path| {
+            path.rsplit('/')
+                .next()
+                .unwrap_or(path)
+                .chars()
+                .filter(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+                })
+                .collect::<String>()
+        })
+        .filter(|label| !label.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let summary = if source_labels.is_empty() {
+        format!("personal context admitted count {}", admitted_paths.len())
+    } else {
+        format!(
+            "personal context admitted count {} sources {}",
+            admitted_paths.len(),
+            source_labels
+        )
+    };
+    LoopSafeSummary::new(summary).map_err(|reason| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            format!("personal context milestone summary invalid: {reason}"),
+        )
+    })
 }
 
 /// Thread-backed transcript adapter for text-only assistant replies.
