@@ -411,7 +411,7 @@ fn check_workspace_dir() -> CheckResult {
 // ── Embeddings ──────────────────────────────────────────────
 
 fn check_embeddings(settings: &Settings) -> CheckResult {
-    match crate::config::EmbeddingsConfig::resolve(settings) {
+    match crate::config::embeddings::resolve_embeddings_config(settings) {
         Ok(config) => {
             if !config.enabled {
                 return CheckResult::Skip("disabled (set EMBEDDING_ENABLED=true)".into());

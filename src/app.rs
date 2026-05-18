@@ -21,7 +21,8 @@ use crate::tools::ToolRegistry;
 use crate::tools::mcp::{McpProcessManager, McpSessionManager};
 use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
-use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
+use crate::workspace::Workspace;
+use ironclaw_embeddings::{EmbeddingCacheConfig, EmbeddingProvider};
 use ironclaw_llm::recording::HttpInterceptor;
 use ironclaw_llm::{LlmProvider, LlmReloadHandle, RecordingLlm, SessionManager};
 use ironclaw_safety::SafetyLayer;
@@ -557,19 +558,17 @@ impl AppBuilder {
                 .llm
                 .bedrock
                 .as_ref()
-                .map(|b| crate::workspace::BedrockEmbeddingSetup {
+                .map(|b| ironclaw_embeddings::BedrockEmbeddingSetup {
                     region: b.region.clone(),
                     profile: b.profile.clone(),
                 });
-        let embeddings = self
-            .config
-            .embeddings
-            .create_provider(
-                &self.config.llm.nearai.base_url,
-                self.session.clone(),
-                bedrock_setup.as_ref(),
-            )
-            .await;
+        let embeddings = ironclaw_embeddings::create_provider(
+            &self.config.embeddings,
+            &self.config.llm.nearai.base_url,
+            self.session.clone(),
+            bedrock_setup.as_ref(),
+        )
+        .await;
 
         // Register memory tools if database is available
         let workspace_user_id = self.config.owner_id.as_str();

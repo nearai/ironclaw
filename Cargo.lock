@@ -3854,9 +3854,6 @@ dependencies = [
  "aho-corasick",
  "anyhow",
  "async-trait",
- "aws-config",
- "aws-sdk-bedrockruntime",
- "aws-smithy-types",
  "axum 0.8.8",
  "base64 0.22.1",
  "blake3",
@@ -3889,6 +3886,7 @@ dependencies = [
  "iana-time-zone",
  "insta",
  "ironclaw_common",
+ "ironclaw_embeddings",
  "ironclaw_engine",
  "ironclaw_gateway",
  "ironclaw_llm",
@@ -4047,6 +4045,26 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-test",
+]
+
+[[package]]
+name = "ironclaw_embeddings"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "aws-config",
+ "aws-sdk-bedrockruntime",
+ "aws-smithy-types",
+ "ironclaw_llm",
+ "lru 0.12.5",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

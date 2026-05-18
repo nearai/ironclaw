@@ -1,6 +1,12 @@
-use std::sync::Arc;
+//! Resolver that builds an `EmbeddingsConfig` from binary-side `Settings`.
+//!
+//! The `EmbeddingsConfig` data shape, factory, cache, and providers all live
+//! in the `ironclaw_embeddings` crate. Only the bit that reads
+//! `crate::settings::Settings` (a binary-internal type) and validates
+//! env-driven base URLs against the SSRF blocklist (also binary-internal)
+//! stays here.
 
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 
 use crate::config::helpers::{
     db_first_bool, db_first_or_default, optional_env, parse_optional_env,
@@ -8,267 +14,93 @@ use crate::config::helpers::{
 };
 use crate::error::ConfigError;
 use crate::settings::Settings;
-use crate::workspace::{BedrockEmbeddingSetup, EmbeddingProvider};
-use ironclaw_llm::SessionManager;
+use ironclaw_embeddings::{
+    DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig, default_dimension_for_model,
+};
 
-/// Default maximum number of cached embeddings.
-pub const DEFAULT_EMBEDDING_CACHE_SIZE: usize = 10_000;
-
-/// Embeddings provider configuration.
-#[derive(Debug, Clone)]
-pub struct EmbeddingsConfig {
-    /// Whether embeddings are enabled.
-    pub enabled: bool,
-    /// Provider to use: "openai", "nearai", "ollama", or "bedrock"
-    pub provider: String,
-    /// OpenAI API key (for OpenAI provider).
-    pub openai_api_key: Option<SecretString>,
-    /// Model to use for embeddings.
-    pub model: String,
-    /// Ollama base URL (for Ollama provider). Defaults to http://localhost:11434.
-    pub ollama_base_url: String,
-    /// Embedding vector dimension. Inferred from the model name when not set explicitly.
-    pub dimension: usize,
-    /// Custom base URL for OpenAI-compatible embedding providers.
-    /// When set, overrides the default `https://api.openai.com`.
-    pub openai_base_url: Option<String>,
-    /// Maximum entries in the embedding LRU cache (default 10,000).
-    ///
-    /// Approximate raw embedding payload: `cache_size × dimension × 4 bytes`.
-    /// 10,000 × 1536 floats ≈ 58 MB (payload only; actual memory is higher
-    /// due to HashMap buckets, per-entry Vec/timestamp overhead).
-    pub cache_size: usize,
-}
-
-impl Default for EmbeddingsConfig {
-    fn default() -> Self {
-        let model = "text-embedding-3-small".to_string();
-        let dimension = default_dimension_for_model(&model);
-        Self {
-            enabled: false,
-            provider: "openai".to_string(),
-            openai_api_key: None,
-            model,
-            ollama_base_url: "http://localhost:11434".to_string(),
-            dimension,
-            openai_base_url: None,
-            cache_size: DEFAULT_EMBEDDING_CACHE_SIZE,
-        }
-    }
-}
-
-/// Infer the embedding dimension from a well-known model name.
+/// Resolve embeddings configuration from settings, env vars, and defaults.
 ///
-/// Falls back to 1536 (OpenAI text-embedding-3-small default) for unknown models.
-pub(crate) fn default_dimension_for_model(model: &str) -> usize {
-    match model {
-        "text-embedding-3-small" => 1536,
-        "text-embedding-3-large" => 3072,
-        "text-embedding-ada-002" => 1536,
-        "amazon.titan-embed-text-v2:0" => 1024,
-        "nomic-embed-text" => 768,
-        "mxbai-embed-large" => 1024,
-        "all-minilm" => 384,
-        _ => 1536,
-    }
-}
+/// Precedence: DB/TOML settings > env > default.
+pub(crate) fn resolve_embeddings_config(
+    settings: &Settings,
+) -> Result<EmbeddingsConfig, ConfigError> {
+    let defaults = crate::settings::EmbeddingsSettings::default();
 
-impl EmbeddingsConfig {
-    pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
-        let defaults = crate::settings::EmbeddingsSettings::default();
+    let openai_api_key = optional_env("OPENAI_API_KEY")?.map(SecretString::from);
 
-        let openai_api_key = optional_env("OPENAI_API_KEY")?.map(SecretString::from);
+    let provider = db_first_or_default(
+        &settings.embeddings.provider,
+        &defaults.provider,
+        "EMBEDDING_PROVIDER",
+    )?;
 
-        let provider = db_first_or_default(
-            &settings.embeddings.provider,
-            &defaults.provider,
-            "EMBEDDING_PROVIDER",
-        )?;
+    let model = if provider == "bedrock" {
+        optional_env("EMBEDDING_MODEL")?
+            .unwrap_or_else(|| "amazon.titan-embed-text-v2:0".to_string())
+    } else {
+        db_first_or_default(
+            &settings.embeddings.model,
+            &defaults.model,
+            "EMBEDDING_MODEL",
+        )?
+    };
 
-        let model = if provider == "bedrock" {
-            optional_env("EMBEDDING_MODEL")?
-                .unwrap_or_else(|| "amazon.titan-embed-text-v2:0".to_string())
-        } else {
-            db_first_or_default(
-                &settings.embeddings.model,
-                &defaults.model,
-                "EMBEDDING_MODEL",
-            )?
-        };
+    // ollama_base_url lives on the top-level Settings, not the embeddings
+    // sub-struct. Use a manual DB > env > default chain.
+    let default_ollama_url = "http://localhost:11434".to_string();
+    let ollama_base_url = match settings
+        .ollama_base_url
+        .as_ref()
+        .filter(|s| !s.is_empty())
+        .cloned()
+    {
+        Some(url) => url,
+        None => optional_env("OLLAMA_BASE_URL")?.unwrap_or(default_ollama_url),
+    };
 
-        // ollama_base_url lives on the top-level Settings, not the embeddings
-        // sub-struct. Use a manual DB > env > default chain.
-        let default_ollama_url = "http://localhost:11434".to_string();
-        let ollama_base_url = match settings
-            .ollama_base_url
-            .as_ref()
-            .filter(|s| !s.is_empty())
-            .cloned()
-        {
-            Some(url) => url,
-            None => optional_env("OLLAMA_BASE_URL")?.unwrap_or(default_ollama_url),
-        };
-
-        // Dimension depends on the resolved model, not on a DB setting — env-only.
-        let dimension =
-            parse_optional_env("EMBEDDING_DIMENSION", default_dimension_for_model(&model))?;
-        if provider == "bedrock" && !matches!(dimension, 256 | 512 | 1024) {
-            return Err(ConfigError::InvalidValue {
-                key: "EMBEDDING_DIMENSION".to_string(),
-                message: "Bedrock Titan v2 embeddings support only 256, 512, or 1024 dimensions"
-                    .to_string(),
-            });
-        }
-
-        let enabled = db_first_bool(
-            settings.embeddings.enabled,
-            defaults.enabled,
-            "EMBEDDING_ENABLED",
-        )?;
-
-        let openai_base_url = optional_env("EMBEDDING_BASE_URL")?;
-
-        // Validate base URLs to prevent SSRF attacks (#1103).
-        validate_operator_base_url(&ollama_base_url, "OLLAMA_BASE_URL")?;
-        if let Some(ref url) = openai_base_url {
-            validate_operator_base_url(url, "EMBEDDING_BASE_URL")?;
-        }
-
-        let cache_size = parse_optional_env("EMBEDDING_CACHE_SIZE", DEFAULT_EMBEDDING_CACHE_SIZE)?;
-
-        if cache_size == 0 {
-            return Err(ConfigError::InvalidValue {
-                key: "EMBEDDING_CACHE_SIZE".to_string(),
-                message: "must be at least 1".to_string(),
-            });
-        }
-
-        Ok(Self {
-            enabled,
-            provider,
-            openai_api_key,
-            model,
-            ollama_base_url,
-            dimension,
-            openai_base_url,
-            cache_size,
-        })
+    // Dimension depends on the resolved model, not on a DB setting — env-only.
+    let dimension = parse_optional_env("EMBEDDING_DIMENSION", default_dimension_for_model(&model))?;
+    if provider == "bedrock" && !matches!(dimension, 256 | 512 | 1024) {
+        return Err(ConfigError::InvalidValue {
+            key: "EMBEDDING_DIMENSION".to_string(),
+            message: "Bedrock Titan v2 embeddings support only 256, 512, or 1024 dimensions"
+                .to_string(),
+        });
     }
 
-    /// Get the OpenAI API key if configured.
-    pub fn openai_api_key(&self) -> Option<&str> {
-        self.openai_api_key.as_ref().map(|s| s.expose_secret())
+    let enabled = db_first_bool(
+        settings.embeddings.enabled,
+        defaults.enabled,
+        "EMBEDDING_ENABLED",
+    )?;
+
+    let openai_base_url = optional_env("EMBEDDING_BASE_URL")?;
+
+    // Validate base URLs to prevent SSRF attacks (#1103).
+    validate_operator_base_url(&ollama_base_url, "OLLAMA_BASE_URL")?;
+    if let Some(ref url) = openai_base_url {
+        validate_operator_base_url(url, "EMBEDDING_BASE_URL")?;
     }
 
-    /// Create the appropriate embedding provider based on configuration.
-    ///
-    /// Returns `None` if embeddings are disabled or the required credentials
-    /// are missing. The `nearai_base_url` and `session` are needed only for
-    /// the NEAR AI provider but must be passed unconditionally; the
-    /// `bedrock_setup` is consulted only for the `bedrock` provider.
-    pub async fn create_provider(
-        &self,
-        nearai_base_url: &str,
-        session: Arc<SessionManager>,
-        bedrock_setup: Option<&BedrockEmbeddingSetup>,
-    ) -> Option<Arc<dyn EmbeddingProvider>> {
-        if !self.enabled {
-            tracing::debug!("Embeddings disabled (set EMBEDDING_ENABLED=true to enable)");
-            return None;
-        }
+    let cache_size = parse_optional_env("EMBEDDING_CACHE_SIZE", DEFAULT_EMBEDDING_CACHE_SIZE)?;
 
-        match self.provider.as_str() {
-            "nearai" => {
-                tracing::debug!(
-                    "Embeddings enabled via NEAR AI (model: {}, dim: {})",
-                    self.model,
-                    self.dimension,
-                );
-                Some(Arc::new(
-                    crate::workspace::NearAiEmbeddings::new(nearai_base_url, session)
-                        .with_model(&self.model, self.dimension),
-                ))
-            }
-            "bedrock" => {
-                #[cfg(feature = "bedrock")]
-                {
-                    let Some(bedrock) = bedrock_setup else {
-                        tracing::warn!(
-                            "Embeddings configured for Bedrock but no Bedrock setup is available"
-                        );
-                        return None;
-                    };
-                    tracing::debug!(
-                        "Embeddings enabled via Bedrock (model: {}, region: {}, dim: {})",
-                        self.model,
-                        bedrock.region,
-                        self.dimension,
-                    );
-                    match crate::workspace::BedrockEmbeddings::new(
-                        bedrock,
-                        &self.model,
-                        self.dimension,
-                    )
-                    .await
-                    {
-                        Ok(provider) => Some(Arc::new(provider) as Arc<dyn EmbeddingProvider>),
-                        Err(e) => {
-                            tracing::warn!("Failed to initialize Bedrock embeddings provider: {e}");
-                            None
-                        }
-                    }
-                }
-                #[cfg(not(feature = "bedrock"))]
-                {
-                    let _ = bedrock_setup;
-                    tracing::warn!(
-                        "Embeddings configured for Bedrock but the `bedrock` feature is disabled"
-                    );
-                    None
-                }
-            }
-            "ollama" => {
-                tracing::debug!(
-                    "Embeddings enabled via Ollama (model: {}, url: {}, dim: {})",
-                    self.model,
-                    self.ollama_base_url,
-                    self.dimension,
-                );
-                Some(Arc::new(
-                    crate::workspace::OllamaEmbeddings::new(&self.ollama_base_url)
-                        .with_model(&self.model, self.dimension),
-                ))
-            }
-            _ => {
-                if let Some(api_key) = self.openai_api_key() {
-                    let mut provider = crate::workspace::OpenAiEmbeddings::with_model(
-                        api_key,
-                        &self.model,
-                        self.dimension,
-                    );
-                    if let Some(ref base_url) = self.openai_base_url {
-                        tracing::debug!(
-                            "Embeddings enabled via OpenAI (model: {}, base_url: {}, dim: {})",
-                            self.model,
-                            base_url,
-                            self.dimension,
-                        );
-                        provider = provider.with_base_url(base_url);
-                    } else {
-                        tracing::debug!(
-                            "Embeddings enabled via OpenAI (model: {}, dim: {})",
-                            self.model,
-                            self.dimension,
-                        );
-                    }
-                    Some(Arc::new(provider))
-                } else {
-                    tracing::warn!("Embeddings configured but OPENAI_API_KEY not set");
-                    None
-                }
-            }
-        }
+    if cache_size == 0 {
+        return Err(ConfigError::InvalidValue {
+            key: "EMBEDDING_CACHE_SIZE".to_string(),
+            message: "must be at least 1".to_string(),
+        });
     }
+
+    Ok(EmbeddingsConfig {
+        enabled,
+        provider,
+        openai_api_key,
+        model,
+        ollama_base_url,
+        dimension,
+        openai_base_url,
+        cache_size,
+    })
 }
 
 #[cfg(test)]
@@ -310,7 +142,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        let config = resolve_embeddings_config(&settings).expect("resolve should succeed");
         assert!(
             !config.enabled,
             "embeddings should remain disabled when settings.embeddings.enabled=false, \
@@ -336,7 +168,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        let config = resolve_embeddings_config(&settings).expect("resolve should succeed");
         assert!(
             config.enabled,
             "embeddings should be enabled when settings say so"
@@ -363,7 +195,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        let config = resolve_embeddings_config(&settings).expect("resolve should succeed");
         assert!(
             config.enabled,
             "DB enabled=true should win over env EMBEDDING_ENABLED=false"
@@ -396,7 +228,7 @@ mod tests {
         // Settings left at defaults — no explicit DB/TOML override
         let settings = Settings::default();
 
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        let config = resolve_embeddings_config(&settings).expect("resolve should succeed");
         assert!(
             config.enabled,
             "env EMBEDDING_ENABLED should be used when settings at default"
@@ -429,7 +261,7 @@ mod tests {
         }
 
         let settings = Settings::default();
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        let config = resolve_embeddings_config(&settings).expect("resolve should succeed");
         assert_eq!(config.openai_base_url.as_deref(), Some("https://8.8.8.8"));
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -443,7 +275,7 @@ mod tests {
         clear_embedding_env();
 
         let settings = Settings::default();
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        let config = resolve_embeddings_config(&settings).expect("resolve should succeed");
         assert!(
             config.openai_base_url.is_none(),
             "openai_base_url should be None when EMBEDDING_BASE_URL is not set"
@@ -460,7 +292,7 @@ mod tests {
         }
 
         let settings = Settings::default();
-        let result = EmbeddingsConfig::resolve(&settings);
+        let result = resolve_embeddings_config(&settings);
         assert!(result.is_err(), "cache_size=0 should be rejected");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("at least 1"), "should mention minimum: {err}");
@@ -482,7 +314,7 @@ mod tests {
         }
 
         let settings = Settings::default();
-        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        let config = resolve_embeddings_config(&settings).expect("resolve should succeed");
         assert_eq!(config.provider, "bedrock");
         assert_eq!(config.model, "amazon.titan-embed-text-v2:0");
         assert_eq!(config.dimension, 1024);
@@ -507,7 +339,7 @@ mod tests {
         }
 
         let settings = Settings::default();
-        let result = EmbeddingsConfig::resolve(&settings);
+        let result = resolve_embeddings_config(&settings);
         assert!(
             result.is_err(),
             "unsupported bedrock dimensions should fail"

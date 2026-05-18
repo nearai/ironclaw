@@ -1,0 +1,38 @@
+[package]
+name = "ironclaw_embeddings"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Embedding-provider trait and implementations (OpenAI, NearAI, Ollama, AWS Bedrock) with LRU caching"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[package.metadata.dist]
+dist = false
+
+[features]
+default = []
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
+
+[dependencies]
+ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0" }
+
+async-trait = "0.1"
+lru = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
+secrecy = { version = "0.10", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tracing = "0.1"
+
+aws-config             = { version = "1", features = ["behavior-version-latest"], optional = true }
+aws-sdk-bedrockruntime = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"], optional = true }
+aws-smithy-types       = { version = "1", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

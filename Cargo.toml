@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/ironclaw_common", "crates/ironclaw_host_api", "crates/ironclaw_filesystem", "crates/ironclaw_memory", "crates/ironclaw_events", "crates/ironclaw_extensions", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_authorization", "crates/ironclaw_run_state", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_trust", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_oauth", "crates/ironclaw_llm", "crates/ironclaw_engine", "crates/ironclaw_gateway", "crates/ironclaw_tui"]
+members = [".", "crates/ironclaw_common", "crates/ironclaw_host_api", "crates/ironclaw_filesystem", "crates/ironclaw_memory", "crates/ironclaw_events", "crates/ironclaw_extensions", "crates/ironclaw_processes", "crates/ironclaw_dispatcher", "crates/ironclaw_scripts", "crates/ironclaw_mcp", "crates/ironclaw_wasm", "crates/ironclaw_capabilities", "crates/ironclaw_secrets", "crates/ironclaw_network", "crates/ironclaw_host_runtime", "crates/ironclaw_authorization", "crates/ironclaw_run_state", "crates/ironclaw_approvals", "crates/ironclaw_resources", "crates/ironclaw_trust", "crates/ironclaw_architecture", "crates/ironclaw_safety", "crates/ironclaw_skills", "crates/ironclaw_oauth", "crates/ironclaw_llm", "crates/ironclaw_embeddings", "crates/ironclaw_engine", "crates/ironclaw_gateway", "crates/ironclaw_tui"]
 exclude = [
     "channels-src/discord",
     "channels-src/feishu",
@@ -122,6 +122,7 @@ ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.2" }
 ironclaw_engine = { path = "crates/ironclaw_engine", version = "0.1.0" }
 ironclaw_gateway = { path = "crates/ironclaw_gateway", version = "0.1.0" }
 ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0" }
+ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0" }
 ironclaw_oauth = { path = "crates/ironclaw_oauth", version = "0.1.0" }
 ironclaw_safety = { path = "crates/ironclaw_safety", version = "0.2.2" }
 ironclaw_skills = { path = "crates/ironclaw_skills", version = "0.3.0" }
@@ -173,10 +174,9 @@ subtle = "2"  # Constant-time comparisons for token validation
 # Multi-provider LLM support
 rig-core = { version = "0.30", default-features = false, features = ["reqwest-rustls"] }
 
-# AWS Bedrock (native Converse API, opt-in via --features bedrock)
-aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
-aws-sdk-bedrockruntime = { version = "1", default-features = false, features = ["default-https-client", "rt-tokio", "behavior-version-latest"], optional = true }
-aws-smithy-types = { version = "1", optional = true }
+# AWS Bedrock: deps now live in `ironclaw_llm` (LLM provider) and
+# `ironclaw_embeddings` (Titan embeddings); the top-level `bedrock` feature
+# (below) re-exposes both via crate-feature forwarding.
 
 # Docker sandbox
 bollard = "0.18"
@@ -261,7 +261,7 @@ integration = []
 # test rig can spin up its embedded database.
 replay = ["libsql"]
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
-bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
+bedrock = ["ironclaw_llm/bedrock", "ironclaw_embeddings/bedrock"]
 tui = ["dep:ironclaw_tui"]
 import = ["dep:json5", "libsql"]
 
