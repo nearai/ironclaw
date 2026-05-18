@@ -252,7 +252,7 @@ async fn with_filesystem_resource_governor_persists_reservations_across_handles(
         MountPermissions::read_write_list_delete(),
     )])
     .unwrap();
-    let scoped = Arc::new(ScopedFilesystem::new(Arc::clone(&backend), mounts));
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(Arc::clone(&backend), mounts));
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -300,7 +300,7 @@ async fn with_filesystem_resource_governor_closes_process_reservations_on_cancel
         MountPermissions::read_write_list_delete(),
     )])
     .unwrap();
-    let scoped = Arc::new(ScopedFilesystem::new(Arc::clone(&backend), mounts));
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(Arc::clone(&backend), mounts));
     let process_services = ProcessServices::new(
         Arc::new(InMemoryProcessStore::new()),
         Arc::new(InMemoryProcessResultStore::new()),
@@ -476,8 +476,8 @@ async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
     .with_libsql_root_filesystem(Arc::clone(&filesystem));
 
     let path = VirtualPath::new("/engine/tenants/t1/users/u1/root-selection.txt").unwrap();
-    filesystem.write_file(&path, b"selected").await.unwrap();
-    assert_eq!(filesystem.read_file(&path).await.unwrap(), b"selected");
+    filesystem.write_file(scope, &path, b"selected").await.unwrap();
+    assert_eq!(filesystem.read_file(scope, &path).await.unwrap(), b"selected");
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]))
@@ -509,7 +509,7 @@ async fn libsql_scoped_turns_fs(
         MountPermissions::read_write_list_delete(),
     )])
     .unwrap();
-    Arc::new(ScopedFilesystem::new(filesystem, view))
+    Arc::new(ScopedFilesystem::with_fixed_view(filesystem, view))
 }
 
 #[cfg(feature = "libsql")]

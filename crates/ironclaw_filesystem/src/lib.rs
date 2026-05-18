@@ -47,7 +47,7 @@ pub use record::{
     CasExpectation, ContentType, Entry, RecordKind, RecordVersion, SeqNo, VersionedEntry,
 };
 pub use root::RootFilesystem;
-pub use scoped::ScopedFilesystem;
+pub use scoped::{MountViewResolver, ScopedFilesystem};
 pub use types::{
     BackendCapabilities, BackendId, BackendKind, Capability, ContentKind, DirEntry, FileStat,
     FileType, FilesystemError, FilesystemOperation, IndexConflictReason, IndexPolicy, StorageClass,

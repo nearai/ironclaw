@@ -38,7 +38,7 @@ use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RecordVersion,
     RootFilesystem, ScopedFilesystem,
 };
-use ironclaw_host_api::ScopedPath;
+use ironclaw_host_api::{ResourceScope, ScopedPath};
 
 use crate::{
     AllowAllTurnAdmissionLimitProvider, CancelRunRequest, CancelRunResponse, EventCursor,
@@ -122,7 +122,11 @@ where
         &self,
     ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
         let path = snapshot_path()?;
-        match self.filesystem.get(&path).await {
+        // Turn persistence is a single process-wide snapshot covering all
+        // tenants; the per-tenant rewrite isn't needed because the
+        // snapshot keys turns by their full scope internally. Use the
+        // system scope to route through the global `/turns` mount.
+        match self.filesystem.get(&ResourceScope::system(), &path).await {
             Ok(Some(versioned)) => {
                 let snapshot = deserialize_snapshot(&versioned.entry.body)?;
                 Ok((snapshot, Some(versioned.version)))
@@ -545,14 +549,15 @@ where
     F: RootFilesystem,
 {
     let fallback_entry = entry.clone();
-    match filesystem.put(path, entry, cas).await {
+    let scope = ResourceScope::system();
+    match filesystem.put(&scope, path, entry, cas).await {
         Ok(_) => Ok(()),
         Err(FilesystemError::VersionMismatch { .. }) => Err(PutError::VersionMismatch),
         Err(FilesystemError::Unsupported {
             operation: FilesystemOperation::WriteFile,
             ..
         }) => filesystem
-            .put(path, fallback_entry, CasExpectation::Any)
+            .put(&scope, path, fallback_entry, CasExpectation::Any)
             .await
             .map(|_| ())
             .map_err(|error| PutError::Other(fs_error(error))),

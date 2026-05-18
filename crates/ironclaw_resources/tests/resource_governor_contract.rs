@@ -1097,7 +1097,7 @@ async fn filesystem_persistent_governor_reloads_active_holds_and_usage_from_stor
         MountPermissions::read_write_list_delete(),
     )])
     .expect("mount view");
-    let scoped = std::sync::Arc::new(ScopedFilesystem::new(
+    let scoped = std::sync::Arc::new(ScopedFilesystem::with_fixed_view(
         std::sync::Arc::clone(&backend),
         mounts,
     ));

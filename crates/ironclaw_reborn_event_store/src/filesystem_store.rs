@@ -43,7 +43,7 @@ use ironclaw_events::{
     EventStreamKey, ReadScope, RuntimeEvent,
 };
 use ironclaw_filesystem::{FilesystemError, RootFilesystem, ScopedFilesystem, SeqNo};
-use ironclaw_host_api::{AuditEnvelope, ScopedPath};
+use ironclaw_host_api::{AuditEnvelope, ResourceScope, ScopedPath};
 
 use crate::{StreamKind, durable_error};
 
@@ -89,7 +89,7 @@ where
         })?;
         let seq = self
             .fs
-            .append(&path, payload)
+            .append(&ResourceScope::system(), &path, payload)
             .await
             .map_err(map_filesystem_append_error)?;
         Ok(EventLogEntry {
@@ -114,7 +114,7 @@ where
         let path = stream_path(StreamKind::Runtime, stream)?;
         let records = self
             .fs
-            .tail(&path, SeqNo::from_backend(after.as_u64()))
+            .tail(&ResourceScope::system(), &path, SeqNo::from_backend(after.as_u64()))
             .await
             .map_err(map_filesystem_tail_error)?;
 
@@ -134,7 +134,7 @@ where
             // after, i.e. a foreign-future cursor.
             let probe = self
                 .fs
-                .tail(&path, SeqNo::from_backend(after.as_u64().saturating_sub(1)))
+                .tail(&ResourceScope::system(), &path, SeqNo::from_backend(after.as_u64().saturating_sub(1)))
                 .await
                 .map_err(map_filesystem_tail_error)?;
             if probe.is_empty() {
@@ -234,7 +234,7 @@ where
         })?;
         let seq = self
             .fs
-            .append(&path, payload)
+            .append(&ResourceScope::system(), &path, payload)
             .await
             .map_err(map_filesystem_append_error)?;
         Ok(EventLogEntry {
@@ -259,7 +259,7 @@ where
         let path = stream_path(StreamKind::Audit, stream)?;
         let records = self
             .fs
-            .tail(&path, SeqNo::from_backend(after.as_u64()))
+            .tail(&ResourceScope::system(), &path, SeqNo::from_backend(after.as_u64()))
             .await
             .map_err(map_filesystem_tail_error)?;
 
@@ -275,7 +275,7 @@ where
             // after, i.e. a foreign-future cursor.
             let probe = self
                 .fs
-                .tail(&path, SeqNo::from_backend(after.as_u64().saturating_sub(1)))
+                .tail(&ResourceScope::system(), &path, SeqNo::from_backend(after.as_u64().saturating_sub(1)))
                 .await
                 .map_err(map_filesystem_tail_error)?;
             if probe.is_empty() {

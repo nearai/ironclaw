@@ -63,7 +63,6 @@ use crate::{
     DEFAULT_SECRET_LEASE_TTL_SECONDS, SecretError, SecretLease, SecretLeaseId, SecretLeaseStatus,
     SecretMaterial, SecretMetadata, SecretStore, SecretStoreError, SecretsCrypto,
     credential_account_aad, credential_session_aad, filesystem_secret_aad,
-    secret_store_key_check_aad,
 };
 
 /// Maximum number of CAS retries before a multi-process write loop gives up
@@ -72,21 +71,8 @@ use crate::{
 /// that should be surfaced to the caller.
 const CAS_RETRY_ATTEMPTS: usize = 3;
 
-/// Fixed sentinel plaintext written by
-/// [`FilesystemSecretStore::verify_can_decrypt_existing_secrets`]. Mirrors
-/// the libSQL/Postgres `SECRET_STORE_KEY_CHECK_PLAINTEXT` so an operator who
-/// rotates a master key sees the same fail-loud-on-mismatch contract on every
-/// backend.
-const FILESYSTEM_KEY_CHECK_PLAINTEXT: &[u8] = b"reborn-secret-store-key-check-v1";
-
-/// Alias-relative path of the master-key readiness sentinel. The file lives
-/// at the `/secrets` mount root (no tenant/agent subscoping) because the
-/// check is process-level: a single sentinel proves the composition's master
-/// key can round-trip ciphertext against the same `RootFilesystem` mounted at
-/// `/secrets`. Tenant isolation for actual secret material is structural via
-/// the caller's [`MountView`](ironclaw_host_api::MountView); the sentinel is
-/// not secret material.
-const KEY_CHECK_PATH: &str = "/secrets/_master_key_check.json";
+// (Master-key sentinel constants and `KEY_CHECK_PATH` removed alongside
+// `verify_can_decrypt_existing_secrets`; see comment in the impl block.)
 
 // -- Serialized DTOs --------------------------------------------------------
 //
@@ -142,17 +128,6 @@ struct StoredSession {
     encrypted_payload: Vec<u8>,
     key_salt: Vec<u8>,
     uses: u64,
-}
-
-/// Master-key readiness sentinel. Encrypted under
-/// [`secret_store_key_check_aad`]; the plaintext is
-/// [`FILESYSTEM_KEY_CHECK_PLAINTEXT`]. Stored at [`KEY_CHECK_PATH`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StoredKeyCheck {
-    encrypted_value: Vec<u8>,
-    key_salt: Vec<u8>,
-    created_at: Timestamp,
-    updated_at: Timestamp,
 }
 
 // CredentialSession is intentionally not `Serialize`/`Deserialize` (its fields
@@ -254,108 +229,15 @@ where
         }
     }
 
-    /// Fail-loud master-key readiness check.
-    ///
-    /// On first run: encrypts a fixed sentinel plaintext
-    /// ([`FILESYSTEM_KEY_CHECK_PLAINTEXT`]) under [`secret_store_key_check_aad`]
-    /// and writes it to [`KEY_CHECK_PATH`]. On every subsequent run: reads the
-    /// sentinel back and verifies it decrypts to the same plaintext. A
-    /// mismatch — operator rotated the master key, copy-pasted a different
-    /// key, lost their keychain entry — fails with
-    /// [`SecretError::DecryptionFailed`] before any other secret operation
-    /// can return a wrong plaintext.
-    ///
-    /// This mirrors the libSQL/Postgres `verify_can_decrypt_existing_secrets`
-    /// contract (see git history for the deleted
-    /// `LibSqlSecretsStore::verify_can_decrypt_existing_secrets`) so the
-    /// startup-readiness shape is backend-independent.
-    ///
-    /// Composition must call this exactly once at process startup, between
-    /// constructing the store and exposing it to the runtime.
-    pub async fn verify_can_decrypt_existing_secrets(&self) -> Result<(), SecretError> {
-        let path = key_check_path()?;
-        let aad = secret_store_key_check_aad();
-        let existing = self
-            .filesystem
-            .get(&path)
-            .await
-            .map_err(filesystem_to_secret_error)?;
-        if let Some(versioned) = existing {
-            let stored: StoredKeyCheck = serde_json::from_slice(&versioned.entry.body)
-                .map_err(|error| SecretError::Database(error.to_string()))?;
-            let decrypted = self
-                .crypto
-                .decrypt(&stored.encrypted_value, &stored.key_salt, &aad)?;
-            // Constant-time compare against the fixed sentinel mirrors
-            // `db.rs::verify_secret_store_key_check` (deleted alongside this
-            // method's port). The sentinel is a compile-time string so the
-            // practical timing-oracle risk is low; the constant-time path is
-            // kept defense-in-depth and consistent with F1/F3 from the
-            // 2026-05 audit.
-            let matches: bool = ConstantTimeEq::ct_eq(
-                decrypted.expose().as_bytes(),
-                FILESYSTEM_KEY_CHECK_PLAINTEXT,
-            )
-            .into();
-            if !matches {
-                return Err(SecretError::DecryptionFailed(
-                    "secret store key check mismatch".to_string(),
-                ));
-            }
-            return Ok(());
-        }
-        // First-run bootstrap: encrypt the sentinel under the current crypto
-        // and write it. A `CasExpectation::Any` write is correct: if a
-        // concurrent process wins the create race, we read the winner back
-        // and verify it decrypts under our key. Either we agree on the
-        // master key (`Ok(())`) or we fail loud at decrypt
-        // (`DecryptionFailed`) — exactly the libSQL bootstrap shape.
-        let (encrypted_value, key_salt) =
-            self.crypto.encrypt(FILESYSTEM_KEY_CHECK_PLAINTEXT, &aad)?;
-        let now = Utc::now();
-        let stored = StoredKeyCheck {
-            encrypted_value,
-            key_salt,
-            created_at: now,
-            updated_at: now,
-        };
-        let body = serde_json::to_vec(&stored)
-            .map_err(|error| SecretError::Database(error.to_string()))?;
-        let entry = Entry::bytes(body).with_content_type(ContentType::json());
-        self.filesystem
-            .put(&path, entry, CasExpectation::Any)
-            .await
-            .map_err(filesystem_to_secret_error)?;
-        // Re-read to confirm: under contention another process may have
-        // written a sentinel encrypted with a different master key, in which
-        // case our own decrypt below fails closed.
-        let Some(versioned) = self
-            .filesystem
-            .get(&path)
-            .await
-            .map_err(filesystem_to_secret_error)?
-        else {
-            return Err(SecretError::Database(
-                "secret store key check missing after bootstrap".to_string(),
-            ));
-        };
-        let stored: StoredKeyCheck = serde_json::from_slice(&versioned.entry.body)
-            .map_err(|error| SecretError::Database(error.to_string()))?;
-        let decrypted = self
-            .crypto
-            .decrypt(&stored.encrypted_value, &stored.key_salt, &aad)?;
-        let matches: bool = ConstantTimeEq::ct_eq(
-            decrypted.expose().as_bytes(),
-            FILESYSTEM_KEY_CHECK_PLAINTEXT,
-        )
-        .into();
-        if !matches {
-            return Err(SecretError::DecryptionFailed(
-                "secret store key check mismatch".to_string(),
-            ));
-        }
-        Ok(())
-    }
+    // The FS-stored master-key sentinel and `verify_can_decrypt_existing_secrets`
+    // method that used to live here were removed when the per-tenant
+    // `ScopedFilesystem` design landed: the sentinel record would have moved to
+    // a per-tenant path, so the startup-readiness check could no longer be a
+    // single process-wide signal. The master key is sourced from
+    // config/env (`secret_master_key: SecretMaterial` in composition); a
+    // wrong key surfaces on the first per-tenant decrypt op rather than at
+    // startup. See PR #3679 / 2026-05-16 design discussion.
+
 
     async fn read_secret(
         &self,
@@ -365,7 +247,7 @@ where
         let path = secret_path(scope, handle)?;
         let Some(versioned) = self
             .filesystem
-            .get(&path)
+            .get(scope, &path)
             .await
             .map_err(fs_to_secret_store_error)?
         else {
@@ -385,9 +267,14 @@ where
             Entry::bytes(body).with_content_type(ContentType::json()),
             &secret.scope,
         );
-        ensure_tenant_id_index_secret(&self.filesystem, &secret_owner_root(&secret.scope)?).await?;
+        ensure_tenant_id_index_secret(
+            &self.filesystem,
+            &secret.scope,
+            &secret_owner_root(&secret.scope)?,
+        )
+        .await?;
         self.filesystem
-            .put(&path, entry, CasExpectation::Any)
+            .put(&secret.scope, &path, entry, CasExpectation::Any)
             .await
             .map(|_| ())
             .map_err(fs_to_secret_store_error)
@@ -400,9 +287,14 @@ where
             Entry::bytes(body).with_content_type(ContentType::json()),
             &lease.scope,
         );
-        ensure_tenant_id_index_secret(&self.filesystem, &lease_root(&lease.scope)?).await?;
+        ensure_tenant_id_index_secret(
+            &self.filesystem,
+            &lease.scope,
+            &lease_root(&lease.scope)?,
+        )
+        .await?;
         self.filesystem
-            .put(&path, entry, CasExpectation::Any)
+            .put(&lease.scope, &path, entry, CasExpectation::Any)
             .await
             .map(|_| ())
             .map_err(fs_to_secret_store_error)
@@ -526,7 +418,7 @@ where
         for _ in 0..CAS_RETRY_ATTEMPTS {
             let Some(versioned) = self
                 .filesystem
-                .get(&path)
+                .get(scope, &path)
                 .await
                 .map_err(fs_to_secret_store_error)?
             else {
@@ -565,6 +457,7 @@ where
                         );
                         match put_with_version_fallback(
                             &*self.filesystem,
+                            &lease.scope,
                             &path,
                             entry,
                             CasExpectation::Version(versioned.version),
@@ -600,9 +493,10 @@ where
                 &lease.scope,
             );
             match put_with_version_fallback(
-                &*self.filesystem,
-                &path,
-                entry,
+                            &*self.filesystem,
+                            &lease.scope,
+                            &path,
+                            entry,
                 CasExpectation::Version(versioned.version),
             )
             .await
@@ -636,7 +530,7 @@ where
         for _ in 0..CAS_RETRY_ATTEMPTS {
             let Some(versioned) = self
                 .filesystem
-                .get(&path)
+                .get(scope, &path)
                 .await
                 .map_err(fs_to_secret_store_error)?
             else {
@@ -679,9 +573,10 @@ where
                 &lease.scope,
             );
             match put_with_version_fallback(
-                &*self.filesystem,
-                &path,
-                entry,
+                            &*self.filesystem,
+                            &lease.scope,
+                            &path,
+                            entry,
                 CasExpectation::Version(versioned.version),
             )
             .await
@@ -713,7 +608,7 @@ where
         // adding that path is a follow-up. Until then, the list+get fan-out
         // is acceptable because N is bounded by the owner prefix.
         let root = lease_root(scope)?;
-        let entries = match self.filesystem.list_dir(&root).await {
+        let entries = match self.filesystem.list_dir(scope, &root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(fs_to_secret_store_error(error)),
@@ -730,7 +625,7 @@ where
             let scoped_child = join_scoped_secret(&root, &entry.name)?;
             let Some(versioned) = self
                 .filesystem
-                .get(&scoped_child)
+                .get(scope, &scoped_child)
                 .await
                 .map_err(fs_to_secret_store_error)?
             else {
@@ -833,10 +728,14 @@ where
             Entry::bytes(body).with_content_type(ContentType::json()),
             &account.scope,
         );
-        ensure_tenant_id_index_broker(&self.filesystem, &credential_account_root(&account.scope)?)
-            .await?;
+        ensure_tenant_id_index_broker(
+            &self.filesystem,
+            &account.scope,
+            &credential_account_root(&account.scope)?,
+        )
+        .await?;
         self.filesystem
-            .put(&path, entry, CasExpectation::Any)
+            .put(&account.scope, &path, entry, CasExpectation::Any)
             .await
             .map(|_| ())
             .map_err(fs_to_broker_error)?;
@@ -851,7 +750,7 @@ where
         let path = credential_account_path(scope, account_id)?;
         let Some(versioned) = self
             .filesystem
-            .get(&path)
+            .get(scope, &path)
             .await
             .map_err(fs_to_broker_error)?
         else {
@@ -875,7 +774,7 @@ where
         scope: &ResourceScope,
     ) -> Result<Vec<CredentialAccount>, CredentialBrokerError> {
         let root = credential_account_root(scope)?;
-        let entries = match self.filesystem.list_dir(&root).await {
+        let entries = match self.filesystem.list_dir(scope, &root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(fs_to_broker_error(error)),
@@ -891,7 +790,7 @@ where
             let scoped_child = join_scoped_broker(&root, &entry.name)?;
             let Some(versioned) = self
                 .filesystem
-                .get(&scoped_child)
+                .get(scope, &scoped_child)
                 .await
                 .map_err(fs_to_broker_error)?
             else {
@@ -936,10 +835,14 @@ where
             Entry::bytes(body).with_content_type(ContentType::json()),
             session.scope(),
         );
-        ensure_tenant_id_index_broker(&self.filesystem, &credential_session_root(session.scope())?)
-            .await?;
+        ensure_tenant_id_index_broker(
+            &self.filesystem,
+            session.scope(),
+            &credential_session_root(session.scope())?,
+        )
+        .await?;
         self.filesystem
-            .put(&path, entry, CasExpectation::Any)
+            .put(session.scope(), &path, entry, CasExpectation::Any)
             .await
             .map(|_| ())
             .map_err(fs_to_broker_error)?;
@@ -954,7 +857,7 @@ where
         let path = credential_session_path(scope, session_id)?;
         let Some(versioned) = self
             .filesystem
-            .get(&path)
+            .get(scope, &path)
             .await
             .map_err(fs_to_broker_error)?
         else {
@@ -981,7 +884,7 @@ where
         let _guard = lock.lock().await;
         let Some(versioned) = self
             .filesystem
-            .get(&path)
+            .get(scope, &path)
             .await
             .map_err(fs_to_broker_error)?
         else {
@@ -1015,7 +918,7 @@ where
         for _ in 0..CAS_RETRY_ATTEMPTS {
             let Some(versioned) = self
                 .filesystem
-                .get(&path)
+                .get(scope, &path)
                 .await
                 .map_err(fs_to_broker_error)?
             else {
@@ -1036,9 +939,10 @@ where
                 scope,
             );
             match put_with_version_fallback(
-                &*self.filesystem,
-                &path,
-                entry,
+                            &*self.filesystem,
+                            scope,
+                            &path,
+                            entry,
                 CasExpectation::Version(versioned.version),
             )
             .await
@@ -1154,24 +1058,6 @@ fn secret_owner_alias(scope: &ResourceScope) -> String {
 
 fn scoped_path_secret(raw: &str) -> Result<ScopedPath, SecretStoreError> {
     ScopedPath::new(raw).map_err(host_api_to_secret_store_error)
-}
-
-/// Alias-relative path of the master-key readiness sentinel. Errors are
-/// surfaced as [`SecretError::Database`] so [`verify_can_decrypt_existing_secrets`]
-/// can return them unchanged.
-fn key_check_path() -> Result<ScopedPath, SecretError> {
-    ScopedPath::new(KEY_CHECK_PATH).map_err(|error| SecretError::Database(error.to_string()))
-}
-
-/// Map filesystem errors raised by the master-key sentinel I/O into
-/// [`SecretError`]. The sentinel path itself contains no host filesystem
-/// detail; [`FilesystemError`] variants carry [`VirtualPath`]/[`ScopedPath`]
-/// references only, so this preserves the no-host-path-leak guardrail.
-fn filesystem_to_secret_error(error: FilesystemError) -> SecretError {
-    SecretError::Database(format!(
-        "secret store key check filesystem error: {}",
-        sanitize_error_kind(error.to_string())
-    ))
 }
 
 fn scoped_path_broker(raw: &str) -> Result<ScopedPath, CredentialBrokerError> {
@@ -1313,6 +1199,7 @@ fn lock_or_recover<T>(mutex: &Mutex<HashMap<String, T>>) -> MutexGuard<'_, HashM
 /// specific `Unsupported` shape.
 async fn put_with_version_fallback<F>(
     filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
     path: &ScopedPath,
     entry: Entry,
     cas: CasExpectation,
@@ -1320,11 +1207,11 @@ async fn put_with_version_fallback<F>(
 where
     F: RootFilesystem,
 {
-    match filesystem.put(path, entry.clone(), cas).await {
+    match filesystem.put(scope, path, entry.clone(), cas).await {
         Ok(_) => Ok(()),
         Err(FilesystemError::Unsupported { .. }) if !matches!(cas, CasExpectation::Any) => {
             filesystem
-                .put(path, entry, CasExpectation::Any)
+                .put(scope, path, entry, CasExpectation::Any)
                 .await
                 .map(|_| ())
         }
@@ -1491,6 +1378,7 @@ fn tag_entry_with_tenant(entry: Entry, scope: &ResourceScope) -> Entry {
 /// instead of failing closed.
 async fn ensure_tenant_id_index_secret<F>(
     filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
     prefix: &ScopedPath,
 ) -> Result<(), SecretStoreError>
 where
@@ -1501,7 +1389,7 @@ where
         vec![index_key_tenant_id()],
         IndexKind::Exact,
     );
-    match filesystem.ensure_index(prefix, &spec).await {
+    match filesystem.ensure_index(scope, prefix, &spec).await {
         Ok(()) => Ok(()),
         Err(FilesystemError::Unsupported { .. }) => Ok(()),
         Err(error) => Err(fs_to_secret_store_error(error)),
@@ -1510,6 +1398,7 @@ where
 
 async fn ensure_tenant_id_index_broker<F>(
     filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
     prefix: &ScopedPath,
 ) -> Result<(), CredentialBrokerError>
 where
@@ -1520,7 +1409,7 @@ where
         vec![index_key_tenant_id()],
         IndexKind::Exact,
     );
-    match filesystem.ensure_index(prefix, &spec).await {
+    match filesystem.ensure_index(scope, prefix, &spec).await {
         Ok(()) => Ok(()),
         Err(FilesystemError::Unsupported { .. }) => Ok(()),
         Err(error) => Err(fs_to_broker_error(error)),
@@ -1584,7 +1473,7 @@ mod tests {
             MountPermissions::read_write_list_delete(),
         )])
         .expect("mount view");
-        Arc::new(ScopedFilesystem::new(backend, mounts))
+        Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
     }
 
     /// Default test mount: `/secrets` → tenant-scoped target. Mirrors the
@@ -1681,7 +1570,7 @@ mod tests {
         // through the same MountView the store uses, so the at-rest check
         // reads exactly the bytes the backend stored.
         let scoped_path = secret_path(&scope, &handle).unwrap();
-        let virtual_path = scoped.mounts().resolve(&scoped_path).unwrap();
+        let virtual_path = scoped.resolve(&scope, &scoped_path).unwrap();
         let versioned = fs
             .get(&virtual_path)
             .await
@@ -1907,7 +1796,7 @@ mod tests {
         broker.put_account(account).await.unwrap();
 
         let scoped_path = credential_account_path(&scope, &account_id).unwrap();
-        let virtual_path = scoped.mounts().resolve(&scoped_path).unwrap();
+        let virtual_path = scoped.resolve(&scope, &scoped_path).unwrap();
         let versioned = fs
             .get(&virtual_path)
             .await
@@ -2055,8 +1944,7 @@ mod tests {
         let scoped_lease = lease_path(&scope, lease.id).unwrap();
         let watched = bootstrap_store
             .filesystem
-            .mounts()
-            .resolve(&scoped_lease)
+            .resolve(&scope, &scoped_lease)
             .unwrap();
         let racing = StdArc::new(VersionRacingBackend::new(StdArc::clone(&inner), watched));
         let racing_scoped = default_scoped_fs(StdArc::clone(&racing));
@@ -2111,8 +1999,7 @@ mod tests {
         let scoped_session_path = credential_session_path(&scope, correlation).unwrap();
         let watched = bootstrap_broker
             .filesystem
-            .mounts()
-            .resolve(&scoped_session_path)
+            .resolve(&scope, &scoped_session_path)
             .unwrap();
 
         let racing = StdArc::new(VersionRacingBackend::new(StdArc::clone(&inner), watched));
@@ -2330,7 +2217,7 @@ mod tests {
         // VirtualPath via the same MountView the store uses so the raw
         // query targets exactly the bytes the backend stored.
         let prefix = secret_owner_root(&scope).unwrap();
-        let virtual_prefix = scoped.mounts().resolve(&prefix).unwrap();
+        let virtual_prefix = scoped.resolve(&scope, &prefix).unwrap();
         let tenant_key = IndexKey::new("tenant_id").unwrap();
 
         let hit = backend
@@ -2377,71 +2264,9 @@ mod tests {
         )
     }
 
-    /// First-run bootstrap: an empty store with no sentinel must accept the
-    /// readiness check and install the sentinel. Calling it again with the
-    /// same crypto must keep accepting (steady-state path reads the existing
-    /// sentinel).
-    #[tokio::test]
-    async fn filesystem_secret_store_verify_can_decrypt_existing_secrets_bootstraps_on_first_run() {
-        let backend = Arc::new(InMemoryBackend::new());
-        let scoped = default_scoped_fs(Arc::clone(&backend));
-        let store = FilesystemSecretStore::new(Arc::clone(&scoped), test_crypto());
-
-        store.verify_can_decrypt_existing_secrets().await.unwrap();
-        // Idempotent: a second call must observe the sentinel and accept it
-        // without re-bootstrapping.
-        store.verify_can_decrypt_existing_secrets().await.unwrap();
-    }
-
-    /// Steady-state mismatch: an operator who rotates the master key (or
-    /// pastes the wrong one on restart) must hit `DecryptionFailed` before
-    /// the store can return any wrong plaintext. The sentinel never appears
-    /// in the error.
-    #[tokio::test]
-    async fn filesystem_secret_store_verify_can_decrypt_existing_secrets_rejects_wrong_key() {
-        let backend = Arc::new(InMemoryBackend::new());
-        let scoped = default_scoped_fs(Arc::clone(&backend));
-        let bootstrap_store = FilesystemSecretStore::new(Arc::clone(&scoped), test_crypto());
-        bootstrap_store
-            .verify_can_decrypt_existing_secrets()
-            .await
-            .unwrap();
-
-        let losing_store = FilesystemSecretStore::new(scoped, wrong_crypto());
-        let error = losing_store
-            .verify_can_decrypt_existing_secrets()
-            .await
-            .expect_err("wrong master key must fail the sentinel check");
-        assert!(
-            matches!(error, SecretError::DecryptionFailed(_)),
-            "expected DecryptionFailed; got {error:?}"
-        );
-        assert!(
-            !format!("{error:?}").contains("reborn-secret-store-key-check-v1"),
-            "sentinel plaintext must not leak through error formatting",
-        );
-    }
-
-    /// Verifies isolation between tenant subtrees: each MountView resolves
-    /// `/secrets` to its own VirtualPath prefix, so the sentinel under one
-    /// tenant cannot satisfy the readiness check for another tenant whose
-    /// composition runs with a different master key. This is the same
-    /// structural protection the runtime relies on for actual secret
-    /// material — see `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
-    #[tokio::test]
-    async fn filesystem_secret_store_verify_can_decrypt_existing_secrets_isolates_per_mount() {
-        let backend = Arc::new(InMemoryBackend::new());
-        let tenant_a = build_scoped_fs(Arc::clone(&backend), "/secrets/tenants/a/users/x/secrets");
-        let tenant_b = build_scoped_fs(Arc::clone(&backend), "/secrets/tenants/b/users/x/secrets");
-
-        let store_a = FilesystemSecretStore::new(tenant_a, test_crypto());
-        store_a.verify_can_decrypt_existing_secrets().await.unwrap();
-
-        // Tenant B's composition uses a different master key entirely. The
-        // mount points at a different VirtualPath subtree, so tenant A's
-        // sentinel is invisible — the bootstrap path runs cleanly under
-        // tenant B's key.
-        let store_b = FilesystemSecretStore::new(tenant_b, wrong_crypto());
-        store_b.verify_can_decrypt_existing_secrets().await.unwrap();
-    }
+    // Master-key sentinel tests were deleted alongside
+    // `verify_can_decrypt_existing_secrets` (PR #3679). Master-key
+    // correctness is now verified by the first per-tenant decrypt op rather
+    // than a process-wide startup sentinel; see the comment in the impl
+    // block above.
 }

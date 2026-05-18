@@ -1443,6 +1443,7 @@ async fn filesystem_process_store_rejects_record_id_mismatches() {
     // a raw `write_file`) keeps the test honest about the actual on-disk
     // surface the store will read from.
     fs.write_bytes(
+        &scope,
         &scoped_record_path(&scope, requested_process_id),
         serde_json::to_vec_pretty(&forged).unwrap(),
     )
@@ -1485,6 +1486,7 @@ async fn filesystem_process_result_store_rejects_unexpected_output_refs() {
         error_kind: None,
     };
     fs.write_bytes(
+        &owner_scope,
         &scoped_result_path(&owner_scope, owner_process_id),
         serde_json::to_vec_pretty(&forged).unwrap(),
     )
@@ -1691,7 +1693,7 @@ async fn filesystem_process_store_writes_tenant_id_indexed_projection() {
         scope.project_id.as_ref().unwrap().as_str()
     ))
     .unwrap();
-    let virtual_root = fs.mounts().resolve(&records_root).unwrap();
+    let virtual_root = fs.resolve(&scope, &records_root).unwrap();
 
     let tenant_key = IndexKey::new("tenant_id").unwrap();
     let hit = backend
@@ -2587,7 +2589,7 @@ where
         MountPermissions::read_write_list_delete(),
     )])
     .expect("mount view");
-    Arc::new(ScopedFilesystem::new(backend, mounts))
+    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
 
 /// Alias-relative [`ScopedPath`] for a lifecycle record. Used by tests

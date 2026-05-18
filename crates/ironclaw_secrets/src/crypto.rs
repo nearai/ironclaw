@@ -176,7 +176,6 @@ pub(crate) fn build_aad(domain: &[u8], parts: &[&[u8]]) -> Vec<u8> {
 pub(crate) const AAD_DOMAIN_SECRET_RECORD: &[u8] = b"reborn/v1/secret_record";
 pub(crate) const AAD_DOMAIN_CREDENTIAL_ACCOUNT: &[u8] = b"reborn/v1/credential_account";
 pub(crate) const AAD_DOMAIN_CREDENTIAL_SESSION: &[u8] = b"reborn/v1/credential_session";
-pub(crate) const AAD_DOMAIN_SECRET_STORE_KEY_CHECK: &[u8] = b"reborn/v1/secret_store_key_check";
 pub(crate) const AAD_DOMAIN_FILESYSTEM_SECRET: &[u8] = b"reborn/v1/fs_secret_record";
 
 /// AAD for the secret-record AES-GCM payload, binding ciphertext to
@@ -192,13 +191,6 @@ pub fn secret_record_aad(user_id: &str, name: &str) -> Vec<u8> {
         AAD_DOMAIN_SECRET_RECORD,
         &[user_id.as_bytes(), name.as_bytes()],
     )
-}
-
-/// AAD for the readiness sentinel row in `reborn_secret_store_key_check`.
-///
-/// Same fixture-only motivation as [`secret_record_aad`].
-pub fn secret_store_key_check_aad() -> Vec<u8> {
-    build_aad(AAD_DOMAIN_SECRET_STORE_KEY_CHECK, &[])
 }
 
 /// Scope-derived key bytes used by credential AAD helpers.

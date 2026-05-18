@@ -403,7 +403,7 @@ async fn jsonl_event_stores(event_root: &Path) -> RebornEventStores {
 }
 
 fn filesystem_process_services(engine_root: &Path) -> DurableProcessServices {
-    let scoped = Arc::new(ScopedFilesystem::new(
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::new(mounted_engine_filesystem(engine_root)),
         durable_mount_view(),
     ));
@@ -447,7 +447,7 @@ fn durable_mount_view() -> MountView {
 /// the wrapping struct is irrelevant — durability lives on disk, and the
 /// per-path lock map is process-global by design.
 fn scoped_engine_filesystem(engine_root: &Path) -> Arc<ScopedFilesystem<LocalFilesystem>> {
-    Arc::new(ScopedFilesystem::new(
+    Arc::new(ScopedFilesystem::with_fixed_view(
         Arc::new(mounted_engine_filesystem(engine_root)),
         durable_mount_view(),
     ))

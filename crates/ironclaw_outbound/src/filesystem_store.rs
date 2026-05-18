@@ -35,7 +35,7 @@ use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
     IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem, VersionedEntry,
 };
-use ironclaw_host_api::{ScopedPath, TenantId, ThreadId};
+use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId, ThreadId};
 use ironclaw_turns::{TurnActor, TurnScope};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -103,20 +103,17 @@ where
 
     async fn put_json<T: Serialize>(
         &self,
+        scope: &ResourceScope,
         path: &ScopedPath,
         value: &T,
         tenant: &TenantId,
         cas: CasExpectation,
     ) -> Result<(), OutboundError> {
         let body = serde_json::to_vec(value).map_err(|_| OutboundError::Serialization)?;
-        // Defense-in-depth: tag the entry with the tenant id so admin-tier
-        // queries can filter by tenant and a path-rewriting bug surfaces as
-        // a query-time mismatch rather than silent cross-tenant leakage.
-        // See docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md.
         let entry = Entry::bytes(body)
             .with_content_type(ContentType::json())
             .with_indexed(tenant_id_index_key(), tenant_id_index_value(tenant));
-        self.put_with_byte_fallback(path, entry, cas).await
+        self.put_with_byte_fallback(scope, path, entry, cas).await
     }
 
     /// Like [`put_json`] but additionally projects an indexed scope value so
@@ -127,6 +124,7 @@ where
     /// tenant-scoped subtree.
     async fn put_delivery_attempt_indexed(
         &self,
+        scope: &ResourceScope,
         path: &ScopedPath,
         attempt: &OutboundDeliveryAttempt,
         cas: CasExpectation,
@@ -138,13 +136,11 @@ where
                 delivery_scope_index_key(),
                 delivery_scope_index_value(&attempt.scope),
             )
-            // Defense-in-depth tenant projection — see `put_json` and
-            // `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
             .with_indexed(
                 tenant_id_index_key(),
                 tenant_id_index_value(&attempt.scope.tenant_id),
             );
-        self.put_with_byte_fallback(path, entry, cas).await
+        self.put_with_byte_fallback(scope, path, entry, cas).await
     }
 
     /// Write `entry` with the given CAS expectation, falling back to a
@@ -156,16 +152,17 @@ where
     /// new filesystem stores.
     async fn put_with_byte_fallback(
         &self,
+        scope: &ResourceScope,
         path: &ScopedPath,
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<(), OutboundError> {
-        match self.filesystem.put(path, entry.clone(), cas).await {
+        match self.filesystem.put(scope, path, entry.clone(), cas).await {
             Ok(_) => Ok(()),
             Err(FilesystemError::Unsupported { .. }) => {
                 let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
                 self.filesystem
-                    .put(path, opaque, CasExpectation::Any)
+                    .put(scope, path, opaque, CasExpectation::Any)
                     .await
                     .map(|_| ())
                     .map_err(map_fs_error)
@@ -174,48 +171,40 @@ where
         }
     }
 
-    /// Declare the `scope` exact-equality index on the deliveries prefix.
-    /// Idempotent across the deliveries mount lifetime; tolerates backends
-    /// that don't materialize indexes (e.g. byte-only `LocalFilesystem`),
-    /// because the in-memory `query` evaluator still filters on
-    /// `Entry::indexed` even without a declared index.
-    async fn ensure_delivery_scope_index(&self) -> Result<(), OutboundError> {
+    async fn ensure_delivery_scope_index(
+        &self,
+        scope: &ResourceScope,
+    ) -> Result<(), OutboundError> {
         let root = deliveries_root()?;
         let name = IndexName::new(DELIVERY_SCOPE_INDEX_NAME).map_err(|_| OutboundError::Backend)?;
         let spec = IndexSpec::new(name, vec![delivery_scope_index_key()], IndexKind::Exact);
-        match self.filesystem.ensure_index(&root, &spec).await {
+        match self.filesystem.ensure_index(scope, &root, &spec).await {
             Ok(()) => Ok(()),
-            // Backends without index support are still usable for
-            // reads/writes; the query path degrades on those mounts but does
-            // not fail closed.
             Err(FilesystemError::Unsupported { .. }) => Ok(()),
             Err(error) => Err(map_fs_error(error)),
         }
     }
 
-    /// Declare the `tenant_id` exact-equality index on `root`. Mirrors
-    /// [`Self::ensure_delivery_scope_index`] but for the defense-in-depth
-    /// tenant projection — see
-    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
-    /// Idempotent across the mount lifetime; tolerates byte-only backends.
-    async fn ensure_tenant_id_index(&self, root: &ScopedPath) -> Result<(), OutboundError> {
+    async fn ensure_tenant_id_index(
+        &self,
+        scope: &ResourceScope,
+        root: &ScopedPath,
+    ) -> Result<(), OutboundError> {
         let name = IndexName::new(TENANT_ID_INDEX_NAME).map_err(|_| OutboundError::Backend)?;
         let spec = IndexSpec::new(name, vec![tenant_id_index_key()], IndexKind::Exact);
-        match self.filesystem.ensure_index(root, &spec).await {
+        match self.filesystem.ensure_index(scope, root, &spec).await {
             Ok(()) => Ok(()),
             Err(FilesystemError::Unsupported { .. }) => Ok(()),
             Err(error) => Err(map_fs_error(error)),
         }
     }
 
-    /// Read the current versioned entry at `path` and decode its body as `T`.
-    /// Returns the parsed value alongside the version token that can be passed
-    /// back as [`CasExpectation::Version`] to detect concurrent writers.
     async fn get_versioned_json<T: for<'de> serde::Deserialize<'de>>(
         &self,
+        scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<Option<(T, VersionedEntry)>, OutboundError> {
-        let Some(versioned) = self.filesystem.get(path).await.map_err(map_fs_error)? else {
+        let Some(versioned) = self.filesystem.get(scope, path).await.map_err(map_fs_error)? else {
             return Ok(None);
         };
         let parsed = serde_json::from_slice(&versioned.entry.body)
@@ -225,10 +214,11 @@ where
 
     async fn get_json<T: for<'de> serde::Deserialize<'de>>(
         &self,
+        scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<Option<T>, OutboundError> {
         Ok(self
-            .get_versioned_json::<T>(path)
+            .get_versioned_json::<T>(scope, path)
             .await?
             .map(|(value, _)| value))
     }
@@ -245,13 +235,17 @@ where
     ) -> Result<(), OutboundError> {
         validate_policy(&policy)?;
         let path = policy_path(&policy.scope)?;
-        self.ensure_tenant_id_index(&policies_root()?).await?;
-        // Notification policy puts are blind overwrites — the caller owns the
-        // full policy and there is no read-then-write progression invariant to
-        // protect. `CasExpectation::Any` is correct here; the read-then-write
-        // paths below carry their own version expectations (audit finding F1).
-        self.put_json(&path, &policy, &policy.scope.tenant_id, CasExpectation::Any)
-            .await
+        let resource_scope = policy.scope.to_resource_scope();
+        self.ensure_tenant_id_index(&resource_scope, &policies_root()?)
+            .await?;
+        self.put_json(
+            &resource_scope,
+            &path,
+            &policy,
+            &policy.scope.tenant_id,
+            CasExpectation::Any,
+        )
+        .await
     }
 
     async fn load_thread_notification_policy(
@@ -259,7 +253,11 @@ where
         scope: TurnScope,
     ) -> Result<ThreadNotificationPolicy, OutboundError> {
         let path = policy_path(&scope)?;
-        match self.get_json::<ThreadNotificationPolicy>(&path).await? {
+        let resource_scope = scope.to_resource_scope();
+        match self
+            .get_json::<ThreadNotificationPolicy>(&resource_scope, &path)
+            .await?
+        {
             Some(policy) => Ok(policy),
             None => Ok(ThreadNotificationPolicy::default_for_scope(scope)),
         }
@@ -276,16 +274,16 @@ where
             &record.scope,
             &record.thread_id,
         )?;
-        self.ensure_tenant_id_index(&subscriptions_root()?).await?;
-        // CAS retry loop (audit finding F1): a concurrent writer could insert
-        // or update the same subscription record between our read and put,
-        // racing the "cursor must not move backwards" check. Re-read on
-        // version mismatch and re-validate identity + progression on every
-        // attempt so a regressing cursor breaks the loop rather than letting
-        // a later writer overwrite it.
+        // Outbound subscription records carry their full identity in the
+        // record body (subscription_id, actor, scope hash); the path is
+        // already a tenant-aware sha256 so the per-tenant FS rewrite isn't
+        // needed. Route through the system scope.
+        let resource_scope = ResourceScope::system();
+        self.ensure_tenant_id_index(&resource_scope, &subscriptions_root()?)
+            .await?;
         for _ in 0..MAX_CAS_RETRIES {
             let (cas, existing) = match self
-                .get_versioned_json::<ProjectionSubscriptionRecord>(&path)
+                .get_versioned_json::<ProjectionSubscriptionRecord>(&resource_scope, &path)
                 .await?
             {
                 Some((existing, versioned)) => {
@@ -297,7 +295,13 @@ where
                 validate_subscription_identity(existing, &record)?;
             }
             match self
-                .put_json(&path, &record, &record.scope.stream.tenant_id, cas)
+                .put_json(
+                    &resource_scope,
+                    &path,
+                    &record,
+                    &record.scope.stream.tenant_id,
+                    cas,
+                )
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -318,7 +322,11 @@ where
             &request.scope,
             &request.thread_id,
         )?;
-        let Some(record) = self.get_json::<ProjectionSubscriptionRecord>(&path).await? else {
+        let resource_scope = ResourceScope::system();
+        let Some(record) = self
+            .get_json::<ProjectionSubscriptionRecord>(&resource_scope, &path)
+            .await?
+        else {
             return Ok(None);
         };
         validate_subscription_request(&record, &request)?;
@@ -335,18 +343,12 @@ where
             &request.cursor.scope,
             &request.thread_id,
         )?;
-        self.ensure_tenant_id_index(&subscriptions_root()?).await?;
-        // CAS retry loop (audit finding F1): the audit specifically calls
-        // this out as the load-bearing site for the "cursor must not move
-        // backwards" invariant. On every retry we re-read the existing
-        // record and re-run `validate_advance_request`, which re-checks
-        // progression against the current persisted cursor. If a racing
-        // writer already advanced the cursor past `request.cursor.runtime`,
-        // the second-pass validation surfaces `InvalidRequest` rather than
-        // silently overwriting forward progress with stale state.
+        let resource_scope = ResourceScope::system();
+        self.ensure_tenant_id_index(&resource_scope, &subscriptions_root()?)
+            .await?;
         for _ in 0..MAX_CAS_RETRIES {
             let Some((mut record, versioned)) = self
-                .get_versioned_json::<ProjectionSubscriptionRecord>(&path)
+                .get_versioned_json::<ProjectionSubscriptionRecord>(&resource_scope, &path)
                 .await?
             else {
                 return Err(OutboundError::SubscriptionScopeMismatch);
@@ -355,6 +357,7 @@ where
             record.cursor = Some(request.cursor.clone());
             match self
                 .put_json(
+                    &resource_scope,
                     &path,
                     &record,
                     &record.scope.stream.tenant_id,
@@ -375,23 +378,26 @@ where
         attempt: OutboundDeliveryAttempt,
     ) -> Result<(), OutboundError> {
         validate_delivery_attempt(&attempt)?;
-        self.ensure_delivery_scope_index().await?;
-        self.ensure_tenant_id_index(&deliveries_root()?).await?;
+        let resource_scope = attempt.scope.to_resource_scope();
+        self.ensure_delivery_scope_index(&resource_scope).await?;
+        self.ensure_tenant_id_index(&resource_scope, &deliveries_root()?)
+            .await?;
         let path = delivery_path(&attempt.delivery_id)?;
-        // CAS retry loop (audit finding F1): two concurrent writers racing the
-        // same `delivery_id` (e.g. an at-least-once orchestrator retry firing
-        // twice) must not both succeed at the first-write branch. We use
-        // `CasExpectation::Absent` for the initial insert so the second
-        // writer's put fails with `CasConflict`; the loop then re-reads and
-        // falls into the identity-validate branch, which treats a matching
-        // existing record as a duplicate-OK no-op.
         for _ in 0..MAX_CAS_RETRIES {
-            if let Some(existing) = self.get_json::<OutboundDeliveryAttempt>(&path).await? {
+            if let Some(existing) = self
+                .get_json::<OutboundDeliveryAttempt>(&resource_scope, &path)
+                .await?
+            {
                 validate_delivery_identity(&existing, &attempt)?;
                 return Ok(());
             }
             match self
-                .put_delivery_attempt_indexed(&path, &attempt, CasExpectation::Absent)
+                .put_delivery_attempt_indexed(
+                    &resource_scope,
+                    &path,
+                    &attempt,
+                    CasExpectation::Absent,
+                )
                 .await
             {
                 Ok(()) => return Ok(()),
@@ -408,16 +414,10 @@ where
     ) -> Result<(), OutboundError> {
         validate_delivery_status_request(&request)?;
         let path = delivery_path(&request.delivery_id)?;
-        // CAS retry loop (audit finding F1): two concurrent status writes
-        // (e.g. delivered + failed firing simultaneously after a retry) race
-        // the read-modify-write. Re-read on version mismatch so the second
-        // writer sees the first writer's state instead of clobbering it with
-        // stale fields. The write side reuses
-        // `put_delivery_attempt_indexed` so the `scope` projection is
-        // preserved on status mutations (audit finding F2).
+        let resource_scope = request.scope.to_resource_scope();
         for _ in 0..MAX_CAS_RETRIES {
             let Some((mut attempt, versioned)) = self
-                .get_versioned_json::<OutboundDeliveryAttempt>(&path)
+                .get_versioned_json::<OutboundDeliveryAttempt>(&resource_scope, &path)
                 .await?
             else {
                 return Err(OutboundError::DeliveryNotFound);
@@ -429,6 +429,7 @@ where
             attempt.failure_kind = request.failure_kind;
             match self
                 .put_delivery_attempt_indexed(
+                    &resource_scope,
                     &path,
                     &attempt,
                     CasExpectation::Version(versioned.version),
@@ -447,18 +448,8 @@ where
         &self,
         scope: TurnScope,
     ) -> Result<Vec<OutboundDeliveryAttempt>, OutboundError> {
-        // Audit finding F2: previously this was a `list_dir` + N+1
-        // `get_json` per row, with no indexed projection. Now we declare an
-        // exact-equality index on the `scope` indexed key (the same hash
-        // `thread_scope_key` uses for policy paths) and let the backend
-        // serve `Filter::Eq` natively.
-        //
-        // Audit finding F3: the previous `list_dir` call was unpaginated;
-        // SQL backends issue `LIMIT Page::MAX_LIMIT` on the list_dir
-        // translation and would silently truncate past 1024 deliveries.
-        // Drain the paginated query in a loop until a short page arrives,
-        // mirroring the engine store's `query_all` pattern.
-        self.ensure_delivery_scope_index().await?;
+        let resource_scope = scope.to_resource_scope();
+        self.ensure_delivery_scope_index(&resource_scope).await?;
         let root = deliveries_root()?;
         let filter = Filter::Eq {
             key: delivery_scope_index_key(),
@@ -468,7 +459,11 @@ where
         let mut offset: u64 = 0;
         loop {
             let page = Page::new(offset, Page::MAX_LIMIT);
-            let entries = match self.filesystem.query(&root, &filter, page).await {
+            let entries = match self
+                .filesystem
+                .query(&resource_scope, &root, &filter, page)
+                .await
+            {
                 Ok(entries) => entries,
                 Err(FilesystemError::NotFound { .. }) => break,
                 Err(error) => return Err(map_fs_error(error)),

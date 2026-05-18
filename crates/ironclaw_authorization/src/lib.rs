@@ -466,7 +466,7 @@ where
         let path = lease_path(scope, lease_id)?;
         let Some(versioned) = self
             .filesystem
-            .get(&path)
+            .get(scope, &path)
             .await
             .map_err(lease_persistence_error)?
         else {
@@ -510,7 +510,12 @@ where
                 index_key_tenant_id(),
                 IndexValue::Text(lease.scope.tenant_id.as_str().to_string()),
             );
-        ensure_tenant_id_index(&self.filesystem, &lease_owner_prefix(&lease.scope)?).await?;
+        ensure_tenant_id_index(
+            &self.filesystem,
+            &lease.scope,
+            &lease_owner_prefix(&lease.scope)?,
+        )
+        .await?;
         // Byte-only backends (LocalFilesystem) reject BOTH non-`Any` CAS
         // AND entries with a populated `indexed` projection in a single
         // `Unsupported` response. Strip the projection and downgrade CAS
@@ -518,13 +523,17 @@ where
         // `mutation_lock` carries the ordering safety invariant on the
         // fallback path, and the dropped tenant projection is best-effort
         // (path-prefix scoping is the primary isolation boundary).
-        match self.filesystem.put(&path, entry.clone(), expectation).await {
+        match self
+            .filesystem
+            .put(&lease.scope, &path, entry.clone(), expectation)
+            .await
+        {
             Ok(_) => Ok(()),
             Err(FilesystemError::Unsupported { .. }) => {
                 let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
                 match self
                     .filesystem
-                    .put(&path, opaque, CasExpectation::Any)
+                    .put(&lease.scope, &path, opaque, CasExpectation::Any)
                     .await
                 {
                     Ok(_) => Ok(()),
@@ -590,7 +599,7 @@ where
         let path = lease_index_path(scope)?;
         let Some(versioned) = self
             .filesystem
-            .get(&path)
+            .get(scope, &path)
             .await
             .map_err(lease_persistence_error)?
         else {
@@ -617,7 +626,7 @@ where
                 index_key_tenant_id(),
                 IndexValue::Text(scope.tenant_id.as_str().to_string()),
             );
-        ensure_tenant_id_index(&self.filesystem, &lease_owner_prefix(scope)?).await?;
+        ensure_tenant_id_index(&self.filesystem, scope, &lease_owner_prefix(scope)?).await?;
         // Byte-only backends (LocalFilesystem) reject entries with a
         // populated `indexed` projection. Fall back to the plain-bytes
         // shape for those — the tenant projection is best-effort defense
@@ -626,14 +635,14 @@ where
         // structurally.
         match self
             .filesystem
-            .put(&path, entry.clone(), CasExpectation::Any)
+            .put(scope, &path, entry.clone(), CasExpectation::Any)
             .await
         {
             Ok(_) => Ok(()),
             Err(FilesystemError::Unsupported { .. }) => {
                 let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
                 self.filesystem
-                    .put(&path, opaque, CasExpectation::Any)
+                    .put(scope, &path, opaque, CasExpectation::Any)
                     .await
                     .map(|_| ())
                     .map_err(lease_persistence_error)
@@ -669,11 +678,11 @@ where
         scope: &ResourceScope,
     ) -> Result<Vec<ScopedPath>, CapabilityLeaseError> {
         let owner_prefix = lease_owner_prefix(scope)?;
-        let invocation_subdirs = self.list_subdir_names(&owner_prefix).await?;
+        let invocation_subdirs = self.list_subdir_names(scope, &owner_prefix).await?;
         let mut paths = Vec::new();
         for subdir in invocation_subdirs {
             let invocation_root = join_scoped(&owner_prefix, &subdir)?;
-            paths.extend(self.list_lease_files(&invocation_root).await?);
+            paths.extend(self.list_lease_files(scope, &invocation_root).await?);
         }
         Ok(paths)
     }
@@ -686,9 +695,10 @@ where
     /// follow-up read.
     async fn list_subdir_names(
         &self,
+        scope: &ResourceScope,
         prefix: &ScopedPath,
     ) -> Result<Vec<String>, CapabilityLeaseError> {
-        match self.filesystem.list_dir(prefix).await {
+        match self.filesystem.list_dir(scope, prefix).await {
             Ok(entries) => Ok(entries
                 .into_iter()
                 .filter(|entry| entry.file_type == FileType::Directory)
@@ -701,9 +711,10 @@ where
 
     async fn list_lease_files(
         &self,
+        scope: &ResourceScope,
         root: &ScopedPath,
     ) -> Result<Vec<ScopedPath>, CapabilityLeaseError> {
-        let entries = match self.filesystem.list_dir(root).await {
+        let entries = match self.filesystem.list_dir(scope, root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(lease_persistence_error(error)),
@@ -723,11 +734,12 @@ where
 
     async fn read_lease_file(
         &self,
+        scope: &ResourceScope,
         path: &ScopedPath,
     ) -> Result<CapabilityLease, CapabilityLeaseError> {
         let versioned = self
             .filesystem
-            .get(path)
+            .get(scope, path)
             .await
             .map_err(lease_persistence_error)?
             .ok_or_else(|| CapabilityLeaseError::Persistence {
@@ -836,7 +848,7 @@ where
         };
         let mut leases = Vec::new();
         for path in paths {
-            if let Ok(lease) = self.read_lease_file(&path).await {
+            if let Ok(lease) = self.read_lease_file(scope, &path).await {
                 leases.push(lease);
             }
         }
@@ -1615,6 +1627,7 @@ fn index_name_authorization_tenant() -> IndexName {
 /// instead of failing closed.
 async fn ensure_tenant_id_index<F>(
     filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
     prefix: &ScopedPath,
 ) -> Result<(), CapabilityLeaseError>
 where
@@ -1625,7 +1638,7 @@ where
         vec![index_key_tenant_id()],
         IndexKind::Exact,
     );
-    match filesystem.ensure_index(prefix, &spec).await {
+    match filesystem.ensure_index(scope, prefix, &spec).await {
         Ok(()) => Ok(()),
         Err(FilesystemError::Unsupported { .. }) => Ok(()),
         Err(error) => Err(lease_persistence_error(error)),

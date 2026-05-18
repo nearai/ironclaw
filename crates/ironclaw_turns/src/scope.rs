@@ -23,6 +23,21 @@ impl TurnScope {
             thread_id,
         }
     }
+
+    /// Convert into a [`ironclaw_host_api::ResourceScope`] for filesystem
+    /// resolver lookup. `user_id` falls back to the system sentinel when
+    /// the turn scope is anchored at tenant level without a specific owner.
+    pub fn to_resource_scope(&self) -> ironclaw_host_api::ResourceScope {
+        ironclaw_host_api::ResourceScope {
+            tenant_id: self.tenant_id.clone(),
+            user_id: UserId::from_trusted(ironclaw_host_api::SYSTEM_RESERVED_ID.to_string()),
+            agent_id: self.agent_id.clone(),
+            project_id: self.project_id.clone(),
+            mission_id: None,
+            thread_id: Some(self.thread_id.clone()),
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -189,7 +189,7 @@ where
         ),
     ])
     .expect("mount view");
-    Arc::new(ScopedFilesystem::new(backend, mounts))
+    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
 
 fn sample_scope(invocation_id: InvocationId, tenant: &str, user: &str) -> ResourceScope {

@@ -94,7 +94,14 @@ where
         let body = serialize_pretty(record)?;
         self.ensure_indexes(&record.scope).await?;
         let entry = process_record_entry(body, record);
-        put_with_byte_fallback(&self.filesystem, &path, entry, CasExpectation::Any).await?;
+        put_with_byte_fallback(
+            &self.filesystem,
+            &record.scope,
+            &path,
+            entry,
+            CasExpectation::Any,
+        )
+        .await?;
         Ok(())
     }
 
@@ -106,6 +113,7 @@ where
         let prefix = process_records_root(scope)?;
         ensure_exact_index(
             &self.filesystem,
+            scope,
             &prefix,
             index_name("processes_by_tenant"),
             index_key_tenant_id(),
@@ -113,6 +121,7 @@ where
         .await?;
         ensure_exact_index(
             &self.filesystem,
+            scope,
             &prefix,
             index_name("processes_by_user"),
             index_key_user_id(),
@@ -120,6 +129,7 @@ where
         .await?;
         ensure_exact_index(
             &self.filesystem,
+            scope,
             &prefix,
             index_name("processes_by_status"),
             index_key_status(),
@@ -127,6 +137,7 @@ where
         .await?;
         ensure_exact_index(
             &self.filesystem,
+            scope,
             &prefix,
             index_name("processes_by_extension"),
             index_key_extension_id(),
@@ -134,6 +145,7 @@ where
         .await?;
         ensure_exact_index(
             &self.filesystem,
+            scope,
             &prefix,
             index_name("processes_by_parent"),
             index_key_parent_process_id(),
@@ -166,7 +178,7 @@ where
         let _guard = self.transition_lock.lock().await;
         for _ in 0..MAX_CAS_RETRIES {
             let path = process_record_path(scope, process_id)?;
-            let Some(versioned) = self.filesystem.get(&path).await? else {
+            let Some(versioned) = self.filesystem.get(scope, &path).await? else {
                 return Err(ProcessError::UnknownProcess { process_id });
             };
             let mut record = deserialize::<ProcessRecord>(&versioned.entry.body)?;
@@ -182,6 +194,7 @@ where
             let entry = process_record_entry(body, &record);
             match put_with_byte_fallback(
                 &self.filesystem,
+                scope,
                 &path,
                 entry,
                 CasExpectation::Version(versioned.version),
@@ -219,7 +232,7 @@ where
         // transition_lock per the single-instance invariant in this struct's
         // docstring. A future migration can switch to `CasExpectation::Absent`
         // once every backend in production exposes native put.
-        if self.filesystem.get(&path).await?.is_some() {
+        if self.filesystem.get(&start.scope, &path).await?.is_some() {
             return Err(ProcessError::ProcessAlreadyExists {
                 process_id: start.process_id,
             });
@@ -282,7 +295,7 @@ where
         process_id: ProcessId,
     ) -> Result<Option<ProcessRecord>, ProcessError> {
         let path = process_record_path(scope, process_id)?;
-        let Some(versioned) = self.filesystem.get(&path).await? else {
+        let Some(versioned) = self.filesystem.get(scope, &path).await? else {
             return Ok(None);
         };
         let record = deserialize::<ProcessRecord>(&versioned.entry.body)?;
@@ -322,7 +335,7 @@ where
                 value: IndexValue::Text(scope.user_id.as_str().to_string()),
             },
         ]);
-        match query_all_records(&self.filesystem, &root, &filter).await {
+        match query_all_records(&self.filesystem, scope, &root, &filter).await {
             Ok(records) => {
                 let mut filtered = records
                     .into_iter()
@@ -352,7 +365,7 @@ where
         scope: &ResourceScope,
         root: &ScopedPath,
     ) -> Result<Vec<ProcessRecord>, ProcessError> {
-        let entries = match self.filesystem.list_dir(root).await {
+        let entries = match self.filesystem.list_dir(scope, root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -374,7 +387,7 @@ where
             // hides this; surface it as a filesystem error so callers see
             // the same failure shape they got with the legacy `read_file`
             // path.
-            let Some(versioned) = self.filesystem.get(&scoped_child).await? else {
+            let Some(versioned) = self.filesystem.get(scope, &scoped_child).await? else {
                 return Err(ProcessError::Filesystem(format!(
                     "process record listed but missing at {}",
                     scoped_child.as_str()
@@ -416,7 +429,7 @@ where
         let body = serialize_pretty(record)?;
         let entry = Entry::bytes(body).with_content_type(ContentType::json());
         self.filesystem
-            .put(&path, entry, CasExpectation::Any)
+            .put(&record.scope, &path, entry, CasExpectation::Any)
             .await?;
         Ok(())
     }
@@ -429,23 +442,14 @@ where
     ) -> Result<VirtualPath, ProcessError> {
         let path = process_output_path(scope, process_id)?;
         let body = serialize_pretty(output)?;
-        // Output blobs are opaque JSON files — no schema kind, no indexed
-        // projection. Stored as an Entry with `kind=None` so reads stay
-        // backwards-compatible with any caller that uses `read_file`.
         let entry = Entry::bytes(body).with_content_type(ContentType::json());
         self.filesystem
-            .put(&path, entry, CasExpectation::Any)
+            .put(scope, &path, entry, CasExpectation::Any)
             .await?;
-        // The on-disk `output_ref` recorded in the result record must be a
-        // [`VirtualPath`] (it is part of the wire surface of
-        // [`ProcessResultRecord`]) — resolve the alias through the
-        // caller's MountView so the value persisted matches the
-        // resolution any future reader would see for the same scope.
         let virtual_path = self
             .filesystem
-            .mounts()
-            .resolve(&path)
-            .map_err(invalid_path)?;
+            .resolve(scope, &path)
+            .map_err(|error| ProcessError::Filesystem(error.to_string()))?;
         Ok(virtual_path)
     }
 
@@ -535,7 +539,7 @@ where
         process_id: ProcessId,
     ) -> Result<Option<ProcessResultRecord>, ProcessError> {
         let path = process_result_path(scope, process_id)?;
-        let Some(versioned) = self.filesystem.get(&path).await? else {
+        let Some(versioned) = self.filesystem.get(scope, &path).await? else {
             return Ok(None);
         };
         let record = deserialize::<ProcessResultRecord>(&versioned.entry.body)?;
@@ -572,9 +576,8 @@ where
         let expected_scoped = process_output_path(scope, process_id)?;
         let expected_virtual = self
             .filesystem
-            .mounts()
-            .resolve(&expected_scoped)
-            .map_err(invalid_path)?;
+            .resolve(scope, &expected_scoped)
+            .map_err(|error| ProcessError::Filesystem(error.to_string()))?;
         if output_ref != expected_virtual {
             return Err(invalid_stored_record(format!(
                 "process result output ref {} does not match expected {}",
@@ -582,7 +585,7 @@ where
                 expected_virtual.as_str()
             )));
         }
-        let Some(versioned) = self.filesystem.get(&expected_scoped).await? else {
+        let Some(versioned) = self.filesystem.get(scope, &expected_scoped).await? else {
             return Ok(None);
         };
         deserialize::<Value>(&versioned.entry.body).map(Some)
@@ -788,6 +791,7 @@ fn process_status_label(status: ProcessStatus) -> &'static str {
 /// invariant that CAS would otherwise provide.
 async fn put_with_byte_fallback<F>(
     filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
     path: &ScopedPath,
     entry: Entry,
     cas: CasExpectation,
@@ -795,16 +799,12 @@ async fn put_with_byte_fallback<F>(
 where
     F: RootFilesystem,
 {
-    match filesystem.put(path, entry.clone(), cas).await {
+    match filesystem.put(scope, path, entry.clone(), cas).await {
         Ok(_) => Ok(()),
         Err(error) if is_unsupported(&error) => {
-            // Byte-only backends (LocalFilesystem) reject BOTH record-shaped
-            // entries AND non-`Any` CAS in a single `Unsupported` response.
-            // Strip the record metadata and downgrade the CAS expectation to
-            // `Any` so the legacy byte-only path stays writeable.
             let opaque = Entry::bytes(entry.body).with_content_type(entry.content_type);
             filesystem
-                .put(path, opaque, CasExpectation::Any)
+                .put(scope, path, opaque, CasExpectation::Any)
                 .await
                 .map(|_| ())
         }
@@ -818,6 +818,7 @@ where
 /// to the list+get fallback path instead of failing closed.
 async fn ensure_exact_index<F>(
     filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
     prefix: &ScopedPath,
     name: IndexName,
     key: IndexKey,
@@ -826,7 +827,7 @@ where
     F: RootFilesystem,
 {
     let spec = IndexSpec::new(name, vec![key], IndexKind::Exact);
-    match filesystem.ensure_index(prefix, &spec).await {
+    match filesystem.ensure_index(scope, prefix, &spec).await {
         Ok(()) => Ok(()),
         Err(FilesystemError::Unsupported { .. }) => Ok(()),
         Err(error) => Err(error.into()),
@@ -837,6 +838,7 @@ where
 /// every matched [`ProcessRecord`].
 async fn query_all_records<F>(
     filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
     prefix: &ScopedPath,
     filter: &Filter,
 ) -> Result<Vec<ProcessRecord>, FilesystemError>
@@ -847,7 +849,7 @@ where
     let mut offset: u64 = 0;
     loop {
         let page = Page::new(offset, Page::MAX_LIMIT);
-        let entries = filesystem.query(prefix, filter, page).await?;
+        let entries = filesystem.query(scope, prefix, filter, page).await?;
         let received = entries.len();
         for entry in entries {
             let record: ProcessRecord =

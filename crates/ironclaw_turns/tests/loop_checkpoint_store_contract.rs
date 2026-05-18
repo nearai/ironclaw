@@ -149,7 +149,7 @@ where
         MountPermissions::read_write_list_delete(),
     )])
     .expect("mount view");
-    Arc::new(ScopedFilesystem::new(backend, mounts))
+    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
 
 #[tokio::test]

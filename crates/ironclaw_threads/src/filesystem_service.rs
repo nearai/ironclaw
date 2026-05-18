@@ -42,7 +42,7 @@ use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RecordVersion,
     RootFilesystem, ScopedFilesystem,
 };
-use ironclaw_host_api::{HostApiError, ScopedPath, ThreadId};
+use ironclaw_host_api::{HostApiError, ResourceScope, ScopedPath, ThreadId};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -138,7 +138,7 @@ where
         thread_id: &ThreadId,
     ) -> Result<Option<(StoredThreadRecord, RecordVersion)>, SessionThreadError> {
         let path = thread_record_path(scope, thread_id)?;
-        let Some(versioned) = self.filesystem.get(&path).await? else {
+        let Some(versioned) = self.filesystem.get(&scope.to_resource_scope(), &path).await? else {
             return Ok(None);
         };
         let record = deserialize::<StoredThreadRecord>(&versioned.entry.body)?;
@@ -155,7 +155,7 @@ where
         message_id: ThreadMessageId,
     ) -> Result<Option<(ThreadMessageRecord, RecordVersion)>, SessionThreadError> {
         let path = message_record_path(scope, thread_id, message_id)?;
-        let Some(versioned) = self.filesystem.get(&path).await? else {
+        let Some(versioned) = self.filesystem.get(&scope.to_resource_scope(), &path).await? else {
             return Ok(None);
         };
         let record = deserialize::<ThreadMessageRecord>(&versioned.entry.body)?;
@@ -171,7 +171,7 @@ where
         thread_id: &ThreadId,
     ) -> Result<Vec<ThreadMessageRecord>, SessionThreadError> {
         let root = messages_root(scope, thread_id)?;
-        let entries = match self.filesystem.list_dir(&root).await {
+        let entries = match self.filesystem.list_dir(&scope.to_resource_scope(), &root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -186,7 +186,7 @@ where
             // runs through the per-op ACL (mirrors the run-state /
             // processes store `join_scoped` shape).
             let child = join_scoped(&root, &entry.name)?;
-            let Some(versioned) = self.filesystem.get(&child).await? else {
+            let Some(versioned) = self.filesystem.get(&scope.to_resource_scope(), &child).await? else {
                 continue;
             };
             let record = deserialize::<ThreadMessageRecord>(&versioned.entry.body)?;
@@ -204,7 +204,7 @@ where
         thread_id: &ThreadId,
     ) -> Result<Vec<SummaryArtifact>, SessionThreadError> {
         let root = summaries_root(scope, thread_id)?;
-        let entries = match self.filesystem.list_dir(&root).await {
+        let entries = match self.filesystem.list_dir(&scope.to_resource_scope(), &root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -215,7 +215,7 @@ where
                 continue;
             }
             let child = join_scoped(&root, &entry.name)?;
-            let Some(versioned) = self.filesystem.get(&child).await? else {
+            let Some(versioned) = self.filesystem.get(&scope.to_resource_scope(), &child).await? else {
                 continue;
             };
             let record = deserialize::<SummaryArtifact>(&versioned.entry.body)?;
@@ -238,7 +238,11 @@ where
         match_predicate: impl Fn(&InboundIdempotencyRecord) -> bool,
     ) -> Result<Option<InboundIdempotencyRecord>, SessionThreadError> {
         let root = idempotency_root()?;
-        let entries = match self.filesystem.list_dir(&root).await {
+        // Idempotency records are scope-keyed at the path level and don't
+        // need a per-tenant filesystem rewrite; use the system scope to
+        // route through the global idempotency root.
+        let scope = ResourceScope::system();
+        let entries = match self.filesystem.list_dir(&scope, &root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(None),
             Err(error) => return Err(error.into()),
@@ -248,7 +252,7 @@ where
                 continue;
             }
             let child = join_scoped(&root, &entry.name)?;
-            let Some(versioned) = self.filesystem.get(&child).await? else {
+            let Some(versioned) = self.filesystem.get(&scope, &child).await? else {
                 continue;
             };
             let record = deserialize::<InboundIdempotencyRecord>(&versioned.entry.body)?;
@@ -281,6 +285,7 @@ where
             let entry = Self::thread_entry(&stored)?;
             match put_with_cas(
                 self.filesystem.as_ref(),
+                &scope.to_resource_scope(),
                 &path,
                 entry,
                 CasExpectation::Version(version),
@@ -321,6 +326,7 @@ where
             let entry = Self::message_entry(&message)?;
             match put_with_cas(
                 self.filesystem.as_ref(),
+                &scope.to_resource_scope(),
                 &path,
                 entry,
                 CasExpectation::Version(version),
@@ -383,9 +389,11 @@ where
             next_sequence: 1,
         };
         let entry = Self::thread_entry(&stored)?;
+        let resource_scope = record.scope.to_resource_scope();
         match put_with_cas(
-            self.filesystem.as_ref(),
-            &path,
+                self.filesystem.as_ref(),
+                &resource_scope,
+                &path,
             entry,
             CasExpectation::Absent,
         )
@@ -424,7 +432,7 @@ where
         if let Some(idempotency_key) = InboundIdempotencyKey::from_request(&request) {
             let record_key = idempotency_record_key(&idempotency_key)?;
             let path = idempotency_record_path(&record_key)?;
-            if let Some(versioned) = self.filesystem.get(&path).await? {
+            if let Some(versioned) = self.filesystem.get(&request.scope.to_resource_scope(), &path).await? {
                 let record = deserialize::<InboundIdempotencyRecord>(&versioned.entry.body)?;
                 if record.thread_id != request.thread_id {
                     return Err(SessionThreadError::IdempotentReplayThreadMismatch {
@@ -476,6 +484,7 @@ where
         let entry = Self::message_entry(&message)?;
         match put_with_cas(
             self.filesystem.as_ref(),
+            &request.scope.to_resource_scope(),
             &message_path,
             entry,
             CasExpectation::Absent,
@@ -508,7 +517,7 @@ where
             // (binding, event, thread, message) — equivalent to the
             // legacy in-memory HashMap upsert.
             self.filesystem
-                .put(&path, entry, CasExpectation::Any)
+                .put(&request.scope.to_resource_scope(), &path, entry, CasExpectation::Any)
                 .await?;
         }
 
@@ -646,8 +655,9 @@ where
         let path = message_record_path(&request.scope, &request.thread_id, message.message_id)?;
         let entry = Self::message_entry(&message)?;
         match put_with_cas(
-            self.filesystem.as_ref(),
-            &path,
+                self.filesystem.as_ref(),
+                &request.scope.to_resource_scope(),
+                &path,
             entry,
             CasExpectation::Absent,
         )
@@ -839,8 +849,9 @@ where
         let path = summary_record_path(&request.scope, &request.thread_id, artifact.summary_id)?;
         let entry = Self::summary_entry(&artifact)?;
         match put_with_cas(
-            self.filesystem.as_ref(),
-            &path,
+                self.filesystem.as_ref(),
+                &request.scope.to_resource_scope(),
+                &path,
             entry,
             CasExpectation::Absent,
         )
@@ -1204,6 +1215,7 @@ enum PutError {
 
 async fn put_with_cas<F>(
     filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
     path: &ScopedPath,
     entry: Entry,
     cas: CasExpectation,
@@ -1212,7 +1224,7 @@ where
     F: RootFilesystem,
 {
     let fallback_entry = entry.clone();
-    match filesystem.put(path, entry, cas).await {
+    match filesystem.put(scope, path, entry, cas).await {
         Ok(_) => Ok(()),
         Err(FilesystemError::VersionMismatch { .. }) => Err(PutError::VersionMismatch),
         Err(FilesystemError::Unsupported {
@@ -1221,7 +1233,7 @@ where
         }) => {
             if matches!(cas, CasExpectation::Absent) {
                 let existing = filesystem
-                    .get(path)
+                    .get(scope, path)
                     .await
                     .map_err(|error| PutError::Other(error.into()))?;
                 if existing.is_some() {
@@ -1229,7 +1241,7 @@ where
                 }
             }
             filesystem
-                .put(path, fallback_entry, CasExpectation::Any)
+                .put(scope, path, fallback_entry, CasExpectation::Any)
                 .await
                 .map(|_| ())
                 .map_err(|error| PutError::Other(error.into()))

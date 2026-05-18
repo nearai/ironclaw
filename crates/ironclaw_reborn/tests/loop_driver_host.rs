@@ -1074,7 +1074,7 @@ async fn build_libsql_thread_service(
         MountPermissions::read_write_list_delete(),
     )])
     .unwrap();
-    let scoped = Arc::new(ScopedFilesystem::new(Arc::new(fs), mounts));
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(Arc::new(fs), mounts));
     ironclaw_threads::FilesystemSessionThreadService::new(scoped)
 }
 
@@ -1100,7 +1100,7 @@ async fn libsql_filesystem_turn_store(
         MountPermissions::read_write_list_delete(),
     )])
     .unwrap();
-    let scoped = Arc::new(ScopedFilesystem::new(filesystem, view));
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(filesystem, view));
     ironclaw_turns::FilesystemTurnStateStore::new(scoped)
 }
 

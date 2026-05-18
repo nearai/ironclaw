@@ -18,7 +18,7 @@ use ironclaw_filesystem::{
     CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RootFilesystem,
     ScopedFilesystem,
 };
-use ironclaw_host_api::{HostApiError, ScopedPath};
+use ironclaw_host_api::{HostApiError, ResourceScope, ScopedPath};
 
 use crate::{
     ResourceError, ResourceGovernorSnapshot, ResourceGovernorStore, snapshot_decode_error,
@@ -89,7 +89,13 @@ where
             let path = snapshot_path()?;
             let record_lock = filesystem_record_lock(&path);
             let _guard = record_lock.lock().await;
-            update_filesystem_snapshot(filesystem.as_ref(), &path, update).await
+            // Resource quotas are process-global (operator-set caps applied
+            // across all tenants). The snapshot record therefore lives under
+            // the system scope rather than any tenant scope — tenant-scoped
+            // resource accounting is a future capability that would change
+            // the `ResourceGovernorStore` trait surface.
+            let scope = ResourceScope::system();
+            update_filesystem_snapshot(filesystem.as_ref(), &scope, &path, update).await
         })
     }
 }
@@ -115,6 +121,7 @@ fn snapshot_path() -> Result<ScopedPath, ResourceError> {
 /// relied on `BEGIN IMMEDIATE` / `LOCK TABLE` for the same guarantee.
 async fn update_filesystem_snapshot<F, T, U>(
     filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
     path: &ScopedPath,
     update: U,
 ) -> Result<T, ResourceError>
@@ -122,7 +129,7 @@ where
     F: RootFilesystem,
     U: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError>,
 {
-    let (mut snapshot, expectation) = match filesystem.get(path).await {
+    let (mut snapshot, expectation) = match filesystem.get(scope, path).await {
         Ok(Some(versioned)) => {
             let snapshot: ResourceGovernorSnapshot =
                 serde_json::from_slice(&versioned.entry.body).map_err(snapshot_decode_error)?;
@@ -134,7 +141,7 @@ where
     let value = update(&mut snapshot)?;
     let encoded = serde_json::to_vec_pretty(&snapshot).map_err(storage_error)?;
     let entry = Entry::bytes(encoded).with_content_type(ContentType::json());
-    match put_with_cas(filesystem, path, entry, expectation).await {
+    match put_with_cas(filesystem, scope, path, entry, expectation).await {
         Ok(()) => Ok(value),
         Err(PutError::VersionMismatch) => Err(ResourceError::Storage {
             reason: format!(
@@ -165,6 +172,7 @@ enum PutError {
 /// process-local limitation (`crates/ironclaw_resources/CLAUDE.md`).
 async fn put_with_cas<F>(
     filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
     path: &ScopedPath,
     entry: Entry,
     cas: CasExpectation,
@@ -174,7 +182,7 @@ where
 {
     let fallback_entry = entry.clone();
     let cas_for_fallback = cas;
-    match filesystem.put(path, entry, cas).await {
+    match filesystem.put(scope, path, entry, cas).await {
         Ok(_) => Ok(()),
         Err(FilesystemError::VersionMismatch { .. }) => Err(PutError::VersionMismatch),
         Err(FilesystemError::Unsupported {
@@ -183,7 +191,7 @@ where
         }) => {
             if matches!(cas_for_fallback, CasExpectation::Absent) {
                 let existing = filesystem
-                    .get(path)
+                    .get(scope, path)
                     .await
                     .map_err(|error| PutError::Other(storage_error(error)))?;
                 if existing.is_some() {
@@ -191,7 +199,7 @@ where
                 }
             }
             filesystem
-                .put(path, fallback_entry, CasExpectation::Any)
+                .put(scope, path, fallback_entry, CasExpectation::Any)
                 .await
                 .map(|_| ())
                 .map_err(|error| PutError::Other(storage_error(error)))
@@ -353,7 +361,7 @@ mod tests {
             MountPermissions::read_write_list_delete(),
         )])
         .expect("mount view");
-        Arc::new(ScopedFilesystem::new(backend, mounts))
+        Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
     }
 
     fn sample_scope(tenant: &str, user: &str, project: Option<&str>) -> ResourceScope {

@@ -45,7 +45,7 @@ where
         MountPermissions::read_write_list_delete(),
     )])
     .expect("mount view");
-    Arc::new(ScopedFilesystem::new(backend, mounts))
+    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
 
 fn scoped_turns_fs<F>(backend: Arc<F>) -> Arc<ScopedFilesystem<F>>

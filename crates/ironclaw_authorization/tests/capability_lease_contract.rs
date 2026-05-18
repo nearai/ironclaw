@@ -1058,7 +1058,9 @@ async fn filesystem_capability_lease_store_writes_tenant_id_indexed_projection()
         context.resource_scope.project_id.as_ref().unwrap().as_str()
     ))
     .unwrap();
-    let virtual_prefix = scoped.mounts().resolve(&owner_alias).unwrap();
+    let virtual_prefix = scoped
+        .resolve(&context.resource_scope, &owner_alias)
+        .unwrap();
     let tenant_key = IndexKey::new("tenant_id").unwrap();
     let tenant_id_str = context.resource_scope.tenant_id.as_str().to_string();
 
@@ -1297,7 +1299,7 @@ where
         MountPermissions::read_write_list_delete(),
     )])
     .expect("mount view");
-    Arc::new(ScopedFilesystem::new(backend, mounts))
+    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
 
 fn execution_context(grants: CapabilitySet) -> ExecutionContext {

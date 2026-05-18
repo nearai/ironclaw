@@ -39,7 +39,7 @@ use ironclaw_filesystem::{
     RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::UserId;
-use ironclaw_host_api::{HostApiError, ScopedPath};
+use ironclaw_host_api::{HostApiError, ResourceScope, ScopedPath};
 use ironclaw_turns::{AcceptedMessageRef, IdempotencyKey, SubmitTurnResponse};
 use serde::{Deserialize, Serialize};
 
@@ -198,7 +198,10 @@ where
 {
     async fn load_state(&self) -> Result<PersistedConversationState, InboundTurnError> {
         let path = state_path()?;
-        let Some(versioned) = self.filesystem.get(&path).await.map_err(filesystem_error)? else {
+        // Conversation state is a single process-wide singleton record;
+        // route through the system scope.
+        let scope = ResourceScope::system();
+        let Some(versioned) = self.filesystem.get(&scope, &path).await.map_err(filesystem_error)? else {
             return Ok(PersistedConversationState {
                 state: InMemoryState::default(),
                 revision: 0,
@@ -226,13 +229,10 @@ where
                 })?;
         let stored = StoredConversationState::from_state(new_revision, state);
         let body = serialize(&stored)?;
+        let scope = ResourceScope::system();
 
         for _ in 0..FILESYSTEM_CAS_RETRIES {
-            // Pre-read to derive the CAS expectation and validate the
-            // caller-supplied revision matches the on-disk one. This
-            // mirrors the libSQL/Postgres adapter's
-            // `UPDATE ... WHERE version = ?expected_revision` precondition.
-            let current = self.filesystem.get(&path).await.map_err(filesystem_error)?;
+            let current = self.filesystem.get(&scope, &path).await.map_err(filesystem_error)?;
             let cas = match &current {
                 None if expected_revision == 0 => CasExpectation::Absent,
                 None => {
@@ -251,7 +251,7 @@ where
                 }
             };
             let entry = state_entry(body.clone(), state);
-            match put_with_byte_fallback(&self.filesystem, &path, entry, cas).await {
+            match put_with_byte_fallback(&self.filesystem, &scope, &path, entry, cas).await {
                 Ok(()) => return Ok(new_revision),
                 Err(FilesystemError::VersionMismatch { .. }) => continue,
                 Err(error) => return Err(filesystem_error(error)),
@@ -341,6 +341,7 @@ fn index_key_tenant_ids() -> IndexKey {
 /// that CAS would otherwise provide on byte-only backends.
 async fn put_with_byte_fallback<F>(
     filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
     path: &ScopedPath,
     entry: Entry,
     cas: CasExpectation,
@@ -349,13 +350,13 @@ where
     F: RootFilesystem,
 {
     let fallback = entry.clone();
-    match filesystem.put(path, entry, cas).await {
+    match filesystem.put(scope, path, entry, cas).await {
         Ok(_) => Ok(()),
         Err(FilesystemError::Unsupported {
             operation: FilesystemOperation::WriteFile,
             ..
         }) => filesystem
-            .put(path, fallback, CasExpectation::Any)
+            .put(scope, path, fallback, CasExpectation::Any)
             .await
             .map(|_| ()),
         Err(error) => Err(error),

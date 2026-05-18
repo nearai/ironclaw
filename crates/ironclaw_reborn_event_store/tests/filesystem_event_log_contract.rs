@@ -94,7 +94,7 @@ fn build_scoped_fs() -> Arc<ScopedFilesystem<InMemoryBackend>> {
         },
     )])
     .expect("mount view");
-    Arc::new(ScopedFilesystem::new(backend, mounts))
+    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
 
 #[tokio::test]

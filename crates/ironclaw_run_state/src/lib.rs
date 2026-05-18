@@ -578,7 +578,7 @@ where
         invocation_id: InvocationId,
     ) -> Result<Option<(RunRecord, RecordVersion)>, RunStateError> {
         let path = run_record_path(scope, invocation_id)?;
-        let Some(versioned) = self.filesystem.get(&path).await? else {
+        let Some(versioned) = self.filesystem.get(scope, &path).await? else {
             return Ok(None);
         };
         let record = deserialize::<RunRecord>(&versioned.entry.body)?;
@@ -615,6 +615,7 @@ where
             let entry = Self::record_entry(&record)?;
             match put_with_cas(
                 self.filesystem.as_ref(),
+                scope,
                 &path,
                 entry,
                 CasExpectation::Version(version),
@@ -652,8 +653,9 @@ where
         };
         let entry = Self::record_entry(&record)?;
         match put_with_cas(
-            self.filesystem.as_ref(),
-            &path,
+                self.filesystem.as_ref(),
+                &record.scope,
+                &path,
             entry,
             CasExpectation::Absent,
         )
@@ -750,7 +752,7 @@ where
         scope: &ResourceScope,
     ) -> Result<Vec<RunRecord>, RunStateError> {
         let root = run_records_root(scope)?;
-        let entries = match self.filesystem.list_dir(&root).await {
+        let entries = match self.filesystem.list_dir(scope, &root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -762,7 +764,7 @@ where
                 // the alias-relative `ScopedPath` so the follow-up `get` still
                 // runs through the per-op ACL.
                 let child = join_scoped(&root, &entry.name)?;
-                let Some(versioned) = self.filesystem.get(&child).await? else {
+                let Some(versioned) = self.filesystem.get(scope, &child).await? else {
                     continue;
                 };
                 let record = deserialize::<RunRecord>(&versioned.entry.body)?;
@@ -808,7 +810,7 @@ where
         request_id: ApprovalRequestId,
     ) -> Result<Option<(ApprovalRecord, RecordVersion)>, RunStateError> {
         let path = approval_record_path(scope, request_id)?;
-        let Some(versioned) = self.filesystem.get(&path).await? else {
+        let Some(versioned) = self.filesystem.get(scope, &path).await? else {
             return Ok(None);
         };
         let record = deserialize::<ApprovalRecord>(&versioned.entry.body)?;
@@ -844,6 +846,7 @@ where
             let entry = Self::record_entry(&record)?;
             match put_with_cas(
                 self.filesystem.as_ref(),
+                scope,
                 &path,
                 entry,
                 CasExpectation::Version(version),
@@ -882,8 +885,9 @@ where
         };
         let entry = Self::record_entry(&record)?;
         match put_with_cas(
-            self.filesystem.as_ref(),
-            &path,
+                self.filesystem.as_ref(),
+                &record.scope,
+                &path,
             entry,
             CasExpectation::Absent,
         )
@@ -950,7 +954,7 @@ where
                 status: record.status,
             });
         }
-        self.filesystem.delete(&path).await?;
+        self.filesystem.delete(scope, &path).await?;
         Ok(record)
     }
 
@@ -959,7 +963,7 @@ where
         scope: &ResourceScope,
     ) -> Result<Vec<ApprovalRecord>, RunStateError> {
         let root = approval_records_root(scope)?;
-        let entries = match self.filesystem.list_dir(&root).await {
+        let entries = match self.filesystem.list_dir(scope, &root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -972,7 +976,7 @@ where
                 // alias-relative `ScopedPath` so the follow-up `get` runs
                 // through the per-op ACL.
                 let child = join_scoped(&root, &entry.name)?;
-                let Some(versioned) = self.filesystem.get(&child).await? else {
+                let Some(versioned) = self.filesystem.get(scope, &child).await? else {
                     continue;
                 };
                 let record = deserialize::<ApprovalRecord>(&versioned.entry.body)?;
@@ -1178,6 +1182,7 @@ enum PutError {
 /// process-local limitation.
 async fn put_with_cas<F>(
     filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
     path: &ScopedPath,
     entry: Entry,
     cas: CasExpectation,
@@ -1186,7 +1191,7 @@ where
     F: RootFilesystem,
 {
     let fallback_entry = entry.clone();
-    match filesystem.put(path, entry, cas).await {
+    match filesystem.put(scope, path, entry, cas).await {
         Ok(_) => Ok(()),
         Err(FilesystemError::VersionMismatch { .. }) => Err(PutError::VersionMismatch),
         Err(FilesystemError::Unsupported {
@@ -1195,7 +1200,7 @@ where
         }) => {
             if matches!(cas, CasExpectation::Absent) {
                 let existing = filesystem
-                    .get(path)
+                    .get(scope, path)
                     .await
                     .map_err(|error| PutError::Other(error.into()))?;
                 if existing.is_some() {
@@ -1203,7 +1208,7 @@ where
                 }
             }
             filesystem
-                .put(path, fallback_entry, CasExpectation::Any)
+                .put(scope, path, fallback_entry, CasExpectation::Any)
                 .await
                 .map(|_| ())
                 .map_err(|error| PutError::Other(error.into()))

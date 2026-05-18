@@ -31,7 +31,7 @@ fn build_scoped_fs<F: RootFilesystem>(
         MountPermissions::read_write_list_delete(),
     )])
     .expect("mount view");
-    Arc::new(ScopedFilesystem::new(backend, mounts))
+    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
 
 fn build_outbound_store_for_backend(
@@ -1128,7 +1128,9 @@ async fn filesystem_outbound_store_writes_tenant_id_indexed_projection() {
     // query targets exactly the bytes the backend stored.
     let deliveries_prefix =
         ironclaw_host_api::ScopedPath::new("/outbound/deliveries".to_string()).unwrap();
-    let virtual_prefix = scoped.mounts().resolve(&deliveries_prefix).unwrap();
+    let virtual_prefix = scoped
+        .resolve(&scope.to_resource_scope(), &deliveries_prefix)
+        .unwrap();
     let tenant_key = ironclaw_filesystem::IndexKey::new("tenant_id").unwrap();
 
     let hit = backend

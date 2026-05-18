@@ -16,6 +16,29 @@ pub struct ThreadScope {
     pub mission_id: Option<MissionId>,
 }
 
+impl ThreadScope {
+    /// Convert into a [`ironclaw_host_api::ResourceScope`] suitable for the
+    /// per-tenant filesystem resolver. `user_id` falls back to a per-thread
+    /// system-tenant slot when `owner_user_id` is absent (system-scoped
+    /// thread infrastructure that has no owning user).
+    pub fn to_resource_scope(&self) -> ironclaw_host_api::ResourceScope {
+        ironclaw_host_api::ResourceScope {
+            tenant_id: self.tenant_id.clone(),
+            user_id: self
+                .owner_user_id
+                .clone()
+                .unwrap_or_else(|| ironclaw_host_api::UserId::from_trusted(
+                    ironclaw_host_api::SYSTEM_RESERVED_ID.to_string(),
+                )),
+            agent_id: Some(self.agent_id.clone()),
+            project_id: self.project_id.clone(),
+            mission_id: self.mission_id.clone(),
+            thread_id: None,
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        }
+    }
+}
+
 /// User/model-visible transcript content accepted by this boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MessageContent {
