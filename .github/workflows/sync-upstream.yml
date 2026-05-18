@@ -1,0 +1,56 @@
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/nearai/ironclaw.git
+          git fetch upstream main --tags
+
+      - name: Attempt fast-forward merge
+        id: ff
+        run: |
+          if git merge --ff-only upstream/main; then
+            echo "result=fast-forward" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=diverged" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push if fast-forwarded
+        if: steps.ff.outputs.result == 'fast-forward'
+        run: git push origin main --tags
+
+      - name: Open PR if diverged
+        if: steps.ff.outputs.result == 'diverged'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git reset --hard HEAD
+          branch="sync/upstream-$(date +%Y%m%d)"
+          git checkout -b "$branch"
+          git merge upstream/main --no-edit || true
+          git push -u origin "$branch"
+          if git diff --quiet HEAD; then
+            gh pr create \
+              --title "sync: merge upstream/main $(date +%Y-%m-%d)" \
+              --body "Automated sync from nearai/ironclaw. Fast-forward was not possible — manual review required."
+          else
+            gh pr create \
+              --title "sync: merge upstream/main $(date +%Y-%m-%d) (conflicts)" \
+              --body "Automated sync from nearai/ironclaw. There are merge conflicts that need manual resolution."
+          fi
