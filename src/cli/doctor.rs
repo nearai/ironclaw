@@ -411,66 +411,64 @@ fn check_workspace_dir() -> CheckResult {
 // ── Embeddings ──────────────────────────────────────────────
 
 fn check_embeddings(settings: &Settings) -> CheckResult {
-    // Resolve embeddings with a placeholder URL first so a disabled
-    // embeddings setup short-circuits to Skip even when the LLM config is
-    // broken. The placeholder is only used to populate `nearai_base_url`,
-    // which is consulted only when `provider == "nearai"` AND `enabled`.
-    // We re-resolve below with the real URL once we know we need it.
-    let placeholder_config = match crate::config::embeddings::resolve_embeddings_config(
-        settings,
-        "https://placeholder.invalid",
-    ) {
-        Ok(c) => c,
-        Err(e) => return CheckResult::Fail(format!("config error: {e}")),
-    };
-    if !placeholder_config.enabled {
+    // Resolve embeddings with a placeholder URL first. The URL field is
+    // only consulted at runtime by the NEAR AI provider, so a non-NEAR AI
+    // provider — even an enabled one — must not report a broken LLM config
+    // as an embeddings failure.
+    let placeholder_url = "https://placeholder.invalid";
+    let initial =
+        match crate::config::embeddings::resolve_embeddings_config(settings, placeholder_url) {
+            Ok(c) => c,
+            Err(e) => return CheckResult::Fail(format!("config error: {e}")),
+        };
+    if !initial.enabled {
         return CheckResult::Skip("disabled (set EMBEDDING_ENABLED=true)".into());
     }
 
-    let nearai_base_url = match crate::config::llm::resolve(settings) {
-        Ok(llm) => llm.nearai.base_url,
-        Err(e) => return CheckResult::Fail(format!("could not resolve LLM config: {e}")),
-    };
-    match crate::config::embeddings::resolve_embeddings_config(settings, &nearai_base_url) {
-        Ok(config) => {
-            // `enabled` was already checked above on `placeholder_config`,
-            // but the value is identical here — re-checking is cheap and
-            // keeps the rest of this function reading naturally.
-            if !config.enabled {
-                return CheckResult::Skip("disabled (set EMBEDDING_ENABLED=true)".into());
-            }
-            let has_creds = match config.provider.as_str() {
-                "openai" => config.openai_api_key().is_some(),
-                "nearai" => {
-                    // NearAiEmbeddings uses SessionManager::get_token() which
-                    // only returns session tokens, NOT NEARAI_API_KEY
-                    // (src/workspace/embeddings.rs:309, src/llm/session.rs:132).
-                    let session_path = crate::config::llm::default_session_path();
-                    session_path.exists()
-                        && std::fs::read_to_string(&session_path)
-                            .map(|s| !s.trim().is_empty())
-                            .unwrap_or(false)
-                }
-                "ollama" => true, // local, no creds needed
-                _ => config.openai_api_key().is_some(),
-            };
-            if has_creds {
-                CheckResult::Pass(format!(
-                    "provider={}, model={}",
-                    config.provider, config.model
-                ))
-            } else {
-                let hint = match config.provider.as_str() {
-                    "nearai" => "run `ironclaw onboard` to create a session",
-                    _ => "set OPENAI_API_KEY",
-                };
-                CheckResult::Fail(format!(
-                    "provider={} but credentials missing ({})",
-                    config.provider, hint
-                ))
-            }
+    // Only re-resolve with the real NEAR AI base URL when the provider
+    // actually needs it — otherwise an unrelated LLM resolve error would
+    // be reported as an embeddings failure.
+    let config = if initial.provider == "nearai" {
+        let nearai_base_url = match crate::config::llm::resolve(settings) {
+            Ok(llm) => llm.nearai.base_url,
+            Err(e) => return CheckResult::Fail(format!("could not resolve LLM config: {e}")),
+        };
+        match crate::config::embeddings::resolve_embeddings_config(settings, &nearai_base_url) {
+            Ok(c) => c,
+            Err(e) => return CheckResult::Fail(format!("config error: {e}")),
         }
-        Err(e) => CheckResult::Fail(format!("config error: {e}")),
+    } else {
+        initial
+    };
+
+    let has_creds = match config.provider.as_str() {
+        "openai" => config.openai_api_key().is_some(),
+        "nearai" => {
+            // NearAiEmbeddings uses SessionManager::get_token() which only
+            // returns session tokens, NOT NEARAI_API_KEY.
+            let session_path = crate::config::llm::default_session_path();
+            session_path.exists()
+                && std::fs::read_to_string(&session_path)
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+        }
+        "ollama" => true, // local, no creds needed
+        _ => config.openai_api_key().is_some(),
+    };
+    if has_creds {
+        CheckResult::Pass(format!(
+            "provider={}, model={}",
+            config.provider, config.model
+        ))
+    } else {
+        let hint = match config.provider.as_str() {
+            "nearai" => "run `ironclaw onboard` to create a session",
+            _ => "set OPENAI_API_KEY",
+        };
+        CheckResult::Fail(format!(
+            "provider={} but credentials missing ({})",
+            config.provider, hint
+        ))
     }
 }
 
@@ -1097,6 +1095,47 @@ mod tests {
     /// `enabled` flag — so a broken LLM env (e.g., public-HTTP NEAR AI
     /// base URL that fails SSRF validation) reported the Embeddings
     /// check as Fail even when embeddings were disabled.
+    /// Regression: PR #3739 Copilot review. Once the disabled-skip
+    /// short-circuit was fixed, an *enabled* non-`nearai` provider
+    /// (e.g. `ollama`) still resolved LLM config to extract the NEAR AI
+    /// base URL — so an invalid LLM env reported the Embeddings check
+    /// as Fail even though embeddings wouldn't have used the URL. The
+    /// LLM resolve must only run when `provider == "nearai"`.
+    #[test]
+    fn check_embeddings_non_nearai_ignores_invalid_llm_config() {
+        let _guard = crate::config::helpers::lock_env();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("EMBEDDING_ENABLED", "true");
+            std::env::set_var("EMBEDDING_PROVIDER", "ollama");
+            // Public-HTTP base URL — `validate_operator_base_url` in the
+            // LLM resolver rejects this. The Ollama embeddings path
+            // does not consult LLM config, so the doctor must not
+            // surface this as an embeddings failure.
+            std::env::set_var("NEARAI_BASE_URL", "http://8.8.8.8/v1");
+        }
+        let settings = Settings::default();
+        let result = check_embeddings(&settings);
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_ENABLED");
+            std::env::remove_var("EMBEDDING_PROVIDER");
+            std::env::remove_var("NEARAI_BASE_URL");
+        }
+        match result {
+            CheckResult::Pass(msg) => {
+                assert!(
+                    msg.contains("ollama"),
+                    "expected Pass mentioning ollama, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Pass for Ollama embeddings regardless of broken LLM env, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
     #[test]
     fn check_embeddings_disabled_skips_even_when_llm_config_invalid() {
         let _guard = crate::config::helpers::lock_env();

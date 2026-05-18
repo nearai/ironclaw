@@ -1,8 +1,11 @@
 //! AWS Bedrock embedding provider (Titan Text Embeddings V2).
 //!
-//! Entire file is gated on the `bedrock` feature; when disabled, only
-//! [`BedrockEmbeddingSetup`] remains so callers can construct one without
-//! depending on the feature flag (it is then ignored by the factory).
+//! [`BedrockEmbeddingSetup`] (region + profile) is compiled
+//! unconditionally so callers can construct it without depending on the
+//! `bedrock` feature flag — when the feature is off the factory just
+//! ignores it. Only the provider `impl` itself (the `imp` submodule
+//! below) is gated on `#[cfg(feature = "bedrock")]`, because it pulls
+//! in the heavy AWS SDK dependencies.
 
 /// AWS Bedrock parameters needed by the embedding provider.
 ///

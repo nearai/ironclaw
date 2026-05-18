@@ -59,7 +59,9 @@ impl EmbeddingProvider for OllamaEmbeddings {
     }
 
     fn max_input_length(&self) -> usize {
-        // Most Ollama embedding models support 8192 tokens (~32k chars)
+        // Most Ollama embedding models support ~8192 tokens, budgeted
+        // here as ~32_000 UTF-8 bytes (matches `str::len()` semantics —
+        // see `EmbeddingProvider::max_input_length` doc).
         32_000
     }
 

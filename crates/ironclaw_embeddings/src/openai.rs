@@ -127,8 +127,9 @@ impl EmbeddingProvider for OpenAiEmbeddings {
     }
 
     fn max_input_length(&self) -> usize {
-        // text-embedding-3-small/large: 8191 tokens (~32k chars)
-        // text-embedding-ada-002: 8191 tokens
+        // text-embedding-3-small/large + ada-002: ~8191 tokens, budgeted
+        // here as ~32_000 UTF-8 bytes (matches `str::len()` semantics —
+        // see `EmbeddingProvider::max_input_length` doc).
         32_000
     }
 
