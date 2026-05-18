@@ -157,6 +157,13 @@ impl MemorySearchRequest {
         self.query_embedding.as_deref()
     }
 
+    /// Dimension of [`query_embedding`](Self::query_embedding) if set; used
+    /// by `FilesystemMemoryDocumentRepository::ensure_search_indexes` to
+    /// register a `Vector { dim }` index that matches the query.
+    pub fn query_embedding_dim(&self) -> Option<u32> {
+        self.query_embedding.as_deref().map(|v| v.len() as u32)
+    }
+
     pub fn fusion_strategy(&self) -> FusionStrategy {
         self.fusion_strategy
     }

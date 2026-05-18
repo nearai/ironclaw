@@ -2254,14 +2254,7 @@ mod tests {
         );
     }
 
-    fn wrong_crypto() -> Arc<SecretsCrypto> {
-        Arc::new(
-            SecretsCrypto::new(SecretMaterial::from(
-                "abcdef0123456789abcdef0123456789".to_string(),
-            ))
-            .expect("alt master key length is valid"),
-        )
-    }
+    // `wrong_crypto` helper deleted alongside master-key sentinel tests.
 
     // Master-key sentinel tests were deleted alongside
     // `verify_can_decrypt_existing_secrets` (PR #3679). Master-key

@@ -37,8 +37,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{
-    CasExpectation, Entry, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexValue,
-    Page, RecordKind, RootFilesystem,
+    CasExpectation, Entry, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind,
+    IndexName, IndexSpec, IndexValue, Page, RecordKind, RootFilesystem,
 };
 use ironclaw_host_api::VirtualPath;
 
@@ -114,6 +114,42 @@ where
 
     fn index_key(name: &'static str) -> IndexKey {
         IndexKey::new(name).unwrap_or_else(|_| unreachable!("{name} is a valid index key"))
+    }
+
+    /// Declare the FTS and Vector indexes the search path needs. libSQL
+    /// and Postgres only translate `Filter::Fts` / `Filter::VectorNearest`
+    /// once a matching index has been registered; without this the search
+    /// silently degrades to `Unsupported`. Tolerates `Unsupported` for
+    /// backends that don't materialize indexes (the in-memory backend
+    /// still serves both filter kinds via in-memory scan).
+    async fn ensure_search_indexes(
+        &self,
+        prefix: &VirtualPath,
+        embedding_dim: Option<u32>,
+    ) -> Result<(), FilesystemError> {
+        let fts = IndexSpec::new(
+            IndexName::new("memory_chunks_content_fts")
+                .unwrap_or_else(|_| unreachable!("valid index name")),
+            vec![Self::index_key(fs_keys::CONTENT)],
+            IndexKind::Fts,
+        );
+        match self.filesystem.ensure_index(prefix, &fts).await {
+            Ok(()) | Err(FilesystemError::Unsupported { .. }) => {}
+            Err(error) => return Err(error),
+        }
+        if let Some(dim) = embedding_dim {
+            let vector = IndexSpec::new(
+                IndexName::new("memory_chunks_embedding_vector")
+                    .unwrap_or_else(|_| unreachable!("valid index name")),
+                vec![Self::index_key(fs_keys::EMBEDDING)],
+                IndexKind::Vector { dim },
+            );
+            match self.filesystem.ensure_index(prefix, &vector).await {
+                Ok(()) | Err(FilesystemError::Unsupported { .. }) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     fn document_virtual_path(
@@ -517,23 +553,40 @@ where
             .read_document_with_version(path, FilesystemOperation::WriteFile)
             .await?;
 
-        // Save an archived version of the prior content when a real
-        // overwrite is happening and `skip_versioning` isn't set. An
-        // empty previous body is treated as a fresh insert (matches the
-        // native repos' `previous_content.is_empty()` short-circuit).
+        // PR #3679 review fix (finding #2): the document CAS write must
+        // happen BEFORE the version archive, not after. The previous
+        // order archived the prior content first, then attempted the
+        // CAS put — if a concurrent writer won the CAS race the loser
+        // had already inserted a `.versions/<n>` record for an
+        // overwrite/append that never happened, corrupting the version
+        // history (and potentially blocking the real writer's later
+        // archive, since `save_document_version` uses
+        // `CasExpectation::Absent` for the computed next version).
+        // Doing the put first means a CAS loss returns
+        // `VersionMismatch` before any sidecar is touched.
+        let virtual_path = Self::document_virtual_path(path, FilesystemOperation::WriteFile)?;
+        let entry = Self::build_document_entry(path.scope(), bytes);
+        let cas = match previous.as_ref() {
+            Some((_, version)) => CasExpectation::Version(*version),
+            None => CasExpectation::Absent,
+        };
+        self.filesystem.put(&virtual_path, entry, cas).await?;
+
+        // Document write succeeded — now archive the prior content. A
+        // failure here is best-effort: the new body is durable, the
+        // version trail just gains a gap. `save_document_version`
+        // already tolerates concurrent writers via `Absent` CAS.
         if let Some((previous_bytes, _previous_version)) = previous.as_ref() {
             let previous_content = std::str::from_utf8(previous_bytes).map_err(|_| {
                 memory_error(
-                    Self::document_virtual_path(path, FilesystemOperation::WriteFile)
-                        .unwrap_or_else(|_| valid_memory_path()),
+                    virtual_path.clone(),
                     FilesystemOperation::WriteFile,
                     "memory document content must be UTF-8",
                 )
             })?;
             let new_content = std::str::from_utf8(bytes).map_err(|_| {
                 memory_error(
-                    Self::document_virtual_path(path, FilesystemOperation::WriteFile)
-                        .unwrap_or_else(|_| valid_memory_path()),
+                    virtual_path.clone(),
                     FilesystemOperation::WriteFile,
                     "memory document content must be UTF-8",
                 )
@@ -546,14 +599,6 @@ where
                     .await?;
             }
         }
-
-        let virtual_path = Self::document_virtual_path(path, FilesystemOperation::WriteFile)?;
-        let entry = Self::build_document_entry(path.scope(), bytes);
-        let cas = match previous.as_ref() {
-            Some((_, version)) => CasExpectation::Version(*version),
-            None => CasExpectation::Absent,
-        };
-        self.filesystem.put(&virtual_path, entry, cas).await?;
         Ok(())
     }
 
@@ -602,25 +647,30 @@ where
                 let should_version = options.metadata.skip_versioning != Some(true)
                     && previous_content != combined
                     && !previous_content.is_empty();
-                if should_version {
-                    self.save_document_version(
-                        path,
-                        previous_content,
-                        options.changed_by.as_deref(),
-                    )
-                    .await?;
-                }
+                // PR #3679 review fix (finding #2): document CAS first,
+                // version archive after success. See the matching comment
+                // in `write_document_with_options`.
                 let entry = Self::build_document_entry(path.scope(), combined.as_bytes());
-                match self
+                let put_result = self
                     .filesystem
                     .put(
                         &virtual_path,
                         entry,
                         CasExpectation::Version(previous_version),
                     )
-                    .await
-                {
-                    Ok(_) => Ok(MemoryAppendOutcome::Appended),
+                    .await;
+                match put_result {
+                    Ok(_) => {
+                        if should_version {
+                            self.save_document_version(
+                                path,
+                                previous_content,
+                                options.changed_by.as_deref(),
+                            )
+                            .await?;
+                        }
+                        Ok(MemoryAppendOutcome::Appended)
+                    }
                     Err(FilesystemError::VersionMismatch { .. }) => {
                         Ok(MemoryAppendOutcome::Conflict)
                     }
@@ -783,6 +833,16 @@ where
             )
         })?;
 
+        // PR #3679 review fix (finding #4): declare the FTS / Vector
+        // indexes the query path requires. libSQL / Postgres backends
+        // need the index registered before they translate `Filter::Fts`
+        // / `Filter::VectorNearest` to a native query — without it they
+        // return `Unsupported` and the search silently degrades. Tolerate
+        // `Unsupported` for backends that don't support these index
+        // kinds (the in-memory backend still serves FTS over a scan).
+        self.ensure_search_indexes(&prefix, request.query_embedding_dim())
+            .await?;
+
         let full_text_results = if request.full_text() {
             let filter = Filter::Fts {
                 key: Self::index_key(fs_keys::CONTENT),
@@ -849,25 +909,30 @@ where
         if content_bytes_sha256(&current_bytes) != expected_content_hash {
             return Ok(MemoryChunkReplaceOutcome::SkippedStaleContentHash);
         }
-        // Sweep the chunk subtree first so the new chunk numbering
-        // starts cleanly from zero.
-        self.delete_chunks_kind_aware(path).await?;
-        // Re-check the document hash AFTER the sweep — a concurrent
-        // writer that rewrote the document between our initial read
-        // and now would otherwise see our (stale) chunks land on top
-        // of their fresh content. Mirrors the transactional guarantee
-        // the native libsql / postgres repos got from BEGIN
-        // IMMEDIATE / FOR UPDATE without requiring `begin()` from
-        // the backend.
-        let Some((bytes_after_sweep, _)) = self
+        // PR #3679 review fix (finding #3): re-check the document hash
+        // BEFORE the sweep, not after. The original ordering (sweep, then
+        // re-check) would delete a winning reindexer's fresh chunks if
+        // they landed between our initial read and the sweep — the
+        // post-sweep hash check prevented writing stale chunks on top,
+        // but the deletion itself was data loss. Doing the second read
+        // first means a stale worker observes the document moved on and
+        // returns `SkippedStaleContentHash` without touching the chunk
+        // subtree. There is still a narrow window between the second
+        // hash check and the sweep, but that window cannot lose data
+        // because any concurrent writer's chunks are guarded by the
+        // per-chunk `CasExpectation::Absent` check at write time below.
+        let Some((bytes_pre_sweep, _)) = self
             .read_document_with_version(path, FilesystemOperation::WriteFile)
             .await?
         else {
             return Ok(MemoryChunkReplaceOutcome::SkippedMissingDocument);
         };
-        if content_bytes_sha256(&bytes_after_sweep) != expected_content_hash {
+        if content_bytes_sha256(&bytes_pre_sweep) != expected_content_hash {
             return Ok(MemoryChunkReplaceOutcome::SkippedStaleContentHash);
         }
+        // Sweep the chunk subtree so the new chunk numbering starts
+        // cleanly from zero.
+        self.delete_chunks_kind_aware(path).await?;
         for (index, chunk) in chunks.iter().enumerate() {
             let entry = Self::build_chunk_entry(path, index, chunk);
             let chunk_path = Self::chunk_child_path(path, index, FilesystemOperation::WriteFile)?;

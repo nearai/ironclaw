@@ -92,7 +92,16 @@ impl RootFilesystem for HsmBackend {
     }
 
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
-        self.inner.list_dir(path).await
+        // PR #3679 review fix (finding #6): the HSM surface declares only
+        // Read/Write/Stat/Delete capabilities — see [`HsmBackend`]'s module
+        // doc and `declared_capabilities` below. Delegating `list_dir` to
+        // the inner backend would let a mount that advertised "no
+        // enumeration" actually enumerate. Fail closed instead so the
+        // declared capability matches runtime behavior.
+        Err(FilesystemError::Unsupported {
+            path: path.clone(),
+            operation: crate::FilesystemOperation::ListDir,
+        })
     }
 
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
@@ -112,9 +121,9 @@ mod tests {
 
     use crate::{
         BackendCapabilities, BackendId, BackendKind, Capability, CasExpectation,
-        CompositeRootFilesystem, ContentKind, Entry, FilesystemError, IndexKey, IndexKind,
-        IndexName, IndexPolicy, IndexSpec, IndexValue, MountDescriptor, RootFilesystem,
-        StorageClass, TxnCapability,
+        CompositeRootFilesystem, ContentKind, Entry, FilesystemError, FilesystemOperation,
+        IndexKey, IndexKind, IndexName, IndexPolicy, IndexSpec, IndexValue, MountDescriptor,
+        RootFilesystem, StorageClass, TxnCapability,
     };
 
     use super::HsmBackend;
@@ -189,6 +198,25 @@ mod tests {
         );
         let index_err = hsm.ensure_index(&path, &spec).await.unwrap_err();
         assert!(matches!(index_err, FilesystemError::Unsupported { .. }));
+    }
+
+    #[tokio::test]
+    async fn list_dir_returns_unsupported_to_match_declared_capabilities() {
+        // PR #3679 review fix (finding #6): HsmBackend declares only
+        // Read/Write/Stat/Delete capabilities, so `list_dir` must fail
+        // closed rather than silently delegate to the inner backend.
+        // Verifies the runtime behavior matches the declared capability
+        // set.
+        let hsm = HsmBackend::new();
+        let path = VirtualPath::new("/secrets/list-dir-target").unwrap();
+        let err = hsm.list_dir(&path).await.unwrap_err();
+        assert!(matches!(
+            err,
+            FilesystemError::Unsupported {
+                operation: FilesystemOperation::ListDir,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
