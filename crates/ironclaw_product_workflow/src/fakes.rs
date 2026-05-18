@@ -1,6 +1,6 @@
 //! In-memory fakes for contract tests and downstream integration tests.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -347,7 +347,7 @@ struct FakeInboundTurnState {
     replay_attempts: usize,
     accepted: Vec<ProductInboundEnvelope>,
     fail_with: Option<ProductWorkflowError>,
-    programmed_replay: Option<InboundTurnOutcome>,
+    programmed_replay: VecDeque<InboundTurnOutcome>,
     programmed_outcome: Option<InboundTurnOutcome>,
 }
 
@@ -367,13 +367,22 @@ impl FakeInboundTurnService {
         state.programmed_outcome = Some(outcome);
     }
 
-    /// Program an already-staged accepted-message replay outcome.
+    /// Append an already-staged accepted-message replay outcome.
     pub fn program_replay_outcome(&self, outcome: InboundTurnOutcome) {
         let mut state = self
             .state
             .lock()
             .expect("fake inbound turn state lock poisoned"); // safety: test-support fake
-        state.programmed_replay = Some(outcome);
+        state.programmed_replay.push_back(outcome);
+    }
+
+    /// Append replay outcomes in call order.
+    pub fn program_replay_outcomes(&self, outcomes: impl IntoIterator<Item = InboundTurnOutcome>) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake inbound turn state lock poisoned"); // safety: test-support fake
+        state.programmed_replay.extend(outcomes);
     }
 
     /// Force all submissions to fail.
@@ -435,10 +444,20 @@ impl InboundTurnService for FakeInboundTurnService {
             .lock()
             .expect("fake inbound turn state lock poisoned"); // safety: test-support fake
         state.replay_attempts += 1;
-        Ok(state.programmed_replay.clone())
+        Ok(state.programmed_replay.pop_front())
     }
 
     async fn accept_user_message(
+        &self,
+        envelope: &ProductInboundEnvelope,
+    ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
+        if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
+            return Ok(outcome);
+        }
+        self.accept_user_message_skipping_policy(envelope).await
+    }
+
+    async fn accept_user_message_skipping_policy(
         &self,
         envelope: &ProductInboundEnvelope,
     ) -> Result<InboundTurnOutcome, ProductWorkflowError> {

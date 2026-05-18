@@ -220,10 +220,10 @@ impl InboundTurnService for ReplayCountingInboundTurnService {
         if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
             return Ok(outcome);
         }
-        self.accept_user_message_after_policy(envelope).await
+        self.accept_user_message_skipping_policy(envelope).await
     }
 
-    async fn accept_user_message_after_policy(
+    async fn accept_user_message_skipping_policy(
         &self,
         envelope: &ProductInboundEnvelope,
     ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
@@ -298,7 +298,19 @@ async fn before_inbound_policy_rewrite_reaches_inbound_turn_service() {
 
     assert!(matches!(ack, ProductInboundAck::Accepted { .. }));
     assert_eq!(policy.request_count(), 1);
-    assert_eq!(policy.requests()[0].user_message.text, "hello");
+    let request = &policy.requests()[0];
+    assert_eq!(request.adapter_id.as_str(), "test_adapter");
+    assert_eq!(request.installation_id.as_str(), "install_alpha");
+    assert_eq!(request.user_message.text, "hello");
+    assert_eq!(request.external_actor_ref.id(), "user1");
+    assert_eq!(
+        request.external_conversation_ref.conversation_fingerprint(),
+        "space:0:;conversation:5:conv1;topic:0:;"
+    );
+    assert_eq!(
+        request.source_binding_key,
+        "space:0:;conversation:5:conv1;topic:0:;"
+    );
     let accepted = inbound.accepted_envelopes();
     assert_eq!(accepted.len(), 1);
     let ProductInboundPayload::UserMessage(payload) = accepted[0].payload() else {
@@ -560,6 +572,94 @@ async fn before_inbound_policy_transient_failure_releases_fingerprint() {
     assert!(second.is_retryable());
     assert_eq!(policy.request_count(), 2);
     assert_eq!(inbound.accepted_count(), 0);
+}
+
+#[tokio::test]
+async fn before_inbound_policy_permanent_failure_settles_terminal_rejection() {
+    let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
+    policy.force_failure(ProductWorkflowError::BeforeInboundPolicyFailed {
+        reason: "policy configuration is invalid".into(),
+        permanent: true,
+    });
+    let envelope = sample_envelope("policy-permanent-failure");
+
+    let err = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect_err("permanent policy failure should surface rejected error");
+    assert!(!err.is_retryable());
+    assert_eq!(policy.request_count(), 1);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 1);
+    let actions = ledger.settled_actions();
+    assert_eq!(
+        actions[0].dispatch_kind,
+        Some(ActionDispatchKind::Rejected {
+            kind: ProductRejectionKind::PolicyDenied
+        })
+    );
+
+    let replay = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect("terminal policy failure should replay duplicate ack");
+    let ProductInboundAck::Duplicate { prior } = replay else {
+        panic!("expected duplicate replay")
+    };
+    let ProductInboundAck::Rejected(rejection) = *prior else {
+        panic!("expected rejected prior outcome")
+    };
+    assert_eq!(rejection.kind, ProductRejectionKind::PolicyDenied);
+    assert_eq!(
+        rejection.disposition(),
+        ProductRejectionDisposition::Permanent
+    );
+}
+
+#[tokio::test]
+async fn fake_inbound_turn_service_replays_programmed_outcomes_in_order() {
+    let inbound = FakeInboundTurnService::new();
+    let envelope = sample_envelope("fake-replay-sequence");
+    let first_run = TurnRunId::new();
+    let second_run = TurnRunId::new();
+    inbound.program_replay_outcomes([
+        InboundTurnOutcome::DeferredBusy {
+            accepted_message_ref: AcceptedMessageRef::new("msg:first").expect("valid"),
+            active_run_id: first_run,
+            binding: fake_binding(),
+        },
+        InboundTurnOutcome::Submitted {
+            accepted_message_ref: AcceptedMessageRef::new("msg:second").expect("valid"),
+            submitted_run_id: second_run,
+            binding: fake_binding(),
+        },
+    ]);
+
+    let first = inbound
+        .replay_accepted_user_message(&envelope)
+        .await
+        .expect("first replay")
+        .expect("first programmed outcome");
+    assert!(matches!(
+        first,
+        InboundTurnOutcome::DeferredBusy { active_run_id, .. } if active_run_id == first_run
+    ));
+    let second = inbound
+        .replay_accepted_user_message(&envelope)
+        .await
+        .expect("second replay")
+        .expect("second programmed outcome");
+    assert!(matches!(
+        second,
+        InboundTurnOutcome::Submitted { submitted_run_id, .. } if submitted_run_id == second_run
+    ));
+    assert!(
+        inbound
+            .replay_accepted_user_message(&envelope)
+            .await
+            .expect("third replay")
+            .is_none()
+    );
 }
 
 #[tokio::test]

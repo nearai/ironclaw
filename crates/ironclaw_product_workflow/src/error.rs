@@ -33,6 +33,10 @@ pub enum ProductWorkflowError {
     #[error("transient workflow failure: {reason}")]
     Transient { reason: String },
 
+    /// Before-inbound policy failed before it could produce an allow/rewrite/reject outcome.
+    #[error("before-inbound policy failed: {reason}")]
+    BeforeInboundPolicyFailed { reason: String, permanent: bool },
+
     /// The action was identified as a duplicate and the prior outcome should be replayed.
     #[error("duplicate action")]
     DuplicateAction {
@@ -88,6 +92,20 @@ impl From<ProductWorkflowError> for ProductAdapterError {
             ProductWorkflowError::Transient { reason } => ProductAdapterError::WorkflowTransient {
                 reason: RedactedString::new(reason),
             },
+            ProductWorkflowError::BeforeInboundPolicyFailed { reason, permanent } => {
+                if permanent {
+                    ProductAdapterError::WorkflowRejected {
+                        kind: ProductWorkflowRejectionKind::AdmissionRejected,
+                        status_code: 403,
+                        retryable: false,
+                        reason: RedactedString::new(reason),
+                    }
+                } else {
+                    ProductAdapterError::WorkflowTransient {
+                        reason: RedactedString::new(reason),
+                    }
+                }
+            }
             ProductWorkflowError::DuplicateAction { .. } => ProductAdapterError::Internal {
                 detail: RedactedString::new("duplicate action escaped workflow layer"),
             },
@@ -123,5 +141,16 @@ mod tests {
         }
         .into();
         assert!(!err.is_retryable());
+    }
+
+    #[test]
+    fn permanent_before_inbound_policy_failure_maps_to_rejection() {
+        let err: ProductAdapterError = ProductWorkflowError::BeforeInboundPolicyFailed {
+            reason: "classifier misconfigured".into(),
+            permanent: true,
+        }
+        .into();
+        assert!(!err.is_retryable());
+        assert!(matches!(err, ProductAdapterError::WorkflowRejected { .. }));
     }
 }

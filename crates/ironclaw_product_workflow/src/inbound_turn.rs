@@ -76,13 +76,13 @@ pub trait InboundTurnService: Send + Sync {
     /// Replay an already-accepted inbound message, if one exists.
     ///
     /// The product workflow calls this before before-inbound policy so retries
-    /// of staged messages are not blocked by later policy changes.
+    /// of staged messages are not blocked by later policy changes. Implementors
+    /// must keep this probe separate from fresh acceptance so callers never
+    /// perform replay lookup twice for one inbound dispatch.
     async fn replay_accepted_user_message(
         &self,
-        _envelope: &ProductInboundEnvelope,
-    ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError> {
-        Ok(None)
-    }
+        envelope: &ProductInboundEnvelope,
+    ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError>;
 
     /// Accept a user message envelope: resolve binding, stage message, submit turn.
     async fn accept_user_message(
@@ -90,13 +90,16 @@ pub trait InboundTurnService: Send + Sync {
         envelope: &ProductInboundEnvelope,
     ) -> Result<InboundTurnOutcome, ProductWorkflowError>;
 
-    /// Accept a user message after the caller already performed replay lookup.
-    async fn accept_user_message_after_policy(
+    /// Accept a user message after the caller already performed replay lookup
+    /// and before-inbound policy.
+    ///
+    /// Only [`DefaultProductWorkflow`](crate::DefaultProductWorkflow) should call
+    /// this directly. Other callers must run replay lookup and before-inbound
+    /// policy first; calling this as a shortcut intentionally skips policy.
+    async fn accept_user_message_skipping_policy(
         &self,
         envelope: &ProductInboundEnvelope,
-    ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
-        self.accept_user_message(envelope).await
-    }
+    ) -> Result<InboundTurnOutcome, ProductWorkflowError>;
 }
 
 /// Default implementation that composes a [`ConversationBindingService`] with a
@@ -169,10 +172,10 @@ where
             return Ok(outcome);
         }
 
-        self.accept_user_message_after_policy(envelope).await
+        self.accept_user_message_skipping_policy(envelope).await
     }
 
-    async fn accept_user_message_after_policy(
+    async fn accept_user_message_skipping_policy(
         &self,
         envelope: &ProductInboundEnvelope,
     ) -> Result<InboundTurnOutcome, ProductWorkflowError> {

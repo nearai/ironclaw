@@ -733,7 +733,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_webhook_surfaces_retryable_ack_as_retryable_error() {
+    async fn process_webhook_surfaces_retryable_policy_rejection_as_retryable_error() {
         let runner = NativeProductAdapterRunner::with_config(
             Arc::new(StaticAdapter::new(sample_parsed())),
             Arc::new(RetryableRejectedWorkflow),

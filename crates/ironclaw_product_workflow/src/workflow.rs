@@ -125,9 +125,8 @@ impl ProductWorkflow for DefaultProductWorkflow {
                     }
                     Err(e) => {
                         if let Some(ack) = terminal_ack_for_error(&e) {
-                            action.mark_dispatched(ActionDispatchKind::try_from_payload(
-                                envelope.payload(),
-                            )?);
+                            action
+                                .mark_dispatched(dispatch_kind_from_ack(&ack, envelope.payload())?);
                             action.settle(ack);
                             self.idempotency_ledger.settle(action).await.map_err(|settle_err| {
                                 ProductAdapterError::from(ProductWorkflowError::Transient {
@@ -202,22 +201,18 @@ async fn dispatch_payload(
                     &dispatch_envelope
                 }
                 BeforeInboundPolicyOutcome::Reject(rejection) => {
-                    let dispatch_kind = ActionDispatchKind::Rejected {
-                        kind: rejection.kind.clone(),
-                    };
                     debug!(
                         rejection_kind = ?rejection.kind,
                         disposition = ?rejection.disposition(),
                         "before-inbound policy rejected user message"
                     );
-                    return Ok(DispatchedAction {
-                        ack: ProductInboundAck::Rejected(rejection),
-                        dispatch_kind,
-                    });
+                    let ack = ProductInboundAck::Rejected(rejection);
+                    let dispatch_kind = dispatch_kind_from_ack(&ack, envelope.payload())?;
+                    return Ok(DispatchedAction { ack, dispatch_kind });
                 }
             };
             let outcome = inbound_turn_service
-                .accept_user_message_after_policy(envelope_for_turn)
+                .accept_user_message_skipping_policy(envelope_for_turn)
                 .await?;
             let ack = outcome.to_ack();
             let dispatch_kind = dispatch_kind_from_ack(&ack, envelope_for_turn.payload())?;
@@ -270,6 +265,9 @@ fn dispatch_kind_from_ack(
                 run_id: *active_run_id,
             })
         }
+        ProductInboundAck::Rejected(rejection) => Ok(ActionDispatchKind::Rejected {
+            kind: rejection.kind.clone(),
+        }),
         _ => ActionDispatchKind::try_from_payload(payload),
     }
 }
@@ -324,11 +322,21 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
                 format!("turn submission rejected: {error}"),
             )))
         }
+        ProductWorkflowError::BeforeInboundPolicyFailed {
+            reason,
+            permanent: true,
+        } => Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+            ProductRejectionKind::PolicyDenied,
+            format!("before-inbound policy failed: {reason}"),
+        ))),
         ProductWorkflowError::BindingResolutionFailed { .. }
         | ProductWorkflowError::TurnSubmissionRejected { .. }
         | ProductWorkflowError::TurnSubmissionFailed { .. }
         | ProductWorkflowError::TurnResumeRejected { .. }
         | ProductWorkflowError::Transient { .. }
+        | ProductWorkflowError::BeforeInboundPolicyFailed {
+            permanent: false, ..
+        }
         | ProductWorkflowError::DuplicateAction { .. } => None,
     }
 }
