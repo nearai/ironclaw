@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
-    ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionStream,
-    ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
+    ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
+    ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product_workflow::{
     RebornGetRunStateRequest, RebornResolveGateResponse, RebornServices, RebornServicesApi,
@@ -20,8 +20,8 @@ use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageStatus,
-    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
     SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
     UpdateAssistantDraftRequest,
@@ -61,6 +61,43 @@ fn caller_for_user_with_project(
 
 fn run_id_string() -> String {
     "3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18".to_string()
+}
+
+fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> ThreadHistory {
+    let thread_id = ThreadId::new(thread_id).expect("valid thread id");
+    let scope = ThreadScope {
+        tenant_id: owner.tenant_id.clone(),
+        agent_id: owner.agent_id.clone().expect("test caller has agent"),
+        project_id: owner.project_id.clone(),
+        owner_user_id: Some(owner.user_id.clone()),
+        mission_id: None,
+    };
+    ThreadHistory {
+        thread: SessionThreadRecord {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: Some("M2 facade contract thread".to_string()),
+            metadata_json: None,
+        },
+        messages: vec![ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id,
+            sequence: 1,
+            kind: MessageKind::User,
+            status: MessageStatus::Submitted,
+            actor_id: Some(owner.user_id.as_str().to_string()),
+            source_binding_id: Some("webui-src:test".to_string()),
+            reply_target_binding_id: Some("webui-reply:test".to_string()),
+            turn_id: Some("turn-test".to_string()),
+            turn_run_id: Some(run_id_string()),
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some("timeline from fake M2 port".to_string()),
+            redaction_ref: None,
+        }],
+        summary_artifacts: vec![],
+    }
 }
 
 fn thread_scope_for(caller: &WebUiAuthenticatedCaller) -> ThreadScope {
@@ -287,6 +324,10 @@ impl RecordingProjectionStream {
     fn drain_count(&self) -> usize {
         self.drains.lock().expect("lock").len()
     }
+
+    fn requests(&self) -> Vec<ProjectionSubscriptionRequest> {
+        self.drains.lock().expect("lock").clone()
+    }
 }
 
 #[async_trait]
@@ -447,24 +488,39 @@ impl SessionThreadService for ScopeMismatchThreadStub {
 
 enum ScriptedThreadBehavior {
     BackendHistory,
+    History(Box<ThreadHistory>),
     SubmittedReplay { turn_run_id: Option<String> },
 }
 
 struct ScriptedThreadService {
     behavior: ScriptedThreadBehavior,
+    history_requests: Mutex<Vec<ThreadHistoryRequest>>,
 }
 
 impl ScriptedThreadService {
     fn backend_history() -> Self {
         Self {
             behavior: ScriptedThreadBehavior::BackendHistory,
+            history_requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn history(history: ThreadHistory) -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::History(Box::new(history)),
+            history_requests: Mutex::new(Vec::new()),
         }
     }
 
     fn submitted_replay(turn_run_id: Option<String>) -> Self {
         Self {
             behavior: ScriptedThreadBehavior::SubmittedReplay { turn_run_id },
+            history_requests: Mutex::new(Vec::new()),
         }
+    }
+
+    fn history_requests(&self) -> Vec<ThreadHistoryRequest> {
+        self.history_requests.lock().expect("lock").clone()
     }
 }
 
@@ -474,10 +530,15 @@ impl SessionThreadService for ScriptedThreadService {
         &self,
         request: ThreadHistoryRequest,
     ) -> Result<ThreadHistory, SessionThreadError> {
+        self.history_requests
+            .lock()
+            .expect("lock")
+            .push(request.clone());
         match &self.behavior {
             ScriptedThreadBehavior::BackendHistory => Err(SessionThreadError::Backend(
                 "backend detail /host/path secret-token".to_string(),
             )),
+            ScriptedThreadBehavior::History(history) => Ok(history.as_ref().clone()),
             ScriptedThreadBehavior::SubmittedReplay { .. } => Ok(ThreadHistory {
                 thread: SessionThreadRecord {
                     scope: request.scope,
@@ -524,7 +585,7 @@ impl SessionThreadService for ScriptedThreadService {
                     turn_run_id: turn_run_id.clone(),
                 }))
             }
-            ScriptedThreadBehavior::BackendHistory => {
+            ScriptedThreadBehavior::BackendHistory | ScriptedThreadBehavior::History(_) => {
                 scripted_stub_unreachable("replay_accepted_inbound_message")
             }
         }
@@ -766,6 +827,88 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
     assert_eq!(
         submission_scope.project_id.expect("project").as_str(),
         "project-alpha"
+    );
+}
+
+#[tokio::test]
+async fn m2_facade_timeline_contract_uses_fake_thread_port_with_authenticated_scope() {
+    let web_caller = caller();
+    let expected_tenant_id = web_caller.tenant_id.clone();
+    let expected_agent_id = web_caller.agent_id.clone().expect("test caller has agent");
+    let expected_project_id = web_caller.project_id.clone();
+    let expected_user_id = web_caller.user_id.clone();
+    let thread_service = Arc::new(ScriptedThreadService::history(fake_thread_history(
+        &web_caller,
+        "thread-alpha",
+    )));
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let timeline = services
+        .get_timeline(
+            web_caller.clone(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("timeline is served by fake M2 thread port");
+
+    assert_eq!(timeline.thread.thread_id.as_str(), "thread-alpha");
+    assert_eq!(timeline.messages.len(), 1);
+    assert_eq!(
+        timeline.messages[0].content.as_deref(),
+        Some("timeline from fake M2 port")
+    );
+
+    let requests = thread_service.history_requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.thread_id.as_str(), "thread-alpha");
+    assert_eq!(request.scope.tenant_id, expected_tenant_id);
+    assert_eq!(request.scope.agent_id, expected_agent_id);
+    assert_eq!(request.scope.project_id, expected_project_id);
+    assert_eq!(request.scope.owner_user_id, Some(expected_user_id));
+}
+
+#[tokio::test]
+async fn m2_facade_stream_contract_uses_fake_projection_port_with_authenticated_scope() {
+    let web_caller = caller();
+    let event_stream = Arc::new(RecordingProjectionStream::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_event_stream(event_stream.clone());
+    create_thread_for(&services, web_caller.clone(), "thread-alpha").await;
+    let after_cursor = ProjectionCursor::new("cursor-alpha").expect("cursor");
+
+    let response = services
+        .stream_events(
+            web_caller.clone(),
+            RebornStreamEventsRequest {
+                thread_id: "thread-alpha".to_string(),
+                after_cursor: Some(after_cursor.clone()),
+            },
+        )
+        .await
+        .expect("stream is served by fake M2 projection port");
+
+    assert!(response.events.is_empty());
+    let requests = event_stream.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.actor.user_id, web_caller.user_id);
+    assert_eq!(request.scope.tenant_id, web_caller.tenant_id);
+    assert_eq!(request.scope.agent_id, web_caller.agent_id);
+    assert_eq!(request.scope.project_id, web_caller.project_id);
+    assert_eq!(request.scope.thread_id.as_str(), "thread-alpha");
+    assert_eq!(
+        request.after_cursor.as_ref().map(ProjectionCursor::as_str),
+        Some(after_cursor.as_str())
     );
 }
 
