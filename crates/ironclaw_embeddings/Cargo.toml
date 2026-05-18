@@ -16,6 +16,10 @@ dist = false
 [features]
 default = []
 bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
+# Exposes `MockEmbeddings` for downstream test harnesses. Off in release
+# builds so the deterministic-hash mock can't be reached from production
+# code paths.
+testing = []
 
 [dependencies]
 ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0" }

@@ -237,6 +237,8 @@ insta = { version = "1.46.3", features = ["yaml"] }
 # Pull the LLM crate's `testing` feature in only for tests so `StubLlm` and
 # fault-injection helpers don't ship in release binaries.
 ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0", features = ["testing"] }
+# Same idea for embeddings: `MockEmbeddings` is only reachable in dev builds.
+ironclaw_embeddings = { path = "crates/ironclaw_embeddings", version = "0.1.0", features = ["testing"] }
 
 [features]
 default = ["postgres", "libsql", "html-to-markdown", "tui"]

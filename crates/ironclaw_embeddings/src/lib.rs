@@ -13,6 +13,7 @@ mod bedrock;
 mod cache;
 mod config;
 mod factory;
+#[cfg(any(test, feature = "testing"))]
 mod mock;
 mod nearai;
 mod ollama;
@@ -23,5 +24,6 @@ pub use bedrock::BedrockEmbeddingSetup;
 pub use cache::{CachedEmbeddingProvider, EmbeddingCacheConfig};
 pub use config::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig, default_dimension_for_model};
 pub use factory::{ProviderDeps, create_provider};
+#[cfg(any(test, feature = "testing"))]
 pub use mock::MockEmbeddings;
 pub use provider::{EmbeddingError, EmbeddingProvider};
