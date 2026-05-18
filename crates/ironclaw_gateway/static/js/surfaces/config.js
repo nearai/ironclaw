@@ -376,7 +376,17 @@ function configureBuiltinProvider(id) {
   baseUrlInput.readOnly = false;
   baseUrlInput.style.opacity = '';
   baseUrlInput.placeholder = p.base_url || '';
-  document.getElementById('provider-api-key-row').style.display = p.api_key_required !== false ? '' : 'none';
+  // `accepts_api_key` tells us whether the provider supports API key
+  // auth at all (so the field should be visible) — distinct from
+  // `api_key_required`, which says whether API key is the *only* way to
+  // configure it. NEAR AI is dual-auth (session token or API key) and
+  // ships `api_key_required: false` + `accepts_api_key: true`. Fall back
+  // to `api_key_required !== false` for older payloads that haven't been
+  // upgraded yet.
+  const acceptsApiKey = p.accepts_api_key !== undefined
+    ? p.accepts_api_key !== false
+    : p.api_key_required !== false;
+  document.getElementById('provider-api-key-row').style.display = acceptsApiKey ? '' : 'none';
   document.getElementById('fetch-models-btn').style.display = p.can_list_models ? '' : 'none';
   const apiKeyInput = document.getElementById('provider-api-key');
   const hasDbKey = override.api_key === API_KEY_UNCHANGED;
