@@ -21,6 +21,8 @@
 
 mod action;
 mod binding;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+mod durable_ledger;
 mod error;
 #[cfg(any(test, feature = "test-support"))]
 mod fakes;
@@ -35,6 +37,10 @@ pub use action::{
     ProductActionId, ProductCommandName, ProductInboundAction, SourceBindingKey,
 };
 pub use binding::{ConversationBindingService, ResolveBindingRequest, ResolvedBinding};
+#[cfg(feature = "libsql")]
+pub use durable_ledger::RebornLibSqlIdempotencyLedger;
+#[cfg(feature = "postgres")]
+pub use durable_ledger::RebornPostgresIdempotencyLedger;
 pub use error::ProductWorkflowError;
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::{FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService};
