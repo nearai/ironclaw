@@ -1,0 +1,4 @@
+# Files that exist only on this fork and must not be pushed to upstream.
+# Used by the global pre-push hook to block accidental inclusion in PRs.
+.github/workflows/sync-upstream.yml
+.github/workflows/mirror-to-enjimi.yml
