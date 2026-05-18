@@ -49,6 +49,10 @@ pub enum ToolCommand {
         /// Force overwrite if tool already exists
         #[arg(short, long)]
         force: bool,
+
+        /// Grant signing-scheme consent without an interactive prompt
+        #[arg(long)]
+        yes: bool,
     },
 
     /// List installed tools
@@ -126,7 +130,20 @@ pub async fn run_tool_command(cmd: ToolCommand) -> anyhow::Result<()> {
             release,
             skip_build,
             force,
-        } => install_tool(path, name, capabilities, target, release, skip_build, force).await,
+            yes,
+        } => {
+            install_tool(
+                path,
+                name,
+                capabilities,
+                target,
+                release,
+                skip_build,
+                force,
+                yes,
+            )
+            .await
+        }
         ToolCommand::List { dir, verbose } => list_tools(dir, verbose).await,
         ToolCommand::Remove { name, dir } => remove_tool(name, dir).await,
         ToolCommand::Info {
@@ -140,6 +157,7 @@ pub async fn run_tool_command(cmd: ToolCommand) -> anyhow::Result<()> {
 }
 
 /// Install a WASM tool.
+#[allow(clippy::too_many_arguments)]
 async fn install_tool(
     path: PathBuf,
     name: Option<String>,
@@ -148,6 +166,7 @@ async fn install_tool(
     release: bool,
     skip_build: bool,
     force: bool,
+    yes: bool,
 ) -> anyhow::Result<()> {
     let target_dir = target.unwrap_or_else(default_tools_dir);
 
@@ -240,11 +259,16 @@ async fn install_tool(
         );
     }
 
-    // Validate capabilities file if provided
     if let Some(ref caps) = caps_path {
         let content = fs::read_to_string(caps).await?;
-        CapabilitiesFile::from_json(&content)
+        let parsed = CapabilitiesFile::from_json(&content)
             .map_err(|e| anyhow::anyhow!("Invalid capabilities file {}: {}", caps.display(), e))?;
+        if let Some(summary) =
+            crate::cli::signer_render::render_signing_summary(&parsed, &tool_name)
+        {
+            println!("{}", summary);
+            crate::cli::signer_render::prompt_for_signing_consent(yes)?;
+        }
     }
 
     // Copy WASM file

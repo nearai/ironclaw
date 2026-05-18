@@ -534,6 +534,9 @@ impl AppBuilder {
         if let Some(ref interceptor) = http_interceptor {
             registry = registry.with_http_interceptor(Arc::clone(interceptor));
         }
+        let signer_gate: Arc<dyn crate::secrets::SignerApprovalGate> =
+            Arc::new(crate::tools::wasm::signer_gate::TerminalSignerGate::new());
+        registry = registry.with_signer_gate(signer_gate);
         let tools = Arc::new(registry);
         tools.register_builtin_tools();
         tools.register_tool_info();

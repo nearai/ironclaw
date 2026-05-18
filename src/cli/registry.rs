@@ -41,6 +41,10 @@ pub enum RegistryCommand {
         /// Build from source instead of downloading pre-built artifact
         #[arg(long)]
         build: bool,
+
+        /// Grant signing-scheme consent without an interactive prompt
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Install the default bundle of recommended extensions
@@ -52,6 +56,10 @@ pub enum RegistryCommand {
         /// Build from source instead of downloading pre-built artifact
         #[arg(long)]
         build: bool,
+
+        /// Grant signing-scheme consent without an interactive prompt
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -77,11 +85,14 @@ pub async fn run_registry_command(cmd: RegistryCommand) -> anyhow::Result<()> {
             cmd_list(&catalog, kind.as_deref(), tag.as_deref(), verbose)
         }
         RegistryCommand::Info { name } => cmd_info(&catalog, &name),
-        RegistryCommand::Install { name, force, build } => {
-            cmd_install(&catalog, &repo_root, &name, force, build).await
-        }
-        RegistryCommand::InstallDefaults { force, build } => {
-            cmd_install(&catalog, &repo_root, "default", force, build).await
+        RegistryCommand::Install {
+            name,
+            force,
+            build,
+            yes,
+        } => cmd_install(&catalog, &repo_root, &name, force, build, yes).await,
+        RegistryCommand::InstallDefaults { force, build, yes } => {
+            cmd_install(&catalog, &repo_root, "default", force, build, yes).await
         }
     }
 }
@@ -241,6 +252,7 @@ async fn cmd_install(
     name: &str,
     force: bool,
     prefer_build: bool,
+    yes: bool,
 ) -> anyhow::Result<()> {
     let installer = RegistryInstaller::with_defaults(repo_root.to_path_buf());
 
@@ -248,6 +260,10 @@ async fn cmd_install(
 
     if manifests.is_empty() {
         anyhow::bail!("No extensions found for '{}'.", name);
+    }
+
+    for manifest in &manifests {
+        prompt_signing_consent_for_source(repo_root, manifest, yes)?;
     }
 
     if let Some(bundle_def) = bundle {
@@ -313,5 +329,35 @@ async fn cmd_install(
         }
     }
 
+    Ok(())
+}
+
+fn prompt_signing_consent_for_source(
+    repo_root: &std::path::Path,
+    manifest: &crate::registry::manifest::ExtensionManifest,
+    yes: bool,
+) -> anyhow::Result<()> {
+    let Some(source) = manifest.source.as_ref() else {
+        return Ok(());
+    };
+    let caps_path = repo_root.join(&source.dir).join(&source.capabilities);
+    if !caps_path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&caps_path).map_err(|e| {
+        anyhow::anyhow!(
+            "Cannot read {} for signing review: {}",
+            caps_path.display(),
+            e
+        )
+    })?;
+    let parsed = crate::tools::wasm::capabilities_schema::CapabilitiesFile::from_json(&content)
+        .map_err(|e| anyhow::anyhow!("Invalid capabilities at {}: {}", caps_path.display(), e))?;
+    if let Some(summary) =
+        crate::cli::signer_render::render_signing_summary(&parsed, &manifest.name)
+    {
+        println!("{}", summary);
+        crate::cli::signer_render::prompt_for_signing_consent(yes)?;
+    }
     Ok(())
 }

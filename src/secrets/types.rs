@@ -211,6 +211,310 @@ pub enum CredentialLocation {
     QueryParam { name: String },
     /// Inject by replacing a placeholder in URL or body templates
     UrlPath { placeholder: String },
+    /// HMAC-SHA256 over `${unix_seconds}${method}${path}${body}`,
+    /// emitted as URL-safe base64 in `signature_header` with the
+    /// timestamp echoed in `timestamp_header`. Secret value is the
+    /// URL-safe-base64-encoded HMAC key.
+    HmacSignedHeader {
+        signature_header: String,
+        timestamp_header: String,
+    },
+    /// EIP-712 typed structured data signing with secp256k1.
+    /// Schema declared by the tool; sources for each field come from
+    /// the closed [`FieldSource`] vocabulary so the signed payload is
+    /// bounded by the manifest review at install time.
+    Eip712SignedHeader {
+        domain: Eip712Domain,
+        primary_type: String,
+        structs: Vec<Eip712StructDef>,
+        output_headers: Vec<HeaderOutput>,
+        #[serde(default)]
+        output_body_fields: Vec<BodyJsonOutput>,
+    },
+    /// NEP-413 signed message with ed25519 (NEAR Protocol).
+    /// Nonce is always host-generated 32 random bytes per the spec.
+    Nep413SignedHeader {
+        recipient_source: FieldSource,
+        message_source: FieldSource,
+        #[serde(default)]
+        callback_url_source: Option<FieldSource>,
+        output_headers: Vec<HeaderOutput>,
+    },
+    /// Solana transaction signing with ed25519. Tool supplies the
+    /// unsigned message bytes; runtime emits the wire-formatted
+    /// signed transaction.
+    SolanaSignedTransaction {
+        message_source: FieldSource,
+        output_body_fields: Vec<BodyJsonOutput>,
+    },
+}
+
+impl CredentialLocation {
+    pub fn is_signing(&self) -> bool {
+        matches!(
+            self,
+            Self::HmacSignedHeader { .. }
+                | Self::Eip712SignedHeader { .. }
+                | Self::Nep413SignedHeader { .. }
+                | Self::SolanaSignedTransaction { .. }
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialKind {
+    #[default]
+    NetworkAuth,
+    Signing,
+}
+
+impl CredentialKind {
+    pub fn for_location(location: &CredentialLocation) -> Self {
+        if location.is_signing() {
+            Self::Signing
+        } else {
+            Self::NetworkAuth
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignerClassification {
+    Low,
+    Medium,
+    High,
+}
+
+pub fn classify_signing_location(location: &CredentialLocation) -> SignerClassification {
+    match location {
+        CredentialLocation::SolanaSignedTransaction { .. } => SignerClassification::High,
+        CredentialLocation::Eip712SignedHeader {
+            primary_type,
+            structs,
+            ..
+        } => classify_eip712(primary_type, structs),
+        CredentialLocation::Nep413SignedHeader { .. } => SignerClassification::Low,
+        CredentialLocation::HmacSignedHeader { .. } => SignerClassification::Low,
+        _ => SignerClassification::Low,
+    }
+}
+
+fn classify_eip712(primary_type: &str, structs: &[Eip712StructDef]) -> SignerClassification {
+    let pt_lower = primary_type.to_ascii_lowercase();
+    let high_value_primary = ["permit", "approval", "transfer", "order", "withdraw"]
+        .iter()
+        .any(|kw| pt_lower.contains(kw));
+    if high_value_primary {
+        return SignerClassification::High;
+    }
+
+    let target = structs
+        .iter()
+        .find(|s| s.name == primary_type)
+        .or_else(|| structs.first());
+    let Some(target) = target else {
+        return SignerClassification::Low;
+    };
+
+    let mut has_address = false;
+    let mut has_value_or_amount = false;
+    for field in &target.fields {
+        let ty = field.type_name.to_ascii_lowercase();
+        let fname = field.name.to_ascii_lowercase();
+        if ty == "address" || ty.starts_with("address[") {
+            has_address = true;
+        }
+        if matches!(
+            fname.as_str(),
+            "value" | "amount" | "tokenid" | "token_id" | "deadline"
+        ) {
+            has_value_or_amount = true;
+        }
+        if fname == "spender" || fname == "operator" {
+            has_address = true;
+        }
+    }
+
+    if has_address && has_value_or_amount {
+        SignerClassification::High
+    } else if has_address {
+        SignerClassification::Medium
+    } else {
+        SignerClassification::Low
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ApprovalRequest {
+    pub tool_name: String,
+    pub host: String,
+    pub path: String,
+    pub secret_name: String,
+    pub classification: SignerClassification,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Approval {
+    Approved,
+    Denied,
+}
+
+#[async_trait::async_trait]
+pub trait SignerApprovalGate: Send + Sync {
+    async fn request_approval(&self, request: &ApprovalRequest) -> Approval;
+}
+
+pub struct AllowAllSignerGate;
+
+#[async_trait::async_trait]
+impl SignerApprovalGate for AllowAllSignerGate {
+    async fn request_approval(&self, _request: &ApprovalRequest) -> Approval {
+        Approval::Approved
+    }
+}
+
+pub struct RejectAllSignerGate;
+
+#[async_trait::async_trait]
+impl SignerApprovalGate for RejectAllSignerGate {
+    async fn request_approval(&self, _request: &ApprovalRequest) -> Approval {
+        Approval::Denied
+    }
+}
+
+/// EIP-712 domain separator parameters.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Eip712Domain {
+    pub name: String,
+    pub version: String,
+    pub chain_id: u64,
+    #[serde(default)]
+    pub verifying_contract: Option<String>,
+}
+
+/// EIP-712 struct definition: the primary type plus any nested types
+/// it references.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Eip712StructDef {
+    pub name: String,
+    pub fields: Vec<Eip712TypedField>,
+}
+
+/// One field of an EIP-712 struct: name, ABI type string, and the
+/// source that supplies its value at request time.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Eip712TypedField {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub type_name: String,
+    pub source: FieldSource,
+}
+
+/// Closed vocabulary of values a signed payload field may take. The
+/// vocabulary is closed so a tool cannot declare an arbitrary signing
+/// oracle: every source is either user-reviewed at install (literal)
+/// or derived from the request the tool was already authorized to
+/// send (timestamp, body, etc.).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum FieldSource {
+    Literal {
+        value: String,
+    },
+    SignerAddress,
+    SignerPublicKey,
+    RequestTimestampSecs,
+    RequestRandomNonceB64,
+    RequestBody,
+    /// Computes `keccak256` over a byte sequence assembled from the
+    /// declared parts and emits the 32-byte digest as a 0x-prefixed
+    /// hex string suitable for an EIP-712 `bytes32` field.
+    Bytes32Keccak256OfBytes {
+        parts: Vec<BytesPart>,
+    },
+    /// Reads the JSON value at `path` in the request body and emits
+    /// it as a string. Strictly narrower than `RequestBody`.
+    BodyFieldString {
+        path: String,
+    },
+}
+
+/// Closed vocabulary of byte fragments that can be concatenated and
+/// hashed under [`FieldSource::Bytes32Keccak256OfBytes`]. Each entry
+/// is either a manifest-time literal or a deterministic transform of
+/// a request body field, so the hashed payload remains bounded by the
+/// install-time review.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum BytesPart {
+    /// Raw bytes specified as a hex string in the manifest.
+    LiteralHex { hex: String },
+    /// MessagePack encoding of the JSON value at `path` in the request
+    /// body. Path uses dot notation (e.g. `action`, `signature.r`).
+    BodyFieldMsgpack { path: String },
+    /// Big-endian 8-byte encoding of the integer at `path` in the
+    /// request body.
+    BodyFieldBeU64 { path: String },
+    /// EVM address marker bytes: emits `0x00` if the field is absent
+    /// or null, otherwise `0x01` followed by the 20-byte address.
+    BodyFieldEthAddressOptionalPrefixed { path: String },
+}
+
+/// Body-mutation output. Sets the JSON value at `json_path` in the
+/// request body to a value drawn from the closed [`BodyValue`]
+/// vocabulary. Path uses dot notation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct BodyJsonOutput {
+    pub json_path: String,
+    pub value: BodyValue,
+}
+
+/// Closed vocabulary of values that may be written into the request
+/// body by a signer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum BodyValue {
+    SignerAddress,
+    SignerPublicKey,
+    SignatureHex,
+    SignatureBase64,
+    SignatureRHex,
+    SignatureSHex,
+    SignatureV,
+    RequestTimestampSecs,
+    RequestRandomNonceB64,
+    LiteralString {
+        value: String,
+    },
+    LiteralNumber {
+        value: i64,
+    },
+    /// Base64 of `[0x01][64-byte sig][message bytes]`. Only valid
+    /// inside `SolanaSignedTransaction` output_body_fields.
+    SolanaSignedTransactionBase64,
+}
+
+/// Header that the signer emits, with the value source.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct HeaderOutput {
+    pub header_name: String,
+    pub value: OutputSource,
+}
+
+/// Closed vocabulary of values an output header may take.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case")]
+pub enum OutputSource {
+    Literal { value: String },
+    SignerAddress,
+    SignerPublicKey,
+    RequestTimestampSecs,
+    RequestRandomNonceB64,
+    SignatureHex,
+    SignatureBase64,
 }
 
 /// Mapping from a secret name to where it should be injected.
@@ -234,6 +538,12 @@ pub struct CredentialMapping {
     /// silently downgraded to an unauthenticated request.
     #[serde(default)]
     pub optional: bool,
+}
+
+impl CredentialMapping {
+    pub fn kind(&self) -> CredentialKind {
+        CredentialKind::for_location(&self.location)
+    }
 }
 
 impl CredentialMapping {
@@ -441,7 +751,252 @@ pub(crate) fn host_matches_pattern(host: &str, pattern: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use crate::secrets::types::{CreateSecretParams, DecryptedSecret, SecretRef};
+    use crate::secrets::types::{
+        CreateSecretParams, CredentialKind, CredentialLocation, DecryptedSecret, FieldSource,
+        SecretRef,
+    };
+
+    #[test]
+    fn credential_location_is_signing_classifies_variants() {
+        assert!(!CredentialLocation::AuthorizationBearer.is_signing());
+        assert!(
+            !CredentialLocation::Header {
+                name: "X-Api-Key".to_string(),
+                prefix: None,
+            }
+            .is_signing()
+        );
+        assert!(
+            CredentialLocation::HmacSignedHeader {
+                signature_header: "X-Sig".to_string(),
+                timestamp_header: "X-Ts".to_string(),
+            }
+            .is_signing()
+        );
+        assert!(
+            CredentialLocation::Nep413SignedHeader {
+                recipient_source: FieldSource::Literal {
+                    value: "iron.near".to_string()
+                },
+                message_source: FieldSource::RequestBody,
+                callback_url_source: None,
+                output_headers: vec![],
+            }
+            .is_signing()
+        );
+        assert!(
+            CredentialLocation::SolanaSignedTransaction {
+                message_source: FieldSource::RequestBody,
+                output_body_fields: vec![],
+            }
+            .is_signing()
+        );
+    }
+
+    #[test]
+    fn classify_solana_as_high() {
+        use crate::secrets::types::{SignerClassification, classify_signing_location};
+        let loc = CredentialLocation::SolanaSignedTransaction {
+            message_source: FieldSource::RequestBody,
+            output_body_fields: vec![],
+        };
+        assert_eq!(classify_signing_location(&loc), SignerClassification::High);
+    }
+
+    #[test]
+    fn classify_hmac_and_nep413_as_low() {
+        use crate::secrets::types::{SignerClassification, classify_signing_location};
+        let hmac = CredentialLocation::HmacSignedHeader {
+            signature_header: "X-Sig".to_string(),
+            timestamp_header: "X-Ts".to_string(),
+        };
+        assert_eq!(classify_signing_location(&hmac), SignerClassification::Low);
+
+        let nep413 = CredentialLocation::Nep413SignedHeader {
+            recipient_source: FieldSource::Literal {
+                value: "iron.near".to_string(),
+            },
+            message_source: FieldSource::RequestBody,
+            callback_url_source: None,
+            output_headers: vec![],
+        };
+        assert_eq!(
+            classify_signing_location(&nep413),
+            SignerClassification::Low
+        );
+    }
+
+    #[test]
+    fn classify_eip712_permit_as_high() {
+        use crate::secrets::types::{
+            Eip712Domain, Eip712StructDef, Eip712TypedField, SignerClassification,
+            classify_signing_location,
+        };
+        let loc = CredentialLocation::Eip712SignedHeader {
+            domain: Eip712Domain {
+                name: "USDC".to_string(),
+                version: "2".to_string(),
+                chain_id: 1,
+                verifying_contract: None,
+            },
+            primary_type: "Permit".to_string(),
+            structs: vec![Eip712StructDef {
+                name: "Permit".to_string(),
+                fields: vec![Eip712TypedField {
+                    name: "owner".to_string(),
+                    type_name: "address".to_string(),
+                    source: FieldSource::SignerAddress,
+                }],
+            }],
+            output_headers: vec![],
+            output_body_fields: vec![],
+        };
+        assert_eq!(classify_signing_location(&loc), SignerClassification::High);
+    }
+
+    #[test]
+    fn classify_eip712_value_and_address_as_high() {
+        use crate::secrets::types::{
+            Eip712Domain, Eip712StructDef, Eip712TypedField, SignerClassification,
+            classify_signing_location,
+        };
+        let loc = CredentialLocation::Eip712SignedHeader {
+            domain: Eip712Domain {
+                name: "X".to_string(),
+                version: "1".to_string(),
+                chain_id: 1,
+                verifying_contract: None,
+            },
+            primary_type: "Auth".to_string(),
+            structs: vec![Eip712StructDef {
+                name: "Auth".to_string(),
+                fields: vec![
+                    Eip712TypedField {
+                        name: "to".to_string(),
+                        type_name: "address".to_string(),
+                        source: FieldSource::SignerAddress,
+                    },
+                    Eip712TypedField {
+                        name: "amount".to_string(),
+                        type_name: "uint256".to_string(),
+                        source: FieldSource::RequestBody,
+                    },
+                ],
+            }],
+            output_headers: vec![],
+            output_body_fields: vec![],
+        };
+        assert_eq!(classify_signing_location(&loc), SignerClassification::High);
+    }
+
+    #[test]
+    fn classify_eip712_address_only_as_medium() {
+        use crate::secrets::types::{
+            Eip712Domain, Eip712StructDef, Eip712TypedField, SignerClassification,
+            classify_signing_location,
+        };
+        let loc = CredentialLocation::Eip712SignedHeader {
+            domain: Eip712Domain {
+                name: "ClobAuthDomain".to_string(),
+                version: "1".to_string(),
+                chain_id: 137,
+                verifying_contract: None,
+            },
+            primary_type: "ClobAuth".to_string(),
+            structs: vec![Eip712StructDef {
+                name: "ClobAuth".to_string(),
+                fields: vec![Eip712TypedField {
+                    name: "address".to_string(),
+                    type_name: "address".to_string(),
+                    source: FieldSource::SignerAddress,
+                }],
+            }],
+            output_headers: vec![],
+            output_body_fields: vec![],
+        };
+        assert_eq!(
+            classify_signing_location(&loc),
+            SignerClassification::Medium
+        );
+    }
+
+    #[test]
+    fn classify_eip712_no_value_no_address_as_low() {
+        use crate::secrets::types::{
+            Eip712Domain, Eip712StructDef, Eip712TypedField, SignerClassification,
+            classify_signing_location,
+        };
+        let loc = CredentialLocation::Eip712SignedHeader {
+            domain: Eip712Domain {
+                name: "Login".to_string(),
+                version: "1".to_string(),
+                chain_id: 1,
+                verifying_contract: None,
+            },
+            primary_type: "Auth".to_string(),
+            structs: vec![Eip712StructDef {
+                name: "Auth".to_string(),
+                fields: vec![Eip712TypedField {
+                    name: "nonce".to_string(),
+                    type_name: "string".to_string(),
+                    source: FieldSource::RequestRandomNonceB64,
+                }],
+            }],
+            output_headers: vec![],
+            output_body_fields: vec![],
+        };
+        assert_eq!(classify_signing_location(&loc), SignerClassification::Low);
+    }
+
+    #[tokio::test]
+    async fn allow_all_gate_returns_approved() {
+        use crate::secrets::types::{
+            AllowAllSignerGate, Approval, ApprovalRequest, SignerApprovalGate, SignerClassification,
+        };
+        let gate = AllowAllSignerGate;
+        let req = ApprovalRequest {
+            tool_name: "x".to_string(),
+            host: "x".to_string(),
+            path: "/".to_string(),
+            secret_name: "s".to_string(),
+            classification: SignerClassification::High,
+            summary: "test".to_string(),
+        };
+        assert_eq!(gate.request_approval(&req).await, Approval::Approved);
+    }
+
+    #[tokio::test]
+    async fn reject_all_gate_returns_denied() {
+        use crate::secrets::types::{
+            Approval, ApprovalRequest, RejectAllSignerGate, SignerApprovalGate,
+            SignerClassification,
+        };
+        let gate = RejectAllSignerGate;
+        let req = ApprovalRequest {
+            tool_name: "x".to_string(),
+            host: "x".to_string(),
+            path: "/".to_string(),
+            secret_name: "s".to_string(),
+            classification: SignerClassification::High,
+            summary: "test".to_string(),
+        };
+        assert_eq!(gate.request_approval(&req).await, Approval::Denied);
+    }
+
+    #[test]
+    fn credential_kind_for_location_picks_signing_for_signing_locations() {
+        assert_eq!(
+            CredentialKind::for_location(&CredentialLocation::AuthorizationBearer),
+            CredentialKind::NetworkAuth
+        );
+        assert_eq!(
+            CredentialKind::for_location(&CredentialLocation::HmacSignedHeader {
+                signature_header: "X-Sig".to_string(),
+                timestamp_header: "X-Ts".to_string(),
+            }),
+            CredentialKind::Signing
+        );
+    }
 
     #[test]
     fn test_secret_ref_creation() {

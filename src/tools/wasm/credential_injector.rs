@@ -48,6 +48,9 @@ pub enum InjectionError {
 
     #[error("No matching credential for host: {0}")]
     NoMatchingCredential(String),
+
+    #[error("Signing denied by user for secret '{0}'")]
+    SigningDenied(String),
 }
 
 impl From<SecretError> for InjectionError {
@@ -215,6 +218,18 @@ impl SharedCredentialRegistry {
         matched
     }
 
+    pub fn find_for_url_with_kind(
+        &self,
+        host: &str,
+        path: &str,
+        kind: crate::secrets::CredentialKind,
+    ) -> Vec<CredentialMapping> {
+        self.find_for_url(host, path)
+            .into_iter()
+            .filter(|m| m.kind() == kind)
+            .collect()
+    }
+
     pub fn oauth_refresh_for_secret(&self, secret_name: &str) -> Option<OAuthRefreshConfig> {
         let guard = match self.oauth_refresh.read() {
             Ok(guard) => guard,
@@ -309,6 +324,18 @@ impl CredentialInjector {
         matched
     }
 
+    pub fn find_credentials_for_url_with_kind(
+        &self,
+        host: &str,
+        path: &str,
+        kind: crate::secrets::CredentialKind,
+    ) -> Vec<&CredentialMapping> {
+        self.find_credentials_for_url(host, path)
+            .into_iter()
+            .filter(|m| m.kind() == kind)
+            .collect()
+    }
+
     /// Host-only inject. See `inject_for_url`.
     #[deprecated(note = "use inject_for_url(user_id, host, path, store) instead")]
     pub async fn inject(
@@ -334,6 +361,47 @@ impl CredentialInjector {
         let matching_mappings = self.find_credentials_for_url(host, path);
         self.inject_from_mappings(user_id, matching_mappings, store)
             .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn inject_for_url_with_approval(
+        &self,
+        user_id: &str,
+        host: &str,
+        path: &str,
+        store: &dyn SecretsStore,
+        gate: &dyn crate::secrets::SignerApprovalGate,
+        tool_name: &str,
+        min_classification: crate::secrets::SignerClassification,
+    ) -> Result<InjectedCredentials, InjectionError> {
+        let matching = self.find_credentials_for_url(host, path);
+        if matching.is_empty() {
+            return Ok(InjectedCredentials::empty());
+        }
+
+        for mapping in &matching {
+            if mapping.kind() != crate::secrets::CredentialKind::Signing {
+                continue;
+            }
+            let classification = crate::secrets::classify_signing_location(&mapping.location);
+            if !at_least(classification, min_classification) {
+                continue;
+            }
+            let summary = signer_request_summary(mapping);
+            let request = crate::secrets::ApprovalRequest {
+                tool_name: tool_name.to_string(),
+                host: host.to_string(),
+                path: path.to_string(),
+                secret_name: mapping.secret_name.clone(),
+                classification,
+                summary,
+            };
+            if gate.request_approval(&request).await == crate::secrets::Approval::Denied {
+                return Err(InjectionError::SigningDenied(mapping.secret_name.clone()));
+            }
+        }
+
+        self.inject_from_mappings(user_id, matching, store).await
     }
 
     async fn inject_from_mappings(
@@ -392,6 +460,33 @@ impl CredentialInjector {
 }
 
 /// Inject a single credential into the result.
+fn at_least(
+    actual: crate::secrets::SignerClassification,
+    floor: crate::secrets::SignerClassification,
+) -> bool {
+    use crate::secrets::SignerClassification::*;
+    let rank = |c| match c {
+        Low => 0u8,
+        Medium => 1,
+        High => 2,
+    };
+    rank(actual) >= rank(floor)
+}
+
+fn signer_request_summary(mapping: &CredentialMapping) -> String {
+    use crate::secrets::CredentialLocation;
+    let kind = match &mapping.location {
+        CredentialLocation::HmacSignedHeader { .. } => "HMAC-SHA256",
+        CredentialLocation::Eip712SignedHeader { primary_type, .. } => {
+            return format!("EIP-712 typed message: {}", primary_type);
+        }
+        CredentialLocation::Nep413SignedHeader { .. } => "NEP-413 NEAR signed message",
+        CredentialLocation::SolanaSignedTransaction { .. } => "Solana ed25519 transaction",
+        _ => "non-signing location",
+    };
+    kind.to_string()
+}
+
 pub(crate) fn inject_credential(
     result: &mut InjectedCredentials,
     location: &CredentialLocation,
@@ -427,6 +522,15 @@ pub(crate) fn inject_credential(
             // URL placeholder replacement is handled by channel/tool wrappers
             // that substitute {PLACEHOLDER} values in templated strings.
         }
+        // Signing variants are intentionally not injected here. Signatures
+        // are computed host-side in the dedicated signer path
+        // (`wrapper::inject_host_credentials`) after the request body is
+        // assembled, so the secret never enters static header/query/url
+        // placement and the WASM tool never sees key material.
+        CredentialLocation::HmacSignedHeader { .. }
+        | CredentialLocation::Eip712SignedHeader { .. }
+        | CredentialLocation::Nep413SignedHeader { .. }
+        | CredentialLocation::SolanaSignedTransaction { .. } => {}
     }
 }
 
@@ -473,7 +577,9 @@ mod tests {
         SecretsStore,
     };
     use crate::testing::credentials::{TEST_OPENAI_API_KEY, test_secrets_store};
-    use crate::tools::wasm::credential_injector::{CredentialInjector, base64_encode};
+    use crate::tools::wasm::credential_injector::{
+        CredentialInjector, InjectionError, base64_encode,
+    };
 
     fn test_store() -> InMemorySecretsStore {
         test_secrets_store()
@@ -806,5 +912,246 @@ mod tests {
 
         let found = registry.find_for_host("api.example.com");
         assert_eq!(found.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn inject_for_url_with_approval_calls_gate_for_high_value_signer_and_proceeds_on_approve()
+    {
+        use crate::secrets::{
+            AllowAllSignerGate, CredentialLocation, FieldSource, SignerClassification,
+        };
+
+        let store = test_store();
+        store
+            .create(
+                "user1",
+                CreateSecretParams::new("polymarket_l1_pk", "test-pk"),
+            )
+            .await
+            .unwrap();
+
+        let mut mappings = HashMap::new();
+        mappings.insert(
+            "drainer".to_string(),
+            CredentialMapping {
+                secret_name: "polymarket_l1_pk".to_string(),
+                location: CredentialLocation::SolanaSignedTransaction {
+                    message_source: FieldSource::RequestBody,
+                    output_body_fields: vec![],
+                },
+                host_patterns: vec!["solana-api.example.com".to_string()],
+                path_patterns: Vec::new(),
+                optional: false,
+            },
+        );
+        let injector = CredentialInjector::new(mappings, vec!["polymarket_l1_pk".to_string()]);
+
+        let gate = AllowAllSignerGate;
+        let _result = injector
+            .inject_for_url_with_approval(
+                "user1",
+                "solana-api.example.com",
+                "/v1/tx",
+                &store,
+                &gate,
+                "evil",
+                SignerClassification::High,
+            )
+            .await
+            .expect("approved injection ok");
+    }
+
+    #[tokio::test]
+    async fn inject_for_url_with_approval_returns_signing_denied_on_reject() {
+        use crate::secrets::{
+            CredentialLocation, FieldSource, RejectAllSignerGate, SignerClassification,
+        };
+
+        let store = test_store();
+        store
+            .create("user1", CreateSecretParams::new("sol_pk", "test-pk"))
+            .await
+            .unwrap();
+
+        let mut mappings = HashMap::new();
+        mappings.insert(
+            "drainer".to_string(),
+            CredentialMapping {
+                secret_name: "sol_pk".to_string(),
+                location: CredentialLocation::SolanaSignedTransaction {
+                    message_source: FieldSource::RequestBody,
+                    output_body_fields: vec![],
+                },
+                host_patterns: vec!["solana-api.example.com".to_string()],
+                path_patterns: Vec::new(),
+                optional: false,
+            },
+        );
+        let injector = CredentialInjector::new(mappings, vec!["sol_pk".to_string()]);
+
+        let gate = RejectAllSignerGate;
+        let err = injector
+            .inject_for_url_with_approval(
+                "user1",
+                "solana-api.example.com",
+                "/v1/tx",
+                &store,
+                &gate,
+                "evil",
+                SignerClassification::High,
+            )
+            .await
+            .expect_err("rejected gate must fail");
+        assert!(matches!(err, InjectionError::SigningDenied(name) if name == "sol_pk"));
+    }
+
+    #[tokio::test]
+    async fn inject_for_url_with_approval_bypasses_gate_for_network_auth() {
+        use crate::secrets::{RejectAllSignerGate, SignerClassification};
+
+        let store = test_store();
+        store
+            .create("user1", CreateSecretParams::new("api_key", "secret123"))
+            .await
+            .unwrap();
+
+        let mut mappings = HashMap::new();
+        mappings.insert(
+            "bearer".to_string(),
+            CredentialMapping {
+                secret_name: "api_key".to_string(),
+                location: CredentialLocation::AuthorizationBearer,
+                host_patterns: vec!["api.example.com".to_string()],
+                path_patterns: Vec::new(),
+                optional: false,
+            },
+        );
+        let injector = CredentialInjector::new(mappings, vec!["api_key".to_string()]);
+
+        let gate = RejectAllSignerGate;
+        let result = injector
+            .inject_for_url_with_approval(
+                "user1",
+                "api.example.com",
+                "/v1/anything",
+                &store,
+                &gate,
+                "no-signer",
+                SignerClassification::High,
+            )
+            .await
+            .expect("network auth bypasses signing gate");
+        assert!(result.headers.contains_key("Authorization"));
+    }
+
+    #[tokio::test]
+    async fn inject_for_url_with_approval_skips_gate_when_below_threshold() {
+        use crate::secrets::{
+            CredentialLocation, FieldSource, RejectAllSignerGate, SignerClassification,
+        };
+
+        let store = test_store();
+        store
+            .create("user1", CreateSecretParams::new("near_pk", "test"))
+            .await
+            .unwrap();
+
+        let mut mappings = HashMap::new();
+        mappings.insert(
+            "nep413".to_string(),
+            CredentialMapping {
+                secret_name: "near_pk".to_string(),
+                location: CredentialLocation::Nep413SignedHeader {
+                    recipient_source: FieldSource::Literal {
+                        value: "iron.near".to_string(),
+                    },
+                    message_source: FieldSource::RequestBody,
+                    callback_url_source: None,
+                    output_headers: vec![],
+                },
+                host_patterns: vec!["api.iron.near".to_string()],
+                path_patterns: Vec::new(),
+                optional: false,
+            },
+        );
+        let injector = CredentialInjector::new(mappings, vec!["near_pk".to_string()]);
+
+        let gate = RejectAllSignerGate;
+        let _result = injector
+            .inject_for_url_with_approval(
+                "user1",
+                "api.iron.near",
+                "/auth",
+                &store,
+                &gate,
+                "iron",
+                SignerClassification::High,
+            )
+            .await
+            .expect("nep413 is Low classification, should not hit High gate");
+    }
+
+    #[test]
+    fn find_credentials_for_url_with_kind_separates_signing_from_network_auth() {
+        use crate::secrets::{CredentialKind, FieldSource};
+
+        let mut mappings = HashMap::new();
+        mappings.insert(
+            "api_key".to_string(),
+            CredentialMapping {
+                secret_name: "polymarket_l2_key".to_string(),
+                location: CredentialLocation::Header {
+                    name: "POLY-API-KEY".to_string(),
+                    prefix: None,
+                },
+                host_patterns: vec!["clob.polymarket.com".to_string()],
+                path_patterns: Vec::new(),
+                optional: false,
+            },
+        );
+        mappings.insert(
+            "eip712".to_string(),
+            CredentialMapping {
+                secret_name: "polymarket_l1_pk".to_string(),
+                location: CredentialLocation::Nep413SignedHeader {
+                    recipient_source: FieldSource::Literal {
+                        value: "iron.near".to_string(),
+                    },
+                    message_source: FieldSource::RequestBody,
+                    callback_url_source: None,
+                    output_headers: Vec::new(),
+                },
+                host_patterns: vec!["clob.polymarket.com".to_string()],
+                path_patterns: Vec::new(),
+                optional: false,
+            },
+        );
+
+        let injector = CredentialInjector::new(
+            mappings,
+            vec![
+                "polymarket_l2_key".to_string(),
+                "polymarket_l1_pk".to_string(),
+            ],
+        );
+
+        let all = injector.find_credentials_for_url("clob.polymarket.com", "/auth/api-key");
+        assert_eq!(all.len(), 2);
+
+        let net_only = injector.find_credentials_for_url_with_kind(
+            "clob.polymarket.com",
+            "/auth/api-key",
+            CredentialKind::NetworkAuth,
+        );
+        assert_eq!(net_only.len(), 1);
+        assert_eq!(net_only[0].secret_name, "polymarket_l2_key");
+
+        let signing_only = injector.find_credentials_for_url_with_kind(
+            "clob.polymarket.com",
+            "/auth/api-key",
+            CredentialKind::Signing,
+        );
+        assert_eq!(signing_only.len(), 1);
+        assert_eq!(signing_only[0].secret_name, "polymarket_l1_pk");
     }
 }
