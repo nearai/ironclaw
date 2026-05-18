@@ -184,6 +184,21 @@ def parse_log(log_text: str) -> list[dict]:
                 record(start.group("name"), trailer)
                 current = None
                 continue
+            # Two `test foo ...` starts with no intervening standalone
+            # outcome means cargo is running in parallel (no
+            # `--test-threads=1`) and the start→outcome pairing this
+            # parser relies on is broken. Bail loudly so the lane
+            # fails closed rather than silently misattributing
+            # outcomes. Reference: scripts/live-canary/run.sh's
+            # run_cargo_test helper is the single producer of these
+            # logs and must keep `--test-threads=1` on every
+            # invocation.
+            if current is not None:
+                raise InterleavedOutputError(
+                    f"interleaved cargo test output: saw `test {start.group('name')} ...`"
+                    f" while previous test {current!r} had no standalone outcome."
+                    f" emit_results_json.py requires --test-threads=1."
+                )
             current = start.group("name")
             continue
 
@@ -193,6 +208,13 @@ def parse_log(log_text: str) -> list[dict]:
             current = None
 
     return entries
+
+
+class InterleavedOutputError(RuntimeError):
+    """Raised when cargo test output appears interleaved across parallel
+    test threads, breaking the parser's start→outcome pairing
+    assumption. See parse_log() for the rule.
+    """
 
 
 def has_cargo_output(log_text: str) -> bool:
@@ -227,7 +249,16 @@ def main() -> int:
         # files. Silent no-op so this is safe to wire unconditionally.
         return 0
 
-    entries = parse_log(log_text)
+    try:
+        entries = parse_log(log_text)
+    except InterleavedOutputError as e:
+        # Fail closed: the log is real cargo output (has_cargo_output
+        # passed) but interleaving means the start→outcome pairing is
+        # untrustworthy. Don't emit a results.json that would
+        # misattribute outcomes; force the lane to fail visibly so
+        # whoever changed run.sh sees it.
+        print(f"[emit_results_json] {e}", file=sys.stderr)
+        return 2
     for entry in entries:
         entry["provider"] = args.provider
 
