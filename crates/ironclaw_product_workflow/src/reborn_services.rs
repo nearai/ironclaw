@@ -10,7 +10,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{AgentId, ThreadId};
 use ironclaw_product_adapters::{
-    ProductAdapterError, ProjectionStream, ProjectionSubscriptionRequest,
+    ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
+    ProjectionSubscriptionRequest,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageStatus,
@@ -33,7 +34,7 @@ use crate::{
 mod error;
 mod types;
 
-pub use error::{RebornServicesError, RebornServicesErrorCode};
+pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use types::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornResolveGateResponse,
     RebornResumeGateResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
@@ -158,8 +159,9 @@ impl RebornServicesApi for RebornServices {
                         .unwrap_or_else(|| source_binding_id.clone()),
                 },
                 _ => {
-                    return Err(RebornServicesError::from_status(
+                    return Err(RebornServicesError::from_status_kind(
                         RebornServicesErrorCode::Conflict,
+                        RebornServicesErrorKind::Duplicate,
                         409,
                         false,
                     ));
@@ -282,7 +284,7 @@ impl RebornServicesApi for RebornServices {
                 thread_id,
             })
             .await
-            .map_err(map_thread_error)?;
+            .map_err(map_timeline_error)?;
 
         Ok(RebornTimelineResponse {
             thread: history.thread,
@@ -298,7 +300,12 @@ impl RebornServicesApi for RebornServices {
     ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
         let Some(event_stream) = &self.event_stream else {
-            return Err(RebornServicesError::service_unavailable(false));
+            return Err(RebornServicesError::from_status_kind(
+                RebornServicesErrorCode::Unavailable,
+                RebornServicesErrorKind::ReplayUnavailable,
+                503,
+                false,
+            ));
         };
         let events = event_stream
             .drain(ProjectionSubscriptionRequest {
@@ -307,7 +314,7 @@ impl RebornServicesApi for RebornServices {
                 after_cursor: request.after_cursor,
             })
             .await
-            .map_err(map_adapter_error)?;
+            .map_err(map_projection_error)?;
         Ok(RebornStreamEventsResponse { events })
     }
 
@@ -357,7 +364,12 @@ impl RebornServicesApi for RebornServices {
                 // facade has only one-shot `resume_turn` and no approval-policy
                 // port. Fail loud rather than silently downgrade.
                 if always {
-                    return Err(RebornServicesError::service_unavailable(false));
+                    return Err(RebornServicesError::from_status_kind(
+                        RebornServicesErrorCode::Unavailable,
+                        RebornServicesErrorKind::BlockedApproval,
+                        503,
+                        false,
+                    ));
                 }
                 assert_thread_owned_by(self.thread_service.as_ref(), &scope, &actor).await?;
                 let binding_id = webui_gate_binding_id(&scope, &gate_ref_string(&gate_ref));
@@ -382,9 +394,14 @@ impl RebornServicesApi for RebornServices {
                     .map_err(map_turn_error)?;
                 Ok(RebornResolveGateResponse::Resumed(response.into()))
             }
-            WebUiGateResolution::CredentialProvided { .. } => Err(
-                RebornServicesError::from_status(RebornServicesErrorCode::Unavailable, 503, false),
-            ),
+            WebUiGateResolution::CredentialProvided { .. } => {
+                Err(RebornServicesError::from_status_kind(
+                    RebornServicesErrorCode::Unavailable,
+                    RebornServicesErrorKind::BlockedAuthentication,
+                    503,
+                    false,
+                ))
+            }
             WebUiGateResolution::Denied | WebUiGateResolution::Cancelled => {
                 assert_thread_owned_by(self.thread_service.as_ref(), &scope, &actor).await?;
                 // `cancel_run` is not gate-aware, so without this check a
@@ -517,8 +534,9 @@ async fn assert_run_parked_on_gate(
         .map_err(map_turn_error)?;
     match state.gate_ref.as_ref() {
         Some(parked) if parked == expected_gate_ref => Ok(()),
-        _ => Err(RebornServicesError::from_status(
+        _ => Err(RebornServicesError::from_status_kind(
             RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::BlockedApproval,
             409,
             false,
         )),
@@ -565,8 +583,9 @@ fn accepted_message_ref(message_id: String) -> Result<AcceptedMessageRef, Reborn
 
 fn parse_replay_run_id(value: Option<String>) -> Result<TurnRunId, RebornServicesError> {
     let Some(value) = value else {
-        return Err(RebornServicesError::from_status(
+        return Err(RebornServicesError::from_status_kind(
             RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::ReplayUnavailable,
             409,
             false,
         ));
@@ -574,7 +593,12 @@ fn parse_replay_run_id(value: Option<String>) -> Result<TurnRunId, RebornService
     Uuid::parse_str(&value)
         .map(TurnRunId::from_uuid)
         .map_err(|_| {
-            RebornServicesError::from_status(RebornServicesErrorCode::Conflict, 409, false)
+            RebornServicesError::from_status_kind(
+                RebornServicesErrorCode::Conflict,
+                RebornServicesErrorKind::ReplayUnavailable,
+                409,
+                false,
+            )
         })
 }
 
@@ -643,9 +667,18 @@ fn map_thread_error(error: SessionThreadError) -> RebornServicesError {
         SessionThreadError::UnknownThread { .. } | SessionThreadError::UnknownMessage { .. } => {
             RebornServicesError::from_status(RebornServicesErrorCode::NotFound, 404, false)
         }
-        SessionThreadError::ThreadScopeMismatch { .. }
-        | SessionThreadError::IdempotentReplayThreadMismatch { .. }
-        | SessionThreadError::InvalidMessageTransition { .. }
+        SessionThreadError::ThreadScopeMismatch { .. } => {
+            RebornServicesError::from_status(RebornServicesErrorCode::Conflict, 409, false)
+        }
+        SessionThreadError::IdempotentReplayThreadMismatch { .. } => {
+            RebornServicesError::from_status_kind(
+                RebornServicesErrorCode::Conflict,
+                RebornServicesErrorKind::Duplicate,
+                409,
+                false,
+            )
+        }
+        SessionThreadError::InvalidMessageTransition { .. }
         | SessionThreadError::MessageNotDraft { .. }
         | SessionThreadError::InvalidSummaryRange { .. }
         | SessionThreadError::OverlappingSummaryRange { .. } => {
@@ -658,50 +691,81 @@ fn map_thread_error(error: SessionThreadError) -> RebornServicesError {
     }
 }
 
+fn map_timeline_error(error: SessionThreadError) -> RebornServicesError {
+    match error {
+        SessionThreadError::Serialization(_)
+        | SessionThreadError::Deserialization(_)
+        | SessionThreadError::Backend(_) => RebornServicesError::from_status_kind(
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::TimelineUnavailable,
+            503,
+            true,
+        ),
+        _ => map_thread_error(error),
+    }
+}
+
 fn map_turn_error(error: TurnError) -> RebornServicesError {
-    let (code, status_code, retryable) = match error.category() {
-        ironclaw_turns::TurnErrorCategory::ThreadBusy
-        | ironclaw_turns::TurnErrorCategory::Conflict => {
-            (RebornServicesErrorCode::Conflict, 409, false)
-        }
-        ironclaw_turns::TurnErrorCategory::AdmissionRejected => {
-            (RebornServicesErrorCode::RateLimited, 429, true)
-        }
-        ironclaw_turns::TurnErrorCategory::ScopeNotFound => {
-            (RebornServicesErrorCode::NotFound, 404, false)
-        }
-        ironclaw_turns::TurnErrorCategory::Unauthorized => {
-            (RebornServicesErrorCode::Forbidden, 403, false)
-        }
-        ironclaw_turns::TurnErrorCategory::InvalidRequest => {
-            (RebornServicesErrorCode::InvalidRequest, 400, false)
-        }
-        ironclaw_turns::TurnErrorCategory::Unavailable => {
-            (RebornServicesErrorCode::Unavailable, 503, true)
-        }
+    let (code, kind, status_code, retryable) = match error.category() {
+        ironclaw_turns::TurnErrorCategory::ThreadBusy => (
+            RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::Busy,
+            409,
+            false,
+        ),
+        ironclaw_turns::TurnErrorCategory::Conflict => (
+            RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::Conflict,
+            409,
+            false,
+        ),
+        ironclaw_turns::TurnErrorCategory::AdmissionRejected => (
+            RebornServicesErrorCode::RateLimited,
+            RebornServicesErrorKind::Busy,
+            429,
+            true,
+        ),
+        ironclaw_turns::TurnErrorCategory::ScopeNotFound => (
+            RebornServicesErrorCode::NotFound,
+            RebornServicesErrorKind::NotFound,
+            404,
+            false,
+        ),
+        ironclaw_turns::TurnErrorCategory::Unauthorized => (
+            RebornServicesErrorCode::Forbidden,
+            RebornServicesErrorKind::ParticipantDenied,
+            403,
+            false,
+        ),
+        ironclaw_turns::TurnErrorCategory::InvalidRequest => (
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+            400,
+            false,
+        ),
+        ironclaw_turns::TurnErrorCategory::Unavailable => (
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ServiceUnavailable,
+            503,
+            true,
+        ),
     };
-    RebornServicesError::from_status(code, status_code, retryable)
+    RebornServicesError::from_status_kind(code, kind, status_code, retryable)
 }
 
 fn map_adapter_error(error: ProductAdapterError) -> RebornServicesError {
     match error {
         ProductAdapterError::WorkflowRejected {
+            kind,
             status_code,
             retryable,
             ..
-        } => {
-            let code = match status_code {
-                400 => RebornServicesErrorCode::InvalidRequest,
-                401 => RebornServicesErrorCode::Unauthenticated,
-                403 => RebornServicesErrorCode::Forbidden,
-                404 => RebornServicesErrorCode::NotFound,
-                409 => RebornServicesErrorCode::Conflict,
-                429 => RebornServicesErrorCode::RateLimited,
-                503 => RebornServicesErrorCode::Unavailable,
-                _ => RebornServicesErrorCode::Internal,
-            };
-            RebornServicesError::from_status(code, status_code, retryable)
-        }
+        } => RebornServicesError::from_status_kind(
+            code_for_status(status_code),
+            kind_for_workflow_rejection(kind),
+            status_code,
+            retryable,
+        ),
         ProductAdapterError::WorkflowTransient { .. }
         | ProductAdapterError::EgressTransient { .. } => {
             RebornServicesError::service_unavailable(true)
@@ -715,11 +779,65 @@ fn map_adapter_error(error: ProductAdapterError) -> RebornServicesError {
         }
         ProductAdapterError::EgressDenied { .. }
         | ProductAdapterError::EgressUndeclaredHost { .. } => {
-            RebornServicesError::from_status(RebornServicesErrorCode::Forbidden, 403, false)
+            RebornServicesError::from_status_kind(
+                RebornServicesErrorCode::Forbidden,
+                RebornServicesErrorKind::BlockedResource,
+                403,
+                false,
+            )
         }
         ProductAdapterError::Internal { .. } => {
             RebornServicesError::from_status(RebornServicesErrorCode::Internal, 500, false)
         }
+    }
+}
+
+fn map_projection_error(error: ProductAdapterError) -> RebornServicesError {
+    match error {
+        ProductAdapterError::WorkflowRejected {
+            kind: ProductWorkflowRejectionKind::Unavailable,
+            status_code,
+            retryable,
+            ..
+        } => RebornServicesError::from_status_kind(
+            code_for_status(status_code),
+            RebornServicesErrorKind::ReplayUnavailable,
+            status_code,
+            retryable,
+        ),
+        ProductAdapterError::WorkflowTransient { .. }
+        | ProductAdapterError::EgressTransient { .. } => RebornServicesError::from_status_kind(
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ReplayUnavailable,
+            503,
+            true,
+        ),
+        _ => map_adapter_error(error),
+    }
+}
+
+fn code_for_status(status_code: u16) -> RebornServicesErrorCode {
+    match status_code {
+        400 => RebornServicesErrorCode::InvalidRequest,
+        401 => RebornServicesErrorCode::Unauthenticated,
+        403 => RebornServicesErrorCode::Forbidden,
+        404 => RebornServicesErrorCode::NotFound,
+        409 => RebornServicesErrorCode::Conflict,
+        429 => RebornServicesErrorCode::RateLimited,
+        503 => RebornServicesErrorCode::Unavailable,
+        _ => RebornServicesErrorCode::Internal,
+    }
+}
+
+fn kind_for_workflow_rejection(kind: ProductWorkflowRejectionKind) -> RebornServicesErrorKind {
+    match kind {
+        ProductWorkflowRejectionKind::ThreadBusy
+        | ProductWorkflowRejectionKind::AdmissionRejected => RebornServicesErrorKind::Busy,
+        ProductWorkflowRejectionKind::ScopeNotFound => RebornServicesErrorKind::NotFound,
+        ProductWorkflowRejectionKind::Unauthorized => RebornServicesErrorKind::ParticipantDenied,
+        ProductWorkflowRejectionKind::InvalidRequest => RebornServicesErrorKind::Validation,
+        ProductWorkflowRejectionKind::Unavailable => RebornServicesErrorKind::ServiceUnavailable,
+        ProductWorkflowRejectionKind::Conflict => RebornServicesErrorKind::Conflict,
     }
 }
 

@@ -43,8 +43,9 @@ pub use ledger::{IdempotencyDecision, IdempotencyLedger};
 pub use reborn_services::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornResolveGateResponse,
     RebornResumeGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse,
 };
 pub use webui_inbound::{
     WebUiAuthenticatedCaller, WebUiCancelReason, WebUiCancelRunRequest, WebUiCreateThreadRequest,

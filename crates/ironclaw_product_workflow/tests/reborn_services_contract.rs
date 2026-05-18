@@ -6,14 +6,15 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
-    ProductAdapterError, ProductOutboundEnvelope, ProjectionStream, ProjectionSubscriptionRequest,
-    ProtocolAuthFailure,
+    ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionStream,
+    ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product_workflow::{
-    RebornResolveGateResponse, RebornServices, RebornServicesApi, RebornServicesErrorCode,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    RebornResolveGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornStreamEventsRequest,
+    RebornSubmitTurnResponse, RebornTimelineRequest, WebUiAuthenticatedCaller,
+    WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiInboundValidationCode,
+    WebUiResolveGateRequest, WebUiSendMessageRequest,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -25,10 +26,11 @@ use ironclaw_threads::{
     UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GateRef,
-    GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-    RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator,
-    TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
+    AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
+    CancelRunResponse, EventCursor, GateRef, GetRunStateRequest, ReplyTargetBindingRef,
+    ResumeTurnRequest, ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef,
+    SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnRunId,
+    TurnRunState, TurnStatus,
 };
 use serde_json::json;
 
@@ -196,43 +198,81 @@ impl ProjectionStream for AuthFailureProjectionStream {
     }
 }
 
-/// Stub thread service whose `list_thread_history` always returns
-/// `ThreadScopeMismatch`. Used to lock in the contract that ownership probes
-/// remap that variant to NotFound, since the current backends happen to return
-/// `UnknownThread` for the same condition. All other methods panic — none of
-/// the cancel_run / resolve_gate paths under test should reach them.
-struct ScopeMismatchThreadStub;
+struct StaticErrorProjectionStream {
+    error: ProductAdapterError,
+}
 
 #[async_trait]
-impl SessionThreadService for ScopeMismatchThreadStub {
+impl ProjectionStream for StaticErrorProjectionStream {
+    async fn drain(
+        &self,
+        _request: ProjectionSubscriptionRequest,
+    ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
+        Err(self.error.clone())
+    }
+}
+
+/// Stub thread service whose `list_thread_history` always returns
+/// the configured failure. Used to lock in facade error mapping without
+/// reaching the rest of the thread service.
+struct FailingThreadHistoryStub {
+    failure: ThreadHistoryFailure,
+}
+
+enum ThreadHistoryFailure {
+    ScopeMismatch,
+    Backend,
+}
+
+impl FailingThreadHistoryStub {
+    fn scope_mismatch() -> Self {
+        Self {
+            failure: ThreadHistoryFailure::ScopeMismatch,
+        }
+    }
+
+    fn backend() -> Self {
+        Self {
+            failure: ThreadHistoryFailure::Backend,
+        }
+    }
+}
+
+#[async_trait]
+impl SessionThreadService for FailingThreadHistoryStub {
     async fn list_thread_history(
         &self,
         request: ThreadHistoryRequest,
     ) -> Result<ThreadHistory, SessionThreadError> {
-        Err(SessionThreadError::ThreadScopeMismatch {
-            thread_id: request.thread_id,
-        })
+        match self.failure {
+            ThreadHistoryFailure::ScopeMismatch => Err(SessionThreadError::ThreadScopeMismatch {
+                thread_id: request.thread_id,
+            }),
+            ThreadHistoryFailure::Backend => Err(SessionThreadError::Backend(
+                "backend detail /host/path secret-token".to_string(),
+            )),
+        }
     }
 
     async fn ensure_thread(
         &self,
         _request: EnsureThreadRequest,
     ) -> Result<SessionThreadRecord, SessionThreadError> {
-        panic!("ScopeMismatchThreadStub::ensure_thread should not be reached")
+        panic!("FailingThreadHistoryStub::ensure_thread should not be reached")
     }
 
     async fn accept_inbound_message(
         &self,
         _request: AcceptInboundMessageRequest,
     ) -> Result<AcceptedInboundMessage, SessionThreadError> {
-        panic!("ScopeMismatchThreadStub::accept_inbound_message should not be reached")
+        panic!("FailingThreadHistoryStub::accept_inbound_message should not be reached")
     }
 
     async fn replay_accepted_inbound_message(
         &self,
         _request: ReplayAcceptedInboundMessageRequest,
     ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
-        panic!("ScopeMismatchThreadStub::replay_accepted_inbound_message should not be reached")
+        panic!("FailingThreadHistoryStub::replay_accepted_inbound_message should not be reached")
     }
 
     async fn mark_message_submitted(
@@ -243,7 +283,7 @@ impl SessionThreadService for ScopeMismatchThreadStub {
         _turn_id: String,
         _turn_run_id: String,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        panic!("ScopeMismatchThreadStub::mark_message_submitted should not be reached")
+        panic!("FailingThreadHistoryStub::mark_message_submitted should not be reached")
     }
 
     async fn mark_message_deferred_busy(
@@ -252,21 +292,21 @@ impl SessionThreadService for ScopeMismatchThreadStub {
         _thread_id: &ThreadId,
         _message_id: ThreadMessageId,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        panic!("ScopeMismatchThreadStub::mark_message_deferred_busy should not be reached")
+        panic!("FailingThreadHistoryStub::mark_message_deferred_busy should not be reached")
     }
 
     async fn append_assistant_draft(
         &self,
         _request: AppendAssistantDraftRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        panic!("ScopeMismatchThreadStub::append_assistant_draft should not be reached")
+        panic!("FailingThreadHistoryStub::append_assistant_draft should not be reached")
     }
 
     async fn update_assistant_draft(
         &self,
         _request: UpdateAssistantDraftRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        panic!("ScopeMismatchThreadStub::update_assistant_draft should not be reached")
+        panic!("FailingThreadHistoryStub::update_assistant_draft should not be reached")
     }
 
     async fn finalize_assistant_message(
@@ -276,28 +316,28 @@ impl SessionThreadService for ScopeMismatchThreadStub {
         _message_id: ThreadMessageId,
         _content: MessageContent,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        panic!("ScopeMismatchThreadStub::finalize_assistant_message should not be reached")
+        panic!("FailingThreadHistoryStub::finalize_assistant_message should not be reached")
     }
 
     async fn redact_message(
         &self,
         _request: RedactMessageRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
-        panic!("ScopeMismatchThreadStub::redact_message should not be reached")
+        panic!("FailingThreadHistoryStub::redact_message should not be reached")
     }
 
     async fn load_context_window(
         &self,
         _request: LoadContextWindowRequest,
     ) -> Result<ContextWindow, SessionThreadError> {
-        panic!("ScopeMismatchThreadStub::load_context_window should not be reached")
+        panic!("FailingThreadHistoryStub::load_context_window should not be reached")
     }
 
     async fn create_summary_artifact(
         &self,
         _request: CreateSummaryArtifactRequest,
     ) -> Result<SummaryArtifact, SessionThreadError> {
-        panic!("ScopeMismatchThreadStub::create_summary_artifact should not be reached")
+        panic!("FailingThreadHistoryStub::create_summary_artifact should not be reached")
     }
 }
 
@@ -352,6 +392,25 @@ async fn create_thread_metadata_is_serialized_json() {
         metadata["client_action_id"].as_str(),
         Some(client_action_id.as_str())
     );
+}
+
+#[test]
+fn facade_error_taxonomy_serializes_stable_wire_names() {
+    let error = RebornServicesError {
+        code: RebornServicesErrorCode::Conflict,
+        kind: RebornServicesErrorKind::Busy,
+        status_code: 409,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    };
+
+    let json = serde_json::to_value(&error).expect("error json");
+
+    assert_eq!(json["code"], "conflict");
+    assert_eq!(json["kind"], "busy");
+    assert_eq!(json["status_code"], 409);
+    assert_eq!(json["retryable"], false);
 }
 
 #[tokio::test]
@@ -455,6 +514,7 @@ async fn validation_errors_are_stable_and_sanitized() {
         .expect_err("missing content rejected");
 
     assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.kind, RebornServicesErrorKind::Validation);
     assert_eq!(err.status_code, 400);
     assert_eq!(err.field.as_deref(), Some("content"));
     assert_eq!(
@@ -464,6 +524,36 @@ async fn validation_errors_are_stable_and_sanitized() {
     let rendered = serde_json::to_string(&err).expect("json");
     assert!(!rendered.contains("backend"));
     assert!(!rendered.contains("TurnCoordinator"));
+}
+
+#[tokio::test]
+async fn turn_admission_rejected_maps_to_busy_taxonomy() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::with_submit_error(
+            TurnError::AdmissionRejected(AdmissionRejection::new(
+                AdmissionRejectionReason::TenantLimit,
+            )),
+        )),
+    );
+
+    let err = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-rate-limited",
+                "thread_id": "thread-alpha",
+                "content": "hello from webui"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("admission rejection is a stable busy/rate-limited error");
+
+    assert_eq!(err.code, RebornServicesErrorCode::RateLimited);
+    assert_eq!(err.kind, RebornServicesErrorKind::Busy);
+    assert_eq!(err.status_code, 429);
+    assert!(err.retryable);
 }
 
 #[tokio::test]
@@ -489,6 +579,7 @@ async fn turn_unauthorized_maps_to_forbidden() {
         .expect_err("turn unauthorized is forbidden");
 
     assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
+    assert_eq!(err.kind, RebornServicesErrorKind::ParticipantDenied);
     assert_eq!(err.status_code, 403);
 }
 
@@ -512,7 +603,181 @@ async fn adapter_authentication_maps_to_unauthenticated() {
         .expect_err("adapter auth failure is unauthenticated");
 
     assert_eq!(err.code, RebornServicesErrorCode::Unauthenticated);
+    assert_eq!(err.kind, RebornServicesErrorKind::ParticipantDenied);
     assert_eq!(err.status_code, 401);
+}
+
+#[tokio::test]
+async fn projection_transient_maps_to_replay_unavailable_taxonomy() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_event_stream(Arc::new(StaticErrorProjectionStream {
+        error: ProductAdapterError::WorkflowTransient {
+            reason: RedactedString::new("provider stack trace with /host/path and secret-token"),
+        },
+    }));
+
+    let err = services
+        .stream_events(
+            caller(),
+            RebornStreamEventsRequest {
+                thread_id: "thread-alpha".to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect_err("projection transient is replay unavailable");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ReplayUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert!(err.retryable);
+    let rendered = format!("{err:?} {}", serde_json::to_string(&err).expect("json"));
+    assert!(!rendered.contains("secret-token"));
+    assert!(!rendered.contains("/host/path"));
+    assert!(!rendered.contains("provider stack trace"));
+}
+
+#[tokio::test]
+async fn projection_egress_denied_maps_to_blocked_resource_taxonomy() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_event_stream(Arc::new(StaticErrorProjectionStream {
+        error: ProductAdapterError::EgressDenied {
+            reason: RedactedString::new("denied api key secret-token"),
+        },
+    }));
+
+    let err = services
+        .stream_events(
+            caller(),
+            RebornStreamEventsRequest {
+                thread_id: "thread-alpha".to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect_err("blocked resource is stable taxonomy");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedResource);
+    assert_eq!(err.status_code, 403);
+    let rendered = format!("{err:?} {}", serde_json::to_string(&err).expect("json"));
+    assert!(!rendered.contains("secret-token"));
+}
+
+#[tokio::test]
+async fn workflow_rejection_kinds_map_to_facade_taxonomy() {
+    let cases = [
+        (
+            ProductWorkflowRejectionKind::ThreadBusy,
+            409,
+            RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::Busy,
+        ),
+        (
+            ProductWorkflowRejectionKind::AdmissionRejected,
+            429,
+            RebornServicesErrorCode::RateLimited,
+            RebornServicesErrorKind::Busy,
+        ),
+        (
+            ProductWorkflowRejectionKind::ScopeNotFound,
+            404,
+            RebornServicesErrorCode::NotFound,
+            RebornServicesErrorKind::NotFound,
+        ),
+        (
+            ProductWorkflowRejectionKind::Unauthorized,
+            403,
+            RebornServicesErrorCode::Forbidden,
+            RebornServicesErrorKind::ParticipantDenied,
+        ),
+        (
+            ProductWorkflowRejectionKind::InvalidRequest,
+            400,
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+        ),
+        (
+            ProductWorkflowRejectionKind::Unavailable,
+            503,
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ReplayUnavailable,
+        ),
+        (
+            ProductWorkflowRejectionKind::Conflict,
+            409,
+            RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::Conflict,
+        ),
+    ];
+
+    for (workflow_kind, status_code, expected_code, expected_kind) in cases {
+        let services = RebornServices::new(
+            Arc::new(InMemorySessionThreadService::default()),
+            Arc::new(FakeTurnCoordinator::default()),
+        )
+        .with_event_stream(Arc::new(StaticErrorProjectionStream {
+            error: ProductAdapterError::WorkflowRejected {
+                kind: workflow_kind,
+                status_code,
+                retryable: false,
+                reason: RedactedString::new("internal workflow detail secret-token"),
+            },
+        }));
+
+        let err = services
+            .stream_events(
+                caller(),
+                RebornStreamEventsRequest {
+                    thread_id: "thread-alpha".to_string(),
+                    after_cursor: None,
+                },
+            )
+            .await
+            .expect_err("workflow rejection maps to stable facade taxonomy");
+
+        assert_eq!(err.code, expected_code);
+        assert_eq!(err.kind, expected_kind);
+        assert_eq!(err.status_code, status_code);
+        assert!(
+            !serde_json::to_string(&err)
+                .expect("json")
+                .contains("secret-token")
+        );
+    }
+}
+
+#[tokio::test]
+async fn timeline_backend_failure_maps_to_timeline_unavailable_taxonomy() {
+    let services = RebornServices::new(
+        Arc::new(FailingThreadHistoryStub::backend()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let err = services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+            },
+        )
+        .await
+        .expect_err("timeline backend failure is stable unavailable taxonomy");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::TimelineUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert!(err.retryable);
+    let rendered = format!("{err:?} {}", serde_json::to_string(&err).expect("json"));
+    assert!(!rendered.contains("secret-token"));
+    assert!(!rendered.contains("/host/path"));
+    assert!(!rendered.contains("backend detail"));
 }
 
 #[tokio::test]
@@ -603,6 +868,7 @@ async fn credential_gate_resolution_returns_sanitized_stable_error_until_gate_po
         .expect_err("credential resolution is not wired yet");
 
     assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedAuthentication);
     assert_eq!(err.status_code, 503);
     assert_eq!(coordinator.resumption_count(), 0);
     let rendered = format!("{err:?} {}", serde_json::to_string(&err).expect("json"));
@@ -676,6 +942,7 @@ async fn cancel_run_rejects_cross_user_access() {
 
     // 404 rather than 403 so the existence of Alice's thread is not leaked.
     assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.kind, RebornServicesErrorKind::NotFound);
     assert_eq!(err.status_code, 404);
     assert_eq!(
         coordinator.cancellation_count(),
@@ -695,7 +962,10 @@ async fn cancel_run_rejects_cross_user_access() {
 #[tokio::test]
 async fn cancel_run_remaps_thread_scope_mismatch_to_not_found() {
     let coordinator = Arc::new(FakeTurnCoordinator::default());
-    let services = RebornServices::new(Arc::new(ScopeMismatchThreadStub), coordinator.clone());
+    let services = RebornServices::new(
+        Arc::new(FailingThreadHistoryStub::scope_mismatch()),
+        coordinator.clone(),
+    );
 
     let err = services
         .cancel_run(
@@ -712,6 +982,7 @@ async fn cancel_run_remaps_thread_scope_mismatch_to_not_found() {
         .expect_err("scope mismatch must surface as NotFound");
 
     assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.kind, RebornServicesErrorKind::NotFound);
     assert_eq!(err.status_code, 404);
     assert_eq!(
         coordinator.cancellation_count(),
@@ -756,6 +1027,7 @@ async fn resolve_gate_rejects_cross_user_access() {
         .expect_err("cross-user gate resolution must be rejected");
 
     assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.kind, RebornServicesErrorKind::NotFound);
     assert_eq!(err.status_code, 404);
     assert_eq!(
         coordinator.cancellation_count(),
@@ -795,6 +1067,7 @@ async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
         .expect_err("stale gate_ref must produce Conflict, not silent cancel");
 
     assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval);
     assert_eq!(err.status_code, 409);
     assert_eq!(
         coordinator.cancellation_count(),
@@ -832,6 +1105,7 @@ async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
         .expect_err("persistent approval must be rejected");
 
     assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval);
     assert_eq!(err.status_code, 503);
     assert_eq!(
         coordinator.resumption_count(),

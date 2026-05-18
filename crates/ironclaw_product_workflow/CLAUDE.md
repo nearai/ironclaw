@@ -38,6 +38,14 @@ canonical turn submission. Do not shortcut directly to `AgentLoopDriver`,
 `PlannedDriver`, host runtime services, or loop host factories from adapters or
 workflow callers.
 
+WebUI-facing facade errors must expose stable, sanitized taxonomy. Keep
+`RebornServicesErrorCode` aligned with coarse transport/status shape and
+`RebornServicesErrorKind` aligned with M1-renderable user-safe families such as
+validation, duplicate, busy, participant denied, blocked approval/auth/resource,
+replay/timeline unavailable, service unavailable, conflict, not found, and
+internal. Do not surface backend strings, host paths, provider/runtime details,
+raw prompts, tool args, or secrets through the facade error payload.
+
 ## Test support
 
 Enable `test-support` feature for in-memory fakes:
