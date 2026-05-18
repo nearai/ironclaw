@@ -243,19 +243,18 @@ async fn build_libsql_production(
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
     filesystem.run_migrations().await?;
 
-    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem))?;
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
     let leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
 
-    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem))?;
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
 
     let secret_crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(secret_master_key)?);
     let secret_store = Arc::new(FilesystemSecretStore::new(
         Arc::clone(&scoped_filesystem),
         Arc::clone(&secret_crypto),
     ));
-    secret_store.verify_can_decrypt_existing_secrets().await?;
 
     let event_store = ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql {
         path_or_url,
@@ -308,19 +307,18 @@ async fn build_postgres_production(
     let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
     filesystem.run_migrations().await?;
 
-    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem))?;
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
     let leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
 
-    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem))?;
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
 
     let secret_crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(secret_master_key)?);
     let secret_store = Arc::new(FilesystemSecretStore::new(
         Arc::clone(&scoped_filesystem),
         Arc::clone(&secret_crypto),
     ));
-    secret_store.verify_can_decrypt_existing_secrets().await?;
 
     let event_store = ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url };
 

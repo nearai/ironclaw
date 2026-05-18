@@ -79,22 +79,11 @@ pub type PostgresProductionHostRuntimeServices = HostRuntimeServices<
     FilesystemProcessResultStore<PostgresRootFilesystem>,
 >;
 
-/// Build the default single-tenant [`MountView`] for production composition.
-///
-/// Wires the canonical consumer-store aliases (`/processes`, `/secrets`,
-/// `/authorization`, `/outbound`, `/engine`) to top-level
-/// [`VirtualPath`] roots and grants full per-user-owner permissions.
-///
-/// This is the **single-tenant** default: every alias maps to the
-/// root-level prefix with no `tenants/<tenant_id>/users/<user_id>/...`
-/// rewriting. Multi-tenant deployments build a per-invocation MountView
-/// that points each alias to a tenant/user-scoped subtree of the same
-/// underlying [`RootFilesystem`] — see
-/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
-/// Per-user-owner consumer aliases (each mount gets full r/w/l/d).
-/// Kept as a constant so both [`default_singleton_mount_view`] and
-/// [`invocation_mount_view`] can share the alias list — adding a new
-/// consumer crate is a single-line change here.
+/// Consumer-store mount aliases that are tenant-rewritten by
+/// [`invocation_mount_view`]. Each alias resolves to
+/// `/tenants/<tenant>/users/<user>/<alias>` for the caller's scope, so
+/// two tenants sharing one underlying [`RootFilesystem`] cannot collide
+/// on identically-shaped paths.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 const PER_USER_ALIASES: &[&str] = &[
     "/processes",
@@ -110,67 +99,21 @@ const PER_USER_ALIASES: &[&str] = &[
     "/engine",
 ];
 
-/// Single-tenant default [`MountView`] used by long-lived production
-/// composition. Every consumer-store alias resolves to a top-level
-/// [`VirtualPath`] root (`/processes` → `/processes`) — no tenant
-/// rewriting, just permission scoping and an alias→VirtualPath layer.
+/// Per-invocation [`MountView`] used as the production resolver.
 ///
-/// Use [`invocation_mount_view`] instead when constructing per-request
-/// services that need cross-tenant isolation. The current long-lived
-/// composition holds one set of consumer stores for the whole process
-/// lifetime, which is correct for single-tenant deployments and a
-/// known follow-up for multi-tenant ones (see
-/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`
-/// "Open Question 1").
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) fn default_singleton_mount_view() -> Result<MountView, ironclaw_host_api::HostApiError> {
-    let mut grants = Vec::with_capacity(PER_USER_ALIASES.len() + 2);
-    for alias in PER_USER_ALIASES {
-        grants.push(MountGrant::new(
-            MountAlias::new(*alias)?,
-            VirtualPath::new(*alias)?,
-            MountPermissions::read_write_list_delete(),
-        ));
-    }
-    // `/tenant-shared`: shared between users/agents in the same tenant.
-    // In the singleton (non-tenant) view it points to a fixed root with
-    // read+write+list (no delete — tenants can mutate but not erase).
-    grants.push(MountGrant::new(
-        MountAlias::new("/tenant-shared")?,
-        VirtualPath::new("/tenant-shared")?,
-        MountPermissions::read_write(),
-    ));
-    // `/system/{settings,extensions,skills}`: globally readable system data.
-    // Each subroot is exposed as its own alias (rather than a unified
-    // `/system` mount) because `VirtualPath` reserves the three canonical
-    // subroots — see `docs/reborn/contracts/storage-placement.md`. ACL is
-    // read-only at the `ScopedFilesystem` layer; writes are rejected
-    // before any backend dispatch.
-    for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
-        grants.push(MountGrant::new(
-            MountAlias::new(system_subroot)?,
-            VirtualPath::new(system_subroot)?,
-            MountPermissions::read_only(),
-        ));
-    }
-    MountView::new(grants)
-}
-
-/// Per-invocation [`MountView`] that rewrites consumer-store aliases to
-/// `/tenants/<tenant>/users/<user>/<alias>` virtual paths.
+/// Every call rebuilds the alias→VirtualPath table for the caller's
+/// scope so consumer-store records land under
+/// `/tenants/<tenant>/users/<user>/<alias>` virtual paths — cross-tenant
+/// isolation is structural rather than a convention. `/tenant-shared`
+/// resolves to `/tenants/<tenant>/shared`; `/system/{settings,
+/// extensions, skills}` route globally as read-only. See
+/// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
 ///
-/// Used by request handlers that need to construct tenant-scoped
-/// consumer stores. The returned view, fed to
-/// [`ScopedFilesystem::new`], makes every consumer crate's `put`/`get`
-/// land under a tenant/user-private subtree of the same underlying
-/// [`RootFilesystem`] — cross-tenant isolation is structural rather
-/// than a convention.
-///
-/// `/tenant-shared` resolves to `/tenants/<tenant>/shared` (full
-/// per-tenant r/w/l), `/system` to `/system` (globally read-only).
-///
-/// The single-tenant production composition uses
-/// [`default_singleton_mount_view`] instead.
+/// The system sentinel scope (see
+/// [`ironclaw_host_api::ResourceScope::system`]) routes records under
+/// `/tenants/__SYSTEM__/users/__SYSTEM__/<alias>`. Production code uses
+/// it for process-global records whose paths already encode per-tenant
+/// identity (event-log stream keys, conversation singleton state).
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 pub fn invocation_mount_view(
     scope: &ResourceScope,
@@ -204,34 +147,16 @@ pub fn invocation_mount_view(
     MountView::new(grants)
 }
 
+/// Wrap `root` in a tenant-aware [`ScopedFilesystem`] whose resolver is
+/// [`invocation_mount_view`]. The returned filesystem is the single
+/// production handle — every consumer-store call routes per-scope
+/// through this one instance.
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) fn wrap_scoped<F>(
-    root: Arc<F>,
-) -> Result<Arc<ScopedFilesystem<F>>, ironclaw_host_api::HostApiError>
+pub fn wrap_scoped<F>(root: Arc<F>) -> Arc<ScopedFilesystem<F>>
 where
     F: RootFilesystem,
 {
-    let view = default_singleton_mount_view()?;
-    Ok(Arc::new(ScopedFilesystem::new(root, view)))
-}
-
-/// Wrap `root` in a per-invocation [`ScopedFilesystem`] that resolves
-/// consumer-store aliases under `/tenants/<tenant>/users/<user>/…`.
-///
-/// Counterpart to [`wrap_scoped`] for request handlers that have a
-/// `ResourceScope` in hand and need a tenant-isolated filesystem view.
-/// The single underlying [`RootFilesystem`] is shared; per-tenant
-/// separation comes from the rewritten target paths in the view.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-pub fn wrap_scoped_for_invocation<F>(
-    root: Arc<F>,
-    scope: &ResourceScope,
-) -> Result<Arc<ScopedFilesystem<F>>, ironclaw_host_api::HostApiError>
-where
-    F: RootFilesystem,
-{
-    let view = invocation_mount_view(scope)?;
-    Ok(Arc::new(ScopedFilesystem::new(root, view)))
+    Arc::new(ScopedFilesystem::new(root, invocation_mount_view))
 }
 
 /// libSQL substrate handles needed to build production host-runtime services.
@@ -306,7 +231,7 @@ where
     let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
     filesystem.run_migrations().await?;
 
-    let scoped_filesystem = wrap_scoped(Arc::clone(&filesystem))?;
+    let scoped_filesystem = wrap_scoped(Arc::clone(&filesystem));
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
 
     let secret_store =
@@ -367,7 +292,7 @@ where
     let filesystem = Arc::new(PostgresRootFilesystem::new(config.pool.clone()));
     filesystem.run_migrations().await?;
 
-    let scoped_filesystem = wrap_scoped(Arc::clone(&filesystem))?;
+    let scoped_filesystem = wrap_scoped(Arc::clone(&filesystem));
     let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
 
     let secret_store =
@@ -432,7 +357,9 @@ where
 {
     let crypto = secrets_crypto(master_key)?;
     let store = FilesystemSecretStore::new(scoped_filesystem, crypto);
-    store.verify_can_decrypt_existing_secrets().await?;
+    // The FS-stored master-key sentinel was removed alongside the tenant-aware
+    // ScopedFilesystem rework — see filesystem_store.rs. Master-key
+    // correctness is verified on first per-tenant decrypt op.
     let store: Arc<dyn SecretStore> = Arc::new(store);
     Ok(Arc::new(SharedSecretStore::new(store)))
 }
@@ -541,25 +468,6 @@ mod mount_view_tests {
     }
 
     #[test]
-    fn default_singleton_mount_view_has_all_consumer_aliases() {
-        let view = default_singleton_mount_view().unwrap();
-        // Per-user aliases.
-        for alias in PER_USER_ALIASES {
-            let resolved = view
-                .resolve(&ScopedPath::new(format!("{alias}/foo")).unwrap())
-                .unwrap();
-            assert_eq!(resolved.as_str(), &format!("{alias}/foo"));
-        }
-        // Shared carve-out + the three canonical /system subroots.
-        view.resolve(&ScopedPath::new("/tenant-shared/foo").unwrap())
-            .unwrap();
-        for system_subroot in ["/system/settings", "/system/extensions", "/system/skills"] {
-            view.resolve(&ScopedPath::new(format!("{system_subroot}/foo")).unwrap())
-                .unwrap();
-        }
-    }
-
-    #[test]
     fn invocation_mount_view_rewrites_per_user_aliases_to_tenant_user_paths() {
         let scope = sample_scope();
         let view = invocation_mount_view(&scope).unwrap();
@@ -617,5 +525,85 @@ mod mount_view_tests {
                 .unwrap();
             assert_eq!(resolved.as_str(), &format!("{system_subroot}/foo"));
         }
+    }
+}
+
+#[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
+mod two_tenant_isolation_tests {
+    //! Regression test for the cross-tenant collision finding from the
+    //! 2026-05-17 serrrfirat review.
+    //!
+    //! Drives the public `SecretStore` surface from two distinct
+    //! `(tenant, user)` scopes that share identical agent/project/handle,
+    //! against the production-shape `wrap_scoped`/`invocation_mount_view`
+    //! wiring over an `InMemoryBackend`. Without per-tenant path
+    //! rewriting both `put`s would land at the same backend row;
+    //! Alice's `consume` would then decrypt to Bob's ciphertext (or
+    //! fail with DecryptionFailed via AAD mismatch). The resolver in
+    //! place gives each tenant their own subtree — both reads succeed
+    //! with their own plaintext.
+    //!
+    //! A regression that puts the old singleton (identity-mapping)
+    //! resolver back into production wiring trips this test directly.
+    use super::*;
+    use ironclaw_filesystem::InMemoryBackend;
+    use ironclaw_host_api::{AgentId, InvocationId, ProjectId, SecretHandle, TenantId, UserId};
+    use secrecy::ExposeSecret;
+
+    fn scope(tenant: &str, user: &str) -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new(tenant).unwrap(),
+            user_id: UserId::new(user).unwrap(),
+            agent_id: Some(AgentId::new("github").unwrap()),
+            project_id: Some(ProjectId::new("default").unwrap()),
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    fn test_crypto() -> Arc<SecretsCrypto> {
+        Arc::new(
+            SecretsCrypto::new(SecretMaterial::from(
+                "test-master-key-32-bytes-aaaaaaaaa".to_string(),
+            ))
+            .expect("crypto"),
+        )
+    }
+
+    #[tokio::test]
+    async fn two_tenants_with_same_agent_project_handle_do_not_collide_on_put() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scoped = wrap_scoped(Arc::clone(&backend));
+        let store = FilesystemSecretStore::new(Arc::clone(&scoped), test_crypto());
+
+        let handle = SecretHandle::new("oauth_token").unwrap();
+        let scope_a = scope("tenant_a", "alice");
+        let scope_b = scope("tenant_b", "bob");
+
+        store
+            .put(
+                scope_a.clone(),
+                handle.clone(),
+                SecretMaterial::from("alice-secret".to_string()),
+            )
+            .await
+            .unwrap();
+        store
+            .put(
+                scope_b.clone(),
+                handle.clone(),
+                SecretMaterial::from("bob-secret".to_string()),
+            )
+            .await
+            .unwrap();
+
+        let lease_a = store.lease_once(&scope_a, &handle).await.unwrap();
+        let material_a = store.consume(&scope_a, lease_a.id).await.unwrap();
+        assert_eq!(material_a.expose_secret(), "alice-secret");
+
+        let lease_b = store.lease_once(&scope_b, &handle).await.unwrap();
+        let material_b = store.consume(&scope_b, lease_b.id).await.unwrap();
+        assert_eq!(material_b.expose_secret(), "bob-secret");
     }
 }

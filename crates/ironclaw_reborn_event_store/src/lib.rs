@@ -262,7 +262,7 @@ where
         backend: "filesystem",
         operation: "construct events mount view",
     })?;
-    Ok(Arc::new(ScopedFilesystem::new(root, view)))
+    Ok(Arc::new(ScopedFilesystem::with_fixed_view(root, view)))
 }
 
 /// Classification of a libSQL `path_or_url` for production policy decisions.

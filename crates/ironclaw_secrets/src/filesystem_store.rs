@@ -55,7 +55,6 @@ use ironclaw_host_api::{
 };
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
 
 use crate::{
     CredentialAccount, CredentialAccountId, CredentialAccountStatus, CredentialAccountStore,
