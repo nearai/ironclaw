@@ -55,8 +55,9 @@ pub enum ProductLivePlannedRuntimeAdapterError {
 /// In-memory capability I/O staging used by the product-live planned runtime adapters.
 ///
 /// Inputs and results are keyed by run-scoped refs so provider tool-call payloads and
-/// runtime outputs cannot be read across loop runs. Each store is capped at 1024 staged refs
-/// and 4 MiB of serialized JSON; callers should still prune entries when a run completes.
+/// runtime outputs cannot be read across loop runs. Staged refs are consumed on successful read.
+/// Each store is capped at 1024 staged refs and 4 MiB of serialized JSON; callers should still
+/// prune entries when a run completes to clear refs that were staged but never consumed.
 #[derive(Default)]
 pub struct ProductLiveCapabilityIo {
     inputs: Mutex<HashMap<String, StagedCapabilityInput>>,
@@ -117,18 +118,18 @@ impl ProductLiveCapabilityIo {
         Ok(input_ref)
     }
 
-    /// Returns a staged capability result after verifying the ref belongs to the run.
+    /// Returns and consumes a staged capability result after verifying the ref belongs to the run.
     pub fn result_for_ref(
         &self,
         run_context: &LoopRunContext,
         result_ref: &LoopResultRef,
     ) -> Result<serde_json::Value, AgentLoopHostError> {
         ensure_ref_scoped_to_run("result", result_ref.as_str(), run_context)?;
-        let results = self
+        let mut results = self
             .results
             .lock()
             .map_err(|_| capability_io_internal_error())?;
-        let result = results.get(result_ref.as_str()).ok_or_else(|| {
+        let result = results.remove(result_ref.as_str()).ok_or_else(|| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "capability result ref was not staged for this loop run",
@@ -167,11 +168,11 @@ impl LoopCapabilityInputResolver for ProductLiveCapabilityIo {
         input_ref: &CapabilityInputRef,
     ) -> Result<serde_json::Value, AgentLoopHostError> {
         ensure_ref_scoped_to_run("input", input_ref.as_str(), run_context)?;
-        let inputs = self
+        let mut inputs = self
             .inputs
             .lock()
             .map_err(|_| capability_io_internal_error())?;
-        let input = inputs.get(input_ref.as_str()).ok_or_else(|| {
+        let input = inputs.remove(input_ref.as_str()).ok_or_else(|| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::InvalidInvocation,
                 "capability input ref was not staged for this loop run",

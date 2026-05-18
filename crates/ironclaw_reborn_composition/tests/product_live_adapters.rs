@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use chrono::Utc;
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExecutionContext, ExtensionId, GrantConstraints, MountAlias, MountGrant, MountPermissions,
@@ -33,7 +34,7 @@ use ironclaw_reborn_composition::{
     visible_capability_request_for_run,
 };
 use ironclaw_threads::{InMemorySessionThreadService, ThreadScope};
-use ironclaw_trust::EffectiveTrustClass;
+use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use ironclaw_turns::{
     CheckpointStateStore, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
     InMemoryTurnStateStore, LoopCheckpointStore, LoopResultRef, RunProfileResolutionRequest,
@@ -80,6 +81,12 @@ async fn capability_io_resolves_staged_inputs_and_materializes_run_scoped_result
         io.result_for_ref(&run_context, &result_ref).unwrap(),
         serde_json::json!({ "reply": "hello" })
     );
+
+    io.resolve_capability_input(&run_context, &input_ref)
+        .await
+        .expect_err("staged input refs should be consumed on successful read");
+    io.result_for_ref(&run_context, &result_ref)
+        .expect_err("staged result refs should be consumed on successful read");
 }
 
 #[tokio::test]
@@ -219,6 +226,22 @@ async fn capability_io_enforces_staging_entry_and_byte_caps() {
 }
 
 #[tokio::test]
+async fn capability_io_rejects_oversized_staged_input_payload() {
+    let io = ProductLiveCapabilityIo::default();
+    let run_context = loop_run_context("capability-io-input-bytes").await;
+
+    let oversized_input = serde_json::json!("x".repeat(4 * 1024 * 1024));
+    let byte_error = io
+        .stage_input(&run_context, oversized_input)
+        .expect_err("input staging must enforce a serialized-byte cap");
+
+    assert_eq!(
+        byte_error.kind,
+        ironclaw_turns::run_profile::AgentLoopHostErrorKind::BudgetExceeded
+    );
+}
+
+#[tokio::test]
 async fn visible_capability_request_builder_scopes_context_to_loop_run() {
     let run_context = loop_run_context("visible-builder").await;
     let request = visible_capability_request_for_run(
@@ -259,6 +282,36 @@ async fn visible_capability_request_builder_scopes_context_to_loop_run() {
             .provider_trust
             .contains_key(&ExtensionId::new("demo").unwrap())
     );
+}
+
+#[tokio::test]
+async fn visible_capability_request_preserves_custom_provider_trust_decision() {
+    let run_context = loop_run_context("visible-custom-trust").await;
+    let provider = ExtensionId::new("custom-provider").unwrap();
+    let trust_decision = TrustDecision {
+        effective_trust: EffectiveTrustClass::sandbox(),
+        authority_ceiling: AuthorityCeiling {
+            allowed_effects: vec![EffectKind::ReadFilesystem],
+            max_resource_ceiling: None,
+        },
+        provenance: TrustProvenance::Default,
+        evaluated_at: Utc::now(),
+    };
+
+    let request = visible_capability_request_for_run(
+        &run_context,
+        ProductLiveVisibleCapabilityRequestConfig::new(
+            UserId::new("user-visible-custom-trust").unwrap(),
+            RuntimeKind::FirstParty,
+            TrustClass::System,
+            SurfaceKind::new("agent_loop").unwrap(),
+            CapabilitySurfacePolicy::allow_all(),
+        )
+        .with_provider_trust_decision(provider.clone(), trust_decision.clone()),
+    )
+    .unwrap();
+
+    assert_eq!(request.provider_trust.get(&provider), Some(&trust_decision));
 }
 
 #[tokio::test]
@@ -504,12 +557,6 @@ async fn local_dev_adapter_registers_provider_tool_calls_as_run_scoped_inputs() 
             .starts_with(&format!("input:{}:", run_context.run_id)),
         "provider tool inputs must be scoped to the loop run: {}",
         candidate.input_ref.as_str()
-    );
-    assert_eq!(
-        io.resolve_capability_input(&run_context, &candidate.input_ref)
-            .await
-            .unwrap(),
-        serde_json::json!({ "message": "hello from provider tool" })
     );
     assert!(
         candidate.provider_replay.is_some(),
@@ -952,6 +999,37 @@ async fn model_route_settings_wire_default_and_mission_slots() {
         .unwrap();
     assert_eq!(mission.route().provider_id(), "openrouter");
     assert_eq!(mission.route().model_id(), "anthropic/claude-sonnet-4");
+}
+
+#[tokio::test]
+async fn model_route_settings_respect_selection_mode_override() {
+    let root = tempfile::tempdir().unwrap();
+    let services = build_reborn_services(RebornBuildInput::local_dev(
+        "route-selection-mode-owner",
+        root.path().join("local-dev"),
+    ))
+    .await
+    .unwrap();
+    let settings = ProductLiveModelRouteSettings::new("nearai", "qwen3-coder")
+        .unwrap()
+        .with_selection_mode(ModelSelectionMode::DeveloperAnyConfigured);
+    let adapters = ProductLivePlannedRuntimeAdapters::from_services(
+        &services,
+        ProductLivePlannedRuntimeAdapterConfig {
+            model_routes: settings,
+            ..adapter_config()
+        },
+    )
+    .unwrap();
+
+    let default = adapters
+        .model_route_resolver
+        .resolve_model_route(ModelSlot::Default)
+        .unwrap();
+    assert_eq!(
+        default.policy_mode(),
+        ModelSelectionMode::DeveloperAnyConfigured
+    );
 }
 
 fn adapter_config() -> ProductLivePlannedRuntimeAdapterConfig {
