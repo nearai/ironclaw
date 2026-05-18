@@ -103,7 +103,7 @@ pub struct HostIdentityMessageContent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IdentityMessageBuildOutcome {
     pub messages: Vec<LoopContextMessage>,
-    pub admitted_personal_context_paths: Vec<String>,
+    pub admitted_personal_context_paths: Vec<IdentityFileName>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,7 +248,7 @@ pub fn build_identity_messages_for_run_detailed(
         }
         used = used.saturating_add(cost);
         if candidate.applies_when == IdentityApplicability::OnPersonalContextAllowed {
-            admitted_personal_context_paths.push(candidate.name.as_str().to_string());
+            admitted_personal_context_paths.push(candidate.name.clone());
         }
         out.push(LoopContextMessage {
             message_ref: candidate.message_ref.clone(),

@@ -7,7 +7,10 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 mod cancellation_port;
@@ -70,8 +73,7 @@ use ironclaw_turns::{
         CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
         LoopCapabilityPort, LoopContextBundle, LoopContextMessage, LoopContextPort,
         LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
-        LoopInputCursor,
-        LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
         LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
         LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
         VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
@@ -103,6 +105,8 @@ struct IdentityCandidateCache {
     codeact: OnceCell<Vec<HostIdentityContextCandidate>>,
     text_only_personal_context_admitted: OnceCell<()>,
     codeact_personal_context_admitted: OnceCell<()>,
+    text_only_personal_context_admitted_in_flight: AtomicBool,
+    codeact_personal_context_admitted_in_flight: AtomicBool,
 }
 
 impl IdentityCandidateCache {
@@ -112,6 +116,8 @@ impl IdentityCandidateCache {
             codeact: OnceCell::new(),
             text_only_personal_context_admitted: OnceCell::new(),
             codeact_personal_context_admitted: OnceCell::new(),
+            text_only_personal_context_admitted_in_flight: AtomicBool::new(false),
+            codeact_personal_context_admitted_in_flight: AtomicBool::new(false),
         }
     }
 
@@ -126,6 +132,13 @@ impl IdentityCandidateCache {
         match mode {
             PromptMode::TextOnly => &self.text_only_personal_context_admitted,
             PromptMode::CodeAct => &self.codeact_personal_context_admitted,
+        }
+    }
+
+    fn personal_context_admitted_in_flight_for_mode(&self, mode: PromptMode) -> &AtomicBool {
+        match mode {
+            PromptMode::TextOnly => &self.text_only_personal_context_admitted_in_flight,
+            PromptMode::CodeAct => &self.codeact_personal_context_admitted_in_flight,
         }
     }
 }
@@ -236,8 +249,7 @@ where
                 self.publish_personal_context_admitted(
                     mode,
                     &outcome.admitted_personal_context_paths,
-                )
-                .await;
+                );
                 outcome.messages
             }
             None => Vec::new(),
@@ -260,7 +272,11 @@ impl<S> ThreadBackedLoopContextPort<S>
 where
     S: SessionThreadService + ?Sized + Send + Sync,
 {
-    async fn publish_personal_context_admitted(&self, mode: PromptMode, admitted_paths: &[String]) {
+    fn publish_personal_context_admitted(
+        &self,
+        mode: PromptMode,
+        admitted_paths: &[IdentityFileName],
+    ) {
         if admitted_paths.is_empty() {
             return;
         }
@@ -270,30 +286,54 @@ where
         let emitted_cell = self
             .identity_candidates
             .personal_context_admitted_cell_for_mode(mode);
-        let publish_result = emitted_cell
-            .get_or_try_init(|| async {
-                let summary = personal_context_admitted_summary(admitted_paths)?;
-                LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(milestone_sink))
-                    .driver_note(LoopDriverNoteKind::Context, summary)
-                    .await?;
-                Ok::<(), AgentLoopHostError>(())
-            })
-            .await;
-        if let Err(error) = publish_result {
-            tracing::warn!("failed to emit personal context admitted milestone: {error}");
+        if emitted_cell.get().is_some() {
+            return;
         }
+        let in_flight = self
+            .identity_candidates
+            .personal_context_admitted_in_flight_for_mode(mode);
+        if in_flight.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let summary = match personal_context_admitted_summary(admitted_paths) {
+            Ok(summary) => summary,
+            Err(error) => {
+                in_flight.store(false, Ordering::Release);
+                tracing::debug!("failed to build personal context admitted milestone: {error}");
+                return;
+            }
+        };
+        let context = self.run_context.clone();
+        let milestone_sink = Arc::clone(milestone_sink);
+        let identity_candidates = Arc::clone(&self.identity_candidates);
+        tokio::spawn(async move {
+            let publish_result = LoopHostMilestoneEmitter::new(context, milestone_sink)
+                .driver_note(LoopDriverNoteKind::Context, summary)
+                .await;
+            if let Err(error) = publish_result {
+                tracing::debug!("failed to emit personal context admitted milestone: {error}");
+            } else {
+                let _ = identity_candidates
+                    .personal_context_admitted_cell_for_mode(mode)
+                    .set(());
+            }
+            identity_candidates
+                .personal_context_admitted_in_flight_for_mode(mode)
+                .store(false, Ordering::Release);
+        });
     }
 }
 
 fn personal_context_admitted_summary(
-    admitted_paths: &[String],
+    admitted_paths: &[IdentityFileName],
 ) -> Result<LoopSafeSummary, AgentLoopHostError> {
     let source_labels = admitted_paths
         .iter()
         .map(|path| {
-            path.rsplit('/')
+            path.as_str()
+                .rsplit('/')
                 .next()
-                .unwrap_or(path)
+                .unwrap_or(path.as_str())
                 .chars()
                 .filter(|character| {
                     character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')

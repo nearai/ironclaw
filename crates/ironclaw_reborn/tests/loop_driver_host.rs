@@ -2970,6 +2970,7 @@ async fn text_only_host_factory_excludes_personal_identity_when_profile_excludes
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();

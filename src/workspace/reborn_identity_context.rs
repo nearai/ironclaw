@@ -323,6 +323,40 @@ mod tests {
 
     #[cfg(feature = "libsql")]
     #[tokio::test]
+    async fn workspace_identity_context_allowed_policy_still_excludes_heartbeat() {
+        let test_db = test_db().await;
+        let workspace = Arc::new(Workspace::new_with_db("primary", test_db.db.clone()));
+        workspace
+            .write(paths::USER, "private user profile")
+            .await
+            .unwrap();
+        workspace
+            .write(paths::HEARTBEAT, "routine heartbeat")
+            .await
+            .unwrap();
+
+        let source = WorkspaceIdentityContextSource::new(workspace);
+        let mut context = run_context().await;
+        context.resolved_run_profile.personal_context_policy = PersonalContextPolicy::Allowed;
+        let candidates = source
+            .load_identity_candidates(&context, PromptMode::TextOnly)
+            .await
+            .unwrap();
+
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.name.as_str() == paths::USER)
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.name.as_str() != paths::HEARTBEAT)
+        );
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
     async fn workspace_identity_context_denies_cached_personal_ref_when_policy_excludes() {
         let test_db = test_db().await;
         let workspace = Arc::new(Workspace::new_with_db("primary", test_db.db.clone()));

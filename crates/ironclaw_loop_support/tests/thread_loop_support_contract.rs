@@ -456,7 +456,7 @@ async fn context_port_emits_safe_milestone_when_personal_identity_is_admitted() 
 
     assert_eq!(bundle.identity_messages.len(), 2);
     assert_eq!(second_bundle.identity_messages.len(), 2);
-    let recorded = milestones.milestones();
+    let recorded = wait_for_in_memory_milestones(&milestones, 1).await;
     assert_eq!(recorded.len(), 1);
     assert!(matches!(
         &recorded[0].kind,
@@ -502,6 +502,7 @@ async fn context_port_survives_personal_context_admitted_milestone_sink_failure(
         .await
         .unwrap();
     assert_eq!(first.identity_messages.len(), 1);
+    wait_for_fail_once_attempts(&milestone_sink, 1).await;
     assert!(milestone_sink.milestones().is_empty());
     assert!(logs_contain(
         "failed to emit personal context admitted milestone"
@@ -517,6 +518,7 @@ async fn context_port_survives_personal_context_admitted_milestone_sink_failure(
         .unwrap();
     assert_eq!(second.identity_messages.len(), 1);
 
+    wait_for_fail_once_attempts(&milestone_sink, 2).await;
     let milestones = milestone_sink.milestones();
     assert_eq!(milestones.len(), 1);
     assert!(matches!(
@@ -525,6 +527,90 @@ async fn context_port_survives_personal_context_admitted_milestone_sink_failure(
             if *kind == LoopDriverNoteKind::Context
                 && safe_summary.as_str() == "personal context admitted count 1 sources USER.md"
     ));
+}
+
+#[tokio::test]
+async fn context_port_milestone_counts_only_budget_admitted_personal_identity() {
+    let fixture = ThreadFixture::new().await;
+    let mut run_context = fixture.run_context.clone();
+    run_context.resolved_run_profile.personal_context_policy = PersonalContextPolicy::Allowed;
+    let source = Arc::new(StaticIdentityContextSource::new(vec![
+        personal_identity("USER.md", "p"),
+        personal_identity(
+            "context/assistant-directives.md",
+            "private assistant directive that exceeds the tiny budget",
+        ),
+    ]));
+    let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let milestone_sink: Arc<dyn LoopHostMilestoneSink> = milestones.clone();
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        16,
+    )
+    .with_identity_context_source(source)
+    .with_identity_budget(IdentityBudget::new(3).unwrap())
+    .with_milestone_sink(milestone_sink);
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bundle.identity_messages.len(), 1);
+    let recorded = wait_for_in_memory_milestones(&milestones, 1).await;
+    assert_eq!(recorded.len(), 1);
+    assert!(matches!(
+        &recorded[0].kind,
+        LoopHostMilestoneKind::DriverNote { kind, safe_summary }
+            if *kind == LoopDriverNoteKind::Context
+                && safe_summary.as_str() == "personal context admitted count 1 sources USER.md"
+    ));
+    let wire = serde_json::to_string(&recorded).unwrap();
+    assert!(!wire.contains("assistant-directives.md"));
+}
+
+#[tokio::test]
+async fn context_port_dedupes_personal_context_admitted_milestone_under_concurrent_loads() {
+    let fixture = ThreadFixture::new().await;
+    let mut run_context = fixture.run_context.clone();
+    run_context.resolved_run_profile.personal_context_policy = PersonalContextPolicy::Allowed;
+    let source = Arc::new(StaticIdentityContextSource::new(vec![personal_identity(
+        "USER.md",
+        "private user profile",
+    )]));
+    let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let milestone_sink: Arc<dyn LoopHostMilestoneSink> = milestones.clone();
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        16,
+    )
+    .with_identity_context_source(source)
+    .with_milestone_sink(milestone_sink);
+
+    let first = adapter.load_loop_context(LoopContextRequest {
+        after: None,
+        limit: 16,
+        mode: PromptMode::TextOnly,
+    });
+    let second = adapter.load_loop_context(LoopContextRequest {
+        after: None,
+        limit: 16,
+        mode: PromptMode::TextOnly,
+    });
+    let (first, second) = tokio::join!(first, second);
+
+    assert_eq!(first.unwrap().identity_messages.len(), 1);
+    assert_eq!(second.unwrap().identity_messages.len(), 1);
+    let recorded = wait_for_in_memory_milestones(&milestones, 1).await;
+    assert_eq!(recorded.len(), 1);
 }
 
 #[tokio::test]
@@ -1053,6 +1139,7 @@ async fn model_port_rejects_policy_denied_identity_ref_before_gateway_call() {
             messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -3096,6 +3183,33 @@ impl FailOnceMilestoneSink {
             .skip(1)
             .cloned()
             .collect()
+    }
+
+    fn attempts_len(&self) -> usize {
+        self.attempts.lock().unwrap().len()
+    }
+}
+
+async fn wait_for_in_memory_milestones(
+    sink: &InMemoryLoopHostMilestoneSink,
+    expected: usize,
+) -> Vec<ironclaw_turns::run_profile::LoopHostMilestone> {
+    for _ in 0..20 {
+        let milestones = sink.milestones();
+        if milestones.len() == expected {
+            return milestones;
+        }
+        tokio::task::yield_now().await;
+    }
+    sink.milestones()
+}
+
+async fn wait_for_fail_once_attempts(sink: &FailOnceMilestoneSink, expected: usize) {
+    for _ in 0..20 {
+        if sink.attempts_len() == expected {
+            return;
+        }
+        tokio::task::yield_now().await;
     }
 }
 

@@ -12,8 +12,7 @@ use ironclaw_turns::{
     RunProfileVersion,
     run_profile::{
         CapabilitySurfaceProfileId, CheckpointSchemaId, InMemoryRunProfileRegistry,
-        InMemoryRunProfileResolver, PersonalContextPolicy, RunProfileDefinition,
-        RunProfileRegistryError,
+        InMemoryRunProfileResolver, RunProfileDefinition, RunProfileRegistryError,
     },
 };
 
@@ -170,8 +169,7 @@ pub fn planned_default_profile_definition() -> Result<RunProfileDefinition, RunP
         checkpoint_schema_id,
         planned_driver_checkpoint_schema_version(),
         capability_surface_profile_id,
-    )
-    .with_personal_context_policy(PersonalContextPolicy::Allowed))
+    ))
 }
 
 pub fn register_default_planned_profile(
@@ -279,7 +277,7 @@ mod tests {
         assert_eq!(snapshot.loop_driver.id.as_str(), PLANNED_DRIVER_DEFAULT_ID);
         assert_eq!(
             snapshot.personal_context_policy,
-            PersonalContextPolicy::Allowed
+            PersonalContextPolicy::Excluded
         );
         assert_eq!(
             snapshot
@@ -304,7 +302,7 @@ mod tests {
         assert_eq!(snapshot.loop_driver.id.as_str(), PLANNED_DRIVER_DEFAULT_ID);
         assert_eq!(
             snapshot.personal_context_policy,
-            PersonalContextPolicy::Allowed
+            PersonalContextPolicy::Excluded
         );
     }
 
