@@ -4056,7 +4056,7 @@ dependencies = [
  "aws-sdk-bedrockruntime",
  "aws-smithy-types",
  "ironclaw_llm",
- "lru 0.12.5",
+ "lru 0.16.3",
  "reqwest",
  "secrecy",
  "serde",

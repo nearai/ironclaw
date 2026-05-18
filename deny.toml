@@ -19,6 +19,11 @@ ignore = [
     # rand unsoundness with custom logger calling rand::rng() during reseed — we don't use this pattern;
     # revisit/remove by 2026-06-30, or when transitive deps (tower, nanoid, phf_generator) release rand ≥0.9.3 compat
     "RUSTSEC-2026-0097",
+    # lru `IterMut` Stacked Borrows soundness issue (fixed in lru >= 0.16.3).
+    # Direct deps already use 0.16.3; `lru 0.12.5` remains pinned by ratatui 0.29.0
+    # (via ironclaw_tui). We don't call `IterMut` from the ratatui code path.
+    # Remove when ratatui releases a version using lru >= 0.16.3.
+    "RUSTSEC-2026-0002",
 ]
 
 [licenses]
