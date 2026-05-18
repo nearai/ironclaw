@@ -1,4 +1,7 @@
-use std::process::Command;
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 
 const INVALID_PROFILE_MESSAGE: &str = "IRONCLAW_REBORN_PROFILE must be one of";
 
@@ -489,8 +492,15 @@ fn run_reports_runtime_readiness_snapshot_without_touching_v1_state() {
     let home_dir = temp.path().join("home");
     let v1_base_dir = temp.path().join("v1-state");
 
+    // `--dry-run` preserves the legacy diagnostic-only behavior: no agent
+    // is started, no state directories are created. The same shell
+    // identifiers (profile, home, v1_state, readiness) are reported so
+    // existing tooling that scrapes `run` output keeps working. Without
+    // the flag, `run` boots the live agent and would create the local-dev
+    // root, which the rest of this test forbids.
     let output = Command::new(reborn_bin())
         .arg("run")
+        .arg("--dry-run")
         .env("IRONCLAW_REBORN_HOME", &reborn_home)
         .env("HOME", &home_dir)
         .env("IRONCLAW_BASE_DIR", &v1_base_dir)
@@ -515,6 +525,10 @@ fn run_reports_runtime_readiness_snapshot_without_touching_v1_state() {
     );
     assert!(stdout.contains("profile: local-dev"), "stdout: {stdout}");
     assert!(stdout.contains("v1_state: not-used"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("runtime_driver: planned-agent-loop"),
+        "stdout: {stdout}"
+    );
     assert!(
         stdout.contains("local_runtime_shell_readiness: ready"),
         "stdout: {stdout}"
@@ -568,6 +582,70 @@ fn doctor_uses_reborn_home_override_without_touching_v1_state() {
     assert!(
         !reborn_home.exists(),
         "doctor should not create state directories"
+    );
+}
+
+#[test]
+fn run_message_exits_nonzero_when_runtime_does_not_produce_reply() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let output = Command::new(reborn_bin())
+        .arg("run")
+        .arg("--message")
+        .arg("hello")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .env("HOME", temp.path().join("home"))
+        .output()
+        .expect("ironclaw-reborn run --message should run");
+
+    assert!(
+        !output.status.success(),
+        "run --message should fail when the runtime cannot produce assistant text"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.is_empty(), "stdout should stay reply-only: {stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reborn run did not produce an assistant reply"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn run_piped_stdin_exits_nonzero_when_runtime_does_not_produce_reply() {
+    let temp = tempfile::tempdir().expect("tempdir");
+
+    let mut child = Command::new(reborn_bin())
+        .arg("run")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
+        .env("HOME", temp.path().join("home"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn run should start");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin should be piped")
+        .write_all(b"  hello  \n")
+        .expect("prompt should be written");
+    let output = child
+        .wait_with_output()
+        .expect("ironclaw-reborn run should finish");
+
+    assert!(
+        !output.status.success(),
+        "piped run should fail when the runtime cannot produce assistant text"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.is_empty(), "stdout should stay reply-only: {stdout}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reborn run did not produce an assistant reply"),
+        "stderr: {stderr}"
     );
 }
 
@@ -627,8 +705,12 @@ fn doctor_reports_explicit_profile() {
 fn run_reports_explicit_profile() {
     let temp = tempfile::tempdir().expect("tempdir");
 
+    // Production / migration-dry-run profiles are recognized by the boot
+    // config but not yet wired into the assembled runtime. `--dry-run`
+    // exercises the boot-config path without booting the agent.
     let output = Command::new(reborn_bin())
         .arg("run")
+        .arg("--dry-run")
         .env("IRONCLAW_REBORN_HOME", temp.path().join("reborn-home"))
         .env("IRONCLAW_REBORN_PROFILE", "migration-dry-run")
         .output()
@@ -642,10 +724,6 @@ fn run_reports_explicit_profile() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         stdout.contains("profile: migration-dry-run"),
-        "stdout: {stdout}"
-    );
-    assert!(
-        stdout.contains("driver_registry: initialized"),
         "stdout: {stdout}"
     );
 }

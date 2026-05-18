@@ -1038,6 +1038,31 @@ fn host_api_contract_types_reject_unknown_fields_on_deserialize() {
     let profile_id = "memory.context_retrieval.v1";
     let in_ref = "schemas/memory/context-retrieve.input.v1.json";
     let out_ref = "schemas/memory/context-retrieve.output.v1.json";
+    let ingress_policy = json!({
+        "listener_class": "local_gateway",
+        "auth": {
+            "type": "required",
+            "schemes": ["bearer_token"],
+        },
+        "scope_source": "authenticated_caller",
+        "body_limit": {
+            "type": "limited",
+            "max_bytes": 16384,
+        },
+        "rate_limit": {
+            "type": "limited",
+            "scope": "per_caller",
+            "max_requests": 30,
+            "window_seconds": 60,
+        },
+        "cors": "same_origin_only",
+        "websocket_origin": "not_applicable",
+        "streaming": "none",
+        "audit": "user_action",
+        "effect_path": {
+            "type": "product_workflow",
+        },
+    });
 
     // Happy paths still parse.
     assert!(serde_json::from_value::<HostPortGrant>(json!({ "id": storage })).is_ok());
@@ -1068,6 +1093,18 @@ fn host_api_contract_types_reject_unknown_fields_on_deserialize() {
         }))
         .is_ok()
     );
+    assert!(serde_json::from_value::<IngressPolicy>(ingress_policy.clone()).is_ok());
+    assert!(
+        serde_json::from_value::<IngressRouteDescriptor>(json!({
+            "route_id": "web_chat.send",
+            "method": "post",
+            "route_pattern": "/api/chat/v2/messages",
+            "policy": ingress_policy.clone(),
+        }))
+        .is_ok()
+    );
+    let mut ingress_policy_with_unknown = ingress_policy.clone();
+    ingress_policy_with_unknown["oops"] = json!(1);
 
     // Unknown fields must fail closed at the wire boundary.
     assert!(serde_json::from_value::<HostPortGrant>(json!({ "id": storage, "oops": 1 })).is_err());
@@ -1116,6 +1153,17 @@ fn host_api_contract_types_reject_unknown_fields_on_deserialize() {
                 "input_schema_ref": in_ref,
                 "output_schema_ref": out_ref,
             }],
+            "oops": 1,
+        }))
+        .is_err()
+    );
+    assert!(serde_json::from_value::<IngressPolicy>(ingress_policy_with_unknown).is_err());
+    assert!(
+        serde_json::from_value::<IngressRouteDescriptor>(json!({
+            "route_id": "web_chat.send",
+            "method": "post",
+            "route_pattern": "/api/chat/v2/messages",
+            "policy": ingress_policy,
             "oops": 1,
         }))
         .is_err()

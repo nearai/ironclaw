@@ -299,7 +299,7 @@ fn resumable_checkpoint_kind_from_host(kind: LoopCheckpointKind) -> Result<Check
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build_loop_family_registry;
+    use crate::app_loop_family::build_loop_family_registry;
     use ironclaw_agent_loop::test_support::{
         MockAgentLoopDriverHost, MockHostCall, test_run_context,
     };
@@ -334,7 +334,10 @@ mod tests {
         assert_eq!(
             descriptor.checkpoint_schema_id,
             Some(
-                CheckpointSchemaId::new(crate::PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID).expect("valid")
+                CheckpointSchemaId::new(
+                    crate::planned_driver_factory::PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID,
+                )
+                .expect("valid"),
             )
         );
         assert_eq!(
@@ -856,4 +859,10 @@ mod tests {
             self.inner.emit_loop_progress(event).await
         }
     }
+    // Note: a duplicate `impl LoopCancellationPort for ResumePayloadHost`
+    // existed here on baseline and broke `cargo test --no-run` for this crate.
+    // The earlier delegating impl (a few hundred lines above) is the
+    // intended one; the trailing one returned `None` unconditionally and
+    // was unreachable behind the conflict. Removed here while updating
+    // tests for the narrowed public surface.
 }

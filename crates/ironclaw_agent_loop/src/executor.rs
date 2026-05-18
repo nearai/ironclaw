@@ -1,7 +1,6 @@
 //! Canonical agent-loop executor.
 //!
 //! The executor owns loop mechanics. Loop families own strategy composition.
-//! See `docs/reborn/agent-loop-skeleton.md` section 8 for the canonical tick.
 
 use std::collections::HashSet;
 
@@ -1086,8 +1085,7 @@ impl CanonicalAgentLoopExecutor {
     }
 
     // Cancellation is checked cooperatively at N boundary points between external calls.
-    // A macro refactor was considered but deferred; the explicit sites are self-documenting
-    // and the boundary count is stable for this workstream.
+    // A macro refactor was considered but deferred; the explicit sites are self-documenting.
     async fn checkpoint_and_exit_if_cancelled(
         &self,
         host: &(dyn AgentLoopDriverHost + Send + Sync),

@@ -5,10 +5,8 @@
 //! Async because future strategies may consult host state for circuit-breaker
 //! counters, route health, etc.
 //!
-//! See `docs/reborn/agent-loop-skeleton.md` §6 ("Strategy decomposition" →
-//! recovery) and §9 ("Sanitization at the host port boundary"). Strategies
-//! never see raw provider errors, host paths, or secrets — sanitization
-//! happens at the host port.
+//! Strategies never see raw provider errors, host paths, or secrets;
+//! sanitization happens at the host port.
 
 use async_trait::async_trait;
 use ironclaw_turns::{LoopDiagnosticRef, LoopFailureKind, run_profile::LoopSafeSummary};
@@ -77,8 +75,8 @@ impl<'de> serde::Deserialize<'de> for SanitizedStrategySummary {
 
 /// Sanitized capability error — class + safe summary string + opaque
 /// diagnostic ref. Strategies never see raw provider errors, host paths,
-/// or secrets (sanitization happens at the host port boundary, per master
-/// doc §9).
+/// or secrets; sanitization happens at the host port boundary before recovery
+/// strategy code runs.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CapabilityErrorSummary {
     pub(crate) class: CapabilityErrorClass,
@@ -171,17 +169,13 @@ pub(crate) enum RetryScope {
 /// Reference baseline `RecoveryStrategy`: bounded retry per error class with
 /// exponential backoff.
 ///
-/// Per master spec §10 ("Production-safe escape" — per-error retry budget),
-/// this strategy:
+/// This strategy:
 /// - Skips `PolicyDenied` so the model can try another authorized tool without
 ///   consuming retry budget.
 /// - Aborts immediately on `Permanent`, `InputInvalid`, and `ContentFiltered`.
 /// - Retries capability/model transient, unavailable, and internal errors up
 ///   to [`Self::max_attempts_per_class`] times with `Backoff`.
 /// - Retries `ContextOverflow` at iteration scope with `ShrinkContext`.
-///
-/// See `docs/reborn/agent-loop-skeleton.md` §6 ("The nine strategies" →
-/// `RecoveryStrategy`) and §10 ("Production-safe escape").
 #[derive(Debug, Clone, Copy)]
 pub struct DefaultRecoveryStrategy {
     /// Max retries per error class before giving up. Default `2`.
@@ -373,9 +367,8 @@ fn backoff_for(attempt: u32) -> BackoffDelayMs {
     BackoffDelayMs(ms.min(5_000))
 }
 
-/// Strategy hint about WHAT to alter on retry. Skeleton supports prompt-shape
-/// alterations only; model-route swap is reserved for the deferred
-/// `ModelRouteChain` follow-up (master doc §9).
+/// Strategy hint about WHAT to alter on retry. Prompt-shape alteration is
+/// supported; model-route swap is reserved for future fallback routing.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", tag = "alteration")]

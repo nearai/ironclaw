@@ -33,6 +33,11 @@ Must NOT depend on: `ironclaw_dispatcher`, `ironclaw_extensions`,
 `ironclaw_host_runtime`, `ironclaw_mcp`, `ironclaw_wasm`, `ironclaw_scripts`,
 `ironclaw_network`, `ironclaw_engine`, `ironclaw_gateway`.
 
+Agent-loop note: product-facing turns enter through workflow services and
+canonical turn submission. Do not shortcut directly to `AgentLoopDriver`,
+`PlannedDriver`, host runtime services, or loop host factories from adapters or
+workflow callers.
+
 ## Test support
 
 Enable `test-support` feature for in-memory fakes:

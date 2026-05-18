@@ -9,7 +9,6 @@ pub(crate) struct DoctorCommand;
 impl DoctorCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
         let report = RebornDoctorReport::from_config(context.boot_config().clone());
-        let _registry = ironclaw_reborn::driver_registry::DriverRegistry::new();
 
         println!("IronClaw Reborn doctor");
         println!("reborn_home: {}", report.home_path().display());

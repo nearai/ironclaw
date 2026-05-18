@@ -1,21 +1,116 @@
 #![forbid(unsafe_code)]
 
-//! Minimal Reborn production composition root.
+//! Reborn composition root.
 //!
-//! This crate intentionally wires substrate services only. Product/AppBuilder
-//! integration belongs in later slices.
+//! Two entry points:
+//!
+//! - [`build_reborn_services`] — substrate-only facades (host runtime,
+//!   turn coordinator). Useful when an outer harness wires the loop
+//!   drivers / turn-runner itself (e.g. v1 `AppBuilder`).
+//! - [`build_reborn_runtime`] — full runtime assembly: substrate + loop
+//!   driver registry + LLM model gateway (under `root-llm-provider`) +
+//!   turn-runner worker, spawned as one unit. This is the single entry
+//!   point used by the standalone `ironclaw-reborn` binary and any
+//!   future Reborn ingress.
+//!
+//! Downstream callers should not name internal Reborn types directly:
+//! [`RebornRuntime`] exposes only task-level methods, so callers never
+//! import `TurnCoordinator`, `SessionThreadService`, `HostManagedModel
+//! Gateway`, etc.
 
 mod error;
 mod factory;
 mod input;
 mod profile;
 mod readiness;
+mod runtime;
+mod runtime_input;
 
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
 pub use input::RebornBuildInput;
 pub use profile::{RebornCompositionProfile, RebornCompositionProfileParseError};
 pub use readiness::{RebornFacadeReadiness, RebornReadiness, RebornReadinessState};
+pub use runtime::{
+    AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, build_reborn_runtime,
+};
+#[cfg(feature = "root-llm-provider")]
+pub use runtime_input::RebornLlmConfig;
+pub use runtime_input::{
+    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings,
+};
+
+/// Reborn model purpose slot names exposed for diagnostic callers.
+///
+/// This keeps CLI diagnostics on the composition boundary instead of making
+/// the CLI mirror `ironclaw_reborn::model_routes::ModelSlot`.
+pub fn reborn_model_slot_names() -> Vec<&'static str> {
+    ironclaw_reborn::model_routes::ModelSlot::all()
+        .iter()
+        .map(|slot| slot.as_str())
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebornRuntimeReadinessSnapshot {
+    pub text_only_driver: RebornRuntimeComponentStatus,
+    pub planned_driver: RebornRuntimeComponentStatus,
+    pub planned_default_profile: RebornRuntimeComponentStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RebornRuntimeComponentStatus {
+    Initialized,
+    Failed(String),
+}
+
+impl RebornRuntimeComponentStatus {
+    pub fn from_result<T, E: std::fmt::Display>(result: Result<T, E>) -> Self {
+        match result {
+            Ok(_) => Self::Initialized,
+            Err(error) => Self::Failed(error.to_string()),
+        }
+    }
+
+    pub fn is_initialized(&self) -> bool {
+        matches!(self, Self::Initialized)
+    }
+
+    pub fn render(&self, ok_label: &str) -> String {
+        match self {
+            Self::Initialized => ok_label.to_string(),
+            Self::Failed(reason) => format!("unavailable: {reason}"),
+        }
+    }
+}
+
+/// Side-effect-free runtime readiness snapshot for diagnostic callers.
+pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
+    let mut registry = ironclaw_reborn::driver_registry::DriverRegistry::new();
+    let text_only_driver = RebornRuntimeComponentStatus::from_result(
+        ironclaw_reborn::planned_driver_factory::register_default_text_only_driver(
+            &mut registry,
+            ironclaw_reborn::text_loop_driver::TextOnlyModelReplyDriverConfig::default(),
+        ),
+    );
+    let planned_driver = match ironclaw_reborn::app_loop_family::build_loop_family_registry() {
+        Ok(family_registry) => RebornRuntimeComponentStatus::from_result(
+            ironclaw_reborn::planned_driver_factory::register_default_planned_driver(
+                &mut registry,
+                family_registry,
+            ),
+        ),
+        Err(error) => RebornRuntimeComponentStatus::Failed(error.to_string()),
+    };
+    let planned_default_profile = RebornRuntimeComponentStatus::from_result(
+        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver(),
+    );
+    RebornRuntimeReadinessSnapshot {
+        text_only_driver,
+        planned_driver,
+        planned_default_profile,
+    }
+}
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::sync::Arc;
