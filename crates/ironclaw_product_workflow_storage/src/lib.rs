@@ -224,13 +224,15 @@ mod libsql_impl {
                AND source_binding_key = ?3
                AND external_event_id = ?4
                AND action_id = ?5
-               AND phase NOT IN ('settled', 'deduplicated_replay')",
+               AND phase NOT IN (?6, ?7)",
             params![
                 action.fingerprint.adapter_id.as_str(),
                 action.fingerprint.installation_id.as_str(),
                 action.fingerprint.source_binding_key.as_str(),
                 action.fingerprint.external_event_id.as_str(),
                 action.action_id.to_string(),
+                phase_label(ActionPhase::Settled),
+                phase_label(ActionPhase::DeduplicatedReplay),
             ],
         )
         .await
@@ -341,7 +343,12 @@ mod libsql_impl {
                 Ok(value)
             }
             Err(error) => {
-                let _ = conn.execute("ROLLBACK", ()).await;
+                if let Err(rollback_error) = conn.execute("ROLLBACK", ()).await {
+                    tracing::warn!(
+                        %rollback_error,
+                        "product workflow idempotency ledger failed to rollback libSQL transaction"
+                    );
+                }
                 Err(error)
             }
         }
@@ -504,13 +511,15 @@ mod postgres_impl {
                AND source_binding_key = $3
                AND external_event_id = $4
                AND action_id = $5
-               AND phase NOT IN ('settled', 'deduplicated_replay')",
+               AND phase NOT IN ($6, $7)",
             &[
                 &action.fingerprint.adapter_id.as_str(),
                 &action.fingerprint.installation_id.as_str(),
                 &action.fingerprint.source_binding_key.as_str(),
                 &action.fingerprint.external_event_id.as_str(),
                 &action.action_id.to_string(),
+                &phase_label(ActionPhase::Settled),
+                &phase_label(ActionPhase::DeduplicatedReplay),
             ],
         )
         .await
@@ -611,7 +620,12 @@ mod postgres_impl {
                 Ok(value)
             }
             Err(error) => {
-                let _ = txn.rollback().await;
+                if let Err(rollback_error) = txn.rollback().await {
+                    tracing::warn!(
+                        %rollback_error,
+                        "product workflow idempotency ledger failed to rollback PostgreSQL transaction"
+                    );
+                }
                 Err(error)
             }
         }
