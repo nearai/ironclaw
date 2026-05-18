@@ -77,6 +77,18 @@ gcloud projects add-iam-policy-binding "${PROJECT}" \
   --quiet 2>/dev/null
 
 # gcloud compute ssh must actAs the VM's attached service account to inject keys.
+# On a fresh project the VM SA is created later by gcp-provision.sh, so create it
+# here if missing — otherwise the binding below fails and blocks initial WIF bootstrap.
+if ! gcloud iam service-accounts describe "${VM_SA_EMAIL}" \
+    --project="${PROJECT}" &>/dev/null; then
+  echo "     creating VM service account '${VM_SA_EMAIL}'..."
+  gcloud iam service-accounts create "${VM_SA_NAME}" \
+    --display-name="T3Claw VM" \
+    --project="${PROJECT}"
+  echo "     waiting for propagation..."
+  sleep 15
+fi
+
 gcloud iam service-accounts add-iam-policy-binding "${VM_SA_EMAIL}" \
   --member="serviceAccount:${SA_EMAIL}" \
   --role="roles/iam.serviceAccountUser" \
