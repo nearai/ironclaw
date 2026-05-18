@@ -25,7 +25,8 @@ use tracing::{debug, error, warn};
 
 use ironclaw_turns::{
     AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopExit,
-    SanitizedFailure, TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
+    SanitizedFailure, TurnError, TurnLeaseToken, TurnRunId, TurnRunWake, TurnRunWakeNotifier,
+    TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStatus,
     runner::{
         ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordModelRouteSnapshotRequest,
         RecordRecoveryRequiredRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
@@ -170,6 +171,13 @@ impl TurnRunnerWakeSender {
     /// Signal the worker that there may be new work available.
     pub fn wake(&self) {
         self.notify.notify_one();
+    }
+}
+
+impl TurnRunWakeNotifier for TurnRunnerWakeSender {
+    fn notify_queued_run(&self, _wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
+        self.wake();
+        Ok(())
     }
 }
 

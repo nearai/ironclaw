@@ -618,8 +618,6 @@ pub struct LoopContextMessage {
     /// `None` means "summary-only entry; prompt port MUST NOT resolve content —
     /// use `safe_summary` verbatim instead." Mirrors the
     /// `SkillTrustLevel::Installed` carrying `prompt_content: None` pattern.
-    /// See `docs/reborn/agent-loop-briefs/prompt-context-assembly.md` §3.2 for
-    /// the upstream invariant this enforces.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_ref: Option<LoopMessageRef>,
     pub role: String,
@@ -1069,11 +1067,10 @@ pub struct VisibleCapabilitySurface {
 
 /// Concurrency hint for a capability surfaced to an agent loop driver.
 ///
-/// Derived at the adapter boundary in WS-9 (`HostRuntimeLoopCapabilityPort::visible_capabilities`)
-/// from the underlying `CapabilityDescriptor.effects` Vec. The lower-layer
-/// `CapabilityDescriptor` is NOT modified; `effects` remains the source of
-/// truth and the hint is a computed projection. See WS-9 §3.2a for the
-/// per-`EffectKind` mapping table.
+/// Derived at the adapter boundary from the underlying
+/// `CapabilityDescriptor.effects` Vec. The lower-layer `CapabilityDescriptor`
+/// is NOT modified; `effects` remains the source of truth and the hint is a
+/// computed projection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ConcurrencyHint {
@@ -1153,7 +1150,7 @@ pub struct CapabilityResultMessage {
     pub safe_summary: String,
     /// Host hint that this completed capability result should end the loop
     /// naturally after the current batch. Defaults to false for compatibility
-    /// with pre-WS-6 hosts.
+    /// with older hosts.
     #[serde(default)]
     pub terminate_hint: bool,
 }
@@ -1434,8 +1431,7 @@ pub struct LoadedCheckpointPayload {
 /// [`LoopCheckpointPort::checkpoint`] with the resulting state ref.
 ///
 /// The two-step write keeps byte-storage and metadata-write responsibilities
-/// cleanly split. See `docs/reborn/agent-loop-briefs/state-and-checkpoints.md`
-/// §2 for the rationale and WS-10 for the read-side counterpart.
+/// cleanly split.
 ///
 /// `kind` is required so adapters that bridge to
 /// `CheckpointStateStore::put_checkpoint_state` can persist the correct kind
@@ -1490,9 +1486,9 @@ pub trait LoopCheckpointPort: Send + Sync {
     /// can reference. The default impl fails closed; concrete impls live in
     /// `ironclaw_loop_support` and wrap the host's `CheckpointStateStore`.
     ///
-    /// The executor's `checkpoint(...)` helper (WS-6 §3.4) calls this method
-    /// before invoking `LoopCheckpointPort::checkpoint(...)` so the metadata
-    /// write references a payload that's already durably stored.
+    /// The executor's checkpoint helper calls this method before invoking
+    /// `LoopCheckpointPort::checkpoint(...)` so the metadata write references
+    /// a payload that's already durably stored.
     async fn stage_checkpoint_payload(
         &self,
         _request: StageCheckpointPayloadRequest,

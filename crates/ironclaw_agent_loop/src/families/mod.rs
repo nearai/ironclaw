@@ -32,8 +32,7 @@ pub const DEFAULT_FAMILY_DIGEST: ComponentDigest = ComponentDigest([
     0x59, 0x19, 0xbe, 0x95, 0xbe, 0xcc, 0x1d, 0xc5, 0x77, 0x47, 0x5f, 0xd1, 0x78, 0xec, 0xbd, 0x93,
 ]);
 
-/// The default loop family: the text-tool-use baseline once the planner and
-/// executor workstreams land.
+/// The default loop family: the text-tool-use baseline.
 pub fn default() -> LoopFamily {
     let planner = DefaultPlanner::compose_default();
     let id = planner.id().clone();

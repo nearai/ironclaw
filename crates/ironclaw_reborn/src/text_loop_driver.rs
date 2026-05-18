@@ -17,8 +17,8 @@ use ironclaw_turns::{
     },
 };
 
-const TEXT_ONLY_DRIVER_ID: &str = "reborn:text-only-model-reply";
-const TEXT_ONLY_DRIVER_VERSION: u64 = 1;
+pub(crate) const TEXT_ONLY_DRIVER_ID: &str = "reborn:text-only-model-reply";
+pub(crate) const TEXT_ONLY_DRIVER_VERSION: u64 = 1;
 const DEFAULT_CONTEXT_LIMIT: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -38,6 +38,17 @@ pub(crate) enum RebornStorageInput {
 }
 
 impl RebornBuildInput {
+    /// Selected composition profile.
+    pub fn profile(&self) -> RebornCompositionProfile {
+        self.profile
+    }
+
+    /// Owner id (string form). Used by the assembled runtime to mint the
+    /// `UserId` actor for inbound CLI messages.
+    pub fn owner_id(&self) -> &str {
+        &self.owner_id
+    }
+
     pub fn disabled(owner_id: impl Into<String>) -> Self {
         Self::new(
             RebornCompositionProfile::Disabled,

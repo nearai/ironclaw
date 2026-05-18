@@ -183,10 +183,17 @@ Select a profile with `IRONCLAW_REBORN_PROFILE=<profile>`.
 
 ### `run`
 
-Initializes the minimal Reborn runtime shell and exits successfully. This is a smokeable composition shell, not full agent execution.
+Starts the standalone Reborn runtime and reads messages from stdin. The no-profile path targets the planned AgentLoop runtime (`reborn-planned-default`). Without model provider environment variables, the runtime still starts but messages fail cleanly because no LLM gateway is wired.
 
 ```bash
 cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run --message "hello"
+```
+
+Use `--dry-run` for the side-effect-free readiness snapshot:
+
+```bash
+cargo run -q -p ironclaw_reborn_cli --bin ironclaw-reborn -- run --dry-run
 ```
 
 Expected fields include:
@@ -197,8 +204,10 @@ Expected fields include:
 - `home_source`
 - `profile`
 - `v1_state: not-used`
+- `runtime_driver: planned-agent-loop`
 - `driver_registry: initialized`
-- `runtime_shell: initialized`
+- `local_runtime_shell_readiness: ready`
+- `planned_default_profile: available`
 
 ### `skills list`
 

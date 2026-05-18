@@ -94,8 +94,8 @@ async fn recovery_budget_exhaustion_uses_single_call_retry() {
             calls.as_slice(),
             [
                 MockHostCall::PollInputs,
-                MockHostCall::BuildPromptBundle,
                 MockHostCall::VisibleCapabilities,
+                MockHostCall::BuildPromptBundle,
                 MockHostCall::StageCheckpointPayload(CheckpointKind::BeforeModel),
                 MockHostCall::SaveCheckpoint(CheckpointKind::BeforeModel),
                 MockHostCall::StreamModel,

@@ -202,6 +202,13 @@ impl DriverRegistry {
         self.entries.get(key)
     }
 
+    pub fn requirements_snapshot(&self) -> HashMap<LoopDriverRegistryKey, DriverRequirements> {
+        self.entries
+            .iter()
+            .map(|(key, entry)| (key.clone(), entry.requirements().clone()))
+            .collect()
+    }
+
     pub fn validate_readiness(
         &self,
         mode: DriverReadinessMode,

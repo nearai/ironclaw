@@ -25,12 +25,8 @@ fn assert_budget_strategy_object_safe(_: &dyn BudgetStrategy) {}
 /// Reference baseline `BudgetStrategy`: 32-iteration cap with no wall-clock
 /// limit.
 ///
-/// Per master spec §10 ("Production-safe escape" — iteration cap), the
-/// 32-iteration ceiling is the first safety net. Loop families that need
+/// The 32-iteration ceiling is the first safety net. Loop families that need
 /// shorter or longer budgets construct this struct directly.
-///
-/// See `docs/reborn/agent-loop-skeleton.md` §6 ("The nine strategies" →
-/// `BudgetStrategy`) and §10 ("Production-safe escape").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DefaultBudgetStrategy {
     /// Hard ceiling on iteration count. Default `32`.

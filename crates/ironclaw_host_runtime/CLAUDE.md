@@ -6,3 +6,27 @@
 - Preserve the accounting invariant: `network_egress_bytes` is outbound request bytes only, with response bytes tracked separately.
 - Keep raw secret material inside the narrow lease/injection path. Reject runtime-supplied manual credentials, scan raw and percent-decoded URL forms, redact leased values from runtime-visible errors and responses, strip sensitive response headers, and block credential-shaped runtime requests/responses before they reach external services or runtime callers.
 - Do not own product workflow, authorization/approval policy, persistence migrations, or event emission unless a later Reborn contract explicitly moves that composition here.
+
+## Agent-loop touch points
+
+- `turn_scheduler.rs` owns scheduler-backed run concurrency. It does not own the
+  canonical loop tick or product inbound serialization.
+- `surface.rs` owns host-runtime capability-surface shaping and versions.
+- `production.rs` and `services.rs` compose runtime services and readiness
+  evidence used by Reborn loop wiring.
+- First-party runtime tools belong under `first_party_tools/`; do not append new
+  built-ins to broad runtime files.
+
+## Adding code
+
+- Add a new runtime service module when the service has its own authority,
+  readiness, or resource accounting boundary.
+- Add a first-party tool file per capability.
+- Keep readiness checks near the runtime service they validate; driver/product
+  readiness belongs in `ironclaw_reborn`.
+
+## Common mistakes
+
+- Do not call `AgentLoopDriver` or compose loop families here.
+- Do not own product adapter routing or workflow idempotency.
+- Do not bypass host API contracts with runtime-specific shortcuts.

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(reborn)* expose runtime poll settings and document the standalone turn-runner cadence change for callers using `TurnRunnerSettings::default()`.
+
 ## [0.28.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.27.0...ironclaw-v0.28.0) - 2026-05-07
 
 ### Added

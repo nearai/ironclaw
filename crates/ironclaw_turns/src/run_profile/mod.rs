@@ -79,7 +79,7 @@ pub use refs::{
 };
 pub use resolver::{
     InMemoryRunProfileRegistry, InMemoryRunProfileResolver, RunProfileDefinition,
-    RunProfileResolutionRequest, RunProfileResolver,
+    RunProfileRegistryError, RunProfileResolutionRequest, RunProfileResolver,
 };
 pub use skill_context::{
     InstalledSkillSnapshot, NoopSkillContextSource, SkillContextBudget, SkillContextError,

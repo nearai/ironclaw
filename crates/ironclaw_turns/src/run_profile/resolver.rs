@@ -1,3 +1,5 @@
+use std::{error::Error, fmt};
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -56,19 +58,34 @@ pub trait RunProfileResolver: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct InMemoryRunProfileResolver {
     registry: InMemoryRunProfileRegistry,
+    implicit_default_profile_id: RunProfileId,
 }
 
 impl Default for InMemoryRunProfileResolver {
     fn default() -> Self {
         Self {
             registry: InMemoryRunProfileRegistry::with_builtin_profiles(),
+            implicit_default_profile_id: RunProfileId::interactive_default(),
         }
     }
 }
 
 impl InMemoryRunProfileResolver {
     pub fn new(registry: InMemoryRunProfileRegistry) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            implicit_default_profile_id: RunProfileId::interactive_default(),
+        }
+    }
+
+    pub fn new_with_implicit_default(
+        registry: InMemoryRunProfileRegistry,
+        implicit_default_profile_id: RunProfileId,
+    ) -> Self {
+        Self {
+            registry,
+            implicit_default_profile_id,
+        }
     }
 }
 
@@ -81,16 +98,14 @@ impl RunProfileResolver for InMemoryRunProfileResolver {
         let requested = request
             .requested_run_profile
             .as_ref()
-            .map(RunProfileRequest::as_str)
-            .unwrap_or("interactive_default");
-        let profile_key = if requested == "default" {
-            "interactive_default"
-        } else {
-            requested
+            .map(RunProfileRequest::as_str);
+        let profile_key = match requested {
+            Some("default") | None => self.implicit_default_profile_id.as_str(),
+            Some(requested) => requested,
         };
         let definition = self.registry.profile(profile_key).ok_or_else(|| {
             RunProfileResolutionError::ProfileUnavailable {
-                profile_id: requested.to_string(),
+                profile_id: requested.unwrap_or(profile_key).to_string(),
             }
         })?;
 
@@ -109,6 +124,29 @@ pub struct InMemoryRunProfileRegistry {
     profiles: Vec<RunProfileDefinition>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunProfileRegistryError {
+    InvalidProfile { reason: String },
+    DuplicateProfile { profile_id: RunProfileId },
+}
+
+impl fmt::Display for RunProfileRegistryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidProfile { reason } => write!(formatter, "invalid run profile: {reason}"),
+            Self::DuplicateProfile { profile_id } => {
+                write!(
+                    formatter,
+                    "duplicate run profile registration for {}",
+                    profile_id.as_str()
+                )
+            }
+        }
+    }
+}
+
+impl Error for RunProfileRegistryError {}
+
 impl InMemoryRunProfileRegistry {
     pub fn with_builtin_profiles() -> Self {
         Self {
@@ -120,6 +158,19 @@ impl InMemoryRunProfileRegistry {
         self.profiles
             .iter()
             .find(|definition| definition.profile_id.as_str() == profile_id)
+    }
+
+    pub fn register(
+        &mut self,
+        definition: RunProfileDefinition,
+    ) -> Result<(), RunProfileRegistryError> {
+        if self.profile(definition.profile_id.as_str()).is_some() {
+            return Err(RunProfileRegistryError::DuplicateProfile {
+                profile_id: definition.profile_id,
+            });
+        }
+        self.profiles.push(definition);
+        Ok(())
     }
 }
 
@@ -146,6 +197,23 @@ pub struct RunProfileDefinition {
 }
 
 impl RunProfileDefinition {
+    pub fn interactive_like(
+        profile_id: RunProfileId,
+        loop_driver: AgentLoopDriverDescriptor,
+        checkpoint_schema_id: CheckpointSchemaId,
+        checkpoint_schema_version: RunProfileVersion,
+        capability_surface_profile_id: CapabilitySurfaceProfileId,
+    ) -> Self {
+        let mut definition = interactive_profile();
+        definition.profile_id = profile_id;
+        definition.profile_version = loop_driver.version;
+        definition.loop_driver = loop_driver;
+        definition.checkpoint_schema_id = checkpoint_schema_id;
+        definition.checkpoint_schema_version = checkpoint_schema_version;
+        definition.capability_surface_profile_id = capability_surface_profile_id;
+        definition
+    }
+
     fn resolve(&self, request: &RunProfileResolutionRequest) -> ResolvedRunProfile {
         let mut provenance = provenance_for(self, request);
         let resource_budget_policy = self.resolve_resource_budget_policy(request, &mut provenance);
