@@ -2,14 +2,30 @@ use std::sync::Arc;
 
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
+#[cfg(feature = "libsql")]
+use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::LocalFilesystem;
+#[cfg(feature = "postgres")]
+use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
 use ironclaw_processes::ProcessServices;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_reborn_event_store::RebornProfile;
 use ironclaw_resources::InMemoryResourceGovernor;
+#[cfg(feature = "libsql")]
+use ironclaw_resources::LibSqlResourceGovernorStore;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_resources::PersistentResourceGovernor;
+#[cfg(feature = "postgres")]
+use ironclaw_resources::PostgresResourceGovernorStore;
 use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
 use ironclaw_trust::HostTrustPolicy;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_turns::InMemoryRunProfileResolver;
+use ironclaw_trust::TrustPolicy;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_turns::TurnRunWakeNotifier;
 use ironclaw_turns::{DefaultTurnCoordinator, InMemoryTurnStateStore};
 
 use crate::input::RebornStorageInput;
@@ -228,15 +244,122 @@ fn production_wiring(
     })
 }
 
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn planned_run_profile_resolver() -> Result<Arc<InMemoryRunProfileResolver>, RebornBuildError> {
-    Ok(Arc::new(
-        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver().map_err(
-            |error| RebornBuildError::PlannedRunProfileResolver {
-                reason: error.to_string(),
-            },
-        )?,
+#[cfg(feature = "libsql")]
+pub(crate) async fn build_libsql_production_host_runtime_services<TPolicy, TWake>(
+    config: crate::LibSqlProductionSubstrateConfig<TPolicy, TWake>,
+) -> Result<crate::LibSqlProductionHostRuntimeServices, crate::RebornCompositionError>
+where
+    TPolicy: TrustPolicy + 'static,
+    TWake: TurnRunWakeNotifier + 'static,
+{
+    let secret_master_key = config
+        .secret_master_key
+        .ok_or(crate::RebornCompositionError::MissingSecretMasterKey)?;
+    let secret_store = crate::secret_store::build_libsql_secret_store(
+        Arc::clone(&config.database),
+        secret_master_key,
+    )
+    .await?;
+
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
+    filesystem.run_migrations().await?;
+
+    let process_services = ProcessServices::filesystem(Arc::clone(&filesystem));
+
+    let resource_store = LibSqlResourceGovernorStore::new(Arc::clone(&config.database));
+    resource_store.run_migrations().await?;
+    let governor = Arc::new(PersistentResourceGovernor::new(resource_store));
+
+    let capability_leases = Arc::new(ironclaw_authorization::LibSqlCapabilityLeaseStore::new(
+        Arc::clone(&config.database),
+    ));
+    capability_leases.run_migrations().await?;
+
+    let services = HostRuntimeServices::new(
+        Arc::new(ExtensionRegistry::new()),
+        filesystem,
+        governor,
+        Arc::new(GrantAuthorizer::new()),
+        process_services,
+        config.surface_version,
+    )
+    .with_trust_policy(config.trust_policy)
+    .with_capability_leases(capability_leases)
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
+    .with_run_profile_resolver(Arc::new(
+        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
     ))
+    .with_libsql_run_state_approval_store(Arc::clone(&config.database))
+    .await?
+    .with_libsql_turn_state_store(Arc::clone(&config.database))
+    .await?
+    .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
+    .await?;
+
+    let services = services.try_with_host_http_egress(PolicyNetworkHttpEgress::new(
+        ReqwestNetworkTransport::default(),
+    ))?;
+
+    Ok(services)
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) async fn build_postgres_production_host_runtime_services<TPolicy, TWake>(
+    config: crate::PostgresProductionSubstrateConfig<TPolicy, TWake>,
+) -> Result<crate::PostgresProductionHostRuntimeServices, crate::RebornCompositionError>
+where
+    TPolicy: TrustPolicy + 'static,
+    TWake: TurnRunWakeNotifier + 'static,
+{
+    let secret_master_key = config
+        .secret_master_key
+        .ok_or(crate::RebornCompositionError::MissingSecretMasterKey)?;
+    let secret_store =
+        crate::secret_store::build_postgres_secret_store(config.pool.clone(), secret_master_key)
+            .await?;
+
+    let filesystem = Arc::new(PostgresRootFilesystem::new(config.pool.clone()));
+    filesystem.run_migrations().await?;
+
+    let process_services = ProcessServices::filesystem(Arc::clone(&filesystem));
+
+    let resource_store = PostgresResourceGovernorStore::new(config.pool.clone());
+    resource_store.run_migrations().await?;
+    let governor = Arc::new(PersistentResourceGovernor::new(resource_store));
+
+    let capability_leases = Arc::new(ironclaw_authorization::PostgresCapabilityLeaseStore::new(
+        config.pool.clone(),
+    ));
+    capability_leases.run_migrations().await?;
+
+    let services = HostRuntimeServices::new(
+        Arc::new(ExtensionRegistry::new()),
+        filesystem,
+        governor,
+        Arc::new(GrantAuthorizer::new()),
+        process_services,
+        config.surface_version,
+    )
+    .with_trust_policy(config.trust_policy)
+    .with_capability_leases(capability_leases)
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
+    .with_run_profile_resolver(Arc::new(
+        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
+    ))
+    .with_postgres_run_state_approval_store(config.pool.clone())
+    .await?
+    .with_postgres_turn_state_store(config.pool.clone())
+    .await?
+    .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
+    .await?;
+
+    let services = services.try_with_host_http_egress(PolicyNetworkHttpEgress::new(
+        ReqwestNetworkTransport::default(),
+    ))?;
+
+    Ok(services)
 }
 
 #[cfg(feature = "libsql")]
@@ -249,44 +372,20 @@ async fn build_libsql_production(
     auth_token: Option<ironclaw_secrets::SecretMaterial>,
     secret_master_key: ironclaw_secrets::SecretMaterial,
 ) -> Result<RebornServices, RebornBuildError> {
-    use ironclaw_authorization::LibSqlCapabilityLeaseStore;
-    use ironclaw_filesystem::LibSqlRootFilesystem;
-
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&db)));
-    filesystem.run_migrations().await?;
-
-    let leases = Arc::new(LibSqlCapabilityLeaseStore::new(Arc::clone(&db)));
-    leases.run_migrations().await?;
-
-    let secret_store =
-        crate::secret_store::build_libsql_secret_store(Arc::clone(&db), secret_master_key).await?;
-
     let event_store = ironclaw_reborn_event_store::RebornEventStoreConfig::Libsql {
         path_or_url,
         auth_token,
     };
-
-    let services = HostRuntimeServices::new(
-        Arc::new(ExtensionRegistry::new()),
-        Arc::clone(&filesystem),
-        Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(GrantAuthorizer::new()),
-        ProcessServices::filesystem(Arc::clone(&filesystem)),
-        CapabilitySurfaceVersion::new("reborn-app-v1")?,
-    )
-    .with_trust_policy(production_wiring.trust_policy)
-    .with_capability_leases(leases)
-    .with_secret_store(secret_store)
-    .with_libsql_resource_governor(Arc::clone(&db))
-    .await?
-    .with_reborn_event_store_config(profile.to_event_store_profile(), event_store)
-    .await?
-    .with_libsql_run_state_approval_store(Arc::clone(&db))
-    .await?
-    .with_libsql_turn_state_store(db)
-    .await?
-    .with_run_profile_resolver(planned_run_profile_resolver()?)
-    .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
+    let services =
+        build_libsql_production_host_runtime_services(crate::LibSqlProductionSubstrateConfig {
+            database: Arc::clone(&db),
+            event_store,
+            secret_master_key: Some(secret_master_key),
+            trust_policy: production_wiring.trust_policy,
+            turn_run_wake_notifier: production_wiring.turn_run_wake_notifier,
+            surface_version: CapabilitySurfaceVersion::new("reborn-app-v1")?,
+        })
+        .await?;
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);
@@ -309,41 +408,17 @@ async fn build_postgres_production(
     url: ironclaw_secrets::SecretMaterial,
     secret_master_key: ironclaw_secrets::SecretMaterial,
 ) -> Result<RebornServices, RebornBuildError> {
-    use ironclaw_authorization::PostgresCapabilityLeaseStore;
-    use ironclaw_filesystem::PostgresRootFilesystem;
-
-    let filesystem = Arc::new(PostgresRootFilesystem::new(pool.clone()));
-    filesystem.run_migrations().await?;
-
-    let leases = Arc::new(PostgresCapabilityLeaseStore::new(pool.clone()));
-    leases.run_migrations().await?;
-
-    let secret_store =
-        crate::secret_store::build_postgres_secret_store(pool.clone(), secret_master_key).await?;
-
     let event_store = ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url };
-
-    let services = HostRuntimeServices::new(
-        Arc::new(ExtensionRegistry::new()),
-        Arc::clone(&filesystem),
-        Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(GrantAuthorizer::new()),
-        ProcessServices::filesystem(Arc::clone(&filesystem)),
-        CapabilitySurfaceVersion::new("reborn-app-v1")?,
-    )
-    .with_trust_policy(production_wiring.trust_policy)
-    .with_capability_leases(leases)
-    .with_secret_store(secret_store)
-    .with_postgres_resource_governor(pool.clone())
-    .await?
-    .with_reborn_event_store_config(profile.to_event_store_profile(), event_store)
-    .await?
-    .with_postgres_run_state_approval_store(pool.clone())
-    .await?
-    .with_postgres_turn_state_store(pool)
-    .await?
-    .with_run_profile_resolver(planned_run_profile_resolver()?)
-    .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
+    let services =
+        build_postgres_production_host_runtime_services(crate::PostgresProductionSubstrateConfig {
+            pool,
+            event_store,
+            secret_master_key: Some(secret_master_key),
+            trust_policy: production_wiring.trust_policy,
+            turn_run_wake_notifier: production_wiring.turn_run_wake_notifier,
+            surface_version: CapabilitySurfaceVersion::new("reborn-app-v1")?,
+        })
+        .await?;
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(services.turn_coordinator_for_production()?);

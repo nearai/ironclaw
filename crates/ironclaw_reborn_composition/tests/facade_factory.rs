@@ -336,7 +336,8 @@ async fn migration_dry_run_validates_libsql_shape() {
             test_master_key(),
         )
         .with_production_trust_policy(production_trust_policy())
-        .with_turn_run_wake_notifier(notifier),
+        .with_turn_run_wake_notifier(notifier)
+        .require_runtime_http_egress(),
     )
     .await
     .unwrap();
@@ -384,7 +385,8 @@ async fn migration_dry_run_validates_postgres_planned_turn_profile() {
             test_master_key(),
         )
         .with_production_trust_policy(production_trust_policy())
-        .with_turn_run_wake_notifier(notifier),
+        .with_turn_run_wake_notifier(notifier)
+        .require_runtime_http_egress(),
     )
     .await
     .unwrap();

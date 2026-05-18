@@ -41,3 +41,27 @@ impl From<ironclaw_host_runtime::ProductionWiringReport> for RebornBuildError {
         Self::ProductionWiring { report }
     }
 }
+
+impl From<crate::RebornCompositionError> for RebornBuildError {
+    fn from(error: crate::RebornCompositionError) -> Self {
+        match error {
+            crate::RebornCompositionError::MissingSecretMasterKey => Self::InvalidConfig {
+                reason: "reborn production composition requires explicit secret master key"
+                    .to_string(),
+            },
+            crate::RebornCompositionError::Filesystem(error) => Self::Filesystem(error),
+            crate::RebornCompositionError::Resource(error) => Self::Resource(error),
+            crate::RebornCompositionError::RunState(error) => Self::RunState(error),
+            crate::RebornCompositionError::CapabilityLease(error) => Self::CapabilityLease(error),
+            crate::RebornCompositionError::Secret(error) => Self::Secret(error),
+            crate::RebornCompositionError::EventStore(error) => Self::EventStore(error),
+            crate::RebornCompositionError::Turn(error) => Self::Turn(error),
+            crate::RebornCompositionError::RunProfile(error) => Self::PlannedRunProfileResolver {
+                reason: error.to_string(),
+            },
+            crate::RebornCompositionError::ProductionWiring { report } => {
+                Self::ProductionWiring { report }
+            }
+        }
+    }
+}

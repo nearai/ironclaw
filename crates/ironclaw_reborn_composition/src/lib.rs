@@ -118,10 +118,6 @@ pub fn reborn_runtime_readiness_snapshot() -> RebornRuntimeReadinessSnapshot {
 use std::sync::Arc;
 
 use ironclaw_authorization::CapabilityLeaseError;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_authorization::GrantAuthorizer;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_extensions::ExtensionRegistry;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
@@ -129,12 +125,10 @@ use ironclaw_filesystem::PostgresRootFilesystem;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
+use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_processes::{FilesystemProcessResultStore, FilesystemProcessStore, ProcessServices};
+use ironclaw_reborn_event_store::RebornEventStoreConfig;
 use ironclaw_reborn_event_store::RebornEventStoreError;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_reborn_event_store::{RebornEventStoreConfig, RebornProfile};
 #[cfg(feature = "libsql")]
 use ironclaw_resources::LibSqlResourceGovernorStore;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -219,6 +213,16 @@ pub enum RebornCompositionError {
     Turn(#[from] TurnError),
     #[error("reborn run-profile resolver substrate failed: {0}")]
     RunProfile(#[from] ironclaw_turns::run_profile::RunProfileRegistryError),
+    #[error("reborn production wiring failed")]
+    ProductionWiring {
+        report: ironclaw_host_runtime::ProductionWiringReport,
+    },
+}
+
+impl From<ironclaw_host_runtime::ProductionWiringReport> for RebornCompositionError {
+    fn from(report: ironclaw_host_runtime::ProductionWiringReport) -> Self {
+        Self::ProductionWiring { report }
+    }
 }
 
 /// Build production-wired host-runtime services over libSQL-backed substrates.
@@ -238,60 +242,7 @@ where
     TPolicy: TrustPolicy + 'static,
     TWake: TurnRunWakeNotifier + 'static,
 {
-    let secret_master_key = config
-        .secret_master_key
-        .ok_or(RebornCompositionError::MissingSecretMasterKey)?;
-    let secret_store =
-        secret_store::build_libsql_secret_store(Arc::clone(&config.database), secret_master_key)
-            .await?;
-
-    let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
-    filesystem.run_migrations().await?;
-
-    let process_services = ProcessServices::filesystem(Arc::clone(&filesystem));
-
-    let resource_store = LibSqlResourceGovernorStore::new(Arc::clone(&config.database));
-    resource_store.run_migrations().await?;
-    let governor = Arc::new(PersistentResourceGovernor::new(resource_store));
-
-    let capability_leases = Arc::new(ironclaw_authorization::LibSqlCapabilityLeaseStore::new(
-        Arc::clone(&config.database),
-    ));
-    capability_leases.run_migrations().await?;
-
-    let services = HostRuntimeServices::new(
-        Arc::new(ExtensionRegistry::new()),
-        filesystem,
-        governor,
-        Arc::new(GrantAuthorizer::new()),
-        process_services,
-        config.surface_version,
-    )
-    .with_trust_policy(config.trust_policy)
-    .with_capability_leases(capability_leases)
-    .with_secret_store(Arc::clone(&secret_store))
-    .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
-    .with_run_profile_resolver(Arc::new(
-        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
-    ))
-    .with_libsql_run_state_approval_store(Arc::clone(&config.database))
-    .await?
-    .with_libsql_turn_state_store(Arc::clone(&config.database))
-    .await?
-    .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
-    .await?;
-
-    // safety: `with_secret_store` is called unconditionally above on the same
-    // builder chain, so `try_with_host_http_egress` can only return a
-    // `Missing(SecretStore)` wiring report if the host-runtime builder API
-    // regresses; treat that as infallible here.
-    let services = services
-        .try_with_host_http_egress(PolicyNetworkHttpEgress::new(
-            ReqwestNetworkTransport::default(),
-        ))
-        .expect("secret_store wired above guarantees host HTTP egress is buildable"); // safety: see comment above
-
-    Ok(services)
+    factory::build_libsql_production_host_runtime_services(config).await
 }
 
 /// Build production-wired host-runtime services over PostgreSQL-backed substrates.
@@ -308,57 +259,5 @@ where
     TPolicy: TrustPolicy + 'static,
     TWake: TurnRunWakeNotifier + 'static,
 {
-    let secret_master_key = config
-        .secret_master_key
-        .ok_or(RebornCompositionError::MissingSecretMasterKey)?;
-    let secret_store =
-        secret_store::build_postgres_secret_store(config.pool.clone(), secret_master_key).await?;
-
-    let filesystem = Arc::new(PostgresRootFilesystem::new(config.pool.clone()));
-    filesystem.run_migrations().await?;
-
-    let process_services = ProcessServices::filesystem(Arc::clone(&filesystem));
-
-    let resource_store = PostgresResourceGovernorStore::new(config.pool.clone());
-    resource_store.run_migrations().await?;
-    let governor = Arc::new(PersistentResourceGovernor::new(resource_store));
-
-    let capability_leases = Arc::new(ironclaw_authorization::PostgresCapabilityLeaseStore::new(
-        config.pool.clone(),
-    ));
-    capability_leases.run_migrations().await?;
-
-    let services = HostRuntimeServices::new(
-        Arc::new(ExtensionRegistry::new()),
-        filesystem,
-        governor,
-        Arc::new(GrantAuthorizer::new()),
-        process_services,
-        config.surface_version,
-    )
-    .with_trust_policy(config.trust_policy)
-    .with_capability_leases(capability_leases)
-    .with_secret_store(Arc::clone(&secret_store))
-    .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
-    .with_run_profile_resolver(Arc::new(
-        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
-    ))
-    .with_postgres_run_state_approval_store(config.pool.clone())
-    .await?
-    .with_postgres_turn_state_store(config.pool.clone())
-    .await?
-    .with_reborn_event_store_config(RebornProfile::Production, config.event_store)
-    .await?;
-
-    // safety: `with_secret_store` is called unconditionally above on the same
-    // builder chain, so `try_with_host_http_egress` can only return a
-    // `Missing(SecretStore)` wiring report if the host-runtime builder API
-    // regresses; treat that as infallible here.
-    let services = services
-        .try_with_host_http_egress(PolicyNetworkHttpEgress::new(
-            ReqwestNetworkTransport::default(),
-        ))
-        .expect("secret_store wired above guarantees host HTTP egress is buildable"); // safety: see comment above
-
-    Ok(services)
+    factory::build_postgres_production_host_runtime_services(config).await
 }
