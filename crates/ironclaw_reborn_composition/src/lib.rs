@@ -10,8 +10,6 @@ mod factory;
 mod input;
 mod profile;
 mod readiness;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-mod tenant;
 
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
