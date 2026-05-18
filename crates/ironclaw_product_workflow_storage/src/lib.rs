@@ -1,10 +1,10 @@
-//! Durable [`IdempotencyLedger`] implementations.
+//! Durable product workflow [`IdempotencyLedger`] storage adapters.
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::{
-    ActionFingerprintKey, ActionPhase, IdempotencyDecision, ProductInboundAction,
-    ProductWorkflowError,
+use ironclaw_product_workflow::{
+    ActionFingerprintKey, ActionPhase, IdempotencyDecision, IdempotencyLedger,
+    ProductInboundAction, ProductWorkflowError,
 };
 
 const DEFAULT_IN_FLIGHT_LEASE: Duration = Duration::seconds(60);
@@ -34,7 +34,8 @@ fn transient(reason: impl Into<String>) -> ProductWorkflowError {
 }
 
 fn durable_error(operation: &'static str, error: impl std::fmt::Display) -> ProductWorkflowError {
-    transient(format!("idempotency ledger failed to {operation}: {error}"))
+    tracing::error!(%error, operation, "product workflow idempotency ledger backend failed");
+    transient(format!("idempotency ledger failed to {operation}"))
 }
 
 fn to_json(action: &ProductInboundAction) -> Result<String, ProductWorkflowError> {
@@ -74,12 +75,13 @@ mod libsql_impl {
     use libsql::params;
 
     use super::*;
-    use crate::IdempotencyLedger;
+    use tokio::sync::OnceCell;
 
     /// libSQL-backed product workflow idempotency ledger.
     pub struct RebornLibSqlIdempotencyLedger {
         db: Arc<libsql::Database>,
         in_flight_lease: Duration,
+        migrations: OnceCell<()>,
     }
 
     impl RebornLibSqlIdempotencyLedger {
@@ -91,10 +93,18 @@ mod libsql_impl {
             Self {
                 db,
                 in_flight_lease,
+                migrations: OnceCell::new(),
             }
         }
 
         pub async fn run_migrations(&self) -> Result<(), ProductWorkflowError> {
+            self.migrations
+                .get_or_try_init(|| async { self.run_migrations_uncached().await })
+                .await
+                .copied()
+        }
+
+        async fn run_migrations_uncached(&self) -> Result<(), ProductWorkflowError> {
             let conn = self.connect().await?;
             conn.execute_batch(SCHEMA)
                 .await
@@ -343,12 +353,13 @@ mod postgres_impl {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::IdempotencyLedger;
+    use tokio::sync::OnceCell;
 
     /// PostgreSQL-backed product workflow idempotency ledger.
     pub struct RebornPostgresIdempotencyLedger {
         pool: deadpool_postgres::Pool,
         in_flight_lease: Duration,
+        migrations: OnceCell<()>,
     }
 
     impl RebornPostgresIdempotencyLedger {
@@ -363,10 +374,18 @@ mod postgres_impl {
             Self {
                 pool,
                 in_flight_lease,
+                migrations: OnceCell::new(),
             }
         }
 
         pub async fn run_migrations(&self) -> Result<(), ProductWorkflowError> {
+            self.migrations
+                .get_or_try_init(|| async { self.run_migrations_uncached().await })
+                .await
+                .copied()
+        }
+
+        async fn run_migrations_uncached(&self) -> Result<(), ProductWorkflowError> {
             let client = self.client().await?;
             client
                 .batch_execute(SCHEMA)

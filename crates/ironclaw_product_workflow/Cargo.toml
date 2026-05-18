@@ -16,22 +16,17 @@ default = []
 # FakeIdempotencyLedger, etc.). Off by default so production binaries don't carry
 # the fake state machinery; downstream crates enable it from `[dev-dependencies]`.
 test-support = ["ironclaw_product_adapters/test-support"]
-libsql = ["dep:libsql"]
-postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
 
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-deadpool-postgres = { version = "0.14", optional = true }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
 ironclaw_threads = { path = "../ironclaw_threads", version = "0.1.0" }
 ironclaw_turns = { path = "../ironclaw_turns", version = "0.1.0" }
-libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio-postgres = { version = "0.7", optional = true }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 

@@ -1,0 +1,32 @@
+[package]
+name = "ironclaw_product_workflow_storage"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Durable storage adapters for IronClaw Reborn product workflow"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[features]
+default = []
+libsql = ["dep:libsql"]
+postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+deadpool-postgres = { version = "0.14", optional = true }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow", version = "0.1.0" }
+libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+serde_json = "1"
+tokio = { version = "1", features = ["sync"] }
+tokio-postgres = { version = "0.7", optional = true }
+tracing = "0.1"
+
+[dev-dependencies]
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
