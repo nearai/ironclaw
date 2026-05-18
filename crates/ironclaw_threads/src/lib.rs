@@ -21,14 +21,16 @@ pub use filesystem_service::FilesystemSessionThreadService;
 
 pub use contract::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextWindow,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextWindowRequest, MessageContent,
-    MessageKind, MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadRecord, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageRecord,
-    ThreadScope, UpdateAssistantDraftRequest,
+    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextMessages,
+    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadRecord, SummaryArtifact, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
 };
 pub use error::SessionThreadError;
 pub use identifiers::ThreadMessageId;
 pub use in_memory::InMemorySessionThreadService;
 pub use service::SessionThreadService;
-pub use tool_result_reference::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
+pub use tool_result_reference::{
+    ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+};
