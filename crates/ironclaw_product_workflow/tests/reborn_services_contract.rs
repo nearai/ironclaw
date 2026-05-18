@@ -10,10 +10,11 @@ use ironclaw_product_adapters::{
     ProtocolAuthFailure,
 };
 use ironclaw_product_workflow::{
-    RebornResolveGateResponse, RebornServices, RebornServicesApi, RebornServicesErrorCode,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    RebornGetRunStateRequest, RebornResolveGateResponse, RebornServices, RebornServicesApi,
+    RebornServicesErrorCode, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiResolveGateRequest,
+    WebUiSendMessageRequest,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -73,7 +74,9 @@ struct FakeTurnCoordinator {
     submissions: Mutex<Vec<SubmitTurnRequest>>,
     cancellations: Mutex<Vec<CancelRunRequest>>,
     resumptions: Mutex<Vec<ResumeTurnRequest>>,
+    run_state_requests: Mutex<Vec<GetRunStateRequest>>,
     submit_error: Mutex<Option<TurnError>>,
+    run_state_error: Mutex<Option<TurnError>>,
     parked_gate_ref: Mutex<Option<GateRef>>,
 }
 
@@ -81,6 +84,13 @@ impl FakeTurnCoordinator {
     fn with_submit_error(error: TurnError) -> Self {
         Self {
             submit_error: Mutex::new(Some(error)),
+            ..Self::default()
+        }
+    }
+
+    fn with_run_state_error(error: TurnError) -> Self {
+        Self {
+            run_state_error: Mutex::new(Some(error)),
             ..Self::default()
         }
     }
@@ -103,6 +113,10 @@ impl FakeTurnCoordinator {
 
     fn resumption_count(&self) -> usize {
         self.resumptions.lock().expect("lock").len()
+    }
+
+    fn run_state_request_count(&self) -> usize {
+        self.run_state_requests.lock().expect("lock").len()
     }
 
     fn last_resumption_source_binding_ref(&self) -> Option<String> {
@@ -160,11 +174,17 @@ impl TurnCoordinator for FakeTurnCoordinator {
     }
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        if let Some(error) = self.run_state_error.lock().expect("lock").take() {
+            return Err(error);
+        }
         let gate_ref = self.parked_gate_ref.lock().expect("lock").clone();
+        let scope = request.scope.clone();
+        let run_id = request.run_id;
+        self.run_state_requests.lock().expect("lock").push(request);
         Ok(TurnRunState {
-            scope: request.scope,
+            scope,
             turn_id: TurnId::new(),
-            run_id: request.run_id,
+            run_id,
             status: TurnStatus::Queued,
             accepted_message_ref: AcceptedMessageRef::new("msg:replayed").expect("valid ref"),
             source_binding_ref: SourceBindingRef::new("webui-src:replayed").expect("valid ref"),
@@ -837,6 +857,182 @@ async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
         coordinator.resumption_count(),
         0,
         "resume_turn must NOT be called for unsupported persistent approval"
+    );
+}
+
+#[tokio::test]
+async fn get_run_state_returns_stable_dto_without_m3_internal_fields() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    setup_owned_thread(&services, caller(), "thread-alpha").await;
+
+    let response = services
+        .get_run_state(
+            caller(),
+            RebornGetRunStateRequest {
+                thread_id: "thread-alpha".to_string(),
+                run_id: run_id_string(),
+            },
+        )
+        .await
+        .expect("get_run_state succeeds");
+
+    assert_eq!(response.run_id.as_uuid().to_string(), run_id_string());
+    assert_eq!(response.status, TurnStatus::Queued);
+    assert_eq!(response.event_cursor, EventCursor(17));
+    assert_eq!(response.accepted_message_ref.as_str(), "msg:replayed");
+    assert_eq!(response.resolved_run_profile_version, 1);
+    assert_eq!(
+        response.resolved_run_profile_id,
+        RunProfileId::default_profile().as_str()
+    );
+    assert!(response.gate_ref.is_none());
+    assert!(response.failure.is_none());
+    assert!(response.checkpoint_id.is_none());
+    assert_eq!(coordinator.run_state_request_count(), 1);
+
+    // Stable DTO must not surface M3-internal binding refs, model route, or
+    // raw turn scope to WebUI consumers.
+    let rendered = serde_json::to_string(&response).expect("json");
+    assert!(!rendered.contains("source_binding_ref"));
+    assert!(!rendered.contains("reply_target_binding_ref"));
+    assert!(!rendered.contains("resolved_model_route"));
+    assert!(!rendered.contains("webui-src:replayed"));
+    assert!(!rendered.contains("webui-reply:replayed"));
+    assert!(!rendered.contains("\"scope\""));
+}
+
+#[tokio::test]
+async fn get_run_state_rejects_invalid_thread_id() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+
+    let err = services
+        .get_run_state(
+            caller(),
+            RebornGetRunStateRequest {
+                thread_id: String::new(),
+                run_id: run_id_string(),
+            },
+        )
+        .await
+        .expect_err("blank thread_id must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(err.field.as_deref(), Some("thread_id"));
+    assert_eq!(
+        err.validation_code,
+        Some(WebUiInboundValidationCode::InvalidId)
+    );
+    // Errors must be sanitized — no internal type names leak through.
+    let rendered = serde_json::to_string(&err).expect("json");
+    assert!(!rendered.contains("TurnCoordinator"));
+    assert!(!rendered.contains("HostRuntime"));
+    assert_eq!(coordinator.run_state_request_count(), 0);
+}
+
+#[tokio::test]
+async fn get_run_state_rejects_non_uuid_run_id() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+
+    let err = services
+        .get_run_state(
+            caller(),
+            RebornGetRunStateRequest {
+                thread_id: "thread-alpha".to_string(),
+                run_id: "not-a-uuid".to_string(),
+            },
+        )
+        .await
+        .expect_err("non-uuid run_id must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.status_code, 400);
+    assert_eq!(err.field.as_deref(), Some("run_id"));
+    assert_eq!(
+        err.validation_code,
+        Some(WebUiInboundValidationCode::InvalidId)
+    );
+    assert_eq!(coordinator.run_state_request_count(), 0);
+}
+
+#[tokio::test]
+async fn get_run_state_maps_scope_not_found_to_not_found() {
+    let coordinator = Arc::new(FakeTurnCoordinator::with_run_state_error(
+        TurnError::ScopeNotFound,
+    ));
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    setup_owned_thread(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .get_run_state(
+            caller(),
+            RebornGetRunStateRequest {
+                thread_id: "thread-alpha".to_string(),
+                run_id: run_id_string(),
+            },
+        )
+        .await
+        .expect_err("missing run must surface NotFound");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+    assert!(!err.retryable);
+}
+
+// Regression: get_run_state must reject when the authenticated user does not
+// own the thread. TurnScope only carries (tenant, agent, project, thread_id),
+// so without this check any caller sharing an agent scope could read another
+// user's run state by guessing thread_id and run_id.
+#[tokio::test]
+async fn get_run_state_rejects_cross_user_access() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    );
+    let alice = caller();
+    setup_owned_thread(&services, alice.clone(), "thread-alice").await;
+
+    let bob = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("user-bob").expect("user"),
+        alice.agent_id.clone(),
+        alice.project_id.clone(),
+    );
+
+    let err = services
+        .get_run_state(
+            bob,
+            RebornGetRunStateRequest {
+                thread_id: "thread-alice".to_string(),
+                run_id: run_id_string(),
+            },
+        )
+        .await
+        .expect_err("cross-user run-state read must be rejected");
+
+    // 404 rather than 403 so the existence of Alice's thread is not leaked.
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+    assert_eq!(
+        coordinator.run_state_request_count(),
+        0,
+        "turn coordinator must NOT be called for cross-user run-state read"
     );
 }
 

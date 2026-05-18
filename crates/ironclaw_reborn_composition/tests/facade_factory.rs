@@ -1,35 +1,45 @@
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::sync::Arc;
 
-#[cfg(feature = "libsql")]
-use ironclaw_host_api::{EffectKind, PackageId};
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use chrono::Utc;
+#[cfg(feature = "postgres")]
+use deadpool_postgres::tokio_postgres;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_host_api::{AgentId, EffectKind, PackageId, ProjectId, TenantId, ThreadId, UserId};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
     TurnRunSchedulerConfig, TurnRunSchedulerHandle,
 };
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_reborn::planned_driver_factory::PLANNED_DEFAULT_PROFILE_ID;
+#[cfg(all(feature = "postgres", not(feature = "libsql")))]
+use ironclaw_reborn_composition::RebornCompositionProfile;
 #[cfg(feature = "libsql")]
 use ironclaw_reborn_composition::{RebornBuildError, RebornCompositionProfile};
 use ironclaw_reborn_composition::{RebornBuildInput, RebornReadinessState, build_reborn_services};
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_secrets::SecretMaterial;
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::{
-    InMemoryTurnStateStore,
+    AcceptedMessageRef, IdempotencyKey, InMemoryTurnStateStore, ReplyTargetBindingRef,
+    RunProfileRequest, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnScope,
     runner::{ClaimedTurnRun, TurnRunTransitionPort},
 };
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn test_master_key() -> SecretMaterial {
-    SecretMaterial::from("x".repeat(32))
+    SecretMaterial::from("01234567890123456789012345678901")
 }
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 struct NoopTurnRunExecutor;
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 #[async_trait::async_trait]
 impl TurnRunExecutor for NoopTurnRunExecutor {
     async fn execute_claimed_run(
@@ -41,7 +51,7 @@ impl TurnRunExecutor for NoopTurnRunExecutor {
     }
 }
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_trust_policy() -> Arc<HostTrustPolicy> {
     Arc::new(
         HostTrustPolicy::new(vec![Box::new(AdminConfig::with_entries([
@@ -61,7 +71,7 @@ fn empty_trust_policy() -> Arc<HostTrustPolicy> {
     Arc::new(HostTrustPolicy::empty())
 }
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 fn live_wake_notifier() -> (Arc<SchedulerTurnRunWakeNotifier>, TurnRunSchedulerHandle) {
     let transitions: Arc<dyn TurnRunTransitionPort> = Arc::new(InMemoryTurnStateStore::default());
     let executor: Arc<dyn TurnRunExecutor> = Arc::new(NoopTurnRunExecutor);
@@ -78,6 +88,97 @@ async fn libsql_db_at(path: impl AsRef<std::path::Path>) -> Arc<libsql::Database
             .await
             .unwrap(),
     )
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
+    SubmitTurnRequest {
+        scope: TurnScope::new(
+            TenantId::new("tenant1").unwrap(),
+            Some(AgentId::new("agent1").unwrap()),
+            Some(ProjectId::new("project1").unwrap()),
+            ThreadId::new(thread).unwrap(),
+        ),
+        actor: TurnActor::new(UserId::new("user1").unwrap()),
+        accepted_message_ref: AcceptedMessageRef::new(format!("message-{thread}")).unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-web").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web").unwrap(),
+        requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
+        idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
+        received_at: Utc::now(),
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn postgres_pool_or_skip() -> Option<(
+    testcontainers_modules::testcontainers::ContainerAsync<
+        testcontainers_modules::postgres::Postgres,
+    >,
+    deadpool_postgres::Pool,
+    String,
+)> {
+    let (container, database_url) = start_postgres_container().await?;
+    let config: tokio_postgres::Config = database_url
+        .parse()
+        .expect("testcontainer database URL must parse");
+    let manager = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
+    let pool = deadpool_postgres::Pool::builder(manager)
+        .max_size(4)
+        .build()
+        .expect("Postgres pool must build");
+    let _connection = pool
+        .get()
+        .await
+        .expect("Postgres testcontainer must accept connections");
+    Some((container, pool, database_url))
+}
+
+#[cfg(feature = "postgres")]
+async fn start_postgres_container() -> Option<(
+    testcontainers_modules::testcontainers::ContainerAsync<
+        testcontainers_modules::postgres::Postgres,
+    >,
+    String,
+)> {
+    use testcontainers_modules::testcontainers::{ImageExt, runners::AsyncRunner};
+
+    let image = testcontainers_modules::postgres::Postgres::default()
+        .with_db_name("ironclaw_test")
+        .with_user("postgres")
+        .with_password("postgres")
+        .with_tag("16-alpine");
+
+    let container = match image.start().await {
+        Ok(container) => container,
+        Err(error) => {
+            eprintln!(
+                "skipping Postgres composition tests: docker/testcontainers unavailable ({error})"
+            );
+            return None;
+        }
+    };
+    let host = match container.get_host().await {
+        Ok(host) => host,
+        Err(error) => {
+            eprintln!(
+                "skipping Postgres composition tests: could not resolve container host ({error})"
+            );
+            return None;
+        }
+    };
+    let port = match container.get_host_port_ipv4(5432).await {
+        Ok(port) => port,
+        Err(error) => {
+            eprintln!(
+                "skipping Postgres composition tests: could not resolve container port ({error})"
+            );
+            return None;
+        }
+    };
+    Some((
+        container,
+        format!("postgres://postgres:postgres@{host}:{port}/ironclaw_test"),
+    ))
 }
 
 #[tokio::test]
@@ -239,6 +340,70 @@ async fn migration_dry_run_validates_libsql_shape() {
     )
     .await
     .unwrap();
+
+    let response = services
+        .turn_coordinator
+        .as_ref()
+        .expect("migration dry-run must expose turn coordinator")
+        .submit_turn(submit_turn_request(
+            "thread-planned-profile",
+            "idem-planned-profile",
+        ))
+        .await
+        .unwrap();
+    let SubmitTurnResponse::Accepted {
+        resolved_run_profile_id,
+        ..
+    } = response;
+    assert_eq!(resolved_run_profile_id.as_str(), PLANNED_DEFAULT_PROFILE_ID);
+
+    handle.shutdown().await;
+
+    assert_eq!(
+        services.readiness.state,
+        RebornReadinessState::MigrationDryRunValidated
+    );
+    assert!(services.host_runtime.is_some());
+    assert!(services.turn_coordinator.is_some());
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn migration_dry_run_validates_postgres_planned_turn_profile() {
+    let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let (notifier, handle) = live_wake_notifier();
+
+    let services = build_reborn_services(
+        RebornBuildInput::postgres(
+            RebornCompositionProfile::MigrationDryRun,
+            "test-owner",
+            pool,
+            SecretMaterial::from(database_url),
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_turn_run_wake_notifier(notifier),
+    )
+    .await
+    .unwrap();
+
+    let response = services
+        .turn_coordinator
+        .as_ref()
+        .expect("migration dry-run must expose turn coordinator")
+        .submit_turn(submit_turn_request(
+            "thread-postgres-planned-profile",
+            "idem-postgres-planned-profile",
+        ))
+        .await
+        .unwrap();
+    let SubmitTurnResponse::Accepted {
+        resolved_run_profile_id,
+        ..
+    } = response;
+    assert_eq!(resolved_run_profile_id.as_str(), PLANNED_DEFAULT_PROFILE_ID);
 
     handle.shutdown().await;
 

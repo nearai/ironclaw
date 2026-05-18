@@ -10,10 +10,12 @@ use ironclaw_loop_support::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
     HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelRouteSnapshot,
 };
-use ironclaw_reborn::{
-    LlmModelProfilePolicy, LlmProviderModelGateway, ModelRoute, ModelRoutePolicy,
-    ModelSelectionMode, ModelSlot, RoutedLlmProviderModelGateway, StaticModelRouteProviderPool,
-    StaticModelRouteResolver, ThreadBackedLoopModelGateway,
+use ironclaw_reborn::model_gateway::{
+    LlmModelProfilePolicy, LlmProviderModelGateway, RoutedLlmProviderModelGateway,
+    StaticModelRouteProviderPool, ThreadBackedLoopModelGateway,
+};
+use ironclaw_reborn::model_routes::{
+    ModelRoute, ModelRoutePolicy, ModelSelectionMode, ModelSlot, StaticModelRouteResolver,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
@@ -588,7 +590,7 @@ async fn routed_gateway_uses_provider_pool_route_not_request_model_override() {
 async fn provider_pool_rejects_wrong_provider_identity_with_same_model() {
     let route = ModelRoute::new("rig-openai", "gpt-4.1").unwrap();
     let provider = Arc::new(RecordingLlmProvider::reply_for_model("gpt-4.1", "unused"));
-    let key = ironclaw_reborn::ModelRouteProviderKey::for_route(route);
+    let key = ironclaw_reborn::model_routes::ModelRouteProviderKey::for_route(route);
 
     let error =
         match StaticModelRouteProviderPool::new().with_provider_identity("nearai", key, provider) {

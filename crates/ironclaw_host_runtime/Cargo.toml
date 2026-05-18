@@ -11,6 +11,7 @@ libsql = ["dep:libsql", "ironclaw_filesystem/libsql", "ironclaw_resources/libsql
 
 [dependencies]
 async-trait = "0.1"
+base64 = "0.22.1"
 blake3 = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 chrono-tz = "0.10"

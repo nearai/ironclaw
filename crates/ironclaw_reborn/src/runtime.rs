@@ -22,7 +22,7 @@ use ironclaw_turns::{
 };
 
 use crate::{
-    build_loop_family_registry,
+    app_loop_family::build_loop_family_registry,
     driver_registry::{DriverRegistry, DriverRegistryError},
     loop_driver_host::{
         LoopCapabilityPortFactory, RebornLoopDriverHostFactory, TextOnlyLoopHostConfig,

@@ -198,7 +198,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::build_loop_family_registry;
+    use crate::app_loop_family::build_loop_family_registry;
 
     #[test]
     fn descriptor_carries_checkpoint_schema() {

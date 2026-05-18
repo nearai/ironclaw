@@ -35,9 +35,10 @@ mod types;
 
 pub use error::{RebornServicesError, RebornServicesErrorCode};
 pub use types::{
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornResolveGateResponse,
-    RebornResumeGateResponse, RebornStreamEventsRequest, RebornStreamEventsResponse,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse,
 };
 
 /// Stable WebUI-facing facade surface for beta Reborn routes.
@@ -78,6 +79,12 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: WebUiResolveGateRequest,
     ) -> Result<RebornResolveGateResponse, RebornServicesError>;
+
+    async fn get_run_state(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornGetRunStateRequest,
+    ) -> Result<RebornGetRunStateResponse, RebornServicesError>;
 }
 
 /// Default facade implementation composed at the WebUI boundary.
@@ -455,6 +462,28 @@ impl RebornServicesApi for RebornServices {
             }
         }
     }
+
+    async fn get_run_state(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: RebornGetRunStateRequest,
+    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
+        let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
+        let run_id = parse_run_id_field("run_id", request.run_id)?;
+        let scope = caller.turn_scope(thread_id);
+        let actor = caller.actor();
+        // TurnScope has no owner_user_id, so without this gate any caller
+        // sharing the (tenant, agent, project) scope could read another user's
+        // run state by guessing thread_id and run_id. Mirrors the ownership
+        // probe `cancel_run` and `resolve_gate` already perform.
+        assert_thread_owned_by(self.thread_service.as_ref(), &scope, &actor).await?;
+        let state = self
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest { scope, run_id })
+            .await
+            .map_err(map_turn_error)?;
+        Ok(state.into())
+    }
 }
 
 struct AcceptedWebUiMessage {
@@ -557,6 +586,20 @@ fn parse_thread_id_field(
             WebUiInboundValidationCode::InvalidId,
         ))
     })
+}
+
+fn parse_run_id_field(
+    field: &'static str,
+    value: String,
+) -> Result<TurnRunId, RebornServicesError> {
+    Uuid::parse_str(&value)
+        .map(TurnRunId::from_uuid)
+        .map_err(|_| {
+            RebornServicesError::validation(WebUiInboundValidationError::new(
+                field,
+                WebUiInboundValidationCode::InvalidId,
+            ))
+        })
 }
 
 fn accepted_message_ref(message_id: String) -> Result<AcceptedMessageRef, RebornServicesError> {

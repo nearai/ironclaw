@@ -8,6 +8,8 @@ use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
 use ironclaw_trust::HostTrustPolicy;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_turns::InMemoryRunProfileResolver;
 use ironclaw_turns::{DefaultTurnCoordinator, InMemoryTurnStateStore};
 
 use crate::input::RebornStorageInput;
@@ -226,6 +228,17 @@ fn production_wiring(
     })
 }
 
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn planned_run_profile_resolver() -> Result<Arc<InMemoryRunProfileResolver>, RebornBuildError> {
+    Ok(Arc::new(
+        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver().map_err(
+            |error| RebornBuildError::PlannedRunProfileResolver {
+                reason: error.to_string(),
+            },
+        )?,
+    ))
+}
+
 #[cfg(feature = "libsql")]
 async fn build_libsql_production(
     profile: RebornCompositionProfile,
@@ -281,6 +294,7 @@ async fn build_libsql_production(
     .await?
     .with_libsql_turn_state_store(db)
     .await?
+    .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
@@ -343,6 +357,7 @@ async fn build_postgres_production(
     .await?
     .with_postgres_turn_state_store(pool)
     .await?
+    .with_run_profile_resolver(planned_run_profile_resolver()?)
     .with_turn_run_wake_notifier(production_wiring.turn_run_wake_notifier);
 
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =

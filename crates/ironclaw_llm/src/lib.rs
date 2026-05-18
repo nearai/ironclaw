@@ -148,7 +148,7 @@ pub async fn create_llm_provider(
             provider: config.backend.clone(),
         })?;
 
-    create_registry_provider(reg_config, timeout)
+    create_registry_provider_inner(reg_config, timeout)
 }
 
 /// Create an LLM provider from a `NearAiConfig` directly.
@@ -182,9 +182,18 @@ pub fn create_llm_provider_with_config(
 /// Create a provider from a registry-resolved config.
 ///
 /// Dispatches on `RegistryProviderConfig::protocol` to build the appropriate
-/// rig-core client. This single function replaces what used to be 5 separate
-/// `create_*_provider` functions.
-fn create_registry_provider(
+/// rig-core client. Exposed only for composition roots that already own
+/// provider resolution and intentionally opt into the registry factory API;
+/// normal callers should use `create_llm_provider` / `build_provider_chain`.
+#[cfg(feature = "registry-provider-factory")]
+pub fn create_registry_provider(
+    config: &RegistryProviderConfig,
+    request_timeout_secs: u64,
+) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    create_registry_provider_inner(config, request_timeout_secs)
+}
+
+fn create_registry_provider_inner(
     config: &RegistryProviderConfig,
     request_timeout_secs: u64,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -772,7 +781,7 @@ fn create_cheap_provider_for_backend(
 
     let mut cheap_reg_config = reg_config.clone();
     cheap_reg_config.model = cheap_model.to_string();
-    let provider = create_registry_provider(&cheap_reg_config, config.request_timeout_secs)?;
+    let provider = create_registry_provider_inner(&cheap_reg_config, config.request_timeout_secs)?;
     Ok(Some(provider))
 }
 
