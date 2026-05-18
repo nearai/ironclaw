@@ -134,6 +134,12 @@ struct SurfaceSnapshot {
     provider_names: HashMap<String, CapabilityId>,
 }
 
+struct PreparedProviderToolCall {
+    surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion,
+    capability_id: CapabilityId,
+    provider_turn_id: String,
+}
+
 const MAX_IN_MEMORY_DISPATCH_RECORDS: usize = 128;
 const SENSITIVE_PROVIDER_TEXT_MARKERS: [&str; 18] = [
     "access token",
@@ -531,6 +537,49 @@ impl HostRuntimeLoopCapabilityPort {
         }
         Ok(())
     }
+
+    fn prepare_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<PreparedProviderToolCall, AgentLoopHostError> {
+        self.validate_visible_request_scope()?;
+        validate_provider_tool_call(tool_call)?;
+        let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call is missing a provider turn id",
+            )
+        })?;
+        let Some((version, snapshot)) = self.current_snapshot()? else {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::StaleSurface,
+                "capability surface is unavailable",
+            ));
+        };
+        let Some(capability_id) = snapshot.provider_names.get(&tool_call.name).cloned() else {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call is outside the visible capability surface",
+            ));
+        };
+        let Some(capability) = snapshot.capabilities.get(&capability_id) else {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::StaleSurface,
+                "capability surface snapshot is missing provider metadata",
+            ));
+        };
+        if !provider_schema_is_usable(&capability.parameters_schema) {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call was not advertised to the model",
+            ));
+        }
+        Ok(PreparedProviderToolCall {
+            surface_version: loop_surface_version(&version)?,
+            capability_id,
+            provider_turn_id,
+        })
+    }
 }
 
 #[async_trait]
@@ -563,55 +612,30 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         Ok(definitions)
     }
 
+    fn validate_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        self.prepare_provider_tool_call(tool_call).map(|_| ())
+    }
+
     async fn register_provider_tool_call(
         &self,
         tool_call: ProviderToolCall,
     ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
-        self.validate_visible_request_scope()?;
-        validate_provider_tool_call(&tool_call)?;
-        let provider_turn_id = tool_call.turn_id.clone().ok_or_else(|| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "provider tool call is missing a provider turn id",
-            )
-        })?;
-        let Some((version, snapshot)) = self.current_snapshot()? else {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::StaleSurface,
-                "capability surface is unavailable",
-            ));
-        };
-        let Some(capability_id) = snapshot.provider_names.get(&tool_call.name).cloned() else {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "provider tool call is outside the visible capability surface",
-            ));
-        };
-        let Some(capability) = snapshot.capabilities.get(&capability_id) else {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::StaleSurface,
-                "capability surface snapshot is missing provider metadata",
-            ));
-        };
-        if !provider_schema_is_usable(&capability.parameters_schema) {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "provider tool call was not advertised to the model",
-            ));
-        }
-        let surface_version = loop_surface_version(&version)?;
+        let prepared = self.prepare_provider_tool_call(&tool_call)?;
         let input_ref = self
             .input_resolver
             .register_provider_tool_call_input(&self.run_context, &tool_call)
             .await?;
         Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
-            surface_version,
-            capability_id,
+            surface_version: prepared.surface_version,
+            capability_id: prepared.capability_id,
             input_ref,
             provider_replay: Some(ProviderToolCallReplay {
                 provider_id: tool_call.provider_id,
                 provider_model_id: tool_call.provider_model_id,
-                provider_turn_id,
+                provider_turn_id: prepared.provider_turn_id,
                 provider_call_id: tool_call.id,
                 provider_tool_name: tool_call.name,
                 arguments: tool_call.arguments,

@@ -273,11 +273,6 @@ impl SessionThreadService for InMemorySessionThreadService {
         let mut state = self.state.lock().await;
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
         let provider_call = request.provider_call;
-        if let Some(provider_call) = &provider_call {
-            provider_call
-                .validate()
-                .map_err(SessionThreadError::Serialization)?;
-        }
         let envelope = ToolResultReferenceEnvelope::new(request.result_ref, request.safe_summary)
             .map_err(SessionThreadError::Serialization)?;
         if let Some(existing) = thread.messages.iter().find(|message| {
@@ -287,6 +282,11 @@ impl SessionThreadService for InMemorySessionThreadService {
                 && message.tool_result_ref.as_deref() == Some(envelope.result_ref.as_str())
         }) {
             return Ok(existing.clone());
+        }
+        if let Some(provider_call) = &provider_call {
+            provider_call
+                .validate()
+                .map_err(SessionThreadError::Serialization)?;
         }
         let content = serde_json::to_string(&envelope)
             .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;

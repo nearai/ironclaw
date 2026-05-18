@@ -788,7 +788,7 @@ impl CanonicalAgentLoopExecutor {
             {
                 RecoveryOutcome::SkipResult { recovery } => {
                     state.recovery_state = recovery;
-                    append_capability_error_ref(host, &call, &summary).await?;
+                    append_capability_error_ref(host, &mut state, &call, &summary).await?;
                     match self.checkpoint_and_exit_if_cancelled(host, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -800,7 +800,7 @@ impl CanonicalAgentLoopExecutor {
                     failure_kind,
                 } => {
                     state.recovery_state = recovery;
-                    append_capability_error_ref(host, &call, &summary).await?;
+                    append_capability_error_ref(host, &mut state, &call, &summary).await?;
                     match self.checkpoint_and_exit_if_cancelled(host, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -818,7 +818,7 @@ impl CanonicalAgentLoopExecutor {
                 } => {
                     if matches!(summary.class, CapabilityErrorClass::PolicyDenied) {
                         state.recovery_state = recovery;
-                        append_capability_error_ref(host, &call, &summary).await?;
+                        append_capability_error_ref(host, &mut state, &call, &summary).await?;
                         match self.checkpoint_and_exit_if_cancelled(host, state).await? {
                             CancelCheck::Continue(next) => state = *next,
                             CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -934,7 +934,7 @@ impl CanonicalAgentLoopExecutor {
             }
         }
 
-        append_capability_error_ref(host, &call, &summary).await?;
+        append_capability_error_ref(host, &mut state, &call, &summary).await?;
         let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
         Ok(BatchStep::Exit(failed_exit(
             host,
@@ -988,6 +988,7 @@ impl CanonicalAgentLoopExecutor {
                 state.gate_state = gate;
                 append_capability_safe_summary_ref(
                     host,
+                    &mut state,
                     &call,
                     gate_tool_result_summary(kind, "skipped"),
                 )
@@ -1002,6 +1003,7 @@ impl CanonicalAgentLoopExecutor {
                 state.gate_state = gate;
                 append_capability_safe_summary_ref(
                     host,
+                    &mut state,
                     &call,
                     gate_tool_result_summary(kind, "aborted"),
                 )
@@ -1024,12 +1026,13 @@ impl CanonicalAgentLoopExecutor {
     async fn fail_unsupported_process_wait(
         &self,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
-        state: LoopExecutionState,
+        mut state: LoopExecutionState,
         call: &CapabilityCallCandidate,
         _process_ref: &ironclaw_turns::run_profile::LoopProcessRef,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
         append_capability_safe_summary_ref(
             host,
+            &mut state,
             call,
             "capability process wait is not supported".to_string(),
         )
@@ -1701,27 +1704,32 @@ fn provider_tool_call_reference(
 
 async fn append_capability_error_ref(
     host: &(dyn AgentLoopDriverHost + Send + Sync),
+    state: &mut LoopExecutionState,
     call: &CapabilityCallCandidate,
     summary: &CapabilityErrorSummary,
 ) -> Result<(), AgentLoopExecutorError> {
-    append_capability_safe_summary_ref(host, call, summary.safe_summary.as_str().to_string()).await
+    append_capability_safe_summary_ref(host, state, call, summary.safe_summary.as_str().to_string())
+        .await
 }
 
 async fn append_capability_safe_summary_ref(
     host: &(dyn AgentLoopDriverHost + Send + Sync),
+    state: &mut LoopExecutionState,
     call: &CapabilityCallCandidate,
     safe_summary: String,
 ) -> Result<(), AgentLoopExecutorError> {
     if call.provider_replay.is_none() {
         return Ok(());
     }
+    let result_ref = synthetic_provider_error_result_ref(call)?;
     host.append_capability_result_ref(AppendCapabilityResultRef {
-        result_ref: synthetic_provider_error_result_ref(call)?,
+        result_ref: result_ref.clone(),
         safe_summary,
         provider_call: provider_tool_call_reference(call),
     })
     .await
     .map_err(capability_host_error)?;
+    state.result_refs.push(result_ref);
     Ok(())
 }
 
@@ -3359,8 +3367,8 @@ mod tests {
     #[tokio::test]
     async fn denied_provider_call_appends_failure_tool_result_for_replay() {
         let result_ref = LoopResultRef::new("result:provider-call").expect("valid");
-        let host = MockHost::new(vec![provider_two_calls_response()]).with_batch_outcomes(vec![
-            ironclaw_turns::run_profile::CapabilityBatchOutcome {
+        let host = MockHost::new(vec![provider_two_calls_response(), reply_response()])
+            .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
                 outcomes: vec![
                     CapabilityOutcome::Completed(CapabilityResultMessage {
                         result_ref: result_ref.clone(),
@@ -3374,12 +3382,11 @@ mod tests {
                     }),
                 ],
                 stopped_on_suspension: false,
-            },
-        ]);
+            }]);
         let executor = CanonicalAgentLoopExecutor;
         let state = LoopExecutionState::initial_for_run(host.run_context());
 
-        executor
+        let exit = executor
             .execute_family(&crate::families::default(), &host, state)
             .await
             .expect("execute");
@@ -3402,6 +3409,19 @@ mod tests {
         assert_eq!(denied_provider_call.provider_turn_id, "turn_1");
         assert_eq!(denied_provider_call.provider_call_id, "call_2");
         assert_eq!(denied_provider_call.provider_tool_name, "demo__echo");
+        match exit {
+            LoopExit::Completed(completed) => {
+                assert_eq!(
+                    completed.result_refs,
+                    vec![result_ref.clone(), appended[1].result_ref.clone()]
+                );
+            }
+            other => panic!("expected completed, got {other:?}"),
+        }
+        assert_eq!(
+            final_staged_state(&host).result_refs,
+            vec![result_ref, appended[1].result_ref.clone()]
+        );
     }
 
     #[tokio::test]

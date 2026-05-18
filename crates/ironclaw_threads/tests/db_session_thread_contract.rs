@@ -222,6 +222,18 @@ async fn durable_history_flow(service: &impl SessionThreadService, label: &str) 
         .await
         .unwrap();
 
+    let provider_call = ProviderToolCallReferenceEnvelope {
+        provider_id: "test-provider".to_string(),
+        provider_model_id: "test-model".to_string(),
+        provider_turn_id: "turn_1".to_string(),
+        provider_call_id: "call_1".to_string(),
+        provider_tool_name: "demo__echo".to_string(),
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        arguments: serde_json::json!({"message":"hello"}),
+        response_reasoning: Some("provider response reasoning".to_string()),
+        reasoning: Some("provider call reasoning".to_string()),
+        signature: Some("sig-1".to_string()),
+    };
     let tool_result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
             scope: scope.clone(),
@@ -229,21 +241,12 @@ async fn durable_history_flow(service: &impl SessionThreadService, label: &str) 
             turn_run_id: "run-1".into(),
             result_ref: "result:durable-demo".into(),
             safe_summary: ToolResultSafeSummary::new("safe durable tool result").unwrap(),
-            provider_call: Some(ProviderToolCallReferenceEnvelope {
-                provider_id: "test-provider".to_string(),
-                provider_model_id: "test-model".to_string(),
-                provider_turn_id: "turn_1".to_string(),
-                provider_call_id: "call_1".to_string(),
-                provider_tool_name: "demo__echo".to_string(),
-                capability_id: CapabilityId::new("demo.echo").unwrap(),
-                arguments: serde_json::json!({"message":"hello"}),
-                response_reasoning: Some("provider response reasoning".to_string()),
-                reasoning: Some("provider call reasoning".to_string()),
-                signature: Some("sig-1".to_string()),
-            }),
+            provider_call: Some(provider_call.clone()),
         })
         .await
         .unwrap();
+    let mut invalid_provider_call = provider_call;
+    invalid_provider_call.provider_id.clear();
     let duplicate_tool_result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
             scope: scope.clone(),
@@ -252,7 +255,7 @@ async fn durable_history_flow(service: &impl SessionThreadService, label: &str) 
             result_ref: "result:durable-demo".into(),
             safe_summary: ToolResultSafeSummary::new("retry safe durable tool result ignored")
                 .unwrap(),
-            provider_call: None,
+            provider_call: Some(invalid_provider_call),
         })
         .await
         .unwrap();

@@ -160,6 +160,13 @@ impl LoopCapabilityPort for SurfaceTrackingLoopCapabilityPort {
         self.inner.tool_definitions()
     }
 
+    fn validate_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        self.inner.validate_provider_tool_call(tool_call)
+    }
+
     async fn register_provider_tool_call(
         &self,
         tool_call: ProviderToolCall,
@@ -719,6 +726,13 @@ impl LoopModelPort for RebornLoopDriverHost {
 impl LoopCapabilityPort for RebornLoopDriverHost {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         self.capabilities.tool_definitions()
+    }
+
+    fn validate_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        self.capabilities.validate_provider_tool_call(tool_call)
     }
 
     async fn register_provider_tool_call(

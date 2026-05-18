@@ -53,6 +53,30 @@ impl LoopCapabilityPort for CapabilitySurfaceVisibleFilter {
         Ok(definitions)
     }
 
+    fn validate_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        let Some(definition) = self
+            .inner
+            .tool_definitions()?
+            .into_iter()
+            .find(|definition| definition.name == tool_call.name)
+        else {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call is outside the visible capability surface",
+            ));
+        };
+        if !self.permits(&definition.capability_id) {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "provider tool call is outside the model-visible capability view",
+            ));
+        }
+        self.inner.validate_provider_tool_call(tool_call)
+    }
+
     async fn register_provider_tool_call(
         &self,
         tool_call: ProviderToolCall,
@@ -126,6 +150,32 @@ impl LoopCapabilityPort for CapabilitySurfaceProfileFilter {
         let mut definitions = self.inner.tool_definitions()?;
         definitions.retain(|definition| self.allow_set.permits(&definition.capability_id));
         Ok(definitions)
+    }
+
+    fn validate_provider_tool_call(
+        &self,
+        tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        if !matches!(self.allow_set.as_ref(), CapabilityAllowSet::All) {
+            let Some(definition) = self
+                .inner
+                .tool_definitions()?
+                .into_iter()
+                .find(|definition| definition.name == tool_call.name)
+            else {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "provider tool call is outside the visible capability surface",
+                ));
+            };
+            if !self.allow_set.permits(&definition.capability_id) {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "provider tool call is outside the run-profile surface",
+                ));
+            }
+        }
+        self.inner.validate_provider_tool_call(tool_call)
     }
 
     async fn register_provider_tool_call(

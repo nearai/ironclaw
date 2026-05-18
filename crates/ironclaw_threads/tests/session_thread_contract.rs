@@ -23,6 +23,21 @@ fn user_message(text: &str) -> MessageContent {
     MessageContent::text(text)
 }
 
+fn provider_call_reference() -> ProviderToolCallReferenceEnvelope {
+    ProviderToolCallReferenceEnvelope {
+        provider_id: "test-provider".to_string(),
+        provider_model_id: "test-model".to_string(),
+        provider_turn_id: "turn_1".to_string(),
+        provider_call_id: "call_1".to_string(),
+        provider_tool_name: "demo__echo".to_string(),
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        arguments: serde_json::json!({"message":"hello"}),
+        response_reasoning: Some("provider response reasoning".to_string()),
+        reasoning: Some("provider call reasoning".to_string()),
+        signature: Some("sig-1".to_string()),
+    }
+}
+
 fn same_tenant_scope(agent_label: &str) -> ThreadScope {
     ThreadScope {
         tenant_id: TenantId::new("tenant-shared").unwrap(),
@@ -84,6 +99,54 @@ async fn append_tool_result_reference_is_finalized_and_idempotent_per_run_result
         .await
         .unwrap();
     assert_eq!(history.messages.len(), 1);
+}
+
+#[tokio::test]
+async fn duplicate_tool_result_reference_returns_existing_before_validating_provider_metadata() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("tool-result-idempotent-provider");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-tool-result-idempotent-provider").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let first = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:demo-provider".into(),
+            safe_summary: ToolResultSafeSummary::new("safe tool result").unwrap(),
+            provider_call: Some(provider_call_reference()),
+        })
+        .await
+        .unwrap();
+
+    let mut invalid_provider_call = provider_call_reference();
+    invalid_provider_call.provider_id.clear();
+    let duplicate = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope,
+            thread_id: thread.thread_id,
+            turn_run_id: "run-1".into(),
+            result_ref: "result:demo-provider".into(),
+            safe_summary: ToolResultSafeSummary::new("retry content ignored").unwrap(),
+            provider_call: Some(invalid_provider_call),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first.message_id, duplicate.message_id);
+    assert_eq!(
+        duplicate.tool_result_ref.as_deref(),
+        Some("result:demo-provider")
+    );
 }
 
 #[tokio::test]

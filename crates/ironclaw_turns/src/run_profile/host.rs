@@ -1453,6 +1453,13 @@ pub trait LoopCapabilityPort: Send + Sync {
         Ok(Vec::new())
     }
 
+    fn validate_provider_tool_call(
+        &self,
+        _tool_call: &ProviderToolCall,
+    ) -> Result<(), AgentLoopHostError> {
+        Ok(())
+    }
+
     async fn register_provider_tool_call(
         &self,
         _tool_call: ProviderToolCall,

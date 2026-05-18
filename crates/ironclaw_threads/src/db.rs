@@ -764,11 +764,6 @@ impl DurableState {
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let thread = get_thread_mut(self, &request.scope, &request.thread_id)?;
         let provider_call = request.provider_call;
-        if let Some(provider_call) = &provider_call {
-            provider_call
-                .validate()
-                .map_err(SessionThreadError::Serialization)?;
-        }
         let envelope = ToolResultReferenceEnvelope::new(request.result_ref, request.safe_summary)
             .map_err(SessionThreadError::Serialization)?;
         if let Some(existing) = thread.messages.iter().find(|message| {
@@ -778,6 +773,11 @@ impl DurableState {
                 && message.tool_result_ref.as_deref() == Some(envelope.result_ref.as_str())
         }) {
             return Ok(existing.clone());
+        }
+        if let Some(provider_call) = &provider_call {
+            provider_call
+                .validate()
+                .map_err(SessionThreadError::Serialization)?;
         }
         let content = to_json(&envelope)?;
         let message = ThreadMessageRecord {

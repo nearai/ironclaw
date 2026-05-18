@@ -799,13 +799,24 @@ async fn tool_response_to_host(
         }
         let mut candidates = Vec::with_capacity(response.tool_calls.len());
         let provider_turn_id = provider_turn_id(provider_turn_scope, &response.tool_calls);
-        for tool_call in response.tool_calls {
-            let provider_call = provider_tool_call_from_llm(
-                tool_call,
-                response.reasoning.clone(),
-                provider_turn_id.clone(),
-                replay_identity,
-            );
+        let provider_calls = response
+            .tool_calls
+            .into_iter()
+            .map(|tool_call| {
+                provider_tool_call_from_llm(
+                    tool_call,
+                    response.reasoning.clone(),
+                    provider_turn_id.clone(),
+                    replay_identity,
+                )
+            })
+            .collect::<Vec<_>>();
+        for provider_call in &provider_calls {
+            capabilities
+                .validate_provider_tool_call(provider_call)
+                .map_err(map_capability_host_error)?;
+        }
+        for provider_call in provider_calls {
             let candidate = capabilities
                 .register_provider_tool_call(provider_call)
                 .await
@@ -957,13 +968,16 @@ fn convert_messages(
                 validate_provider_replay_identity(&provider_call, replay_identity)?;
                 let provider_turn_id = provider_call.provider_turn_id.clone();
                 let mut provider_results = vec![(provider_call, replay.safe_summary)];
+                let mut plain_tool_summaries = Vec::new();
                 index += 1;
                 while index < messages.len()
                     && messages[index].role == HostManagedModelMessageRole::ToolResult
                 {
                     let next = tool_result_replay_message(&messages[index])?;
                     let Some(next_provider_call) = next.provider_call else {
-                        break;
+                        plain_tool_summaries.push(next.safe_summary);
+                        index += 1;
+                        continue;
                     };
                     validate_provider_replay_identity(&next_provider_call, replay_identity)?;
                     if next_provider_call.provider_turn_id != provider_turn_id {
@@ -973,6 +987,7 @@ fn convert_messages(
                     index += 1;
                 }
                 converted.extend(provider_tool_roundtrip_messages(provider_results));
+                converted.extend(plain_tool_summaries.into_iter().map(ChatMessage::system));
                 continue;
             }
         }
