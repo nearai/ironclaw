@@ -5,7 +5,7 @@
 //! that contract to the shared `ironclaw_llm` provider abstraction.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -205,7 +205,12 @@ impl<P> LlmProviderModelGateway<P>
 where
     P: LlmProvider + ?Sized,
 {
-    pub fn new(
+    pub fn new(provider: Arc<P>, policy: LlmModelProfilePolicy) -> Self {
+        let provider_id = provider.model_name().to_string();
+        Self::with_provider_identity(provider_id, provider, policy)
+    }
+
+    pub fn with_provider_identity(
         provider_id: impl Into<String>,
         provider: Arc<P>,
         policy: LlmModelProfilePolicy,
@@ -776,6 +781,22 @@ async fn tool_response_to_host(
             FinishReason::ToolUse | FinishReason::Stop
         )
     {
+        let advertised_tool_names = capabilities
+            .tool_definitions()
+            .map_err(map_capability_host_error)?
+            .into_iter()
+            .map(|definition| definition.name)
+            .collect::<HashSet<_>>();
+        if response
+            .tool_calls
+            .iter()
+            .any(|tool_call| !advertised_tool_names.contains(&tool_call.name))
+        {
+            return Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::InvalidRequest,
+                "model returned a tool call outside the advertised capability surface",
+            ));
+        }
         let mut candidates = Vec::with_capacity(response.tool_calls.len());
         let provider_turn_id = provider_turn_id(provider_turn_scope, &response.tool_calls);
         for tool_call in response.tool_calls {
@@ -964,6 +985,12 @@ fn validate_provider_replay_identity(
     provider_call: &ProviderToolCallReferenceEnvelope,
     expected: &ProviderReplayIdentity,
 ) -> Result<(), HostManagedModelError> {
+    provider_call.validate().map_err(|_| {
+        HostManagedModelError::safe(
+            HostManagedModelErrorKind::InvalidRequest,
+            "provider tool-call replay metadata is invalid",
+        )
+    })?;
     if provider_call.provider_id != expected.provider_id
         || provider_call.provider_model_id != expected.provider_model_id
     {

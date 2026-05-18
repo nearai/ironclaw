@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use ironclaw_host_api::ThreadId;
@@ -551,10 +554,11 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
         .iter()
         .filter(|summary| {
             summary.model_context_policy.as_deref() == Some("replace_range_when_selected")
+                && !summary_covers_hidden_content(thread, summary)
         })
         .collect::<Vec<_>>();
     let mut skip_through = 0;
-    let mut emitted_summaries = Vec::new();
+    let mut emitted_summaries = HashSet::new();
     let mut context = Vec::new();
     for message in thread
         .messages
@@ -568,7 +572,6 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
             summary.start_sequence <= message.sequence
                 && message.sequence <= summary.end_sequence
                 && !emitted_summaries.contains(&summary.summary_id)
-                && !summary_covers_hidden_content(thread, summary)
         }) {
             context.push(ContextMessage {
                 message_id: None,
@@ -578,7 +581,7 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
                 tool_result_provider_call: None,
                 content: summary.content.clone(),
             });
-            emitted_summaries.push(summary.summary_id);
+            emitted_summaries.insert(summary.summary_id);
             skip_through = summary.end_sequence;
             continue;
         }
@@ -600,12 +603,16 @@ fn context_messages_by_id(
     thread: &StoredThread,
     message_ids: &[ThreadMessageId],
 ) -> Vec<ContextMessage> {
+    let visible_messages = thread
+        .messages
+        .iter()
+        .filter(|message| is_model_visible(message.status))
+        .map(|message| (message.message_id, message))
+        .collect::<HashMap<_, _>>();
     message_ids
         .iter()
         .filter_map(|message_id| {
-            let message = thread.messages.iter().find(|message| {
-                message.message_id == *message_id && is_model_visible(message.status)
-            })?;
+            let message = visible_messages.get(message_id)?;
             Some(ContextMessage {
                 message_id: Some(message.message_id),
                 summary_id: None,
@@ -641,10 +648,21 @@ fn history_messages(thread: &StoredThread) -> Vec<ThreadMessageRecord> {
     thread
         .messages
         .iter()
-        .cloned()
-        .map(|mut message| {
-            message.tool_result_provider_call = None;
-            message
+        .map(|message| ThreadMessageRecord {
+            message_id: message.message_id,
+            thread_id: message.thread_id.clone(),
+            sequence: message.sequence,
+            kind: message.kind,
+            status: message.status,
+            actor_id: message.actor_id.clone(),
+            source_binding_id: message.source_binding_id.clone(),
+            reply_target_binding_id: message.reply_target_binding_id.clone(),
+            turn_id: message.turn_id.clone(),
+            turn_run_id: message.turn_run_id.clone(),
+            tool_result_ref: message.tool_result_ref.clone(),
+            tool_result_provider_call: None,
+            content: message.content.clone(),
+            redaction_ref: message.redaction_ref.clone(),
         })
         .collect()
 }

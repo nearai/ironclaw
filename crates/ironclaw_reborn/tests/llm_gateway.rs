@@ -39,7 +39,11 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
     let provider = Arc::new(RecordingLlmProvider::reply("assistant response"));
     let policy = LlmModelProfilePolicy::new()
         .allow_model_profile(interactive_model(), Some("host-selected-model".to_string()));
-    let gateway = LlmProviderModelGateway::new(STATIC_PROVIDER_ID, provider.clone(), policy);
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        policy,
+    );
 
     let request = model_request(interactive_model());
     let expected_run_id = request.run_id.to_string();
@@ -77,7 +81,7 @@ async fn gateway_calls_llm_provider_for_allowed_model_profile() {
 #[tokio::test]
 async fn gateway_with_empty_tool_definitions_uses_plain_complete() {
     let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
@@ -107,7 +111,7 @@ async fn gateway_with_tool_surface_calls_complete_with_tools_and_returns_capabil
         reasoning: None,
         signature: Some("sig-1".to_string()),
     }]));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
@@ -165,6 +169,41 @@ async fn gateway_with_tool_surface_calls_complete_with_tools_and_returns_capabil
 }
 
 #[tokio::test]
+async fn gateway_rejects_unknown_provider_tool_call_before_registration() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(vec![
+        ToolCall {
+            id: "call_1".to_string(),
+            name: "demo__echo".to_string(),
+            arguments: serde_json::json!({"message":"one"}),
+            reasoning: None,
+            signature: None,
+        },
+        ToolCall {
+            id: "call_2".to_string(),
+            name: "hidden__tool".to_string(),
+            arguments: serde_json::json!({"message":"two"}),
+            reasoning: None,
+            signature: None,
+        },
+    ]));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let error = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
+    assert!(capabilities.registered.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn gateway_with_two_tool_calls_returns_two_candidates() {
     let provider = Arc::new(ToolAwareProvider::tool_calls(vec![
         ToolCall {
@@ -182,7 +221,7 @@ async fn gateway_with_two_tool_calls_returns_two_candidates() {
             signature: None,
         },
     ]));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider,
         LlmModelProfilePolicy::new()
@@ -218,7 +257,7 @@ async fn gateway_with_two_tool_calls_returns_two_candidates() {
 #[tokio::test]
 async fn gateway_reconstructs_provider_tool_roundtrip_from_tool_result_reference() {
     let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
@@ -279,7 +318,7 @@ async fn gateway_reconstructs_provider_tool_roundtrip_from_tool_result_reference
 #[tokio::test]
 async fn gateway_reconstructs_multi_tool_provider_turn_from_grouped_result_references() {
     let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
@@ -368,7 +407,7 @@ async fn gateway_reconstructs_multi_tool_provider_turn_from_grouped_result_refer
 #[tokio::test]
 async fn gateway_rejects_provider_tool_replay_from_different_provider_route() {
     let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
@@ -409,7 +448,7 @@ async fn gateway_rejects_provider_tool_replay_from_different_provider_route() {
 #[tokio::test]
 async fn gateway_rejects_unknown_model_profile_without_calling_provider() {
     let provider = Arc::new(RecordingLlmProvider::reply("unused"));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
@@ -428,7 +467,7 @@ async fn gateway_rejects_unknown_model_profile_without_calling_provider() {
 #[tokio::test]
 async fn gateway_rejects_unpinned_model_profile_without_calling_provider() {
     let provider = Arc::new(RecordingLlmProvider::reply("unused"));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new().allow_model_profile(interactive_model(), None),
@@ -449,7 +488,7 @@ async fn gateway_rejects_truncated_provider_responses() {
         "partial response",
         FinishReason::Length,
     ));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider,
         LlmModelProfilePolicy::new()
@@ -470,7 +509,7 @@ async fn gateway_rejects_content_filtered_provider_responses() {
         "filtered response",
         FinishReason::ContentFilter,
     ));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider,
         LlmModelProfilePolicy::new()
@@ -491,7 +530,7 @@ async fn gateway_rejects_tool_use_provider_responses() {
         "tool call requested",
         FinishReason::ToolUse,
     ));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider,
         LlmModelProfilePolicy::new()
@@ -512,7 +551,7 @@ async fn gateway_rejects_unknown_finish_reason_provider_responses() {
         "unknown completion",
         FinishReason::Unknown,
     ));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider,
         LlmModelProfilePolicy::new()
@@ -531,7 +570,7 @@ async fn gateway_rejects_unknown_finish_reason_provider_responses() {
 async fn production_loop_model_gateway_resolves_thread_refs_and_emits_milestones() {
     let fixture = ThreadFixture::new().await;
     let provider = Arc::new(RecordingLlmProvider::reply("production response"));
-    let provider_gateway = Arc::new(LlmProviderModelGateway::new(
+    let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
@@ -593,7 +632,7 @@ async fn production_loop_model_gateway_sanitizes_provider_output_before_public_c
     let provider = Arc::new(RecordingLlmProvider::reply(
         "RAW_CREDENTIAL_SENTINEL sk-production-secret",
     ));
-    let provider_gateway = Arc::new(LlmProviderModelGateway::new(
+    let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
@@ -655,7 +694,7 @@ async fn production_loop_model_gateway_maps_provider_auth_and_session_to_credent
     ] {
         let fixture = ThreadFixture::new().await;
         let provider = Arc::new(RecordingLlmProvider::fail(provider_error));
-        let provider_gateway = Arc::new(LlmProviderModelGateway::new(
+        let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
             STATIC_PROVIDER_ID,
             provider.clone(),
             LlmModelProfilePolicy::new()
@@ -704,7 +743,7 @@ async fn production_loop_model_gateway_maps_provider_auth_and_session_to_credent
 async fn production_loop_model_gateway_fails_closed_before_provider_call() {
     let fixture = ThreadFixture::new().await;
     let provider = Arc::new(RecordingLlmProvider::reply("unused"));
-    let provider_gateway = Arc::new(LlmProviderModelGateway::new(
+    let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
@@ -751,7 +790,7 @@ async fn production_loop_model_gateway_fails_closed_before_provider_call() {
 async fn production_loop_model_gateway_rejects_forged_context_summary_before_provider_call() {
     let fixture = ThreadFixture::new().await;
     let provider = Arc::new(RecordingLlmProvider::reply("unused"));
-    let provider_gateway = Arc::new(LlmProviderModelGateway::new(
+    let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
@@ -798,7 +837,7 @@ async fn production_loop_model_gateway_rejects_forged_context_summary_before_pro
 async fn production_loop_model_gateway_rejects_unvalidated_surface_before_provider_call() {
     let fixture = ThreadFixture::new().await;
     let provider = Arc::new(RecordingLlmProvider::reply("unused"));
-    let provider_gateway = Arc::new(LlmProviderModelGateway::new(
+    let provider_gateway = Arc::new(LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider.clone(),
         LlmModelProfilePolicy::new()
@@ -882,7 +921,7 @@ async fn gateway_sanitizes_provider_errors() {
         provider: "raw-provider".to_string(),
         reason: "RAW_PROVIDER_SECRET".to_string(),
     }));
-    let gateway = LlmProviderModelGateway::new(
+    let gateway = LlmProviderModelGateway::with_provider_identity(
         STATIC_PROVIDER_ID,
         provider,
         LlmModelProfilePolicy::new()

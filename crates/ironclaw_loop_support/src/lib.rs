@@ -1063,7 +1063,7 @@ pub struct HostManagedModelMessage {
     pub role: HostManagedModelMessageRole,
     pub content: String,
     pub content_ref: LoopMessageRef,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing)]
     pub tool_result_provider_call: Option<ProviderToolCallReferenceEnvelope>,
 }
 

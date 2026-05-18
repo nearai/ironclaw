@@ -89,12 +89,7 @@ impl ProviderToolCallReferenceEnvelope {
         validate_provider_token(&self.provider_turn_id, "provider turn id", 512)?;
         validate_provider_token(&self.provider_call_id, "provider call id", 512)?;
         validate_provider_token(&self.provider_tool_name, "provider tool name", 256)?;
-        let arguments_len = serde_json::to_vec(&self.arguments)
-            .map_err(|error| format!("provider arguments are not serializable: {error}"))?
-            .len();
-        if arguments_len > 16 * 1024 {
-            return Err("provider tool arguments exceed 16384 bytes".to_string());
-        }
+        validate_provider_arguments(&self.arguments)?;
         validate_optional_provider_text(
             &self.response_reasoning,
             "provider response reasoning",
@@ -178,6 +173,55 @@ fn validate_provider_identity(value: &str, label: &str, max_len: usize) -> Resul
     Ok(())
 }
 
+fn validate_provider_arguments(arguments: &serde_json::Value) -> Result<(), String> {
+    let arguments_len = serde_json::to_vec(arguments)
+        .map_err(|error| format!("provider arguments are not serializable: {error}"))?
+        .len();
+    if arguments_len > 16 * 1024 {
+        return Err("provider tool arguments exceed 16384 bytes".to_string());
+    }
+    validate_provider_json_value(arguments, "provider arguments", 0)
+}
+
+fn validate_provider_json_value(
+    value: &serde_json::Value,
+    label: &str,
+    depth: usize,
+) -> Result<(), String> {
+    if depth > 16 {
+        return Err(format!("{label} exceed maximum nesting depth"));
+    }
+    match value {
+        serde_json::Value::String(text) => validate_provider_text_content(text, label),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                validate_provider_json_value(item, label, depth + 1)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(entries) => {
+            for (key, item) in entries {
+                validate_provider_json_key(key)?;
+                validate_provider_json_value(item, label, depth + 1)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            Ok(())
+        }
+    }
+}
+
+fn validate_provider_json_key(key: &str) -> Result<(), String> {
+    if key
+        .chars()
+        .any(|character| character == '\0' || character.is_control())
+    {
+        return Err("provider argument key must not contain NUL/control characters".to_string());
+    }
+    Ok(())
+}
+
 fn validate_optional_provider_text(
     value: &Option<String>,
     label: &str,
@@ -188,6 +232,30 @@ fn validate_optional_provider_text(
     };
     if value.len() > max_len {
         return Err(format!("{label} exceeds {max_len} bytes"));
+    }
+    validate_provider_text_content(value, label)
+}
+
+fn validate_provider_text_content(value: &str, label: &str) -> Result<(), String> {
+    if value
+        .chars()
+        .any(|character| character == '\0' || character.is_control())
+    {
+        return Err(format!("{label} must not contain NUL/control characters"));
+    }
+    let lower = value.to_ascii_lowercase();
+    for forbidden in SENSITIVE_SUMMARY_MARKERS {
+        if lower.contains(forbidden) {
+            return Err(format!(
+                "{label} must not contain sensitive marker `{forbidden}`"
+            ));
+        }
+    }
+    if lower
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+        .any(|token| token.starts_with("sk-"))
+    {
+        return Err(format!("{label} must not contain API-key-like tokens"));
     }
     Ok(())
 }
@@ -237,7 +305,11 @@ fn validate_tool_result_safe_summary(value: String) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ToolResultReferenceEnvelope, ToolResultSafeSummary};
+    use ironclaw_host_api::CapabilityId;
+
+    use super::{
+        ProviderToolCallReferenceEnvelope, ToolResultReferenceEnvelope, ToolResultSafeSummary,
+    };
 
     #[test]
     fn safe_summary_rejects_control_characters() {
@@ -278,5 +350,38 @@ mod tests {
         let too_long = format!("result:{}", "a".repeat(250));
 
         assert!(ToolResultReferenceEnvelope::new(too_long, summary).is_err());
+    }
+
+    #[test]
+    fn provider_reference_validation_rejects_sensitive_arguments_and_text() {
+        let mut envelope = provider_reference();
+        envelope.arguments = serde_json::json!({"api_key":"sk-live-secret"});
+        assert!(envelope.validate().is_err());
+
+        let mut envelope = provider_reference();
+        envelope.response_reasoning = Some("raw provider error included a stack trace".to_string());
+        assert!(envelope.validate().is_err());
+    }
+
+    #[test]
+    fn provider_reference_validation_accepts_safe_zero_arg_metadata() {
+        let mut envelope = provider_reference();
+        envelope.arguments = serde_json::json!({});
+        envelope.validate().expect("safe provider metadata");
+    }
+
+    fn provider_reference() -> ProviderToolCallReferenceEnvelope {
+        ProviderToolCallReferenceEnvelope {
+            provider_id: "provider".to_string(),
+            provider_model_id: "model".to_string(),
+            provider_turn_id: "turn_1".to_string(),
+            provider_call_id: "call_1".to_string(),
+            provider_tool_name: "demo__echo".to_string(),
+            capability_id: CapabilityId::new("demo.echo").expect("capability id"),
+            arguments: serde_json::json!({"message":"hello"}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }
     }
 }

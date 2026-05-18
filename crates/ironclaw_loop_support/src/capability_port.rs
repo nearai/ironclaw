@@ -135,6 +135,26 @@ struct SurfaceSnapshot {
 }
 
 const MAX_IN_MEMORY_DISPATCH_RECORDS: usize = 128;
+const SENSITIVE_PROVIDER_TEXT_MARKERS: [&str; 18] = [
+    "access token",
+    "api key",
+    "api_key",
+    "apikey",
+    "authorization:",
+    "bearer ",
+    "host path",
+    "invalid api key",
+    "invalid_api_key",
+    "password",
+    "passwd",
+    "provider error",
+    "raw runtime",
+    "secret",
+    "stack trace",
+    "tool input",
+    "tool_input",
+    "traceback",
+];
 
 #[derive(Clone)]
 enum DispatchRecord {
@@ -836,22 +856,16 @@ fn provider_tool_name(
 fn validate_provider_tool_call(tool_call: &ProviderToolCall) -> Result<(), AgentLoopHostError> {
     validate_provider_identity(&tool_call.provider_id, "provider id", 512)?;
     validate_provider_identity(&tool_call.provider_model_id, "provider model id", 512)?;
-    if let Some(turn_id) = tool_call.turn_id.as_deref() {
-        validate_provider_token(turn_id, "provider turn id", 512)?;
-    }
+    let turn_id = tool_call.turn_id.as_deref().ok_or_else(|| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "provider tool call is missing a provider turn id",
+        )
+    })?;
+    validate_provider_token(turn_id, "provider turn id", 512)?;
     validate_provider_token(&tool_call.id, "provider call id", 512)?;
     validate_provider_token(&tool_call.name, "provider tool name", 256)?;
-    let arguments_len = serde_json::to_vec(&tool_call.arguments)
-        .map_err(|error| {
-            AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
-        })?
-        .len();
-    if arguments_len > 16 * 1024 {
-        return Err(AgentLoopHostError::new(
-            AgentLoopHostErrorKind::InvalidInvocation,
-            "provider tool arguments exceed 16384 bytes",
-        ));
-    }
+    validate_provider_arguments(&tool_call.arguments)?;
     validate_optional_provider_text(
         &tool_call.response_reasoning,
         "provider response reasoning",
@@ -919,6 +933,66 @@ fn validate_provider_token(
     Ok(())
 }
 
+fn validate_provider_arguments(arguments: &serde_json::Value) -> Result<(), AgentLoopHostError> {
+    let arguments_len = serde_json::to_vec(arguments)
+        .map_err(|error| {
+            AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
+        })?
+        .len();
+    if arguments_len > 16 * 1024 {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "provider tool arguments exceed 16384 bytes",
+        ));
+    }
+    validate_provider_json_value(arguments, "provider arguments", 0)
+}
+
+fn validate_provider_json_value(
+    value: &serde_json::Value,
+    label: &'static str,
+    depth: usize,
+) -> Result<(), AgentLoopHostError> {
+    if depth > 16 {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            format!("{label} exceed maximum nesting depth"),
+        ));
+    }
+    match value {
+        serde_json::Value::String(text) => validate_provider_text_content(text, label),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                validate_provider_json_value(item, label, depth + 1)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(entries) => {
+            for (key, item) in entries {
+                validate_provider_json_key(key)?;
+                validate_provider_json_value(item, label, depth + 1)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            Ok(())
+        }
+    }
+}
+
+fn validate_provider_json_key(key: &str) -> Result<(), AgentLoopHostError> {
+    if key
+        .chars()
+        .any(|character| character == '\0' || character.is_control())
+    {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "provider argument key must not contain NUL/control characters",
+        ));
+    }
+    Ok(())
+}
+
 fn validate_optional_provider_text(
     value: &Option<String>,
     label: &'static str,
@@ -931,6 +1005,40 @@ fn validate_optional_provider_text(
         return Err(AgentLoopHostError::new(
             AgentLoopHostErrorKind::InvalidInvocation,
             format!("{label} exceeds {max_len} bytes"),
+        ));
+    }
+    validate_provider_text_content(value, label)
+}
+
+fn validate_provider_text_content(
+    value: &str,
+    label: &'static str,
+) -> Result<(), AgentLoopHostError> {
+    if value
+        .chars()
+        .any(|character| character == '\0' || character.is_control())
+    {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            format!("{label} must not contain NUL/control characters"),
+        ));
+    }
+    let lower = value.to_ascii_lowercase();
+    for forbidden in SENSITIVE_PROVIDER_TEXT_MARKERS {
+        if lower.contains(forbidden) {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                format!("{label} must not contain sensitive marker `{forbidden}`"),
+            ));
+        }
+    }
+    if lower
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+        .any(|token| token.starts_with("sk-"))
+    {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            format!("{label} must not contain API-key-like tokens"),
         ));
     }
     Ok(())
@@ -1401,6 +1509,40 @@ mod tests {
                 .chars()
                 .all(|character| character.is_ascii_hexdigit())
         );
+    }
+
+    #[test]
+    fn provider_tool_call_validation_requires_turn_id() {
+        let mut call = provider_tool_call();
+        call.turn_id = None;
+
+        let error = validate_provider_tool_call(&call).expect_err("missing turn id rejected");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn provider_tool_call_validation_rejects_sensitive_metadata() {
+        let mut call = provider_tool_call();
+        call.arguments = serde_json::json!({"password":"sk-live-secret"});
+        assert!(validate_provider_tool_call(&call).is_err());
+
+        let mut call = provider_tool_call();
+        call.reasoning = Some("provider error included traceback".to_string());
+        assert!(validate_provider_tool_call(&call).is_err());
+    }
+
+    fn provider_tool_call() -> ProviderToolCall {
+        ProviderToolCall {
+            provider_id: "provider".to_string(),
+            provider_model_id: "model".to_string(),
+            turn_id: Some("turn_1".to_string()),
+            id: "call_1".to_string(),
+            name: "demo__echo".to_string(),
+            arguments: serde_json::json!({"message":"hello"}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        }
     }
 
     #[tokio::test]
