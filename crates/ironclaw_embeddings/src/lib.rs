@@ -19,6 +19,7 @@ mod nearai;
 mod ollama;
 mod openai;
 mod provider;
+mod url_check;
 
 pub use bedrock::BedrockEmbeddingSetup;
 pub use cache::{CachedEmbeddingProvider, EmbeddingCacheConfig};

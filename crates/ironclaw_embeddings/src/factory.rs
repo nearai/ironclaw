@@ -10,6 +10,7 @@ use crate::nearai::NearAiEmbeddings;
 use crate::ollama::OllamaEmbeddings;
 use crate::openai::OpenAiEmbeddings;
 use crate::provider::EmbeddingProvider;
+use crate::url_check::check_base_url;
 
 /// Runtime wiring the factory needs that doesn't fit in [`EmbeddingsConfig`].
 ///
@@ -38,6 +39,10 @@ pub async fn create_provider(
 
     match config.provider.as_str() {
         "nearai" => {
+            if let Err(e) = check_base_url(&config.nearai_base_url, "nearai_base_url") {
+                tracing::warn!("Refusing to build NEAR AI embeddings: {e}");
+                return None;
+            }
             tracing::debug!(
                 "Embeddings enabled via NEAR AI (model: {}, dim: {})",
                 config.model,
@@ -87,6 +92,10 @@ pub async fn create_provider(
             }
         }
         "ollama" => {
+            if let Err(e) = check_base_url(&config.ollama_base_url, "ollama_base_url") {
+                tracing::warn!("Refusing to build Ollama embeddings: {e}");
+                return None;
+            }
             tracing::debug!(
                 "Embeddings enabled via Ollama (model: {}, url: {}, dim: {})",
                 config.model,
@@ -103,6 +112,10 @@ pub async fn create_provider(
                 let mut provider =
                     OpenAiEmbeddings::with_model(api_key, &config.model, config.dimension);
                 if let Some(ref base_url) = config.openai_base_url {
+                    if let Err(e) = check_base_url(base_url, "openai_base_url") {
+                        tracing::warn!("Refusing to build OpenAI embeddings: {e}");
+                        return None;
+                    }
                     tracing::debug!(
                         "Embeddings enabled via OpenAI (model: {}, base_url: {}, dim: {})",
                         config.model,
@@ -123,5 +136,94 @@ pub async fn create_provider(
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regression coverage for the public factory + config surface: anyone
+    //! that constructs `EmbeddingsConfig` directly and calls
+    //! `create_provider` must hit the baseline URL check before any HTTP
+    //! work happens. See PR #3739 review (P1).
+    use super::*;
+    use crate::config::EmbeddingsConfig;
+    use ironclaw_llm::{SessionConfig, SessionManager};
+    use secrecy::SecretString;
+
+    fn stub_deps() -> ProviderDeps {
+        ProviderDeps {
+            session: Arc::new(SessionManager::new(SessionConfig::default())),
+            bedrock_setup: None,
+        }
+    }
+
+    fn config_with_provider(provider: &str) -> EmbeddingsConfig {
+        EmbeddingsConfig {
+            enabled: true,
+            provider: provider.to_string(),
+            ..EmbeddingsConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_blocked_ollama_base_url() {
+        let cfg = EmbeddingsConfig {
+            ollama_base_url: "https://169.254.169.254".to_string(),
+            ..config_with_provider("ollama")
+        };
+        let provider = create_provider(&cfg, stub_deps()).await;
+        assert!(
+            provider.is_none(),
+            "Ollama provider must not be built with cloud-metadata IP"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_blocked_nearai_base_url() {
+        let cfg = EmbeddingsConfig {
+            nearai_base_url: "https://169.254.169.254".to_string(),
+            ..config_with_provider("nearai")
+        };
+        let provider = create_provider(&cfg, stub_deps()).await;
+        assert!(
+            provider.is_none(),
+            "NEAR AI provider must not be built with cloud-metadata IP"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_blocked_openai_base_url() {
+        let cfg = EmbeddingsConfig {
+            openai_api_key: Some(SecretString::from("sk-stub".to_string())),
+            openai_base_url: Some("https://169.254.169.254".to_string()),
+            ..config_with_provider("openai")
+        };
+        let provider = create_provider(&cfg, stub_deps()).await;
+        assert!(
+            provider.is_none(),
+            "OpenAI-compatible provider must not be built with cloud-metadata IP"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_non_http_scheme() {
+        let cfg = EmbeddingsConfig {
+            ollama_base_url: "file:///etc/passwd".to_string(),
+            ..config_with_provider("ollama")
+        };
+        assert!(create_provider(&cfg, stub_deps()).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn accepts_localhost_ollama() {
+        let cfg = EmbeddingsConfig {
+            ollama_base_url: "http://localhost:11434".to_string(),
+            ..config_with_provider("ollama")
+        };
+        let provider = create_provider(&cfg, stub_deps()).await;
+        assert!(
+            provider.is_some(),
+            "loopback Ollama is a legitimate operator endpoint"
+        );
     }
 }

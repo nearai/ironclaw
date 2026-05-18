@@ -411,12 +411,31 @@ fn check_workspace_dir() -> CheckResult {
 // ── Embeddings ──────────────────────────────────────────────
 
 fn check_embeddings(settings: &Settings) -> CheckResult {
+    // Resolve embeddings with a placeholder URL first so a disabled
+    // embeddings setup short-circuits to Skip even when the LLM config is
+    // broken. The placeholder is only used to populate `nearai_base_url`,
+    // which is consulted only when `provider == "nearai"` AND `enabled`.
+    // We re-resolve below with the real URL once we know we need it.
+    let placeholder_config = match crate::config::embeddings::resolve_embeddings_config(
+        settings,
+        "https://placeholder.invalid",
+    ) {
+        Ok(c) => c,
+        Err(e) => return CheckResult::Fail(format!("config error: {e}")),
+    };
+    if !placeholder_config.enabled {
+        return CheckResult::Skip("disabled (set EMBEDDING_ENABLED=true)".into());
+    }
+
     let nearai_base_url = match crate::config::llm::resolve(settings) {
         Ok(llm) => llm.nearai.base_url,
         Err(e) => return CheckResult::Fail(format!("could not resolve LLM config: {e}")),
     };
     match crate::config::embeddings::resolve_embeddings_config(settings, &nearai_base_url) {
         Ok(config) => {
+            // `enabled` was already checked above on `placeholder_config`,
+            // but the value is identical here — re-checking is cheap and
+            // keeps the rest of this function reading naturally.
             if !config.enabled {
                 return CheckResult::Skip("disabled (set EMBEDDING_ENABLED=true)".into());
             }
@@ -1068,6 +1087,42 @@ mod tests {
             }
             other => panic!(
                 "expected Skip for disabled embeddings, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    /// Regression: PR #3739 review (P2 #5). The doctor used to resolve LLM
+    /// config to extract `nearai.base_url` before consulting the
+    /// `enabled` flag — so a broken LLM env (e.g., public-HTTP NEAR AI
+    /// base URL that fails SSRF validation) reported the Embeddings
+    /// check as Fail even when embeddings were disabled.
+    #[test]
+    fn check_embeddings_disabled_skips_even_when_llm_config_invalid() {
+        let _guard = crate::config::helpers::lock_env();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::remove_var("EMBEDDING_ENABLED");
+            // Public-HTTP base URL — `validate_operator_base_url` in the
+            // LLM resolver rejects this. The doctor must not see the
+            // resulting error, because embeddings are disabled.
+            std::env::set_var("NEARAI_BASE_URL", "http://8.8.8.8/v1");
+        }
+        let settings = Settings::default();
+        let result = check_embeddings(&settings);
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("NEARAI_BASE_URL");
+        }
+        match result {
+            CheckResult::Skip(msg) => {
+                assert!(
+                    msg.contains("disabled"),
+                    "expected 'disabled' Skip even with broken LLM env, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Skip for disabled embeddings with broken LLM, got: {}",
                 format_result(&other)
             ),
         }

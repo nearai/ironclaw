@@ -21,6 +21,9 @@ pub enum EmbeddingError {
 
     #[error("Text too long: {length} > {max}")]
     TextTooLong { length: usize, max: usize },
+
+    #[error("Invalid provider URL '{url}': {reason}")]
+    InvalidUrl { url: String, reason: String },
 }
 
 impl From<reqwest::Error> for EmbeddingError {
@@ -38,7 +41,13 @@ pub trait EmbeddingProvider: Send + Sync {
     /// Get the model name.
     fn model_name(&self) -> &str;
 
-    /// Maximum input length in characters.
+    /// Maximum input length in **bytes** (matches `str::len()` semantics).
+    ///
+    /// Provider implementations enforce this against `text.len()`, which
+    /// counts UTF-8 bytes, not Unicode characters. Implementations document
+    /// the byte budget for their underlying model (typically derived from a
+    /// token limit; e.g. 8191 tokens ≈ 32_000 bytes for the OpenAI
+    /// embedding family).
     fn max_input_length(&self) -> usize;
 
     /// Generate an embedding for a single text.
