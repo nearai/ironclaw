@@ -440,6 +440,114 @@ async fn gateway_reconstructs_multi_tool_provider_turn_from_grouped_result_refer
 }
 
 #[tokio::test]
+async fn gateway_splits_adjacent_provider_tool_results_from_different_turns() {
+    let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider.clone(),
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let first_envelope = ToolResultReferenceEnvelope::new(
+        "result:first-tool",
+        ToolResultSafeSummary::new("first tool completed").unwrap(),
+    )
+    .unwrap();
+    let second_envelope = ToolResultReferenceEnvelope::new(
+        "result:second-tool",
+        ToolResultSafeSummary::new("second tool completed").unwrap(),
+    )
+    .unwrap();
+    let first_provider_call = ProviderToolCallReferenceEnvelope {
+        provider_id: STATIC_PROVIDER_ID.to_string(),
+        provider_model_id: "host-selected-model".to_string(),
+        provider_turn_id: "turn_1".to_string(),
+        provider_call_id: "call_1".to_string(),
+        provider_tool_name: "demo__echo".to_string(),
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        arguments: serde_json::json!({"message":"first"}),
+        response_reasoning: Some("first provider reasoning".to_string()),
+        reasoning: Some("first call reasoning".to_string()),
+        signature: Some("sig-1".to_string()),
+    };
+    let second_provider_call = ProviderToolCallReferenceEnvelope {
+        provider_id: STATIC_PROVIDER_ID.to_string(),
+        provider_model_id: "host-selected-model".to_string(),
+        provider_turn_id: "turn_2".to_string(),
+        provider_call_id: "call_2".to_string(),
+        provider_tool_name: "demo__echo".to_string(),
+        capability_id: CapabilityId::new("demo.echo").unwrap(),
+        arguments: serde_json::json!({"message":"second"}),
+        response_reasoning: Some("second provider reasoning".to_string()),
+        reasoning: Some("second call reasoning".to_string()),
+        signature: Some("sig-2".to_string()),
+    };
+    let mut request = model_request(interactive_model());
+    request.messages = vec![
+        HostManagedModelMessage {
+            role: HostManagedModelMessageRole::ToolResult,
+            content: serde_json::to_string(&first_envelope).unwrap(),
+            content_ref: LoopMessageRef::new("msg:33333333-3333-3333-3333-333333333333").unwrap(),
+            tool_result_provider_call: Some(first_provider_call),
+        },
+        HostManagedModelMessage {
+            role: HostManagedModelMessageRole::ToolResult,
+            content: serde_json::to_string(&second_envelope).unwrap(),
+            content_ref: LoopMessageRef::new("msg:44444444-4444-4444-4444-444444444444").unwrap(),
+            tool_result_provider_call: Some(second_provider_call),
+        },
+    ];
+
+    gateway.stream_model(request).await.unwrap();
+
+    let requests = provider.complete_requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].messages.len(), 4);
+
+    let first_assistant = &requests[0].messages[0];
+    assert_eq!(first_assistant.role, Role::Assistant);
+    assert_eq!(
+        first_assistant.reasoning.as_deref(),
+        Some("first provider reasoning")
+    );
+    let first_tool_calls = first_assistant
+        .tool_calls
+        .as_ref()
+        .expect("first assistant tool call");
+    assert_eq!(first_tool_calls.len(), 1);
+    assert_eq!(first_tool_calls[0].id, "call_1");
+    assert_eq!(
+        first_tool_calls[0].arguments,
+        serde_json::json!({"message":"first"})
+    );
+    let first_tool_result = &requests[0].messages[1];
+    assert_eq!(first_tool_result.role, Role::Tool);
+    assert_eq!(first_tool_result.tool_call_id.as_deref(), Some("call_1"));
+    assert_eq!(first_tool_result.content, "first tool completed");
+
+    let second_assistant = &requests[0].messages[2];
+    assert_eq!(second_assistant.role, Role::Assistant);
+    assert_eq!(
+        second_assistant.reasoning.as_deref(),
+        Some("second provider reasoning")
+    );
+    let second_tool_calls = second_assistant
+        .tool_calls
+        .as_ref()
+        .expect("second assistant tool call");
+    assert_eq!(second_tool_calls.len(), 1);
+    assert_eq!(second_tool_calls[0].id, "call_2");
+    assert_eq!(
+        second_tool_calls[0].arguments,
+        serde_json::json!({"message":"second"})
+    );
+    let second_tool_result = &requests[0].messages[3];
+    assert_eq!(second_tool_result.role, Role::Tool);
+    assert_eq!(second_tool_result.tool_call_id.as_deref(), Some("call_2"));
+    assert_eq!(second_tool_result.content, "second tool completed");
+}
+
+#[tokio::test]
 async fn gateway_keeps_same_turn_provider_roundtrip_when_plain_tool_result_is_interleaved() {
     let provider = Arc::new(ToolAwareProvider::plain_reply("assistant response"));
     let gateway = LlmProviderModelGateway::with_provider_identity(
@@ -673,6 +781,26 @@ async fn gateway_rejects_tool_use_provider_responses() {
         .unwrap_err();
 
     assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
+}
+
+#[tokio::test]
+async fn gateway_rejects_tool_use_without_tool_calls_on_capability_path() {
+    let provider = Arc::new(ToolAwareProvider::tool_calls(Vec::new()));
+    let gateway = LlmProviderModelGateway::with_provider_identity(
+        STATIC_PROVIDER_ID,
+        provider,
+        LlmModelProfilePolicy::new()
+            .allow_model_profile(interactive_model(), Some("host-selected-model".to_string())),
+    );
+    let capabilities = Arc::new(GatewayCapabilityPort::with_tool_surface());
+
+    let error = gateway
+        .stream_model_with_capabilities(model_request(interactive_model()), capabilities.clone())
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
+    assert!(capabilities.registered.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

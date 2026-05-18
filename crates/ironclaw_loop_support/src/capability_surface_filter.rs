@@ -584,6 +584,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tool_definitions_filters_provider_tools_to_allowlist() {
+        let inner = Arc::new(SpyPort::default());
+        *inner
+            .tool_definitions
+            .lock()
+            .expect("tool definitions lock") = vec![
+            provider_definition("demo.allowed", "demo__allowed"),
+            provider_definition("demo.denied", "demo__denied"),
+            provider_definition("demo.other_allowed", "demo__other_allowed"),
+        ];
+        let filter = CapabilitySurfaceProfileFilter::new(
+            inner,
+            Arc::new(CapabilityAllowSet::allowlist([
+                capability_id("demo.allowed"),
+                capability_id("demo.other_allowed"),
+            ])),
+        );
+
+        let definitions = filter.tool_definitions().expect("tool definitions");
+
+        assert_eq!(
+            definitions
+                .iter()
+                .map(|definition| (definition.capability_id.as_str(), definition.name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("demo.allowed", "demo__allowed"),
+                ("demo.other_allowed", "demo__other_allowed"),
+            ]
+        );
+    }
+
     #[tokio::test]
     async fn invoke_denied_when_not_in_allowlist() {
         let inner = Arc::new(SpyPort::default());

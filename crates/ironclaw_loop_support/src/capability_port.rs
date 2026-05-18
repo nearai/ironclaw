@@ -50,6 +50,72 @@ pub trait LoopCapabilityInputResolver: Send + Sync {
     }
 }
 
+struct ProviderToolCallInputResolver {
+    inner: Arc<dyn LoopCapabilityInputResolver>,
+    provider_inputs: Mutex<HashMap<String, serde_json::Value>>,
+}
+
+impl ProviderToolCallInputResolver {
+    fn new(inner: Arc<dyn LoopCapabilityInputResolver>) -> Self {
+        Self {
+            inner,
+            provider_inputs: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityInputResolver for ProviderToolCallInputResolver {
+    async fn resolve_capability_input(
+        &self,
+        run_context: &LoopRunContext,
+        input_ref: &CapabilityInputRef,
+    ) -> Result<serde_json::Value, AgentLoopHostError> {
+        if let Some(input) = self
+            .provider_inputs
+            .lock()
+            .map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Unavailable,
+                    "provider tool-call input store is unavailable",
+                )
+            })?
+            .get(input_ref.as_str())
+            .cloned()
+        {
+            return Ok(input);
+        }
+        self.inner
+            .resolve_capability_input(run_context, input_ref)
+            .await
+    }
+
+    async fn register_provider_tool_call_input(
+        &self,
+        run_context: &LoopRunContext,
+        tool_call: &ProviderToolCall,
+    ) -> Result<CapabilityInputRef, AgentLoopHostError> {
+        let input_ref = provider_tool_call_input_ref(run_context, tool_call)?;
+        let mut provider_inputs = self.provider_inputs.lock().map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "provider tool-call input store is unavailable",
+            )
+        })?;
+        if let Some(existing) = provider_inputs.get(input_ref.as_str()) {
+            if existing != &tool_call.arguments {
+                return Err(AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::Internal,
+                    "provider tool-call input ref collision",
+                ));
+            }
+        } else {
+            provider_inputs.insert(input_ref.as_str().to_string(), tool_call.arguments.clone());
+        }
+        Ok(input_ref)
+    }
+}
+
 #[async_trait]
 pub trait LoopCapabilityResultWriter: Send + Sync {
     async fn write_capability_result(
@@ -302,6 +368,8 @@ impl HostRuntimeLoopCapabilityPort {
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
     ) -> Self {
+        let input_resolver: Arc<dyn LoopCapabilityInputResolver> =
+            Arc::new(ProviderToolCallInputResolver::new(input_resolver));
         Self {
             runtime,
             run_context,
@@ -1280,6 +1348,39 @@ fn invocation_idempotency_key(
     .map_err(host_runtime_error)
 }
 
+fn provider_tool_call_input_ref(
+    run_context: &LoopRunContext,
+    tool_call: &ProviderToolCall,
+) -> Result<CapabilityInputRef, AgentLoopHostError> {
+    let turn_id = tool_call.turn_id.as_deref().ok_or_else(|| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "provider tool call is missing a provider turn id",
+        )
+    })?;
+    let arguments = serde_json::to_string(&tool_call.arguments).map_err(|error| {
+        AgentLoopHostError::new(AgentLoopHostErrorKind::InvalidInvocation, error.to_string())
+    })?;
+    let payload = format!(
+        "provider-tool-input\nrun={}\nprovider={}\nmodel={}\nturn={}\ncall={}\ntool={}\narguments={}",
+        run_context.run_id,
+        tool_call.provider_id,
+        tool_call.provider_model_id,
+        turn_id,
+        tool_call.id,
+        tool_call.name,
+        arguments
+    );
+    let digest = sha256_digest_token(payload.as_bytes());
+    let digest = digest.strip_prefix("sha256:").unwrap_or(&digest);
+    CapabilityInputRef::new(format!("input:provider-tool-{digest}")).map_err(|_| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            "provider tool-call input ref could not be represented",
+        )
+    })
+}
+
 fn loop_surface_version(
     version: &str,
 ) -> Result<ironclaw_turns::run_profile::CapabilitySurfaceVersion, AgentLoopHostError> {
@@ -1667,6 +1768,41 @@ mod tests {
             reasoning: None,
             signature: None,
         }
+    }
+
+    struct FallbackInputResolver;
+
+    #[async_trait]
+    impl LoopCapabilityInputResolver for FallbackInputResolver {
+        async fn resolve_capability_input(
+            &self,
+            _run_context: &LoopRunContext,
+            _input_ref: &CapabilityInputRef,
+        ) -> Result<serde_json::Value, AgentLoopHostError> {
+            Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "fallback input resolver should not be used",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_tool_call_input_resolver_stages_arguments() {
+        let run_context = loop_run_context(&execution_context("thread-provider-input")).await;
+        let resolver = ProviderToolCallInputResolver::new(Arc::new(FallbackInputResolver));
+        let call = provider_tool_call();
+
+        let input_ref = resolver
+            .register_provider_tool_call_input(&run_context, &call)
+            .await
+            .expect("provider input should stage");
+        let resolved = resolver
+            .resolve_capability_input(&run_context, &input_ref)
+            .await
+            .expect("provider input should resolve");
+
+        assert!(input_ref.as_str().starts_with("input:provider-tool-"));
+        assert_eq!(resolved, serde_json::json!({"message":"hello"}));
     }
 
     #[tokio::test]
