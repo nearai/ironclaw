@@ -157,8 +157,8 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     assert_workspace_deps_exactly(
         &dependencies,
         "ironclaw_reborn_cli",
-        ["ironclaw_reborn", "ironclaw_reborn_config"],
-        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn and ironclaw_reborn_config only; add explicit architectural justification before depending on other workspace crates",
+        ["ironclaw_reborn_composition", "ironclaw_reborn_config"],
+        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition and ironclaw_reborn_config only; the composition root is the assembled-runtime facade and the boot-config contract crate. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -391,6 +391,215 @@ fn reborn_loop_support_llm_wiring_stays_out_of_root_src() {
             && reborn_manifest.contains("default-features = false")
             && reborn_manifest.contains("root-llm-provider"),
         "ironclaw_reborn may reuse root LLM code only behind an explicit feature, without enabling the root app's default postgres/libsql/tui feature set"
+    );
+
+    // The composition root — the only crate that should pull `ironclaw_reborn`
+    // (and through it `ironclaw_llm`) for the assembled runtime — must mirror
+    // the same feature-gated discipline. Both `ironclaw_reborn` (transitive)
+    // and `ironclaw_llm` (direct) live behind a `root-llm-provider` feature
+    // on the composition crate, so a default build of composition stays
+    // substrate-only.
+    let composition_manifest =
+        std::fs::read_to_string(root.join("crates/ironclaw_reborn_composition/Cargo.toml"))
+            .expect("Reborn composition manifest must be readable");
+    assert!(
+        composition_manifest.contains("root-llm-provider")
+            && composition_manifest.contains("ironclaw_llm")
+            && composition_manifest.contains("optional = true")
+            && composition_manifest.contains("default-features = false"),
+        "ironclaw_reborn_composition must gate `ironclaw_llm` behind the same `root-llm-provider` feature with `optional = true, default-features = false`"
+    );
+}
+
+/// Lock the narrowed `ironclaw_reborn` public surface in place.
+///
+/// `ironclaw_reborn` previously exposed ~25 types as a wall of `pub use`
+/// re-exports (capability resolvers, surface profile filters, milestone
+/// scope/sink, model route policies, planned-driver factory helpers, the
+/// loop-driver-host factory, etc.). Internal-trace audits found that **no
+/// crate outside the reborn family ever named any of those items** and that
+/// composition does not need them either — it imports via submodule paths
+/// (`ironclaw_reborn::driver_registry::DriverRegistry`, etc.). The wall was
+/// pure speculative public API.
+///
+/// This test pins the cleanup: `crates/ironclaw_reborn/src/lib.rs` must be a
+/// directory of `pub mod` declarations and nothing else. A future contributor
+/// who tries to re-add the convenience `pub use` block fails this test
+/// alongside the boundary rule that forbids any non-composition crate from
+/// taking a normal cargo dep on `ironclaw_reborn`.
+#[test]
+fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
+    let root = workspace_root();
+    let lib = std::fs::read_to_string(root.join("crates/ironclaw_reborn/src/lib.rs"))
+        .expect("ironclaw_reborn lib.rs must be readable");
+
+    // The forbidden re-export prefixes correspond to the original noisy
+    // wall. Anyone wanting these items must reach them through a `pub mod`
+    // path or (preferably) consume them through `ironclaw_reborn_composition`.
+    let forbidden_reexports = [
+        "pub use ironclaw_loop_support::",
+        "pub use loop_driver_host::",
+        "pub use milestone_events::",
+        "pub use model_gateway::",
+        "pub use model_routes::",
+        "pub use planned_driver::",
+        "pub use planned_driver_factory::",
+        "pub use text_loop_driver::",
+        "pub use app_loop_family::",
+    ];
+    for forbidden in forbidden_reexports {
+        assert!(
+            !lib.contains(forbidden),
+            "ironclaw_reborn/src/lib.rs must not re-export internal items via `{forbidden}`. \
+             Reach them through the `pub mod` path or through ironclaw_reborn_composition. \
+             See `reborn_internal_crate_keeps_directory_of_modules_lib_rs` for context."
+        );
+    }
+
+    // The composition root is the sanctioned consumer of `ironclaw_reborn`'s
+    // module paths. Confirm the run-state assembly is wired there (it would
+    // otherwise have to live in the CLI or root app, which the dep rules
+    // forbid).
+    let composition_runtime = root.join("crates/ironclaw_reborn_composition/src/runtime.rs");
+    assert!(
+        composition_runtime.exists(),
+        "expected Reborn runtime assembly at {}",
+        composition_runtime.display()
+    );
+    let composition_runtime_source = std::fs::read_to_string(&composition_runtime)
+        .expect("composition runtime.rs must be readable");
+    for required in [
+        "pub async fn build_reborn_runtime",
+        "pub struct RebornRuntime",
+        "use ironclaw_reborn::loop_driver_host::",
+        "use ironclaw_reborn::runtime::",
+        "build_default_planned_runtime",
+        "DefaultPlannedRuntimeParts",
+    ] {
+        assert!(
+            composition_runtime_source.contains(required),
+            "composition runtime.rs missing `{required}` -- the runtime assembly slice \
+             must live in `ironclaw_reborn_composition` so the CLI and other \
+             ingress points can avoid importing `ironclaw_reborn` directly."
+        );
+    }
+}
+
+/// Lock the boot-config TOML + provider-catalog layering for the
+/// standalone `ironclaw-reborn` binary.
+///
+/// Three properties:
+///
+/// 1. `ironclaw_reborn_config` continues to expose the boot-time parser
+///    (`RebornConfigFile`) and the file-path accessors
+///    (`RebornHome::config_file_path` / `providers_file_path`). These are
+///    the surface the CLI relies on to find both files without
+///    hardcoding the paths itself, and they're what shell tooling /
+///    operator runbooks pattern-match on.
+///
+/// 2. The provider catalog file lives at `<home>/providers.json` —
+///    same filename as v1's `~/.ironclaw/providers.json` so operator
+///    muscle memory transfers and the same JSON editor tooling
+///    applies. The boot TOML lives at `<home>/config.toml`. Changing
+///    either filename breaks all existing operator-side documentation.
+///
+/// 3. `RebornConfigFile` rejects inline secret material at parse time.
+///    The unit test in `secrets_guard` covers the patterns; this
+///    boundary test asserts that the rejection path is *wired through*
+///    `RebornConfigFile::validate` (file-level grep). A regression
+///    that bypasses the guard for the boot file fails here loudly
+///    rather than silently round-tripping a secret through git.
+#[test]
+fn reborn_boot_config_file_layout_is_pinned() {
+    let root = workspace_root();
+
+    let config_lib = std::fs::read_to_string(root.join("crates/ironclaw_reborn_config/src/lib.rs"))
+        .expect("reborn config lib.rs must be readable");
+    for required_export in [
+        "pub use config_file::",
+        "RebornConfigFile",
+        "REBORN_CONFIG_API_VERSION",
+        "InlineSecretError",
+    ] {
+        assert!(
+            config_lib.contains(required_export),
+            "ironclaw_reborn_config/src/lib.rs must export `{required_export}`; \
+             see reborn_boot_config_file_layout_is_pinned for context"
+        );
+    }
+
+    let home_src = std::fs::read_to_string(root.join("crates/ironclaw_reborn_config/src/home.rs"))
+        .expect("reborn config home.rs must be readable");
+    for required_method in ["pub fn config_file_path", "pub fn providers_file_path"] {
+        assert!(
+            home_src.contains(required_method),
+            "RebornHome must expose `{required_method}` so the CLI / composition can locate \
+             the boot files without hardcoding paths; see \
+             reborn_boot_config_file_layout_is_pinned"
+        );
+    }
+    // File names — these match v1's `~/.ironclaw/providers.json` so the
+    // same operator tooling / documentation applies.
+    assert!(
+        home_src.contains("\"config.toml\""),
+        "boot config file name must be `config.toml`"
+    );
+    assert!(
+        home_src.contains("\"providers.json\""),
+        "provider catalog file name must be `providers.json` to match v1's filename for \
+         operator-tooling compatibility"
+    );
+
+    // The boot TOML parser must wire the inline-secret guard. A
+    // regression that bypasses it (e.g. a future contributor adds a
+    // new section and forgets to call `reject_inline_secret`) would
+    // silently allow pasted credentials through.
+    let config_file_src =
+        std::fs::read_to_string(root.join("crates/ironclaw_reborn_config/src/config_file.rs"))
+            .expect("reborn config_file.rs must be readable");
+    assert!(
+        config_file_src.contains("reject_inline_secret"),
+        "RebornConfigFile::validate must call `reject_inline_secret` on operator-pasteable \
+         fields. See `docs/reborn/contracts/secrets.md` and epic #3036's `Pitfalls & \
+         Landmines` section: \"Do not bake secret material into blueprints/config.\""
+    );
+
+    // Provider-catalog load-from-path must be reachable from
+    // composition without forcing `ironclaw_reborn_config` to depend
+    // on `ironclaw_llm` (which would violate _config's standalone
+    // boundary). The composition crate is the legitimate consumer.
+    let llm_catalog = root.join("crates/ironclaw_reborn_composition/src/llm_catalog.rs");
+    assert!(
+        llm_catalog.exists(),
+        "composition must expose a catalog resolver at {} so the CLI can stitch \
+         RebornConfigFile + providers.json into a RebornLlmConfig without itself \
+         depending on ironclaw_llm",
+        llm_catalog.display()
+    );
+    let llm_catalog_src = std::fs::read_to_string(&llm_catalog).expect("llm_catalog readable");
+    for required in [
+        "pub fn resolve_llm_selection_against_catalog",
+        "pub fn resolve_against_registry",
+        "ProviderRegistry::load_from_path",
+    ] {
+        assert!(
+            llm_catalog_src.contains(required),
+            "composition llm_catalog must expose `{required}` so the resolver path is \
+             stable; see reborn_boot_config_file_layout_is_pinned"
+        );
+    }
+
+    // `ironclaw_llm` must expose the path-overridable loader so the
+    // catalog file location is selectable per-deployment (the
+    // standalone Reborn binary points at $IRONCLAW_REBORN_HOME/providers.json,
+    // not v1's ~/.ironclaw/providers.json).
+    let llm_registry = std::fs::read_to_string(root.join("crates/ironclaw_llm/src/registry.rs"))
+        .expect("ironclaw_llm registry.rs must be readable");
+    assert!(
+        llm_registry.contains("pub fn load_from_path"),
+        "ironclaw_llm::ProviderRegistry must expose `load_from_path` so callers can \
+         override the user-overlay catalog path; v1 hardcoded ~/.ironclaw/providers.json \
+         and the Reborn standalone needs its own home."
     );
 }
 
@@ -749,7 +958,81 @@ fn reborn_runtime_http_egress_has_single_network_boundary() {
     );
 }
 
+#[test]
+fn reborn_product_api_crates_do_not_bind_http_ingress() {
+    let forbidden = [
+        ForbiddenRebornIngressUse {
+            pattern: "tokio::net::TcpListener::bind",
+            reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "std::net::TcpListener::bind",
+            reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "TcpListener::bind",
+            reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "axum::serve",
+            reason: "Reborn product/API crates must not own server lifecycle",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "hyper::Server",
+            reason: "Reborn product/API crates must not own server lifecycle",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "Server::bind",
+            reason: "Reborn product/API crates must not own server lifecycle",
+        },
+        ForbiddenRebornIngressUse {
+            pattern: "axum_server::bind",
+            reason: "Reborn product/API crates must not own server lifecycle",
+        },
+    ];
+
+    let root = workspace_root();
+    let reborn_product_api_src_roots = [
+        "crates/ironclaw_reborn/src",
+        "crates/ironclaw_reborn_cli/src",
+        "crates/ironclaw_reborn_composition/src",
+        "crates/ironclaw_reborn_config/src",
+        "crates/ironclaw_reborn_event_store/src",
+        "crates/ironclaw_reborn_api/src",
+        "crates/ironclaw_product_adapters/src",
+        "crates/ironclaw_product_adapter_registry/src",
+        "crates/ironclaw_product_workflow/src",
+        "crates/ironclaw_wasm_product_adapters/src",
+        "crates/ironclaw_telegram_v2_adapter/src",
+        "crates/ironclaw_outbound/src",
+        "crates/ironclaw_conversations/src",
+        "crates/ironclaw_turns/src",
+        "crates/ironclaw_threads/src",
+        "crates/ironclaw_loop_support/src",
+    ];
+
+    let mut violations = Vec::new();
+    for relative_root in reborn_product_api_src_roots {
+        let dir = root.join(relative_root);
+        if !dir.exists() {
+            continue;
+        }
+        collect_forbidden_reborn_ingress_uses(&dir, &root, &forbidden, &mut violations);
+    }
+
+    assert!(
+        violations.is_empty(),
+        "Reborn HTTP ingress must be host-owned; product/API crates may expose descriptors or route fragments but must not bind/serve listeners:\n{}",
+        violations.join("\n")
+    );
+}
+
 struct ForbiddenRuntimeNetworkUse {
+    pattern: &'static str,
+    reason: &'static str,
+}
+
+struct ForbiddenRebornIngressUse {
     pattern: &'static str,
     reason: &'static str,
 }
@@ -885,13 +1168,24 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // The standalone CLI must reach the assembled runtime only
+            // through `ironclaw_reborn_composition`. Adding any of the
+            // forbidden deps here re-opens "speculative public API" access
+            // to internal Reborn types (turn coordinator, session thread
+            // service, loop drivers, LLM provider, etc.) and re-introduces
+            // the narrow-surface regression this rule exists to prevent.
             crate_name: "ironclaw_reborn_cli",
             forbidden: vec![
                 "ironclaw",
                 "ironclaw_engine",
                 "ironclaw_gateway",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_reborn",
                 "ironclaw_skills",
+                "ironclaw_threads",
                 "ironclaw_tui",
+                "ironclaw_turns",
             ],
         },
         BoundaryRule {
@@ -1523,6 +1817,43 @@ fn collect_forbidden_runtime_network_uses(
         let path = entry.path();
         if path.is_dir() {
             collect_forbidden_runtime_network_uses(&path, root, forbidden, violations);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        for (line_number, line) in contents.lines().enumerate() {
+            for rule in forbidden {
+                if line.contains(rule.pattern) {
+                    let relative = path.strip_prefix(root).unwrap_or(&path);
+                    violations.push(format!(
+                        "{}:{} contains `{}` ({})",
+                        relative.display(),
+                        line_number + 1,
+                        rule.pattern,
+                        rule.reason
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn collect_forbidden_reborn_ingress_uses(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    forbidden: &[ForbiddenRebornIngressUse],
+    violations: &mut Vec<String>,
+) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| panic!("failed to read dir entry: {error}"));
+        let path = entry.path();
+        if path.is_dir() {
+            collect_forbidden_reborn_ingress_uses(&path, root, forbidden, violations);
             continue;
         }
         if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {

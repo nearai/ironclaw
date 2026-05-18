@@ -1,5 +1,4 @@
 use clap::{Args, Subcommand};
-use ironclaw_reborn::ModelSlot;
 
 #[derive(Debug, Args)]
 pub(crate) struct ModelsCommand {
@@ -40,12 +39,12 @@ impl ModelsCommand {
 
 impl ModelsListCommand {
     fn execute(self) -> anyhow::Result<()> {
-        let slots = ModelSlot::all();
+        let slots = ironclaw_reborn_composition::reborn_model_slot_names();
 
         if self.json {
             let slots = slots
                 .iter()
-                .map(|slot| serde_json::json!({ "slot": slot.as_str() }))
+                .map(|slot| serde_json::json!({ "slot": slot }))
                 .collect::<Vec<_>>();
             println!(
                 "{}",
@@ -70,14 +69,14 @@ impl ModelsListCommand {
 
 impl ModelsStatusCommand {
     fn execute(self) -> anyhow::Result<()> {
-        let slots = ModelSlot::all();
+        let slots = ironclaw_reborn_composition::reborn_model_slot_names();
 
         if self.json {
             let slot_status: serde_json::Map<String, serde_json::Value> = slots
                 .iter()
                 .map(|slot| {
                     (
-                        slot.as_str().to_string(),
+                        (*slot).to_string(),
                         serde_json::Value::from("not-configured"),
                     )
                 })

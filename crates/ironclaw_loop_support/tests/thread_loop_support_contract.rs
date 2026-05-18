@@ -17,20 +17,20 @@ use ironclaw_loop_support::{
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, ContextMessage, ContextWindow, CreateSummaryArtifactRequest,
-    EnsureThreadRequest, InMemorySessionThreadService, MessageContent, MessageKind, MessageStatus,
-    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    UpdateAssistantDraftRequest,
+    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextWindow,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
+    MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    LoopMessageRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor, TurnId, TurnRunId,
-    TurnScope,
+    LoopMessageRef, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor,
+    TurnId, TurnRunId, TurnScope,
     run_profile::{
-        AgentLoopHostErrorKind, AssistantReply, BeginAssistantDraft, CapabilityDeniedReasonKind,
-        CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilitySurfaceVersion,
-        FinalizeAssistantMessage, HostManagedLoopPromptPort,
+        AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft,
+        CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+        CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle, LoopContextMessage,
         LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopHostMilestoneKind,
@@ -1139,6 +1139,92 @@ async fn transcript_port_finalizes_assistant_reply_into_durable_thread_history()
     assert_eq!(
         message_ref.as_str(),
         format!("msg:{}", assistant.message_id)
+    );
+}
+
+#[tokio::test]
+async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+    let result_ref = LoopResultRef::new("result:demo-tool").unwrap();
+
+    let first_ref = adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: result_ref.clone(),
+            safe_summary: "tool completed".to_string(),
+        })
+        .await
+        .unwrap();
+    let second_ref = adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: result_ref.clone(),
+            safe_summary: "retry summary ignored".to_string(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first_ref, second_ref);
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    let records = history
+        .messages
+        .iter()
+        .filter(|message| message.kind == MessageKind::ToolResultReference)
+        .collect::<Vec<_>>();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].status, MessageStatus::Finalized);
+    assert_eq!(
+        records[0].tool_result_ref.as_deref(),
+        Some(result_ref.as_str())
+    );
+    let envelope: ToolResultReferenceEnvelope =
+        serde_json::from_str(records[0].content.as_deref().unwrap()).unwrap();
+    assert_eq!(envelope.version, 1);
+    assert_eq!(envelope.result_ref, result_ref.as_str());
+    assert_eq!(envelope.safe_summary.as_str(), "tool completed");
+}
+
+#[tokio::test]
+async fn transcript_port_rejects_unsafe_tool_result_summary() {
+    let fixture = ThreadFixture::new().await;
+    let adapter = ThreadBackedLoopTranscriptPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+    );
+
+    let error = adapter
+        .append_capability_result_ref(AppendCapabilityResultRef {
+            result_ref: LoopResultRef::new("result:unsafe-tool").unwrap(),
+            safe_summary: "raw tool input includes secret".to_string(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    let history = fixture
+        .thread_service
+        .list_thread_history(ThreadHistoryRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        !history
+            .messages
+            .iter()
+            .any(|message| message.kind == MessageKind::ToolResultReference)
     );
 }
 
@@ -2319,6 +2405,13 @@ impl SessionThreadService for GatedFinalizeThreadService {
         self.inner.append_assistant_draft(request).await
     }
 
+    async fn append_tool_result_reference(
+        &self,
+        request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.inner.append_tool_result_reference(request).await
+    }
+
     async fn update_assistant_draft(
         &self,
         request: UpdateAssistantDraftRequest,
@@ -2429,6 +2522,13 @@ impl SessionThreadService for StaticContextThreadService {
         _request: AppendAssistantDraftRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         panic!("static context service does not append assistant drafts")
+    }
+
+    async fn append_tool_result_reference(
+        &self,
+        _request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        panic!("static context service does not append tool result references")
     }
 
     async fn update_assistant_draft(

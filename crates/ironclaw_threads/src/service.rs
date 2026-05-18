@@ -3,11 +3,11 @@ use ironclaw_host_api::ThreadId;
 
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
-    LoadContextWindowRequest, MessageContent, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
-    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    UpdateAssistantDraftRequest,
+    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextWindow,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextWindowRequest, MessageContent,
+    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
 };
 
 /// Canonical Reborn session thread and transcript boundary.
@@ -47,6 +47,11 @@ pub trait SessionThreadService: Send + Sync {
     async fn append_assistant_draft(
         &self,
         request: AppendAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError>;
+
+    async fn append_tool_result_reference(
+        &self,
+        request: AppendToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError>;
 
     async fn update_assistant_draft(

@@ -12,6 +12,16 @@ publish = false
 
 [features]
 default = []
+# Wire a host-managed LLM model gateway into the assembled runtime via
+# ironclaw_reborn's `LlmProviderModelGateway`. Off by default so this crate
+# stays substrate-only when callers don't want a model gateway in the
+# composed runtime. Mirrors `ironclaw_reborn`'s own `root-llm-provider`
+# feature shape (optional dep, `default-features = false`).
+root-llm-provider = [
+    "dep:ironclaw_llm",
+    "ironclaw_llm/registry-provider-factory",
+    "ironclaw_reborn/root-llm-provider",
+]
 libsql = [
     "dep:libsql",
     "ironclaw_filesystem/libsql",
@@ -37,22 +47,31 @@ ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
+ironclaw_llm = { path = "../ironclaw_llm", optional = true, default-features = false }
+ironclaw_loop_support = { path = "../ironclaw_loop_support" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_processes = { path = "../ironclaw_processes" }
+ironclaw_reborn = { path = "../ironclaw_reborn" }
+ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
+ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
+chrono = "0.4"
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-serde_json = "1"
 tempfile = "3"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 tokio = { version = "1", features = ["macros", "rt", "time"] }

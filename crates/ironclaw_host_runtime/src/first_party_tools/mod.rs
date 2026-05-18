@@ -7,6 +7,7 @@
 
 mod coding;
 mod echo;
+mod http;
 mod json;
 mod time;
 
@@ -30,6 +31,7 @@ pub use coding::{
     READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };
 pub use echo::ECHO_CAPABILITY_ID;
+pub use http::HTTP_CAPABILITY_ID;
 pub use json::JSON_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
 
@@ -60,8 +62,12 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                 service: "builtin".to_string(),
             },
             capabilities: {
-                let mut capabilities =
-                    vec![echo::manifest()?, time::manifest()?, json::manifest()?];
+                let mut capabilities = vec![
+                    echo::manifest()?,
+                    time::manifest()?,
+                    json::manifest()?,
+                    http::manifest()?,
+                ];
                 capabilities.extend(coding::manifests()?);
                 capabilities
             },
@@ -77,6 +83,7 @@ pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, Ho
         .with_handler(CapabilityId::new(ECHO_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(TIME_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(JSON_CAPABILITY_ID)?, handler.clone())
+        .with_handler(CapabilityId::new(HTTP_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(READ_FILE_CAPABILITY_ID)?, handler.clone())
         .with_handler(
             CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
@@ -102,10 +109,16 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
         bounded_input_size(request.capability_id.as_str(), &request.input)?;
         let start = Instant::now();
+        let mut network_egress_bytes = 0;
         let output = match request.capability_id.as_str() {
             ECHO_CAPABILITY_ID => echo::dispatch(&request.input)?,
             TIME_CAPABILITY_ID => time::dispatch(&request.input)?,
             JSON_CAPABILITY_ID => json::dispatch(&request.input)?,
+            HTTP_CAPABILITY_ID => {
+                let result = http::dispatch(&request).await?;
+                network_egress_bytes = result.network_egress_bytes;
+                result.output
+            }
             READ_FILE_CAPABILITY_ID
             | WRITE_FILE_CAPABILITY_ID
             | LIST_DIR_CAPABILITY_ID
@@ -120,10 +133,22 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                 ));
             }
         };
-        let output_bytes = bounded_output_bytes(&output)?;
+        let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+        let output_bytes = bounded_output_bytes(&output).map_err(|error| {
+            if network_egress_bytes > 0 {
+                error.with_usage(ResourceUsage {
+                    wall_clock_ms,
+                    network_egress_bytes,
+                    ..ResourceUsage::default()
+                })
+            } else {
+                error
+            }
+        })?;
         let usage = ResourceUsage {
-            wall_clock_ms: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+            wall_clock_ms,
             output_bytes,
+            network_egress_bytes,
             ..ResourceUsage::default()
         };
         Ok(FirstPartyCapabilityResult::new(output, usage))

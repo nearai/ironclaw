@@ -1,8 +1,5 @@
 //! Immutable loop execution state.
 //!
-//! See `docs/reborn/agent-loop-skeleton.md` sections 5-7 for the mutability
-//! model and `docs/reborn/agent-loop-briefs/state-and-checkpoints.md` for this
-//! crate foundation.
 
 mod bounded_ring;
 mod signature;
@@ -23,10 +20,8 @@ use ironclaw_turns::{
 
 /// Checkpoint payload schema reserved for the default Reborn loop.
 ///
-/// Note: master spec §9 pins `ComponentIdentity { id, digest }` as the
-/// canonical versioning shape for checkpoint payload metadata. WS-0 keeps the
-/// legacy `&'static str` form because the `ComponentIdentity` migration is
-/// deferred to follow-up PRs (#3470/#3524/#3462) per the brief.
+/// Changing the payload layout is a compatibility break and requires an
+/// explicit migration plan.
 pub const CHECKPOINT_SCHEMA_ID: &str = "reborn:default-loop-v1";
 pub const CHECKPOINT_SCHEMA_VERSION: u64 = 1;
 
@@ -119,7 +114,7 @@ pub struct CheckpointMarker {
     pub iteration_at_checkpoint: u32,
 }
 
-/// Mirrors the four checkpoint boundaries from the executor (master doc §8).
+/// Mirrors the four checkpoint boundaries from the executor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckpointKind {

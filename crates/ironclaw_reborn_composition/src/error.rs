@@ -12,6 +12,8 @@ pub enum RebornBuildError {
     EmptyProductionTrustPolicy,
     #[error("reborn composition requires live turn scheduler wake notifier")]
     MissingTurnRunWakeNotifier,
+    #[error("reborn planned run-profile resolver build failed: {reason}")]
+    PlannedRunProfileResolver { reason: String },
     #[error("reborn composition failed production validation")]
     ProductionWiring {
         report: ironclaw_host_runtime::ProductionWiringReport,

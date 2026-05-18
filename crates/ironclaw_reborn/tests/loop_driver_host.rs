@@ -25,33 +25,41 @@ use ironclaw_host_runtime::{
     VisibleCapability, VisibleCapabilityAccess,
 };
 use ironclaw_loop_support::{
+    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     EmptyLoopCapabilityPort, HostIdentityContextBuildError, HostIdentityContextCandidate,
     HostIdentityContextSource, HostIdentityMessageContent, HostInputBatch, HostInputEnvelope,
     HostInputQueue, HostInputQueueError, HostManagedModelError, HostManagedModelErrorKind,
     HostManagedModelGateway, HostManagedModelRequest, HostManagedModelResponse,
-    HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
-    IdentityApplicability, IdentityFileName, ProductLiveCancellationProbe, RunCancellationFactory,
+    HostRuntimeLoopCapabilityPort, HostSkillContextBuildError, HostSkillContextCandidate,
+    HostSkillContextSource, IdentityApplicability, IdentityFileName, LoopCapabilityInputResolver,
+    LoopCapabilityResultWriter, ProductLiveCancellationProbe, RunCancellationFactory,
     RunCancellationHandle, identity_message_ref,
 };
 use ironclaw_processes::ProcessServices;
-use ironclaw_reborn::{
-    CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, HostRuntimeLoopCapabilityPort,
-    LoopCapabilityInputResolver, LoopCapabilityPortFactory, LoopCapabilityResultWriter, ModelRoute,
-    ModelRoutePolicy, ModelRouteResolver, ModelSelectionMode, ModelSlot,
-    RebornLoopDriverHostFactory, RebornLoopDriverHostRequest, StaticModelRouteResolver,
-    TextOnlyLoopHostConfig, TextOnlyModelReplyDriver, build_default_planned_runtime,
-    build_product_live_planned_runtime, default_planned_run_profile_resolver,
-    driver_registry::{DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey},
-    loop_exit_applier::{
-        BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
-        FinalCheckpointEvidenceRequest, LoopExitApplier, LoopExitEvidencePort,
-        ThreadCheckpointLoopExitEvidencePort,
-    },
-    turn_runner::{
-        HostFactory, HostFactoryError, TurnRunnerWakeReceiver, TurnRunnerWorker,
-        TurnRunnerWorkerConfig,
-    },
+use ironclaw_reborn::driver_registry::{
+    DriverKind, DriverRegistry, DriverRequirements, LoopDriverRegistryKey,
+};
+use ironclaw_reborn::loop_driver_host::{
+    LoopCapabilityPortFactory, RebornLoopDriverHost, RebornLoopDriverHostFactory,
+    RebornLoopDriverHostRequest, TextOnlyLoopHostConfig,
+};
+use ironclaw_reborn::loop_exit_applier::{
+    BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
+    FinalCheckpointEvidenceRequest, LoopExitApplier, LoopExitEvidencePort,
+    ThreadCheckpointLoopExitEvidencePort,
+};
+use ironclaw_reborn::model_routes::{
+    ModelRoute, ModelRoutePolicy, ModelRouteResolver, ModelSelectionMode, ModelSlot,
+    StaticModelRouteResolver,
+};
+use ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver;
+use ironclaw_reborn::runtime::{
+    DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts, build_default_planned_runtime,
+    build_product_live_planned_runtime,
+};
+use ironclaw_reborn::text_loop_driver::TextOnlyModelReplyDriver;
+use ironclaw_reborn::turn_runner::{
+    HostFactory, HostFactoryError, TurnRunnerWakeReceiver, TurnRunnerWorker, TurnRunnerWorkerConfig,
 };
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_scripts::{
@@ -2163,8 +2171,8 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
 }
 
 // Identity source is now required by the `DefaultPlannedRuntimeParts` type
-// signature (WS-16), so the previous fail-closed runtime gate is enforced at
-// compile time. The dynamic gate test has been retired alongside the dead
+// signature, so the previous fail-closed runtime gate is enforced at compile
+// time. The dynamic gate test has been retired alongside the dead
 // `is_none()` check; the "builds when all required adapters are present" test
 // below still proves the happy-path readiness contract.
 
@@ -2229,9 +2237,9 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
     assert_eq!(resolved.profile_id.as_str(), "reborn-planned-default");
 }
 
-/// Build a fully-populated `DefaultPlannedRuntimeParts` for the WS-17
-/// product-live readiness gate tests. Callers below override individual
-/// fields with `None` to assert the fail-closed branch fires.
+/// Build a fully-populated `DefaultPlannedRuntimeParts` for product-live
+/// readiness gate tests. Callers below override individual fields with `None`
+/// to assert the fail-closed branch fires.
 async fn product_live_parts_for_gate_test(
     thread_label: &'static str,
 ) -> DefaultPlannedRuntimeParts<
@@ -4613,7 +4621,7 @@ async fn text_only_host_rejects_mismatched_capability_authority_context() {
 
     assert!(matches!(
         error,
-        ironclaw_reborn::RebornLoopDriverHostError::InvalidRequest { .. }
+        ironclaw_reborn::loop_driver_host::RebornLoopDriverHostError::InvalidRequest { .. }
     ));
     assert!(runtime.invocations().is_empty());
 }
@@ -6304,7 +6312,7 @@ impl HostFixture {
         )
     }
 
-    async fn build_host(&self) -> ironclaw_reborn::RebornLoopDriverHost {
+    async fn build_host(&self) -> RebornLoopDriverHost {
         self.factory()
             .build_text_only_host(RebornLoopDriverHostRequest {
                 claimed_run: self.claimed.clone(),

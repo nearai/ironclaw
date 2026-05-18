@@ -1,114 +1,493 @@
+use std::io::{IsTerminal, Write};
+use std::path::PathBuf;
+use std::time::Duration;
+
 use clap::Args;
-use ironclaw_reborn_config::RebornBootConfig;
+use ironclaw_reborn_composition::{
+    PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings,
+    build_reborn_runtime, reborn_runtime_readiness_snapshot,
+};
+use ironclaw_reborn_config::{REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile};
+use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
 
+/// Start the standalone Reborn runtime. Sends `--message` if provided
+/// (single-shot mode), otherwise drops into a stdin REPL.
 #[derive(Debug, Args)]
-pub(crate) struct RunCommand;
+pub(crate) struct RunCommand {
+    /// Send a single message, print the assistant reply, and exit.
+    /// Without this flag, the CLI reads lines from stdin in a loop.
+    #[arg(short = 'm', long = "message")]
+    message: Option<String>,
+
+    /// Print the substrate readiness snapshot and exit without starting
+    /// the agent. Preserves the legacy `run` diagnostic shape so existing
+    /// smoke tests keep passing.
+    #[arg(long = "dry-run")]
+    dry_run: bool,
+}
 
 impl RunCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
-        RuntimeReadinessSnapshot::initialize(context).print();
+        init_tracing();
+        if self.dry_run {
+            return run_dry(context);
+        }
+
+        let runtime_input = build_runtime_input(context.boot_config())?;
+        let message = self.message.clone();
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+        rt.block_on(async move {
+            let runtime = build_reborn_runtime(runtime_input).await?;
+            print_runtime_banner(context.boot_config());
+
+            let conversation = runtime.new_conversation().await?;
+            let cancellation = install_ctrl_c_cancellation();
+
+            let outcome = if let Some(text) = message {
+                send_once(&runtime, &conversation, &text, cancellation).await
+            } else {
+                run_repl(&runtime, &conversation, cancellation).await
+            };
+
+            runtime.shutdown().await?;
+            outcome
+        })?;
         Ok(())
     }
 }
 
-/// Side-effect-free runtime readiness snapshot for the standalone Reborn binary.
-#[derive(Debug, Clone)]
-struct RuntimeReadinessSnapshot {
-    config: RebornBootConfig,
-    text_only_driver: ComponentStatus,
-    planned_driver: ComponentStatus,
-    planned_default_profile: ComponentStatus,
+fn run_dry(context: RebornCliContext) -> anyhow::Result<()> {
+    let config = context.boot_config();
+    let readiness = reborn_runtime_readiness_snapshot();
+    let driver_registry_initialized =
+        readiness.text_only_driver.is_initialized() && readiness.planned_driver.is_initialized();
+    println!("IronClaw Reborn runtime readiness snapshot");
+    println!("binary: ironclaw-reborn");
+    println!("version: {}", env!("CARGO_PKG_VERSION"));
+    println!("reborn_home: {}", config.home().path().display());
+    println!("home_source: {}", config.home().source_label());
+    println!("profile: {}", config.profile());
+    println!("v1_state: not-used");
+    println!("runtime_driver: planned-agent-loop");
+    println!(
+        "text_only_driver: {}",
+        readiness.text_only_driver.render("initialized")
+    );
+    println!(
+        "planned_driver: {}",
+        readiness.planned_driver.render("initialized")
+    );
+    println!(
+        "driver_registry: {}",
+        if driver_registry_initialized {
+            "initialized"
+        } else {
+            "unavailable"
+        }
+    );
+    println!(
+        "local_runtime_shell_readiness: {}",
+        if driver_registry_initialized && readiness.planned_default_profile.is_initialized() {
+            "ready"
+        } else {
+            "unavailable"
+        }
+    );
+    println!(
+        "planned_default_profile: {}",
+        readiness.planned_default_profile.render("available")
+    );
+    Ok(())
 }
 
-#[derive(Debug, Clone)]
-enum ComponentStatus {
-    Initialized,
-    Failed(String),
+fn print_runtime_banner(config: &RebornBootConfig) {
+    eprintln!("ironclaw-reborn: runtime started");
+    eprintln!("  profile     : {}", config.profile());
+    eprintln!("  reborn_home : {}", config.home().path().display());
+    eprintln!();
 }
 
-impl ComponentStatus {
-    fn from_result<T, E: std::fmt::Display>(result: Result<T, E>) -> Self {
-        match result {
-            Ok(_) => Self::Initialized,
-            Err(error) => Self::Failed(error.to_string()),
-        }
-    }
-
-    fn is_initialized(&self) -> bool {
-        matches!(self, Self::Initialized)
-    }
-
-    fn render(&self, ok_label: &str) -> String {
-        match self {
-            Self::Initialized => ok_label.to_string(),
-            Self::Failed(reason) => format!("unavailable: {reason}"),
-        }
-    }
-}
-
-impl RuntimeReadinessSnapshot {
-    fn initialize(context: RebornCliContext) -> Self {
-        let mut registry = ironclaw_reborn::driver_registry::DriverRegistry::new();
-        let text_only_driver =
-            ComponentStatus::from_result(ironclaw_reborn::register_default_text_only_driver(
-                &mut registry,
-                ironclaw_reborn::TextOnlyModelReplyDriverConfig::default(),
-            ));
-        let planned_driver = match ironclaw_reborn::build_loop_family_registry() {
-            Ok(family_registry) => ComponentStatus::from_result(
-                ironclaw_reborn::register_default_planned_driver(&mut registry, family_registry),
-            ),
-            Err(error) => ComponentStatus::Failed(error.to_string()),
-        };
-        let planned_default_profile =
-            ComponentStatus::from_result(ironclaw_reborn::default_planned_run_profile_resolver());
-        Self {
-            config: context.boot_config().clone(),
-            text_only_driver,
-            planned_driver,
-            planned_default_profile,
-        }
-    }
-
-    fn print(&self) {
-        println!("IronClaw Reborn runtime readiness snapshot");
-        println!("binary: ironclaw-reborn");
-        println!("version: {}", env!("CARGO_PKG_VERSION"));
-        println!("reborn_home: {}", self.config.home().path().display());
-        println!("home_source: {}", self.config.home().source_label());
-        println!("profile: {}", self.config.profile());
-        println!("v1_state: not-used");
-        println!(
-            "text_only_driver: {}",
-            self.text_only_driver.render("initialized")
+async fn send_once(
+    runtime: &ironclaw_reborn_composition::RebornRuntime,
+    conversation: &ironclaw_reborn_composition::ConversationId,
+    text: &str,
+    cancellation: CancellationToken,
+) -> anyhow::Result<()> {
+    let reply = runtime
+        .send_user_message_with_cancellation(conversation, text, cancellation)
+        .await?;
+    if !reply.is_successful_final_reply() {
+        anyhow::bail!(
+            "reborn run did not produce an assistant reply (status={:?}, run_id={})",
+            reply.status,
+            reply.run_id
         );
-        println!(
-            "planned_driver: {}",
-            self.planned_driver.render("initialized")
-        );
-        let driver_registry_initialized =
-            self.text_only_driver.is_initialized() && self.planned_driver.is_initialized();
-        println!(
-            "driver_registry: {}",
-            if driver_registry_initialized {
-                "initialized"
-            } else {
-                "unavailable"
+    }
+    print_reply(&reply);
+    Ok(())
+}
+
+async fn run_repl(
+    runtime: &ironclaw_reborn_composition::RebornRuntime,
+    conversation: &ironclaw_reborn_composition::ConversationId,
+    cancellation: CancellationToken,
+) -> anyhow::Result<()> {
+    let stdin_is_tty = std::io::stdin().is_terminal();
+    if stdin_is_tty {
+        eprintln!("(repl) type a message and press enter; Ctrl-D to exit");
+    }
+    let stdin = tokio::io::stdin();
+    let reader = tokio::io::BufReader::new(stdin);
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = reader.lines();
+
+    loop {
+        if stdin_is_tty {
+            // Prompt to stderr so stdout stays clean for piping.
+            eprint!("> ");
+            let _ = std::io::stderr().flush();
+        }
+        tokio::select! {
+            line = lines.next_line() => {
+                match line? {
+                    Some(text) if text.trim().is_empty() => continue,
+                    Some(text) => {
+                        match runtime
+                            .send_user_message_with_cancellation(
+                                conversation,
+                                &text,
+                                cancellation.clone(),
+                            )
+                            .await
+                        {
+                            Ok(reply) if reply.is_successful_final_reply() => print_reply(&reply),
+                            Ok(reply) if stdin_is_tty => print_reply(&reply),
+                            Ok(reply) => {
+                                anyhow::bail!(
+                                    "reborn run did not produce an assistant reply (status={:?}, run_id={})",
+                                    reply.status,
+                                    reply.run_id
+                                );
+                            }
+                            Err(error) if stdin_is_tty => {
+                                eprintln!("error: {error}");
+                                if cancellation.is_cancelled() {
+                                    return Ok(());
+                                }
+                            }
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                    None => {
+                        if stdin_is_tty {
+                            eprintln!();
+                        }
+                        return Ok(());
+                    }
+                }
             }
-        );
-        println!(
-            "local_runtime_shell_readiness: {}",
-            if driver_registry_initialized && self.planned_default_profile.is_initialized() {
-                "ready"
-            } else {
-                "unavailable"
+            _ = cancellation.cancelled() => {
+                eprintln!();
+                eprintln!("(repl) caught ctrl-c, shutting down");
+                return Ok(());
             }
-        );
-        println!(
-            "planned_default_profile: {}",
-            self.planned_default_profile.render("available")
+        }
+    }
+}
+
+fn print_reply(reply: &ironclaw_reborn_composition::AssistantReply) {
+    match reply.text.as_deref() {
+        Some(text) => println!("{text}"),
+        None => eprintln!(
+            "(no assistant text; status={:?}, run_id={})",
+            reply.status, reply.run_id
+        ),
+    }
+}
+
+fn install_ctrl_c_cancellation() -> CancellationToken {
+    let cancellation = CancellationToken::new();
+    let ctrl_c_cancellation = cancellation.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            ctrl_c_cancellation.cancel();
+        }
+    });
+    cancellation
+}
+
+fn build_runtime_input(config: &RebornBootConfig) -> anyhow::Result<RebornRuntimeInput> {
+    use ironclaw_reborn_composition::RebornBuildInput;
+
+    // Read the operator's boot TOML if present. Missing file is OK
+    // (operator may not have run `ironclaw-reborn config init` yet);
+    // sparse fields are OK (each absent field falls back to the
+    // CLI-shaped default baked into composition).
+    let config_file = read_config_file(config)?;
+
+    reject_unsupported_runtime_sections(config_file.as_ref())?;
+
+    let owner_id = config_file
+        .as_ref()
+        .and_then(|file| file.identity.as_ref())
+        .and_then(|identity| identity.default_owner.as_deref())
+        .unwrap_or("reborn-cli");
+
+    let local_dev_root: PathBuf = config.home().path().join("local-dev");
+
+    match effective_profile(config, config_file.as_ref())? {
+        RebornProfile::LocalDev => {}
+        other => {
+            anyhow::bail!(
+                "ironclaw-reborn run currently supports profile=local-dev; got profile={other}. \
+                 Production wiring lands in a follow-up slice."
+            );
+        }
+    }
+
+    let services_input = RebornBuildInput::local_dev(owner_id, local_dev_root);
+
+    #[allow(unused_mut)]
+    let mut runtime_input = RebornRuntimeInput::from_services(services_input)
+        .with_runner_settings(runner_settings(config_file.as_ref())?)
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(200),
+            max_total: Duration::from_secs(180),
+        })
+        .with_identity(RebornRuntimeIdentity::reborn_cli());
+
+    #[cfg(feature = "root-llm-provider")]
+    {
+        match resolve_llm_config(config, config_file.as_ref())? {
+            LlmResolutionOutcome::Resolved(llm) => {
+                runtime_input = runtime_input.with_llm(llm);
+            }
+            LlmResolutionOutcome::NoSelectionConfigured => {
+                tracing::warn!(
+                    "no LLM selection configured; set `[llm.default]` in {} or export \
+                     OPENAI_API_KEY / ANTHROPIC_API_KEY / OLLAMA_BASE_URL. \
+                     Runs will fail until an LLM is wired.",
+                    config.home().config_file_path().display()
+                );
+            }
+        }
+    }
+
+    Ok(runtime_input)
+}
+
+fn read_config_file(
+    config: &RebornBootConfig,
+) -> anyhow::Result<Option<ironclaw_reborn_config::RebornConfigFile>> {
+    use ironclaw_reborn_config::RebornConfigFile;
+    let path = config.home().config_file_path();
+    let file = RebornConfigFile::load(&path).map_err(anyhow::Error::from)?;
+    if let Some(parsed) = &file {
+        tracing::debug!(
+            path = %path.display(),
+            api_version = ?parsed.api_version,
+            "loaded boot config TOML"
         );
     }
+    Ok(file)
+}
+
+fn effective_profile(
+    config: &RebornBootConfig,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> anyhow::Result<RebornProfile> {
+    // Env wins over file. `RebornBootConfig` already parsed/validated env,
+    // so if the variable is present we keep that value.
+    if std::env::var_os(REBORN_PROFILE_ENV).is_some() {
+        return Ok(config.profile());
+    }
+
+    let Some(profile) = config_file
+        .and_then(|file| file.boot.as_ref())
+        .and_then(|boot| boot.profile.as_deref())
+    else {
+        return Ok(config.profile());
+    };
+
+    profile.parse::<RebornProfile>().map_err(|error| {
+        anyhow::anyhow!("config file [boot].profile `{profile}` is invalid: {error}")
+    })
+}
+
+fn reject_unsupported_runtime_sections(
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> anyhow::Result<()> {
+    let Some(file) = config_file else {
+        return Ok(());
+    };
+
+    if let Some(identity) = file.identity.as_ref() {
+        let mut unsupported = Vec::new();
+        if identity.tenant.is_some() {
+            unsupported.push("tenant");
+        }
+        if identity.default_agent.is_some() {
+            unsupported.push("default_agent");
+        }
+        if identity.default_project.is_some() {
+            unsupported.push("default_project");
+        }
+        if !unsupported.is_empty() {
+            anyhow::bail!(
+                "config file [identity] field(s) {} are parsed but not wired in this runtime slice; \
+                 leave them commented until identity-scope wiring lands (default_owner is supported)",
+                unsupported.join(", ")
+            );
+        }
+    }
+
+    let mut sections = Vec::new();
+    if file.policy.is_some() {
+        sections.push("[policy]");
+    }
+    if file.drivers.is_some() {
+        sections.push("[drivers]");
+    }
+    if file.harness.is_some() {
+        sections.push("[harness]");
+    }
+    if sections.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "config file section(s) {} are parsed but not wired in this runtime slice; \
+             leave them commented until epic #3036 substrate lands",
+            sections.join(", ")
+        )
+    }
+}
+
+fn runner_settings(
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> anyhow::Result<TurnRunnerSettings> {
+    let mut settings = TurnRunnerSettings::default();
+    if let Some(runner) = config_file.and_then(|file| file.runner.as_ref()) {
+        if let Some(secs) = runner.heartbeat_interval_secs {
+            if secs == 0 {
+                anyhow::bail!(
+                    "config file [runner].heartbeat_interval_secs must be greater than 0"
+                );
+            }
+            settings.heartbeat_interval = Duration::from_secs(secs);
+        }
+        if let Some(ms) = runner.poll_interval_ms {
+            if ms == 0 {
+                anyhow::bail!("config file [runner].poll_interval_ms must be greater than 0");
+            }
+            settings.poll_interval = Duration::from_millis(ms);
+        }
+    }
+    Ok(settings)
+}
+
+#[cfg(feature = "root-llm-provider")]
+enum LlmResolutionOutcome {
+    Resolved(ironclaw_reborn_composition::RebornLlmConfig),
+    NoSelectionConfigured,
+}
+
+#[cfg(feature = "root-llm-provider")]
+fn resolve_llm_config(
+    boot: &RebornBootConfig,
+    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+) -> anyhow::Result<LlmResolutionOutcome> {
+    // Preference order:
+    //   1. boot TOML [llm.default] (catalog-driven via providers.json)
+    //   2. env-only fallback (legacy: OPENAI_API_KEY etc.) for ergonomics
+    //   3. no LLM configured -> stub gateway, send fails at first message
+    if let Some(selection) = config_file.and_then(|file| file.default_llm_slot()) {
+        let providers_path = boot.home().providers_file_path();
+        let llm = ironclaw_reborn_composition::resolve_llm_selection_against_catalog(
+            selection,
+            Some(providers_path.as_path()),
+        )?;
+        tracing::info!(
+            provider_id = %llm.provider_id,
+            model = %llm.model,
+            "resolved LLM selection from config.toml against provider catalog"
+        );
+        return Ok(LlmResolutionOutcome::Resolved(llm));
+    }
+
+    if let Some(llm) = resolve_llm_config_from_env()? {
+        tracing::info!(
+            provider_id = %llm.provider_id,
+            model = %llm.model,
+            "resolved LLM selection from environment (no [llm.default] in config.toml)"
+        );
+        return Ok(LlmResolutionOutcome::Resolved(llm));
+    }
+
+    Ok(LlmResolutionOutcome::NoSelectionConfigured)
+}
+
+#[cfg(feature = "root-llm-provider")]
+fn resolve_llm_config_from_env()
+-> anyhow::Result<Option<ironclaw_reborn_composition::RebornLlmConfig>> {
+    use ironclaw_reborn_composition::RebornLlmConfig;
+    use secrecy::SecretString;
+
+    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+        let model =
+            std::env::var("IRONCLAW_REBORN_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
+        let base_url = std::env::var("OPENAI_BASE_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+        return Ok(Some(RebornLlmConfig::openai_compat(
+            "openai",
+            base_url,
+            model,
+            SecretString::from(key),
+        )));
+    }
+    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+        let model = std::env::var("IRONCLAW_REBORN_MODEL")
+            .unwrap_or_else(|_| "claude-3-5-sonnet-latest".to_string());
+        let base_url = std::env::var("ANTHROPIC_BASE_URL")
+            .unwrap_or_else(|_| "https://api.anthropic.com/v1".to_string());
+        return Ok(Some(RebornLlmConfig {
+            provider_id: "anthropic".to_string(),
+            model,
+            base_url,
+            api_key: Some(SecretString::from(key)),
+            protocol: "anthropic".to_string(),
+            request_timeout_secs: 120,
+            extra_headers: Vec::new(),
+        }));
+    }
+    if let Ok(base_url) = std::env::var("OLLAMA_BASE_URL") {
+        let model =
+            std::env::var("IRONCLAW_REBORN_MODEL").unwrap_or_else(|_| "llama3.2".to_string());
+        return Ok(Some(RebornLlmConfig {
+            provider_id: "ollama".to_string(),
+            model,
+            base_url,
+            api_key: None,
+            protocol: "ollama".to_string(),
+            request_timeout_secs: 120,
+            extra_headers: Vec::new(),
+        }));
+    }
+    Ok(None)
+}
+
+fn init_tracing() {
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::fmt;
+    let filter = EnvFilter::try_from_env("IRONCLAW_REBORN_LOG").unwrap_or_else(|_| {
+        EnvFilter::new("info,ironclaw_reborn=info,ironclaw_reborn_composition=info")
+    });
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
 }

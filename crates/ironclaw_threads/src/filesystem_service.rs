@@ -49,12 +49,12 @@ use sha2::{Digest, Sha256};
 use crate::identifiers::SummaryArtifactId;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, ContextMessage, ContextWindow, CreateSummaryArtifactRequest,
-    EnsureThreadRequest, LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
+    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextWindow,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextWindowRequest, MessageContent,
+    MessageKind, MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    UpdateAssistantDraftRequest,
+    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
 };
 
 /// Bound on the CAS retry loop. Mirrors the run-state / authorization
@@ -477,6 +477,7 @@ where
             reply_target_binding_id: request.reply_target_binding_id.clone(),
             turn_id: None,
             turn_run_id: None,
+            tool_result_ref: None,
             content: Some(request.content.clone().into_text()),
             redaction_ref: None,
         };
@@ -649,6 +650,7 @@ where
             reply_target_binding_id: None,
             turn_id: None,
             turn_run_id: Some(request.turn_run_id),
+            tool_result_ref: None,
             content: Some(request.content.into_text()),
             redaction_ref: None,
         };
@@ -666,6 +668,63 @@ where
             Ok(()) => Ok(message),
             Err(PutError::VersionMismatch) => Err(SessionThreadError::Backend(format!(
                 "filesystem CAS Absent rejected new assistant draft at {}",
+                path.as_str()
+            ))),
+            Err(PutError::Other(error)) => Err(error),
+        }
+    }
+
+    async fn append_tool_result_reference(
+        &self,
+        request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let envelope = ToolResultReferenceEnvelope::new(request.result_ref, request.safe_summary)
+            .map_err(SessionThreadError::Serialization)?;
+        let existing = self
+            .list_thread_messages(&request.scope, &request.thread_id)
+            .await?;
+        if let Some(existing) = existing.into_iter().find(|message| {
+            message.kind == MessageKind::ToolResultReference
+                && message.status == MessageStatus::Finalized
+                && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
+                && message.tool_result_ref.as_deref() == Some(envelope.result_ref.as_str())
+        }) {
+            return Ok(existing);
+        }
+        let content = serde_json::to_string(&envelope)
+            .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+        let sequence = self
+            .reserve_sequence(&request.scope, &request.thread_id)
+            .await?;
+        let message = ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id: request.thread_id.clone(),
+            sequence,
+            kind: MessageKind::ToolResultReference,
+            status: MessageStatus::Finalized,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: Some(request.turn_run_id),
+            tool_result_ref: Some(envelope.result_ref),
+            content: Some(content),
+            redaction_ref: None,
+        };
+        let path = message_record_path(&request.scope, &request.thread_id, message.message_id)?;
+        let entry = Self::message_entry(&message)?;
+        match put_with_cas(
+            self.filesystem.as_ref(),
+            &request.scope.to_resource_scope(),
+            &path,
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        {
+            Ok(()) => Ok(message),
+            Err(PutError::VersionMismatch) => Err(SessionThreadError::Backend(format!(
+                "filesystem CAS Absent rejected new tool result reference at {}",
                 path.as_str()
             ))),
             Err(PutError::Other(error)) => Err(error),

@@ -1,10 +1,11 @@
 use futures::future::join_all;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AppendAssistantDraftRequest, CreateSummaryArtifactRequest,
-    EnsureThreadRequest, InMemorySessionThreadService, LoadContextWindowRequest, MessageContent,
-    MessageKind, MessageStatus, RedactMessageRequest, SessionThreadService, ThreadHistoryRequest,
-    ThreadMessageId, ThreadScope, UpdateAssistantDraftRequest,
+    AcceptInboundMessageRequest, AppendAssistantDraftRequest, AppendToolResultReferenceRequest,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 
 fn scope(label: &str) -> ThreadScope {
@@ -29,6 +30,57 @@ fn same_tenant_scope(agent_label: &str) -> ThreadScope {
         owner_user_id: Some(UserId::new(format!("user-{agent_label}")).unwrap()),
         mission_id: None,
     }
+}
+
+#[tokio::test]
+async fn append_tool_result_reference_is_finalized_and_idempotent_per_run_result_ref() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("tool-result");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-tool-result").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let first = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:demo".into(),
+            safe_summary: ToolResultSafeSummary::new("safe tool result").unwrap(),
+        })
+        .await
+        .unwrap();
+    let duplicate = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:demo".into(),
+            safe_summary: ToolResultSafeSummary::new("retry content ignored").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first.message_id, duplicate.message_id);
+    assert_eq!(first.kind, MessageKind::ToolResultReference);
+    assert_eq!(first.status, MessageStatus::Finalized);
+    assert_eq!(first.tool_result_ref.as_deref(), Some("result:demo"));
+
+    let history = service
+        .list_thread_history(ThreadHistoryRequest {
+            scope,
+            thread_id: thread.thread_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(history.messages.len(), 1);
 }
 
 #[tokio::test]

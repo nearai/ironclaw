@@ -50,17 +50,17 @@ use tokio::sync::{Mutex, OnceCell};
 
 use async_trait::async_trait;
 use ironclaw_threads::{
-    AppendAssistantDraftRequest, ContextMessage, LoadContextWindowRequest, MessageContent,
-    MessageKind, MessageStatus, SessionThreadError, SessionThreadService, SummaryArtifact,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    UpdateAssistantDraftRequest,
+    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, SessionThreadError,
+    SessionThreadService, SummaryArtifact, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
     LoopMessageRef, TurnId, TurnRunId,
     run_profile::ModelProfileId,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply, BeginAssistantDraft,
-        CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
+        AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
+        BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome,
         CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
         LoopContextBundle, LoopContextMessage, LoopContextPort, LoopContextRequest,
@@ -72,7 +72,6 @@ use ironclaw_turns::{
     },
 };
 use serde::{Deserialize, Serialize};
-
 const EMPTY_SURFACE_VERSION: &str = "empty:v1";
 const LOOP_SYSTEM_ROLE: &str = "system";
 
@@ -383,6 +382,38 @@ where
                 Err(transcript_write_error(error))
             }
         }
+    }
+
+    async fn append_capability_result_ref(
+        &self,
+        request: AppendCapabilityResultRef,
+    ) -> Result<LoopMessageRef, AgentLoopHostError> {
+        validate_thread_scope_for_run(&self.thread_scope, &self.run_context)?;
+        let safe_summary = LoopSafeSummary::new(request.safe_summary).map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::InvalidInvocation,
+                "tool result reference summary is not safe",
+            )
+        })?;
+        let safe_summary =
+            ToolResultSafeSummary::new(safe_summary.as_str().to_string()).map_err(|_| {
+                AgentLoopHostError::new(
+                    AgentLoopHostErrorKind::InvalidInvocation,
+                    "tool result reference summary is not safe",
+                )
+            })?;
+        let record = self
+            .thread_service
+            .append_tool_result_reference(AppendToolResultReferenceRequest {
+                scope: self.thread_scope.clone(),
+                thread_id: self.run_context.thread_id.clone(),
+                turn_run_id: self.run_context.run_id.to_string(),
+                result_ref: request.result_ref.as_str().to_string(),
+                safe_summary,
+            })
+            .await
+            .map_err(transcript_write_error)?;
+        message_ref(record.message_id)
     }
 }
 
