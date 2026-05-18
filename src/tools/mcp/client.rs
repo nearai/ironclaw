@@ -976,7 +976,8 @@ fn strip_delegation_fields_if_present(
     if let Some(obj) = arguments.as_object_mut() {
         let had_cred = obj.remove("credential_jcs_b64u").is_some();
         let had_sig = obj.remove("user_sig_b64u").is_some();
-        if had_cred || had_sig {
+        let had_org_did = obj.remove("org_did").is_some();
+        if had_cred || had_sig || had_org_did {
             tracing::warn!(
                 tool = %tool_name,
                 "delegation credential fields stripped from a tool that does not declare \
@@ -2822,13 +2823,14 @@ mod tests {
         let transport = make_capturing_transport("getAgentDid", false);
         let client = make_t3n_client_with_store(Arc::clone(&transport), store);
 
-        // Agent attempts to include credential fields — they must be stripped.
+        // Agent attempts to include every delegation field — all three must be stripped.
         let result = client
             .call_tool(
                 "getAgentDid",
                 serde_json::json!({
                     "credential_jcs_b64u": "should-be-stripped",
-                    "user_sig_b64u": "should-be-stripped"
+                    "user_sig_b64u": "should-be-stripped",
+                    "org_did": "did:t3:agent-supplied-should-not-leak"
                 }),
             )
             .await
@@ -2853,7 +2855,8 @@ mod tests {
         );
         assert!(
             args.get("org_did").is_none(),
-            "org_did must not be injected for a non-delegating tool"
+            "org_did must be stripped from a non-delegating tool call so an agent \
+             cannot smuggle an arbitrary org_did past the delegation gate"
         );
     }
 
