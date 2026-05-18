@@ -8,6 +8,7 @@ on:
 
 jobs:
   mirror:
+    if: github.repository == 'theredspoon/ironclaw'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
