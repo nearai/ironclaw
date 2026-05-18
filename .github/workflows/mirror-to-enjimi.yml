@@ -14,7 +14,22 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Push to enjimi
+      - name: Verify token
+        env:
+          ENJIMI_PAT: ${{ secrets.ENJIMI_PAT }}
         run: |
-          git remote add enjimi https://x-access-token:${{ secrets.ENJIMI_PAT }}@github.com/enjimi/ironclaw.git
+          if [ -z "$ENJIMI_PAT" ]; then
+            echo "::error::ENJIMI_PAT secret is empty"
+            exit 1
+          fi
+          echo "Token length: ${#ENJIMI_PAT}"
+          curl -sf -o /dev/null -w "API status: %{http_code}\n" \
+            -H "Authorization: token $ENJIMI_PAT" \
+            https://api.github.com/repos/enjimi/ironclaw
+
+      - name: Push to enjimi
+        env:
+          ENJIMI_PAT: ${{ secrets.ENJIMI_PAT }}
+        run: |
+          git remote add enjimi https://x-access-token:${ENJIMI_PAT}@github.com/enjimi/ironclaw.git
           git push enjimi "$GITHUB_REF" --tags --force
