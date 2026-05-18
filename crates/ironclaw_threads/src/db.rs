@@ -8,12 +8,12 @@ use sha2::{Digest, Sha256};
 use crate::identifiers::SummaryArtifactId;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, ContextMessage, ContextWindow, CreateSummaryArtifactRequest,
-    EnsureThreadRequest, LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
+    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextWindow,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextWindowRequest, MessageContent,
+    MessageKind, MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    UpdateAssistantDraftRequest,
+    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
 };
 
 #[cfg(feature = "libsql")]
@@ -250,6 +250,14 @@ impl SessionThreadService for LibSqlSessionThreadService {
             .await
     }
 
+    async fn append_tool_result_reference(
+        &self,
+        request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.mutate(|state| state.append_tool_result_reference(request))
+            .await
+    }
+
     async fn update_assistant_draft(
         &self,
         request: UpdateAssistantDraftRequest,
@@ -420,6 +428,14 @@ impl SessionThreadService for PostgresSessionThreadService {
         request: AppendAssistantDraftRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         self.mutate(|state| state.append_assistant_draft(request))
+            .await
+    }
+
+    async fn append_tool_result_reference(
+        &self,
+        request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        self.mutate(|state| state.append_tool_result_reference(request))
             .await
     }
 
@@ -606,6 +622,7 @@ impl DurableState {
             reply_target_binding_id: request.reply_target_binding_id,
             turn_id: None,
             turn_run_id: None,
+            tool_result_ref: None,
             content: Some(request.content.into_text()),
             redaction_ref: None,
         });
@@ -714,7 +731,44 @@ impl DurableState {
             reply_target_binding_id: None,
             turn_id: None,
             turn_run_id: Some(request.turn_run_id),
+            tool_result_ref: None,
             content: Some(request.content.into_text()),
+            redaction_ref: None,
+        };
+        thread.next_sequence += 1;
+        thread.messages.push(message.clone());
+        Ok(message)
+    }
+
+    fn append_tool_result_reference(
+        &mut self,
+        request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let thread = get_thread_mut(self, &request.scope, &request.thread_id)?;
+        let envelope = ToolResultReferenceEnvelope::new(request.result_ref, request.safe_summary)
+            .map_err(SessionThreadError::Serialization)?;
+        if let Some(existing) = thread.messages.iter().find(|message| {
+            message.kind == MessageKind::ToolResultReference
+                && message.status == MessageStatus::Finalized
+                && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
+                && message.tool_result_ref.as_deref() == Some(envelope.result_ref.as_str())
+        }) {
+            return Ok(existing.clone());
+        }
+        let content = to_json(&envelope)?;
+        let message = ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id: request.thread_id.clone(),
+            sequence: thread.next_sequence,
+            kind: MessageKind::ToolResultReference,
+            status: MessageStatus::Finalized,
+            actor_id: None,
+            source_binding_id: None,
+            reply_target_binding_id: None,
+            turn_id: None,
+            turn_run_id: Some(request.turn_run_id),
+            tool_result_ref: Some(envelope.result_ref),
+            content: Some(content),
             redaction_ref: None,
         };
         thread.next_sequence += 1;

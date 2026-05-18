@@ -18,10 +18,12 @@ libsql-secrets = ["dep:ironclaw_secrets", "ironclaw_secrets/libsql", "dep:libsql
 # Keep separate from `libsql-secrets` so local `cargo test -p ironclaw_reborn`
 # stays fast, while CI can exercise process-restart persistence explicitly.
 libsql-restart-tests = ["dep:libsql", "ironclaw_threads/libsql", "ironclaw_turns/libsql"]
+postgres-thread-tests = ["dep:deadpool-postgres", "dep:tokio-postgres", "ironclaw_threads/postgres"]
 
 [dependencies]
 async-trait = "0.1"
 chrono = "0.4"
+deadpool-postgres = { version = "0.14", optional = true }
 futures-util = { version = "0.3", default-features = false }
 ironclaw_agent_loop = { path = "../ironclaw_agent_loop", version = "0.1.0" }
 ironclaw_events = { path = "../ironclaw_events", version = "0.1.0" }
@@ -37,6 +39,7 @@ secrecy = { version = "0.10", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-postgres = { version = "0.7", optional = true }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 

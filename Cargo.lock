@@ -4587,6 +4587,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "deadpool-postgres",
  "futures-util",
  "ironclaw_agent_loop",
  "ironclaw_authorization",
@@ -4614,6 +4615,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-postgres",
  "tokio-util",
  "tracing",
 ]

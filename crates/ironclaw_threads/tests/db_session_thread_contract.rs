@@ -3,10 +3,10 @@
 use futures::future::join_all;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, AppendAssistantDraftRequest, CreateSummaryArtifactRequest,
-    EnsureThreadRequest, LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus,
-    RedactMessageRequest, SessionThreadService, ThreadHistoryRequest, ThreadScope,
-    UpdateAssistantDraftRequest,
+    AcceptInboundMessageRequest, AppendAssistantDraftRequest, AppendToolResultReferenceRequest,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextWindowRequest, MessageContent,
+    MessageKind, MessageStatus, RedactMessageRequest, SessionThreadService, ThreadHistoryRequest,
+    ThreadScope, ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 
 #[cfg(feature = "libsql")]
@@ -219,6 +219,30 @@ async fn durable_history_flow(service: &impl SessionThreadService, label: &str) 
         })
         .await
         .unwrap();
+
+    let tool_result = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:durable-demo".into(),
+            safe_summary: ToolResultSafeSummary::new("safe durable tool result").unwrap(),
+        })
+        .await
+        .unwrap();
+    let duplicate_tool_result = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:durable-demo".into(),
+            safe_summary: ToolResultSafeSummary::new("retry safe durable tool result ignored")
+                .unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(tool_result.message_id, duplicate_tool_result.message_id);
+
     service
         .finalize_assistant_message(
             &scope,
@@ -246,7 +270,7 @@ async fn assert_reopened_history(
         .await
         .unwrap();
     assert_eq!(history.thread.title.as_deref(), Some("Durable thread"));
-    assert_eq!(history.messages.len(), 3);
+    assert_eq!(history.messages.len(), 4);
     assert_eq!(history.messages[0].sequence, 1);
     assert_eq!(history.messages[0].status, MessageStatus::Redacted);
     assert!(history.messages[0].content.is_none());
@@ -257,6 +281,12 @@ async fn assert_reopened_history(
     assert_eq!(history.messages[2].kind, MessageKind::Assistant);
     assert_eq!(history.messages[2].status, MessageStatus::Finalized);
     assert_eq!(history.messages[2].content.as_deref(), Some("final answer"));
+    assert_eq!(history.messages[3].kind, MessageKind::ToolResultReference);
+    assert_eq!(history.messages[3].status, MessageStatus::Finalized);
+    assert_eq!(
+        history.messages[3].tool_result_ref.as_deref(),
+        Some("result:durable-demo")
+    );
     assert_eq!(history.summary_artifacts.len(), 1);
     assert_eq!(history.summary_artifacts[0].content, "[redacted]");
 
@@ -268,9 +298,14 @@ async fn assert_reopened_history(
         })
         .await
         .unwrap();
-    assert_eq!(context.messages.len(), 2);
+    assert_eq!(context.messages.len(), 3);
     assert_eq!(context.messages[0].content, "safe follow-up");
     assert_eq!(context.messages[1].content, "final answer");
+    let envelope: ToolResultReferenceEnvelope =
+        serde_json::from_str(&context.messages[2].content).unwrap();
+    assert_eq!(envelope.version, 1);
+    assert_eq!(envelope.result_ref, "result:durable-demo");
+    assert_eq!(envelope.safe_summary.as_str(), "safe durable tool result");
 
     let wrong_scope = service
         .list_thread_history(ThreadHistoryRequest {

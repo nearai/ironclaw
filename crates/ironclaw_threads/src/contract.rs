@@ -2,6 +2,7 @@ use ironclaw_host_api::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserI
 use serde::{Deserialize, Serialize};
 
 use crate::identifiers::{SummaryArtifactId, ThreadMessageId};
+use crate::tool_result_reference::ToolResultSafeSummary;
 
 /// Canonical scope carried by a Reborn session thread.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -86,6 +87,8 @@ pub struct ThreadMessageRecord {
     pub reply_target_binding_id: Option<String>,
     pub turn_id: Option<String>,
     pub turn_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_result_ref: Option<String>,
     pub content: Option<String>,
     pub redaction_ref: Option<String>,
 }
@@ -155,6 +158,15 @@ pub struct AppendAssistantDraftRequest {
     pub thread_id: ThreadId,
     pub turn_run_id: String,
     pub content: MessageContent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendToolResultReferenceRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub turn_run_id: String,
+    pub result_ref: String,
+    pub safe_summary: ToolResultSafeSummary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
