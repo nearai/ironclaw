@@ -4256,6 +4256,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_event_streams"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_event_projections",
+ "ironclaw_events",
+ "ironclaw_host_api",
+ "ironclaw_outbound",
+ "ironclaw_turns",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "ironclaw_events"
 version = "0.1.0"
 dependencies = [
