@@ -766,12 +766,27 @@ impl DurableState {
         let provider_call = request.provider_call;
         let envelope = ToolResultReferenceEnvelope::new(request.result_ref, request.safe_summary)
             .map_err(SessionThreadError::Serialization)?;
-        if let Some(existing) = thread.messages.iter().find(|message| {
+        if let Some(existing) = thread.messages.iter_mut().find(|message| {
             message.kind == MessageKind::ToolResultReference
                 && message.status == MessageStatus::Finalized
                 && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
                 && message.tool_result_ref.as_deref() == Some(envelope.result_ref.as_str())
         }) {
+            if let Some(provider_call) = provider_call.as_ref() {
+                provider_call
+                    .validate()
+                    .map_err(SessionThreadError::Serialization)?;
+                match existing.tool_result_provider_call.as_ref() {
+                    None => existing.tool_result_provider_call = Some(provider_call.clone()),
+                    Some(existing_provider_call) if existing_provider_call == provider_call => {}
+                    Some(_) => {
+                        return Err(SessionThreadError::Serialization(
+                            "tool result provider metadata conflicts with existing record"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
             return Ok(existing.clone());
         }
         if let Some(provider_call) = &provider_call {

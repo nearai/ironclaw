@@ -271,6 +271,7 @@ impl CanonicalAgentLoopExecutor {
 
             let mut context_request = planner.context().plan_context_request(&state).await;
             context_request.surface_version = Some(surface.version.clone());
+            context_request.capability_view = Some(capability_view.clone());
             let prompt_mode = context_request.mode;
             state = match self
                 .checkpoint_and_exit_if_cancelled_after_pending_input_ack(
@@ -1835,6 +1836,7 @@ mod tests {
         model_responses: Arc<Mutex<VecDeque<LoopModelResponse>>>,
         model_errors: Arc<Mutex<VecDeque<AgentLoopHostError>>>,
         model_requests: Arc<Mutex<Vec<LoopModelRequest>>>,
+        prompt_requests: Arc<Mutex<Vec<LoopPromptBundleRequest>>>,
         input_batches: Arc<Mutex<VecDeque<LoopInputBatch>>>,
         acked_input_tokens: Arc<Mutex<Vec<LoopInputAckToken>>>,
         batch_outcomes: Arc<Mutex<VecDeque<ironclaw_turns::run_profile::CapabilityBatchOutcome>>>,
@@ -1864,6 +1866,7 @@ mod tests {
                 model_responses: Arc::new(Mutex::new(model_responses.into())),
                 model_errors: Arc::new(Mutex::new(VecDeque::new())),
                 model_requests: Arc::new(Mutex::new(Vec::new())),
+                prompt_requests: Arc::new(Mutex::new(Vec::new())),
                 input_batches: Arc::new(Mutex::new(VecDeque::new())),
                 acked_input_tokens: Arc::new(Mutex::new(Vec::new())),
                 batch_outcomes: Arc::new(Mutex::new(VecDeque::new())),
@@ -1937,6 +1940,10 @@ mod tests {
 
         fn model_requests(&self) -> Vec<LoopModelRequest> {
             self.model_requests.lock().expect("lock").clone()
+        }
+
+        fn prompt_requests(&self) -> Vec<LoopPromptBundleRequest> {
+            self.prompt_requests.lock().expect("lock").clone()
         }
 
         fn acked_input_tokens(&self) -> Vec<LoopInputAckToken> {
@@ -2059,8 +2066,9 @@ mod tests {
     impl ironclaw_turns::run_profile::LoopPromptPort for MockHost {
         async fn build_prompt_bundle(
             &self,
-            _request: LoopPromptBundleRequest,
+            request: LoopPromptBundleRequest,
         ) -> Result<LoopPromptBundle, AgentLoopHostError> {
+            self.prompt_requests.lock().expect("lock").push(request);
             Ok(LoopPromptBundle {
                 bundle_ref: LoopPromptBundleRef::for_run(&self.context, "bundle").expect("valid"),
                 messages: vec![LoopModelMessage {
@@ -2498,6 +2506,14 @@ mod tests {
                 .capability_view
                 .as_ref()
                 .expect("model capability view")
+                .visible_capability_ids
+                .is_empty()
+        );
+        assert!(
+            host.prompt_requests()[0]
+                .capability_view
+                .as_ref()
+                .expect("prompt capability view")
                 .visible_capability_ids
                 .is_empty()
         );

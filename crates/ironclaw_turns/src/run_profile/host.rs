@@ -849,6 +849,8 @@ pub struct LoopPromptBundleRequest {
     pub mode: PromptMode,
     pub context_cursor: Option<LoopInputCursor>,
     pub surface_version: Option<CapabilitySurfaceVersion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability_view: Option<LoopModelCapabilityView>,
     pub checkpoint_state_ref: Option<LoopCheckpointStateRef>,
     pub max_messages: Option<u32>,
     #[serde(default)]

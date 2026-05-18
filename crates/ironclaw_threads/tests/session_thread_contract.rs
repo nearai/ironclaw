@@ -102,7 +102,7 @@ async fn append_tool_result_reference_is_finalized_and_idempotent_per_run_result
 }
 
 #[tokio::test]
-async fn duplicate_tool_result_reference_returns_existing_before_validating_provider_metadata() {
+async fn duplicate_tool_result_reference_accepts_matching_provider_metadata() {
     let service = InMemorySessionThreadService::default();
     let scope = scope("tool-result-idempotent-provider");
     let thread = service
@@ -128,8 +128,6 @@ async fn duplicate_tool_result_reference_returns_existing_before_validating_prov
         .await
         .unwrap();
 
-    let mut invalid_provider_call = provider_call_reference();
-    invalid_provider_call.provider_id.clear();
     let duplicate = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
             scope,
@@ -137,7 +135,7 @@ async fn duplicate_tool_result_reference_returns_existing_before_validating_prov
             turn_run_id: "run-1".into(),
             result_ref: "result:demo-provider".into(),
             safe_summary: ToolResultSafeSummary::new("retry content ignored").unwrap(),
-            provider_call: Some(invalid_provider_call),
+            provider_call: Some(provider_call_reference()),
         })
         .await
         .unwrap();
@@ -147,6 +145,115 @@ async fn duplicate_tool_result_reference_returns_existing_before_validating_prov
         duplicate.tool_result_ref.as_deref(),
         Some("result:demo-provider")
     );
+}
+
+#[tokio::test]
+async fn append_tool_result_reference_backfills_provider_metadata_on_idempotent_retry() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("tool-result-provider-backfill");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-tool-result-provider-backfill").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let first = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:demo-provider".into(),
+            safe_summary: ToolResultSafeSummary::new("safe tool result").unwrap(),
+            provider_call: None,
+        })
+        .await
+        .unwrap();
+    let duplicate = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:demo-provider".into(),
+            safe_summary: ToolResultSafeSummary::new("retry content ignored").unwrap(),
+            provider_call: Some(provider_call_reference()),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(first.message_id, duplicate.message_id);
+    assert_eq!(
+        duplicate
+            .tool_result_provider_call
+            .as_ref()
+            .expect("provider metadata backfilled")
+            .provider_call_id,
+        "call_1"
+    );
+    let context = service
+        .load_context_messages(LoadContextMessagesRequest {
+            scope,
+            thread_id: thread.thread_id,
+            message_ids: vec![duplicate.message_id],
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        context.messages[0]
+            .tool_result_provider_call
+            .as_ref()
+            .expect("model context preserves backfilled metadata")
+            .provider_tool_name,
+        "demo__echo"
+    );
+}
+
+#[tokio::test]
+async fn append_tool_result_reference_rejects_conflicting_provider_metadata_on_retry() {
+    let service = InMemorySessionThreadService::default();
+    let scope = scope("tool-result-provider-conflict");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope.clone(),
+            thread_id: Some(ThreadId::new("thread-tool-result-provider-conflict").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            turn_run_id: "run-1".into(),
+            result_ref: "result:demo-provider".into(),
+            safe_summary: ToolResultSafeSummary::new("safe tool result").unwrap(),
+            provider_call: Some(provider_call_reference()),
+        })
+        .await
+        .unwrap();
+    let mut conflicting_provider_call = provider_call_reference();
+    conflicting_provider_call.provider_call_id = "call_2".to_string();
+
+    let error = service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope,
+            thread_id: thread.thread_id,
+            turn_run_id: "run-1".into(),
+            result_ref: "result:demo-provider".into(),
+            safe_summary: ToolResultSafeSummary::new("retry content ignored").unwrap(),
+            provider_call: Some(conflicting_provider_call),
+        })
+        .await
+        .expect_err("conflicting provider metadata rejected");
+
+    assert!(error.to_string().contains("provider metadata conflicts"));
 }
 
 #[tokio::test]

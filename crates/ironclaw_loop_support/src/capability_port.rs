@@ -27,6 +27,9 @@ use ironclaw_turns::{
 };
 use tokio::sync::Notify;
 
+const PROVIDER_TOOL_NAME_MAX_BYTES: usize = 64;
+const PROVIDER_TOOL_NAME_DIGEST_BYTES: usize = 32;
+
 #[async_trait]
 pub trait LoopCapabilityInputResolver: Send + Sync {
     async fn resolve_capability_input(
@@ -336,6 +339,12 @@ impl HostRuntimeLoopCapabilityPort {
     }
 
     fn current_snapshot(&self) -> Result<Option<(String, SurfaceSnapshot)>, AgentLoopHostError> {
+        let snapshots = self.snapshots.lock().map_err(|_| {
+            AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                "capability surface snapshot store is unavailable",
+            )
+        })?;
         let version = self
             .current_surface_version
             .lock()
@@ -349,12 +358,6 @@ impl HostRuntimeLoopCapabilityPort {
         let Some(version) = version else {
             return Ok(None);
         };
-        let snapshots = self.snapshots.lock().map_err(|_| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Unavailable,
-                "capability surface snapshot store is unavailable",
-            )
-        })?;
         let snapshot = snapshots.get(&version).cloned().ok_or_else(|| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::StaleSurface,
@@ -860,21 +863,70 @@ fn provider_tool_name(
     capability_id: &CapabilityId,
     existing: &HashMap<String, CapabilityId>,
 ) -> String {
-    let base = capability_id.as_str().replace('.', "__");
-    if base.len() <= 256 && !existing.contains_key(&base) {
+    let base = provider_tool_name_base(capability_id.as_str());
+    if base.len() <= PROVIDER_TOOL_NAME_MAX_BYTES
+        && existing
+            .get(&base)
+            .is_none_or(|existing_id| existing_id == capability_id)
+    {
         return base;
     }
-    let digest = sha256_digest_token(capability_id.as_str().as_bytes());
+    provider_tool_name_with_digest(&base, capability_id.as_str(), existing, 0)
+}
+
+fn provider_tool_name_with_digest(
+    base: &str,
+    capability_id: &str,
+    existing: &HashMap<String, CapabilityId>,
+    attempt: u16,
+) -> String {
+    let digest_input = if attempt == 0 {
+        capability_id.to_string()
+    } else {
+        format!("{capability_id}#{attempt}")
+    };
+    let digest = sha256_digest_token(digest_input.as_bytes());
     let suffix = digest.strip_prefix("sha256:").unwrap_or(&digest);
-    let suffix = &suffix[..32];
-    let prefix_len = 256usize.saturating_sub("__".len() + suffix.len());
-    let prefix = base
-        .char_indices()
-        .map(|(index, _)| index)
-        .take_while(|index| *index <= prefix_len)
-        .last()
-        .unwrap_or(0);
-    format!("{}__{}", &base[..prefix], suffix)
+    let suffix = &suffix[..PROVIDER_TOOL_NAME_DIGEST_BYTES];
+    let prefix_len = PROVIDER_TOOL_NAME_MAX_BYTES.saturating_sub("__".len() + suffix.len());
+    let prefix = if base.len() <= prefix_len {
+        base
+    } else {
+        let prefix_end = base
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= prefix_len)
+            .last()
+            .unwrap_or(0);
+        &base[..prefix_end]
+    };
+    let candidate = format!("{prefix}__{suffix}");
+    if existing
+        .get(&candidate)
+        .is_none_or(|existing_id| existing_id.as_str() == capability_id)
+        || attempt == u16::MAX
+    {
+        return candidate;
+    }
+    provider_tool_name_with_digest(base, capability_id, existing, attempt + 1)
+}
+
+fn provider_tool_name_base(capability_id: &str) -> String {
+    let mut name = String::with_capacity(capability_id.len());
+    for character in capability_id.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+            name.push(character);
+        } else if character == '.' {
+            name.push_str("__");
+        } else {
+            name.push('_');
+        }
+    }
+    if name.is_empty() {
+        "tool".to_string()
+    } else {
+        name
+    }
 }
 
 fn validate_provider_tool_call(tool_call: &ProviderToolCall) -> Result<(), AgentLoopHostError> {
@@ -888,7 +940,7 @@ fn validate_provider_tool_call(tool_call: &ProviderToolCall) -> Result<(), Agent
     })?;
     validate_provider_token(turn_id, "provider turn id", 512)?;
     validate_provider_token(&tool_call.id, "provider call id", 512)?;
-    validate_provider_token(&tool_call.name, "provider tool name", 256)?;
+    validate_provider_tool_name(&tool_call.name)?;
     validate_provider_arguments(&tool_call.arguments)?;
     validate_optional_provider_text(
         &tool_call.response_reasoning,
@@ -897,6 +949,31 @@ fn validate_provider_tool_call(tool_call: &ProviderToolCall) -> Result<(), Agent
     )?;
     validate_optional_provider_text(&tool_call.reasoning, "provider reasoning", 4096)?;
     validate_optional_provider_text(&tool_call.signature, "provider signature", 4096)?;
+    Ok(())
+}
+
+fn validate_provider_tool_name(value: &str) -> Result<(), AgentLoopHostError> {
+    if value.is_empty() {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "provider tool name must not be empty",
+        ));
+    }
+    if value.len() > PROVIDER_TOOL_NAME_MAX_BYTES {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            format!("provider tool name exceeds {PROVIDER_TOOL_NAME_MAX_BYTES} bytes"),
+        ));
+    }
+    if !value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return Err(AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            "provider tool name must contain only ASCII letters, digits, _, or -",
+        ));
+    }
     Ok(())
 }
 
@@ -1525,14 +1602,37 @@ mod tests {
         );
         let name = provider_tool_name(&capability_id, &existing);
 
-        assert!(name.len() <= 256);
+        assert!(name.len() <= PROVIDER_TOOL_NAME_MAX_BYTES);
+        assert!(
+            name.chars().all(
+                |character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+            )
+        );
         let suffix = name.rsplit("__").next().expect("digest suffix");
-        assert_eq!(suffix.len(), 32);
+        assert_eq!(suffix.len(), PROVIDER_TOOL_NAME_DIGEST_BYTES);
         assert!(
             suffix
                 .chars()
                 .all(|character| character.is_ascii_hexdigit())
         );
+    }
+
+    #[test]
+    fn provider_tool_name_normalizes_provider_unsafe_characters() {
+        let capability_id = CapabilityId::new("demo.echo.v1").expect("valid capability id");
+        let name = provider_tool_name(&capability_id, &HashMap::new());
+
+        assert_eq!(name, "demo__echo__v1");
+        validate_provider_tool_name(&name).expect("provider-safe name");
+    }
+
+    #[test]
+    fn provider_tool_call_validation_rejects_provider_unsafe_tool_name() {
+        let mut call = provider_tool_call();
+        call.name = "demo.echo".to_string();
+
+        let error = validate_provider_tool_call(&call).expect_err("unsafe name rejected");
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
     }
 
     #[test]

@@ -22,13 +22,14 @@ use ironclaw_turns::{
         FinalizeAssistantMessage, HostManagedLoopModelPort, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InstructionBundleBuilder, InstructionBundleFingerprint, InstructionBundleRequest,
-        InstructionSafetyContext, LoopCancellationPort, LoopCancellationSignal, LoopCapabilityPort,
-        LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
-        LoopContextBundle, LoopContextMessage, LoopContextPort, LoopContextRequest,
-        LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverId, LoopDriverNoteKind,
-        LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter, LoopHostMilestoneKind,
-        LoopHostMilestoneSink, LoopInputAckToken, LoopInputBatch, LoopInputCursor,
-        LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGateway,
+        InstructionMaterializationStore, InstructionSafetyContext, LoopCancellationPort,
+        LoopCancellationSignal, LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort,
+        LoopCheckpointRequest, LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage,
+        LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata,
+        LoopDriverId, LoopDriverNoteKind, LoopGateKind, LoopHostMilestone,
+        LoopHostMilestoneEmitter, LoopHostMilestoneKind, LoopHostMilestoneSink, LoopInputAckToken,
+        LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
+        LoopModelBudgetAccountant, LoopModelCapabilityView, LoopModelGateway,
         LoopModelGatewayError, LoopModelGatewayRequest, LoopModelMessage, LoopModelPolicyGuard,
         LoopModelPort, LoopModelRequest, LoopModelResponse, LoopProgressEvent, LoopProgressPort,
         LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptBundleRequest,
@@ -535,6 +536,7 @@ async fn instruction_bundle_builder_allows_tool_result_reference_context_message
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -620,6 +622,7 @@ async fn loop_prompt_port_builds_text_only_bundle_from_context_refs() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -637,6 +640,70 @@ async fn loop_prompt_port_builds_text_only_bundle_from_context_refs() {
     );
     assert_eq!(host.effects(), vec!["context"]);
     assert_eq!(host.milestone_kind_names(), vec!["prompt_bundle_built"]);
+}
+
+#[tokio::test]
+async fn loop_prompt_port_filters_visible_surface_by_capability_view() {
+    let host = Arc::new(RecordingAgentLoopHost::new(claimed_run_context().await));
+    let surface = VisibleCapabilitySurface {
+        version: CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        descriptors: vec![
+            CapabilityDescriptorView {
+                capability_id: CapabilityId::new("demo.echo").unwrap(),
+                provider: None,
+                runtime: RuntimeKind::Wasm,
+                safe_name: "Echo".to_string(),
+                safe_description: "Returns an opaque result ref".to_string(),
+                concurrency_hint: ConcurrencyHint::Exclusive,
+                parameters_schema: serde_json::json!({"type":"object"}),
+            },
+            CapabilityDescriptorView {
+                capability_id: CapabilityId::new("demo.hidden").unwrap(),
+                provider: None,
+                runtime: RuntimeKind::Wasm,
+                safe_name: "Hidden".to_string(),
+                safe_description: "Should not reach the prompt".to_string(),
+                concurrency_hint: ConcurrencyHint::Exclusive,
+                parameters_schema: serde_json::json!({"type":"object"}),
+            },
+        ],
+    };
+    let store = Arc::new(InMemoryInstructionMaterializationStore::default());
+    let port = HostManagedLoopPromptPort::new(
+        host.context.clone(),
+        host.clone(),
+        host.milestone_sink.clone(),
+    )
+    .with_current_surface(surface.clone())
+    .with_instruction_materialization_store(store.clone());
+
+    let bundle = port
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: Some(surface.version),
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+            capability_view: Some(LoopModelCapabilityView {
+                visible_capability_ids: vec![CapabilityId::new("demo.echo").unwrap()],
+            }),
+        })
+        .await
+        .unwrap();
+    let surface_message = bundle
+        .messages
+        .iter()
+        .find_map(|message| {
+            store
+                .get_materialized_message(&host.context, &message.content_ref)
+                .unwrap()
+                .filter(|materialized| materialized.safe_content.starts_with("surface "))
+        })
+        .expect("surface instruction materialized");
+
+    assert!(surface_message.safe_content.contains("demo.echo"));
+    assert!(!surface_message.safe_content.contains("demo.hidden"));
 }
 
 #[tokio::test]
@@ -700,6 +767,7 @@ async fn loop_prompt_port_uses_current_surface_version_lookup_each_build() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -715,6 +783,7 @@ async fn loop_prompt_port_uses_current_surface_version_lookup_each_build() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -790,6 +859,7 @@ async fn loop_prompt_port_materializes_instruction_snippets_as_system_refs() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -828,6 +898,7 @@ async fn loop_prompt_port_preserves_mid_conversation_system_message_order() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -874,6 +945,7 @@ async fn loop_prompt_port_keeps_identity_before_skill_snippets_and_records_skill
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -940,6 +1012,7 @@ async fn loop_prompt_port_rejects_unsupported_prompt_mode() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -971,6 +1044,7 @@ async fn loop_prompt_port_rejects_malformed_same_run_checkpoint_ref() {
             ),
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -1004,6 +1078,7 @@ async fn loop_prompt_port_rejects_cross_run_checkpoint_ref() {
             ),
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -1035,6 +1110,7 @@ async fn loop_prompt_port_rejects_cross_run_context_cursor() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -1064,6 +1140,7 @@ async fn loop_prompt_port_rejects_checkpoint_state_ref_until_supported() {
             ),
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -1090,6 +1167,7 @@ async fn loop_prompt_port_rejects_unvalidated_surface_version() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -1117,6 +1195,7 @@ async fn loop_prompt_port_rejects_stale_surface_version() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -1146,6 +1225,7 @@ async fn loop_prompt_port_rejects_unstored_synthetic_instruction_refs() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -1194,6 +1274,7 @@ async fn loop_prompt_port_materializes_memory_surface_and_safety_as_host_owned_r
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -1238,6 +1319,7 @@ async fn loop_prompt_port_rejects_zero_message_limit() {
             checkpoint_state_ref: None,
             max_messages: Some(0),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -1264,6 +1346,7 @@ async fn loop_prompt_port_clamps_default_and_requested_message_limits() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -1285,6 +1368,7 @@ async fn loop_prompt_port_clamps_default_and_requested_message_limits() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -1305,6 +1389,7 @@ async fn loop_prompt_port_clamps_default_and_requested_message_limits() {
             checkpoint_state_ref: None,
             max_messages: Some(u32::MAX),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -1342,6 +1427,7 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -1589,6 +1675,7 @@ impl AgentLoopDriver for ReplyDriver {
                 checkpoint_state_ref: None,
                 max_messages: Some(8),
                 inline_messages: Vec::new(),
+                capability_view: None,
             })
             .await
             .map_err(driver_error)?;

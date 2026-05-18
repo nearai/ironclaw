@@ -241,12 +241,10 @@ async fn durable_history_flow(service: &impl SessionThreadService, label: &str) 
             turn_run_id: "run-1".into(),
             result_ref: "result:durable-demo".into(),
             safe_summary: ToolResultSafeSummary::new("safe durable tool result").unwrap(),
-            provider_call: Some(provider_call.clone()),
+            provider_call: None,
         })
         .await
         .unwrap();
-    let mut invalid_provider_call = provider_call;
-    invalid_provider_call.provider_id.clear();
     let duplicate_tool_result = service
         .append_tool_result_reference(AppendToolResultReferenceRequest {
             scope: scope.clone(),
@@ -255,11 +253,19 @@ async fn durable_history_flow(service: &impl SessionThreadService, label: &str) 
             result_ref: "result:durable-demo".into(),
             safe_summary: ToolResultSafeSummary::new("retry safe durable tool result ignored")
                 .unwrap(),
-            provider_call: Some(invalid_provider_call),
+            provider_call: Some(provider_call),
         })
         .await
         .unwrap();
     assert_eq!(tool_result.message_id, duplicate_tool_result.message_id);
+    assert_eq!(
+        duplicate_tool_result
+            .tool_result_provider_call
+            .as_ref()
+            .expect("provider metadata backfilled")
+            .provider_call_id,
+        "call_1"
+    );
 
     service
         .finalize_assistant_message(

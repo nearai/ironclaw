@@ -265,6 +265,7 @@ mod tests {
                     checkpoint_state_ref: None,
                     max_messages: Some(7),
                     inline_messages: Vec::new(),
+                    capability_view: None,
                 }
             }
         }

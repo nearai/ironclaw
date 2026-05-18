@@ -375,6 +375,7 @@ async fn prompt_and_model_ports_materialize_trusted_identity_content() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -679,6 +680,7 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -770,6 +772,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -850,6 +853,7 @@ async fn prompt_port_records_installed_skill_trust_metadata_without_prompt_paylo
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -910,6 +914,7 @@ async fn prompt_port_records_multiple_active_skill_metadata_in_prompt_order() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -974,6 +979,7 @@ async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -1041,6 +1047,7 @@ async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -1863,6 +1870,7 @@ async fn prompt_port_builds_bundle_with_tool_result_reference_context() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();

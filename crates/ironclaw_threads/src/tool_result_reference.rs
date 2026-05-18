@@ -88,7 +88,7 @@ impl ProviderToolCallReferenceEnvelope {
         validate_provider_identity(&self.provider_model_id, "provider model id", 512)?;
         validate_provider_token(&self.provider_turn_id, "provider turn id", 512)?;
         validate_provider_token(&self.provider_call_id, "provider call id", 512)?;
-        validate_provider_token(&self.provider_tool_name, "provider tool name", 256)?;
+        validate_provider_tool_name(&self.provider_tool_name)?;
         validate_provider_arguments(&self.arguments)?;
         validate_optional_provider_text(
             &self.response_reasoning,
@@ -99,6 +99,24 @@ impl ProviderToolCallReferenceEnvelope {
         validate_optional_provider_text(&self.signature, "provider signature", 4096)?;
         Ok(())
     }
+}
+
+fn validate_provider_tool_name(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("provider tool name must not be empty".to_string());
+    }
+    if value.len() > 64 {
+        return Err("provider tool name exceeds 64 bytes".to_string());
+    }
+    if !value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return Err(
+            "provider tool name must contain only ASCII letters, digits, _, or -".to_string(),
+        );
+    }
+    Ok(())
 }
 
 impl ToolResultReferenceEnvelope {

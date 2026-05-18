@@ -324,6 +324,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -398,6 +399,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();

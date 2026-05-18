@@ -168,6 +168,7 @@ where
                 checkpoint_state_ref: None,
                 max_messages: Some(self.max_messages.min(u32::MAX as usize) as u32),
                 inline_messages: Vec::new(),
+                capability_view: None,
             })
             .await
             .map_err(host_error_to_model_gateway_error)?;
