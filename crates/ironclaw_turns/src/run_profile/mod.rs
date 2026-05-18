@@ -67,7 +67,7 @@ pub use model::{
     NoOpPolicyGuard,
 };
 pub use policy::{
-    CancellationPolicy, CheckpointPolicy, PrivilegedRunProfileDimension,
+    CancellationPolicy, CheckpointPolicy, PersonalContextAuthority, PrivilegedRunProfileDimension,
     RedactedRunProfileProvenance, RedactedRunProfileSource, ResourceBudgetPolicy,
     RunProfileRequestAuthority, RunProfileResolutionError, RuntimeProfileConstraints,
     SteeringPolicy,

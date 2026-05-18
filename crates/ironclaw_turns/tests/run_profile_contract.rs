@@ -112,6 +112,10 @@ async fn authorized_long_running_profile_resolves_distinct_driver_and_budget_env
     assert_eq!(snapshot.checkpoint_schema_id.as_str(), "durable_mission_v1");
     assert_eq!(snapshot.model_profile_id.as_str(), "mission_model");
     assert_eq!(
+        snapshot.personal_context_policy,
+        PersonalContextPolicy::Excluded
+    );
+    assert_eq!(
         snapshot.resource_budget_policy.tier.as_str(),
         "mission_standard"
     );

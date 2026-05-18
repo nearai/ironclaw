@@ -422,6 +422,17 @@ mod tests {
         assert!(messages.is_empty());
     }
 
+    #[test]
+    fn identity_budget_rejects_zero_token_ceiling() {
+        let error = IdentityBudget::new(0).unwrap_err();
+
+        assert_eq!(error, HostIdentityContextBuildError::BudgetMisconfigured);
+        assert_eq!(
+            error.into_host_error().kind,
+            AgentLoopHostErrorKind::Internal
+        );
+    }
+
     #[tokio::test]
     async fn installed_trust_summary_only() {
         let context = run_context().await;

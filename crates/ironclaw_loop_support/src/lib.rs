@@ -40,7 +40,8 @@ pub use identity_context::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostIdentityMessageContent, IdentityApplicability, IdentityBudget, IdentityFileName,
     IdentityMessageBuildOutcome, IdentityTrustLevel, build_identity_messages,
-    identity_applicability_allowed_for_run, identity_message_ref,
+    build_identity_messages_for_run_detailed, identity_applicability_allowed_for_run,
+    identity_message_ref,
 };
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
@@ -100,6 +101,8 @@ where
 struct IdentityCandidateCache {
     text_only: OnceCell<Vec<HostIdentityContextCandidate>>,
     codeact: OnceCell<Vec<HostIdentityContextCandidate>>,
+    text_only_personal_context_admitted: OnceCell<()>,
+    codeact_personal_context_admitted: OnceCell<()>,
 }
 
 impl IdentityCandidateCache {
@@ -107,6 +110,8 @@ impl IdentityCandidateCache {
         Self {
             text_only: OnceCell::new(),
             codeact: OnceCell::new(),
+            text_only_personal_context_admitted: OnceCell::new(),
+            codeact_personal_context_admitted: OnceCell::new(),
         }
     }
 
@@ -114,6 +119,13 @@ impl IdentityCandidateCache {
         match mode {
             PromptMode::TextOnly => &self.text_only,
             PromptMode::CodeAct => &self.codeact,
+        }
+    }
+
+    fn personal_context_admitted_cell_for_mode(&self, mode: PromptMode) -> &OnceCell<()> {
+        match mode {
+            PromptMode::TextOnly => &self.text_only_personal_context_admitted,
+            PromptMode::CodeAct => &self.codeact_personal_context_admitted,
         }
     }
 }
@@ -221,8 +233,11 @@ where
                     mode,
                     self.identity_budget,
                 )?;
-                self.publish_personal_context_admitted(&outcome.admitted_personal_context_paths)
-                    .await?;
+                self.publish_personal_context_admitted(
+                    mode,
+                    &outcome.admitted_personal_context_paths,
+                )
+                .await;
                 outcome.messages
             }
             None => Vec::new(),
@@ -245,20 +260,28 @@ impl<S> ThreadBackedLoopContextPort<S>
 where
     S: SessionThreadService + ?Sized + Send + Sync,
 {
-    async fn publish_personal_context_admitted(
-        &self,
-        admitted_paths: &[String],
-    ) -> Result<(), AgentLoopHostError> {
+    async fn publish_personal_context_admitted(&self, mode: PromptMode, admitted_paths: &[String]) {
         if admitted_paths.is_empty() {
-            return Ok(());
+            return;
         }
         let Some(milestone_sink) = self.milestone_sink.as_ref() else {
-            return Ok(());
+            return;
         };
-        let summary = personal_context_admitted_summary(admitted_paths)?;
-        LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(milestone_sink))
-            .driver_note(LoopDriverNoteKind::Context, summary)
-            .await
+        let emitted_cell = self
+            .identity_candidates
+            .personal_context_admitted_cell_for_mode(mode);
+        let publish_result = emitted_cell
+            .get_or_try_init(|| async {
+                let summary = personal_context_admitted_summary(admitted_paths)?;
+                LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(milestone_sink))
+                    .driver_note(LoopDriverNoteKind::Context, summary)
+                    .await?;
+                Ok::<(), AgentLoopHostError>(())
+            })
+            .await;
+        if let Err(error) = publish_result {
+            tracing::warn!("failed to emit personal context admitted milestone: {error}");
+        }
     }
 }
 

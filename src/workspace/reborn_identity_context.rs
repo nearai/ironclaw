@@ -27,6 +27,9 @@ const STABLE_IDENTITY_PATHS: &[&str] = &[
     paths::BOOTSTRAP,
 ];
 
+// These basenames are surfaced in safe admission milestones after path
+// sanitization. Keep future additions collision-free and clear of
+// `validate_loop_safe_summary` forbidden tokens such as secret/password/bearer.
 const PERSONAL_IDENTITY_PATHS: &[&str] = &[paths::USER, paths::ASSISTANT_DIRECTIVES];
 
 #[derive(Clone)]
