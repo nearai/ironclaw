@@ -411,7 +411,11 @@ fn check_workspace_dir() -> CheckResult {
 // ── Embeddings ──────────────────────────────────────────────
 
 fn check_embeddings(settings: &Settings) -> CheckResult {
-    match crate::config::embeddings::resolve_embeddings_config(settings) {
+    let nearai_base_url = match crate::config::llm::resolve(settings) {
+        Ok(llm) => llm.nearai.base_url,
+        Err(e) => return CheckResult::Fail(format!("could not resolve LLM config: {e}")),
+    };
+    match crate::config::embeddings::resolve_embeddings_config(settings, &nearai_base_url) {
         Ok(config) => {
             if !config.enabled {
                 return CheckResult::Skip("disabled (set EMBEDDING_ENABLED=true)".into());

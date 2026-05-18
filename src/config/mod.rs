@@ -550,11 +550,15 @@ impl Config {
         // handled separately by WorkspacePool.
         let workspace = WorkspaceConfig::resolve(&owner_id)?;
 
+        let llm = crate::config::llm::resolve(settings)?;
+        let embeddings =
+            self::embeddings::resolve_embeddings_config(settings, &llm.nearai.base_url)?;
+
         Ok(Self {
             owner_id: owner_id.clone(),
             database: DatabaseConfig::resolve()?,
-            llm: crate::config::llm::resolve(settings)?,
-            embeddings: self::embeddings::resolve_embeddings_config(settings)?,
+            llm,
+            embeddings,
             tunnel,
             channels,
             agent: AgentConfig::resolve(settings)?,

@@ -455,9 +455,10 @@ pub async fn run_memory_command(mem_cmd: &MemoryCommand) -> anyhow::Result<()> {
             });
     let embeddings = ironclaw_embeddings::create_provider(
         &config.embeddings,
-        &config.llm.nearai.base_url,
-        session,
-        bedrock_setup.as_ref(),
+        ironclaw_embeddings::ProviderDeps {
+            session,
+            bedrock_setup,
+        },
     )
     .await;
 

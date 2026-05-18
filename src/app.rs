@@ -564,9 +564,10 @@ impl AppBuilder {
                 });
         let embeddings = ironclaw_embeddings::create_provider(
             &self.config.embeddings,
-            &self.config.llm.nearai.base_url,
-            self.session.clone(),
-            bedrock_setup.as_ref(),
+            ironclaw_embeddings::ProviderDeps {
+                session: self.session.clone(),
+                bedrock_setup,
+            },
         )
         .await;
 

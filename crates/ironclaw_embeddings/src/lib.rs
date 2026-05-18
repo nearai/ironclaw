@@ -1,29 +1,27 @@
-//! Embedding-provider trait + implementations (OpenAI, NearAI, Ollama, AWS Bedrock)
-//! and an LRU-caching decorator.
+//! Embedding-provider trait + caching decorator.
 //!
-//! Extracted from `src/workspace/embeddings.rs` and `src/workspace/embedding_cache.rs`.
+//! Concrete provider implementations (OpenAI, NEAR AI, Ollama, AWS Bedrock)
+//! are crate-internal — construct one through [`create_provider`] using
+//! [`EmbeddingsConfig`] + [`ProviderDeps`]. Callers should only ever hold
+//! `Arc<dyn EmbeddingProvider>`.
+//!
 //! The resolver that reads the binary-side `Settings` lives in
 //! `src/config/embeddings.rs::resolve_embeddings_config`; everything else
-//! (the trait, error, providers, config shape, cache, and factory) lives here.
+//! (trait, error, config shape, cache, factory, providers) lives here.
 
-pub mod bedrock;
-pub mod cache;
-pub mod config;
-pub mod factory;
-pub mod mock;
-pub mod nearai;
-pub mod ollama;
-pub mod openai;
-pub mod provider;
+mod bedrock;
+mod cache;
+mod config;
+mod factory;
+mod mock;
+mod nearai;
+mod ollama;
+mod openai;
+mod provider;
 
 pub use bedrock::BedrockEmbeddingSetup;
-#[cfg(feature = "bedrock")]
-pub use bedrock::BedrockEmbeddings;
 pub use cache::{CachedEmbeddingProvider, EmbeddingCacheConfig};
 pub use config::{DEFAULT_EMBEDDING_CACHE_SIZE, EmbeddingsConfig, default_dimension_for_model};
-pub use factory::create_provider;
+pub use factory::{ProviderDeps, create_provider};
 pub use mock::MockEmbeddings;
-pub use nearai::NearAiEmbeddings;
-pub use ollama::OllamaEmbeddings;
-pub use openai::OpenAiEmbeddings;
 pub use provider::{EmbeddingError, EmbeddingProvider};

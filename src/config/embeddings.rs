@@ -21,8 +21,13 @@ use ironclaw_embeddings::{
 /// Resolve embeddings configuration from settings, env vars, and defaults.
 ///
 /// Precedence: DB/TOML settings > env > default.
+///
+/// `nearai_base_url` is copied from `LlmConfig::nearai::base_url` by the
+/// caller so embeddings share the LLM's NEAR AI endpoint rather than
+/// duplicate the config knob.
 pub(crate) fn resolve_embeddings_config(
     settings: &Settings,
+    nearai_base_url: &str,
 ) -> Result<EmbeddingsConfig, ConfigError> {
     let defaults = crate::settings::EmbeddingsSettings::default();
 
@@ -99,6 +104,7 @@ pub(crate) fn resolve_embeddings_config(
         ollama_base_url,
         dimension,
         openai_base_url,
+        nearai_base_url: nearai_base_url.to_string(),
         cache_size,
     })
 }
@@ -142,7 +148,8 @@ mod tests {
             ..Default::default()
         };
 
-        let config = resolve_embeddings_config(&settings).expect("resolve should succeed");
+        let config = resolve_embeddings_config(&settings, "https://api.near.ai")
+            .expect("resolve should succeed");
         assert!(
             !config.enabled,
             "embeddings should remain disabled when settings.embeddings.enabled=false, \
@@ -168,7 +175,8 @@ mod tests {
             ..Default::default()
         };
 
-        let config = resolve_embeddings_config(&settings).expect("resolve should succeed");
+        let config = resolve_embeddings_config(&settings, "https://api.near.ai")
+            .expect("resolve should succeed");
         assert!(
             config.enabled,
             "embeddings should be enabled when settings say so"
@@ -195,7 +203,8 @@ mod tests {
             ..Default::default()
         };
 
-        let config = resolve_embeddings_config(&settings).expect("resolve should succeed");
+        let config = resolve_embeddings_config(&settings, "https://api.near.ai")
+            .expect("resolve should succeed");
         assert!(
             config.enabled,
             "DB enabled=true should win over env EMBEDDING_ENABLED=false"
@@ -228,7 +237,8 @@ mod tests {
         // Settings left at defaults — no explicit DB/TOML override
         let settings = Settings::default();
 
-        let config = resolve_embeddings_config(&settings).expect("resolve should succeed");
+        let config = resolve_embeddings_config(&settings, "https://api.near.ai")
+            .expect("resolve should succeed");
         assert!(
             config.enabled,
             "env EMBEDDING_ENABLED should be used when settings at default"
@@ -261,7 +271,8 @@ mod tests {
         }
 
         let settings = Settings::default();
-        let config = resolve_embeddings_config(&settings).expect("resolve should succeed");
+        let config = resolve_embeddings_config(&settings, "https://api.near.ai")
+            .expect("resolve should succeed");
         assert_eq!(config.openai_base_url.as_deref(), Some("https://8.8.8.8"));
         // SAFETY: Under ENV_MUTEX.
         unsafe {
@@ -275,7 +286,8 @@ mod tests {
         clear_embedding_env();
 
         let settings = Settings::default();
-        let config = resolve_embeddings_config(&settings).expect("resolve should succeed");
+        let config = resolve_embeddings_config(&settings, "https://api.near.ai")
+            .expect("resolve should succeed");
         assert!(
             config.openai_base_url.is_none(),
             "openai_base_url should be None when EMBEDDING_BASE_URL is not set"
@@ -292,7 +304,7 @@ mod tests {
         }
 
         let settings = Settings::default();
-        let result = resolve_embeddings_config(&settings);
+        let result = resolve_embeddings_config(&settings, "https://api.near.ai");
         assert!(result.is_err(), "cache_size=0 should be rejected");
         let err = result.unwrap_err().to_string();
         assert!(err.contains("at least 1"), "should mention minimum: {err}");
@@ -314,7 +326,8 @@ mod tests {
         }
 
         let settings = Settings::default();
-        let config = resolve_embeddings_config(&settings).expect("resolve should succeed");
+        let config = resolve_embeddings_config(&settings, "https://api.near.ai")
+            .expect("resolve should succeed");
         assert_eq!(config.provider, "bedrock");
         assert_eq!(config.model, "amazon.titan-embed-text-v2:0");
         assert_eq!(config.dimension, 1024);
@@ -339,7 +352,7 @@ mod tests {
         }
 
         let settings = Settings::default();
-        let result = resolve_embeddings_config(&settings);
+        let result = resolve_embeddings_config(&settings, "https://api.near.ai");
         assert!(
             result.is_err(),
             "unsupported bedrock dimensions should fail"

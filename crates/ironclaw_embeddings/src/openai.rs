@@ -11,7 +11,7 @@ const OPENAI_API_BASE_URL: &str = "https://api.openai.com";
 /// OpenAI embedding provider using text-embedding-ada-002 or text-embedding-3-small.
 ///
 /// Supports any OpenAI-compatible embedding endpoint via [`with_base_url`](Self::with_base_url).
-pub struct OpenAiEmbeddings {
+pub(crate) struct OpenAiEmbeddings {
     client: reqwest::Client,
     api_key: String,
     model: String,
@@ -23,7 +23,8 @@ impl OpenAiEmbeddings {
     /// Create a new OpenAI embedding provider with the default model.
     ///
     /// Uses text-embedding-3-small which has 1536 dimensions.
-    pub fn new(api_key: impl Into<String>) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn new(api_key: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
             api_key: api_key.into(),
@@ -34,7 +35,8 @@ impl OpenAiEmbeddings {
     }
 
     /// Use text-embedding-ada-002 model.
-    pub fn ada_002(api_key: impl Into<String>) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn ada_002(api_key: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
             api_key: api_key.into(),
@@ -45,7 +47,8 @@ impl OpenAiEmbeddings {
     }
 
     /// Use text-embedding-3-large model.
-    pub fn large(api_key: impl Into<String>) -> Self {
+    #[allow(dead_code)]
+    pub(crate) fn large(api_key: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
             api_key: api_key.into(),
@@ -56,7 +59,7 @@ impl OpenAiEmbeddings {
     }
 
     /// Use a custom model with specified dimension.
-    pub fn with_model(
+    pub(crate) fn with_model(
         api_key: impl Into<String>,
         model: impl Into<String>,
         dimension: usize,
@@ -74,7 +77,7 @@ impl OpenAiEmbeddings {
     ///
     /// The URL must use `http://` or `https://` scheme. If no scheme is present,
     /// `https://` is prepended automatically. Trailing slashes are stripped.
-    pub fn with_base_url(mut self, base_url: &str) -> Self {
+    pub(crate) fn with_base_url(mut self, base_url: &str) -> Self {
         let url = base_url.trim();
 
         // Auto-prepend https:// if no scheme is present.

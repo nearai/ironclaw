@@ -11,17 +11,25 @@ use crate::ollama::OllamaEmbeddings;
 use crate::openai::OpenAiEmbeddings;
 use crate::provider::EmbeddingProvider;
 
+/// Runtime wiring the factory needs that doesn't fit in [`EmbeddingsConfig`].
+///
+/// `EmbeddingsConfig` is pure data (Debug/Clone, populated from `Settings`).
+/// These are shared runtime objects supplied by the host and consulted only
+/// by the matching provider — `session` for `nearai`, `bedrock_setup` for
+/// `bedrock`. Construct once at startup and pass into [`create_provider`].
+#[derive(Clone)]
+pub struct ProviderDeps {
+    pub session: Arc<SessionManager>,
+    pub bedrock_setup: Option<BedrockEmbeddingSetup>,
+}
+
 /// Build the configured embedding provider.
 ///
 /// Returns `None` if embeddings are disabled or required credentials are
-/// missing. `nearai_base_url` and `session` are needed only for the NEAR AI
-/// provider but must be passed unconditionally; `bedrock_setup` is consulted
-/// only for the `bedrock` provider.
+/// missing.
 pub async fn create_provider(
     config: &EmbeddingsConfig,
-    nearai_base_url: &str,
-    session: Arc<SessionManager>,
-    bedrock_setup: Option<&BedrockEmbeddingSetup>,
+    deps: ProviderDeps,
 ) -> Option<Arc<dyn EmbeddingProvider>> {
     if !config.enabled {
         tracing::debug!("Embeddings disabled (set EMBEDDING_ENABLED=true to enable)");
@@ -36,14 +44,14 @@ pub async fn create_provider(
                 config.dimension,
             );
             Some(Arc::new(
-                NearAiEmbeddings::new(nearai_base_url, session)
+                NearAiEmbeddings::new(&config.nearai_base_url, deps.session)
                     .with_model(&config.model, config.dimension),
             ) as Arc<dyn EmbeddingProvider>)
         }
         "bedrock" => {
             #[cfg(feature = "bedrock")]
             {
-                let Some(bedrock) = bedrock_setup else {
+                let Some(bedrock) = deps.bedrock_setup.as_ref() else {
                     tracing::warn!(
                         "Embeddings configured for Bedrock but no Bedrock setup is available"
                     );
@@ -71,7 +79,7 @@ pub async fn create_provider(
             }
             #[cfg(not(feature = "bedrock"))]
             {
-                let _ = bedrock_setup;
+                let _ = deps.bedrock_setup;
                 tracing::warn!(
                     "Embeddings configured for Bedrock but the `bedrock` feature is disabled"
                 );

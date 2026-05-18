@@ -25,7 +25,7 @@ mod imp {
     use super::BedrockEmbeddingSetup;
 
     /// AWS Bedrock embedding provider using Titan Text Embeddings V2.
-    pub struct BedrockEmbeddings {
+    pub(crate) struct BedrockEmbeddings {
         client: aws_sdk_bedrockruntime::Client,
         model: String,
         dimension: usize,
@@ -33,7 +33,7 @@ mod imp {
 
     impl BedrockEmbeddings {
         /// Create a new Bedrock embedding provider.
-        pub async fn new(
+        pub(crate) async fn new(
             setup: &BedrockEmbeddingSetup,
             model: impl Into<String>,
             dimension: usize,
@@ -162,4 +162,4 @@ mod imp {
 }
 
 #[cfg(feature = "bedrock")]
-pub use imp::BedrockEmbeddings;
+pub(crate) use imp::BedrockEmbeddings;

@@ -9,7 +9,7 @@ use crate::provider::{EmbeddingError, EmbeddingProvider};
 ///
 /// Ollama serves embedding models (e.g. `nomic-embed-text`, `mxbai-embed-large`)
 /// via a REST API, typically at `http://localhost:11434`.
-pub struct OllamaEmbeddings {
+pub(crate) struct OllamaEmbeddings {
     client: reqwest::Client,
     base_url: String,
     model: String,
@@ -20,7 +20,7 @@ impl OllamaEmbeddings {
     /// Create a new Ollama embedding provider.
     ///
     /// Defaults to `nomic-embed-text` (768 dimensions).
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub(crate) fn new(base_url: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
             base_url: base_url.into(),
@@ -30,7 +30,7 @@ impl OllamaEmbeddings {
     }
 
     /// Use a specific model with a given dimension.
-    pub fn with_model(mut self, model: impl Into<String>, dimension: usize) -> Self {
+    pub(crate) fn with_model(mut self, model: impl Into<String>, dimension: usize) -> Self {
         self.model = model.into();
         self.dimension = dimension;
         self

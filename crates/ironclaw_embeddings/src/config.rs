@@ -28,6 +28,11 @@ pub struct EmbeddingsConfig {
     /// Custom base URL for OpenAI-compatible embedding providers.
     /// When set, overrides the default `https://api.openai.com`.
     pub openai_base_url: Option<String>,
+    /// Base URL for the NEAR AI embeddings endpoint.
+    ///
+    /// Copied from `LlmConfig::nearai::base_url` by the resolver so embeddings
+    /// share the LLM's NEAR AI endpoint. Only consulted when `provider == "nearai"`.
+    pub nearai_base_url: String,
     /// Maximum entries in the embedding LRU cache (default 10,000).
     ///
     /// Approximate raw embedding payload: `cache_size × dimension × 4 bytes`.
@@ -48,6 +53,7 @@ impl Default for EmbeddingsConfig {
             ollama_base_url: "http://localhost:11434".to_string(),
             dimension,
             openai_base_url: None,
+            nearai_base_url: "https://api.near.ai".to_string(),
             cache_size: DEFAULT_EMBEDDING_CACHE_SIZE,
         }
     }

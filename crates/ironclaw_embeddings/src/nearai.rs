@@ -8,7 +8,7 @@ use crate::provider::{EmbeddingError, EmbeddingProvider};
 /// NEAR AI embedding provider using the NEAR AI API.
 ///
 /// Uses the same session-based auth as the LLM provider.
-pub struct NearAiEmbeddings {
+pub(crate) struct NearAiEmbeddings {
     client: reqwest::Client,
     base_url: String,
     session: std::sync::Arc<ironclaw_llm::SessionManager>,
@@ -20,7 +20,7 @@ impl NearAiEmbeddings {
     /// Create a new NEAR AI embedding provider.
     ///
     /// Uses the same session manager as the LLM provider for auth.
-    pub fn new(
+    pub(crate) fn new(
         base_url: impl Into<String>,
         session: std::sync::Arc<ironclaw_llm::SessionManager>,
     ) -> Self {
@@ -34,7 +34,7 @@ impl NearAiEmbeddings {
     }
 
     /// Use a specific model.
-    pub fn with_model(mut self, model: impl Into<String>, dimension: usize) -> Self {
+    pub(crate) fn with_model(mut self, model: impl Into<String>, dimension: usize) -> Self {
         self.model = model.into();
         self.dimension = dimension;
         self
