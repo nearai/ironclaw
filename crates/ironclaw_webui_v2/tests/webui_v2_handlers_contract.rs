@@ -16,10 +16,11 @@ use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_workflow::{
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornResolveGateResponse,
-    RebornResumeGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornStreamEventsRequest,
+    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
 };
 use ironclaw_threads::SessionThreadRecord;
@@ -171,6 +172,24 @@ impl RebornServicesApi for StubServices {
         self.stream_events_notify.notify_waiters();
         // Empty drain; SSE handler will keep-alive until the test drops it.
         Ok(RebornStreamEventsResponse { events: Vec::new() })
+    }
+
+    async fn get_run_state(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        _request: RebornGetRunStateRequest,
+    ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
+        // Not exercised by any current handler test — `get_run_state` is on
+        // the facade trait but not wired to a WebChat v2 HTTP route. Fail
+        // loud rather than fabricate a response so a future caller-level
+        // test that forgets to program this path can't quietly pass.
+        Err(RebornServicesError {
+            code: RebornServicesErrorCode::Internal,
+            status_code: 500,
+            retryable: false,
+            field: None,
+            validation_code: None,
+        })
     }
 
     async fn cancel_run(
