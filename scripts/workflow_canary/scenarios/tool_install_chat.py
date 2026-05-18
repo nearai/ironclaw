@@ -48,6 +48,7 @@ the contracts.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from pathlib import Path
@@ -127,33 +128,99 @@ async def _get_extension(
     return None
 
 
-def _history_has_tool_install(
-    history: dict[str, Any], extension: str
+async def _remove_extension_if_present(
+    client: httpx.AsyncClient, base_url: str, name: str
 ) -> bool:
-    """True iff a ``tool_install`` invocation targeting ``extension``
-    appears anywhere in the history payload.
+    """Best-effort removal of `name` so the probe starts from a clean
+    slate regardless of prior scenario state.
 
-    The gateway has used a handful of envelope shapes over time for tool
-    calls — sometimes ``{"tool_calls": [{"name": ..., "arguments":
-    {...}}]}`` on assistant messages, sometimes ``<tool_output
-    name="...">`` wrapping, sometimes ``tool_name`` / ``action`` on the
-    turn record. Walk the whole tree and substring-match instead of
-    binding to one shape, so this probe survives benign envelope
-    refactors. The phrase "tool_install" + the extension name appearing
-    together in a single message is a strong-enough signal — false
-    positives would require user text or LLM prose to mention both
-    tokens, which doesn't happen with the canned mock LLM responses.
+    The workflow-canary runner shares one gateway stack across all
+    scenarios; auth_recovery runs immediately before this probe and
+    uses the same `check gmail unread` prompt, which can leave gmail
+    installed (or part-installed) by the time we run. Without
+    isolation, the probe's "gmail registered after our chat send"
+    signal becomes "gmail registered for *some* reason," which fails
+    the assertion serrrfirat flagged: the probe stops proving a fresh
+    chat → tool_install → install path.
+
+    Returns True if removal was attempted (extension was present).
     """
-    needle_tool = "tool_install"
-    needle_name = f'"{extension}"'
+    if await _get_extension(client, base_url, name) is None:
+        return False
+    response = await client.post(
+        f"{base_url}/api/extensions/{name}/remove", timeout=30.0
+    )
+    response.raise_for_status()
+    # Confirm the gateway no longer lists it before letting the probe
+    # proceed; otherwise a slow removal race would let our chat-send
+    # see stale "already installed" state.
+    for _ in range(20):
+        if await _get_extension(client, base_url, name) is None:
+            return True
+        await asyncio.sleep(0.25)
+    raise RuntimeError(
+        f"extension {name!r} still present after remove + 5s grace; "
+        "cannot guarantee fresh-install precondition"
+    )
+
+
+def _history_has_tool_install_call_for(
+    history: dict[str, Any], target: str
+) -> bool:
+    """True iff a ``tool_install`` invocation in history targets the
+    given extension by name.
+
+    Walks the tree looking for any dict that names ``tool_install`` and
+    binds its argument payload to ``target``. Recognises the three
+    envelope shapes the gateway uses today:
+
+    - Direct: ``{"name": "tool_install", "arguments": {"name": "gmail"}}``
+    - OpenAI-style: ``{"function": {"name": "tool_install",
+      "arguments": "{\"name\": \"gmail\"}"}}`` — arguments here may be
+      either a dict or a JSON string the model emitted.
+    - Pending-gate: ``{"tool_name": "tool_install", "parameters":
+      "{\"name\": \"gmail\"}"}`` — `parameters` is a JSON string the
+      gate exposes on ``/api/chat/history``.
+
+    Critically: the tool-name check and the target check happen on the
+    *same* invocation. A bare ``"tool_install" in history`` (anywhere)
+    combined with ``"gmail" in history`` (elsewhere) is the false
+    positive serrrfirat flagged — a tool_install for a different
+    extension followed by gmail appearing for unrelated reasons would
+    pass that weak check. This walker rejects that.
+    """
+
+    def _args_target(args: Any) -> str | None:
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except (ValueError, json.JSONDecodeError):
+                return None
+        if isinstance(args, dict):
+            for key in ("name", "extension"):
+                value = args.get(key)
+                if isinstance(value, str):
+                    return value
+        return None
+
+    def _check_call(name_field: str, args_field: str, node: dict) -> bool:
+        if node.get(name_field) != "tool_install":
+            return False
+        return _args_target(node.get(args_field)) == target
 
     def _walk(node: Any) -> bool:
-        if isinstance(node, str):
-            return needle_tool in node and needle_name in node
+        if isinstance(node, dict):
+            if _check_call("name", "arguments", node):
+                return True
+            if _check_call("tool_name", "parameters", node):
+                return True
+            fn = node.get("function")
+            if isinstance(fn, dict) and fn.get("name") == "tool_install":
+                if _args_target(fn.get("arguments")) == target:
+                    return True
+            return any(_walk(v) for v in node.values())
         if isinstance(node, list):
             return any(_walk(x) for x in node)
-        if isinstance(node, dict):
-            return any(_walk(v) for v in node.values())
         return False
 
     return _walk(history)
@@ -300,6 +367,23 @@ async def run(
     auth_headers = {"Authorization": f"Bearer {token}"}
     try:
         async with httpx.AsyncClient(headers=auth_headers) as client:
+            # Isolation: the workflow-canary runner shares one gateway
+            # stack across all probes, and `auth_recovery` (which runs
+            # immediately before this one) uses the same trigger
+            # prompt. If gmail is still registered from that run, the
+            # probe's "gmail registered after our chat send" check
+            # passes for the wrong reason. Remove gmail first so the
+            # subsequent install can only succeed via the chat-driven
+            # path we're trying to verify.
+            pre_existing = (
+                await _get_extension(client, base_url, TARGET_EXTENSION)
+                is not None
+            )
+            if pre_existing:
+                await _remove_extension_if_present(
+                    client, base_url, TARGET_EXTENSION
+                )
+
             thread_id = await _open_thread(client, base_url)
             send_status = await _send_chat(
                 client, base_url, thread_id, TRIGGER_PROMPT
@@ -326,17 +410,16 @@ async def run(
 
             history = await _read_history(client, base_url, thread_id)
         text = _history_text(history)
-        # Use the structured tool-call enumerator rather than the
-        # substring walker — production tool calls live as
-        # `{"name": "tool_install", "arguments": {"name": "gmail"}}`
-        # where the two needles live in different string fields, so a
-        # same-string-only walker silently misses them. The
-        # _history_has_tool_install helper is kept as a defensive
-        # back-stop for envelope shapes where the name does appear
-        # inline as a string.
-        tool_install_seen = (
-            "tool_install" in _collect_tool_calls(history)
-            or _history_has_tool_install(history, TARGET_EXTENSION)
+        # Target-bound check: assert a ``tool_install`` invocation
+        # exists in history *and* its argument payload binds the
+        # target extension. A bare "tool_install" presence check is
+        # not enough — a tool_install for a different extension
+        # followed by gmail appearing in /api/extensions for unrelated
+        # reasons (e.g. seeded by a prior probe) would falsely pass.
+        # See _history_has_tool_install_call_for for the recognised
+        # envelope shapes.
+        tool_install_seen = _history_has_tool_install_call_for(
+            history, TARGET_EXTENSION
         )
         forbidden_hits = [frag for frag in FORBIDDEN_FRAGMENTS if frag in text]
 
@@ -349,6 +432,7 @@ async def run(
             "thread_id": thread_id,
             "trigger_prompt": TRIGGER_PROMPT,
             "target_extension": TARGET_EXTENSION,
+            "pre_existing_before_probe": pre_existing,
             "extension_registered": registered,
             "tool_install_seen_in_history": tool_install_seen,
             "extension_state": (
