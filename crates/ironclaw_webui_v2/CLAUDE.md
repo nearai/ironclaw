@@ -45,6 +45,28 @@ handler drains, emits each event with its projection cursor as the SSE
 `RebornServicesApi::stream_events` gains a true subscription API the
 handler can migrate without changing the descriptor.
 
+The browser resumes via `Last-Event-ID` on auto-reconnect; the handler
+prefers that header over the `?after_cursor=` query parameter, falling
+back to the projection origin when neither is supplied.
+
+### SSE resource caps
+
+Two ceilings sit in front of `stream_events`, on top of the route
+descriptor's per-caller request rate limit:
+
+- **Per-caller concurrency cap** — `WebUiV2State` carries an
+  `SseCapacity` keyed by `(tenant, user)`. New opens beyond the cap
+  return `429 Too Many Requests` with `retryable: true`. The default
+  cap is 3 streams per `(tenant, user)`; host composition can override
+  via `WebUiV2State::with_sse_concurrency_limit`.
+- **Max stream lifetime** — every stream is closed after 5 minutes so
+  the browser must reconnect with `Last-Event-ID`. Bounds cursor drift
+  and recycles slots even under leaked client connections.
+
+Slots are RAII: the SSE generator owns an `SseSlot` guard that
+decrements the per-caller count on drop, so a client disconnect,
+lifetime expiry, or facade error all release the slot automatically.
+
 ## Test support
 
 - `tests/webui_v2_descriptors_contract.rs` — locks the descriptor table

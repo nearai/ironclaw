@@ -512,6 +512,64 @@ fn url_encode(value: &str) -> String {
     out
 }
 
+// Regression for the per-caller SSE concurrency review (Medium): once the
+// router is mounted, an authenticated caller must not be able to keep
+// opening long-lived `EventSource` connections beyond the configured cap
+// — even though each new request stays under the descriptor's per-caller
+// rate limit. Without the cap, sustained reconnects would multiply
+// backend `stream_events` drains at `connections × poll-interval`.
+#[tokio::test]
+async fn stream_events_caps_concurrent_streams_per_caller() {
+    let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
+    // Use a low custom cap so the test runs without burning resources.
+    let router = webui_v2_router(WebUiV2State::with_sse_concurrency_limit(services, 2))
+        .layer(axum::Extension(caller()));
+
+    let open_stream = || {
+        router.clone().oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+    };
+
+    let first = open_stream().await.expect("first oneshot");
+    assert_eq!(first.status(), StatusCode::OK);
+    let second = open_stream().await.expect("second oneshot");
+    assert_eq!(second.status(), StatusCode::OK);
+
+    // Third open must hit the cap. Keep the first two responses alive so
+    // their slots stay reserved — the SSE generator (and the slot it
+    // owns) lives inside the response body.
+    let third = open_stream().await.expect("third oneshot");
+    assert_eq!(
+        third.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "third concurrent open from same caller must be rejected"
+    );
+    let body = read_json(third).await;
+    assert_eq!(body["error"], "rate_limited");
+    assert_eq!(body["retryable"], true);
+
+    // Release the first stream — slot returns to the pool.
+    drop(first);
+    // The SSE body's drop chain runs synchronously, but yield once so any
+    // pending wakers settle before we measure recovery.
+    tokio::task::yield_now().await;
+
+    let recovered = open_stream().await.expect("oneshot after release");
+    assert_eq!(
+        recovered.status(),
+        StatusCode::OK,
+        "slot must be reusable after the earlier stream is dropped"
+    );
+
+    drop(second);
+    drop(recovered);
+}
+
 #[tokio::test]
 async fn missing_caller_extension_returns_500() {
     // No `Extension(caller)` layer — exercises the failure mode if host

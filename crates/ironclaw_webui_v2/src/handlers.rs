@@ -18,12 +18,11 @@ use std::time::Duration;
 use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::HeaderMap;
-use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornResolveGateResponse,
-    RebornServicesApi, RebornServicesErrorCode, RebornStreamEventsRequest,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornStreamEventsRequest,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiResolveGateRequest, WebUiSendMessageRequest,
@@ -32,6 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::WebUiV2HttpError;
 use crate::router::WebUiV2State;
+use crate::sse_capacity::{SSE_MAX_LIFETIME, SseSlot};
 
 /// `POST /api/webchat/v2/threads`
 ///
@@ -97,27 +97,55 @@ const LAST_EVENT_ID_HEADER: &str = "last-event-id";
 /// `?after_cursor=...` query parameter. Both are optional — first
 /// connects pass neither and start from the projection origin.
 ///
+/// The handler acquires a per-`(tenant, user)` concurrency slot before
+/// returning the stream; callers at or above the configured cap receive
+/// `429 Too Many Requests` with `retryable: true`. Each stream is also
+/// closed after [`SSE_MAX_LIFETIME`] so the browser must reconnect with
+/// `Last-Event-ID`, which bounds drift and recycles slots even under
+/// long-running tab leaks.
+///
 /// Until the facade gains a true subscription API, the handler drains and
 /// polls in a loop. Drain-only semantics are documented on
 /// [`RebornServicesApi::stream_events`].
 ///
 /// [`ProductOutboundEnvelope`]: ironclaw_product_adapters::ProductOutboundEnvelope
 /// [`RebornServicesApi::stream_events`]: ironclaw_product_workflow::RebornServicesApi::stream_events
+/// [`SSE_MAX_LIFETIME`]: crate::sse_capacity::SSE_MAX_LIFETIME
 pub async fn stream_events(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(thread_id): Path<String>,
     headers: HeaderMap,
     Query(query): Query<StreamEventsQuery>,
-) -> impl IntoResponse {
+) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, WebUiV2HttpError> {
+    let slot = state
+        .sse_capacity()
+        .try_acquire(&caller.tenant_id, &caller.user_id)
+        .ok_or_else(sse_concurrency_exhausted)?;
     let services = state.services().clone();
     let initial_cursor = headers
         .get(LAST_EVENT_ID_HEADER)
+        // silent-ok: non-visible-ASCII Last-Event-ID is treated as absent so the
+        // handler falls back to the query param / origin, matching the standard
+        // EventSource contract (server SHOULD ignore a malformed Last-Event-ID).
         .and_then(|value| value.to_str().ok())
         .map(str::to_string)
         .or(query.after_cursor);
-    let stream = build_sse_stream(services, caller, thread_id, initial_cursor);
-    Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE_INTERVAL))
+    let stream = build_sse_stream(services, caller, thread_id, initial_cursor, slot);
+    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(SSE_KEEPALIVE_INTERVAL)))
+}
+
+/// Build the 429 response for SSE openings that exceed the per-caller
+/// concurrency cap. `retryable: true` because the slot will free as soon
+/// as one of the caller's existing streams closes.
+fn sse_concurrency_exhausted() -> WebUiV2HttpError {
+    WebUiV2HttpError::from(RebornServicesError {
+        code: RebornServicesErrorCode::RateLimited,
+        status_code: 429,
+        retryable: true,
+        field: None,
+        validation_code: None,
+    })
 }
 
 /// Query parameters for `stream_events`. `after_cursor` is the opaque
@@ -143,10 +171,23 @@ fn build_sse_stream(
     caller: WebUiAuthenticatedCaller,
     thread_id: String,
     initial_cursor: Option<String>,
+    slot: SseSlot,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     async_stream::stream! {
+        // The slot guard moves into the generator and stays alive for
+        // the lifetime of this stream. It drops automatically when the
+        // generator is dropped (client disconnect, max-lifetime expiry,
+        // or facade error), releasing the per-caller concurrency slot.
+        let _slot_guard = slot;
+        let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
         loop {
+            if started_at.elapsed() >= SSE_MAX_LIFETIME {
+                // Force a clean close so the browser can reconnect with
+                // Last-Event-ID; this caps single-stream lifetime
+                // regardless of client behavior and recycles the slot.
+                return;
+            }
             let request = RebornStreamEventsRequest {
                 thread_id: thread_id.clone(),
                 after_cursor: after_cursor.clone(),

@@ -17,23 +17,46 @@ use crate::descriptors::{
     WEBUI_V2_PATTERN_RESOLVE_GATE, WEBUI_V2_PATTERN_SEND_MESSAGE, WEBUI_V2_PATTERN_STREAM_EVENTS,
 };
 use crate::handlers;
+use crate::sse_capacity::{DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER, SseCapacity};
 
 /// Shared state injected into every WebChat v2 handler.
 ///
 /// Handlers receive a single facade so they can never reach into the
-/// dispatcher, run-state, or any runtime lane directly.
+/// dispatcher, run-state, or any runtime lane directly. The state also
+/// owns the [`SseCapacity`] gate that bounds concurrent SSE streams per
+/// `(tenant, user)`; cloning the state shares the same gate so all
+/// handler invocations enforce one cap process-wide.
 #[derive(Clone)]
 pub struct WebUiV2State {
     services: Arc<dyn RebornServicesApi>,
+    sse_capacity: Arc<SseCapacity>,
 }
 
 impl WebUiV2State {
+    /// Build state with the default per-caller SSE concurrency cap
+    /// ([`DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER`]).
     pub fn new(services: Arc<dyn RebornServicesApi>) -> Self {
-        Self { services }
+        Self::with_sse_concurrency_limit(services, DEFAULT_SSE_MAX_CONCURRENT_PER_CALLER)
+    }
+
+    /// Build state with a custom per-caller SSE concurrency cap. Use
+    /// from host composition or tests that want to tune the ceiling.
+    pub fn with_sse_concurrency_limit(
+        services: Arc<dyn RebornServicesApi>,
+        max_concurrent_streams_per_caller: usize,
+    ) -> Self {
+        Self {
+            services,
+            sse_capacity: Arc::new(SseCapacity::new(max_concurrent_streams_per_caller)),
+        }
     }
 
     pub fn services(&self) -> &Arc<dyn RebornServicesApi> {
         &self.services
+    }
+
+    pub(crate) fn sse_capacity(&self) -> &Arc<SseCapacity> {
+        &self.sse_capacity
     }
 }
 

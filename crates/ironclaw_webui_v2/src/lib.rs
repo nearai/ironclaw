@@ -28,6 +28,12 @@
 //! events. When the facade gains a real subscription API the handler can
 //! migrate without changing the descriptor.
 //!
+//! Beyond the route descriptor's per-caller request rate limit, the
+//! handler caps the number of *concurrent* SSE streams a single
+//! `(tenant, user)` may hold and closes any single stream after a fixed
+//! maximum lifetime so leaked guards or stuck pollers cannot wedge a
+//! caller's slot indefinitely.
+//!
 //! [`RebornServicesApi`]: ironclaw_product_workflow::RebornServicesApi
 //! [`WebUiAuthenticatedCaller`]: ironclaw_product_workflow::WebUiAuthenticatedCaller
 //! [`IngressRouteDescriptor`]: ironclaw_host_api::ingress::IngressRouteDescriptor
@@ -42,6 +48,8 @@ mod error;
 mod handlers;
 #[cfg(feature = "webui-v2-beta")]
 mod router;
+#[cfg(feature = "webui-v2-beta")]
+mod sse_capacity;
 
 #[cfg(feature = "webui-v2-beta")]
 pub use descriptors::{
