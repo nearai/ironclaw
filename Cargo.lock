@@ -4741,6 +4741,7 @@ dependencies = [
  "clap_complete",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
+ "ironclaw_reborn_traces",
  "ironclaw_reborn_webui_ingress",
  "secrecy",
  "serde_json",

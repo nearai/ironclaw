@@ -32,7 +32,6 @@ root-llm-provider = ["ironclaw_reborn_composition/root-llm-provider"]
 webui-v2-beta = [
     "ironclaw_reborn_composition/webui-v2-beta",
     "dep:ironclaw_reborn_webui_ingress",
-    "dep:secrecy",
 ]
 
 [dependencies]
@@ -41,8 +40,9 @@ clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4.5.0"
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
+ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
 ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", version = "0.1.0", optional = true }
-secrecy = { version = "0.10", optional = true }
+secrecy = "0.10"
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "io-std", "sync", "time"] }
