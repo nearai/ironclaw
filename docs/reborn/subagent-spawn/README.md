@@ -206,7 +206,34 @@ own coordinator-managed run.
 
 ![Blocking subagent lifecycle](diagrams/blocking-lifecycle.svg)
 
-### 7.4 Cancellation
+### 7.4 Autonomous wake (background)
+
+When a background subagent completes and **the parent is idle / no user is
+interacting**, the parent still runs — `SubagentCompletionObserver`'s
+`submit_turn(parent_scope)` **is the tick**. Reborn turns are
+**coordinator-queued, not user-triggered**; any submitter can queue a turn for a
+thread, and the runner-worker pool claims it. The observer is one such submitter
+(channels are another). No user presence is required for the parent to wake.
+
+**Result and tick are decoupled.**
+
+| Concept | Where it lives | Lifetime |
+|---|---|---|
+| Subagent result data | A message in the **parent thread transcript** (provenance-tagged `SubagentResult`) | Durable |
+| Wake signal | A **queued parent turn** from `submit_turn(parent_scope)` | Transient — collapsed into the next-claimed turn |
+
+That decoupling is what makes coalescing work: **N child completions stage N
+transcript messages but only 1 queued parent turn**, which consumes all N at
+once via the normal context-load path. `ThreadBusy` from a second `submit_turn`
+is expected ("already pending — message will be consumed"), not an error.
+
+**Cascade risk** — autonomous wake can drive its own follow-up spawns
+(parent processes results → spawns more subagents → those complete → wake parent
+again → loop). Bounded by `MAX_TREE_DESCENDANTS`, `MAX_SPAWN_PER_TURN`, the
+`subagent_depth` cap, and per-flavor `max_iterations` + token/cost budget — all
+enforced **before** `submit_turn` (see §8).
+
+### 7.5 Cancellation
 
 ```
 parent CancelRequested
