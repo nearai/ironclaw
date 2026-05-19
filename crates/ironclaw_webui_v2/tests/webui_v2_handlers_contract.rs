@@ -345,6 +345,41 @@ async fn get_timeline_threads_path_into_request() {
     assert_eq!(calls[0].thread_id, "thread-x");
 }
 
+// Regression for the timeline pagination wire plumbing. Per
+// `.claude/rules/testing.md` "Test Through the Caller", a facade-only
+// test on `get_timeline` is not enough — the Query<TimelineQuery>
+// extractor sits between the URL and the facade, and a future refactor
+// that drops or renames a query field would only fail here.
+#[tokio::test]
+async fn get_timeline_forwards_query_params_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(
+                    "/api/webchat/v2/threads/thread-x/timeline?limit=42&cursor=opaque-from-browser",
+                )
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let calls = services.get_timeline_calls.lock().expect("lock").clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].thread_id, "thread-x");
+    assert_eq!(calls[0].limit, Some(42), "?limit= must reach the facade");
+    assert_eq!(
+        calls[0].cursor.as_deref(),
+        Some("opaque-from-browser"),
+        "?cursor= must reach the facade"
+    );
+}
+
 #[tokio::test]
 async fn cancel_run_path_overrides_body_run_id() {
     let services = Arc::new(StubServices::default());
