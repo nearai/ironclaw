@@ -157,6 +157,10 @@ Kernel-mediated prompt safety rules:
   excluded unless the resolved run profile explicitly allows personal context;
 - when personal context is admitted, the loop emits safe observability metadata
   such as source count and source names, never raw file content;
+- personal-context admission metadata is best-effort and may be emitted
+  asynchronously after prompt assembly or model consumption; consumers must not
+  treat absence of that metadata as proof that no personal context was admitted
+  until the turn's terminal event stream has been inspected;
 - group chat must not receive personal memory/profile context unless explicit policy allows it;
 - `HEARTBEAT.md` is not part of the default planned or interactive loop prompt
   prefix; routine, mission, or proactive profiles must own any volatile

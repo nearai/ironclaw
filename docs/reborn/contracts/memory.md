@@ -272,6 +272,9 @@ Loop/userland assembly rules:
 - active loops may choose prompt order, summarization, model-specific formatting, and inclusion heuristics over authorized reads;
 - loops that admit personal context must emit safe observability metadata such
   as admitted source count and source names, never raw file contents;
+- that admission metadata is best-effort/eventually consistent; consumers must
+  not rely on its absence before terminal turn events to prove personal context
+  was not admitted;
 - custom loops cannot bypass primary-scope identity filtering, group-chat privacy filtering, write-safety checks, or event/audit redaction;
 - reference loop prompt assemblers are replaceable behavior, not memory backend source of truth.
 
