@@ -87,14 +87,72 @@ MAX_ERROR_LEN = 240
 # token if an assertion happens to dump a captured response body. Redact
 # the obvious shapes before writing so a token can never reach the
 # artifact store via results.json, regardless of what scrub-artifacts.sh
-# decides to do downstream. Keep this list aligned with scrub-artifacts.sh.
+# decides to do downstream.
+#
+# This list is the union of every shape `scrub-artifacts.sh` rewrites
+# plus the provider-specific shapes the canary actually exercises that
+# the shell script doesn't carry on its own (OpenAI `sk-…`, AWS access
+# keys). Composio has no published key prefix, so its keys are caught
+# only via the generic `api_key=…` / `"api_key": "…"` assignment shapes
+# below — same gap as scrub-artifacts.sh, documented so nobody assumes
+# a bare Composio token survives.
+#
+# Order matters: Anthropic (`sk-ant-…`) is matched before the broader
+# OpenAI `sk-…` rule so an Anthropic key gets the correct label. The
+# OpenAI pattern also uses a negative lookahead as belt-and-braces in
+# case anyone reorders this list.
 REDACT_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"), "<REDACTED_GITHUB_TOKEN>"),
     (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "<REDACTED_GITHUB_PAT>"),
     (re.compile(r"ya29\.[A-Za-z0-9._-]{20,}"), "<REDACTED_GOOGLE_TOKEN>"),
     (re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"), "<REDACTED_SLACK_TOKEN>"),
     (re.compile(r"sk-ant-[A-Za-z0-9_-]{10,}"), "<REDACTED_ANTHROPIC_KEY>"),
+    (re.compile(r"sk-(?!ant-)[A-Za-z0-9_-]{20,}"), "<REDACTED_OPENAI_KEY>"),
+    (re.compile(r"AKIA[0-9A-Z]{16}"), "<REDACTED_AWS_ACCESS_KEY>"),
     (re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+"), "Bearer <REDACTED>"),
+    # Generic `key=value` / `key: value` assignments. Mirrors the
+    # corresponding rules in scrub-artifacts.sh so anything that script
+    # would have stripped from a log file also gets stripped from a
+    # panic message that landed in results.json.
+    (
+        re.compile(r"(?i)(api[_-]?key)\s*[:=]\s*\S+"),
+        r"\1=<REDACTED>",
+    ),
+    (
+        re.compile(r"(?i)(access[_-]?token)\s*[:=]\s*\S+"),
+        r"\1=<REDACTED>",
+    ),
+    (
+        re.compile(r"(?i)(refresh[_-]?token)\s*[:=]\s*\S+"),
+        r"\1=<REDACTED>",
+    ),
+    (
+        re.compile(r"(?i)(client[_-]?secret)\s*[:=]\s*\S+"),
+        r"\1=<REDACTED>",
+    ),
+    (
+        re.compile(r"(?i)(password)\s*[:=]\s*\S+"),
+        r"\1=<REDACTED>",
+    ),
+    (
+        re.compile(r"(?i)\bsecret\s*[:=]\s*\S+"),
+        "secret=<REDACTED>",
+    ),
+    # JSON-quoted token shapes — same defensive cases scrub-artifacts.sh
+    # rewrites. An assertion that dumped an OAuth response body would
+    # land here.
+    (
+        re.compile(
+            r'"(access|refresh|id|bearer)_token"\s*:\s*"[^"]+"'
+        ),
+        r'"\1_token": "<REDACTED>"',
+    ),
+    (
+        re.compile(
+            r'"(api[_-]?key|client[_-]?secret|password)"\s*:\s*"[^"]+"'
+        ),
+        r'"\1": "<REDACTED>"',
+    ),
 ]
 
 

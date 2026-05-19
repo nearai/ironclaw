@@ -295,17 +295,66 @@ class TokenRedactionTests(unittest.TestCase):
 
     def test_redact_function_covers_documented_shapes(self):
         # Belt-and-braces — verify each pattern listed in
-        # REDACT_PATTERNS actually transforms its input.
+        # REDACT_PATTERNS actually transforms its input. This list is
+        # the union of provider-specific shapes the canary actually
+        # exercises plus the generic assignment / JSON-quoted shapes
+        # carried by scripts/live-canary/scrub-artifacts.sh — keep them
+        # in sync so a token can't slip through emit_results_json that
+        # the shell scrubber would have caught.
         cases = [
             ("token ghp_aaaaaaaaaaaaaaaaaaaa", "REDACTED_GITHUB_TOKEN"),
             ("token github_pat_bbbbbbbbbbbbbbbbbbbbb", "REDACTED_GITHUB_PAT"),
             ("token ya29.cccccccccccccccccc1234", "REDACTED_GOOGLE_TOKEN"),
             ("token xoxb-1234567890-abc", "REDACTED_SLACK_TOKEN"),
             ("Authorization: Bearer eyJabc.defg+hij/kl=", "Bearer <REDACTED>"),
+            # OpenAI bare key shape (sk- prefix without `ant-`).
+            ("token sk-abcDEF0123456789ghij", "REDACTED_OPENAI_KEY"),
+            # AWS access key ID literal — fixed AKIA prefix + 16 upper/digit.
+            ("aws AKIAIOSFODNN7EXAMPLE call", "REDACTED_AWS_ACCESS_KEY"),
+            # Generic env-var / assignment shapes the persona harness
+            # could leak (e.g. LIVE_CANARY_COMPOSIO_API_KEY=…). The
+            # generic api_key rule is the catch-all for any provider
+            # without a published key prefix (e.g. Composio).
+            ("api_key=composio-abcdef12345", "api_key=<REDACTED>"),
+            ("ACCESS_TOKEN: abcdef.1234567", "ACCESS_TOKEN=<REDACTED>"),
+            ("refresh-token = xyz.987654321", "refresh-token=<REDACTED>"),
+            ("client_secret=hunter2", "client_secret=<REDACTED>"),
+            ("password=hunter2", "password=<REDACTED>"),
+            ('"access_token": "abc.def.ghi"', '"access_token": "<REDACTED>"'),
+            ('"refresh_token": "rt-abc-123"', '"refresh_token": "<REDACTED>"'),
+            ('"api_key": "composio-abc"', '"api_key": "<REDACTED>"'),
+            ('"client_secret": "shh"', '"client_secret": "<REDACTED>"'),
         ]
         for raw, marker in cases:
             redacted = emit.redact(raw)
             self.assertIn(marker, redacted, f"redact() failed for {raw!r}")
+
+    def test_anthropic_key_wins_over_openai_pattern(self):
+        # Both `sk-ant-…` and `sk-…` are valid prefixes. The Anthropic
+        # rule is listed first so the dedicated label survives — and
+        # the OpenAI rule uses a negative lookahead as belt-and-braces
+        # for future reorderings. Lock both invariants here.
+        out = emit.redact("token sk-ant-abcdef0123456789xyz")
+        self.assertIn("REDACTED_ANTHROPIC_KEY", out)
+        self.assertNotIn("REDACTED_OPENAI_KEY", out)
+
+    def test_openai_pattern_does_not_swallow_sk_ant(self):
+        # If someone reorders REDACT_PATTERNS, the negative lookahead
+        # on the OpenAI rule still keeps `sk-ant-…` strings out of the
+        # OpenAI bucket. Test the rule in isolation.
+        for pattern, replacement in emit.REDACT_PATTERNS:
+            if replacement == "<REDACTED_OPENAI_KEY>":
+                self.assertIsNone(
+                    pattern.search("sk-ant-abcdef0123456789xyz"),
+                    "OpenAI pattern must not match sk-ant- strings",
+                )
+                self.assertIsNotNone(
+                    pattern.search("sk-abcDEF0123456789ghij"),
+                    "OpenAI pattern must match bare sk- strings",
+                )
+                break
+        else:
+            self.fail("no <REDACTED_OPENAI_KEY> rule in REDACT_PATTERNS")
 
 
 class MultiBinaryTests(unittest.TestCase):
