@@ -427,6 +427,15 @@ impl SessionThreadService for InMemorySessionThreadService {
         })
     }
 
+    async fn read_thread(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        let state = self.state.lock().await;
+        let thread = get_thread(&state, &request.scope, &request.thread_id)?;
+        Ok(thread.record.clone())
+    }
+
     async fn create_summary_artifact(
         &self,
         request: CreateSummaryArtifactRequest,

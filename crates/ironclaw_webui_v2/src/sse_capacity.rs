@@ -59,6 +59,14 @@ impl SseCapacity {
         tenant_id: &TenantId,
         user_id: &UserId,
     ) -> Option<SseSlot> {
+        // Reject before touching the HashMap so a configured cap of 0
+        // (SSE disabled) does not leak a zero-count entry per rejected
+        // open. With the insert-before-check order we used to use, every
+        // 429 under a `with_sse_concurrency_limit(_, 0)` deployment would
+        // store the caller's `(tenant, user)` key indefinitely.
+        if self.max_per_caller == 0 {
+            return None;
+        }
         let key = CallerKey {
             tenant_id: tenant_id.clone(),
             user_id: user_id.clone(),
@@ -144,6 +152,23 @@ mod tests {
         drop(s2);
         drop(s3);
         assert_eq!(cap.open_count(&tenant(), &alice), 0);
+    }
+
+    #[test]
+    fn zero_capacity_rejects_without_creating_caller_entry() {
+        // Regression for the review point that `try_acquire` used to call
+        // `state.entry(...).or_insert(0)` *before* the cap check. With
+        // max_per_caller=0 every rejected open would leave a zero-count
+        // entry in the HashMap that nothing ever cleared. With the early
+        // return the rejected open touches no state.
+        let cap = Arc::new(SseCapacity::new(0));
+        let alice = user("alice");
+        assert!(cap.try_acquire(&tenant(), &alice).is_none());
+        assert_eq!(
+            cap.open_count(&tenant(), &alice),
+            0,
+            "rejected open must not store a HashMap entry"
+        );
     }
 
     #[test]

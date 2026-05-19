@@ -7,6 +7,7 @@
 //! the facade method bodies that are already covered in
 //! `ironclaw_product_workflow`.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,6 +17,10 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+use ironclaw_product_adapters::{
+    AdapterInstallationId, ExternalConversationRef, FinalReplyView, ProductAdapterId,
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProjectionCursor,
+};
 use ironclaw_product_workflow::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornResolveGateResponse, RebornResumeGateResponse,
@@ -25,7 +30,9 @@ use ironclaw_product_workflow::{
     WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
 };
 use ironclaw_threads::SessionThreadRecord;
-use ironclaw_turns::{EventCursor, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus};
+use ironclaw_turns::{
+    EventCursor, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, TurnRunId, TurnStatus,
+};
 use ironclaw_webui_v2::{WebUiV2State, webui_v2_router};
 use serde_json::Value;
 use tokio::sync::Notify;
@@ -57,12 +64,31 @@ struct StubServices {
     cancel_run_calls: Mutex<Vec<WebUiCancelRunRequest>>,
     resolve_gate_calls: Mutex<Vec<WebUiResolveGateRequest>>,
     next_create_thread_error: Mutex<Option<RebornServicesError>>,
+    /// Per-call queued responses for `stream_events`. When non-empty, the
+    /// front entry is popped and returned on each call so SSE tests can
+    /// drive the handler through specific projection envelopes, error
+    /// branches, or empty drains in a deterministic order.
+    next_stream_events: Mutex<VecDeque<Result<RebornStreamEventsResponse, RebornServicesError>>>,
     stream_events_notify: Arc<Notify>,
 }
 
 impl StubServices {
     fn fail_create_thread(&self, error: RebornServicesError) {
         *self.next_create_thread_error.lock().expect("lock") = Some(error);
+    }
+
+    /// Queue one response for the next `stream_events` call. Tests use this
+    /// to drive the SSE handler through programmable projection envelopes
+    /// or error branches. Falls back to an empty `Ok` drain when the queue
+    /// is empty.
+    fn enqueue_stream_events(
+        &self,
+        response: Result<RebornStreamEventsResponse, RebornServicesError>,
+    ) {
+        self.next_stream_events
+            .lock()
+            .expect("lock")
+            .push_back(response);
     }
 
     /// Triggered the first time `stream_events` is invoked. Lets the SSE
@@ -158,6 +184,7 @@ impl RebornServicesApi for StubServices {
             },
             messages: Vec::new(),
             summary_artifacts: Vec::new(),
+            next_cursor: None,
         })
     }
 
@@ -171,6 +198,9 @@ impl RebornServicesApi for StubServices {
             .expect("lock")
             .push(request.clone());
         self.stream_events_notify.notify_waiters();
+        if let Some(response) = self.next_stream_events.lock().expect("lock").pop_front() {
+            return response;
+        }
         // Empty drain; SSE handler will keep-alive until the test drops it.
         Ok(RebornStreamEventsResponse { events: Vec::new() })
     }
@@ -699,6 +729,296 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
         "slot must be released after the lifetime budget bounds the stalled drain"
     );
     drop(recovered);
+}
+
+/// Build a minimal `ProductOutboundEnvelope` with a caller-supplied
+/// projection cursor and reply text. The exact payload shape is not the
+/// contract under test (it lives in `ironclaw_product_adapters`); these
+/// tests only care that whatever the facade hands back becomes a
+/// well-formed SSE event.
+fn make_projection_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope {
+    ProductOutboundEnvelope::new(
+        ProductAdapterId::new("webui_v2").expect("adapter id"), // safety: literal valid id
+        AdapterInstallationId::new("install:alpha").expect("install id"), // safety: literal valid id
+        ProductOutboundTarget::new(
+            ReplyTargetBindingRef::new("reply:fake").expect("reply ref"), // safety: literal valid ref
+            ExternalConversationRef::new(None, "conv-1", None, None).expect("conv ref"), // safety: literal valid ref
+            None,
+        ),
+        ProjectionCursor::new(cursor).expect("cursor"), // safety: test-supplied
+        ProductOutboundPayload::FinalReply(FinalReplyView {
+            turn_run_id: TurnRunId::new(),
+            text: text.into(),
+            generated_at: chrono::Utc::now(),
+        }),
+    )
+}
+
+/// One parsed SSE event from the wire bytes. `event:`, `id:`, and `data:`
+/// fields are extracted; everything else (comments, keep-alives) is
+/// ignored.
+#[derive(Default, Debug)]
+struct ParsedSseEvent {
+    event: Option<String>,
+    id: Option<String>,
+    data: Option<String>,
+}
+
+/// Minimal SSE chunk parser tailored to the handler's emit shape. The
+/// handler writes each event as `event: <name>\n[id: <cursor>\n]data:
+/// <json>\n\n`; this helper splits the buffer on the blank-line
+/// separator and pulls out the three fields. It is deliberately not a
+/// general SSE parser — the handler's emit shape is fixed and any drift
+/// would be the regression the surrounding tests are pinning.
+fn parse_sse_events(bytes: &[u8]) -> Vec<ParsedSseEvent> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut events = Vec::new();
+    for block in text.split("\n\n") {
+        let block = block.trim_matches(|c| c == '\n' || c == '\r');
+        if block.is_empty() {
+            continue;
+        }
+        let mut parsed = ParsedSseEvent::default();
+        for line in block.split('\n') {
+            let line = line.trim_end_matches('\r');
+            if let Some(rest) = line.strip_prefix("event:") {
+                parsed.event = Some(rest.trim_start().to_string());
+            } else if let Some(rest) = line.strip_prefix("id:") {
+                parsed.id = Some(rest.trim_start().to_string());
+            } else if let Some(rest) = line.strip_prefix("data:") {
+                parsed.data = Some(rest.trim_start().to_string());
+            }
+        }
+        if parsed.event.is_some() || parsed.data.is_some() {
+            events.push(parsed);
+        }
+    }
+    events
+}
+
+/// Pull body frames until the predicate fires or the timeout elapses,
+/// returning whatever bytes were collected. SSE bodies in axum surface as
+/// a stream of frames where each frame is a single `\n\n`-terminated
+/// event; tests want to inspect the wire shape after N events arrive.
+async fn collect_sse_until<F>(body: &mut Body, timeout: Duration, mut done: F) -> Vec<u8>
+where
+    F: FnMut(&[u8]) -> bool,
+{
+    let deadline = std::time::Instant::now() + timeout;
+    let mut buf = Vec::<u8>::new();
+    while std::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, body.frame()).await {
+            Ok(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    buf.extend_from_slice(data.as_ref());
+                    if done(&buf) {
+                        return buf;
+                    }
+                }
+            }
+            // Stream closed or errored: return what we have so the caller
+            // can still assert on the bytes we collected before close.
+            Ok(_) => return buf,
+            Err(_) => return buf,
+        }
+    }
+    buf
+}
+
+// Regression for the "SSE projection payload shape is untested" review
+// (Medium). Pins the *wire* contract the browser sees, not just the
+// handler being called: each envelope must emit a `projection` event
+// with the JSON-serialized projection cursor as the SSE `id` and the
+// JSON-serialized envelope as `data`. Also asserts that the next poll
+// carries the *latest* cursor in `after_cursor`, so a future refactor
+// that loses cursor advancement (e.g. dropping the loop's bookkeeping)
+// breaks loudly.
+#[tokio::test]
+async fn stream_events_emits_projection_events_with_cursor_ids() {
+    let services = Arc::new(StubServices::default());
+
+    let envelope_a = make_projection_envelope("cursor:a", "hello");
+    let envelope_b = make_projection_envelope("cursor:b", "world");
+
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![envelope_a.clone(), envelope_b.clone()],
+    }));
+    // Second drain is empty: lets the test observe `after_cursor`
+    // advancement on the follow-up call without producing more events.
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse { events: Vec::new() }));
+
+    let router = router_with(services.clone());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Pump frames directly in this task — the body cannot be moved to a
+    // background task and then dropped, since dropping kills the SSE
+    // generator before the second `stream_events` call can run. Instead,
+    // keep awaiting frames in-place, accumulating bytes, until we have
+    // both (a) the two emitted SSE events and (b) the second drain call
+    // observed via `services.stream_events_calls`.
+    let mut body = response.into_body();
+    let mut bytes = Vec::<u8>::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let have_events = bytes.windows(2).filter(|w| *w == b"\n\n").count() >= 2;
+        let saw_second_call = services.stream_events_calls.lock().expect("lock").len() >= 2;
+        if have_events && saw_second_call {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, body.frame()).await {
+            Ok(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref() {
+                    bytes.extend_from_slice(data.as_ref());
+                }
+            }
+            _ => break,
+        }
+    }
+    drop(body);
+
+    let events = parse_sse_events(&bytes);
+    assert!(
+        events.len() >= 2,
+        "expected at least two SSE events, got: {events:?}; raw: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+
+    let cursor_a_json =
+        serde_json::to_string(envelope_a.projection_cursor()).expect("cursor-a json");
+    let cursor_b_json =
+        serde_json::to_string(envelope_b.projection_cursor()).expect("cursor-b json");
+
+    assert_eq!(events[0].event.as_deref(), Some("projection"));
+    assert_eq!(events[0].id.as_deref(), Some(cursor_a_json.as_str()));
+    let envelope_a_json: Value =
+        serde_json::from_str(events[0].data.as_deref().expect("data")).expect("envelope a json");
+    let expected_a: Value = serde_json::to_value(&envelope_a).expect("envelope a to value");
+    assert_eq!(
+        envelope_a_json, expected_a,
+        "envelope wire shape must match"
+    );
+
+    assert_eq!(events[1].event.as_deref(), Some("projection"));
+    assert_eq!(events[1].id.as_deref(), Some(cursor_b_json.as_str()));
+    let envelope_b_json: Value =
+        serde_json::from_str(events[1].data.as_deref().expect("data")).expect("envelope b json");
+    let expected_b: Value = serde_json::to_value(&envelope_b).expect("envelope b to value");
+    assert_eq!(envelope_b_json, expected_b);
+
+    let calls = services.stream_events_calls.lock().expect("lock").clone();
+    assert!(
+        calls.len() >= 2,
+        "second poll must occur so cursor advancement is observable; saw {} call(s)",
+        calls.len()
+    );
+    assert_eq!(
+        calls[1].after_cursor.as_ref(),
+        Some(envelope_b.projection_cursor()),
+        "second poll must advance after_cursor to the last emitted cursor"
+    );
+}
+
+// Regression for the "SSE facade error event path is untested" review
+// (Medium). When `RebornServicesApi::stream_events` returns Err, the
+// handler must emit one SSE `error` frame carrying only the redacted
+// `error` code + `retryable` flag (no `field`, no internal `detail`),
+// then close the stream — never propagate an HTTP error on a long-lived
+// SSE connection because the browser would replay it as a hard
+// reconnect failure.
+#[tokio::test]
+async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
+    let services = Arc::new(StubServices::default());
+    services.enqueue_stream_events(Err(RebornServicesError {
+        code: RebornServicesErrorCode::Forbidden,
+        status_code: 403,
+        retryable: false,
+        // The handler must NOT echo these into the SSE payload — the
+        // redacted shape carries only `error` + `retryable`.
+        field: Some("thread_id".into()),
+        validation_code: None,
+    }));
+
+    let router = router_with(services.clone());
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    // The handler must surface the facade error as an SSE event, not as a
+    // failed HTTP open. EventSource cannot recover from a non-OK status.
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "SSE open must succeed even when the facade drain errors; the error path is an in-stream event"
+    );
+
+    let mut body = response.into_body();
+    // Read until we see an `error` event chunk, or the stream closes.
+    let bytes = collect_sse_until(&mut body, Duration::from_secs(2), |buf| {
+        buf.windows(b"event: error".len())
+            .any(|w| w == b"event: error")
+            && buf.windows(2).any(|w| w == b"\n\n")
+    })
+    .await;
+
+    let events = parse_sse_events(&bytes);
+    let error_event = events
+        .iter()
+        .find(|event| event.event.as_deref() == Some("error"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected an SSE `error` event, got: {events:?}; raw: {}",
+                String::from_utf8_lossy(&bytes)
+            )
+        });
+    let payload: Value = serde_json::from_str(error_event.data.as_deref().expect("error data"))
+        .expect("error data is JSON");
+    assert_eq!(
+        payload["error"], "forbidden",
+        "error event must carry the redacted error code"
+    );
+    assert_eq!(
+        payload["retryable"], false,
+        "error event must carry the retryable flag verbatim"
+    );
+    assert!(
+        payload.get("field").is_none(),
+        "redacted SSE error payload must not leak the failing field name"
+    );
+    assert!(
+        payload.get("validation_code").is_none(),
+        "redacted SSE error payload must not leak validation metadata"
+    );
+
+    // The stream closes after the error event. Polling once more must
+    // return `None` (end-of-stream) within a small budget.
+    let final_frame = tokio::time::timeout(Duration::from_millis(500), body.frame()).await;
+    let closed = matches!(final_frame, Ok(None) | Err(_));
+    assert!(
+        closed,
+        "facade error must close the SSE stream, but body.frame() yielded another chunk"
+    );
 }
 
 #[tokio::test]

@@ -47,9 +47,16 @@ tokio = { version = "1", features = ["sync", "time"], optional = true }
 [dev-dependencies]
 ironclaw_webui_v2 = { path = ".", features = ["webui-v2-beta"] }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = ["test-support"] }
+# Production handlers must NOT depend on `ironclaw_product_adapters`
+# (enforced by the architecture boundary test). The handler contract
+# tests do, because they need to construct `ProductOutboundEnvelope`
+# fixtures with the canonical newtype constructors to drive the SSE
+# projection wire-shape regression.
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { version = "1", features = ["macros", "rt", "sync", "time", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 http = "1"

@@ -61,14 +61,36 @@ pub async fn send_message(
 }
 
 /// `GET /api/webchat/v2/threads/{thread_id}/timeline`
+///
+/// Optional query parameters:
+/// - `limit`: maximum number of messages per response. The facade
+///   clamps to a hard ceiling so an unbounded value cannot widen the
+///   response.
+/// - `cursor`: opaque cursor echoed from the previous response's
+///   `next_cursor` to load the page preceding it.
 pub async fn get_timeline(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(thread_id): Path<String>,
+    Query(query): Query<TimelineQuery>,
 ) -> Result<Json<RebornTimelineResponse>, WebUiV2HttpError> {
-    let request = RebornTimelineRequest { thread_id };
+    let request = RebornTimelineRequest {
+        thread_id,
+        limit: query.limit,
+        cursor: query.cursor,
+    };
     let response = state.services().get_timeline(caller, request).await?;
     Ok(Json(response))
+}
+
+/// Query parameters for `get_timeline`. Both fields are optional — a
+/// caller with neither gets the most recent page (default size).
+#[derive(Debug, Default, Deserialize)]
+pub struct TimelineQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 /// SSE polling cadence for `stream_events`. The facade only exposes a
@@ -229,7 +251,11 @@ fn build_sse_stream(
                                 yield Ok(event);
                             }
                             Err(error) => {
-                                tracing::warn!(
+                                // debug, not warn: this is an internal
+                                // diagnostic, not user-facing status, and
+                                // info!/warn! corrupts the REPL/TUI per
+                                // CLAUDE.md.
+                                tracing::debug!(
                                     target = "ironclaw_webui_v2::sse",
                                     error = %error,
                                     "failed to serialize ProductOutboundEnvelope for SSE",

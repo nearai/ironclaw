@@ -52,7 +52,7 @@ browser-reachable.
 |---|---|---|---|---|
 | `webui.v2.create_thread` | POST | `/api/webchat/v2/threads` | None | `ProductWorkflow` |
 | `webui.v2.send_message` | POST | `/api/webchat/v2/threads/{thread_id}/messages` | None | `TurnCoordinator` |
-| `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` | None | `ProjectionOnly` |
+| `webui.v2.get_timeline` | GET | `/api/webchat/v2/threads/{thread_id}/timeline` (optional `?limit=N&cursor=...`) | None | `ProjectionOnly` |
 | `webui.v2.stream_events` | GET | `/api/webchat/v2/threads/{thread_id}/events` | SSE | `ProjectionOnly` |
 | `webui.v2.cancel_run` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/cancel` | None | `TurnCoordinator` |
 | `webui.v2.resolve_gate` | POST | `/api/webchat/v2/threads/{thread_id}/runs/{run_id}/gates/{gate_ref}/resolve` | None | `TurnCoordinator` |
@@ -79,9 +79,28 @@ handler drains, emits each event with its projection cursor as the SSE
 `RebornServicesApi::stream_events` gains a true subscription API the
 handler can migrate without changing the descriptor.
 
+The per-poll ownership probe goes through `SessionThreadService::read_thread`
+(metadata-only) rather than `list_thread_history`, so an active stream does
+not reload the full message transcript every second.
+
 The browser resumes via `Last-Event-ID` on auto-reconnect; the handler
 prefers that header over the `?after_cursor=` query parameter, falling
 back to the projection origin when neither is supplied.
+
+## Timeline pagination
+
+`get_timeline` accepts two optional query parameters:
+
+- `limit=N` — maximum number of messages returned in one response. The
+  facade clamps to `[1, 200]` so a caller cannot widen the response by
+  passing a huge value.
+- `cursor=<opaque>` — round-tripped value from the previous response's
+  `next_cursor`. The browser does not interpret the cursor; it just
+  echoes it back to load the page preceding the current one.
+
+The response carries `next_cursor: Option<String>`. `None` means the
+caller has reached the start of the thread and there are no older
+pages.
 
 ### SSE resource caps
 

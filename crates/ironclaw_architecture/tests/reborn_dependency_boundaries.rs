@@ -1010,6 +1010,12 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         "crates/ironclaw_turns/src",
         "crates/ironclaw_threads/src",
         "crates/ironclaw_loop_support/src",
+        // WebChat v2 route surface: a Product/API crate that exposes
+        // axum handler functions and `IngressRouteDescriptor`s but must
+        // never bind sockets or call `axum::serve` itself — that is
+        // host composition's job. Without this entry the contract fails
+        // open for the new route crate.
+        "crates/ironclaw_webui_v2/src",
     ];
 
     let mut violations = Vec::new();

@@ -343,15 +343,21 @@ impl RebornServicesApi for RebornServices {
     ) -> Result<RebornTimelineResponse, RebornServicesError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
         let actor = caller.actor();
+        let limit = clamp_timeline_limit(request.limit);
+        let cursor = parse_timeline_cursor(request.cursor.as_deref())?;
         let history = self
             .resolve_webui_thread(caller.turn_scope(thread_id), &actor)
             .await?
             .history;
 
+        let (messages, next_cursor) = paginate_timeline_messages(history.messages, limit, cursor);
+        let summary_artifacts = cap_summary_artifacts(history.summary_artifacts);
+
         Ok(RebornTimelineResponse {
             thread: history.thread,
-            messages: history.messages,
-            summary_artifacts: history.summary_artifacts,
+            messages,
+            summary_artifacts,
+            next_cursor,
         })
     }
 
@@ -362,15 +368,18 @@ impl RebornServicesApi for RebornServices {
     ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
         let actor = caller.actor();
-        // resolve_webui_thread performs the owner-bound ownership probe via
-        // list_thread_history + map_ownership_probe_error, matching the gate
-        // cancel_run / resolve_gate / get_run_state already use. Without it
-        // a caller sharing (tenant, agent, project) could read another
-        // user's projection feed by guessing thread_id.
-        let scope = self
-            .resolve_webui_thread(caller.turn_scope(thread_id), &actor)
-            .await?
-            .scope;
+        // Metadata-only ownership probe: the SSE handler calls
+        // stream_events once per poll, and using list_thread_history here
+        // would load the full message transcript + summary artifacts per
+        // call — for an active stream that is hundreds of rows per second
+        // per caller. resolve_webui_thread_metadata uses the cheap
+        // read_thread probe; without it a caller sharing
+        // (tenant, agent, project) could still read another user's
+        // projection feed by guessing thread_id, so the probe itself
+        // stays.
+        let (scope, _thread_scope) = self
+            .resolve_webui_thread_metadata(caller.turn_scope(thread_id), &actor)
+            .await?;
         let Some(event_stream) = &self.event_stream else {
             return Err(RebornServicesError::service_unavailable(false));
         };
@@ -394,7 +403,9 @@ impl RebornServicesApi for RebornServices {
         let WebUiInboundCommand::CancelRun { request } = command else {
             return Err(RebornServicesError::internal_invariant());
         };
-        self.resolve_webui_thread(request.scope.clone(), &request.actor)
+        // Metadata-only ownership probe — cancel_run has no use for the
+        // message transcript and the load would be wasted work.
+        self.resolve_webui_thread_metadata(request.scope.clone(), &request.actor)
             .await?;
         let response = self
             .turn_coordinator
@@ -422,7 +433,10 @@ impl RebornServicesApi for RebornServices {
             return Err(RebornServicesError::internal_invariant());
         };
 
-        self.resolve_webui_thread(scope.clone(), &actor).await?;
+        // Metadata-only ownership probe — resolve_gate has no use for
+        // the message transcript and the load would be wasted work.
+        self.resolve_webui_thread_metadata(scope.clone(), &actor)
+            .await?;
         match resolution {
             WebUiGateResolution::Approved { always } => {
                 // `always: true` requests a *persistent* approval but this
@@ -496,7 +510,9 @@ impl RebornServicesApi for RebornServices {
         // sharing the (tenant, agent, project) scope could read another user's
         // run state by guessing thread_id and run_id. Mirrors the ownership
         // probe `cancel_run` and `resolve_gate` already perform.
-        self.resolve_webui_thread(scope.clone(), &actor).await?;
+        // Metadata-only — get_run_state has no use for the transcript.
+        self.resolve_webui_thread_metadata(scope.clone(), &actor)
+            .await?;
         let state = self
             .turn_coordinator
             .get_run_state(GetRunStateRequest { scope, run_id })
@@ -660,13 +676,25 @@ async fn replay_accepted_message(
 }
 
 // Owner-bound thread resolution shared by the WebUI-facing methods that
-// land in this trait impl. Calling `list_thread_history` with the actor
-// pinned as `owner_user_id` is what keeps cancel_run / resolve_gate /
-// stream_events / get_run_state from acting on threads the caller does
+// land in this trait impl. The actor is pinned as `owner_user_id` so a
+// caller sharing (tenant, agent, project) cannot act on a thread it does
 // not own; `map_ownership_probe_error` collapses both UnknownThread and
 // ThreadScopeMismatch into NotFound so the response cannot be used as
 // an existence oracle. Splitting this off the trait impl avoids having
 // to thread the same probe through every caller.
+//
+// Two helpers, two cost profiles:
+//
+// - `resolve_webui_thread_metadata` is the cheap probe: it returns just
+//   the validated scopes via `read_thread`, which is metadata-only on
+//   the production backends. Use this for any one-shot mutation
+//   (`cancel_run`, `resolve_gate`, `get_run_state`) and especially for
+//   the long-lived `stream_events` poll loop where loading the full
+//   transcript per second per active caller was the original High
+//   review issue.
+// - `resolve_webui_thread` keeps loading the full `ThreadHistory`
+//   because `get_timeline` is the one caller that actually needs the
+//   transcript — there is no point doing two reads in that path.
 impl RebornServices {
     async fn resolve_webui_thread(
         &self,
@@ -688,6 +716,27 @@ impl RebornServices {
             thread_scope,
             history,
         })
+    }
+
+    async fn resolve_webui_thread_metadata(
+        &self,
+        scope: TurnScope,
+        actor: &TurnActor,
+    ) -> Result<(TurnScope, ThreadScope), RebornServicesError> {
+        let thread_scope = thread_scope_from_turn_scope(&scope, Some(actor.user_id.clone()))?;
+        // `read_thread` is the metadata-only probe; production backends
+        // override it to skip the message/summary load entirely. The
+        // ownership semantics (UnknownThread / ThreadScopeMismatch
+        // collapse to NotFound) must match `list_thread_history`'s
+        // path, which `map_ownership_probe_error` guarantees.
+        self.thread_service
+            .read_thread(ThreadHistoryRequest {
+                scope: thread_scope.clone(),
+                thread_id: scope.thread_id.clone(),
+            })
+            .await
+            .map_err(map_ownership_probe_error)?;
+        Ok((scope, thread_scope))
     }
 }
 
@@ -870,6 +919,111 @@ fn legacy_webui_source_binding_id(scope: &TurnScope, actor: &TurnActor) -> Strin
         segment("thread", scope.thread_id.as_str()),
         segment("actor", actor.user_id.as_str())
     )
+}
+
+/// Default page size for [`RebornServicesApi::get_timeline`] when the
+/// caller does not supply one. Sized to cover a typical chat history
+/// without forcing a multi-megabyte JSON response on first load.
+pub(crate) const TIMELINE_DEFAULT_PAGE_SIZE: u32 = 100;
+
+/// Hard ceiling on the number of messages a single timeline response can
+/// carry. Callers asking for more get the cap. Without this, a large
+/// thread would let the per-route rate limit be the only thing bounding
+/// per-request response size, which was the original Medium review
+/// issue.
+pub(crate) const TIMELINE_MAX_PAGE_SIZE: u32 = 200;
+
+/// Hard ceiling on summary artifacts returned per response. Summary
+/// artifacts are typically much smaller than the message transcript so
+/// this cap is generous; it exists to bound the worst case where a
+/// thread accumulates an unusual number of summaries.
+const TIMELINE_MAX_SUMMARY_ARTIFACTS: usize = 200;
+
+fn clamp_timeline_limit(requested: Option<u32>) -> usize {
+    let raw = requested.unwrap_or(TIMELINE_DEFAULT_PAGE_SIZE);
+    let clamped = raw.clamp(1, TIMELINE_MAX_PAGE_SIZE);
+    clamped as usize
+}
+
+/// Wire shape of the opaque timeline cursor. The browser does not need
+/// to interpret this; it just echoes the previous response's
+/// `next_cursor` back as the next request's `cursor`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct TimelineCursor {
+    /// Only return messages whose `sequence` is strictly less than this
+    /// value. Naming is deliberate: `before_*` makes the directional
+    /// semantics (page backward through history) obvious at call sites.
+    before_message_sequence: u64,
+}
+
+fn parse_timeline_cursor(raw: Option<&str>) -> Result<Option<TimelineCursor>, RebornServicesError> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let cursor: TimelineCursor = serde_json::from_str(raw).map_err(|_| {
+        RebornServicesError::validation(WebUiInboundValidationError::new(
+            "cursor",
+            WebUiInboundValidationCode::InvalidValue,
+        ))
+    })?;
+    Ok(Some(cursor))
+}
+
+fn serialize_timeline_cursor(cursor: &TimelineCursor) -> Option<String> {
+    // Serialization of a tiny tagged struct is total in practice, but
+    // returning Option keeps the call site honest without an unwrap.
+    serde_json::to_string(cursor).ok()
+}
+
+/// Slice the message transcript to the most recent `limit` messages
+/// strictly older than `cursor.before_message_sequence` (or the most
+/// recent `limit` overall when no cursor is supplied), returning the
+/// page plus the cursor the caller should pass back to load the page
+/// preceding this one. `None` for `next_cursor` means there is nothing
+/// older — the caller has reached the start of the thread.
+///
+/// Messages are sorted by `sequence` ascending before slicing so the
+/// returned page is in monotonic order regardless of the input order
+/// the underlying store happens to produce.
+fn paginate_timeline_messages(
+    mut messages: Vec<ironclaw_threads::ThreadMessageRecord>,
+    limit: usize,
+    cursor: Option<TimelineCursor>,
+) -> (Vec<ironclaw_threads::ThreadMessageRecord>, Option<String>) {
+    messages.sort_by_key(|message| message.sequence);
+    if let Some(cursor) = cursor.as_ref() {
+        messages.retain(|message| message.sequence < cursor.before_message_sequence);
+    }
+    let total = messages.len();
+    let start = total.saturating_sub(limit);
+    let next_cursor = if start > 0 {
+        // The next page is older than the oldest message in *this* page.
+        // We take the sequence of the page's first (oldest) message and
+        // use it as `before_message_sequence` for the follow-up: that
+        // request returns messages with sequence < this one, i.e. the
+        // page strictly preceding the current one.
+        messages.get(start).and_then(|message| {
+            serialize_timeline_cursor(&TimelineCursor {
+                before_message_sequence: message.sequence,
+            })
+        })
+    } else {
+        None
+    };
+    let page: Vec<_> = messages.into_iter().skip(start).collect();
+    (page, next_cursor)
+}
+
+fn cap_summary_artifacts(
+    mut artifacts: Vec<ironclaw_threads::SummaryArtifact>,
+) -> Vec<ironclaw_threads::SummaryArtifact> {
+    if artifacts.len() > TIMELINE_MAX_SUMMARY_ARTIFACTS {
+        artifacts.truncate(TIMELINE_MAX_SUMMARY_ARTIFACTS);
+    }
+    artifacts
 }
 
 fn webui_gate_binding_id(scope: &TurnScope, gate_ref: &str) -> String {

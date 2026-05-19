@@ -1382,6 +1382,64 @@ async fn wrong_scope_lookup_returns_not_found_instead_of_cross_tenant_history() 
     assert!(result.is_err());
 }
 
+#[tokio::test]
+async fn read_thread_returns_metadata_for_owned_scope() {
+    let service = InMemorySessionThreadService::default();
+    let created = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: Some("hi".into()),
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let record = service
+        .read_thread(ThreadHistoryRequest {
+            scope: scope("a"),
+            thread_id: created.thread_id.clone(),
+        })
+        .await
+        .expect("read_thread should succeed for owned scope");
+
+    assert_eq!(record.thread_id, created.thread_id);
+    assert_eq!(record.scope, scope("a"));
+    assert_eq!(record.title.as_deref(), Some("hi"));
+}
+
+#[tokio::test]
+async fn read_thread_rejects_cross_scope_lookup_with_unknown_thread() {
+    // Regression: the metadata-only ownership probe must collapse "wrong
+    // scope" to UnknownThread just like list_thread_history, so a caller
+    // sharing (tenant, agent, project) cannot use it as an existence
+    // oracle for another owner's threads.
+    let service = InMemorySessionThreadService::default();
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: scope("a"),
+            thread_id: None,
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    let err = service
+        .read_thread(ThreadHistoryRequest {
+            scope: scope("b"),
+            thread_id: thread.thread_id.clone(),
+        })
+        .await
+        .expect_err("cross-scope read must error");
+    assert!(
+        matches!(&err, ironclaw_threads::SessionThreadError::UnknownThread { thread_id } if thread_id == &thread.thread_id),
+        "cross-scope read_thread must collapse to UnknownThread, got: {err:?}"
+    );
+}
+
 #[test]
 fn message_ids_are_stable_values() {
     let id = ThreadMessageId::new();

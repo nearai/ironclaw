@@ -539,6 +539,7 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
             caller(),
             RebornTimelineRequest {
                 thread_id: "thread-alpha".to_string(),
+                ..Default::default()
             },
         )
         .await
@@ -772,6 +773,7 @@ async fn same_thread_retry_reuses_legacy_accepted_message_without_creating_dupli
             caller,
             RebornTimelineRequest {
                 thread_id: thread_id.as_str().to_string(),
+                ..Default::default()
             },
         )
         .await
@@ -824,6 +826,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_of_same_client_action() {
             caller(),
             RebornTimelineRequest {
                 thread_id: "thread-alpha".to_string(),
+                ..Default::default()
             },
         )
         .await
@@ -835,6 +838,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_of_same_client_action() {
             caller(),
             RebornTimelineRequest {
                 thread_id: "thread-beta".to_string(),
+                ..Default::default()
             },
         )
         .await
@@ -897,6 +901,7 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
             caller(),
             RebornTimelineRequest {
                 thread_id: "thread-alpha".to_string(),
+                ..Default::default()
             },
         )
         .await
@@ -918,6 +923,7 @@ async fn refresh_reresolves_thread_to_same_canonical_scope() {
             caller(),
             RebornTimelineRequest {
                 thread_id: "thread-alpha".to_string(),
+                ..Default::default()
             },
         )
         .await
@@ -927,6 +933,7 @@ async fn refresh_reresolves_thread_to_same_canonical_scope() {
             caller(),
             RebornTimelineRequest {
                 thread_id: "thread-alpha".to_string(),
+                ..Default::default()
             },
         )
         .await
@@ -960,6 +967,7 @@ async fn get_timeline_rejects_cross_user_access() {
             caller_for_user("user-beta"),
             RebornTimelineRequest {
                 thread_id: "thread-alpha".to_string(),
+                ..Default::default()
             },
         )
         .await
@@ -1751,6 +1759,194 @@ async fn get_run_state_rejects_cross_user_access() {
         coordinator.run_state_request_count(),
         0,
         "turn coordinator must NOT be called for cross-user run-state read"
+    );
+}
+
+/// Seed `count` user messages into the in-memory thread service so the
+/// timeline pagination regressions below have real, ordered message
+/// rows to slice against.
+async fn seed_thread_messages(
+    threads: &InMemorySessionThreadService,
+    caller: &WebUiAuthenticatedCaller,
+    thread_id: &str,
+    count: usize,
+) {
+    let scope = thread_scope_for(caller);
+    let parsed_thread_id = ironclaw_host_api::ThreadId::new(thread_id).expect("thread id");
+    for index in 0..count {
+        threads
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: scope.clone(),
+                thread_id: parsed_thread_id.clone(),
+                actor_id: caller.user_id.as_str().to_string(),
+                source_binding_id: None,
+                reply_target_binding_id: None,
+                external_event_id: None,
+                content: MessageContent::text(format!("msg-{index}")),
+            })
+            .await
+            .expect("seed message");
+    }
+}
+
+// Regression for the timeline-pagination review (Medium). Without
+// per-response caps a thread with hundreds of messages would force a
+// multi-megabyte JSON allocation + serialize per call, since the route
+// rate limit only bounds open frequency. `get_timeline` must (a) clamp
+// `limit` to a hard ceiling so callers cannot bypass the cap, (b)
+// return at most `limit` messages per page, and (c) surface a
+// `next_cursor` the browser can echo back to load the page preceding
+// it. When the caller has reached the start of the thread, `next_cursor`
+// must be `None` so the browser stops asking for more.
+#[tokio::test]
+async fn get_timeline_pages_messages_with_cursor() {
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads.clone(), coordinator);
+    let alice = caller();
+    setup_owned_thread(&services, alice.clone(), "thread-paginate").await;
+    seed_thread_messages(&threads, &alice, "thread-paginate", 25).await;
+
+    let first = services
+        .get_timeline(
+            alice.clone(),
+            RebornTimelineRequest {
+                thread_id: "thread-paginate".to_string(),
+                limit: Some(10),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("first page");
+    assert_eq!(
+        first.messages.len(),
+        10,
+        "first page must honor the requested limit"
+    );
+    // The page is the newest 10 messages — the page boundary sits at
+    // the message just *before* the earliest one in this page.
+    let earliest_in_first_page = first
+        .messages
+        .first()
+        .expect("first message on page")
+        .sequence;
+    let next_cursor = first
+        .next_cursor
+        .as_deref()
+        .expect("next_cursor must surface when more messages remain");
+
+    let second = services
+        .get_timeline(
+            alice.clone(),
+            RebornTimelineRequest {
+                thread_id: "thread-paginate".to_string(),
+                limit: Some(10),
+                cursor: Some(next_cursor.to_string()),
+            },
+        )
+        .await
+        .expect("second page");
+    assert_eq!(second.messages.len(), 10, "second page is fully populated");
+    // Every message in page two must be older than every message in
+    // page one.
+    assert!(
+        second
+            .messages
+            .last()
+            .map(|message| message.sequence < earliest_in_first_page)
+            .unwrap_or(false),
+        "second page must contain messages strictly older than the first"
+    );
+    assert!(
+        second.next_cursor.is_some(),
+        "more pages remain after the second page"
+    );
+
+    let third = services
+        .get_timeline(
+            alice,
+            RebornTimelineRequest {
+                thread_id: "thread-paginate".to_string(),
+                limit: Some(10),
+                cursor: second.next_cursor.clone(),
+            },
+        )
+        .await
+        .expect("third page");
+    // Five messages remain (25 - 10 - 10) and the caller has reached
+    // the start of the thread, so next_cursor must be None.
+    assert_eq!(third.messages.len(), 5);
+    assert!(
+        third.next_cursor.is_none(),
+        "next_cursor must be None once all older messages are exhausted"
+    );
+}
+
+// Regression: `limit` must be clamped to the facade's hard ceiling so a
+// caller cannot widen the response by passing a huge value. Without the
+// clamp, the per-route rate limit would be the only thing bounding
+// per-request response size.
+#[tokio::test]
+async fn get_timeline_clamps_oversize_limit_to_hard_ceiling() {
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads.clone(), coordinator);
+    let alice = caller();
+    setup_owned_thread(&services, alice.clone(), "thread-cap").await;
+    // Seed more than the hard ceiling so the clamp is observable.
+    seed_thread_messages(&threads, &alice, "thread-cap", 250).await;
+
+    let response = services
+        .get_timeline(
+            alice,
+            RebornTimelineRequest {
+                thread_id: "thread-cap".to_string(),
+                limit: Some(u32::MAX),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("clamped timeline");
+    assert!(
+        response.messages.len() <= 200,
+        "limit must be clamped to TIMELINE_MAX_PAGE_SIZE (200); got {}",
+        response.messages.len()
+    );
+    assert!(
+        response.next_cursor.is_some(),
+        "next_cursor must surface because the underlying thread has more messages than the cap"
+    );
+}
+
+// Regression: a malformed cursor must be rejected at the wire boundary
+// with an InvalidValue validation error rather than silently treated as
+// "no cursor". Without this guard, a caller could send garbage in
+// `cursor=...` and quietly load page 1 instead of the intended page.
+#[tokio::test]
+async fn get_timeline_rejects_malformed_cursor() {
+    let threads = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator);
+    let alice = caller();
+    setup_owned_thread(&services, alice.clone(), "thread-bad-cursor").await;
+
+    let err = services
+        .get_timeline(
+            alice,
+            RebornTimelineRequest {
+                thread_id: "thread-bad-cursor".to_string(),
+                limit: None,
+                cursor: Some("not-a-valid-cursor".to_string()),
+            },
+        )
+        .await
+        .expect_err("malformed cursor must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.field.as_deref(), Some("cursor"));
+    assert_eq!(
+        err.validation_code,
+        Some(WebUiInboundValidationCode::InvalidValue)
     );
 }
 
