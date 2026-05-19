@@ -458,6 +458,10 @@ pub enum ManifestV2Error {
 }
 
 impl ExtensionManifestV2 {
+    pub fn runtime_kind(&self) -> RuntimeKind {
+        self.runtime.kind()
+    }
+
     /// Parse a v2 manifest TOML body and validate it against `host_port_catalog`.
     ///
     /// `source` is supplied by the loader/install path, never read from TOML.
@@ -505,6 +509,37 @@ impl ExtensionManifestV2 {
         let document = RawManifestDocumentV2::parse(input)?;
         let manifest = Self::from_raw(document.raw, source, host_port_catalog, &document.sections)?;
         registry.validate_manifest(&manifest, &document.sections)?;
+        Ok(manifest)
+    }
+
+    /// Parse a v2 manifest for production discovery.
+    ///
+    /// Legacy top-level capability manifests keep the stricter no-extra-table
+    /// rule from [`Self::parse`]. Manifests that declare `[[host_api]]` are
+    /// validated through the composition-supplied contract registry.
+    pub fn parse_with_optional_host_api_contracts(
+        input: &str,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+        registry: &HostApiContractRegistry,
+    ) -> Result<Self, ManifestV2Error> {
+        if input.len() > MAX_MANIFEST_BYTES {
+            return Err(ManifestV2Error::ManifestTooLarge {
+                bytes: input.len(),
+                max: MAX_MANIFEST_BYTES,
+            });
+        }
+        let document = RawManifestDocumentV2::parse(input)?;
+        let manifest = Self::from_raw(document.raw, source, host_port_catalog, &document.sections)?;
+        if manifest.host_apis.is_empty() {
+            if let Some(key) = document.sections.first_non_envelope_top_level_key() {
+                return Err(ManifestV2Error::Parse {
+                    reason: format!("unknown top-level field {key:?}"),
+                });
+            }
+        } else {
+            registry.validate_manifest(&manifest, &document.sections)?;
+        }
         Ok(manifest)
     }
 

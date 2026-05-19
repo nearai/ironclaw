@@ -1,3 +1,7 @@
+mod support;
+
+use support::legacy_capability_fixture_to_v2;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -8,7 +12,7 @@ use ironclaw_capabilities::{
     CapabilityObligationRequest,
 };
 use ironclaw_events::InMemoryAuditSink;
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
@@ -1169,12 +1173,22 @@ fn allowed_network_policy() -> NetworkPolicy {
 }
 
 fn registry_with_echo_capability() -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse(ECHO_MANIFEST).unwrap();
+    let manifest = parse_manifest(ECHO_MANIFEST);
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     let package = ExtensionPackage::from_manifest(manifest, root).unwrap();
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     registry
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
 }
 
 fn execution_context(grants: CapabilitySet) -> ExecutionContext {

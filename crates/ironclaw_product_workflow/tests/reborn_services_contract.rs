@@ -35,13 +35,24 @@ use ironclaw_turns::{
 use serde_json::json;
 
 fn caller() -> WebUiAuthenticatedCaller {
-    caller_with_project(Some("project-alpha"))
+    caller_for_user("user-alpha")
+}
+
+fn caller_for_user(user_id: &str) -> WebUiAuthenticatedCaller {
+    caller_for_user_with_project(user_id, Some("project-alpha"))
 }
 
 fn caller_with_project(project_id: Option<&str>) -> WebUiAuthenticatedCaller {
+    caller_for_user_with_project("user-alpha", project_id)
+}
+
+fn caller_for_user_with_project(
+    user_id: &str,
+    project_id: Option<&str>,
+) -> WebUiAuthenticatedCaller {
     WebUiAuthenticatedCaller::new(
         TenantId::new("tenant-alpha").expect("valid tenant"),
-        UserId::new("user-alpha").expect("valid user"),
+        UserId::new(user_id).expect("valid user"),
         Some(AgentId::new("agent-alpha").expect("valid agent")),
         project_id.map(|project_id| ProjectId::new(project_id).expect("valid project")),
     )
@@ -83,26 +94,13 @@ fn segment(name: &str, value: &str) -> String {
 }
 
 /// Establish thread ownership for `caller` under `thread_id` so subsequent
-/// `cancel_run` / `resolve_gate` calls pass the `assert_thread_owned_by`
-/// check. Goes through `submit_turn` because that is the only public path
-/// that calls `ensure_thread` with the actor pinned as `owner_user_id`.
+/// thread-bound facade calls pass the ownership check.
 async fn setup_owned_thread(
     services: &RebornServices,
     owner: WebUiAuthenticatedCaller,
     thread_id: &str,
 ) {
-    services
-        .submit_turn(
-            owner,
-            serde_json::from_value::<WebUiSendMessageRequest>(json!({
-                "client_action_id": format!("setup-{thread_id}"),
-                "thread_id": thread_id,
-                "content": "seed",
-            }))
-            .expect("setup request"),
-        )
-        .await
-        .expect("setup submit succeeds");
+    create_thread_for(services, owner, thread_id).await;
 }
 
 #[derive(Default)]
@@ -161,6 +159,14 @@ impl FakeTurnCoordinator {
             .expect("lock")
             .last()
             .map(|request| request.source_binding_ref.as_str().to_string())
+    }
+
+    fn last_submission_scope(&self) -> Option<ironclaw_turns::TurnScope> {
+        self.submissions
+            .lock()
+            .expect("lock")
+            .last()
+            .map(|request| request.scope.clone())
     }
 }
 
@@ -274,6 +280,32 @@ impl ProjectionStream for RecordingProjectionStream {
         request: ProjectionSubscriptionRequest,
     ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
         self.drains.lock().expect("lock").push(request);
+        Ok(Vec::new())
+    }
+}
+
+/// Lighter-weight projection stream used by the timeline drain
+/// regressions: counts calls without retaining the request shape. Kept
+/// alongside `RecordingProjectionStream` because some sites only need
+/// the count and the leaner stub keeps those tests focused.
+#[derive(Default)]
+struct SpyProjectionStream {
+    drain_count: Mutex<usize>,
+}
+
+impl SpyProjectionStream {
+    fn drain_count(&self) -> usize {
+        *self.drain_count.lock().expect("lock")
+    }
+}
+
+#[async_trait]
+impl ProjectionStream for SpyProjectionStream {
+    async fn drain(
+        &self,
+        _request: ProjectionSubscriptionRequest,
+    ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
+        *self.drain_count.lock().expect("lock") += 1;
         Ok(Vec::new())
     }
 }
@@ -397,6 +429,24 @@ impl SessionThreadService for ScopeMismatchThreadStub {
     }
 }
 
+async fn create_thread_for(
+    services: &RebornServices,
+    caller: WebUiAuthenticatedCaller,
+    thread_id: &str,
+) {
+    services
+        .create_thread(
+            caller,
+            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+                "client_action_id": format!("create-{thread_id}"),
+                "requested_thread_id": thread_id
+            }))
+            .expect("create request"),
+        )
+        .await
+        .expect("create thread");
+}
+
 #[tokio::test]
 async fn duplicate_create_thread_replays_generated_thread_for_same_client_action() {
     let services = RebornServices::new(
@@ -455,6 +505,7 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
 
     let response = services
         .submit_turn(
@@ -498,6 +549,19 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
         timeline.messages[0].content.as_deref(),
         Some("hello from webui")
     );
+    let submission_scope = coordinator
+        .last_submission_scope()
+        .expect("submission scope");
+    assert_eq!(submission_scope.thread_id.as_str(), "thread-alpha");
+    assert_eq!(submission_scope.tenant_id.as_str(), "tenant-alpha");
+    assert_eq!(
+        submission_scope.agent_id.expect("agent").as_str(),
+        "agent-alpha"
+    );
+    assert_eq!(
+        submission_scope.project_id.expect("project").as_str(),
+        "project-alpha"
+    );
 }
 
 #[tokio::test]
@@ -505,6 +569,7 @@ async fn duplicate_submit_replays_prior_handoff_without_second_submission() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
 
     let request = || {
         serde_json::from_value::<WebUiSendMessageRequest>(json!({
@@ -529,6 +594,55 @@ async fn duplicate_submit_replays_prior_handoff_without_second_submission() {
         RebornSubmitTurnResponse::AlreadySubmitted { .. }
     ));
     assert_eq!(coordinator.submission_count(), 1);
+}
+
+#[tokio::test]
+async fn submit_turn_rejects_missing_thread_before_turn_submission() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator.clone());
+
+    let err = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-missing",
+                "thread_id": "thread-missing",
+                "content": "this thread was never created"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("missing thread must reject");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+    assert_eq!(coordinator.submission_count(), 0);
+}
+
+#[tokio::test]
+async fn submit_turn_rejects_non_owner_before_turn_submission() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .submit_turn(
+            caller_for_user("user-beta"),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-denied",
+                "thread_id": "thread-alpha",
+                "content": "wrong participant"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("non-owner must reject");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+    assert_eq!(coordinator.submission_count(), 0);
 }
 
 #[tokio::test]
@@ -672,6 +786,8 @@ async fn duplicate_submit_rejects_cross_thread_reuse_of_same_client_action() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    create_thread_for(&services, caller(), "thread-beta").await;
 
     services
         .submit_turn(
@@ -714,7 +830,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_of_same_client_action() {
         .expect("alpha timeline");
     assert_eq!(alpha_timeline.messages.len(), 1);
 
-    let beta_err = services
+    let beta_timeline = services
         .get_timeline(
             caller(),
             RebornTimelineRequest {
@@ -722,8 +838,8 @@ async fn duplicate_submit_rejects_cross_thread_reuse_of_same_client_action() {
             },
         )
         .await
-        .expect_err("beta thread was never created");
-    assert_eq!(beta_err.code, RebornServicesErrorCode::NotFound);
+        .expect("beta timeline");
+    assert!(beta_timeline.messages.is_empty());
 }
 
 #[tokio::test]
@@ -732,7 +848,9 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
     let coordinator = Arc::new(DefaultTurnCoordinator::new(Arc::new(
         InMemoryTurnStateStore::default(),
     )));
-    let services = Arc::new(RebornServices::new(threads, coordinator));
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-alpha").await;
+    let services = Arc::new(services);
 
     let request = || {
         serde_json::from_value::<WebUiSendMessageRequest>(json!({
@@ -789,11 +907,102 @@ async fn concurrent_duplicate_submit_creates_one_message_and_replays_outcome() {
 }
 
 #[tokio::test]
+async fn refresh_reresolves_thread_to_same_canonical_scope() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator);
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let first = services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+            },
+        )
+        .await
+        .expect("first resolve");
+    let refreshed = services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+            },
+        )
+        .await
+        .expect("refresh resolve");
+
+    assert_eq!(first.thread, refreshed.thread);
+    assert_eq!(refreshed.thread.thread_id.as_str(), "thread-alpha");
+    assert_eq!(refreshed.thread.scope.tenant_id.as_str(), "tenant-alpha");
+    assert_eq!(refreshed.thread.scope.agent_id.as_str(), "agent-alpha");
+    assert_eq!(
+        refreshed
+            .thread
+            .scope
+            .owner_user_id
+            .expect("owner")
+            .as_str(),
+        "user-alpha"
+    );
+}
+
+#[tokio::test]
+async fn get_timeline_rejects_cross_user_access() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .get_timeline(
+            caller_for_user("user-beta"),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+            },
+        )
+        .await
+        .expect_err("cross-user timeline read must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+}
+
+#[tokio::test]
+async fn stream_events_rejects_cross_user_access_before_draining_stream() {
+    let stream = Arc::new(SpyProjectionStream::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_event_stream(stream.clone());
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .stream_events(
+            caller_for_user("user-beta"),
+            RebornStreamEventsRequest {
+                thread_id: "thread-alpha".to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect_err("cross-user stream read must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+    assert_eq!(stream.drain_count(), 0);
+}
+
+#[tokio::test]
 async fn duplicate_submit_without_project_id_still_rejects_cross_thread_reuse() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(threads, coordinator.clone());
     let caller = caller_with_project(None);
+    create_thread_for(&services, caller.clone(), "thread-alpha").await;
+    create_thread_for(&services, caller.clone(), "thread-beta").await;
 
     services
         .submit_turn(
@@ -831,6 +1040,18 @@ async fn duplicate_submit_is_isolated_by_project_scope() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(threads, coordinator.clone());
+    create_thread_for(
+        &services,
+        caller_with_project(Some("project-alpha")),
+        "thread-alpha",
+    )
+    .await;
+    create_thread_for(
+        &services,
+        caller_with_project(Some("project-beta")),
+        "thread-beta",
+    )
+    .await;
 
     let first = services
         .submit_turn(
@@ -901,6 +1122,7 @@ async fn turn_unauthorized_maps_to_forbidden() {
             TurnError::Unauthorized,
         )),
     );
+    create_thread_for(&services, caller(), "thread-alpha").await;
 
     let err = services
         .submit_turn(
@@ -953,7 +1175,7 @@ async fn cancel_run_uses_turn_facade_and_stable_response() {
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
-    setup_owned_thread(&services, caller(), "thread-alpha").await;
+    create_thread_for(&services, caller(), "thread-alpha").await;
 
     let response = services
         .cancel_run(
@@ -982,7 +1204,7 @@ async fn approved_gate_resolution_resumes_turn() {
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
-    setup_owned_thread(&services, caller(), "thread-alpha").await;
+    create_thread_for(&services, caller(), "thread-alpha").await;
 
     let response = services
         .resolve_gate(
@@ -1016,6 +1238,7 @@ async fn credential_gate_resolution_returns_sanitized_stable_error_until_gate_po
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
+    create_thread_for(&services, caller(), "thread-alpha").await;
 
     let err = services
         .resolve_gate(
@@ -1047,7 +1270,7 @@ async fn denied_gate_resolution_cancels_run() {
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
-    setup_owned_thread(&services, caller(), "thread-alpha").await;
+    create_thread_for(&services, caller(), "thread-alpha").await;
     coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
 
     let response = services
@@ -1081,7 +1304,7 @@ async fn cancel_run_rejects_cross_user_access() {
         coordinator.clone(),
     );
     let alice = caller();
-    setup_owned_thread(&services, alice.clone(), "thread-alice").await;
+    create_thread_for(&services, alice.clone(), "thread-alice").await;
 
     // Bob shares Alice's (tenant, agent, project) scope and guesses her thread.
     let bob = WebUiAuthenticatedCaller::new(
@@ -1161,7 +1384,7 @@ async fn resolve_gate_rejects_cross_user_access() {
         coordinator.clone(),
     );
     let alice = caller();
-    setup_owned_thread(&services, alice.clone(), "thread-alice").await;
+    create_thread_for(&services, alice.clone(), "thread-alice").await;
     coordinator.set_parked_gate(GateRef::new("gate-alpha").expect("gate"));
 
     let bob = WebUiAuthenticatedCaller::new(
@@ -1290,7 +1513,7 @@ async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
-    setup_owned_thread(&services, caller(), "thread-alpha").await;
+    create_thread_for(&services, caller(), "thread-alpha").await;
     // The run is parked on `gate-current`, but the browser supplies `gate-stale`.
     coordinator.set_parked_gate(GateRef::new("gate-current").expect("gate"));
 
@@ -1328,7 +1551,7 @@ async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
         Arc::new(InMemorySessionThreadService::default()),
         coordinator.clone(),
     );
-    setup_owned_thread(&services, caller(), "thread-alpha").await;
+    create_thread_for(&services, caller(), "thread-alpha").await;
 
     let err = services
         .resolve_gate(

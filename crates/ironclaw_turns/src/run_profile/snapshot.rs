@@ -30,12 +30,31 @@ pub struct ResolvedRunProfile {
     pub cancellation_policy: CancellationPolicy,
     pub checkpoint_policy: CheckpointPolicy,
     pub resource_budget_policy: ResourceBudgetPolicy,
+    #[serde(default)]
+    pub personal_context_policy: PersonalContextPolicy,
     pub runtime_constraints: RuntimeProfileConstraints,
     pub runner_pool_id: Option<RunnerPoolId>,
     pub scheduling_class: SchedulingClass,
     pub concurrency_class: ConcurrencyClass,
     pub resolution_fingerprint: RunProfileFingerprint,
     pub provenance: RedactedRunProfileProvenance,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PersonalContextPolicy {
+    #[default]
+    Excluded,
+    Allowed,
+}
+
+impl PersonalContextPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Excluded => "excluded",
+            Self::Allowed => "allowed",
+        }
+    }
 }
 
 impl ResolvedRunProfile {
@@ -86,6 +105,7 @@ impl ResolvedRunProfile {
                 max_model_calls: 32,
                 max_capability_invocations: 64,
             },
+            personal_context_policy: PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {
                 allow_raw_runtime_backend_selection: false,
                 allow_broad_capability_surface: false,

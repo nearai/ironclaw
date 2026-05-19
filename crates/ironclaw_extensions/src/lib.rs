@@ -7,12 +7,11 @@
 
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem};
 use ironclaw_host_api::{
-    CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, ExtensionLifecycleOperation,
-    HostApiError, PackageId, PackageIdentity, PackageSource, PermissionMode, RequestedTrustClass,
-    ResourceProfile, RuntimeKind, TrustClass, VirtualPath,
+    CapabilityDescriptor, CapabilityId, ExtensionId, ExtensionLifecycleOperation, HostApiError,
+    HostPortCatalog, PackageId, PackageIdentity, PackageSource, RequestedTrustClass, RuntimeKind,
+    TrustClass, VirtualPath,
 };
 use ironclaw_trust::TrustPolicyInput;
-use serde::{Deserialize, Deserializer};
 use std::collections::{BTreeSet, HashSet};
 use thiserror::Error;
 
@@ -45,6 +44,8 @@ pub enum ExtensionError {
         operation: ExtensionLifecycleOperation,
     },
     #[error(transparent)]
+    ManifestV2(#[from] v2::ManifestV2Error),
+    #[error(transparent)]
     Filesystem(#[from] FilesystemError),
 }
 
@@ -73,7 +74,8 @@ impl ExtensionAssetPath {
     }
 }
 
-/// Declarative runtime metadata for an extension package.
+/// Declarative runtime metadata for an extension package after boundary
+/// validation has converted manifest strings into typed internal values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtensionRuntime {
     Wasm {
@@ -109,104 +111,116 @@ impl ExtensionRuntime {
             Self::System { .. } => RuntimeKind::System,
         }
     }
+
+    fn from_v2(runtime: ExtensionRuntimeV2) -> Result<Self, ExtensionError> {
+        match runtime {
+            ExtensionRuntimeV2::Wasm { module } => Ok(Self::Wasm {
+                module: ExtensionAssetPath::new(module)?,
+            }),
+            ExtensionRuntimeV2::Script {
+                runner,
+                image,
+                command,
+                args,
+            } => Ok(Self::Script {
+                runner,
+                image,
+                command,
+                args,
+            }),
+            ExtensionRuntimeV2::Mcp {
+                transport,
+                command,
+                args,
+                url,
+            } => Ok(Self::Mcp {
+                transport,
+                command,
+                args,
+                url,
+            }),
+            ExtensionRuntimeV2::FirstParty { service } => Ok(Self::FirstParty { service }),
+            ExtensionRuntimeV2::System { service } => Ok(Self::System { service }),
+        }
+    }
 }
 
-/// Validated extension manifest.
+/// Validated production extension manifest.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExtensionManifest {
+    pub schema_version: String,
     pub id: ExtensionId,
     pub name: String,
     pub version: String,
     pub description: String,
-    /// Manifest-declared trust request. This is untrusted metadata and must
-    /// be evaluated by `ironclaw_trust` before it can affect authorization.
+    pub source: ManifestSource,
     pub requested_trust: RequestedTrustClass,
-    /// Safe declarative descriptor metadata derived from [`requested_trust`].
-    /// Privileged requests remain sandboxed here; effective privileged trust
-    /// only comes from a host policy [`TrustPolicyInput`].
-    pub trust: TrustClass,
+    pub descriptor_trust_default: TrustClass,
     pub runtime: ExtensionRuntime,
+    pub host_apis: Vec<HostApiRefV2>,
     pub capabilities: Vec<CapabilityManifest>,
 }
 
 impl ExtensionManifest {
-    pub fn parse(input: &str) -> Result<Self, ExtensionError> {
-        let raw: RawManifest =
-            toml::from_str(input).map_err(|error| ExtensionError::ManifestParse {
-                reason: error.to_string(),
-            })?;
-        Self::from_raw(raw)
+    pub fn parse(
+        input: &str,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+    ) -> Result<Self, ExtensionError> {
+        ExtensionManifestV2::parse(input, source, host_port_catalog)?.try_into()
+    }
+
+    pub fn parse_with_host_api_contracts(
+        input: &str,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+        registry: &HostApiContractRegistry,
+    ) -> Result<Self, ExtensionError> {
+        ExtensionManifestV2::parse_with_host_api_contracts(
+            input,
+            source,
+            host_port_catalog,
+            registry,
+        )?
+        .try_into()
+    }
+
+    pub fn parse_with_optional_host_api_contracts(
+        input: &str,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+        registry: &HostApiContractRegistry,
+    ) -> Result<Self, ExtensionError> {
+        ExtensionManifestV2::parse_with_optional_host_api_contracts(
+            input,
+            source,
+            host_port_catalog,
+            registry,
+        )?
+        .try_into()
     }
 
     pub fn runtime_kind(&self) -> RuntimeKind {
         self.runtime.kind()
     }
-
-    fn from_raw(raw: RawManifest) -> Result<Self, ExtensionError> {
-        if raw.name.trim().is_empty() {
-            return Err(ExtensionError::InvalidManifest {
-                reason: "name must not be empty".to_string(),
-            });
-        }
-        if raw.version.trim().is_empty() {
-            return Err(ExtensionError::InvalidManifest {
-                reason: "version must not be empty".to_string(),
-            });
-        }
-        if raw.capabilities.is_empty() {
-            return Err(ExtensionError::InvalidManifest {
-                reason: "at least one capability is required".to_string(),
-            });
-        }
-
-        let id = ExtensionId::new(raw.id)?;
-        let runtime = raw.runtime.into_runtime()?;
-        let capabilities = raw
-            .capabilities
-            .into_iter()
-            .map(CapabilityManifest::from_raw)
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let trust = requested_trust_to_descriptor_trust(raw.trust);
-
-        Ok(Self {
-            id,
-            name: raw.name,
-            version: raw.version,
-            description: raw.description,
-            requested_trust: raw.trust,
-            trust,
-            runtime,
-            capabilities,
-        })
-    }
 }
 
-/// Manifest capability declaration before registry/package context is applied.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CapabilityManifest {
-    pub id: CapabilityId,
-    pub description: String,
-    pub effects: Vec<EffectKind>,
-    pub default_permission: PermissionMode,
-    pub parameters_schema: serde_json::Value,
-    pub resource_profile: Option<ResourceProfile>,
-}
+impl TryFrom<ExtensionManifestV2> for ExtensionManifest {
+    type Error = ExtensionError;
 
-impl CapabilityManifest {
-    fn from_raw(raw: RawCapability) -> Result<Self, ExtensionError> {
-        if raw.description.trim().is_empty() {
-            return Err(ExtensionError::InvalidManifest {
-                reason: format!("capability {} description must not be empty", raw.id),
-            });
-        }
+    fn try_from(manifest: ExtensionManifestV2) -> Result<Self, Self::Error> {
         Ok(Self {
-            id: CapabilityId::new(raw.id)?,
-            description: raw.description,
-            effects: raw.effects,
-            default_permission: raw.default_permission,
-            parameters_schema: raw.parameters_schema,
-            resource_profile: raw.resource_profile,
+            schema_version: manifest.schema_version,
+            id: manifest.id,
+            name: manifest.name,
+            version: manifest.version,
+            description: manifest.description,
+            source: manifest.source,
+            requested_trust: manifest.requested_trust,
+            descriptor_trust_default: manifest.descriptor_trust_default,
+            runtime: ExtensionRuntime::from_v2(manifest.runtime)?,
+            host_apis: manifest.host_apis,
+            capabilities: manifest.capabilities,
         })
     }
 }
@@ -250,9 +264,9 @@ impl ExtensionPackage {
                     id: capability.id.clone(),
                     provider: manifest.id.clone(),
                     runtime: manifest.runtime_kind(),
-                    trust_ceiling: manifest.trust,
+                    trust_ceiling: manifest.descriptor_trust_default,
                     description: capability.description.clone(),
-                    parameters_schema: capability.parameters_schema.clone(),
+                    parameters_schema: descriptor_schema_ref(capability),
                     effects: capability.effects.clone(),
                     default_permission: capability.default_permission,
                     resource_profile: capability.resource_profile.clone(),
@@ -323,6 +337,8 @@ pub use v2::{
     ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX,
 };
 
+pub type CapabilityManifest = CapabilityDeclV2;
+
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
 };
@@ -335,6 +351,28 @@ impl ExtensionDiscovery {
     pub async fn discover<F>(
         fs: &F,
         root: &VirtualPath,
+    ) -> Result<ExtensionRegistry, ExtensionError>
+    where
+        F: RootFilesystem,
+    {
+        let host_port_catalog = HostPortCatalog::empty();
+        let host_api_contracts = HostApiContractRegistry::new();
+        Self::discover_with_manifest_contracts(
+            fs,
+            root,
+            ManifestSource::InstalledLocal,
+            &host_port_catalog,
+            &host_api_contracts,
+        )
+        .await
+    }
+
+    pub async fn discover_with_manifest_contracts<F>(
+        fs: &F,
+        root: &VirtualPath,
+        source: ManifestSource,
+        host_port_catalog: &HostPortCatalog,
+        host_api_contracts: &HostApiContractRegistry,
     ) -> Result<ExtensionRegistry, ExtensionError>
     where
         F: RootFilesystem,
@@ -359,7 +397,12 @@ impl ExtensionDiscovery {
             let text = String::from_utf8(bytes).map_err(|error| ExtensionError::ManifestParse {
                 reason: error.to_string(),
             })?;
-            let manifest = ExtensionManifest::parse(&text)?;
+            let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+                &text,
+                source,
+                host_port_catalog,
+                host_api_contracts,
+            )?;
             if manifest.id != expected {
                 return Err(ExtensionError::ManifestIdMismatch {
                     root: entry.path,
@@ -373,175 +416,6 @@ impl ExtensionDiscovery {
 
         Ok(registry)
     }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawManifest {
-    id: String,
-    name: String,
-    version: String,
-    description: String,
-    #[serde(
-        default = "default_requested_trust",
-        deserialize_with = "deserialize_requested_trust"
-    )]
-    trust: RequestedTrustClass,
-    runtime: RawRuntime,
-    #[serde(default)]
-    capabilities: Vec<RawCapability>,
-}
-
-fn default_requested_trust() -> RequestedTrustClass {
-    RequestedTrustClass::Untrusted
-}
-
-fn deserialize_requested_trust<'de, D>(deserializer: D) -> Result<RequestedTrustClass, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    match value.as_str() {
-        "untrusted" => Ok(RequestedTrustClass::Untrusted),
-        "third_party" => Ok(RequestedTrustClass::ThirdParty),
-        "first_party_requested" => Ok(RequestedTrustClass::FirstPartyRequested),
-        "system_requested" => Ok(RequestedTrustClass::SystemRequested),
-        "sandbox" => Err(serde::de::Error::custom(
-            "trust = \"sandbox\" is obsolete; use \"untrusted\"",
-        )),
-        "user_trusted" => Err(serde::de::Error::custom(
-            "trust = \"user_trusted\" is obsolete; use \"third_party\"",
-        )),
-        "first_party" => Err(serde::de::Error::custom(
-            "trust = \"first_party\" is obsolete; use \"first_party_requested\"",
-        )),
-        "system" => Err(serde::de::Error::custom(
-            "trust = \"system\" is obsolete; use \"system_requested\"",
-        )),
-        _ => Err(serde::de::Error::custom(format!(
-            "unsupported trust value {value:?}; expected one of untrusted, third_party, first_party_requested, system_requested"
-        ))),
-    }
-}
-
-fn requested_trust_to_descriptor_trust(requested: RequestedTrustClass) -> TrustClass {
-    match requested {
-        RequestedTrustClass::ThirdParty => TrustClass::UserTrusted,
-        RequestedTrustClass::Untrusted
-        | RequestedTrustClass::FirstPartyRequested
-        | RequestedTrustClass::SystemRequested => TrustClass::Sandbox,
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-enum RawRuntime {
-    Wasm {
-        module: String,
-    },
-    Script {
-        runner: Option<String>,
-        backend: Option<String>,
-        image: Option<String>,
-        command: String,
-        #[serde(default)]
-        args: Vec<String>,
-    },
-    Mcp {
-        transport: String,
-        command: Option<String>,
-        #[serde(default)]
-        args: Vec<String>,
-        url: Option<String>,
-    },
-    FirstParty {
-        service: String,
-    },
-    System {
-        service: String,
-    },
-}
-
-impl RawRuntime {
-    fn into_runtime(self) -> Result<ExtensionRuntime, ExtensionError> {
-        match self {
-            Self::Wasm { module } => Ok(ExtensionRuntime::Wasm {
-                module: ExtensionAssetPath::new(module)?,
-            }),
-            Self::Script {
-                runner,
-                backend,
-                image,
-                command,
-                args,
-            } => {
-                let runner = match (runner, backend) {
-                    (Some(runner), None) => runner,
-                    (None, Some(backend)) => backend,
-                    (Some(_), Some(_)) => {
-                        return Err(ExtensionError::InvalidManifest {
-                            reason: "script runtime must specify either runner or legacy backend, not both".to_string(),
-                        });
-                    }
-                    (None, None) => {
-                        return Err(ExtensionError::InvalidManifest {
-                            reason: "script runtime runner is required".to_string(),
-                        });
-                    }
-                };
-                validate_non_empty("script runner", &runner)?;
-                if runner == "docker" {
-                    let image = image.as_deref().unwrap_or_default();
-                    validate_non_empty("script image", image)?;
-                }
-                validate_non_empty("script command", &command)?;
-                Ok(ExtensionRuntime::Script {
-                    runner,
-                    image,
-                    command,
-                    args,
-                })
-            }
-            Self::Mcp {
-                transport,
-                command,
-                args,
-                url,
-            } => {
-                validate_mcp_runtime_shape(&transport, command.as_deref(), url.as_deref())?;
-                Ok(ExtensionRuntime::Mcp {
-                    transport,
-                    command,
-                    args,
-                    url,
-                })
-            }
-            Self::FirstParty { service } => {
-                validate_non_empty("first-party service", &service)?;
-                Err(ExtensionError::InvalidManifest {
-                    reason: "first-party and system runtimes are host-assigned and cannot be self-asserted by manifests".to_string(),
-                })
-            }
-            Self::System { service } => {
-                validate_non_empty("system service", &service)?;
-                Err(ExtensionError::InvalidManifest {
-                    reason: "first-party and system runtimes are host-assigned and cannot be self-asserted by manifests".to_string(),
-                })
-            }
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawCapability {
-    id: String,
-    description: String,
-    effects: Vec<EffectKind>,
-    default_permission: PermissionMode,
-    parameters_schema: serde_json::Value,
-    #[serde(default)]
-    resource_profile: Option<ResourceProfile>,
 }
 
 fn ensure_extension_root_matches(
@@ -576,6 +450,10 @@ fn invalid_package_root(root: &VirtualPath) -> ExtensionError {
             root.as_str()
         ),
     }
+}
+
+fn descriptor_schema_ref(capability: &CapabilityManifest) -> serde_json::Value {
+    serde_json::json!({ "$ref": capability.input_schema_ref.as_str() })
 }
 
 fn validate_asset_path(value: &str) -> Result<(), ExtensionError> {
@@ -618,77 +496,6 @@ fn validate_asset_path(value: &str) -> Result<(), ExtensionError> {
         }
     }
     Ok(())
-}
-
-fn validate_mcp_runtime_shape(
-    transport: &str,
-    command: Option<&str>,
-    url: Option<&str>,
-) -> Result<(), ExtensionError> {
-    validate_non_empty("mcp transport", transport)?;
-    if let Some(command) = command {
-        validate_non_empty("mcp command", command)?;
-    }
-    if let Some(url) = url {
-        validate_non_empty("mcp url", url)?;
-    }
-
-    match transport {
-        "stdio" => {
-            if url.is_some() {
-                return Err(ExtensionError::InvalidManifest {
-                    reason: "mcp stdio transport must not specify url".to_string(),
-                });
-            }
-            if command.is_none() {
-                return Err(ExtensionError::InvalidManifest {
-                    reason: "mcp stdio transport requires command".to_string(),
-                });
-            }
-        }
-        "http" | "sse" => {
-            if command.is_some() {
-                return Err(ExtensionError::InvalidManifest {
-                    reason: format!("mcp {transport} transport must not specify command"),
-                });
-            }
-            let Some(url) = url else {
-                return Err(ExtensionError::InvalidManifest {
-                    reason: format!("mcp {transport} transport requires url"),
-                });
-            };
-            validate_mcp_http_url(transport, url)?;
-        }
-        _ => {
-            return Err(ExtensionError::InvalidManifest {
-                reason: "mcp transport must be one of stdio, http, or sse".to_string(),
-            });
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_mcp_http_url(transport: &str, value: &str) -> Result<(), ExtensionError> {
-    let parsed = url::Url::parse(value).map_err(|_| ExtensionError::InvalidManifest {
-        reason: format!("mcp {transport} transport URL must be absolute http(s) URL"),
-    })?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(ExtensionError::InvalidManifest {
-            reason: format!("mcp {transport} transport URL must use http or https"),
-        });
-    }
-    Ok(())
-}
-
-fn validate_non_empty(kind: &str, value: &str) -> Result<(), ExtensionError> {
-    if value.trim().is_empty() {
-        Err(ExtensionError::InvalidManifest {
-            reason: format!("{kind} must not be empty"),
-        })
-    } else {
-        Ok(())
-    }
 }
 
 fn looks_like_windows_path(value: &str) -> bool {

@@ -143,7 +143,12 @@ impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
 }
 
 pub fn registry_with_echo_capability() -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse(ECHO_MANIFEST).unwrap();
+    let manifest = ExtensionManifest::parse(
+        ECHO_MANIFEST,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/echo").unwrap(),

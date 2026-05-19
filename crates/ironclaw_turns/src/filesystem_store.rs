@@ -122,10 +122,19 @@ where
         &self,
     ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
         let path = snapshot_path()?;
-        // Turn persistence is a single process-wide snapshot covering all
-        // tenants; the per-tenant rewrite isn't needed because the
-        // snapshot keys turns by their full scope internally. Use the
-        // system scope to route through the global `/turns` mount.
+        let record_lock = filesystem_record_lock(self.filesystem.as_ref(), &path);
+        let _guard = record_lock.lock().await;
+        self.read_snapshot_unlocked().await
+    }
+
+    async fn read_snapshot_unlocked(
+        &self,
+    ) -> Result<(TurnPersistenceSnapshot, Option<RecordVersion>), TurnError> {
+        let path = snapshot_path()?;
+        // Turn persistence is a single alias-relative snapshot for this
+        // scoped filesystem. Tenant/user isolation comes from the mount view
+        // that resolves `/turns/state.json` to the backend virtual path; the
+        // snapshot body then scopes records by agent/project/thread.
         match self.filesystem.get(&ResourceScope::system(), &path).await {
             Ok(Some(versioned)) => {
                 let snapshot = deserialize_snapshot(&versioned.entry.body)?;
@@ -154,17 +163,17 @@ where
     /// resulting snapshot is written back. On `VersionMismatch` the loop
     /// re-reads (cross-process contention); on `Unsupported` it falls back
     /// to `CasExpectation::Any` so the byte-only `LocalFilesystem` path
-    /// still works through the per-path `FILESYSTEM_RECORD_LOCKS` map.
+    /// still works through the per-record `FILESYSTEM_RECORD_LOCKS` map.
     async fn apply<T, A, Fut>(&self, mut apply: A) -> Result<T, TurnError>
     where
         A: FnMut(InMemoryTurnStateStore) -> Fut,
         Fut: std::future::Future<Output = (Result<T, TurnError>, InMemoryTurnStateStore)>,
     {
         let path = snapshot_path()?;
-        let record_lock = filesystem_record_lock(&path);
+        let record_lock = filesystem_record_lock(self.filesystem.as_ref(), &path);
         let _guard = record_lock.lock().await;
         for _ in 0..FILESYSTEM_CAS_RETRIES {
-            let (snapshot, version) = self.read_snapshot().await?;
+            let (snapshot, version) = self.read_snapshot_unlocked().await?;
             let store = self.build_in_memory_store(snapshot)?;
             let (outcome, store) = apply(store).await;
             let new_snapshot = store.persistence_snapshot();
@@ -497,23 +506,38 @@ fn fs_error(error: FilesystemError) -> TurnError {
 
 type FilesystemRecordLock = Arc<tokio::sync::Mutex<()>>;
 
-// Per-path async serialization for the filesystem-backed turn store.
+// Per-resolved-record async serialization for the filesystem-backed turn store.
 //
 // Values are stored as `Weak<Mutex<()>>` so the map does not pin lock entries
 // alive once all in-flight operations on a path have released their `Arc`
-// clones. Mirrors the per-record lock map shape used by
+// clones. The key is the backend virtual path when the scoped filesystem can
+// resolve it, not the alias-relative path shared by every mount. Mirrors the
+// per-record lock map shape used by
 // `ironclaw_run_state::FilesystemRunStateStore`; only one snapshot path lives
 // in this map per tenant/user, so churn is even lower here than there.
 static FILESYSTEM_RECORD_LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
     OnceLock::new();
 
-fn filesystem_record_lock(path: &ScopedPath) -> FilesystemRecordLock {
+fn filesystem_record_lock<F>(
+    filesystem: &ScopedFilesystem<F>,
+    path: &ScopedPath,
+) -> FilesystemRecordLock
+where
+    F: RootFilesystem,
+{
+    let key = filesystem
+        .resolve(&ResourceScope::system(), path)
+        .map(|virtual_path| virtual_path.as_str().to_string())
+        .unwrap_or_else(|_| path.as_str().to_string());
+    filesystem_record_lock_for_key(&key)
+}
+
+fn filesystem_record_lock_for_key(key: &str) -> FilesystemRecordLock {
     let locks = FILESYSTEM_RECORD_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard: MutexGuard<'_, HashMap<String, Weak<tokio::sync::Mutex<()>>>> = locks
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     guard.retain(|_, weak| weak.strong_count() > 0);
-    let key = path.as_str();
     if let Some(existing) = guard.get(key).and_then(Weak::upgrade) {
         return existing;
     }

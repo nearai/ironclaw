@@ -8,12 +8,19 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductRejection, ProductRejectionKind, ProductWorkflow, ProjectionSubscriptionRequest,
+    ProductRejection, ProductRejectionKind, ProductTriggerReason, ProductWorkflow,
+    ProductWorkflowRejectionKind, ProjectionSubscriptionRequest, RedactedString,
 };
-use ironclaw_turns::{AdmissionRejectionReason, TurnError, TurnErrorCategory};
+use ironclaw_turns::{
+    AdmissionRejectionReason, TurnActor, TurnError, TurnErrorCategory, TurnScope,
+};
 use tracing::debug;
 
 use crate::action::{ActionDispatchKind, ActionFingerprintKey, SourceBindingKey};
+use crate::binding::{
+    ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
+    ResolvedBinding,
+};
 use crate::error::ProductWorkflowError;
 use crate::inbound_turn::InboundTurnService;
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
@@ -24,16 +31,19 @@ use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 pub struct DefaultProductWorkflow {
     inbound_turn_service: Arc<dyn InboundTurnService>,
     idempotency_ledger: Arc<dyn IdempotencyLedger>,
+    binding_service: Arc<dyn ConversationBindingService>,
 }
 
 impl DefaultProductWorkflow {
     pub fn new(
         inbound_turn_service: Arc<dyn InboundTurnService>,
         idempotency_ledger: Arc<dyn IdempotencyLedger>,
+        binding_service: Arc<dyn ConversationBindingService>,
     ) -> Self {
         Self {
             inbound_turn_service,
             idempotency_ledger,
+            binding_service,
         }
     }
 }
@@ -51,6 +61,7 @@ impl ProductWorkflow for DefaultProductWorkflow {
         let fingerprint = ActionFingerprintKey::new(
             envelope.adapter_id().clone(),
             envelope.installation_id().clone(),
+            envelope.external_actor_ref().clone(),
             source_binding_key,
             envelope.external_event_id().clone(),
         );
@@ -135,14 +146,90 @@ impl ProductWorkflow for DefaultProductWorkflow {
 
     async fn resolve_projection_subscription(
         &self,
-        _envelope: ProductInboundEnvelope,
+        envelope: ProductInboundEnvelope,
     ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-        Err(ProductAdapterError::Internal {
-            detail: ironclaw_product_adapters::RedactedString::new(
-                "projection subscription resolution not yet implemented",
+        let ProductInboundPayload::SubscriptionRequest(payload) = envelope.payload() else {
+            return Err(ProductAdapterError::MalformedInboundPayload {
+                reason: RedactedString::new(
+                    "projection subscription resolution requires subscription_request payload",
+                ),
+            });
+        };
+        let binding = self
+            .binding_service
+            .lookup_binding(resolve_binding_request(&envelope))
+            .await
+            .map_err(ProductAdapterError::from)?;
+        let thread_id =
+            projection_thread_id_from_binding(&binding, payload.thread_id_hint.as_deref())?;
+
+        Ok(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(binding.user_id.clone()),
+            scope: TurnScope::new(
+                binding.tenant_id.clone(),
+                binding.agent_id.clone(),
+                binding.project_id.clone(),
+                thread_id,
             ),
+            after_cursor: payload.after_cursor.clone(),
         })
     }
+}
+
+fn resolve_binding_request(envelope: &ProductInboundEnvelope) -> ResolveBindingRequest {
+    ResolveBindingRequest {
+        adapter_id: envelope.adapter_id().clone(),
+        installation_id: envelope.installation_id().clone(),
+        external_actor_ref: envelope.external_actor_ref().clone(),
+        external_conversation_ref: envelope.external_conversation_ref().clone(),
+        external_event_id: envelope.external_event_id().clone(),
+        route_kind: route_kind_for_payload(envelope.payload()),
+        auth_claim: envelope.auth_claim().clone(),
+    }
+}
+
+fn route_kind_for_payload(payload: &ProductInboundPayload) -> ProductConversationRouteKind {
+    match payload {
+        ProductInboundPayload::UserMessage(message) => match message.trigger {
+            ProductTriggerReason::DirectChat => ProductConversationRouteKind::Direct,
+            ProductTriggerReason::BotMention
+            | ProductTriggerReason::ReplyToBot
+            | ProductTriggerReason::BotCommand
+            | ProductTriggerReason::LinkedThreadAction => ProductConversationRouteKind::Shared,
+        },
+        ProductInboundPayload::Command(command) => match command.trigger {
+            ProductTriggerReason::DirectChat => ProductConversationRouteKind::Direct,
+            ProductTriggerReason::BotMention
+            | ProductTriggerReason::ReplyToBot
+            | ProductTriggerReason::BotCommand
+            | ProductTriggerReason::LinkedThreadAction => ProductConversationRouteKind::Shared,
+        },
+        _ => ProductConversationRouteKind::Direct,
+    }
+}
+
+fn projection_thread_id_from_binding(
+    binding: &ResolvedBinding,
+    thread_id_hint: Option<&str>,
+) -> Result<ironclaw_host_api::ThreadId, ProductAdapterError> {
+    if let Some(thread_id_hint) = thread_id_hint {
+        let hinted = ironclaw_host_api::ThreadId::new(thread_id_hint).map_err(|_| {
+            ProductAdapterError::MalformedInboundPayload {
+                reason: RedactedString::new("invalid thread_id_hint"),
+            }
+        })?;
+        if hinted != binding.thread_id {
+            return Err(ProductAdapterError::WorkflowRejected {
+                kind: ProductWorkflowRejectionKind::InvalidRequest,
+                status_code: 400,
+                retryable: false,
+                reason: RedactedString::new(
+                    "thread_id_hint does not match resolved conversation binding",
+                ),
+            });
+        }
+    }
+    Ok(binding.thread_id.clone())
 }
 
 async fn dispatch_payload(
@@ -234,6 +321,27 @@ fn rejection_kind_for_turn_error(error: &TurnError) -> ProductRejectionKind {
 
 fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInboundAck> {
     match error {
+        ProductWorkflowError::UnknownInstallation => {
+            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::UnknownInstallation,
+                "unknown adapter installation",
+            )))
+        }
+        ProductWorkflowError::BindingRequired { reason } => Some(ProductInboundAck::Rejected(
+            ProductRejection::permanent(ProductRejectionKind::BindingRequired, reason.clone()),
+        )),
+        ProductWorkflowError::BindingAccessDenied => {
+            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::AccessDenied,
+                "binding access denied",
+            )))
+        }
+        ProductWorkflowError::InvalidBindingRequest { reason } => {
+            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::PolicyDenied,
+                reason.clone(),
+            )))
+        }
         ProductWorkflowError::CommandRoutingUnavailable { command } => {
             Some(ProductInboundAck::Rejected(ProductRejection::permanent(
                 ProductRejectionKind::PolicyDenied,

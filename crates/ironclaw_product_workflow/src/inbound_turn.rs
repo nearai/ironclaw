@@ -22,7 +22,10 @@ use ironclaw_turns::{
 };
 use uuid::Uuid;
 
-use crate::binding::{ConversationBindingService, ResolveBindingRequest, ResolvedBinding};
+use crate::binding::{
+    ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
+    ResolvedBinding,
+};
 use crate::error::ProductWorkflowError;
 
 /// Result of the inbound turn submission flow.
@@ -122,9 +125,26 @@ where
         let source_binding_id = product_source_binding_id(envelope);
         let submit_idempotency_key = submit_idempotency_key(envelope);
 
+        let route_kind = route_kind_for_user_message(payload.trigger);
+        let binding = self
+            .binding_service
+            .resolve_binding(ResolveBindingRequest {
+                adapter_id: envelope.adapter_id().clone(),
+                installation_id: envelope.installation_id().clone(),
+                external_actor_ref: envelope.external_actor_ref().clone(),
+                external_conversation_ref: envelope.external_conversation_ref().clone(),
+                external_event_id: envelope.external_event_id().clone(),
+                route_kind,
+                auth_claim: envelope.auth_claim().clone(),
+            })
+            .await?;
+        let thread_scope = thread_scope_from_binding(&binding, route_kind)?;
+
         if let Some(replay) = self
             .thread_service
             .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
+                scope: thread_scope.clone(),
+                actor_id: binding.user_id.as_str().to_string(),
                 source_binding_id: source_binding_id.clone(),
                 external_event_id: envelope.external_event_id().as_str().to_string(),
             })
@@ -143,18 +163,6 @@ where
             .await;
         }
 
-        let binding = self
-            .binding_service
-            .resolve_binding(ResolveBindingRequest {
-                adapter_id: envelope.adapter_id().clone(),
-                installation_id: envelope.installation_id().clone(),
-                external_actor_ref: envelope.external_actor_ref().clone(),
-                external_conversation_ref: envelope.external_conversation_ref().clone(),
-                auth_claim: envelope.auth_claim().clone(),
-            })
-            .await?;
-
-        let thread_scope = thread_scope_from_binding(&binding)?;
         self.thread_service
             .ensure_thread(EnsureThreadRequest {
                 scope: thread_scope.clone(),
@@ -187,6 +195,7 @@ where
 
         ProductInboundTurnHandoff::NeedsSubmission(AcceptedProductInboundTurn {
             binding,
+            thread_scope,
             message_id: accepted.message_id,
             source_binding_id,
             reply_target_binding_id,
@@ -195,6 +204,22 @@ where
         })
         .submit_or_replay(&self.thread_service, &self.turn_coordinator)
         .await
+    }
+}
+
+fn route_kind_for_user_message(
+    trigger: ironclaw_product_adapters::ProductTriggerReason,
+) -> ProductConversationRouteKind {
+    match trigger {
+        ironclaw_product_adapters::ProductTriggerReason::DirectChat => {
+            ProductConversationRouteKind::Direct
+        }
+        ironclaw_product_adapters::ProductTriggerReason::BotMention
+        | ironclaw_product_adapters::ProductTriggerReason::ReplyToBot
+        | ironclaw_product_adapters::ProductTriggerReason::BotCommand
+        | ironclaw_product_adapters::ProductTriggerReason::LinkedThreadAction => {
+            ProductConversationRouteKind::Shared
+        }
     }
 }
 
@@ -275,6 +300,7 @@ impl ProductInboundTurnHandoff {
 
         Ok(Self::NeedsSubmission(AcceptedProductInboundTurn {
             binding,
+            thread_scope: replay.scope,
             message_id: replay.message_id,
             source_binding_id,
             reply_target_binding_id,
@@ -311,6 +337,7 @@ impl ProductInboundTurnHandoff {
 
 struct AcceptedProductInboundTurn {
     binding: ResolvedBinding,
+    thread_scope: ThreadScope,
     message_id: ThreadMessageId,
     source_binding_id: String,
     reply_target_binding_id: String,
@@ -330,13 +357,13 @@ impl AcceptedProductInboundTurn {
     {
         let Self {
             binding,
+            thread_scope,
             message_id,
             source_binding_id,
             reply_target_binding_id,
             idempotency_key_raw,
             received_at,
         } = self;
-        let thread_scope = thread_scope_from_binding(&binding)?;
         let turn_scope = TurnScope::new(
             binding.tenant_id.clone(),
             binding.agent_id.clone(),
@@ -436,17 +463,22 @@ fn binding_from_replay(
 
 fn thread_scope_from_binding(
     binding: &ResolvedBinding,
+    route_kind: ProductConversationRouteKind,
 ) -> Result<ThreadScope, ProductWorkflowError> {
     let Some(agent_id) = binding.agent_id.clone() else {
         return Err(ProductWorkflowError::BindingResolutionFailed {
             reason: "resolved binding missing agent_id required for thread scope".into(),
         });
     };
+    let owner_user_id = match route_kind {
+        ProductConversationRouteKind::Direct => Some(binding.user_id.clone()),
+        ProductConversationRouteKind::Shared => None,
+    };
     Ok(ThreadScope {
         tenant_id: binding.tenant_id.clone(),
         agent_id,
         project_id: binding.project_id.clone(),
-        owner_user_id: Some(binding.user_id.clone()),
+        owner_user_id,
         mission_id: None,
     })
 }
