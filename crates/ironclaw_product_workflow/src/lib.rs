@@ -26,6 +26,7 @@ mod error;
 mod fakes;
 mod inbound_turn;
 mod ledger;
+mod memory_product;
 mod reborn_services;
 mod webui_inbound;
 mod workflow;
@@ -40,6 +41,13 @@ pub use error::ProductWorkflowError;
 pub use fakes::{FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService};
 pub use inbound_turn::{DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService};
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
+pub use memory_product::{
+    MemoryProductError, MemoryProductFacade, MemoryProductListRequest, MemoryProductReadMode,
+    MemoryProductReadRequest, MemoryProductReadResponse, MemoryProductSearchRequest,
+    MemoryProductServices, MemoryProductStatusRequest, MemoryProductTreeRequest,
+    MemoryProductWriteMode, MemoryProductWriteRequest, MemoryProductWriteResponse,
+    MemoryProductWriteTarget,
+};
 pub use reborn_services::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornResolveGateResponse, RebornResumeGateResponse, RebornServices,

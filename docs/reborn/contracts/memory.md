@@ -143,6 +143,11 @@ The current type name is `MemoryBackendCapabilities` for implementation continui
 
 Reborn memory should expose focused services over the shared backend, not one monolithic production `Workspace` clone.
 
+The product-surface mapping and first-slice facade contract live in
+[`memory-product-surfaces.md`](memory-product-surfaces.md). That document is the
+#3287 inventory for CLI, Web, and LLM-facing `memory_*` behavior. Storage,
+schema, and migration choices remain outside #3287.
+
 ### 5.1 `MemoryDocumentService`
 
 Owns user-facing document operations:

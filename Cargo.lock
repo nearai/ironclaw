@@ -4559,6 +4559,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_loop_support",
+ "ironclaw_memory",
  "ironclaw_product_adapters",
  "ironclaw_product_workflow",
  "ironclaw_reborn",
