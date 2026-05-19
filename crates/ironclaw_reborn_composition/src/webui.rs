@@ -40,15 +40,11 @@ pub(crate) fn build_webui_services(
     event_stream: Option<Arc<dyn ProjectionStream>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
     let services = runtime.services();
-    let turn_coordinator =
-        services
-            .turn_coordinator
-            .clone()
-            .ok_or_else(|| RebornBuildError::InvalidConfig {
-                reason: "webui services require an initialized turn coordinator".to_string(),
-            })?;
 
-    let mut api = ProductRebornServices::new(runtime.webui_thread_service(), turn_coordinator);
+    let mut api = ProductRebornServices::new(
+        runtime.webui_thread_service(),
+        runtime.webui_turn_coordinator(),
+    );
     if let Some(event_stream) = event_stream {
         api = api.with_event_stream(event_stream);
     }
@@ -61,6 +57,7 @@ pub(crate) fn build_webui_services(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use crate::{
@@ -89,9 +86,14 @@ mod tests {
         });
 
         let runtime = build_reborn_runtime(input).await.unwrap();
+        let runtime_turn_coordinator = runtime.webui_turn_coordinator();
         let bundle = build_webui_services(&runtime, None).unwrap();
 
         let _api = bundle.api.clone();
+        assert!(Arc::ptr_eq(
+            &runtime_turn_coordinator,
+            &runtime.webui_turn_coordinator()
+        ));
         assert_eq!(bundle.readiness, runtime.services().readiness);
         assert_eq!(bundle.readiness.state, RebornReadinessState::DevOnly);
 

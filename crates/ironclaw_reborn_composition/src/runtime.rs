@@ -170,6 +170,10 @@ impl RebornRuntime {
         self.thread_service.clone()
     }
 
+    pub(crate) fn webui_turn_coordinator(&self) -> Arc<dyn TurnCoordinator> {
+        self.turn_coordinator.clone()
+    }
+
     /// Create a fresh conversation. Returns the opaque conversation id used
     /// in subsequent `send_user_message` calls.
     ///
