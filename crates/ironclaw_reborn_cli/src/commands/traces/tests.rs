@@ -29,6 +29,18 @@ fn parse_cli<const N: usize>(args: [&'static str; N]) -> Cli {
     parse_cli_result(args).expect("CLI args should parse")
 }
 
+/// Tests that touch the shared global `policy_path()` must serialize their
+/// access — without this, concurrent `truncate + write_all` cycles in
+/// `write_policy` interleave and leave the file with mixed-length bytes,
+/// which `read_policy` then refuses to parse.
+static GLOBAL_POLICY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_global_policy_for_test() -> std::sync::MutexGuard<'static, ()> {
+    GLOBAL_POLICY_TEST_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 struct TracePolicyFileRestore {
     path: PathBuf,
     previous: Option<String>,
@@ -435,6 +447,7 @@ fn opt_in_user_scope_flag_parses_through_cli() {
 
 #[test]
 fn opt_in_writes_runtime_owner_policy_and_normalizes_selected_tools() {
+    let _global_lock = lock_global_policy_for_test();
     let runtime_scope = format!("trace-cli-runtime-scope-{}", Uuid::new_v4());
     let _global_policy_restore = TracePolicyFileRestore::new(policy_path());
     let _runtime_policy_restore = TracePolicyFileRestore::new(
@@ -616,4 +629,139 @@ fn cli_credit_notice_message_includes_delayed_and_event_totals() {
     assert!(message.contains("delayed ledger +0.75"));
     assert!(message.contains("5 credit event(s) recorded"));
     assert!(message.contains("Delayed credit can change"));
+}
+
+#[test]
+fn opt_in_persists_invite_code_when_set() {
+    let _global_lock = lock_global_policy_for_test();
+    let runtime_scope = format!("trace-cli-invite-persist-scope-{}", Uuid::new_v4());
+    let _global_policy_restore = TracePolicyFileRestore::new(policy_path());
+    let _runtime_policy_restore = TracePolicyFileRestore::new(
+        ironclaw_reborn_traces::contribution::trace_contribution_dir_for_scope(Some(
+            &runtime_scope,
+        ))
+        .join("policy.json"),
+    );
+
+    opt_in(OptInOptions {
+        endpoint: "https://trace.example.com/v1/traces".to_string(),
+        user_scope: Some(runtime_scope.clone()),
+        bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+        upload_token_issuer_url: None,
+        upload_token_issuer_allowed_hosts: Vec::new(),
+        upload_token_audience: None,
+        upload_token_tenant_id: None,
+        upload_token_workload_token_env: None,
+        upload_token_invite_code: Some("INV-PILOT-001".to_string()),
+        upload_token_issuer_timeout_ms:
+            ironclaw_reborn_traces::contribution::TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS,
+        include_message_text: true,
+        include_tool_payloads: false,
+        scope: TraceScopeArg::DebuggingEvaluation,
+        selected_tools: Vec::new(),
+        allow_pii_review_bypass: true,
+        min_submission_score: 0.2,
+    })
+    .expect("opt-in succeeds");
+
+    // Assert against the per-test scoped policy — the global policy.json is
+    // shared across the test binary, so other tests that opt-in without an
+    // invite code can race the global file. The scoped policy lives under a
+    // uuid-unique scope dir and is the authoritative round-trip target for
+    // this assertion.
+    let scoped = read_trace_policy_for_scope(Some(&runtime_scope)).expect("scoped policy reads");
+    assert_eq!(
+        scoped.upload_token_invite_code.as_deref(),
+        Some("INV-PILOT-001"),
+        "scoped policy round-trips invite code"
+    );
+
+    // Confirm the on-disk scoped policy.json deserializes to the same field —
+    // this guards against silent serde-skip regressions for the invite code.
+    let scoped_policy_path =
+        ironclaw_reborn_traces::contribution::trace_contribution_dir_for_scope(Some(
+            &runtime_scope,
+        ))
+        .join("policy.json");
+    let on_disk = std::fs::read_to_string(&scoped_policy_path).expect("policy.json readable");
+    let parsed: StandingTraceContributionPolicy =
+        serde_json::from_str(&on_disk).expect("policy.json deserializes");
+    assert_eq!(
+        parsed.upload_token_invite_code.as_deref(),
+        Some("INV-PILOT-001")
+    );
+}
+
+#[test]
+fn queue_status_diagnostics_reports_invite_code_configured() {
+    let runtime_scope = format!("trace-cli-invite-diagnostic-scope-{}", Uuid::new_v4());
+    let _global_policy_restore = TracePolicyFileRestore::new(policy_path());
+    let _runtime_policy_restore = TracePolicyFileRestore::new(
+        ironclaw_reborn_traces::contribution::trace_contribution_dir_for_scope(Some(
+            &runtime_scope,
+        ))
+        .join("policy.json"),
+    );
+
+    // Configured: non-empty invite code => true.
+    let configured_policy = StandingTraceContributionPolicy {
+        enabled: true,
+        ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+        bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+        upload_token_invite_code: Some("INV-PILOT-001".to_string()),
+        ..Default::default()
+    };
+    ironclaw_reborn_traces::contribution::write_trace_policy_for_scope(
+        Some(&runtime_scope),
+        &configured_policy,
+    )
+    .expect("scoped policy writes");
+
+    let diagnostics =
+        trace_queue_status_diagnostics(Some(&runtime_scope)).expect("diagnostics computed");
+    assert!(
+        diagnostics.upload_token_invite_code_configured,
+        "non-empty invite code must report configured=true"
+    );
+
+    // Whitespace-only invite code => false (matches show_policy_status's
+    // trimmed-emptiness contract).
+    let whitespace_policy = StandingTraceContributionPolicy {
+        enabled: true,
+        ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+        bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+        upload_token_invite_code: Some("   ".to_string()),
+        ..Default::default()
+    };
+    ironclaw_reborn_traces::contribution::write_trace_policy_for_scope(
+        Some(&runtime_scope),
+        &whitespace_policy,
+    )
+    .expect("scoped policy writes");
+    let diagnostics =
+        trace_queue_status_diagnostics(Some(&runtime_scope)).expect("diagnostics computed");
+    assert!(
+        !diagnostics.upload_token_invite_code_configured,
+        "whitespace-only invite code must report configured=false"
+    );
+
+    // None => false.
+    let none_policy = StandingTraceContributionPolicy {
+        enabled: true,
+        ingestion_endpoint: Some("https://trace.example.com/v1/traces".to_string()),
+        bearer_token_env: "TRACE_COMMONS_TEST_TOKEN".to_string(),
+        upload_token_invite_code: None,
+        ..Default::default()
+    };
+    ironclaw_reborn_traces::contribution::write_trace_policy_for_scope(
+        Some(&runtime_scope),
+        &none_policy,
+    )
+    .expect("scoped policy writes");
+    let diagnostics =
+        trace_queue_status_diagnostics(Some(&runtime_scope)).expect("diagnostics computed");
+    assert!(
+        !diagnostics.upload_token_invite_code_configured,
+        "absent invite code must report configured=false"
+    );
 }

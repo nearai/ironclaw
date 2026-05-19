@@ -548,7 +548,11 @@ fn show_policy_status(json: bool, user_scope: Option<&str>) -> anyhow::Result<()
         // operator-secret material.
         println!(
             "  pilot invite code: {}",
-            if policy.upload_token_invite_code.is_some() {
+            if policy
+                .upload_token_invite_code
+                .as_deref()
+                .is_some_and(|code| !code.trim().is_empty())
+            {
                 "configured"
             } else {
                 "not configured"
@@ -1719,8 +1723,34 @@ fn write_policy(policy: &StandingTraceContributionPolicy) -> anyhow::Result<()> 
     }
     let body = serde_json::to_string_pretty(policy)
         .map_err(|e| anyhow::anyhow!("failed to serialize trace policy: {}", e))?;
-    std::fs::write(&path, body)
-        .map_err(|e| anyhow::anyhow!("failed to write trace policy {}: {}", path.display(), e))
+    // policy.json may now carry an operator-issued pilot invite code, so
+    // restrict permissions on unix. Non-unix targets fall back to the
+    // standard write — the surrounding directory layout already inherits
+    // user-only access via ironclaw_base_dir.
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| {
+                anyhow::anyhow!("failed to write trace policy {}: {}", path.display(), e)
+            })?;
+        file.write_all(body.as_bytes()).map_err(|e| {
+            anyhow::anyhow!("failed to write trace policy {}: {}", path.display(), e)
+        })?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, body).map_err(|e| {
+            anyhow::anyhow!("failed to write trace policy {}: {}", path.display(), e)
+        })?;
+    }
+    Ok(())
 }
 
 fn preflight_cli_trace_upload(

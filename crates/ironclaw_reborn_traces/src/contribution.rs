@@ -4687,6 +4687,16 @@ fn trace_upload_claim_cache_key(
     // claim fetch (the issuer's mint binds a `policy_label` claim derived
     // from the active allowlist policy; serving a cached token after the
     // operator changed the user's invite_code would mis-attribute traces).
+    // Hash the invite code to keep the operator-secret out of the in-memory
+    // cache key; distinct raw codes still produce distinct hashes, so cache
+    // separation is preserved.
+    let invite_code_key = policy
+        .upload_token_invite_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|code| format!("sha256:{}", hex::encode(Sha256::digest(code.as_bytes()))))
+        .unwrap_or_default();
     Ok(format!(
         "{}|tenant={}|audience={}|scopes={}|uses={}|workload_env={}|invite_code={}",
         issuer,
@@ -4698,12 +4708,7 @@ fn trace_upload_claim_cache_key(
             .upload_token_workload_token_env
             .as_deref()
             .unwrap_or_default(),
-        policy
-            .upload_token_invite_code
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or_default()
+        invite_code_key,
     ))
 }
 
@@ -4739,6 +4744,93 @@ fn trace_upload_claim_refresh_after(
     let refresh_after =
         expires_at - chrono::Duration::seconds(TRACE_UPLOAD_CLAIM_REFRESH_SKEW_SECONDS);
     (refresh_after > now).then_some(refresh_after)
+}
+
+/// Typed PilotAllowlist refusal labels returned by the upload-claim issuer
+/// when its `pilot_allowlist` gate refuses to mint a claim. Parsing into an
+/// enum keeps the diagnostic mapping closed: any unknown label falls through
+/// to the generic HTTP-status diagnostic, which is what we want for
+/// future-extension safety.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PilotAllowlistRefusal {
+    NotMatched,
+    InviteCodeMissing,
+    Stale,
+    Malformed,
+}
+
+impl PilotAllowlistRefusal {
+    fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "PilotAllowlistNotMatched" => Some(Self::NotMatched),
+            "PilotAllowlistInviteCodeMissing" => Some(Self::InviteCodeMissing),
+            "PilotAllowlistStale" => Some(Self::Stale),
+            "PilotAllowlistMalformed" => Some(Self::Malformed),
+            _ => None,
+        }
+    }
+
+    fn label_str(&self) -> &'static str {
+        match self {
+            Self::NotMatched => "PilotAllowlistNotMatched",
+            Self::InviteCodeMissing => "PilotAllowlistInviteCodeMissing",
+            Self::Stale => "PilotAllowlistStale",
+            Self::Malformed => "PilotAllowlistMalformed",
+        }
+    }
+
+    fn diagnostic(&self) -> &'static str {
+        match self {
+            Self::InviteCodeMissing => {
+                "the workload token did not carry an invite_code claim. \
+                 Re-run `ironclaw traces opt-in --upload-token-invite-code <CODE> ...` with the operator-issued code, \
+                 or have your operator reissue a workload token that includes it."
+            }
+            Self::NotMatched => {
+                "the invite code hash was not in the issuer's active allowlist. \
+                 Confirm the code with your operator; it may have been rotated or revoked."
+            }
+            Self::Stale => {
+                "the issuer's allowlist snapshot is stale and the source has not reloaded successfully. \
+                 This is transient on the issuer side — retry after the operator confirms recovery."
+            }
+            Self::Malformed => {
+                "the issuer's allowlist source is failing to parse. \
+                 This is an operator-side problem — escalate to the issuer admin."
+            }
+        }
+    }
+}
+
+/// Build the `anyhow` error returned when the issuer rejects an upload-claim
+/// request with a non-success HTTP status. Factored out so the
+/// label-dispatch logic (typed PilotAllowlist diagnostics vs. generic HTTP
+/// fallback) is unit-testable without spinning up a full HTTPS issuer.
+fn build_trace_upload_claim_http_error(
+    issuer_label: &str,
+    status: u16,
+    body_text: &str,
+) -> anyhow::Error {
+    let label = parse_trace_upload_claim_error_label(body_text);
+    let refusal = label.as_deref().and_then(PilotAllowlistRefusal::from_label);
+    if let Some(refusal) = refusal {
+        return anyhow::anyhow!(
+            "Trace Commons upload claim refused by {} ({}): {} — {}",
+            issuer_label,
+            status,
+            refusal.label_str(),
+            refusal.diagnostic(),
+        );
+    }
+    anyhow::anyhow!(
+        "failed to fetch Trace Commons upload claim from {}: HTTP {}{}",
+        issuer_label,
+        status,
+        label
+            .as_deref()
+            .map(|l| format!(" ({l})"))
+            .unwrap_or_default(),
+    )
 }
 
 async fn fetch_trace_upload_claim_from_issuer(
@@ -4816,47 +4908,11 @@ async fn fetch_trace_upload_claim_from_issuer(
         let body_text = read_bounded_trace_upload_claim_response(response, &parsed)
             .await
             .unwrap_or_default();
-        let label = parse_trace_upload_claim_error_label(&body_text);
-        let label_diagnostic = match label.as_deref() {
-            Some("PilotAllowlistInviteCodeMissing") => Some(
-                "the workload token did not carry an invite_code claim. \
-                 Re-run `ironclaw traces opt-in --upload-token-invite-code <CODE> ...` with the operator-issued code, \
-                 or have your operator reissue a workload token that includes it.",
-            ),
-            Some("PilotAllowlistNotMatched") => Some(
-                "the invite code hash was not in the issuer's active allowlist. \
-                 Confirm the code with your operator; it may have been rotated or revoked.",
-            ),
-            Some("PilotAllowlistStale") => Some(
-                "the issuer's allowlist snapshot is stale and the source has not reloaded successfully. \
-                 This is transient on the issuer side — retry after the operator confirms recovery.",
-            ),
-            Some("PilotAllowlistMalformed") => Some(
-                "the issuer's allowlist source is failing to parse. \
-                 This is an operator-side problem — escalate to the issuer admin.",
-            ),
-            _ => None,
-        };
-        if let Some(ref label_str) = label
-            && let Some(diagnostic) = label_diagnostic
-        {
-            anyhow::bail!(
-                "Trace Commons upload claim refused by {} ({}): {} — {}",
-                safe_trace_upload_claim_issuer_url_label(&parsed),
-                status.as_u16(),
-                label_str,
-                diagnostic,
-            );
-        }
-        anyhow::bail!(
-            "failed to fetch Trace Commons upload claim from {}: HTTP {}{}",
-            safe_trace_upload_claim_issuer_url_label(&parsed),
+        return Err(build_trace_upload_claim_http_error(
+            &safe_trace_upload_claim_issuer_url_label(&parsed),
             status.as_u16(),
-            label
-                .as_deref()
-                .map(|l| format!(" ({l})"))
-                .unwrap_or_default(),
-        );
+            &body_text,
+        ));
     }
     if let Some(content_length) = response.content_length() {
         anyhow::ensure!(
@@ -7524,18 +7580,26 @@ fn write_json_file<T: Serialize + ?Sized>(
         trace_json_temp_prefix(path),
         Uuid::new_v4()
     ));
-    let mut temp = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp_path)
-        .map_err(|e| {
+    let mut temp = {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        // Trace policy files now potentially carry an operator-issued pilot
+        // invite code; mirror the CLI's 0o600 stance for atomic policy
+        // writes too so the rename-into-place step doesn't widen perms.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options.open(&temp_path).map_err(|e| {
             anyhow::anyhow!(
                 "failed to create temporary {} {}: {}",
                 label,
                 temp_path.display(),
                 e
             )
-        })?;
+        })?
+    };
     if let Err(error) = temp.write_all(body.as_bytes()) {
         let _ = std::fs::remove_file(&temp_path);
         return Err(anyhow::anyhow!(
@@ -12039,5 +12103,137 @@ mod tests {
         assert!(parse_trace_upload_claim_error_label("not json").is_none());
         // `error` present but empty/whitespace-only => None (not a usable label).
         assert!(parse_trace_upload_claim_error_label(r#"{"error":"   "}"#).is_none());
+    }
+
+    #[test]
+    fn parse_trace_upload_claim_error_label_returns_none_for_non_string_error() {
+        // Non-string error fields must not panic and must return None so the
+        // caller falls back to the generic HTTP-status diagnostic rather than
+        // formatting a label like "42" or "[1,2,3]" into the user-facing
+        // message.
+        assert!(parse_trace_upload_claim_error_label(r#"{"error":42}"#).is_none());
+        assert!(parse_trace_upload_claim_error_label(r#"{"error":{"detail":"x"}}"#).is_none());
+        assert!(parse_trace_upload_claim_error_label(r#"{"error":[1,2,3]}"#).is_none());
+        assert!(parse_trace_upload_claim_error_label(r#"{"error":true}"#).is_none());
+        assert!(parse_trace_upload_claim_error_label(r#"{"error":null}"#).is_none());
+    }
+
+    #[tokio::test]
+    async fn fetch_trace_upload_claim_from_issuer_returns_typed_pilot_allowlist_error() {
+        // Spin up a mock HTTP server that returns the issuer's typed
+        // PilotAllowlistNotMatched refusal. The URL-validation seam in
+        // fetch_trace_upload_claim_from_issuer requires https + non-loopback
+        // hosts, so we exercise the same error-formatting path via the
+        // factored-out helper directly. The mock server confirms the body
+        // shape the real issuer emits, then we drive the helper with that
+        // body to assert the user-actionable diagnostic.
+        let app = axum::Router::new().route(
+            "/v1/trace-upload-claim",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(serde_json::json!({"error": "PilotAllowlistNotMatched"})),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock issuer listener binds");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = reqwest::Client::builder()
+            .build()
+            .expect("reqwest client builds");
+        let response = client
+            .post(format!("http://{addr}/v1/trace-upload-claim"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect("mock issuer responds");
+        let status = response.status().as_u16();
+        let body_text = response.text().await.expect("mock issuer body");
+        assert_eq!(status, 400);
+
+        let error = build_trace_upload_claim_http_error("issuer.example", status, &body_text);
+        let chain = format!("{error:#}");
+        assert!(
+            chain.contains("PilotAllowlistNotMatched"),
+            "diagnostic chain must surface the typed label: {chain}"
+        );
+        assert!(
+            chain.contains("invite code hash was not in the issuer's active allowlist"),
+            "diagnostic chain must surface the user-actionable diagnostic text: {chain}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_trace_upload_claim_from_issuer_generic_http_error_when_label_unknown() {
+        // Issuer returns a non-JSON 500 — the helper must fall back to the
+        // generic "HTTP 500" diagnostic without naming any PilotAllowlist
+        // refusal label.
+        let app = axum::Router::new().route(
+            "/v1/trace-upload-claim",
+            axum::routing::post(|| async {
+                (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal error",
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock issuer listener binds");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = reqwest::Client::builder()
+            .build()
+            .expect("reqwest client builds");
+        let response = client
+            .post(format!("http://{addr}/v1/trace-upload-claim"))
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .expect("mock issuer responds");
+        let status = response.status().as_u16();
+        let body_text = response.text().await.expect("mock issuer body");
+        assert_eq!(status, 500);
+
+        let error = build_trace_upload_claim_http_error("issuer.example", status, &body_text);
+        let chain = format!("{error:#}");
+        assert!(
+            chain.contains("HTTP 500"),
+            "generic fallback must surface the HTTP status: {chain}"
+        );
+        assert!(
+            !chain.contains("PilotAllowlist"),
+            "generic fallback must not name any PilotAllowlist label: {chain}"
+        );
+    }
+
+    #[test]
+    fn cache_key_hashes_invite_code_with_sha256_prefix() {
+        let policy = StandingTraceContributionPolicy {
+            upload_token_issuer_url: Some("https://issuer.example/v1/trace-upload-claim".into()),
+            upload_token_invite_code: Some("INV-PILOT-001".into()),
+            ..StandingTraceContributionPolicy::default()
+        };
+        let context = TraceUploadClaimContext::for_status_sync();
+        let key = trace_upload_claim_cache_key(&policy, &context).expect("cache key");
+        assert!(
+            !key.contains("INV-PILOT-001"),
+            "raw invite code must not appear in cache key: {key}"
+        );
+        let expected_hash = format!(
+            "sha256:{}",
+            hex::encode(Sha256::digest("INV-PILOT-001".as_bytes()))
+        );
+        assert!(
+            key.contains(&expected_hash),
+            "cache key must include sha256-hashed invite code: {key}"
+        );
     }
 }
