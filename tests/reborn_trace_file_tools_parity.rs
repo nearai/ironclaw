@@ -76,6 +76,7 @@ async fn reborn_trace_file_tools_parity() {
         |kind| matches!(kind, LoopHostMilestoneKind::CapabilityBatchCompleted { .. }),
         |kind| matches!(kind, LoopHostMilestoneKind::AssistantReplyFinalized { .. }),
     );
+    harness.assert_model_exhausted();
 
     harness.shutdown().await;
 }

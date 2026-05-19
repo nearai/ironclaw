@@ -102,6 +102,11 @@ const TEST_CAPABILITY_ID: &str = "test.echo";
 const TEST_CAPABILITY_SURFACE_VERSION: &str = "trace_replay_v1";
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+type HarnessCapabilityParts = (
+    Arc<dyn LoopCapabilityPortFactory>,
+    Arc<dyn CapabilitySurfaceProfileResolver>,
+    HarnessCapabilityRecorder,
+);
 
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,
@@ -495,6 +500,10 @@ impl RebornBinaryE2EHarness {
         self.model_gateway.remaining_responses()
     }
 
+    pub fn assert_model_exhausted(&self) {
+        self.model_gateway.assert_exhausted();
+    }
+
     pub fn capability_invocations(&self) -> Vec<CapabilityInvocation> {
         self.capability_recorder.invocations()
     }
@@ -604,11 +613,7 @@ impl HarnessCapabilityMode {
     fn into_parts(
         self,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
-    ) -> HarnessResult<(
-        Arc<dyn LoopCapabilityPortFactory>,
-        Arc<dyn CapabilitySurfaceProfileResolver>,
-        HarnessCapabilityRecorder,
-    )> {
+    ) -> HarnessResult<HarnessCapabilityParts> {
         match self {
             Self::Recording(port) => {
                 let port = Arc::new(port);

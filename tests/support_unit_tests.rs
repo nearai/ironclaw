@@ -367,8 +367,8 @@ mod reborn_support_tests {
         ProjectId, ResourceScope, TenantId, ThreadId, UserId,
     };
     use ironclaw_loop_support::{
-        HostManagedModelGateway, HostManagedModelMessage, HostManagedModelMessageRole,
-        HostManagedModelRequest, HostManagedModelResponse,
+        HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
+        HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
     };
     use ironclaw_network::{
         NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse,
@@ -404,9 +404,10 @@ mod reborn_support_tests {
     use tokio::sync::Barrier;
 
     use crate::reborn_support::delivery::RecordingOutboundDeliverySink;
+    use crate::reborn_support::harness::RecordingTestCapabilityPort;
     use crate::reborn_support::model_replay::{
-        RebornTraceReplayError, RebornTraceReplayModelGateway,
-        capability_call_from_trace_with_surface,
+        RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayError,
+        RebornTraceReplayModelGateway, capability_call_from_trace_with_surface,
     };
     use crate::reborn_support::network::RecordingNetworkHttpTransport;
     use crate::reborn_support::product_workflow::{
@@ -471,6 +472,37 @@ mod reborn_support_tests {
                 .provider_call_id,
             "call-1"
         );
+    }
+
+    #[tokio::test]
+    async fn trace_replay_rejects_scripted_capability_not_advertised_by_surface() {
+        let missing_capability =
+            CapabilityId::new("test.missing").expect("valid missing capability id");
+        let gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+            RebornModelReplayStep::ProviderToolCalls(vec![RebornScriptedProviderToolCall::new(
+                missing_capability,
+                "call-missing",
+                serde_json::json!({"message": "hi"}),
+            )]),
+        ]);
+
+        let error = gateway
+            .stream_model_with_capabilities(
+                model_request(Vec::new()),
+                Arc::new(RecordingTestCapabilityPort::echo()),
+            )
+            .await
+            .expect_err("unadvertised scripted capability should fail");
+
+        assert_eq!(error.kind, HostManagedModelErrorKind::InvalidRequest);
+        assert!(
+            error
+                .safe_summary
+                .contains("scripted capability test.missing was not advertised to the model"),
+            "unexpected error summary: {}",
+            error.safe_summary
+        );
+        assert_eq!(gateway.remaining_responses(), 0);
     }
 
     #[tokio::test]
