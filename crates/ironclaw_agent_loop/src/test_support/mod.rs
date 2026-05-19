@@ -27,10 +27,10 @@ use ironclaw_turns::{
         LoopInputCursorToken, LoopModelMessage, LoopModelRequest, LoopModelResponse,
         LoopProgressEvent, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
         LoopRunContext, LoopRunInfoPort, ModelProfileId, ModelStreamChunk, ParentLoopOutput,
-        RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy, ResourceBudgetTier,
-        RunClassId, RunProfileFingerprint, RuntimeProfileConstraints, SchedulingClass,
-        StageCheckpointPayloadRequest, SteeringPolicy, VisibleCapabilityRequest,
-        VisibleCapabilitySurface,
+        ProviderToolCallReference, RedactedRunProfileProvenance, ResolvedRunProfile,
+        ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+        RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 
@@ -200,6 +200,8 @@ pub enum MockHostCall {
     AppendCapabilityResultRef {
         /// Result ref that was appended.
         result_ref: LoopResultRef,
+        /// Provider call metadata linked to the result, when the model emitted the call.
+        provider_call: Box<Option<ProviderToolCallReference>>,
     },
     /// A checkpoint metadata write was requested.
     SaveCheckpoint(CheckpointKind),
@@ -698,6 +700,7 @@ impl ironclaw_turns::run_profile::LoopTranscriptPort for MockAgentLoopDriverHost
     ) -> Result<LoopMessageRef, AgentLoopHostError> {
         self.record_call(MockHostCall::AppendCapabilityResultRef {
             result_ref: request.result_ref.clone(),
+            provider_call: Box::new(request.provider_call.clone()),
         });
         Ok(loop_message_ref("msg:tool-result"))
     }
@@ -815,6 +818,7 @@ pub fn test_run_context(label: &str) -> LoopRunContext {
             max_model_calls: 32,
             max_capability_invocations: 64,
         },
+        personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
         runtime_constraints: RuntimeProfileConstraints {
             allow_raw_runtime_backend_selection: false,
             allow_broad_capability_surface: false,
@@ -846,6 +850,7 @@ pub fn capability_descriptor(
         safe_name: "demo".to_string(),
         safe_description: "demo capability".to_string(),
         concurrency_hint,
+        parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
     }
 }
 
@@ -891,6 +896,7 @@ fn scripted_capability_call(call: ScriptedCapabilityCall) -> CapabilityCallCandi
         capability_id: capability_id(&call.name),
         input_ref: CapabilityInputRef::new(call.input_ref)
             .unwrap_or_else(|error| panic!("test capability input ref should be valid: {error}")),
+        provider_replay: None,
     }
 }
 

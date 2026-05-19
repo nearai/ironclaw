@@ -3,11 +3,12 @@ use ironclaw_host_api::ThreadId;
 
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextWindow,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextWindowRequest, MessageContent,
-    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
-    SessionThreadRecord, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
+    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessages, ContextWindow,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
+    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    UpdateAssistantDraftRequest,
 };
 
 /// Canonical Reborn session thread and transcript boundary.
@@ -76,6 +77,11 @@ pub trait SessionThreadService: Send + Sync {
         &self,
         request: LoadContextWindowRequest,
     ) -> Result<ContextWindow, SessionThreadError>;
+
+    async fn load_context_messages(
+        &self,
+        request: LoadContextMessagesRequest,
+    ) -> Result<ContextMessages, SessionThreadError>;
 
     async fn list_thread_history(
         &self,

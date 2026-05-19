@@ -1,8 +1,9 @@
 use std::{fmt, sync::Arc};
 
+use ironclaw_filesystem::{LibSqlRootFilesystem, RootFilesystem, ScopedFilesystem};
+use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 use ironclaw_secrets::{
-    LibSqlSecretsStore, ScopedSecretsStoreAdapter, SecretError, SecretMaterial, SecretStore,
-    SecretsCrypto,
+    FilesystemSecretStore, SecretError, SecretMaterial, SecretStore, SecretsCrypto,
 };
 
 /// Explicit standalone-Reborn secret store configuration.
@@ -92,7 +93,11 @@ pub async fn check_libsql_reborn_secret_store_health(
 /// Build the libSQL Reborn secret store.
 ///
 /// Requires explicit operator-provided master key material. The returned store
-/// has completed schema migration and secret-store key-check verification.
+/// is a [`FilesystemSecretStore`] over the libSQL-backed [`RootFilesystem`];
+/// the underlying `RootFilesystem` schema migration has run before this
+/// returns. The FS-stored master-key sentinel was removed alongside the
+/// tenant-aware `ScopedFilesystem` rework — master-key correctness is now
+/// verified on first per-tenant decrypt op (see PR #3679).
 pub async fn build_libsql_reborn_secret_store(
     config: RebornLibSqlSecretStoreConfig,
 ) -> Result<Arc<dyn SecretStore>, RebornSecretStoreError> {
@@ -103,30 +108,33 @@ pub async fn build_libsql_reborn_secret_store(
         SecretError::InvalidMasterKey => RebornSecretStoreError::InvalidMasterKey,
         _ => RebornSecretStoreError::BackendUnavailable,
     })?);
-    let backend = Arc::new(LibSqlSecretsStore::new(config.database, crypto));
-    backend
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(config.database));
+    filesystem
         .run_migrations()
         .await
-        .map_err(map_secret_store_error)?;
-    backend
-        .verify_can_decrypt_existing_secrets()
-        .await
-        .map_err(map_existing_secret_decryptability_error)?;
-    Ok(Arc::new(ScopedSecretsStoreAdapter::new(backend)))
+        .map_err(|_| RebornSecretStoreError::BackendUnavailable)?;
+    let scoped = reborn_singleton_secret_mount(filesystem)
+        .map_err(|_| RebornSecretStoreError::BackendUnavailable)?;
+    let store = FilesystemSecretStore::new(scoped, crypto);
+    Ok(Arc::new(store))
 }
 
-fn map_secret_store_error(error: SecretError) -> RebornSecretStoreError {
-    match error {
-        SecretError::InvalidMasterKey => RebornSecretStoreError::InvalidMasterKey,
-        _ => RebornSecretStoreError::BackendUnavailable,
-    }
-}
-
-fn map_existing_secret_decryptability_error(error: SecretError) -> RebornSecretStoreError {
-    match error {
-        SecretError::InvalidMasterKey
-        | SecretError::DecryptionFailed(_)
-        | SecretError::InvalidUtf8 => RebornSecretStoreError::InvalidMasterKey,
-        other => map_secret_store_error(other),
-    }
+/// Build the single-tenant `/secrets` mount the standalone Reborn binary uses
+/// when wiring a secret store directly. Mirrors
+/// `ironclaw_reborn_composition::default_singleton_mount_view` but is kept
+/// local so this crate does not depend on the composition crate.
+fn reborn_singleton_secret_mount<F>(
+    filesystem: Arc<F>,
+) -> Result<Arc<ScopedFilesystem<F>>, ironclaw_host_api::HostApiError>
+where
+    F: RootFilesystem,
+{
+    let view = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/secrets")?,
+        VirtualPath::new("/secrets")?,
+        MountPermissions::read_write_list_delete(),
+    )])?;
+    Ok(Arc::new(ScopedFilesystem::with_fixed_view(
+        filesystem, view,
+    )))
 }

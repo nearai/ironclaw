@@ -5,21 +5,28 @@
 //! reserve estimated resources, execute work, then reconcile actual usage or
 //! release the unused hold.
 //!
+//! Durable persistence is provided by [`FilesystemResourceGovernorStore`]
+//! over a [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). The
+//! `RootFilesystem` choice (libSQL-backed, PostgreSQL-backed, in-memory, or
+//! local-disk) is made at the filesystem layer — the consumer-store level no
+//! longer carries per-backend impls. See
+//! `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+//!
 //! Persistent governors fail closed when snapshot reads, writes, locks, or
 //! schema validation fail. Callers must handle [`ResourceError::Storage`] the
 //! same way as quota denials: do not start costed or quota-limited work until a
 //! reservation operation succeeds.
 #![warn(unreachable_pub)]
 
+mod filesystem_store;
+
+pub use filesystem_store::FilesystemResourceGovernorStore;
+
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use std::future::Future;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use std::sync::{OnceLock, mpsc};
 
 use fs2::FileExt;
 
@@ -696,316 +703,16 @@ fn is_unsupported_parent_dir_sync_error(error: &std::io::Error) -> bool {
     false
 }
 
-fn storage_error(error: impl std::fmt::Display) -> ResourceError {
+pub(crate) fn storage_error(error: impl std::fmt::Display) -> ResourceError {
     ResourceError::Storage {
         reason: error.to_string(),
     }
 }
 
-fn snapshot_decode_error(error: impl std::fmt::Display) -> ResourceError {
+pub(crate) fn snapshot_decode_error(error: impl std::fmt::Display) -> ResourceError {
     ResourceError::Storage {
         reason: format!("malformed resource governor snapshot: {error}"),
     }
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-const SNAPSHOT_ID: &str = "default";
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-const RESOURCE_GOVERNOR_SCHEMA: &str = "\
-CREATE TABLE IF NOT EXISTS ironclaw_resource_governor_snapshots (\
-    snapshot_id TEXT PRIMARY KEY,\
-    state_json TEXT NOT NULL,\
-    updated_at_ms BIGINT NOT NULL DEFAULT 0\
-);";
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-type AsyncStorageJob = Box<dyn FnOnce(&tokio::runtime::Runtime) + Send + 'static>;
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-#[derive(Debug, Clone)]
-struct AsyncStorageWorker {
-    sender: mpsc::Sender<AsyncStorageJob>,
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-impl AsyncStorageWorker {
-    fn spawn(name: &'static str) -> Result<Self, ResourceError> {
-        let (sender, receiver) = mpsc::channel::<AsyncStorageJob>();
-        let (ready_sender, ready_receiver) = mpsc::channel();
-        std::thread::Builder::new()
-            .name(name.to_string())
-            .spawn(move || {
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(error) => {
-                        let _ = ready_sender.send(Err(storage_error(error)));
-                        return;
-                    }
-                };
-                let _ = ready_sender.send(Ok(()));
-                while let Ok(job) = receiver.recv() {
-                    job(&runtime);
-                }
-            })
-            .map_err(storage_error)?;
-        ready_receiver
-            .recv()
-            .map_err(|_| storage_error("resource governor storage worker failed to start"))??;
-        Ok(Self { sender })
-    }
-
-    fn run<T, Fut, F>(&self, build: F) -> Result<T, ResourceError>
-    where
-        T: Send + 'static,
-        Fut: Future<Output = Result<T, ResourceError>> + Send + 'static,
-        F: FnOnce() -> Fut + Send + 'static,
-    {
-        let (result_sender, result_receiver) = mpsc::channel();
-        self.sender
-            .send(Box::new(move |runtime| {
-                let result = runtime.block_on(build());
-                let _ = result_sender.send(result);
-            }))
-            .map_err(|_| storage_error("resource governor storage worker stopped"))?;
-        result_receiver
-            .recv()
-            .map_err(|_| storage_error("resource governor storage worker stopped"))?
-    }
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-type AsyncStorageWorkerCell = std::sync::Arc<OnceLock<Result<AsyncStorageWorker, String>>>;
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn new_storage_worker_cell() -> AsyncStorageWorkerCell {
-    std::sync::Arc::new(OnceLock::new())
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-fn run_async_on_storage_worker<T, Fut, F>(
-    worker_cell: &AsyncStorageWorkerCell,
-    build: F,
-) -> Result<T, ResourceError>
-where
-    T: Send + 'static,
-    Fut: Future<Output = Result<T, ResourceError>> + Send + 'static,
-    F: FnOnce() -> Fut + Send + 'static,
-{
-    let worker = worker_cell.get_or_init(|| {
-        AsyncStorageWorker::spawn("resource-governor-storage").map_err(|error| error.to_string())
-    });
-    match worker {
-        Ok(worker) => worker.run(build),
-        Err(error) => Err(storage_error(error)),
-    }
-}
-
-#[cfg(feature = "libsql")]
-#[derive(Debug, Clone)]
-pub struct LibSqlResourceGovernorStore {
-    db: std::sync::Arc<libsql::Database>,
-    worker: AsyncStorageWorkerCell,
-}
-
-#[cfg(feature = "libsql")]
-impl LibSqlResourceGovernorStore {
-    pub fn new(db: std::sync::Arc<libsql::Database>) -> Self {
-        Self {
-            db,
-            worker: new_storage_worker_cell(),
-        }
-    }
-
-    pub async fn run_migrations(&self) -> Result<(), ResourceError> {
-        let conn = self.connect().await?;
-        conn.execute_batch("BEGIN IMMEDIATE")
-            .await
-            .map_err(storage_error)?;
-        let result = conn.execute_batch(RESOURCE_GOVERNOR_SCHEMA).await;
-        match result {
-            Ok(_) => conn
-                .execute_batch("COMMIT")
-                .await
-                .map(|_| ())
-                .map_err(storage_error),
-            Err(error) => {
-                let _ = conn.execute_batch("ROLLBACK").await;
-                Err(storage_error(error))
-            }
-        }
-    }
-
-    async fn connect(&self) -> Result<libsql::Connection, ResourceError> {
-        let conn = self.db.connect().map_err(storage_error)?;
-        conn.query("PRAGMA busy_timeout = 5000", ())
-            .await
-            .map_err(storage_error)?;
-        Ok(conn)
-    }
-}
-
-#[cfg(feature = "libsql")]
-impl ResourceGovernorStore for LibSqlResourceGovernorStore {
-    fn update<T, F>(&self, update: F) -> Result<T, ResourceError>
-    where
-        T: Send + 'static,
-        F: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
-    {
-        let store = self.clone();
-        run_async_on_storage_worker(&self.worker, move || async move {
-            let conn = store.connect().await?;
-            conn.execute_batch("BEGIN IMMEDIATE")
-                .await
-                .map_err(storage_error)?;
-            let result = update_libsql_snapshot(&conn, update).await;
-            match result {
-                Ok(value) => {
-                    conn.execute_batch("COMMIT").await.map_err(storage_error)?;
-                    Ok(value)
-                }
-                Err(error) => {
-                    let _ = conn.execute_batch("ROLLBACK").await;
-                    Err(error)
-                }
-            }
-        })
-    }
-}
-
-#[cfg(feature = "libsql")]
-async fn update_libsql_snapshot<T, F>(
-    conn: &libsql::Connection,
-    update: F,
-) -> Result<T, ResourceError>
-where
-    F: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError>,
-{
-    let mut rows = conn
-        .query(
-            "SELECT state_json FROM ironclaw_resource_governor_snapshots WHERE snapshot_id = ?1",
-            libsql::params![SNAPSHOT_ID],
-        )
-        .await
-        .map_err(storage_error)?;
-    let mut snapshot = if let Some(row) = rows.next().await.map_err(storage_error)? {
-        let state_json: String = row.get(0).map_err(storage_error)?;
-        serde_json::from_str(&state_json).map_err(snapshot_decode_error)?
-    } else {
-        ResourceGovernorSnapshot::default()
-    };
-
-    let value = update(&mut snapshot)?;
-    let encoded = serde_json::to_string(&snapshot).map_err(storage_error)?;
-    conn.execute(
-        "INSERT INTO ironclaw_resource_governor_snapshots (snapshot_id, state_json, updated_at_ms) \
-         VALUES (?1, ?2, strftime('%s','now') * 1000) \
-         ON CONFLICT(snapshot_id) DO UPDATE SET \
-         state_json = excluded.state_json, updated_at_ms = excluded.updated_at_ms",
-        libsql::params![SNAPSHOT_ID, encoded],
-    )
-    .await
-    .map_err(storage_error)?;
-    Ok(value)
-}
-
-#[cfg(feature = "postgres")]
-#[derive(Debug, Clone)]
-pub struct PostgresResourceGovernorStore {
-    pool: deadpool_postgres::Pool,
-    worker: AsyncStorageWorkerCell,
-}
-
-#[cfg(feature = "postgres")]
-impl PostgresResourceGovernorStore {
-    pub fn new(pool: deadpool_postgres::Pool) -> Self {
-        Self {
-            pool,
-            worker: new_storage_worker_cell(),
-        }
-    }
-
-    pub async fn run_migrations(&self) -> Result<(), ResourceError> {
-        let mut client = self.pool.get().await.map_err(storage_error)?;
-        let transaction = client.transaction().await.map_err(storage_error)?;
-        let result = transaction.batch_execute(RESOURCE_GOVERNOR_SCHEMA).await;
-        match result {
-            Ok(()) => transaction.commit().await.map_err(storage_error),
-            Err(error) => {
-                let _ = transaction.rollback().await;
-                Err(storage_error(error))
-            }
-        }
-    }
-}
-
-#[cfg(feature = "postgres")]
-impl ResourceGovernorStore for PostgresResourceGovernorStore {
-    fn update<T, F>(&self, update: F) -> Result<T, ResourceError>
-    where
-        T: Send + 'static,
-        F: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError> + Send + 'static,
-    {
-        let store = self.clone();
-        run_async_on_storage_worker(&self.worker, move || async move {
-            let mut client = store.pool.get().await.map_err(storage_error)?;
-            let transaction = client.transaction().await.map_err(storage_error)?;
-            transaction
-                .batch_execute("LOCK TABLE ironclaw_resource_governor_snapshots IN EXCLUSIVE MODE")
-                .await
-                .map_err(storage_error)?;
-            let result = update_postgres_snapshot(&transaction, update).await;
-            match result {
-                Ok(value) => {
-                    transaction.commit().await.map_err(storage_error)?;
-                    Ok(value)
-                }
-                Err(error) => {
-                    let _ = transaction.rollback().await;
-                    Err(error)
-                }
-            }
-        })
-    }
-}
-
-#[cfg(feature = "postgres")]
-async fn update_postgres_snapshot<T, F>(
-    transaction: &tokio_postgres::Transaction<'_>,
-    update: F,
-) -> Result<T, ResourceError>
-where
-    F: FnOnce(&mut ResourceGovernorSnapshot) -> Result<T, ResourceError>,
-{
-    let row = transaction
-        .query_opt(
-            "SELECT state_json FROM ironclaw_resource_governor_snapshots WHERE snapshot_id = $1",
-            &[&SNAPSHOT_ID],
-        )
-        .await
-        .map_err(storage_error)?;
-    let mut snapshot = if let Some(row) = row {
-        let state_json: String = row.get(0);
-        serde_json::from_str(&state_json).map_err(snapshot_decode_error)?
-    } else {
-        ResourceGovernorSnapshot::default()
-    };
-
-    let value = update(&mut snapshot)?;
-    let encoded = serde_json::to_string(&snapshot).map_err(storage_error)?;
-    transaction
-        .execute(
-            "INSERT INTO ironclaw_resource_governor_snapshots (snapshot_id, state_json, updated_at_ms) \
-             VALUES ($1, $2, (EXTRACT(EPOCH FROM NOW()) * 1000)::BIGINT) \
-             ON CONFLICT(snapshot_id) DO UPDATE SET \
-             state_json = excluded.state_json, updated_at_ms = excluded.updated_at_ms",
-            &[&SNAPSHOT_ID, &encoded],
-        )
-        .await
-        .map_err(storage_error)?;
-    Ok(value)
 }
 
 /// Durable resource governor backed by a transactional [`ResourceGovernorStore`].
@@ -1705,47 +1412,5 @@ mod tests {
         let error = std::io::Error::new(ErrorKind::Unsupported, "directory sync unsupported");
 
         assert!(normalize_parent_dir_sync_result(Err(error)).is_ok());
-    }
-
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    #[test]
-    fn independent_storage_worker_cells_do_not_head_of_line_block() {
-        let first_worker = new_storage_worker_cell();
-        let second_worker = new_storage_worker_cell();
-        let (started_tx, started_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-
-        let blocked = std::thread::spawn({
-            let first_worker = first_worker.clone();
-            move || {
-                run_async_on_storage_worker(&first_worker, move || async move {
-                    started_tx.send(()).unwrap();
-                    release_rx.recv().unwrap();
-                    Ok::<(), ResourceError>(())
-                })
-            }
-        });
-        started_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("first worker job should start");
-
-        let (done_tx, done_rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let result = run_async_on_storage_worker(&second_worker, || async {
-                Ok::<u8, ResourceError>(7)
-            });
-            done_tx.send(result).unwrap();
-        });
-
-        assert_eq!(
-            done_rx
-                .recv_timeout(std::time::Duration::from_secs(1))
-                .expect("independent worker should not wait behind blocked worker")
-                .unwrap(),
-            7
-        );
-
-        release_tx.send(()).unwrap();
-        blocked.join().unwrap().unwrap();
     }
 }

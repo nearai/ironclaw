@@ -36,6 +36,8 @@ use ironclaw_events::{
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
+#[cfg(feature = "libsql")]
+use ironclaw_filesystem::ScopedFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
@@ -59,14 +61,10 @@ use ironclaw_processes::{
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
 };
-#[cfg(feature = "libsql")]
-use ironclaw_resources::ResourceTally;
 use ironclaw_resources::{
     InMemoryResourceGovernor, JsonFileResourceGovernorStore, PersistentResourceGovernor,
-    ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
+    ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits, ResourceTally,
 };
-#[cfg(feature = "libsql")]
-use ironclaw_run_state::LibSqlRunStateApprovalStore;
 use ironclaw_run_state::{
     ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
     RunRecord, RunStart, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
@@ -81,7 +79,7 @@ use ironclaw_trust::{
     HostTrustPolicy, TrustDecision, TrustProvenance,
 };
 #[cfg(feature = "libsql")]
-use ironclaw_turns::LibSqlTurnStateStore;
+use ironclaw_turns::FilesystemTurnStateStore;
 #[cfg(feature = "libsql")]
 use ironclaw_turns::{
     AcceptedMessageRef, IdempotencyKey, InMemoryRunProfileResolver, ReplyTargetBindingRef,
@@ -242,16 +240,26 @@ fn production_wiring_validation_accepts_persistent_resource_governor_component()
     );
 }
 
-#[cfg(feature = "libsql")]
+/// Filesystem-backed equivalent of the deleted libSQL/Postgres tests.
+/// Backend choice is a `RootFilesystem` property; the `with_filesystem_resource_governor`
+/// builder drives the same surface that the deleted SQL-specific builders
+/// covered.
 #[tokio::test]
-async fn with_libsql_resource_governor_runs_migrations_before_first_reserve() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = Arc::new(
-        libsql::Builder::new_local(dir.path().join("resources.db"))
-            .build()
-            .await
-            .unwrap(),
-    );
+async fn with_filesystem_resource_governor_persists_reservations_across_handles() {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/resources").unwrap(),
+        VirtualPath::new("/tenants/tenant1/users/user1/resources").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        mounts,
+    ));
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -261,9 +269,7 @@ async fn with_libsql_resource_governor_runs_migrations_before_first_reserve() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_libsql_resource_governor(Arc::clone(&db))
-    .await
-    .unwrap();
+    .with_filesystem_resource_governor(Arc::clone(&scoped));
 
     let governor = services.resource_governor();
     let scope = sample_scope(InvocationId::new());
@@ -289,16 +295,22 @@ async fn with_libsql_resource_governor_runs_migrations_before_first_reserve() {
     governor.release(reservation.id).unwrap();
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
-async fn with_libsql_resource_governor_closes_process_reservations_on_cancel() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = Arc::new(
-        libsql::Builder::new_local(dir.path().join("resources.db"))
-            .build()
-            .await
-            .unwrap(),
-    );
+async fn with_filesystem_resource_governor_closes_process_reservations_on_cancel() {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/resources").unwrap(),
+        VirtualPath::new("/tenants/tenant1/users/user1/resources").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        mounts,
+    ));
     let process_services = ProcessServices::new(
         Arc::new(InMemoryProcessStore::new()),
         Arc::new(InMemoryProcessResultStore::new()),
@@ -313,9 +325,7 @@ async fn with_libsql_resource_governor_closes_process_reservations_on_cancel() {
         process_services,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_libsql_resource_governor(Arc::clone(&db))
-    .await
-    .unwrap();
+    .with_filesystem_resource_governor(Arc::clone(&scoped));
     let governor = services.resource_governor();
     let scope = sample_scope(InvocationId::new());
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
@@ -364,99 +374,6 @@ async fn with_libsql_resource_governor_closes_process_reservations_on_cancel() {
             ..
         }
     ));
-}
-
-#[cfg(feature = "postgres")]
-const POSTGRES_SKIP_ENV: &str = "IRONCLAW_SKIP_POSTGRES_TESTS";
-
-#[cfg(feature = "postgres")]
-fn postgres_skip_requested() -> bool {
-    std::env::var(POSTGRES_SKIP_ENV).is_ok_and(|value| value == "1" || value == "true")
-}
-
-#[cfg(feature = "postgres")]
-async fn postgres_pool_or_skip() -> Option<deadpool_postgres::Pool> {
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://localhost/ironclaw_test".to_string());
-    let config: tokio_postgres::Config = database_url
-        .parse()
-        .expect("DATABASE_URL must be a valid Postgres URL");
-    let mgr = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-    let pool = deadpool_postgres::Pool::builder(mgr)
-        .max_size(2)
-        .build()
-        .expect("build deadpool");
-    match pool.get().await {
-        Ok(_) => Some(pool),
-        Err(error) => {
-            if postgres_skip_requested() {
-                eprintln!(
-                    "skipping host-runtime Postgres resource governor test ({POSTGRES_SKIP_ENV}=1): {error}"
-                );
-                None
-            } else {
-                panic!(
-                    "host-runtime Postgres resource governor test could not reach Postgres ({error}); \
-                     set DATABASE_URL to a reachable Postgres test database, or set \
-                     {POSTGRES_SKIP_ENV}=1 to explicitly skip."
-                );
-            }
-        }
-    }
-}
-
-#[cfg(feature = "postgres")]
-async fn drop_postgres_resource_governor_table(pool: &deadpool_postgres::Pool) {
-    let client = pool.get().await.expect("cleanup client");
-    client
-        .batch_execute("DROP TABLE IF EXISTS ironclaw_resource_governor_snapshots")
-        .await
-        .expect("drop resource governor snapshots table");
-}
-
-#[cfg(feature = "postgres")]
-#[tokio::test]
-async fn with_postgres_resource_governor_runs_migrations_before_first_reserve() {
-    let Some(pool) = postgres_pool_or_skip().await else {
-        return;
-    };
-    drop_postgres_resource_governor_table(&pool).await;
-
-    let services = HostRuntimeServices::new(
-        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
-        Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
-        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    )
-    .with_postgres_resource_governor(pool.clone())
-    .await
-    .unwrap();
-
-    let governor = services.resource_governor();
-    let scope = sample_scope(InvocationId::new());
-    let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor
-        .set_limit(
-            account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
-        )
-        .unwrap();
-    let reservation = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
-        )
-        .unwrap();
-    governor.release(reservation.id).unwrap();
-    drop_postgres_resource_governor_table(&pool).await;
 }
 
 #[test]
@@ -531,119 +448,23 @@ fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
     );
 }
 
-#[cfg(feature = "libsql")]
-#[tokio::test]
-async fn libsql_run_state_store_selection_satisfies_production_run_state_guardrails() {
-    let db_dir = tempfile::tempdir().unwrap();
-    let db_path = db_dir.path().join("run-state-selection.db");
-    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let services = HostRuntimeServices::new(
-        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
-        Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
-        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    )
-    .with_libsql_run_state_approval_store(Arc::clone(&db))
-    .await
-    .unwrap();
-
-    let report = services
-        .validate_production_wiring(&ProductionWiringConfig::new([]))
-        .expect_err("other local services remain intentionally unready");
-    assert!(
-        !report.contains(
-            ProductionWiringComponent::RunState,
-            ProductionWiringIssueKind::Missing
-        ),
-        "LibSqlRunStateApprovalStore must satisfy run-state presence: {report:?}"
-    );
-    assert!(
-        !report.contains(
-            ProductionWiringComponent::ApprovalRequests,
-            ProductionWiringIssueKind::Missing
-        ),
-        "LibSqlRunStateApprovalStore must satisfy approval-store presence: {report:?}"
-    );
-    assert!(
-        !report.contains(
-            ProductionWiringComponent::RunState,
-            ProductionWiringIssueKind::LocalOnlyImplementation
-        ),
-        "LibSqlRunStateApprovalStore must not be classified local-only: {report:?}"
-    );
-    assert!(
-        !report.contains(
-            ProductionWiringComponent::ApprovalRequests,
-            ProductionWiringIssueKind::LocalOnlyImplementation
-        ),
-        "LibSqlRunStateApprovalStore must not be classified local-only: {report:?}"
-    );
-}
-
-#[cfg(feature = "libsql")]
-#[tokio::test]
-async fn libsql_run_state_store_selection_persists_runtime_approval_block() {
-    let db_dir = tempfile::tempdir().unwrap();
-    let db_path = db_dir.path().join("run-state-runtime-approval.db");
-    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let services = HostRuntimeServices::new(
-        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
-        Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
-        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    )
-    .with_libsql_run_state_approval_store(Arc::clone(&db))
-    .await
-    .unwrap()
-    .with_trust_policy(Arc::new(local_manifest_trust_policy(
-        "script",
-        vec![EffectKind::DispatchCapability],
-    )))
-    .with_script_runtime(Arc::new(ScriptRuntime::new(
-        ScriptRuntimeConfig::for_testing(),
-        EchoScriptBackend,
-    )));
-
-    let runtime = services.host_runtime_for_local_testing();
-    let context = execution_context_without_grants();
-    let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context.clone(),
-            script_capability_id(),
-            ResourceEstimate::default(),
-            json!({"message": "durable approval"}),
-            trust_decision_with_dispatch_authority(),
-        ))
-        .await
-        .unwrap();
-
-    let RuntimeCapabilityOutcome::ApprovalRequired(gate) = outcome else {
-        panic!("expected approval gate, got {outcome:?}");
-    };
-    let store = LibSqlRunStateApprovalStore::new(db);
-    let run_record = RunStateStore::get(&store, &context.resource_scope, context.invocation_id)
-        .await
-        .unwrap()
-        .expect("run record persisted");
-    assert_eq!(run_record.status, RunStatus::BlockedApproval);
-    assert_eq!(
-        run_record.approval_request_id,
-        Some(gate.approval_request_id)
-    );
-    let approval_record =
-        ApprovalRequestStore::get(&store, &context.resource_scope, gate.approval_request_id)
-            .await
-            .unwrap()
-            .expect("approval record persisted");
-    assert_eq!(
-        approval_record.status,
-        ironclaw_run_state::ApprovalStatus::Pending
-    );
-}
+// The legacy `LibSqlRunStateApprovalStore` / `PostgresRunStateApprovalStore`
+// per-backend run-state + approval stores were deleted along with their
+// `with_libsql_run_state_approval_store` /
+// `with_postgres_run_state_approval_store` builder methods (see
+// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`).
+// Durability across reopen is now a property of the underlying
+// `RootFilesystem` (`LibSqlRootFilesystem`, `PostgresRootFilesystem`, …)
+// composed through `with_filesystem_run_state`; the run-state store layer
+// no longer owns its own per-SQL persistence. The deleted tests were:
+//
+//   - `libsql_run_state_store_selection_satisfies_production_run_state_guardrails`
+//   - `libsql_run_state_store_selection_persists_runtime_approval_block`
+//
+// The equivalent guardrail surface for the filesystem-backed wiring is
+// exercised by `tests/reborn_durable_restart_integration.rs` (services
+// graph restart over `LocalFilesystem`) and the `ironclaw_run_state`
+// contract suite.
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
@@ -680,14 +501,34 @@ async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
     );
 }
 
+/// Construct an [`Arc<ScopedFilesystem<LibSqlRootFilesystem>>`] that exposes
+/// the `/turns` mount alias over a libSQL-backed [`RootFilesystem`]. Mirrors
+/// the production composition shape: the `/turns` alias rewrites to a
+/// tenant/user-scoped target inside `/engine`, and the filesystem backend
+/// supplies durable storage. Used by tests that previously constructed
+/// `LibSqlTurnStateStore` directly.
+#[cfg(feature = "libsql")]
+async fn libsql_scoped_turns_fs(
+    db: Arc<libsql::Database>,
+) -> Arc<ScopedFilesystem<LibSqlRootFilesystem>> {
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await.unwrap();
+    let view = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").unwrap(),
+        VirtualPath::new("/engine/tenants/tenant1/users/user1/turns").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    Arc::new(ScopedFilesystem::with_fixed_view(filesystem, view))
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
-async fn production_turn_state_selection_accepts_libsql_turn_state_store() {
+async fn production_turn_state_selection_accepts_filesystem_turn_state_store() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("turn-state.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let turn_state = Arc::new(LibSqlTurnStateStore::new(Arc::clone(&db)));
-    turn_state.run_migrations().await.unwrap();
+    let scoped = libsql_scoped_turns_fs(Arc::clone(&db)).await;
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -697,9 +538,7 @@ async fn production_turn_state_selection_accepts_libsql_turn_state_store() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_libsql_turn_state_store(Arc::clone(&db))
-    .await
-    .unwrap();
+    .with_filesystem_turn_state_store(scoped);
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]))
@@ -709,14 +548,14 @@ async fn production_turn_state_selection_accepts_libsql_turn_state_store() {
             ProductionWiringComponent::TurnState,
             ProductionWiringIssueKind::Missing
         ),
-        "LibSqlTurnStateStore must satisfy production turn-state presence: {report:?}"
+        "FilesystemTurnStateStore must satisfy production turn-state presence: {report:?}"
     );
     assert!(
         !report.contains(
             ProductionWiringComponent::TurnState,
             ProductionWiringIssueKind::LocalOnlyImplementation
         ),
-        "LibSqlTurnStateStore must not be classified local-only: {report:?}"
+        "FilesystemTurnStateStore over LibSqlRootFilesystem must not be classified local-only: {report:?}"
     );
 }
 
@@ -749,6 +588,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     let db_path = db_dir.path().join("turn-coordinator.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
     let notifier = Arc::new(RecordingTurnRunWakeNotifier::default());
+    let scoped = libsql_scoped_turns_fs(Arc::clone(&db)).await;
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -758,9 +598,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_libsql_turn_state_store(Arc::clone(&db))
-    .await
-    .unwrap()
+    .with_filesystem_turn_state_store(Arc::clone(&scoped))
     .with_run_profile_resolver(Arc::new(InMemoryRunProfileResolver::default()))
     .with_turn_run_wake_notifier(Arc::clone(&notifier));
 
@@ -771,7 +609,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     let response = coordinator.submit_turn(request.clone()).await.unwrap();
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
 
-    let reopened = LibSqlTurnStateStore::new(Arc::clone(&db));
+    let reopened = FilesystemTurnStateStore::new(scoped);
     let state = reopened
         .get_run_state(ironclaw_turns::GetRunStateRequest {
             scope: request.scope,
@@ -790,6 +628,7 @@ async fn production_turn_coordinator_requires_explicit_run_profile_resolver() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("turn-coordinator-missing-resolver.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let scoped = libsql_scoped_turns_fs(Arc::clone(&db)).await;
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -799,9 +638,7 @@ async fn production_turn_coordinator_requires_explicit_run_profile_resolver() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_libsql_turn_state_store(Arc::clone(&db))
-    .await
-    .unwrap()
+    .with_filesystem_turn_state_store(scoped)
     .with_turn_run_wake_notifier(Arc::new(RecordingTurnRunWakeNotifier::default()));
 
     let report = match services.turn_coordinator_for_production() {

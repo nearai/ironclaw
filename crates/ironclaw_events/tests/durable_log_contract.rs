@@ -12,10 +12,10 @@ use ironclaw_events::{
     parse_jsonl, replay_jsonl, sanitize_error_kind,
 };
 use ironclaw_host_api::{
-    Action, ActionSummary, AgentId, ApprovalRequest, ApprovalRequestId, AuditEnvelope,
-    CapabilityId, CorrelationId, DenyReason, ExecutionContext, ExtensionId, InvocationId,
-    MountView, Principal, ProjectId, ResourceEstimate, ResourceScope, RuntimeKind, TenantId,
-    UserId,
+    Action, ActionSummary, AgentId, ApprovalDecisionKind, ApprovalRequest, ApprovalRequestId,
+    AuditEnvelope, CapabilityId, CorrelationId, DenyReason, ExecutionContext, ExtensionId,
+    InvocationId, MountView, Principal, ProjectId, ResourceEstimate, ResourceScope, RuntimeKind,
+    TenantId, UserId,
 };
 
 fn capability_id() -> CapabilityId {
@@ -639,7 +639,7 @@ async fn approval_audit_records_partition_by_stream_key() {
         &alice_scope,
         &alice_request,
         Principal::User(alice_scope.user_id.clone()),
-        "approved",
+        ApprovalDecisionKind::Approved,
     );
     let bob_request = ApprovalRequest {
         id: ApprovalRequestId::new(),
@@ -657,7 +657,7 @@ async fn approval_audit_records_partition_by_stream_key() {
         &bob_scope,
         &bob_request,
         Principal::User(bob_scope.user_id.clone()),
-        "approved",
+        ApprovalDecisionKind::Approved,
     );
 
     log.append(alice_audit).await.expect("alice audit");
@@ -714,7 +714,7 @@ async fn approval_audit_envelope_serialization_excludes_raw_reason_and_fingerpri
         &scope,
         &request,
         Principal::User(scope.user_id.clone()),
-        "approved",
+        ApprovalDecisionKind::Approved,
     );
 
     let serialized = serde_json::to_string(&envelope).expect("serialize");

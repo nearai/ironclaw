@@ -333,12 +333,12 @@ mod tests {
         );
         assert_eq!(
             descriptor.checkpoint_schema_id,
-            Some(
-                CheckpointSchemaId::new(
-                    crate::planned_driver_factory::PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID,
-                )
-                .expect("valid"),
-            )
+            // Keep the unprefixed `CHECKPOINT_SCHEMA_ID` (already in scope via
+            // `use super::*` -> `use ironclaw_agent_loop::state::*`) — the
+            // `crate::PLANNED_DRIVER_CHECKPOINT_SCHEMA_ID` alias trips clippy's
+            // `unused-imports` lint on newer toolchains because it resolves to
+            // the same const value, and that gate is enforced on this PR.
+            Some(CheckpointSchemaId::new(CHECKPOINT_SCHEMA_ID).expect("valid"))
         );
         assert_eq!(
             descriptor.checkpoint_schema_version,

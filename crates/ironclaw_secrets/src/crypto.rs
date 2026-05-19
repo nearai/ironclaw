@@ -12,8 +12,11 @@ use hkdf::Hkdf;
 use secrecy::{ExposeSecret, SecretString};
 use sha2::Sha256;
 
+use ironclaw_host_api::{ResourceScope, SecretHandle};
+
 use crate::SecretError;
 use crate::legacy_store::DecryptedSecret;
+use crate::{CredentialAccountId, CredentialSessionId};
 
 const KEY_SIZE: usize = 32;
 const NONCE_SIZE: usize = 12;
@@ -171,11 +174,9 @@ pub(crate) fn build_aad(domain: &[u8], parts: &[&[u8]]) -> Vec<u8> {
 }
 
 pub(crate) const AAD_DOMAIN_SECRET_RECORD: &[u8] = b"reborn/v1/secret_record";
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) const AAD_DOMAIN_CREDENTIAL_ACCOUNT: &[u8] = b"reborn/v1/credential_account";
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 pub(crate) const AAD_DOMAIN_CREDENTIAL_SESSION: &[u8] = b"reborn/v1/credential_session";
-pub(crate) const AAD_DOMAIN_SECRET_STORE_KEY_CHECK: &[u8] = b"reborn/v1/secret_store_key_check";
+pub(crate) const AAD_DOMAIN_FILESYSTEM_SECRET: &[u8] = b"reborn/v1/fs_secret_record";
 
 /// AAD for the secret-record AES-GCM payload, binding ciphertext to
 /// `(user_id, name)`.
@@ -192,11 +193,149 @@ pub fn secret_record_aad(user_id: &str, name: &str) -> Vec<u8> {
     )
 }
 
-/// AAD for the readiness sentinel row in `reborn_secret_store_key_check`.
+/// Scope-derived key bytes used by credential AAD helpers.
 ///
-/// Same fixture-only motivation as [`secret_record_aad`].
-pub fn secret_store_key_check_aad() -> Vec<u8> {
-    build_aad(AAD_DOMAIN_SECRET_STORE_KEY_CHECK, &[])
+/// Centralises the `ResourceScope` → AAD-component mapping so the libSQL,
+/// Postgres, and filesystem credential stores all bind ciphertext to the same
+/// identity tuple. Two flavours: account-scope clears the
+/// mission/thread/invocation slots (accounts are pinned to the owner prefix
+/// only), session-scope fills every slot (sessions carry the full execution
+/// identity).
+pub(crate) struct ScopeKey {
+    pub tenant_id: String,
+    pub user_id: String,
+    pub agent_id: String,
+    pub project_id: String,
+    pub mission_id: String,
+    pub thread_id: String,
+    pub invocation_id: String,
+}
+
+impl ScopeKey {
+    pub(crate) fn from_account_scope(scope: &ResourceScope) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.to_string(),
+            user_id: scope.user_id.to_string(),
+            agent_id: scope
+                .agent_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            project_id: scope
+                .project_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            mission_id: String::new(),
+            thread_id: String::new(),
+            invocation_id: String::new(),
+        }
+    }
+
+    pub(crate) fn from_full_scope(scope: &ResourceScope) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.to_string(),
+            user_id: scope.user_id.to_string(),
+            agent_id: scope
+                .agent_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            project_id: scope
+                .project_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            mission_id: scope
+                .mission_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            thread_id: scope
+                .thread_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default(),
+            invocation_id: scope.invocation_id.to_string(),
+        }
+    }
+}
+
+/// AAD for the credential-account payload, binding ciphertext to
+/// `(scope, account_id)`.
+///
+/// Used by every credential-account store (libSQL, Postgres, filesystem) so
+/// the same payload-id binding holds across backends. Production storage code
+/// reaches this through the credential store API and never needs to call it
+/// directly. It is `pub` so contract tests and integration fixtures that
+/// bypass the store and write directly to the underlying table or path can
+/// construct ciphertext the production code will accept — and cross-domain
+/// replay tests can prove that swapping AAD between domains fails decryption.
+pub fn credential_account_aad(scope: &ResourceScope, account_id: &CredentialAccountId) -> Vec<u8> {
+    let key = ScopeKey::from_account_scope(scope);
+    build_aad(
+        AAD_DOMAIN_CREDENTIAL_ACCOUNT,
+        &[
+            key.tenant_id.as_bytes(),
+            key.user_id.as_bytes(),
+            key.agent_id.as_bytes(),
+            key.project_id.as_bytes(),
+            account_id.as_str().as_bytes(),
+        ],
+    )
+}
+
+/// AAD for the credential-session payload, binding ciphertext to
+/// `(scope, session_id)`.
+///
+/// Same fixture-only motivation as [`credential_account_aad`].
+pub fn credential_session_aad(scope: &ResourceScope, session_id: CredentialSessionId) -> Vec<u8> {
+    let key = ScopeKey::from_full_scope(scope);
+    let session_id_string = session_id.to_private_storage_string();
+    build_aad(
+        AAD_DOMAIN_CREDENTIAL_SESSION,
+        &[
+            key.tenant_id.as_bytes(),
+            key.user_id.as_bytes(),
+            key.agent_id.as_bytes(),
+            key.project_id.as_bytes(),
+            key.mission_id.as_bytes(),
+            key.thread_id.as_bytes(),
+            key.invocation_id.as_bytes(),
+            session_id_string.as_bytes(),
+        ],
+    )
+}
+
+/// AAD for the filesystem secret-material payload, binding ciphertext to
+/// `(scope, handle)`.
+///
+/// Distinct domain from the DB-backed `secret_record_aad` because the
+/// filesystem store keys secrets by `(scope, SecretHandle)` rather than
+/// `(user_id, name)` — a swap between the two encodings must fail decryption
+/// even with an identical scope/user, which the domain separator enforces.
+pub fn filesystem_secret_aad(scope: &ResourceScope, handle: &SecretHandle) -> Vec<u8> {
+    // The filesystem secret store keys by *owner scope*
+    // (`tenant/user/agent/project`) — see `secret_path` and
+    // `same_scope_owner` in `filesystem_store.rs`. The AAD must match the
+    // storage scope: previously this bound `mission_id`/`thread_id`/
+    // `invocation_id` too, so a secret written by one invocation could be
+    // *read* by another invocation under the same owner (the path layer
+    // allowed it) but `consume` failed with a confusing decryption error.
+    // Bind AAD to the owner scope so cross-invocation reads within the
+    // same owner succeed and cross-owner reads still fail closed (both at
+    // the path layer and via AAD).
+    let key = ScopeKey::from_account_scope(scope);
+    build_aad(
+        AAD_DOMAIN_FILESYSTEM_SECRET,
+        &[
+            key.tenant_id.as_bytes(),
+            key.user_id.as_bytes(),
+            key.agent_id.as_bytes(),
+            key.project_id.as_bytes(),
+            handle.as_str().as_bytes(),
+        ],
+    )
 }
 
 /// Count of distinct byte values in the slice.

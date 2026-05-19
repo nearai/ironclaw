@@ -14,8 +14,8 @@ pub enum OutboundPushKind {
     DeliveryStatus,
 }
 
+#[allow(dead_code)] // retained for future debug/log surfaces — not yet wired
 impl OutboundPushKind {
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::FinalReply => "final_reply",
@@ -176,8 +176,8 @@ pub enum OutboundDeliveryStatus {
     DeadLettered,
 }
 
+#[allow(dead_code)] // retained for future debug/log surfaces — not yet wired
 impl OutboundDeliveryStatus {
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Pending => "pending",

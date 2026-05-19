@@ -13,19 +13,20 @@ publish = false
 
 [features]
 default = []
-libsql = ["dep:libsql", "dep:tokio"]
-postgres = ["dep:deadpool-postgres", "dep:tokio", "dep:tokio-postgres"]
+libsql = ["dep:libsql"]
+postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
 
 [dependencies]
 deadpool-postgres = { version = "0.14", optional = true }
 fs2 = "0.4"
+ironclaw_filesystem = { path = "../ironclaw_filesystem", version = "0.1.0" }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", optional = true, features = ["macros", "rt", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 tokio-postgres = { version = "0.7", optional = true }
 
 [target.'cfg(windows)'.dependencies]

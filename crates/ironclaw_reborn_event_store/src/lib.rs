@@ -6,14 +6,24 @@
 //! validation, and concrete storage adapters that should not live in the
 //! substrate crate.
 //!
+//! Backend dispatch happens at the [`RootFilesystem`] layer: the `Libsql` /
+//! `Postgres` variants of [`RebornEventStoreConfig`] open a backend-specific
+//! `RootFilesystem` (libSQL / PostgreSQL) and route the durable log through
+//! [`FilesystemDurableEventLog`] / [`FilesystemDurableAuditLog`] over a
+//! [`ScopedFilesystem`] anchored at `/events`. The legacy per-backend
+//! `LibSql*` / `Postgres*` impls that spoke SQL directly were removed during
+//! the `src/db/` dissolution pass — see the design-doc entry "Legacy
+//! per-backend store cleanup" in
+//! `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+//!
 //! KNOWN LIMITATION (PR #3171 review #39): replay filtering currently stops
 //! at project / mission / thread / process scope. The `ResourceScope` carries
 //! an `invocation_id`, but `ReadScope` (defined in `ironclaw_events`) does
 //! not yet expose it — so a per-invocation consumer sharing the same
 //! `(tenant, user, agent)` stream cannot ask the backend to enforce the
 //! invocation boundary. Adding it requires changes to `ironclaw_events`,
-//! the SQL schemas, the JSONL/in-memory `matches_event` / `matches_audit`
-//! predicates, and every replay caller — tracked as a follow-up.
+//! the JSONL/in-memory `matches_event` / `matches_audit` predicates, and
+//! every replay caller — tracked as a follow-up.
 #![warn(unreachable_pub)]
 
 use std::{
@@ -27,20 +37,28 @@ use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay,
     EventStreamKey, InMemoryDurableAuditLog, InMemoryDurableEventLog, ReadScope, RuntimeEvent,
 };
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{AgentId, AuditEnvelope};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-#[cfg(feature = "libsql")]
-mod libsql_store;
-#[cfg(feature = "postgres")]
-mod postgres_store;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-mod sql_common;
+mod filesystem_store;
+
+pub use filesystem_store::{FilesystemDurableAuditLog, FilesystemDurableEventLog};
 
 /// Backend configuration for Reborn durable event/audit stores.
+///
+/// The `Libsql` / `Postgres` variants open a backend-specific
+/// [`RootFilesystem`] internally and route the durable log through
+/// [`FilesystemDurableEventLog`] / [`FilesystemDurableAuditLog`]. Production
+/// callers that match on this enum see the same external shape; backend
+/// dispatch now happens at the filesystem layer rather than at the
+/// consumer-store layer.
 #[derive(Debug)]
 pub enum RebornEventStoreConfig {
     /// In-memory reference backend. Valid only for explicit local/test
@@ -53,11 +71,15 @@ pub enum RebornEventStoreConfig {
         root: PathBuf,
         accept_single_node_durable: bool,
     },
-    /// PostgreSQL backend configuration. Schema files and the concrete adapter
-    /// are owned by this crate rather than V1 DB/AppBuilder paths.
+    /// PostgreSQL backend configuration. The store opens a
+    /// [`PostgresRootFilesystem`](ironclaw_filesystem::PostgresRootFilesystem)
+    /// over the provided URL and runs durable-log ops through the unified
+    /// filesystem dispatch fabric.
     Postgres { url: SecretString },
-    /// libSQL backend configuration. Local paths and remote libSQL URLs are
-    /// opened directly by this crate rather than V1 DB/AppBuilder paths.
+    /// libSQL backend configuration. The store opens a
+    /// [`LibSqlRootFilesystem`](ironclaw_filesystem::LibSqlRootFilesystem)
+    /// over the provided local path or remote URL and runs durable-log ops
+    /// through the unified filesystem dispatch fabric.
     Libsql {
         path_or_url: String,
         auth_token: Option<SecretString>,
@@ -156,7 +178,7 @@ pub async fn build_reborn_event_stores(
         RebornEventStoreConfig::Postgres { url } => {
             #[cfg(feature = "postgres")]
             {
-                postgres_store::build_postgres_event_stores(url).await
+                postgres_backed::build(url).await
             }
             #[cfg(not(feature = "postgres"))]
             {
@@ -175,7 +197,7 @@ pub async fn build_reborn_event_stores(
             }
             #[cfg(feature = "libsql")]
             {
-                libsql_store::build_libsql_event_stores(path_or_url, auth_token).await
+                libsql_backed::build(path_or_url, auth_token).await
             }
             #[cfg(not(feature = "libsql"))]
             {
@@ -184,6 +206,64 @@ pub async fn build_reborn_event_stores(
             }
         }
     }
+}
+
+/// Build a [`RebornEventStores`] from any [`RootFilesystem`] by routing the
+/// durable log through [`FilesystemDurableEventLog`] /
+/// [`FilesystemDurableAuditLog`] over a [`ScopedFilesystem`] anchored at
+/// `/events`. Production composition reuses this on top of a libSQL /
+/// PostgreSQL `RootFilesystem` so the backend choice is a property of the
+/// filesystem rather than of the durable-log impl.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn wrap_root_filesystem_as_event_stores<F>(
+    root: Arc<F>,
+) -> Result<RebornEventStores, RebornEventStoreError>
+where
+    F: RootFilesystem + Send + Sync + 'static,
+{
+    let scoped = build_events_scoped_filesystem(root)?;
+    Ok(RebornEventStores {
+        events: Arc::new(FilesystemDurableEventLog::new(Arc::clone(&scoped))),
+        audit: Arc::new(FilesystemDurableAuditLog::new(scoped)),
+    })
+}
+
+/// Wrap a [`RootFilesystem`] in a [`ScopedFilesystem`] whose [`MountView`]
+/// grants the `/events` plane the permissions the durable log needs
+/// (append → write, tail → read+list).
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn build_events_scoped_filesystem<F>(
+    root: Arc<F>,
+) -> Result<Arc<ScopedFilesystem<F>>, RebornEventStoreError>
+where
+    F: RootFilesystem + Send + Sync + 'static,
+{
+    let alias =
+        MountAlias::new("/events").map_err(|_| RebornEventStoreError::BackendOperation {
+            backend: "filesystem",
+            operation: "construct events mount alias",
+        })?;
+    let target =
+        VirtualPath::new("/events").map_err(|_| RebornEventStoreError::BackendOperation {
+            backend: "filesystem",
+            operation: "construct events mount target",
+        })?;
+    let view = MountView::new(vec![MountGrant::new(
+        alias,
+        target,
+        MountPermissions {
+            read: true,
+            write: true,
+            delete: false,
+            list: true,
+            execute: false,
+        },
+    )])
+    .map_err(|_| RebornEventStoreError::BackendOperation {
+        backend: "filesystem",
+        operation: "construct events mount view",
+    })?;
+    Ok(Arc::new(ScopedFilesystem::with_fixed_view(root, view)))
 }
 
 /// Classification of a libSQL `path_or_url` for production policy decisions.
@@ -247,6 +327,481 @@ fn validate_production_libsql_target(path_or_url: &str) -> Result<(), RebornEven
         LibsqlTargetClass::RemoteSecure
         | LibsqlTargetClass::LocalAbsolute
         | LibsqlTargetClass::LocalRelative => Ok(()),
+    }
+}
+
+#[cfg(feature = "libsql")]
+mod libsql_backed {
+    //! libSQL-backed [`RootFilesystem`] construction for the durable event
+    //! store. The connection lives behind the standard
+    //! [`FilesystemDurableEventLog`] / [`FilesystemDurableAuditLog`] surface
+    //! so this module only owns URL → `libsql::Database` plumbing and the
+    //! filesystem-layer migration.
+
+    use std::{path::Path, sync::Arc};
+
+    use ironclaw_filesystem::LibSqlRootFilesystem;
+    use secrecy::{ExposeSecret, SecretString};
+
+    use super::{RebornEventStoreError, RebornEventStores, wrap_root_filesystem_as_event_stores};
+
+    pub(super) async fn build(
+        path_or_url: String,
+        auth_token: Option<SecretString>,
+    ) -> Result<RebornEventStores, RebornEventStoreError> {
+        let db = build_database(&path_or_url, auth_token).await?;
+        let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+        filesystem
+            .run_migrations()
+            .await
+            .map_err(|source| RebornEventStoreError::backend("libsql", "run migrations", source))?;
+        wrap_root_filesystem_as_event_stores(filesystem)
+    }
+
+    async fn build_database(
+        path_or_url: &str,
+        auth_token: Option<SecretString>,
+    ) -> Result<Arc<libsql::Database>, RebornEventStoreError> {
+        let db = if is_remote_libsql(path_or_url) {
+            libsql::Builder::new_remote(
+                path_or_url.to_string(),
+                auth_token
+                    .as_ref()
+                    .map(|token| token.expose_secret().to_string())
+                    .unwrap_or_default(),
+            )
+            .build()
+            .await
+        } else if path_or_url == ":memory:" {
+            libsql::Builder::new_local(path_or_url).build().await
+        } else {
+            let path = Path::new(path_or_url);
+            // `Path::parent()` returns `Some("")` for a bare filename like
+            // `events.db`, and `create_dir_all("")` fails with ENOENT. Skip
+            // parent creation when the parent is empty so common configs like
+            // `path_or_url = "events.db"` work without forcing callers to
+            // write `./events.db`.
+            if let Some(parent) = path.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                tokio::fs::create_dir_all(parent).await.map_err(|source| {
+                    RebornEventStoreError::io("initialize libsql parent", source)
+                })?;
+            }
+            libsql::Builder::new_local(path_or_url).build().await
+        };
+        db.map(Arc::new)
+            .map_err(|source| RebornEventStoreError::backend("libsql", "connect", source))
+    }
+
+    /// Detect a remote libSQL endpoint by recognised URL scheme.
+    ///
+    /// Scheme matching is case-insensitive: `HTTPS://...`, `LibSQL://...`, and
+    /// `HTTP://...` would otherwise fall through to `Builder::new_local(...)`
+    /// and silently create a node-local SQLite path like `HTTPS:/host/...`,
+    /// stranding durable history on one node and ignoring the auth token.
+    ///
+    /// A bare value with no scheme (e.g. `db.example.com` or `events.db`) is
+    /// treated as local here — production composition (in `lib.rs`) is
+    /// responsible for rejecting that ambiguity before we get this far. See
+    /// `validate_production_libsql_target`.
+    fn is_remote_libsql(path_or_url: &str) -> bool {
+        let Some(scheme_end) = path_or_url.find("://") else {
+            return false;
+        };
+        let scheme = &path_or_url[..scheme_end];
+        scheme.eq_ignore_ascii_case("libsql")
+            || scheme.eq_ignore_ascii_case("https")
+            || scheme.eq_ignore_ascii_case("http")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::is_remote_libsql;
+
+        #[test]
+        fn case_insensitive_remote_scheme_detection() {
+            // Regression for nearai/ironclaw#3171 review finding: mixed-case
+            // schemes previously fell through to `Builder::new_local`. The
+            // detector now matches scheme case-insensitively.
+            for url in [
+                "libsql://example.invalid",
+                "LIBSQL://example.invalid",
+                "LibSQL://example.invalid",
+                "https://example.invalid",
+                "HTTPS://example.invalid",
+                "Https://example.invalid",
+                "http://example.invalid",
+                "HTTP://example.invalid",
+            ] {
+                assert!(is_remote_libsql(url), "expected `{url}` to be remote");
+            }
+        }
+
+        #[test]
+        fn unscheme_values_are_local() {
+            // Bare values and explicit local-path syntax are not remote — the
+            // production gate in lib.rs handles ambiguity for production
+            // profiles separately.
+            for url in [
+                ":memory:",
+                "/var/lib/ironclaw/events.db",
+                "./events.db",
+                "events.db",
+                "db.example.com",
+            ] {
+                assert!(!is_remote_libsql(url), "expected `{url}` to be local");
+            }
+        }
+    }
+}
+
+#[cfg(feature = "postgres")]
+mod postgres_backed {
+    //! PostgreSQL-backed [`RootFilesystem`] construction for the durable
+    //! event store. Mirrors `libsql_backed::build`: parse the URL, enforce
+    //! the production TLS policy, open a pool, hand the pool to
+    //! [`PostgresRootFilesystem`], and wrap the result in the standard
+    //! filesystem-backed durable-log surface.
+
+    use std::sync::Arc;
+
+    use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
+    use ironclaw_filesystem::PostgresRootFilesystem;
+    use secrecy::{ExposeSecret, SecretString};
+    use tokio_postgres::config::{Host, SslMode};
+    use tokio_postgres::{Config, NoTls};
+    use tokio_postgres_rustls::MakeRustlsConnect;
+
+    use super::{RebornEventStoreError, RebornEventStores, wrap_root_filesystem_as_event_stores};
+
+    pub(super) async fn build(
+        url: SecretString,
+    ) -> Result<RebornEventStores, RebornEventStoreError> {
+        let pool = build_pool(url).await?;
+        let filesystem = Arc::new(PostgresRootFilesystem::new(pool));
+        filesystem.run_migrations().await.map_err(|source| {
+            RebornEventStoreError::backend("postgres", "run migrations", source)
+        })?;
+        wrap_root_filesystem_as_event_stores(filesystem)
+    }
+
+    async fn build_pool(url: SecretString) -> Result<Pool, RebornEventStoreError> {
+        let raw_url = url.expose_secret();
+        let mut pg_config: Config = raw_url.parse().map_err(|source| {
+            RebornEventStoreError::backend("postgres", "parse connection string", source)
+        })?;
+        let manager_config = ManagerConfig {
+            recycling_method: RecyclingMethod::Fast,
+        };
+        let local = is_local_postgres_config(&pg_config);
+        let local_wants_tls = local && matches!(pg_config.get_ssl_mode(), SslMode::Require);
+        let manager = if local && !local_wants_tls {
+            // Local without an explicit `sslmode=require`: NoTls is acceptable
+            // because the connection never leaves the host.
+            Manager::from_config(pg_config, NoTls, manager_config)
+        } else {
+            if !local {
+                // Remote: TLS is mandatory. Reject `sslmode=disable` and upgrade
+                // `Prefer` to `Require` before handing the config to the manager.
+                enforce_remote_ssl_mode(&mut pg_config)?;
+            }
+            // For local-with-`sslmode=require` we pass the config through
+            // unchanged: the user explicitly opted in to TLS, so we route
+            // through the rustls connector. Use cases include TLS-only
+            // loopback Postgres and a local TLS-terminating proxy.
+            let tls = make_rustls_connector()?;
+            Manager::from_config(pg_config, tls, manager_config)
+        };
+        Pool::builder(manager)
+            .runtime(Runtime::Tokio1)
+            .build()
+            .map_err(|source| RebornEventStoreError::backend("postgres", "build pool", source))
+    }
+
+    /// Returns true if the parsed Postgres `Config` targets only loopback
+    /// hosts or Unix sockets. Anything else — including mixed lists where a
+    /// remote host appears alongside a socket path — is treated as remote
+    /// and must use TLS.
+    ///
+    /// We inspect the parsed `Config` rather than re-parsing the raw
+    /// connection string so that all libpq forms are normalised:
+    /// - `host=db.example.com` (keyword TCP)
+    /// - `hostaddr=10.0.0.5` (numeric-IP keyword, returns no `Host` entry but
+    ///   does add a hostaddr)
+    /// - `postgresql:///db?host=db.example.com` (URL with empty authority +
+    ///   `host` query param)
+    /// - `host=/var/run/postgresql,db.example.com` (mixed list)
+    fn is_local_postgres_config(config: &Config) -> bool {
+        let hosts = config.get_hosts();
+        let hostaddrs = config.get_hostaddrs();
+
+        // Empty host list means libpq's compiled-in default socket directory —
+        // treat as local only if there are no overriding hostaddrs.
+        if hosts.is_empty() && hostaddrs.is_empty() {
+            return true;
+        }
+
+        for host in hosts {
+            match host {
+                Host::Unix(_) => continue,
+                Host::Tcp(name) => {
+                    if !is_local_host_literal(name) {
+                        return false;
+                    }
+                }
+            }
+        }
+        for addr in hostaddrs {
+            if !addr.is_loopback() && !addr.is_unspecified() {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn is_local_host_literal(host: &str) -> bool {
+        matches!(
+            host,
+            "localhost" | "127.0.0.1" | "::1" | "[::1]" | "0.0.0.0"
+        )
+    }
+
+    /// Reject `sslmode=disable` for any non-local Postgres config.
+    ///
+    /// Passing a rustls connector to `tokio-postgres` is not enough on its
+    /// own: the connector is *only* used when `Config::ssl_mode` is `Prefer`
+    /// or `Require`. An explicit `sslmode=disable` in the connection string
+    /// returns a plaintext stream before the connector is consulted, so a
+    /// misconfigured production URL can silently downgrade. We reject that
+    /// here, and force `Require` if the config left the default `Prefer` in
+    /// place — otherwise `tokio-postgres` would still complete a `Prefer`
+    /// connection that the server happens to refuse TLS on.
+    fn enforce_remote_ssl_mode(config: &mut Config) -> Result<(), RebornEventStoreError> {
+        match config.get_ssl_mode() {
+            SslMode::Disable => Err(RebornEventStoreError::RemotePostgresClearTextDisabled),
+            SslMode::Prefer => {
+                config.ssl_mode(SslMode::Require);
+                Ok(())
+            }
+            SslMode::Require => Ok(()),
+            // Forward-compat: future tokio-postgres SslMode variants we don't
+            // recognise are treated as already strict.
+            _ => Ok(()),
+        }
+    }
+
+    /// Build a rustls TLS connector for remote Postgres connections.
+    ///
+    /// Mirrors `src/db/tls.rs`: prefer the platform's native certificate
+    /// store, fall back to Mozilla's bundled webpki roots when the system
+    /// store is empty.
+    fn make_rustls_connector() -> Result<MakeRustlsConnect, RebornEventStoreError> {
+        let mut root_store = rustls::RootCertStore::empty();
+        let native = rustls_native_certs::load_native_certs();
+        for error in &native.errors {
+            tracing::warn!("postgres event-store: error loading system root certs: {error}");
+        }
+        for cert in native.certs {
+            if let Err(error) = root_store.add(cert) {
+                tracing::warn!("postgres event-store: skipping invalid system root cert: {error}");
+            }
+        }
+        if root_store.is_empty() {
+            tracing::info!(
+                "postgres event-store: no system root certificates found, using bundled Mozilla roots"
+            );
+            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        }
+        let config = rustls::ClientConfig::builder_with_provider(
+            rustls::crypto::ring::default_provider().into(),
+        )
+        .with_safe_default_protocol_versions()
+        .map_err(|source| RebornEventStoreError::backend("postgres", "configure rustls", source))?
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+        Ok(MakeRustlsConnect::new(config))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{Config, enforce_remote_ssl_mode, is_local_postgres_config};
+        use crate::RebornEventStoreError;
+        use tokio_postgres::config::SslMode;
+
+        fn parse(url: &str) -> Config {
+            url.parse::<Config>().unwrap_or_else(|e| {
+                panic!("test connection string `{url}` failed to parse: {e}");
+            })
+        }
+
+        fn is_local(url: &str) -> bool {
+            is_local_postgres_config(&parse(url))
+        }
+
+        #[test]
+        fn local_postgres_urls_are_recognised() {
+            for url in [
+                "postgres://user:pass@localhost/db",
+                "postgres://user@127.0.0.1:5432/db",
+                "postgresql://localhost/db",
+                "postgres://[::1]/db",
+                "postgres://user@0.0.0.0/db",
+                // Unix-socket-style: libpq treats these as local.
+                "host=/var/run/postgresql user=ironclaw dbname=ironclaw",
+            ] {
+                assert!(is_local(url), "expected `{url}` to be detected as local");
+            }
+        }
+
+        #[test]
+        fn remote_postgres_urls_require_tls() {
+            for url in [
+                "postgres://user:pass@db.internal/db",
+                "postgres://user@10.0.0.5:5432/db",
+                "postgresql://user@managed-postgres.example.com/db",
+                "postgres://user@[2001:db8::1]/db",
+            ] {
+                assert!(!is_local(url), "expected `{url}` to require TLS");
+            }
+        }
+
+        #[test]
+        fn libpq_keyword_strings_to_remote_hosts_require_tls() {
+            // Regression for the High-severity finding on PR #3171: libpq
+            // keyword form was previously treated as local because the
+            // original check fired on `!url.contains("://")`.
+            for url in [
+                "host=db.example.com user=event_user dbname=ironclaw",
+                "host=10.0.0.5 port=5432 user=ironclaw",
+                "user=ironclaw host=managed-pg.internal",
+            ] {
+                assert!(
+                    !is_local(url),
+                    "expected libpq keyword string `{url}` to require TLS"
+                );
+            }
+        }
+
+        #[test]
+        fn libpq_keyword_strings_without_host_or_with_socket_path_are_local() {
+            for url in [
+                // No host= keyword: libpq default = local socket.
+                "user=ironclaw dbname=ironclaw",
+                // Socket directory.
+                "host=/var/run/postgresql user=ironclaw dbname=ironclaw",
+                // Localhost literal.
+                "host=localhost user=ironclaw",
+                "host=127.0.0.1 user=ironclaw",
+            ] {
+                assert!(is_local(url), "expected `{url}` to be detected as local");
+            }
+        }
+
+        #[test]
+        fn libpq_hostaddr_to_remote_address_requires_tls() {
+            // Regression for the High-severity finding (round 2) on PR
+            // #3171: hostaddr= is a libpq keyword that bypassed the previous
+            // raw-string detector entirely; switching to
+            // Config::get_hostaddrs() catches it.
+            assert!(!is_local("hostaddr=10.0.0.5 user=ironclaw"));
+            assert!(!is_local("hostaddr=2001:db8::1 user=ironclaw"));
+        }
+
+        #[test]
+        fn libpq_hostaddr_to_loopback_is_local() {
+            assert!(is_local("hostaddr=127.0.0.1 user=ironclaw"));
+            assert!(is_local("hostaddr=::1 user=ironclaw"));
+        }
+
+        #[test]
+        fn libpq_mixed_socket_and_remote_host_list_requires_tls() {
+            // host=/var/run/postgresql,db.example.com — first socket, second
+            // TCP. tokio-postgres parses this as two Host entries; if any
+            // TCP host isn't loopback the whole config is remote.
+            assert!(!is_local(
+                "host=/var/run/postgresql,db.example.com user=ironclaw"
+            ));
+        }
+
+        #[test]
+        fn url_with_empty_authority_and_query_host_uses_query_host() {
+            // postgresql:///db?host=db.example.com — empty authority routes
+            // to a host listed in the query string, which the parsed Config
+            // exposes as a TCP Host entry.
+            assert!(!is_local(
+                "postgresql:///db?host=db.example.com&user=ironclaw"
+            ));
+        }
+
+        #[test]
+        fn enforce_remote_ssl_mode_rejects_disable() {
+            let mut config = parse("postgres://user@db.example.com/db?sslmode=disable");
+            let err = enforce_remote_ssl_mode(&mut config)
+                .expect_err("sslmode=disable on remote must be rejected");
+            assert!(matches!(
+                err,
+                RebornEventStoreError::RemotePostgresClearTextDisabled
+            ));
+        }
+
+        #[test]
+        fn enforce_remote_ssl_mode_upgrades_prefer_to_require() {
+            // Default sslmode is `prefer`, which silently downgrades when
+            // the server declines TLS — for remote we force `require`.
+            let mut config = parse("postgres://user@db.example.com/db");
+            assert!(matches!(config.get_ssl_mode(), SslMode::Prefer));
+            enforce_remote_ssl_mode(&mut config).expect("default prefer must upgrade to require");
+            assert!(matches!(config.get_ssl_mode(), SslMode::Require));
+        }
+
+        #[test]
+        fn enforce_remote_ssl_mode_keeps_require() {
+            let mut config = parse("postgres://user@db.example.com/db?sslmode=require");
+            enforce_remote_ssl_mode(&mut config).expect("require should pass through");
+            assert!(matches!(config.get_ssl_mode(), SslMode::Require));
+        }
+
+        // --- libpq quoted / whitespace-tolerant keyword strings (issues #35, #47) ---
+
+        #[test]
+        fn libpq_quoted_socket_path_is_local() {
+            // Regression for review finding #35: a libpq DSN that quotes the
+            // socket path was previously misclassified as remote because the
+            // string-level detector saw the value as `'/var/run/postgresql'`
+            // (with the leading quote) instead of the unquoted path.
+            // Switching to `Config::get_hosts()` parses the libpq
+            // single-quote form correctly: the value is a
+            // `Host::Unix("/var/run/postgresql")` and the config is local.
+            // (libpq only recognises single quotes; double quotes are not a
+            // libpq quoting mechanism.)
+            let url = "host='/var/run/postgresql' user=ironclaw dbname=ironclaw";
+            assert!(
+                is_local(url),
+                "expected quoted-socket DSN `{url}` to be local"
+            );
+        }
+
+        #[test]
+        fn libpq_whitespace_around_equals_classifies_remote_correctly() {
+            // Regression for review finding #47: tokenising the raw DSN on
+            // whitespace and looking for `host=` previously caused a
+            // remote-host DSN with whitespace around `=` to be treated as
+            // having no host, falling through to NoTls. Parsing through
+            // `tokio_postgres::Config` normalises this — the resulting
+            // `Host` entry is a TCP host that fails the local-literal
+            // check.
+            for url in [
+                "host = db.internal user=ironclaw",
+                "host =db.internal user=ironclaw",
+                "host= db.internal user=ironclaw",
+            ] {
+                assert!(
+                    !is_local(url),
+                    "expected whitespace-keyword DSN `{url}` to require TLS"
+                );
+            }
+        }
     }
 }
 
@@ -490,14 +1045,6 @@ enum StreamKind {
 }
 
 impl StreamKind {
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    fn as_db_str(self) -> &'static str {
-        match self {
-            Self::Runtime => "runtime",
-            Self::Audit => "audit",
-        }
-    }
-
     fn directory(self) -> &'static Path {
         match self {
             Self::Runtime => Path::new("events"),

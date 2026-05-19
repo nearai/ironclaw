@@ -70,6 +70,7 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
                 checkpoint_state_ref: None,
                 max_messages: Some(context_limit_hint(self.config.context_limit)),
                 inline_messages: Vec::new(),
+                capability_view: None,
             })
             .await
             .map_err(|error| map_host_error("prompt", error))?;
@@ -79,6 +80,7 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
                 messages: prompt_bundle.messages,
                 surface_version: prompt_bundle.surface_version,
                 model_preference: None,
+                capability_view: None,
             })
             .await
             .map_err(|error| map_host_error("model", error))?;

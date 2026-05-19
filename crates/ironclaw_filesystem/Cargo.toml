@@ -17,6 +17,7 @@ libsql = ["dep:libsql"]
 
 [dependencies]
 async-trait = "0.1"
+blake3 = "1"
 deadpool-postgres = { version = "0.14", optional = true }
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
 ironclaw_safety = { path = "../ironclaw_safety", version = "0.2.2" }

@@ -485,10 +485,13 @@ async fn build_redacted_trace_envelope(
     user_id: &str,
     options: TraceCaptureOptions,
 ) -> Result<TraceContributionEnvelope, (StatusCode, String)> {
-    let store = state.store.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Database not available".to_string(),
-    ))?;
+    let store = state
+        .store // dispatch-exempt: trace capture reads conversation history for export, not a tool mutation.
+        .as_ref()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Database not available".to_string(),
+        ))?;
     let thread_id = resolve_trace_thread_id(state, user_id, options.thread_id).await?;
     let tenant_store = crate::tenant::TenantScope::new(user_id.to_string(), Arc::clone(store));
 
@@ -547,10 +550,13 @@ async fn resolve_trace_thread_id(
         return Ok(thread_id);
     }
 
-    let session_manager = state.session_manager.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Session manager not available".to_string(),
-    ))?;
+    let session_manager = state
+        .session_manager // dispatch-exempt: resolves current active thread for trace export routing.
+        .as_ref()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Session manager not available".to_string(),
+        ))?;
     let session = session_manager.get_or_create_session(user_id).await;
     let session = session.lock().await;
     session
