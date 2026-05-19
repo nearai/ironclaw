@@ -1,3 +1,7 @@
+mod support;
+
+use support::legacy_capability_fixture_to_v2_with_schema_suffix as legacy_capability_fixture_to_v2;
+
 use std::{
     collections::BTreeMap,
     sync::{
@@ -9,7 +13,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
@@ -726,12 +730,22 @@ fn runtime_with(
 fn registry_from_manifests<const N: usize>(manifests: [(&str, &str); N]) -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     for (manifest, root) in manifests {
-        let manifest = ExtensionManifest::parse(manifest).unwrap();
+        let manifest = parse_manifest(manifest);
         let package =
             ExtensionPackage::from_manifest(manifest, VirtualPath::new(root).unwrap()).unwrap();
         registry.insert(package).unwrap();
     }
     registry
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
 }
 
 fn trust_policy_for<const N: usize>(

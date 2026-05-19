@@ -4,6 +4,7 @@ mod reborn_support;
 mod support;
 
 use ironclaw_product_adapters::ProductInboundAck;
+use ironclaw_threads::{MessageKind, MessageStatus};
 use ironclaw_turns::TurnStatus;
 use reborn_support::harness::RebornBinaryE2EHarness;
 
@@ -29,6 +30,23 @@ async fn reborn_minimal_dispatch_parity() {
         .assert_final_reply("minimal dispatch complete")
         .await
         .expect("final reply");
+    let history = harness.history().await.expect("thread history");
+    assert!(
+        history
+            .iter()
+            .any(|message| message.kind == MessageKind::User
+                && message.status == MessageStatus::Submitted
+                && message.content.as_deref() == Some("ping")),
+        "history accessor should expose the submitted inbound message"
+    );
+    assert!(
+        history
+            .iter()
+            .any(|message| message.kind == MessageKind::Assistant
+                && message.status == MessageStatus::Finalized
+                && message.content.as_deref() == Some("minimal dispatch complete")),
+        "history accessor should expose the finalized assistant reply"
+    );
     assert_eq!(harness.model_requests().len(), 1);
 
     harness.shutdown().await;

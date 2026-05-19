@@ -102,6 +102,11 @@ const TEST_CAPABILITY_ID: &str = "test.echo";
 const TEST_CAPABILITY_SURFACE_VERSION: &str = "trace_replay_v1";
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+type HarnessCapabilityParts = (
+    Arc<dyn LoopCapabilityPortFactory>,
+    Arc<dyn CapabilitySurfaceProfileResolver>,
+    HarnessCapabilityRecorder,
+);
 
 pub struct RebornBinaryE2EHarness {
     ingress: RebornTestIngress,
@@ -187,20 +192,6 @@ impl RebornBinaryE2EHarness {
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
         let host_runtime = Arc::new(HostRuntimeCapabilityHarness::file_tools().await?);
-        Self::with_model_gateway_capability_mode(
-            conversation_id,
-            model_gateway,
-            HarnessCapabilityMode::HostRuntime(host_runtime),
-            false,
-        )
-        .await
-    }
-
-    pub async fn with_host_runtime_write_only(
-        conversation_id: &str,
-        model_gateway: RebornTraceReplayModelGateway,
-    ) -> HarnessResult<Self> {
-        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::write_only().await?);
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -509,6 +500,10 @@ impl RebornBinaryE2EHarness {
         self.model_gateway.remaining_responses()
     }
 
+    pub fn assert_model_exhausted(&self) {
+        self.model_gateway.assert_exhausted();
+    }
+
     pub fn capability_invocations(&self) -> Vec<CapabilityInvocation> {
         self.capability_recorder.invocations()
     }
@@ -618,11 +613,7 @@ impl HarnessCapabilityMode {
     fn into_parts(
         self,
         milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
-    ) -> HarnessResult<(
-        Arc<dyn LoopCapabilityPortFactory>,
-        Arc<dyn CapabilitySurfaceProfileResolver>,
-        HarnessCapabilityRecorder,
-    )> {
+    ) -> HarnessResult<HarnessCapabilityParts> {
         match self {
             Self::Recording(port) => {
                 let port = Arc::new(port);
@@ -688,33 +679,6 @@ impl HostRuntimeCapabilityHarness {
             ],
             effect_kinds: vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
             user_id: UserId::new("reborn-e2e-builtin-user")?,
-            invocations: Arc::new(Mutex::new(Vec::new())),
-        })
-    }
-
-    async fn write_only() -> HarnessResult<Self> {
-        let root = Arc::new(tempfile::tempdir()?);
-        let storage_root = root.path().join("local-dev");
-        let workspace_root = storage_root.join("workspace");
-        std::fs::create_dir_all(&workspace_root)?;
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            "reborn-e2e-write-only",
-            storage_root,
-        ))
-        .await?;
-        let runtime = services
-            .host_runtime
-            .ok_or("local-dev Reborn services missing host runtime")?;
-        let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
-        Ok(Self {
-            runtime,
-            io: Arc::new(ProductLiveCapabilityIo::default()),
-            root,
-            workspace_root,
-            mounts,
-            capability_ids: vec![CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?],
-            effect_kinds: vec![EffectKind::WriteFilesystem],
-            user_id: UserId::new("reborn-e2e-write-only-user")?,
             invocations: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -914,6 +878,10 @@ impl RecordingTestCapabilityPort {
 
     fn invocations(&self) -> Vec<CapabilityInvocation> {
         self.invocations.lock().unwrap().clone()
+    }
+
+    pub fn invocation_count(&self) -> usize {
+        self.invocations.lock().unwrap().len()
     }
 
     fn completed_result(&self) -> CapabilityOutcome {

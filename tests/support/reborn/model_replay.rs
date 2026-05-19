@@ -41,7 +41,10 @@ pub struct RebornTraceReplayModelGateway {
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum RebornModelReplayStep {
-    Response(HostManagedModelResponse),
+    Response {
+        response: HostManagedModelResponse,
+        expected_tool_results: Vec<ExpectedToolResult>,
+    },
     ProviderToolCalls {
         calls: Vec<RebornScriptedProviderToolCall>,
         expected_tool_results: Vec<ExpectedToolResult>,
@@ -118,21 +121,20 @@ impl RebornTraceReplayModelGateway {
         Self::from_steps(
             steps
                 .into_iter()
-                .map(|step| ReplayStep {
-                    output: match &step {
-                        RebornModelReplayStep::Response(response) => {
-                            ReplayOutput::Response(response.clone())
-                        }
-                        RebornModelReplayStep::ProviderToolCalls { calls, .. } => {
-                            ReplayOutput::ProviderToolCalls(calls.clone())
-                        }
+                .map(|step| match step {
+                    RebornModelReplayStep::Response {
+                        response,
+                        expected_tool_results,
+                    } => ReplayStep {
+                        output: ReplayOutput::Response(response),
+                        expected_tool_results,
                     },
-                    expected_tool_results: match step {
-                        RebornModelReplayStep::ProviderToolCalls {
-                            expected_tool_results,
-                            ..
-                        } => expected_tool_results,
-                        RebornModelReplayStep::Response(_) => Vec::new(),
+                    RebornModelReplayStep::ProviderToolCalls {
+                        calls,
+                        expected_tool_results,
+                    } => ReplayStep {
+                        output: ReplayOutput::ProviderToolCalls(calls),
+                        expected_tool_results,
                     },
                 })
                 .collect(),

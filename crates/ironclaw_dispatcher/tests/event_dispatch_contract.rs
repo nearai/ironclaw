@@ -1,3 +1,7 @@
+mod support;
+
+use support::legacy_capability_fixture_to_v2;
+
 use async_trait::async_trait;
 use ironclaw_dispatcher::*;
 use ironclaw_events::*;
@@ -490,17 +494,35 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
 fn write_echo_extensions(root: &std::path::Path) {
     let wasm_root = root.join("echo-wasm");
     std::fs::create_dir_all(wasm_root).unwrap();
-    std::fs::write(root.join("echo-wasm/manifest.toml"), WASM_MANIFEST).unwrap();
+    std::fs::write(
+        root.join("echo-wasm/manifest.toml"),
+        legacy_capability_fixture_to_v2(WASM_MANIFEST),
+    )
+    .unwrap();
 
     let script_root = root.join("echo-script");
     std::fs::create_dir_all(&script_root).unwrap();
-    std::fs::write(script_root.join("manifest.toml"), SCRIPT_MANIFEST).unwrap();
+    std::fs::write(
+        script_root.join("manifest.toml"),
+        legacy_capability_fixture_to_v2(SCRIPT_MANIFEST),
+    )
+    .unwrap();
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse(manifest).unwrap();
+    let manifest = parse_manifest(manifest);
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
 }
 
 fn sample_scope() -> ResourceScope {

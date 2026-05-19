@@ -12,7 +12,7 @@ use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRuntime};
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRuntime, ManifestSource};
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
@@ -780,7 +780,12 @@ fn registry_with_package(manifest: &str) -> ironclaw_extensions::ExtensionRegist
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse(manifest).unwrap();
+    let manifest = ExtensionManifest::parse(
+        manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
 }

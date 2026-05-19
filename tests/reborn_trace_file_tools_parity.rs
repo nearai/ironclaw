@@ -42,9 +42,10 @@ async fn reborn_trace_file_tools_parity() {
             )],
             expected_tool_results: Vec::new(),
         },
-        RebornModelReplayStep::Response(HostManagedModelResponse::assistant_reply(
-            "file trace complete",
-        )),
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply("file trace complete"),
+            expected_tool_results: Vec::new(),
+        },
     ]);
     let mut harness = RebornBinaryE2EHarness::with_host_runtime_file_capabilities(
         "room-trace-file-tools",
@@ -91,8 +92,7 @@ async fn reborn_trace_file_tools_parity() {
         |kind| matches!(kind, LoopHostMilestoneKind::CapabilityBatchCompleted { .. }),
         |kind| matches!(kind, LoopHostMilestoneKind::AssistantReplyFinalized { .. }),
     );
+    harness.assert_model_exhausted();
 
-    // Let the worker observe the terminal run before cancellation tears down the loop.
-    tokio::task::yield_now().await;
     harness.shutdown().await;
 }

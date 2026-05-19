@@ -1,30 +1,21 @@
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
-use ironclaw_host_api::{CapabilityId, EffectKind, PermissionMode};
+use ironclaw_host_api::{EffectKind, PermissionMode};
 use serde_json::{Value, json};
 
 use crate::FirstPartyCapabilityError;
 
-use super::{guest_error, input_error, resource_profile};
+use super::{first_party_capability_manifest, guest_error, input_error, resource_profile};
 
 pub const JSON_CAPABILITY_ID: &str = "builtin.json";
 
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
-    Ok(CapabilityManifest {
-        id: CapabilityId::new(JSON_CAPABILITY_ID)?,
-        description: "Parse, query, stringify, and validate JSON".to_string(),
-        effects: vec![EffectKind::DispatchCapability],
-        default_permission: PermissionMode::Allow,
-        parameters_schema: json!({
-            "type": "object",
-            "properties": {
-                "operation": { "type": "string", "enum": ["parse", "query", "stringify", "validate"] },
-                "data": {},
-                "path": { "type": "string" }
-            },
-            "required": ["operation"]
-        }),
-        resource_profile: resource_profile(),
-    })
+    first_party_capability_manifest(
+        JSON_CAPABILITY_ID,
+        "Parse, query, stringify, and validate JSON",
+        vec![EffectKind::DispatchCapability],
+        PermissionMode::Allow,
+        resource_profile(),
+    )
 }
 
 pub(super) fn dispatch(input: &Value) -> Result<Value, FirstPartyCapabilityError> {
