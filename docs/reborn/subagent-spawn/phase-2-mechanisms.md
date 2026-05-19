@@ -28,14 +28,15 @@ so each workstream can be reviewed without cross-referencing. If the Phase 1 doc
 diverges, **Phase 1 is authoritative** and this doc must be re-grounded.
 
 > **Note on a correction to the overarching doc.** README §5.3 says
-> `ironclaw_turns` gets `+ CapabilityOutcome::SpawnedChildRun` and a 5-enum
+> `ironclaw_turns` gets
+> `+ CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}` and a 5-enum
 > blocked-kind surface, and that `ironclaw_loop_support` is "no stateful stores".
 > Two refinements after grounding against the live crates:
 >
 > 1. `CapabilityOutcome` (in `ironclaw_turns/src/run_profile/host.rs`) is
->    `#[serde(rename_all = "snake_case")]` but **not** `#[non_exhaustive]`. Phase 1
->    P1.A must add `#[non_exhaustive]` *and* the `SpawnedChildRun` variant in the
->    same change, updating every in-workspace match arm
+>    `#[serde(rename_all = "snake_case")]` but **not** `#[non_exhaustive]`, and
+>    it should stay exhaustive. Phase 1 P1.A must add both subagent variants in
+>    the same workspace-green change, updating every in-workspace match arm
 >    (`capability_surface_filter.rs`, `capability_port.rs`, the agent_loop
 >    executor's outcome handling). Phase 2 assumes that is done.
 > 2. The blocked-kind surface is **5 enums, not 4** — `LoopGateKind`,
@@ -49,7 +50,6 @@ diverges, **Phase 1 is authoritative** and this doc must be re-grounded.
 // ironclaw_turns/src/run_profile/host.rs
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]                                   // P1.A adds this
 pub enum CapabilityOutcome {
     Completed(CapabilityResultMessage),
     ApprovalRequired   { gate_ref: LoopGateRef, safe_summary: String },
@@ -58,7 +58,7 @@ pub enum CapabilityOutcome {
     SpawnedProcess(ProcessHandleSummary),
     // P1.A adds:
     AwaitDependentRun  { gate_ref: LoopGateRef, safe_summary: String },
-    SpawnedChildRun    { child_run_id: TurnRunId, safe_summary: String },
+    SpawnedChildRun    { child_run_id: TurnRunId, result_ref: LoopResultRef, safe_summary: String },
     Denied(CapabilityDenied),
     Failed(CapabilityFailure),
 }
@@ -76,7 +76,7 @@ pub enum BlockedReason {
     Approval { gate_ref: GateRef },
     Auth     { gate_ref: GateRef },
     Resource { gate_ref: GateRef },
-    AwaitDependentRun { gate_ref: GateRef },        // P1.A
+    DependentRun { gate_ref: GateRef },             // P1.A
 }
 pub enum TurnStatus { /* … */ BlockedDependentRun } // P1.A persisted-enum migration
 
@@ -86,8 +86,9 @@ pub struct TurnRunRecord {
     #[serde(default)] pub parent_run_id: Option<TurnRunId>,    // P1.A
     #[serde(default)] pub subagent_depth: u32,                 // P1.A
 }
-// SubmitTurnRequest gains the same two fields (defaulted), and
-// TurnStateStore gains `children_of(run_id) -> Vec<TurnRunRecord>`.
+// SubmitTurnRequest gains the same two fields (defaulted), and TurnStateStore
+// gains `children_of(run_id) -> Vec<TurnRunRecord>` plus
+// `get_run_record(run_id) -> Option<TurnRunRecord>`.
 ```
 
 ### P1.C — `ironclaw_reborn` data (assumed present)
@@ -242,8 +243,9 @@ use ironclaw_turns::{
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityDenied, CapabilityDeniedReasonKind,
-        CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort, LoopGateRef,
-        LoopRunContext, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        CapabilityInvocation, CapabilityOutcome, LoopCapabilityPort,
+        LoopCapabilityResultWriter, LoopGateRef, LoopRunContext,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use ironclaw_threads::SessionThreadService;
@@ -265,6 +267,7 @@ pub struct SubagentSpawnDeps {
     pub flavor_resolver:  Arc<dyn SubagentFlavorResolver>,       // from ironclaw_reborn
     pub child_profiles:   Arc<dyn SubagentRunProfileBinding>,    // flavor -> RunProfileRequest
     pub spawn_input_codec: Arc<dyn SpawnSubagentInputCodec>,     // parses the tool input_ref
+    pub result_writer:   Arc<dyn LoopCapabilityResultWriter>,    // writes bg spawn result refs
 }
 
 /// Decorator. Recognises `spawn_subagent`; everything else passes through.
@@ -531,8 +534,16 @@ impl SubagentSpawnCapabilityPort {
                 self.reconcile_run_id(child_run_id, run_id, &gate_ref,
                                       args.run_in_background, parent_run_id).await?;
                 if args.run_in_background {
+                    let result_ref = self.deps.result_writer
+                        .write_capability_result(
+                            &self.run_context,
+                            &self.spawn_id,
+                            subagent_spawn_result_payload(run_id, &flavor.flavor_id),
+                        )
+                        .await?;
                     Ok(CapabilityOutcome::SpawnedChildRun {
                         child_run_id: run_id,
+                        result_ref,
                         safe_summary: format!("spawned background subagent {}", flavor.flavor_id),
                     })
                 } else {
@@ -632,8 +643,9 @@ Use a `SpyTurnCoordinator`, `SpySessionThreadService`, in-memory
 1. `non_spawn_calls_pass_through` — a batch of only non-spawn calls is forwarded
    verbatim and outcome slots are preserved 1:1.
 2. `background_spawn_returns_spawned_child_run` — `run_in_background=true` →
-   `CapabilityOutcome::SpawnedChildRun { child_run_id, .. }`; goal + background
-   record written; `submit_turn` called once.
+   `CapabilityOutcome::SpawnedChildRun { child_run_id, result_ref, .. }`; goal
+   + background record written; durable capability result written;
+   `submit_turn` called once.
 3. `blocking_spawn_returns_await_dependent_run` — `run_in_background=false` →
    `CapabilityOutcome::AwaitDependentRun { gate_ref, .. }`; awaited-set entry
    written **before** `submit_turn` (assert via spy call-order log).
@@ -1246,6 +1258,7 @@ pub struct AcceptedInboundMessage {
 
 // P1.A store query for lineage
 // TurnStateStore::children_of(run_id) -> Vec<TurnRunRecord>   (parent_run_id index)
+// TurnStateStore::get_run_record(run_id) -> Option<TurnRunRecord>
 ```
 
 > **`TurnStatus::is_terminal()`** — `matches!(self, Cancelled | Completed |
@@ -1262,7 +1275,7 @@ pub struct AcceptedInboundMessage {
 
 pub struct SubagentCompletionObserver {
     coordinator:     Arc<dyn TurnCoordinator>,
-    turn_store:      Arc<dyn TurnStateStore>,        // children_of + get run record
+    turn_store:      Arc<dyn TurnStateStore>,        // children_of + get_run_record
     thread_service:  Arc<dyn SessionThreadService>,
     gate_store:      Arc<dyn SubagentGateResolutionStore>,   // P1.C
     safety_scanner:  Arc<dyn SubagentResultSafetyScanner>,   // inbound safety_layer adapter
@@ -1648,10 +1661,10 @@ reverse. If the two PRs land in either order, P2.A must not be *merged* before
 
 | WS | Phase 1 contracts consumed |
 |---|---|
-| P2.A | `CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}`, `SubmitTurnRequest.{parent_run_id, subagent_depth}`, `SubagentGoalStore` + `rekey`, `SubagentGateResolutionStore.record_*`, flavor table |
+| P2.A | `CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}`, `SubmitTurnRequest.{parent_run_id, subagent_depth}`, `TurnStateStore.{children_of, get_run_record}`, `SubagentGoalStore` + `rekey`, `SubagentGateResolutionStore.record_*`, flavor table |
 | P2.B | `LoopInlineMessage`/`LoopInlineMessageRole` (already in `ironclaw_turns`), `SubagentGoalStore.get_goal`, `direction_md`, flavor table, `CapabilityAllowSet`/`CapabilitySurfaceProfileFilter` (already present) |
 | P2.C | `families::subagent()` + `LoopFamilyId("subagent")`, the subagent family's checkpoint payload shape, flavor table |
-| P2.D | `TurnRunRecord.parent_run_id`, `TurnStateStore.children_of` + `get_run_record`, `TurnStatus::BlockedDependentRun`, `SubagentGateResolutionStore.{record_child_result, awaited_set}` |
+| P2.D | `TurnRunRecord.parent_run_id`, `TurnStateStore.children_of` + `get_run_record`, `DefaultTurnCoordinator::with_event_sink`, `TurnStatus::BlockedDependentRun`, `SubagentGateResolutionStore.{record_child_result, awaited_set}` |
 
 ---
 
@@ -1667,7 +1680,7 @@ reverse. If the two PRs land in either order, P2.A must not be *merged* before
 | **Coalescing follow-up** drops a result if `submit_turn` `ThreadBusy` is treated as an error. | `ThreadBusy` explicitly no-ops; the pending turn loads all coalesced inbound messages (§4.6). |
 | **Fork-bomb via depth × fan-out.** | Three caps — depth, per-turn fan-out, per-tree descendants — all enforced before `submit_turn`, all rejecting without queuing (§1.6 gates 1–3 + batch fan-out check). |
 | **Untrusted child output** injected into the parent thread. | `SubagentResultSafetyScanner` wraps + sanitises + safety-scans before any storage or `accept_inbound_message` (§4.8). |
-| **`CapabilityOutcome` not `#[non_exhaustive]`** today — adding variants breaks exhaustive matches across the workspace. | P1.A adds `#[non_exhaustive]` *and* the two variants atomically, updating `capability_surface_filter.rs`, `capability_port.rs`, and the agent_loop executor in the same change (§0). |
+| **`CapabilityOutcome` remains exhaustive** — adding variants breaks exhaustive matches across the workspace. | P1.A adds the two variants atomically and keeps the enum exhaustive, updating `capability_surface_filter.rs`, `capability_port.rs`, and the agent_loop executor in the same workspace-green change (§0). |
 | **P2.A imports a P2.B helper** — merge ordering. | Sequence P2.B → P2.A, or land the agreed `materialize_goal_message` signature first (§5). |
 | **Subagent driver/family mismatch** — a profile bound to the wrong descriptor is silently un-runnable. | `register_subagent_run_profiles` builds every flavor profile from the *same* `subagent_driver_descriptor()`; `PlannedDriver::run` validates descriptor assignment; test `subagent_profile_resolves_to_subagent_driver` (§3.7). |
 

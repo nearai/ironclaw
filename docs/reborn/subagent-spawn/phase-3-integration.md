@@ -67,8 +67,8 @@ divergence is logged in the PR description.
 | Phase 2 WS | Artifact Phase 3 consumes | Where it is used in Phase 3 |
 |---|---|---|
 | **P1.B / P2.C** | `ironclaw_agent_loop::families::subagent() -> LoopFamily` with `LoopFamilyId::new("subagent")` | `app_loop_family.rs::build_loop_family_registry` |
-| **P1.B** | `GateKind::AwaitDependentRun` (sealed) + `LoopGateKind::AwaitDependentRun`, `LoopBlockedKind::AwaitDependentRun`, `BlockedReason::AwaitDependentRun`, `TurnStatus::BlockedDependentRun` | flows through unchanged; asserted in §4.2 / §4.3 |
-| **P1.A** | `CapabilityOutcome::SpawnedChildRun { child_run_id }`; `TurnRunRecord.parent_run_id`, `.subagent_depth`; `TurnStateStore::children_of(run_id)` query | capability port, observer, §4 assertions |
+| **P1.A / P1.B** | `GateKind::AwaitDependentRun` (sealed) + `LoopGateKind::AwaitDependentRun`, `LoopBlockedKind::AwaitDependentRun`, `BlockedReason::DependentRun`, `TurnStatus::BlockedDependentRun` | flows through unchanged; asserted in §4.2 / §4.3 |
+| **P1.A** | `CapabilityOutcome::SpawnedChildRun { child_run_id, result_ref, safe_summary }`; `CapabilityOutcome::AwaitDependentRun { gate_ref, safe_summary }`; `SubmitTurnRequest` / `TurnRunRecord` lineage fields; `TurnStateStore::{children_of, get_run_record}` queries; `DefaultTurnCoordinator::with_event_sink` | capability port, observer, §4 assertions |
 | **P2.C** | `subagent_planned_driver()` building a `PlannedDriver` over the `subagent` family with its own descriptor + checkpoint schema | `planned_driver_factory.rs` |
 | **P2.A** | The spawn-capable capability port type (call it `SpawnCapableLoopCapabilityPort` / its factory) and its `spawn_subagent` capability-id constant | `subagent_runtime.rs` |
 | **P2.B** | prompt composition (direction system message + `## Task` user message) — internal to the capability port / context port; Phase 3 only asserts the *effect* (child sees the goal) |
@@ -544,15 +544,13 @@ pub enum SubagentSeed {
 mode:
 
 - **background** (`run_in_background = true`):
-  `CapabilityOutcome::SpawnedChildRun { child_run_id }` (P1.A variant). The
-  executor threads `child_run_id` back as the tool result. The parent turn
-  completes normally.
+  `CapabilityOutcome::SpawnedChildRun { child_run_id, result_ref, safe_summary }`
+  (P1.A variant). The executor pushes `result_ref` as the tool result and keeps
+  `child_run_id` for lineage/observability. The parent turn completes normally.
 - **blocking** (`run_in_background = false`):
-  a `CapabilityOutcome` carrying an `AwaitDependentRun` gate
-  (`CapabilityOutcome::ApprovalRequired`-shaped, but with the
-  `LoopGateKind::AwaitDependentRun` discriminant — exact variant name is P1.A's
-  to fix). The executor checkpoints `BeforeBlock` and returns
-  `LoopExit::Blocked` with `LoopBlockedKind::AwaitDependentRun`.
+  `CapabilityOutcome::AwaitDependentRun { gate_ref, safe_summary }`. The
+  executor maps it to `GateKind::AwaitDependentRun`, checkpoints `BeforeBlock`,
+  and returns `LoopExit::Blocked` with `LoopBlockedKind::AwaitDependentRun`.
 - **rejected** (depth / fan-out / nesting / unknown flavor / `Fork`):
   `CapabilityOutcome::Denied(CapabilityDenied { reason_kind, safe_summary })`
   with a typed `reason_kind` — `subagent_depth_exceeded`,
@@ -578,7 +576,7 @@ composition** (`build_subagent_runtime`) with these substitutions:
 
 | Component | Real or test double | Why |
 |---|---|---|
-| `TurnStateStore` + `TurnRunTransitionPort` | in-memory impl from `ironclaw_turns` test support (the same one `coordinator` tests use) | needs `children_of`, `parent_run_id` — real query semantics |
+| `TurnStateStore` + `TurnRunTransitionPort` | in-memory impl from `ironclaw_turns` test support (the same one `coordinator` tests use) | needs `children_of`, `get_run_record`, `parent_run_id` — real query semantics |
 | `SessionThreadService` | in-memory thread service | child threads must be creatable; transcript must be readable |
 | `HostManagedModelGateway` | **scripted** gateway — per-thread script keyed by `thread_id` | parent emits `spawn_subagent` tool calls; children emit a reply |
 | `BoundedSubagentGoalStore` | **real** | durability + bounded eviction are under test |
@@ -1287,11 +1285,11 @@ What must pass specifically:
 
 - **`cargo fmt`** — clean. All new files (`subagent_runtime.rs`, the two test
   files) and all edits formatted.
-- **`cargo clippy`** — zero warnings. Watch for: unused `Arc::clone`s in the
-  wiring, `#[non_exhaustive]` match arms newly added to wire-stable enums
-  (README §10 — `CapabilityOutcome`, `LoopGateKind`, `LoopBlockedKind`,
-  `BlockedReason`, `TurnStatus`) all updated *atomically* in this PR so no
-  non-exhaustive-match warning fires.
+- **`cargo clippy`** — zero warnings. Watch for unused `Arc::clone`s in the
+  wiring and for exhaustive matches on the new contract variants from README
+  §10 (`CapabilityOutcome`, `LoopGateKind`, `LoopBlockedKind`, `BlockedReason`,
+  `TurnStatus`). `CapabilityOutcome`, `BlockedReason`, and `TurnStatus` remain
+  deliberately exhaustive; do not paper over them with catch-all arms.
 - **`cargo test -p ironclaw_reborn`** — the eight E2E tests (§5), the ten
   wiring tests (§6), and the existing `production_readiness.rs` /
   `planned_driver_e2e.rs` / `driver_registry.rs` tests still pass. The
@@ -1315,10 +1313,11 @@ Execute strictly top-to-bottom — each step depends on the prior. Steps marked
 1. **[P2]** Confirm `ironclaw_agent_loop::families::subagent()` exists and
    `LoopFamilyId::new("subagent")` validates. *(P1.B / P2.C)*
 2. **[P2]** Confirm the Phase 1 contract additions are merged:
-   `CapabilityOutcome::SpawnedChildRun`, `LoopGateKind::AwaitDependentRun`,
-   `LoopBlockedKind::AwaitDependentRun`, `BlockedReason::AwaitDependentRun`,
-   `TurnStatus::BlockedDependentRun`, `TurnRunRecord.parent_run_id`,
-   `.subagent_depth`, `TurnStateStore::children_of`. *(P1.A, P1.B)*
+   `CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}`,
+   `LoopGateKind::AwaitDependentRun`, `LoopBlockedKind::AwaitDependentRun`,
+   `BlockedReason::DependentRun`, `TurnStatus::BlockedDependentRun`,
+   `SubmitTurnRequest` / `TurnRunRecord` lineage fields,
+   `TurnStateStore::{children_of, get_run_record}`. *(P1.A, P1.B)*
 3. **[P2]** Confirm `DefaultTurnCoordinator::with_event_sink` exists (or get it
    added to P1.A — it is a coordination contract, not Reborn composition).
 4. **[P2]** Confirm the spawn-capable capability port + factory and the

@@ -8,8 +8,9 @@
 This document is the detailed, implementer-facing spec for **Phase 1** of the
 subagent-spawn feature. Phase 1 lands the *contracts and isolated units* that
 Phase 2 (mechanisms) and Phase 3 (integration) build on. It is three
-independently-reviewable PRs that touch three different crates and run **fully
-in parallel** — see §0 for the shared-name contract that makes that possible.
+independently-reviewable PRs, but **P1.B depends on P1.A** if each PR must build
+against the whole workspace: P1.B maps the new `ironclaw_turns` gate kinds in
+the executor. P1.C is independent. See §0 and §4 for the exact ordering.
 
 Every type definition, field name, and signature in this doc was checked against
 the live worktree. Where the overarching design named something inaccurately,
@@ -27,7 +28,8 @@ they are the seam.
 
 | Concept | Exact name | Owner | Consumers |
 |---|---|---|---|
-| New `CapabilityOutcome` variant | `SpawnedChildRun { child_run_id: TurnRunId }` | P1.A | P2.A produces it; executor (P2/P3) reads it |
+| New `CapabilityOutcome` variant | `SpawnedChildRun { child_run_id: TurnRunId, result_ref: LoopResultRef, safe_summary: String }` | P1.A | P2.A produces it; executor pushes the result ref |
+| New `CapabilityOutcome` variant | `AwaitDependentRun { gate_ref: LoopGateRef, safe_summary: String }` | P1.A | P2.A produces it; executor maps it to `GateKind::AwaitDependentRun` |
 | New `LoopGateKind` variant | `AwaitDependentRun` | P1.A | executor `loop_gate_kind` (P3) |
 | New `LoopBlockedKind` variant | `AwaitDependentRun` | P1.A | executor `blocked_kind` (P3) |
 | New `BlockedReason` variant | `DependentRun { gate_ref: GateRef }` | P1.A | coordinator, runner (P2/P3) |
@@ -36,11 +38,14 @@ they are the seam.
 | New `LoopFamilyId` value | `"subagent"` (wire string) | P1.B | reborn driver binding (P2.C) |
 | New lineage fields on `TurnRunRecord` | `parent_run_id: Option<TurnRunId>`, `subagent_depth: u32` | P1.A | reborn submit path (P2.A), observer (P2.D) |
 | New store query | `children_of(&self, run_id: TurnRunId)` | P1.A | observer cancellation subtree walk (P2.D) |
+| New store query | `get_run_record(&self, run_id: TurnRunId)` | P1.A | observer parent lookup for terminal child events (P2.D) |
+| New coordinator hook | `DefaultTurnCoordinator::with_event_sink(Arc<dyn TurnEventSink>)` | P1.A | live `SubagentCompletionObserver` notification (P2.D/P3) |
 
 ### 0.2 Wire-string contract for the new enum variants
 
-All five wire-stable `ironclaw_turns` enums and the one `ironclaw_agent_loop`
-enum gain exactly one variant. The serialized wire strings are frozen here:
+Five wire-stable `ironclaw_turns` enums and the one `ironclaw_agent_loop` enum
+gain the additive variants below. `CapabilityOutcome` gains two variants; every
+other enum gains one. The serialized wire strings are frozen here:
 
 | Enum | Rust variant | `#[serde]` wire string |
 |---|---|---|
@@ -48,7 +53,8 @@ enum gain exactly one variant. The serialized wire strings are frozen here:
 | `LoopBlockedKind` | `AwaitDependentRun` | `"await_dependent_run"` (enum has `rename_all = "snake_case"`) |
 | `BlockedReason` | `DependentRun { gate_ref }` | `{"DependentRun":{"gate_ref":"…"}}` — **no `rename_all`** on this enum; variant tag is PascalCase, matching the existing `Approval`/`Auth`/`Resource` arms |
 | `TurnStatus` | `BlockedDependentRun` | `"BlockedDependentRun"` — **no `rename_all`** on this enum; variant is PascalCase, matching the existing `BlockedApproval` etc. |
-| `CapabilityOutcome` | `SpawnedChildRun { child_run_id }` | `{"spawned_child_run":{"child_run_id":"…"}}` — enum has `rename_all = "snake_case"` |
+| `CapabilityOutcome` | `SpawnedChildRun { child_run_id, result_ref, safe_summary }` | `{"spawned_child_run":{"child_run_id":"…","result_ref":"…","safe_summary":"…"}}` — enum has `rename_all = "snake_case"` |
+| `CapabilityOutcome` | `AwaitDependentRun { gate_ref, safe_summary }` | `{"await_dependent_run":{"gate_ref":"…","safe_summary":"…"}}` — enum has `rename_all = "snake_case"` |
 | `GateKind` (`agent_loop`) | `AwaitDependentRun` | `"await_dependent_run"` (enum has `rename_all = "snake_case"`) |
 
 > **[CORRECTION]** The overarching doc (§10) lumps `BlockedReason` and
@@ -60,8 +66,10 @@ enum gain exactly one variant. The serialized wire strings are frozen here:
 
 ### 0.3 Parallelism
 
-- P1.A, P1.B, P1.C have **no compile-time dependency on each other**. Each is
-  buildable and testable in isolation against its own crate.
+- P1.C has **no compile-time dependency** on P1.A or P1.B.
+- P1.B has a deliberate compile-time dependency on P1.A if the workspace build
+  must stay green, because it maps `GateKind::AwaitDependentRun` to P1.A's new
+  `LoopGateKind` / `LoopBlockedKind` variants.
 - The names in §0.1/§0.2 are the only coupling. They are string/identifier
   constants — agree once, then never touch the other workstream.
 - Risk: if a name drifts, Phase 2 fails to compile. Mitigation — land §0 as a
@@ -79,20 +87,24 @@ durable lineage fields on `TurnRunRecord`, and a `children_of` store query.
 
 | File | Change |
 |---|---|
-| `crates/ironclaw_turns/src/run_profile/host.rs` | + `CapabilityOutcome::SpawnedChildRun`; + `LoopGateKind::AwaitDependentRun`; update `CapabilityOutcome::is_suspension` |
+| `crates/ironclaw_turns/src/run_profile/host.rs` | + `CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}`; + `LoopGateKind::AwaitDependentRun`; update `CapabilityOutcome::is_suspension` |
 | `crates/ironclaw_turns/src/status.rs` | + `TurnStatus::BlockedDependentRun`; + `BlockedReason::DependentRun`; update `is_terminal`, `keeps_active_lock` (no behavior change, but re-verify); update `BlockedReason::status` / `gate_ref` |
 | `crates/ironclaw_turns/src/loop_exit.rs` | + `LoopBlockedKind::AwaitDependentRun`; update `LoopBlockedKind::to_blocked_reason` |
+| `crates/ironclaw_turns/src/request.rs` | + `parent_run_id`, `subagent_depth` on `SubmitTurnRequest` |
 | `crates/ironclaw_turns/src/store.rs` | + `parent_run_id`, `subagent_depth` on `TurnRunRecord`; + `children_of` on `TurnStateStore` trait |
+| `crates/ironclaw_turns/src/coordinator.rs` | + optional `TurnEventSink` on `DefaultTurnCoordinator`; publish submit/resume/cancel lifecycle events best-effort |
 | `crates/ironclaw_turns/src/memory.rs` | + `parent_run_id`/`subagent_depth` on `RunRecord`; thread through `persistence_record`; impl `children_of`; update blocked-status `match` arms (resume + cancel) |
 | `crates/ironclaw_turns/src/run_profile/milestones.rs` | no code change — `LoopHostMilestoneKind::GateBlocked` carries `LoopGateKind` opaquely; verify it still compiles |
 | `crates/ironclaw_turns/src/db.rs` | no schema change — `TurnRunRecord` is stored as a JSON payload; verify the round-trip test still passes |
-| `crates/ironclaw_turns/tests/…` | new unit + contract tests (§1.7) |
+| `crates/ironclaw_turns/tests/…` | new unit + contract tests (§1.9) |
 
-`request.rs` (`SubmitTurnRequest`) is **not** modified in Phase 1 — the parent
-linkage is carried into the record by P2.A wiring, not by a new request field in
-this phase. Phase 1 only adds the *fields* and the *query*.
+`request.rs` (`SubmitTurnRequest`) **is** modified in Phase 1. Without request
+fields, P2.A has no caller-level way to carry lineage into the store, so
+`TurnRunRecord.parent_run_id` / `subagent_depth` would always remain top-level
+defaults. Phase 1 adds the request fields with `#[serde(default)]` and the memory
+store copies them into `RunRecord` during `submit_turn`.
 
-### 1.2 `CapabilityOutcome::SpawnedChildRun`
+### 1.2 `CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}`
 
 **Current** (`run_profile/host.rs` lines 1114–1145):
 
@@ -133,26 +145,35 @@ pub enum CapabilityOutcome {
     AuthRequired { gate_ref: LoopGateRef, safe_summary: String },
     ResourceBlocked { gate_ref: LoopGateRef, safe_summary: String },
     SpawnedProcess(ProcessHandleSummary),
+    /// A `spawn_subagent` capability submitted a *blocking* child run. This is
+    /// a suspension gate, mapped by the executor to `GateKind::AwaitDependentRun`.
+    AwaitDependentRun { gate_ref: LoopGateRef, safe_summary: String },
     /// A `spawn_subagent` capability completed by submitting a *background*
-    /// child run. The child id is threaded back to the model as the tool
-    /// result. Unlike `SpawnedProcess`, this is a **terminal capability
-    /// result** — the loop continues; it is NOT a suspension.
-    SpawnedChildRun { child_run_id: TurnRunId },
+    /// child run. The executor pushes `result_ref` as the tool result while
+    /// retaining `child_run_id` for lineage/observability. Unlike
+    /// `SpawnedProcess`, this is a terminal capability result — the loop
+    /// continues; it is NOT a suspension.
+    SpawnedChildRun {
+        child_run_id: TurnRunId,
+        result_ref: LoopResultRef,
+        safe_summary: String,
+    },
     Denied(CapabilityDenied),
     Failed(CapabilityFailure),
 }
 
 impl CapabilityOutcome {
     pub fn is_suspension(&self) -> bool {
+        // `AwaitDependentRun` is a suspension: a blocking spawn parks the parent
+        // on a dependent-run gate.
         // `SpawnedChildRun` is intentionally NOT a suspension: a background
         // spawn returns a normal result and the parent loop keeps running.
-        // The *blocking* spawn path uses an `AwaitDependentRun` gate
-        // (`ApprovalRequired`-style variant family), not this variant.
         matches!(
             self,
             Self::ApprovalRequired { .. }
                 | Self::AuthRequired { .. }
                 | Self::ResourceBlocked { .. }
+                | Self::AwaitDependentRun { .. }
                 | Self::SpawnedProcess(_)
         )
     }
@@ -160,23 +181,38 @@ impl CapabilityOutcome {
 ```
 
 Notes:
-- `TurnRunId` is already in scope in `host.rs` imports — confirm; if not, add it
-  to the `use crate::{…}` block.
-- Wire form: `{"spawned_child_run":{"child_run_id":"<uuid>"}}` (`TurnRunId` is
-  `#[serde(transparent)]` over `Uuid`).
+- `TurnRunId` and `LoopResultRef` are already imported in/near `host.rs`;
+  confirm and extend the `use crate::{…}` block if needed.
+- Background wire form:
+  `{"spawned_child_run":{"child_run_id":"<uuid>","result_ref":"result:…","safe_summary":"…"}}`.
+  Blocking wire form:
+  `{"await_dependent_run":{"gate_ref":"gate:…","safe_summary":"…"}}`.
 - The variant is a **struct variant** (named field), consistent with the gate
   variants and ready for Phase 2 to carry more if needed without a tuple→struct
   break.
 
 **Exhaustive `match` sites to update** (grep `CapabilityOutcome::` in non-test
-`src`): exactly one — `executor.rs::handle_capability_outcome` (lines 713–761).
-That match is **not** modified in P1.A (it lives in `ironclaw_agent_loop`); it
-is handled in Phase 3. P1.A only needs `ironclaw_turns` itself to compile, and
-`ironclaw_turns` has no exhaustive match on `CapabilityOutcome`. **Risk note for
-P1.A reviewer:** adding the variant will break `ironclaw_agent_loop`'s build
-until Phase 3 — that is expected; P1.A's CI is its own crate. Document this in
-the PR. (Alternative considered: mark `CapabilityOutcome` `#[non_exhaustive]` —
-rejected, see §1.6.)
+`src`): the executor's `handle_capability_outcome` must gain two arms in the
+same workspace-green change:
+
+```rust
+CapabilityOutcome::AwaitDependentRun { gate_ref, .. } => {
+    self.handle_gate(planner, host, state, GateKind::AwaitDependentRun, gate_ref).await
+}
+CapabilityOutcome::SpawnedChildRun { result_ref, safe_summary, .. } => {
+    push_completed_result(&mut state, CapabilityResultMessage {
+        result_ref,
+        safe_summary,
+        terminate_hint: false,
+    });
+    Ok(BatchStep::Continue(Box::new(state)))
+}
+```
+
+The important contract is that the background path pushes a **durable result
+ref**. A child id alone is insufficient because the executor only appends result
+refs to the loop state. (Alternative considered: mark `CapabilityOutcome`
+`#[non_exhaustive]` — rejected, see §1.6.)
 
 ### 1.3 `LoopGateKind::AwaitDependentRun`
 
@@ -462,7 +498,7 @@ Per `.claude/rules/types.md` and the design's "wire-stable enum" requirement:
 |---|---|---|
 | `LoopGateKind` | **add it** | observability/wire enum; mission/cron/trigger families will add more gate kinds; external (reborn) test code constructs it but never exhaustively matches it |
 | `LoopBlockedKind` | **add it** | same; the only exhaustive match (`to_blocked_reason`) is in-crate and updated atomically |
-| `CapabilityOutcome` | **do NOT add it** | the executor in `ironclaw_agent_loop` *must* exhaustively match every outcome — a non-exhaustive `CapabilityOutcome` would force a `_ =>` arm that silently drops a future spawn-like outcome. Keeping it exhaustive means adding a variant is a compile error at every host, which is the desired fail-loud behavior. Phase 3 updates the one executor match. |
+| `CapabilityOutcome` | **do NOT add it** | the executor in `ironclaw_agent_loop` *must* exhaustively match every outcome — a non-exhaustive `CapabilityOutcome` would force a `_ =>` arm that silently drops a future spawn-like outcome. Keeping it exhaustive means adding a variant is a compile error at every host, which is the desired fail-loud behavior. The P1.B/companion agent-loop change updates the executor match. |
 | `TurnStatus` | **do NOT add it** | status drives exhaustive lifecycle matches in `memory.rs`; a `_ =>` arm would silently mishandle a new status (e.g. treat it as terminal). Adding a variant *should* break every match so each is reviewed. The two match sites in §1.4 are updated atomically in this PR. |
 | `BlockedReason` | **do NOT add it** | `status()` / `gate_ref()` are exhaustive by design; a new reason must be mapped to a `TurnStatus`, never defaulted. |
 | `GateKind` (`agent_loop`) | already `#[non_exhaustive]` | unchanged; see §2.4 |
@@ -479,6 +515,31 @@ Naming: both new snake_case enums get a snake_case wire string
 existing variants and avoid a silent wire break on already-persisted records.
 
 ### 1.7 `TurnRunRecord` lineage fields + `children_of`
+
+**`SubmitTurnRequest` lineage input.** Add the same two fields to
+`request.rs::SubmitTurnRequest` so callers can create child runs with durable
+lineage:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubmitTurnRequest {
+    pub scope: TurnScope,
+    pub actor: TurnActor,
+    pub accepted_message_ref: AcceptedMessageRef,
+    pub source_binding_ref: SourceBindingRef,
+    pub reply_target_binding_ref: ReplyTargetBindingRef,
+    pub requested_run_profile: Option<RunProfileRequest>,
+    pub idempotency_key: IdempotencyKey,
+    pub received_at: TurnTimestamp,
+    #[serde(default)]
+    pub parent_run_id: Option<TurnRunId>,
+    #[serde(default)]
+    pub subagent_depth: u32,
+}
+```
+
+Top-level submitters leave both fields at their defaults. P2.A is the first
+caller that sets them.
 
 **Current** (`store.rs` lines 79–101):
 
@@ -571,15 +632,16 @@ Thread them through:
 - `from_persistence_snapshot` reconstruction — when rebuilding `RunRecord` from a
   `TurnRunRecord`, copy `parent_run_id` / `subagent_depth` across.
 - `RunRecord` construction in `submit_turn` (`memory.rs` ~line 476/499/512) —
-  Phase 1 sets `parent_run_id: None, subagent_depth: 0` for every run.
-  Carrying real parent linkage from a `SubmitTurnRequest` is **Phase 2 (P2.A)** —
-  Phase 1 only lands the fields and the storage round-trip.
+  copy `request.parent_run_id` and `request.subagent_depth` into the record.
+  Top-level callers get legacy behavior through the request fields' serde/default
+  values (`None`, `0`).
 - `state()` (`TurnRunState`, line 1845) — **not modified.** `TurnRunState` does
   not gain lineage fields in Phase 1; the observer reads lineage via
   `children_of` / the record, not via run state. Keeping `TurnRunState` stable
   avoids touching every `get_run_state` consumer.
 
-**`children_of` store query.** Add to the `TurnStateStore` trait
+**`children_of` and `get_run_record` store queries.** Add to the
+`TurnStateStore` trait
 (`store.rs` lines 15–35):
 
 ```rust
@@ -598,6 +660,13 @@ pub trait TurnStateStore: Send + Sync {
     /// valid, common state.
     async fn children_of(&self, run_id: TurnRunId)
         -> Result<Vec<TurnRunRecord>, TurnError>;
+
+    /// Return the durable run record for `run_id`, or `Ok(None)` if unknown.
+    ///
+    /// Used by the completion observer to determine whether a terminal event is
+    /// for a child run and, if so, which parent run should receive the result.
+    async fn get_run_record(&self, run_id: TurnRunId)
+        -> Result<Option<TurnRunRecord>, TurnError>;
 }
 ```
 
@@ -606,6 +675,8 @@ pub trait TurnStateStore: Send + Sync {
 > `Vec<TurnRunRecord>` (not `TurnRunState`) because the caller (P2.D observer)
 > needs `parent_run_id`/`status`/`run_id` to BFS the subtree, and only
 > `TurnRunRecord` carries `parent_run_id`. `TurnRunState` deliberately does not.
+> The same reason requires `get_run_record(run_id)` for single terminal child
+> events; `get_run_state` is not enough.
 
 **`InMemoryTurnStateStore` impl** (`memory.rs`, inside `impl TurnStateStore for
 InMemoryTurnStateStore`, lines 351+):
@@ -626,6 +697,16 @@ async fn children_of(&self, run_id: TurnRunId)
         .collect();
     Ok(children)
 }
+
+async fn get_run_record(&self, run_id: TurnRunId)
+    -> Result<Option<TurnRunRecord>, TurnError>
+{
+    let inner = match self.inner.lock() {
+        Ok(inner) => inner,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    Ok(inner.records.get(&run_id).map(RunRecord::persistence_record))
+}
 ```
 
 (`Inner::records` is the `HashMap<TurnRunId, RunRecord>` — confirm field name
@@ -634,9 +715,10 @@ when implementing; `take_record` already indexes it.)
 **`LibSqlTurnStateStore` / `PostgresTurnStateStore`** (`db.rs`). `TurnRunRecord`
 is stored as an opaque JSON payload (`libsql_load_payloads::<TurnRunRecord>` /
 `postgres_load_payloads::<TurnRunRecord>`, lines 1060 / 1358) — the new fields
-serialize into that payload with **no schema migration**. For `children_of`,
+serialize into that payload with **no schema migration**. For `children_of` and
+`get_run_record`,
 the simplest correct Phase 1 implementation is a **load-then-filter** mirroring
-the in-memory store (load all run payloads, filter on
+the in-memory store (load run payloads, filter by `run_id` or by
 `parent_run_id == Some(run_id)`). A dedicated indexed column is a deferred
 optimization (README §13 "durable goal-store backend beyond the bounded
 store" is the analogous deferral) — note it as a follow-up in the PR; do not
@@ -644,61 +726,105 @@ add a migration in Phase 1. If `db.rs` proves to have no whole-table load
 helper, the acceptable Phase-1 fallback is a JSON-path `WHERE` filter; either
 way it is a contained `db.rs` change.
 
-### 1.8 Unit tests to add (P1.A)
+### 1.8 `DefaultTurnCoordinator` event sink
+
+`TurnEventSink` already exists in `ironclaw_turns::events`, and the stores
+already persist `TurnLifecycleEvent`s. The missing live seam is that
+`DefaultTurnCoordinator` does not publish those events to an injected sink, so a
+`SubagentCompletionObserver` would otherwise have no reliable notification path.
+
+Add an optional sink to `DefaultTurnCoordinator`:
+
+```rust
+pub struct DefaultTurnCoordinator<S: ?Sized> {
+    store: Arc<S>,
+    admission_policy: Arc<dyn TurnAdmissionPolicy>,
+    run_profile_resolver: Arc<dyn RunProfileResolver>,
+    wake_notifier: Arc<dyn TurnRunWakeNotifier>,
+    event_sink: Option<Arc<dyn TurnEventSink>>,
+}
+
+impl<S> DefaultTurnCoordinator<S>
+where
+    S: TurnStateStore + ?Sized,
+{
+    pub fn with_event_sink(mut self, sink: Arc<dyn TurnEventSink>) -> Self {
+        self.event_sink = Some(sink);
+        self
+    }
+}
+```
+
+After successful `submit_turn`, `resume_turn`, and `cancel_run`, construct the
+corresponding `TurnLifecycleEvent` from the operation response (`Submitted`,
+`Resumed`, `Cancelled` / `CancelRequested` as appropriate) and publish it
+best-effort to the sink. Sink failure is logged and does not roll back the
+coordinator operation; the store remains the durable source of truth.
+
+### 1.9 Unit tests to add (P1.A)
 
 Place in the existing `crates/ironclaw_turns/tests/` integration tests and/or
 `#[cfg(test)] mod tests` blocks. Required:
 
 1. **`CapabilityOutcome::SpawnedChildRun` serde round-trip** — serialize and
-   deserialize `SpawnedChildRun { child_run_id }`; assert the wire JSON is
-   `{"spawned_child_run":{"child_run_id":"<uuid>"}}`; assert
-   `is_suspension() == false`.
+   deserialize `SpawnedChildRun { child_run_id, result_ref, safe_summary }`;
+   assert the wire JSON is
+   `{"spawned_child_run":{"child_run_id":"<uuid>","result_ref":"result:…","safe_summary":"…"}}`;
+   assert `is_suspension() == false`.
 
-2. **`LoopGateKind::AwaitDependentRun` round-trip** — assert wire string
+2. **`CapabilityOutcome::AwaitDependentRun` serde round-trip** — serialize and
+   deserialize `AwaitDependentRun { gate_ref, safe_summary }`; assert wire JSON
+   is `{"await_dependent_run":{"gate_ref":"gate:…","safe_summary":"…"}}`;
+   assert `is_suspension() == true`.
+
+3. **`LoopGateKind::AwaitDependentRun` round-trip** — assert wire string
    `"await_dependent_run"`; round-trips for all four variants.
 
-3. **`LoopBlockedKind::AwaitDependentRun` round-trip + `to_blocked_reason`** —
+4. **`LoopBlockedKind::AwaitDependentRun` round-trip + `to_blocked_reason`** —
    assert `"await_dependent_run"`; assert
    `LoopBlockedKind::AwaitDependentRun.to_blocked_reason(gate)` yields
    `BlockedReason::DependentRun { gate_ref }` (use the existing private-fn test
    pattern in `loop_exit/tests/`, or expose via a `LoopBlocked` validate path).
 
-4. **`TurnStatus::BlockedDependentRun` serde round-trip** — assert wire string
+5. **`TurnStatus::BlockedDependentRun` serde round-trip** — assert wire string
    `"BlockedDependentRun"` (PascalCase), `is_terminal() == false`,
    `keeps_active_lock() == true`.
 
-5. **`TurnStatus` legacy-JSON deserialization** — deserialize each *pre-existing*
+6. **`TurnStatus` legacy-JSON deserialization** — deserialize each *pre-existing*
    variant from its already-persisted wire string
    (`"Queued"`, `"BlockedApproval"`, …) and assert it still decodes — proves the
    new variant did not perturb the wire format of old data.
 
-6. **`BlockedReason::DependentRun` round-trip + mapping** — round-trip the JSON
+7. **`BlockedReason::DependentRun` round-trip + mapping** — round-trip the JSON
    `{"DependentRun":{"gate_ref":"…"}}`; assert
    `status() == TurnStatus::BlockedDependentRun` and `gate_ref()` returns the
    ref.
 
-7. **`TurnRunRecord` legacy-JSON deserialization** — take a `TurnRunRecord` JSON
+8. **`SubmitTurnRequest` lineage defaults + explicit child lineage** — deserialize
+   legacy request JSON with no lineage keys and assert `None`/`0`; construct a
+   child request with `Some(parent_run_id)` / `2` and assert the memory store
+   persists those values into the emitted `TurnRunRecord`.
+
+9. **`TurnRunRecord` legacy-JSON deserialization** — take a `TurnRunRecord` JSON
    blob with **no** `parent_run_id` / `subagent_depth` keys; assert it
    deserializes with `parent_run_id == None`, `subagent_depth == 0`. Then
    round-trip a child record with `parent_run_id = Some(..)`,
    `subagent_depth = 2` and assert field equality.
 
-8. **`children_of` semantics** (in-memory store contract test, in
+10. **`children_of` / `get_run_record` semantics** (in-memory store contract test, in
    `turn_coordinator_contract.rs` style) — submit a parent run; submit two child
-   runs whose `RunRecord` is constructed with `parent_run_id = Some(parent)`
-   (in Phase 1 this requires a small test helper since `submit_turn` does not
-   yet set lineage — acceptable: test the store query directly via
-   `from_persistence_snapshot` with hand-built `TurnRunRecord`s carrying
-   lineage). Assert `children_of(parent)` returns exactly the two children;
+   runs using `SubmitTurnRequest.parent_run_id = Some(parent)`. Assert
+   `children_of(parent)` returns exactly the two children;
    `children_of(unknown_run_id)` returns `Ok(vec![])`; `children_of(child)`
-   returns `Ok(vec![])`.
+   returns `Ok(vec![])`; `get_run_record(child)` returns the durable child
+   record; `get_run_record(unknown_run_id)` returns `Ok(None)`.
 
-9. **Resume of a `BlockedDependentRun` run** — drive a `RunRecord` to
+11. **Resume of a `BlockedDependentRun` run** — drive a `RunRecord` to
    `BlockedDependentRun` (via `block_claimed_record` with a
    `BlockedReason::DependentRun`) and assert `resume_turn` succeeds (not
    `InvalidTransition`) — regression guard for the §1.4 match-arm edit.
 
-10. **Cancel of a `BlockedDependentRun` run** — assert `request_cancel` of a
+12. **Cancel of a `BlockedDependentRun` run** — assert `request_cancel` of a
     `BlockedDependentRun` run transitions directly to `Cancelled` (not
     `CancelRequested`, not `already_terminal`) — regression guard for the §1.4
     cancel-match edit.
@@ -708,8 +834,8 @@ Place in the existing `crates/ironclaw_turns/tests/` integration tests and/or
 ## 2. P1.B — `ironclaw_agent_loop`: `subagent` family + `GateKind::AwaitDependentRun`
 
 **Goal:** add the static `subagent` `LoopFamily` factory and the
-`GateKind::AwaitDependentRun` strategy-side variant. No executor change in
-Phase 1.
+`GateKind::AwaitDependentRun` strategy-side variant plus the mechanical executor
+maps for the new gate/result outcomes.
 
 ### 2.1 Files to create / modify
 
@@ -938,7 +1064,7 @@ tightening is a defense-in-depth guard against a future custom gate strategy.
 > `GateKind` and gets the new variant for free; its serde round-trip test should
 > gain an `AwaitDependentRun` case (§2.6).
 
-### 2.5 No executor change in Phase 1
+### 2.5 Minimal executor maps in Phase 1
 
 `executor.rs` has three relevant exhaustive matches — `handle_gate` dispatch
 (produces `GateKind`), `blocked_kind(GateKind) -> LoopBlockedKind` (lines
@@ -977,11 +1103,12 @@ fn loop_gate_kind(kind: GateKind) -> LoopGateKind {
 
 This makes **P1.B depend on P1.A's `LoopBlockedKind`/`LoopGateKind` variants at
 compile time** — see §4 ordering. The `handle_capability_outcome` match on
-`CapabilityOutcome` (§1.2) routing a `SpawnedChildRun` is *not* added in P1.B;
-that match only breaks when `CapabilityOutcome` gains its variant, which is
-P1.A's crate — and the executor handling is Phase 3. To keep P1.B's CI green
-*without* P1.A merged, P1.B can pin a path/branch dependency on P1.A's branch,
-or P1.A and P1.B land in dependency order (P1.A first). See §4.
+`CapabilityOutcome` (§1.2) routing for `AwaitDependentRun` and
+`SpawnedChildRun` is also a mechanical executor map. It can land in the same
+agent-loop PR as P1.B after P1.A is available, or in a tiny companion PR stacked
+on P1.A. Do not leave it until Phase 3 if workspace CI must stay green: adding
+the `CapabilityOutcome` variants intentionally breaks the exhaustive match until
+these arms exist. See §4.
 
 ### 2.6 Unit tests to add (P1.B)
 
@@ -1555,19 +1682,12 @@ with whichever of A/B is chosen.
 
 ### 4.2 The "variant added, downstream crate breaks" hazard
 
-- Adding `CapabilityOutcome::SpawnedChildRun` (P1.A) makes
+- Adding `CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}` (P1.A) makes
   `ironclaw_agent_loop::executor::handle_capability_outcome` non-exhaustive.
-  **`ironclaw_agent_loop` will not compile against the updated `ironclaw_turns`
-  until Phase 3** adds the executor arm. This is *intended* (we deliberately
-  keep `CapabilityOutcome` exhaustive — §1.6). Mitigation: P1.A's PR CI only
-  builds/tests `ironclaw_turns`; the workspace-wide build goes green at Phase 3.
-  **Call this out explicitly in the P1.A PR description** so reviewers do not
-  treat the downstream break as a regression. If the workspace CI gates merges,
-  the pragmatic sequencing is to land P1.A and Phase 3's one-line executor arm
-  close together, or temporarily add a `#[allow]`-free `_ =>
-  unreachable!("SpawnedChildRun handled in Phase 3")` stub arm in P1.A's PR and
-  replace it in Phase 3 — **avoid the stub if possible**; a real exhaustive
-  break is the safer signal.
+  This is *intended* (we deliberately keep `CapabilityOutcome` exhaustive —
+  §1.6), but a workspace-green branch must include the two executor arms from
+  §1.2 / §2.5 in the same stack. **Do not** add a catch-all `_` arm or a stub
+  `unreachable!`; that would erase the fail-loud contract for future outcomes.
 - Adding `GateKind::AwaitDependentRun` (P1.B) — `GateKind` is already
   `#[non_exhaustive]`, but the *in-crate* `blocked_kind` / `loop_gate_kind`
   matches are exhaustive and **must** be updated in the same P1.B PR (§2.5).
@@ -1607,7 +1727,7 @@ Phase 1 is done when, per workstream:
 
 - **P1.A** — `ironclaw_turns` compiles; `cargo test -p ironclaw_turns` green
   (incl. `--features integration` for the libSQL/Postgres `children_of` and the
-  `TurnRunRecord` round-trip); all §1.8 tests present and passing.
+  `TurnRunRecord` round-trip); all §1.9 tests present and passing.
 - **P1.B** — `ironclaw_agent_loop` compiles **against the Phase-1 `ironclaw_turns`**
   and `cargo test -p ironclaw_agent_loop` green; `SUBAGENT_FAMILY_DIGEST`
   filled in with the real hash; all §2.6 tests passing.
@@ -1615,8 +1735,8 @@ Phase 1 is done when, per workstream:
   all §3.6 tests passing; `thiserror` added to `Cargo.toml`.
 - Workspace-wide `cargo fmt` clean and `cargo clippy --all --benches --tests
   --examples --all-features` zero-warnings **per crate touched** (the
-  workspace-wide clippy goes fully green only after Phase 3 closes the
-  `CapabilityOutcome` executor match — see §4.2).
+  workspace-wide clippy should be green once the P1.B executor arms from §2.5
+  are present — see §4.2).
 
 No new variant is *exercised* end-to-end in Phase 1 — Phase 1 only lands the
 types, the family, and the data. The first end-to-end spawn is Phase 3.
