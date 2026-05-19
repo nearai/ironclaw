@@ -1,0 +1,87 @@
+# Agent-loop execution — checkpoint (pause) and exit points. Render: d2 loop-execution.d2 loop-execution.svg
+direction: down
+
+title: "Agent-loop execution — pause (checkpoint) points and exit points" {
+  near: top-center
+  shape: text
+  style.font-size: 22
+  style.bold: true
+}
+
+start: "Run claimed by a runner worker" {
+  shape: oval
+  style.fill: "#e8f5e9"
+}
+tick: "Loop tick (executor)" {
+  style.fill: "#e3f2fd"
+}
+ctx: "Build context\nContextStrategy + host LoopContextPort"
+cp_model: "checkpoint BeforeModel" {
+  shape: hexagon
+  style.fill: "#fff9c4"
+}
+model: "LLM call — LoopModelPort"
+decide: "Response?" {
+  shape: diamond
+  style.fill: "#e1f5fe"
+}
+cp_side: "checkpoint BeforeSideEffect" {
+  shape: hexagon
+  style.fill: "#fff9c4"
+}
+caps: "Execute capability calls\ninvoke_capability_batch\n(spawn_subagent handled here)"
+outcome: "CapabilityOutcome?" {
+  shape: diamond
+  style.fill: "#e1f5fe"
+}
+cp_block: "checkpoint BeforeBlock" {
+  shape: hexagon
+  style.fill: "#fff9c4"
+}
+term: "StopCondition / Terminator" {
+  shape: diamond
+  style.fill: "#e1f5fe"
+}
+cp_final: "checkpoint Final" {
+  shape: hexagon
+  style.fill: "#fff9c4"
+}
+
+exit_done: "EXIT  LoopExit::Completed" {
+  shape: oval
+  style.fill: "#c8e6c9"
+}
+exit_block: "PAUSE  LoopExit::Blocked\nworker released · thread lock kept\n(gate: Approval / Auth / Resource / AwaitDependentRun)" {
+  shape: oval
+  style.fill: "#ffe0b2"
+}
+exit_fail: "EXIT  LoopExit::Failed\nbudget exceeded / driver error" {
+  shape: oval
+  style.fill: "#ffcdd2"
+}
+exit_cancel: "EXIT  LoopExit::Cancelled\ncancel signal observed" {
+  shape: oval
+  style.fill: "#ffcdd2"
+}
+
+start -> tick
+tick -> ctx
+ctx -> cp_model
+cp_model -> model
+model -> decide
+decide -> cp_final: "text reply (no calls)"
+decide -> cp_side: "capability calls"
+cp_side -> caps
+caps -> outcome
+outcome -> tick: "result -> continue loop"
+outcome -> cp_block: "gate outcome"
+cp_block -> exit_block
+cp_final -> term
+term -> exit_done: "goal / stop condition met"
+term -> tick: "continue"
+tick -> exit_fail: "budget / error"
+tick -> exit_cancel: "cancel signal"
+exit_block -> start: "resumed via resume_turn\n(re-claimed by a worker)" {
+  style.stroke-dash: 4
+  style.stroke: "#ef6c00"
+}

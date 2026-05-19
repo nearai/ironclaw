@@ -1,0 +1,49 @@
+# Blocking subagent — parent suspension & child lifecycle. Render: d2 blocking-lifecycle.d2 blocking-lifecycle.svg
+direction: right
+
+title: "Blocking subagent — parent suspension and child run lifecycle" {
+  near: top-center
+  shape: text
+  style.font-size: 22
+  style.bold: true
+}
+
+parent: "Parent run" {
+  style.fill: "#e3f2fd"
+  p_run: "Running" {shape: oval}
+  p_block: "Blocked — AwaitDependentRun\nworker RELEASED · thread lock KEPT" {
+    style.fill: "#ffe0b2"
+  }
+  p_resume: "Running (resumed)" {shape: oval}
+  p_done: "Completed" {
+    shape: oval
+    style.fill: "#c8e6c9"
+  }
+  p_run -> p_block: "emit N blocking spawns\n(gate recorded before submit)"
+  p_block -> p_resume: "last child terminal\nresume_turn(all N results)"
+  p_block -> p_resume: "all children already terminal\nresolve INLINE (no real block)" {
+    style.stroke-dash: 3
+  }
+  p_resume -> p_done
+}
+
+child: "Child run  (x N, concurrent)" {
+  style.fill: "#f3e5f5"
+  c_pending: "Pending" {shape: oval}
+  c_running: "Running\nsubagent family · fresh ctx ·\nattenuated tools · empty authority" {shape: oval}
+  c_term: "Completed / Failed / Cancelled" {
+    shape: oval
+    style.fill: "#c8e6c9"
+  }
+  c_pending -> c_running: "claimed by worker"
+  c_running -> c_term
+}
+
+parent.p_run -> child.c_pending: "submit_turn (fresh child thread_id)"
+child.c_term -> parent.p_block: "terminal TurnLifecycleEvent\nSubagentCompletionObserver marks the awaited set" {
+  style.stroke: "#6a1b9a"
+}
+parent.p_block -> child.c_running: "parent CancelRequested ->\nrecursive cancel_run over the subtree" {
+  style.stroke-dash: 4
+  style.stroke: "#c62828"
+}

@@ -1,0 +1,49 @@
+# Subagent spawn flow — background & blocking. Render: d2 spawn-flow.d2 spawn-flow.svg
+shape: sequence_diagram
+
+title: "Subagent spawn flow — background and blocking" {
+  near: top-center
+  shape: text
+  style.font-size: 22
+  style.bold: true
+}
+
+parent: "Parent agent loop"
+port: "Capability port\n(ironclaw_loop_support)"
+coord: "TurnCoordinator\n(ironclaw_turns)"
+pool: "Runner-worker pool"
+child: "Child run\n(subagent family)"
+obs: "SubagentCompletionObserver\n(ironclaw_reborn)"
+
+parent -> port: "invoke spawn_subagent(flavor, goal, run_in_background)"
+
+spawn_seq: "spawn sequence (per call, ordinal order)" {
+  port -> port: "gate checks: depth / fan-out / nesting — reject BEFORE submit"
+  port -> port: "resolve static flavor; ensure fresh child thread\n(tenant/agent/project copied); persist goal"
+  port -> port: "record AwaitDependentRun gate + awaited child-run set (durable)"
+  port -> coord: "submit_turn(child scope, subagent profile,\nparent_run_id, idempotency = parent_run+turn+ordinal)"
+  coord -> port: "coordinator-minted child_run_id"
+}
+
+background: "BACKGROUND (run_in_background = true)" {
+  port -> parent: "CapabilityOutcome::SpawnedChildRun { child_run_id }"
+  parent -> parent: "parent turn completes normally"
+}
+
+blocking: "BLOCKING (run_in_background = false)" {
+  port -> parent: "AwaitDependentRun gate outcome"
+  parent -> parent: "checkpoint BeforeBlock -> LoopExit::Blocked\nworker RELEASED, thread lock KEPT\n(if all children already terminal: resolve INLINE)"
+}
+
+coord -> pool: "child run queued"
+pool -> child: "claim & drive — fresh ctx, attenuated tools, EMPTY authority"
+child -> obs: "terminal TurnLifecycleEvent"
+
+deliver_bg: "DELIVER — background" {
+  obs -> coord: "accept_inbound_message(parent thread, sanitised result)\n+ coalescing submit_turn"
+}
+
+deliver_blk: "DELIVER — blocking" {
+  obs -> coord: "when LAST awaited child terminal:\nresume_turn(parent, one GateRef -> all N results)"
+  coord -> parent: "parent resumes; N results map to N spawn calls"
+}

@@ -90,17 +90,12 @@ exist because of that review.
 
 ## 5. Architecture
 
+> Diagrams below are rendered from D2 sources in [`diagrams/`](./diagrams/) —
+> edit the `.d2` file and re-run `d2 <name>.d2 <name>.svg`.
+
 ### 5.1 Dependency layering (acyclic)
 
-```
-                ironclaw_host_api
-                   ^         ^
-        ironclaw_turns      ironclaw_host_runtime   (untouched)
-           ^      ^
-ironclaw_agent_loop  ironclaw_loop_support
-           ^      ^      ^
-              ironclaw_reborn
-```
+![Crate layering](diagrams/architecture.svg)
 
 ### 5.2 The spawn mechanism — corrected
 
@@ -150,6 +145,15 @@ ironclaw_reborn        + `subagent` PlannedDriver + run-profile→driver binding
 ironclaw_host_runtime / ironclaw_host_api   — unchanged
 ```
 
+### 5.4 Static vs dynamic — ownership boundaries
+
+Everything that defines *what subagents exist* is **static** — compiled into the
+binary, identical in every deployment, no plugin loader, no runtime swapping. Only
+*per-run* state (the goal, run ids, gates, lineage) is **dynamic**, created at
+spawn time and keyed by the coordinator-minted `TurnRunId`.
+
+![Static vs dynamic, by owning crate](diagrams/static-vs-dynamic.svg)
+
 ## 6. Detailed design — locked decisions
 
 | Area | Decision |
@@ -176,49 +180,33 @@ ironclaw_host_runtime / ironclaw_host_api   — unchanged
 
 ## 7. Flows
 
-### 7.1 Background spawn
+### 7.1 Loop execution — pause & exit points
 
-```
-parent loop tick — model emits N spawn_subagent calls (run_in_background=true)
- └ executor → invoke_capability_batch → capability-port impl  [loop_support]
-      per call (ordinal order): gate checks → resolve flavor → ensure_thread →
-      persist goal → record AwaitDependentRun set entry → submit_turn → returns
-      CapabilityOutcome::SpawnedChildRun{child_run_id}
- parent turn completes normally with N child ids as tool results
- · · · children run concurrently (runner-worker pool) · · ·
- each child terminal → SubagentCompletionObserver:
-   accept_inbound_message(parent thread, sanitised result, idempotent)
-   coalescing submit_turn(parent) — ThreadBusy ⇒ "already pending"
-```
+A subagent run is an ordinary agent-loop run. The executor cycles
+context → model → capability calls, **checkpointing** at four points (the pause
+points) and terminating at one of four `LoopExit` outcomes (the exit points). The
+blocking-spawn gate reuses the `BeforeBlock` checkpoint + `LoopExit::Blocked` path
+that approvals already use.
 
-### 7.2 Blocking spawn (parallel)
+![Loop execution — checkpoint and exit points](diagrams/loop-execution.svg)
 
-```
-parent loop tick — model emits N spawn_subagent calls (blocking)
- └ capability-port impl, per call (ordinal):
-      a depth / fan-out / nesting gates → reject BEFORE submit_turn
-      b resolve flavor (static table) → child run profile
-      c ensure_thread(id=None) → fresh child thread (tenant/agent/project copied)
-      d persist goal → durable goal store[child_run_id]
-      e RECORD AwaitDependentRun gate + awaited child-run set (durable)  ◄ before submit
-      f submit_turn{ child scope, subagent profile, parent_run_id, subagent_depth,
-                     idempotency=(parent_run,turn,ordinal) }
- └ returns the AwaitDependentRun gate outcome
- executor → checkpoint BeforeBlock; on entering the gate, reconcile the awaited
-   set against get_run_state:
-     all children already terminal → resolve gate INLINE, no Blocked
-     else → LoopExit::Blocked → parent Blocked, worker RELEASED, thread lock KEPT
- · · · N children run concurrently — each: subagent PlannedDriver → `subagent`
-       family · fresh context · attenuated surface · EMPTY authority · own
-       thread/scope/lock · runner-worker pool · · ·
- each child terminal → SubagentCompletionObserver (looked up via parent_run_id):
-   record child result (sanitised) in the gate-resolution store
-   all awaited children terminal? → resume_turn(parent, one GateRef →
-     resolution store holds all N results; failed children = typed entries)
- parent resumes → N tool results map back to the N spawn calls → continues
-```
+### 7.2 Spawn flow — background & blocking
 
-### 7.3 Cancellation
+`spawn_subagent` is an ordinary capability; the `ironclaw_loop_support` capability
+port handles it and returns either `SpawnedChildRun` (background) or an
+`AwaitDependentRun` gate (blocking).
+
+![Subagent spawn flow](diagrams/spawn-flow.svg)
+
+### 7.3 Blocking lifecycle — parent suspension & child runs
+
+In blocking mode the parent suspends on the `AwaitDependentRun` gate (releasing its
+runner worker, keeping its thread lock) while N children run concurrently, each its
+own coordinator-managed run.
+
+![Blocking subagent lifecycle](diagrams/blocking-lifecycle.svg)
+
+### 7.4 Cancellation
 
 ```
 parent CancelRequested
@@ -302,6 +290,8 @@ exhaustive `TurnStatus` match sites in `ironclaw_turns` `memory.rs`
 
 The work is a 3-level DAG. Phase 1 and Phase 2 each contain parallel workstreams;
 Phase 3 wires everything. Each workstream is an independently reviewable PR.
+
+![Implementation phase DAG](diagrams/phase-dag.svg)
 
 ```
 PHASE 1 — Contracts & isolated units   (3 parallel workstreams)
