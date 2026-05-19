@@ -79,7 +79,7 @@ fn default_retention_days() -> u32 {
 }
 
 /// Options resolved by the memory backend before persisting a document write.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MemoryWriteOptions {
     pub metadata: DocumentMetadata,
     pub changed_by: Option<String>,

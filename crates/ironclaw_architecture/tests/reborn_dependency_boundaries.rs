@@ -358,6 +358,76 @@ fn reborn_turns_public_surface_keeps_runner_api_explicit() {
 }
 
 #[test]
+fn reborn_memory_product_facade_stays_on_typed_memory_services() {
+    let root = workspace_root();
+    let facade = std::fs::read_to_string(
+        root.join("crates/ironclaw_product_workflow/src/memory_product.rs"),
+    )
+    .expect("memory product facade source must be readable");
+    let contract =
+        std::fs::read_to_string(root.join("docs/reborn/contracts/memory-product-surfaces.md"))
+            .expect("memory product surface contract must be readable");
+
+    for required in [
+        "MemoryProductFacade",
+        "MemoryDocumentService",
+        "MemorySearchService",
+        "MemoryLayerService",
+        "MemoryVersionService",
+        "MemorySeedService",
+        "MemoryProfileService",
+        "MemoryPromptWriteSafetyPolicy",
+    ] {
+        assert!(
+            facade.contains(required),
+            "memory product facade must consume typed Reborn memory service `{required}`"
+        );
+    }
+
+    for forbidden in [
+        "crate::workspace",
+        "src::workspace",
+        "Workspace::",
+        "WorkspacePool",
+        "WorkspaceResolver",
+        "MemoryDocumentRepository",
+        "InMemoryMemoryDocumentRepository",
+        "FilesystemMemoryDocumentRepository",
+        "EmbeddingProvider",
+        "LlmProvider",
+        "SecretsStore",
+        "HostRuntime",
+        "std::fs",
+        "tokio::fs",
+        "std::net",
+        "reqwest",
+    ] {
+        assert!(
+            !facade.contains(forbidden),
+            "MemoryProductFacade must not depend on v1 workspace/raw substrate escape hatch `{forbidden}`"
+        );
+    }
+
+    for required_phrase in [
+        "#3287 migrates memory-document product behavior",
+        "legacy-relative paths",
+        "MemoryDocumentService",
+        "MemorySearchService",
+        "MemoryLayerService",
+        "MemoryVersionService",
+        "MemorySeedService",
+        "MemoryProfileService",
+        "legacy `Workspace` remains the production writer",
+        "no silent legacy/Reborn dual-write",
+    ] {
+        assert!(
+            contract.contains(required_phrase),
+            "memory product surface contract missing `{required_phrase}`"
+        );
+    }
+}
+
+#[test]
 fn reborn_loop_support_llm_wiring_stays_out_of_root_src() {
     let root = workspace_root();
     let root_lib =

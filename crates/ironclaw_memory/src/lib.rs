@@ -16,6 +16,7 @@ mod repo;
 mod safety;
 mod schema;
 mod search;
+mod services;
 
 pub use backend::{
     MemoryBackend, MemoryBackendCapabilities, MemoryContext, RepositoryMemoryBackend,
@@ -46,3 +47,17 @@ pub use safety::{
     PromptWriteSafetyPolicy, PromptWriteSafetyRequest, PromptWriteSource,
 };
 pub use search::{FusionStrategy, MemorySearchRequest, MemorySearchResult};
+pub use services::{
+    MemoryAppendDocumentRequest, MemoryBootstrapClearOutcome, MemoryBootstrapClearRequest,
+    MemoryDocumentEntry, MemoryDocumentRecord, MemoryDocumentService, MemoryLayerService,
+    MemoryLayerWriteMode, MemoryLayerWriteOutcome, MemoryLayerWriteRequest,
+    MemoryListDocumentsRequest, MemoryPatchDocumentOutcome, MemoryPatchDocumentRequest,
+    MemoryProductSearchHit, MemoryProductSearchRequest, MemoryProfileService,
+    MemoryProfileSyncOutcome, MemoryProfileSyncRequest, MemoryPromptWriteSafetyDecision,
+    MemoryPromptWriteSafetyPolicy, MemoryPromptWriteSafetyRequest, MemoryReadDocumentRequest,
+    MemorySearchGroupContext, MemorySearchService, MemorySeedService, MemoryServiceError,
+    MemoryServiceErrorCode, MemoryStatus, MemoryStatusRequest, MemoryTreeRequest,
+    MemoryVersionListRequest, MemoryVersionReadRequest, MemoryVersionRecord, MemoryVersionService,
+    MemoryVersionSummary, MemoryWriteActor, MemoryWriteAuthority, MemoryWriteDocumentOutcome,
+    MemoryWriteDocumentRequest, MemoryWritePurpose, MemoryWriteSurface,
+};
