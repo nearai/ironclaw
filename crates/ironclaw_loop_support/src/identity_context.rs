@@ -3,7 +3,8 @@ use ironclaw_memory::DEFAULT_PROMPT_PROTECTED_PATHS;
 use ironclaw_turns::{
     LoopMessageRef,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, LoopContextMessage, LoopRunContext, PromptMode,
+        AgentLoopHostError, AgentLoopHostErrorKind, LoopContextMessage, LoopRunContext,
+        PersonalContextPolicy, PromptMode,
     },
 };
 use thiserror::Error;
@@ -90,12 +91,19 @@ pub enum IdentityTrustLevel {
 pub enum IdentityApplicability {
     Always,
     OnCodeAct,
+    OnPersonalContextAllowed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostIdentityMessageContent {
     pub name: IdentityFileName,
     pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentityMessageBuildOutcome {
+    pub messages: Vec<LoopContextMessage>,
+    pub admitted_personal_context_paths: Vec<IdentityFileName>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,7 +163,9 @@ pub enum HostIdentityContextBuildError {
     UnknownIdentityFile,
     #[error("identity context path is invalid")]
     InvalidIdentityFile,
-    /// Reserved for a future hard-limit mode. Currently, `build_identity_messages_from_candidates`
+    #[error("identity context denied by run policy")]
+    PolicyDenied,
+    /// Reserved for a future hard-limit mode. Currently, `build_identity_messages_for_run`
     /// truncates silently on budget overflow rather than returning this error.
     #[error("identity context budget exceeded")]
     ContextBudgetExceeded,
@@ -169,7 +179,7 @@ impl HostIdentityContextBuildError {
     pub fn into_host_error(self) -> AgentLoopHostError {
         let kind = match self {
             Self::SourceUnavailable => AgentLoopHostErrorKind::Unavailable,
-            Self::UnknownIdentityFile | Self::InvalidIdentityFile => {
+            Self::UnknownIdentityFile | Self::InvalidIdentityFile | Self::PolicyDenied => {
                 AgentLoopHostErrorKind::PolicyDenied
             }
             Self::ContextBudgetExceeded => AgentLoopHostErrorKind::BudgetExceeded,
@@ -189,17 +199,46 @@ pub async fn build_identity_messages(
         .load_identity_candidates(run_context, mode)
         .await
         .map_err(HostIdentityContextBuildError::into_host_error)?;
-    build_identity_messages_from_candidates(&candidates, mode, budget)
+    build_identity_messages_for_run(&candidates, run_context, mode, budget)
 }
 
-pub fn build_identity_messages_from_candidates(
+pub fn identity_applicability_allowed_for_run(
+    applicability: IdentityApplicability,
+    run_context: &LoopRunContext,
+) -> bool {
+    match applicability {
+        IdentityApplicability::Always | IdentityApplicability::OnCodeAct => true,
+        IdentityApplicability::OnPersonalContextAllowed => {
+            match run_context.resolved_run_profile.personal_context_policy {
+                PersonalContextPolicy::Excluded => false,
+                PersonalContextPolicy::Allowed => true,
+            }
+        }
+    }
+}
+
+pub fn build_identity_messages_for_run(
     candidates: &[HostIdentityContextCandidate],
+    run_context: &LoopRunContext,
     mode: PromptMode,
     budget: IdentityBudget,
 ) -> Result<Vec<LoopContextMessage>, AgentLoopHostError> {
+    Ok(build_identity_messages_for_run_detailed(candidates, run_context, mode, budget)?.messages)
+}
+
+pub fn build_identity_messages_for_run_detailed(
+    candidates: &[HostIdentityContextCandidate],
+    run_context: &LoopRunContext,
+    mode: PromptMode,
+    budget: IdentityBudget,
+) -> Result<IdentityMessageBuildOutcome, AgentLoopHostError> {
     let mut out = Vec::with_capacity(candidates.len());
+    let mut admitted_personal_context_paths = Vec::new();
     let mut used = 0u32;
     for candidate in candidates {
+        if !identity_applicability_allowed_for_run(candidate.applies_when, run_context) {
+            continue;
+        }
         if !applies(candidate.applies_when, mode) {
             continue;
         }
@@ -208,13 +247,19 @@ pub fn build_identity_messages_from_candidates(
             break;
         }
         used = used.saturating_add(cost);
+        if candidate.applies_when == IdentityApplicability::OnPersonalContextAllowed {
+            admitted_personal_context_paths.push(candidate.name.clone());
+        }
         out.push(LoopContextMessage {
             message_ref: candidate.message_ref.clone(),
             role: LOOP_SYSTEM_ROLE.to_string(),
             safe_summary: candidate.safe_summary.clone(),
         });
     }
-    Ok(out)
+    Ok(IdentityMessageBuildOutcome {
+        messages: out,
+        admitted_personal_context_paths,
+    })
 }
 
 pub fn identity_message_ref(
@@ -239,6 +284,9 @@ fn applies(applicability: IdentityApplicability, mode: PromptMode) -> bool {
     match applicability {
         IdentityApplicability::Always => true,
         IdentityApplicability::OnCodeAct => mode == PromptMode::CodeAct,
+        // Personal-context applicability is policy-only today. Add a combined
+        // variant if a future personal directive must also be mode-specific.
+        IdentityApplicability::OnPersonalContextAllowed => true,
     }
 }
 
@@ -309,10 +357,40 @@ mod tests {
     use ironclaw_host_api::{TenantId, ThreadId};
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-        run_profile::{InMemoryRunProfileResolver, LoopRunContext},
+        run_profile::{InMemoryRunProfileResolver, LoopRunContext, PersonalContextPolicy},
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn identity_applicability_allowed_for_run_all_variants_covering_excluded_and_allowed() {
+        let excluded_context = run_context().await;
+        let mut allowed_context = run_context().await;
+        allowed_context.resolved_run_profile.personal_context_policy =
+            PersonalContextPolicy::Allowed;
+
+        for applicability in [
+            IdentityApplicability::Always,
+            IdentityApplicability::OnCodeAct,
+        ] {
+            assert!(identity_applicability_allowed_for_run(
+                applicability,
+                &excluded_context
+            ));
+            assert!(identity_applicability_allowed_for_run(
+                applicability,
+                &allowed_context
+            ));
+        }
+        assert!(!identity_applicability_allowed_for_run(
+            IdentityApplicability::OnPersonalContextAllowed,
+            &excluded_context
+        ));
+        assert!(identity_applicability_allowed_for_run(
+            IdentityApplicability::OnPersonalContextAllowed,
+            &allowed_context
+        ));
+    }
 
     #[tokio::test]
     async fn filters_by_applies_when() {
@@ -374,6 +452,17 @@ mod tests {
         assert!(messages.is_empty());
     }
 
+    #[test]
+    fn identity_budget_rejects_zero_token_ceiling() {
+        let error = IdentityBudget::new(0).unwrap_err();
+
+        assert_eq!(error, HostIdentityContextBuildError::BudgetMisconfigured);
+        assert_eq!(
+            error.into_host_error().kind,
+            AgentLoopHostErrorKind::Internal
+        );
+    }
+
     #[tokio::test]
     async fn installed_trust_summary_only() {
         let context = run_context().await;
@@ -425,6 +514,35 @@ mod tests {
             serde_json::to_vec(&second).unwrap()
         );
         assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn build_identity_messages_for_run_detailed_mixed_candidates_excluded_covering_filtering()
+    {
+        let context = run_context().await;
+        let candidates = vec![
+            trusted("AGENTS.md", "agent", IdentityApplicability::Always),
+            trusted(
+                "USER.md",
+                "private user profile",
+                IdentityApplicability::OnPersonalContextAllowed,
+            ),
+        ];
+
+        let outcome = build_identity_messages_for_run_detailed(
+            &candidates,
+            &context,
+            PromptMode::TextOnly,
+            IdentityBudget::default(),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.messages.len(), 1);
+        assert_eq!(
+            outcome.messages[0].safe_summary,
+            "identity file AGENTS.md available"
+        );
+        assert!(outcome.admitted_personal_context_paths.is_empty());
     }
 
     fn trusted(
