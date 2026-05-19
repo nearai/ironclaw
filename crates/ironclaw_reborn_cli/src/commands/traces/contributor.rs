@@ -108,6 +108,5 @@ pub(super) async fn dispatch(cmd: TracesSubcommand) -> anyhow::Result<()> {
         TracesSubcommand::IngestHealth { endpoint, json } => {
             trace_commons_ingest_health(&endpoint, json).await
         }
-        _ => unreachable!("router ensures only audience variants reach this dispatch"),
     }
 }

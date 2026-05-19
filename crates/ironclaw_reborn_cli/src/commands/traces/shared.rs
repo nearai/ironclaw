@@ -9,6 +9,6 @@
 
 pub(super) use super::{
     TraceCommonsApiResponse, compact_response_body, join_url_paths, normalize_url_path,
-    print_json_map, resolve_runtime_owner_scope, trace_commons_api_request,
-    trace_commons_api_url, trace_commons_endpoint_prefix, trace_commons_optional_api_request,
+    resolve_runtime_owner_scope, trace_commons_api_request, trace_commons_api_url,
+    trace_commons_endpoint_prefix,
 };
