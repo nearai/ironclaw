@@ -57,7 +57,9 @@ pub use fakes::{
     FakeInboundTurnService,
 };
 pub use in_memory_ledger::InMemoryIdempotencyLedger;
-pub use inbound_turn::{DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService};
+pub use inbound_turn::{
+    DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
+};
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
 pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,

@@ -112,56 +112,12 @@ pub trait InboundTurnService: Send + Sync {
         envelope: &ProductInboundEnvelope,
     ) -> Result<InboundTurnOutcome, ProductWorkflowError>;
 
-    /// Accept a user message after the caller already performed replay lookup
-    /// and before-inbound policy.
-    ///
-    /// Only [`DefaultProductWorkflow`](crate::DefaultProductWorkflow) should call
-    /// this directly. Other callers must run replay lookup and before-inbound
-    /// policy first; calling this as a shortcut intentionally skips policy.
-    async fn accept_user_message_skipping_policy(
-        &self,
-        envelope: &ProductInboundEnvelope,
-    ) -> Result<InboundTurnOutcome, ProductWorkflowError>;
-
     /// Accept a user message while preserving the replay-before-policy ordering.
     async fn accept_user_message_with_before_policy(
         &self,
         envelope: &ProductInboundEnvelope,
         before_inbound_policy: &dyn BeforeInboundPolicy,
-    ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
-        if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
-            return Ok(InboundUserMessageDispatch::Accepted(outcome));
-        }
-
-        let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
-            return Err(ProductWorkflowError::UnsupportedActionKind {
-                kind: "non_user_message".into(),
-            });
-        };
-        let policy_outcome = before_inbound_policy
-            .check_user_message(BeforeInboundPolicyRequest::new(envelope, payload))
-            .await?;
-        let dispatch_envelope;
-        let envelope_for_turn = match policy_outcome {
-            BeforeInboundPolicyOutcome::Allow => envelope,
-            BeforeInboundPolicyOutcome::RewriteUserMessage(payload) => {
-                dispatch_envelope =
-                    envelope.with_rewritten_user_message(payload).map_err(|_| {
-                        ProductWorkflowError::TurnSubmissionRejected {
-                            reason: "invalid policy-rewritten user message".into(),
-                        }
-                    })?;
-                &dispatch_envelope
-            }
-            BeforeInboundPolicyOutcome::Reject(rejection) => {
-                return Ok(InboundUserMessageDispatch::Rejected(rejection));
-            }
-        };
-
-        self.accept_user_message_skipping_policy(envelope_for_turn)
-            .await
-            .map(InboundUserMessageDispatch::Accepted)
-    }
+    ) -> Result<InboundUserMessageDispatch, ProductWorkflowError>;
 }
 
 /// Default implementation that composes a [`ConversationBindingService`] with a
@@ -218,75 +174,6 @@ where
         }
     }
 
-    async fn accept_user_message_skipping_policy(
-        &self,
-        envelope: &ProductInboundEnvelope,
-    ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
-        let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
-            return Err(ProductWorkflowError::UnsupportedActionKind {
-                kind: "non_user_message".into(),
-            });
-        };
-        let source_binding_id = product_source_binding_id(envelope);
-        let submit_idempotency_key = submit_idempotency_key(envelope);
-
-        let route_kind = route_kind_for_user_message(payload.trigger);
-        let binding = self
-            .binding_service
-            .resolve_binding(ResolveBindingRequest {
-                adapter_id: envelope.adapter_id().clone(),
-                installation_id: envelope.installation_id().clone(),
-                external_actor_ref: envelope.external_actor_ref().clone(),
-                external_conversation_ref: envelope.external_conversation_ref().clone(),
-                external_event_id: envelope.external_event_id().clone(),
-                route_kind,
-                auth_claim: envelope.auth_claim().clone(),
-            })
-            .await?;
-        let thread_scope = thread_scope_from_binding(&binding, route_kind)?;
-        self.thread_service
-            .ensure_thread(EnsureThreadRequest {
-                scope: thread_scope.clone(),
-                thread_id: Some(binding.thread_id.clone()),
-                created_by_actor_id: binding.user_id.as_str().to_string(),
-                title: None,
-                metadata_json: None,
-            })
-            .await
-            .map_err(|e| ProductWorkflowError::Transient {
-                reason: format!("failed to ensure thread: {e}"),
-            })?;
-
-        let reply_target_binding_id = source_binding_id.clone();
-        let accepted = self
-            .thread_service
-            .accept_inbound_message(AcceptInboundMessageRequest {
-                scope: thread_scope.clone(),
-                thread_id: binding.thread_id.clone(),
-                actor_id: binding.user_id.as_str().to_string(),
-                source_binding_id: Some(source_binding_id.clone()),
-                reply_target_binding_id: Some(reply_target_binding_id.clone()),
-                external_event_id: Some(envelope.external_event_id().as_str().to_string()),
-                content: MessageContent::text(payload.text.clone()),
-            })
-            .await
-            .map_err(|e| ProductWorkflowError::Transient {
-                reason: format!("failed to accept inbound message: {e}"),
-            })?;
-
-        ProductInboundTurnHandoff::NeedsSubmission(AcceptedProductInboundTurn {
-            binding,
-            thread_scope,
-            message_id: accepted.message_id,
-            source_binding_id,
-            reply_target_binding_id,
-            idempotency_key_raw: submit_idempotency_key,
-            received_at: envelope.received_at(),
-        })
-        .submit_or_replay(&self.thread_service, &self.turn_coordinator)
-        .await
-    }
-
     async fn accept_user_message_with_before_policy(
         &self,
         envelope: &ProductInboundEnvelope,
@@ -306,11 +193,11 @@ where
         }
 
         let policy_outcome = before_inbound_policy
-            .check_user_message(BeforeInboundPolicyRequest::new(envelope, payload))
+            .check_user_message(BeforeInboundPolicyRequest::new(envelope, payload)?)
             .await?;
         let dispatch_envelope;
-        let envelope_for_turn = match policy_outcome {
-            BeforeInboundPolicyOutcome::Allow => envelope,
+        let (prepared_for_turn, envelope_for_turn) = match policy_outcome {
+            BeforeInboundPolicyOutcome::Allow => (prepared, envelope),
             BeforeInboundPolicyOutcome::RewriteUserMessage(payload) => {
                 dispatch_envelope =
                     envelope.with_rewritten_user_message(payload).map_err(|_| {
@@ -318,14 +205,15 @@ where
                             reason: "invalid policy-rewritten user message".into(),
                         }
                     })?;
-                &dispatch_envelope
+                let rewritten_prepared = self.prepare_user_message(&dispatch_envelope).await?;
+                (rewritten_prepared, &dispatch_envelope)
             }
             BeforeInboundPolicyOutcome::Reject(rejection) => {
                 return Ok(InboundUserMessageDispatch::Rejected(rejection));
             }
         };
 
-        self.accept_prepared_user_message(prepared, envelope_for_turn)
+        self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn)
             .await
             .map(InboundUserMessageDispatch::Accepted)
     }

@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
-use ironclaw_product_adapters::{ProductInboundEnvelope, ProductRejection, UserMessagePayload};
+use ironclaw_product_adapters::{
+    ProductInboundEnvelope, ProductInboundPayload, ProductRejection, UserMessagePayload,
+};
 use ironclaw_turns::{AcceptedMessageRef, TurnRunId};
 
 use crate::action::{ActionFingerprintKey, ProductInboundAction};
@@ -452,39 +454,8 @@ impl FakeInboundTurnService {
     pub fn accepted_count(&self) -> usize {
         self.accepted_envelopes().len()
     }
-}
 
-impl Default for FakeInboundTurnService {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl InboundTurnService for FakeInboundTurnService {
-    async fn replay_accepted_user_message(
-        &self,
-        _envelope: &ProductInboundEnvelope,
-    ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("fake inbound turn state lock poisoned"); // safety: test-support fake
-        state.replay_attempts += 1;
-        Ok(state.programmed_replay.pop_front())
-    }
-
-    async fn accept_user_message(
-        &self,
-        envelope: &ProductInboundEnvelope,
-    ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
-        if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
-            return Ok(outcome);
-        }
-        self.accept_user_message_skipping_policy(envelope).await
-    }
-
-    async fn accept_user_message_skipping_policy(
+    fn accept_fresh_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
     ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
@@ -532,5 +503,78 @@ impl InboundTurnService for FakeInboundTurnService {
             submitted_run_id: TurnRunId::new(),
             binding,
         })
+    }
+}
+
+impl Default for FakeInboundTurnService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl InboundTurnService for FakeInboundTurnService {
+    async fn replay_accepted_user_message(
+        &self,
+        _envelope: &ProductInboundEnvelope,
+    ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError> {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake inbound turn state lock poisoned"); // safety: test-support fake
+        state.replay_attempts += 1;
+        Ok(state.programmed_replay.pop_front())
+    }
+
+    async fn accept_user_message(
+        &self,
+        envelope: &ProductInboundEnvelope,
+    ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
+        if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
+            return Ok(outcome);
+        }
+        self.accept_fresh_user_message(envelope)
+    }
+
+    async fn accept_user_message_with_before_policy(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        before_inbound_policy: &dyn BeforeInboundPolicy,
+    ) -> Result<crate::inbound_turn::InboundUserMessageDispatch, ProductWorkflowError> {
+        if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
+            return Ok(crate::inbound_turn::InboundUserMessageDispatch::Accepted(
+                outcome,
+            ));
+        }
+
+        let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
+            return Err(ProductWorkflowError::UnsupportedActionKind {
+                kind: "non_user_message".into(),
+            });
+        };
+        let policy_outcome = before_inbound_policy
+            .check_user_message(BeforeInboundPolicyRequest::new(envelope, payload)?)
+            .await?;
+        let dispatch_envelope;
+        let envelope_for_turn = match policy_outcome {
+            BeforeInboundPolicyOutcome::Allow => envelope,
+            BeforeInboundPolicyOutcome::RewriteUserMessage(payload) => {
+                dispatch_envelope =
+                    envelope.with_rewritten_user_message(payload).map_err(|_| {
+                        ProductWorkflowError::TurnSubmissionRejected {
+                            reason: "invalid policy-rewritten user message".into(),
+                        }
+                    })?;
+                &dispatch_envelope
+            }
+            BeforeInboundPolicyOutcome::Reject(rejection) => {
+                return Ok(crate::inbound_turn::InboundUserMessageDispatch::Rejected(
+                    rejection,
+                ));
+            }
+        };
+
+        self.accept_fresh_user_message(envelope_for_turn)
+            .map(crate::inbound_turn::InboundUserMessageDispatch::Accepted)
     }
 }

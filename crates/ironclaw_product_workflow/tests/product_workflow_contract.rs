@@ -16,13 +16,14 @@ use ironclaw_product_adapters::{
     ProjectionSubscriptionPayload, ProtocolAuthEvidence, TrustedInboundContext, UserMessagePayload,
 };
 use ironclaw_product_workflow::{
-    ActionDispatchKind, ActionFingerprintKey, AuthRequestRef, DefaultInboundTurnService,
+    ActionDispatchKind, ActionFingerprintKey, AuthRequestRef, BeforeInboundPolicy,
+    BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest, DefaultInboundTurnService,
     DefaultProductWorkflow, FakeBeforeInboundPolicy, FakeConversationBindingService,
     FakeIdempotencyLedger, FakeInboundTurnService, IdempotencyDecision, IdempotencyLedger,
-    InMemoryIdempotencyLedger, InboundTurnOutcome, InboundTurnService, LinkedThreadActionId,
-    ProductCommandName, ProductConversationBindingService, ProductInstallationKey,
-    ProductInstallationScope, ProductWorkflowError, ResolvedBinding, SourceBindingKey,
-    StaticProductInstallationResolver,
+    InMemoryIdempotencyLedger, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
+    LinkedThreadActionId, ProductCommandName, ProductConversationBindingService,
+    ProductInstallationKey, ProductInstallationScope, ProductWorkflowError, ResolvedBinding,
+    SourceBindingKey, StaticProductInstallationResolver,
 };
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_turns::{
@@ -277,6 +278,26 @@ impl ReplayCountingInboundTurnService {
             .expect("accepted envelopes lock poisoned")
             .clone()
     }
+
+    fn accept_fresh_user_message(
+        &self,
+        envelope: &ProductInboundEnvelope,
+    ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
+        *self.attempts.lock().expect("attempt counter lock poisoned") += 1;
+        self.accepted
+            .lock()
+            .expect("accepted envelopes lock poisoned")
+            .push(envelope.clone());
+        Ok(InboundTurnOutcome::Submitted {
+            accepted_message_ref: AcceptedMessageRef::new(format!(
+                "msg:{}",
+                envelope.external_event_id()
+            ))
+            .expect("valid accepted message ref"),
+            submitted_run_id: TurnRunId::new(),
+            binding: fake_binding(),
+        })
+    }
 }
 
 #[async_trait]
@@ -299,27 +320,50 @@ impl InboundTurnService for ReplayCountingInboundTurnService {
         if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
             return Ok(outcome);
         }
-        self.accept_user_message_skipping_policy(envelope).await
+        self.accept_fresh_user_message(envelope)
     }
 
-    async fn accept_user_message_skipping_policy(
+    async fn accept_user_message_with_before_policy(
         &self,
         envelope: &ProductInboundEnvelope,
-    ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
-        *self.attempts.lock().expect("attempt counter lock poisoned") += 1;
-        self.accepted
-            .lock()
-            .expect("accepted envelopes lock poisoned")
-            .push(envelope.clone());
-        Ok(InboundTurnOutcome::Submitted {
-            accepted_message_ref: AcceptedMessageRef::new(format!(
-                "msg:{}",
-                envelope.external_event_id()
-            ))
-            .expect("valid accepted message ref"),
-            submitted_run_id: TurnRunId::new(),
-            binding: fake_binding(),
-        })
+        before_inbound_policy: &dyn BeforeInboundPolicy,
+    ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
+        if let Some(outcome) = self.replay_accepted_user_message(envelope).await? {
+            return Ok(InboundUserMessageDispatch::Accepted(outcome));
+        }
+
+        let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
+            return Err(ProductWorkflowError::UnsupportedActionKind {
+                kind: "non_user_message".into(),
+            });
+        };
+        let policy_outcome = before_inbound_policy
+            .check_user_message(BeforeInboundPolicyRequest::new(envelope, payload)?)
+            .await?;
+        let dispatch_envelope;
+        let envelope_for_turn = match policy_outcome {
+            BeforeInboundPolicyOutcome::Allow => envelope,
+            BeforeInboundPolicyOutcome::RewriteUserMessage(payload) => {
+                dispatch_envelope =
+                    envelope.with_rewritten_user_message(payload).map_err(|_| {
+                        ProductWorkflowError::TurnSubmissionRejected {
+                            reason: "invalid policy-rewritten user message".into(),
+                        }
+                    })?;
+                &dispatch_envelope
+            }
+            BeforeInboundPolicyOutcome::Reject(rejection) => {
+                return Ok(InboundUserMessageDispatch::Rejected(rejection));
+            }
+            _ => {
+                return Err(ProductWorkflowError::Transient {
+                    reason: "unsupported before-inbound policy outcome".into(),
+                });
+            }
+        };
+
+        self.accept_fresh_user_message(envelope_for_turn)
+            .map(InboundUserMessageDispatch::Accepted)
     }
 }
 
@@ -406,7 +450,7 @@ async fn before_inbound_policy_rewrite_reaches_inbound_turn_service() {
         "space:0:;conversation:5:conv1;topic:0:;"
     );
     assert_eq!(
-        request.source_binding_key,
+        request.source_binding_key.as_str(),
         "space:0:;conversation:5:conv1;topic:0:;"
     );
     let accepted = inbound.accepted_envelopes();
@@ -658,6 +702,34 @@ async fn before_inbound_policy_transient_failure_releases_fingerprint() {
         .accept_inbound(envelope.clone())
         .await
         .expect_err("policy failure should be retryable");
+    assert!(first.is_retryable());
+    assert_eq!(policy.request_count(), 1);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+
+    let second = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect_err("released fingerprint should retry policy");
+    assert!(second.is_retryable());
+    assert_eq!(policy.request_count(), 2);
+    assert_eq!(inbound.accepted_count(), 0);
+}
+
+#[tokio::test]
+async fn before_inbound_policy_retryable_failure_releases_fingerprint() {
+    let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
+    policy.force_failure(ProductWorkflowError::BeforeInboundPolicyFailed {
+        reason: "policy cache miss".into(),
+        permanent: false,
+    });
+    let envelope = sample_envelope("policy-retryable-failure");
+
+    let first = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect_err("retryable policy failure should release fingerprint");
     assert!(first.is_retryable());
     assert_eq!(policy.request_count(), 1);
     assert_eq!(inbound.accepted_count(), 0);
@@ -1268,6 +1340,49 @@ async fn concrete_product_workflow_bot_mention_uses_shared_route() {
     assert_eq!(
         binding.route_kinds(),
         vec![ironclaw_product_workflow::ProductConversationRouteKind::Shared]
+    );
+}
+
+#[tokio::test]
+async fn concrete_product_workflow_recomputes_route_after_policy_rewrites_trigger() {
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let inbound = Arc::new(DefaultInboundTurnService::new(
+        binding.clone(),
+        InMemorySessionThreadService::default(),
+        coordinator.clone(),
+    ));
+    let policy = Arc::new(FakeBeforeInboundPolicy::new());
+    policy.rewrite_user_message(
+        UserMessagePayload::new("rewritten shared", vec![], ProductTriggerReason::BotMention)
+            .expect("message"),
+    );
+    let workflow = DefaultProductWorkflow::new(
+        inbound,
+        Arc::new(InMemoryIdempotencyLedger::new()),
+        binding.clone(),
+    )
+    .with_before_inbound_policy(policy);
+
+    workflow
+        .accept_inbound(sample_envelope_with_payload(
+            "policy-rewrite-shared-route",
+            ProductInboundPayload::UserMessage(
+                UserMessagePayload::new("hello direct", vec![], ProductTriggerReason::DirectChat)
+                    .expect("message"),
+            ),
+        ))
+        .await
+        .expect("policy-rewritten message accepted");
+
+    let submissions = coordinator.submissions();
+    assert_eq!(submissions.len(), 1);
+    assert_eq!(
+        binding.route_kinds(),
+        vec![
+            ironclaw_product_workflow::ProductConversationRouteKind::Direct,
+            ironclaw_product_workflow::ProductConversationRouteKind::Shared,
+        ]
     );
 }
 

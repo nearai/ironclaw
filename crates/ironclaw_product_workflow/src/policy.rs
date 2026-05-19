@@ -10,6 +10,7 @@ use ironclaw_product_adapters::{
     ProductInboundEnvelope, ProductRejection, UserMessagePayload,
 };
 
+use crate::action::SourceBindingKey;
 use crate::error::ProductWorkflowError;
 
 /// Request passed to before-inbound policy implementations.
@@ -24,20 +25,25 @@ pub struct BeforeInboundPolicyRequest {
     pub installation_id: AdapterInstallationId,
     pub external_actor_ref: ExternalActorRef,
     pub external_conversation_ref: ExternalConversationRef,
-    pub source_binding_key: String,
+    pub source_binding_key: SourceBindingKey,
     pub user_message: UserMessagePayload,
 }
 
 impl BeforeInboundPolicyRequest {
-    pub fn new(envelope: &ProductInboundEnvelope, user_message: &UserMessagePayload) -> Self {
-        Self {
+    pub fn new(
+        envelope: &ProductInboundEnvelope,
+        user_message: &UserMessagePayload,
+    ) -> Result<Self, ProductWorkflowError> {
+        let source_binding_key = SourceBindingKey::new(envelope.source_binding_key())
+            .map_err(|reason| ProductWorkflowError::BindingResolutionFailed { reason })?;
+        Ok(Self {
             adapter_id: envelope.adapter_id().clone(),
             installation_id: envelope.installation_id().clone(),
             external_actor_ref: envelope.external_actor_ref().clone(),
             external_conversation_ref: envelope.external_conversation_ref().clone(),
-            source_binding_key: envelope.source_binding_key(),
+            source_binding_key,
             user_message: user_message.clone(),
-        }
+        })
     }
 }
 
