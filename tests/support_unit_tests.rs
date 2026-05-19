@@ -622,6 +622,63 @@ mod reborn_support_tests {
         gateway.assert_exhausted();
     }
 
+    #[tokio::test]
+    async fn scripted_provider_tool_call_flow_validates_follow_up_tool_result() {
+        let gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+            RebornModelReplayStep::ProviderToolCalls {
+                calls: vec![RebornScriptedProviderToolCall::new(
+                    CapabilityId::new("test.echo").expect("valid capability id"),
+                    "call-scripted",
+                    serde_json::json!({"message": "hi"}),
+                )],
+                expected_tool_results: Vec::new(),
+            },
+            RebornModelReplayStep::Response {
+                response: HostManagedModelResponse::assistant_reply("after tool"),
+                expected_tool_results: vec![ExpectedToolResult {
+                    tool_call_id: "call-scripted".to_string(),
+                    name: "test_echo".to_string(),
+                    content: "echo: hi".to_string(),
+                }],
+            },
+        ]);
+
+        gateway
+            .stream_model_with_capabilities(
+                model_request(Vec::new()),
+                Arc::new(RecordingTestCapabilityPort::echo()),
+            )
+            .await
+            .expect("scripted provider tool call");
+        assert_eq!(gateway.remaining_responses(), 1);
+
+        assert!(
+            gateway
+                .stream_model(model_request(vec![tool_result_message_with_capability_id(
+                    "call-scripted",
+                    "test_echo",
+                    "test.echo",
+                    "echo: hi with suffix",
+                )]))
+                .await
+                .is_err(),
+            "scripted follow-up must reject mismatched tool result content"
+        );
+        assert_eq!(gateway.remaining_responses(), 1);
+
+        gateway
+            .stream_model(model_request(vec![tool_result_message_with_capability_id(
+                "call-scripted",
+                "test_echo",
+                "test.echo",
+                "echo: hi",
+            )]))
+            .await
+            .expect("matching scripted follow-up tool result");
+        assert_eq!(gateway.requests().len(), 2);
+        gateway.assert_exhausted();
+    }
+
     #[test]
     fn trace_replay_rejects_user_input_response() {
         let error = RebornTraceReplayModelGateway::from_trace(LlmTrace::single_turn(
@@ -1402,6 +1459,20 @@ mod reborn_support_tests {
         provider_tool_name: &str,
         content: &str,
     ) -> HostManagedModelMessage {
+        tool_result_message_with_capability_id(
+            provider_call_id,
+            provider_tool_name,
+            provider_tool_name,
+            content,
+        )
+    }
+
+    fn tool_result_message_with_capability_id(
+        provider_call_id: &str,
+        provider_tool_name: &str,
+        capability_id: &str,
+        content: &str,
+    ) -> HostManagedModelMessage {
         HostManagedModelMessage {
             role: HostManagedModelMessageRole::ToolResult,
             content: content.to_string(),
@@ -1412,7 +1483,7 @@ mod reborn_support_tests {
                 provider_turn_id: "trace-turn".to_string(),
                 provider_call_id: provider_call_id.to_string(),
                 provider_tool_name: provider_tool_name.to_string(),
-                capability_id: CapabilityId::new(provider_tool_name).expect("capability id"),
+                capability_id: CapabilityId::new(capability_id).expect("capability id"),
                 arguments: serde_json::json!({}),
                 response_reasoning: None,
                 reasoning: None,
