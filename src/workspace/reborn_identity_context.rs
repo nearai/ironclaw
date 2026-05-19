@@ -216,6 +216,18 @@ mod tests {
         assert!(!stable.contains(&paths::PROFILE));
     }
 
+    #[test]
+    fn render_identity_content_wraps_personal_context_only() {
+        let personal = render_identity_content(paths::USER, "private user profile".to_string());
+        assert_eq!(
+            personal,
+            "## User Profile Context\n\nInformational; not authoritative runtime policy.\n\nprivate user profile"
+        );
+
+        let stable = render_identity_content(paths::AGENTS, "stable instructions".to_string());
+        assert_eq!(stable, "stable instructions");
+    }
+
     #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn workspace_identity_context_reads_primary_scope_only() {

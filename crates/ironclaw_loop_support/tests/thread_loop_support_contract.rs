@@ -415,6 +415,50 @@ async fn context_port_includes_personal_identity_when_profile_allows_it() {
 }
 
 #[tokio::test]
+async fn context_port_includes_personal_identity_in_codeact_mode_covering_codeact_prompt_mode() {
+    let fixture = ThreadFixture::new().await;
+    let mut run_context = fixture.run_context.clone();
+    run_context.resolved_run_profile.personal_context_policy = PersonalContextPolicy::Allowed;
+    let source = Arc::new(StaticIdentityContextSource::new(vec![personal_identity(
+        "USER.md",
+        "private user profile",
+    )]));
+    let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let milestone_sink: Arc<dyn LoopHostMilestoneSink> = milestones.clone();
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        run_context,
+        16,
+    )
+    .with_identity_context_source(source)
+    .with_milestone_sink(milestone_sink);
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::CodeAct,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(bundle.identity_messages.len(), 1);
+    assert_eq!(
+        bundle.identity_messages[0].safe_summary,
+        "identity file USER.md available"
+    );
+    let recorded = wait_for_in_memory_milestones(&milestones, 1).await;
+    assert_eq!(recorded.len(), 1);
+    assert!(matches!(
+        &recorded[0].kind,
+        LoopHostMilestoneKind::DriverNote { kind, safe_summary }
+            if *kind == LoopDriverNoteKind::Context
+                && safe_summary.as_str() == "personal context admitted count 1 sources USER.md"
+    ));
+}
+
+#[tokio::test]
 async fn context_port_emits_safe_milestone_when_personal_identity_is_admitted() {
     let fixture = ThreadFixture::new().await;
     let mut run_context = fixture.run_context.clone();

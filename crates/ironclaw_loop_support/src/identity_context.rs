@@ -357,10 +357,40 @@ mod tests {
     use ironclaw_host_api::{TenantId, ThreadId};
     use ironclaw_turns::{
         RunProfileResolutionRequest, RunProfileResolver, TurnId, TurnRunId, TurnScope,
-        run_profile::{InMemoryRunProfileResolver, LoopRunContext},
+        run_profile::{InMemoryRunProfileResolver, LoopRunContext, PersonalContextPolicy},
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn identity_applicability_allowed_for_run_all_variants_covering_excluded_and_allowed() {
+        let excluded_context = run_context().await;
+        let mut allowed_context = run_context().await;
+        allowed_context.resolved_run_profile.personal_context_policy =
+            PersonalContextPolicy::Allowed;
+
+        for applicability in [
+            IdentityApplicability::Always,
+            IdentityApplicability::OnCodeAct,
+        ] {
+            assert!(identity_applicability_allowed_for_run(
+                applicability,
+                &excluded_context
+            ));
+            assert!(identity_applicability_allowed_for_run(
+                applicability,
+                &allowed_context
+            ));
+        }
+        assert!(!identity_applicability_allowed_for_run(
+            IdentityApplicability::OnPersonalContextAllowed,
+            &excluded_context
+        ));
+        assert!(identity_applicability_allowed_for_run(
+            IdentityApplicability::OnPersonalContextAllowed,
+            &allowed_context
+        ));
+    }
 
     #[tokio::test]
     async fn filters_by_applies_when() {
@@ -484,6 +514,35 @@ mod tests {
             serde_json::to_vec(&second).unwrap()
         );
         assert_eq!(source.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn build_identity_messages_for_run_detailed_mixed_candidates_excluded_covering_filtering()
+    {
+        let context = run_context().await;
+        let candidates = vec![
+            trusted("AGENTS.md", "agent", IdentityApplicability::Always),
+            trusted(
+                "USER.md",
+                "private user profile",
+                IdentityApplicability::OnPersonalContextAllowed,
+            ),
+        ];
+
+        let outcome = build_identity_messages_for_run_detailed(
+            &candidates,
+            &context,
+            PromptMode::TextOnly,
+            IdentityBudget::default(),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.messages.len(), 1);
+        assert_eq!(
+            outcome.messages[0].safe_summary,
+            "identity file AGENTS.md available"
+        );
+        assert!(outcome.admitted_personal_context_paths.is_empty());
     }
 
     fn trusted(

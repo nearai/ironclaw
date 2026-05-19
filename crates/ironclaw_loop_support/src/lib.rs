@@ -329,18 +329,7 @@ fn personal_context_admitted_summary(
 ) -> Result<LoopSafeSummary, AgentLoopHostError> {
     let source_labels = admitted_paths
         .iter()
-        .map(|path| {
-            path.as_str()
-                .rsplit('/')
-                .next()
-                .unwrap_or(path.as_str())
-                .chars()
-                .filter(|character| {
-                    character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
-                })
-                .collect::<String>()
-        })
-        .filter(|label| !label.is_empty())
+        .filter_map(|path| personal_context_source_label(path.as_str()))
         .collect::<Vec<_>>()
         .join(" ");
     let summary = if source_labels.is_empty() {
@@ -358,6 +347,21 @@ fn personal_context_admitted_summary(
             format!("personal context milestone summary invalid: {reason}"),
         )
     })
+}
+
+fn personal_context_source_label(path: &str) -> Option<String> {
+    let basename = path
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|label| !label.is_empty())
+        .unwrap_or(path);
+    let label = basename
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+        .collect::<String>();
+    (!label.is_empty()).then_some(label)
 }
 
 /// Thread-backed transcript adapter for text-only assistant replies.
@@ -1529,5 +1533,48 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
         HostManagedModelErrorKind::CredentialUnavailable => "model credentials are unavailable",
         HostManagedModelErrorKind::Unavailable => "model service is unavailable",
         HostManagedModelErrorKind::Cancelled => "model request was cancelled",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn personal_context_admitted_summary_empty_paths_uses_count_only() {
+        let summary = personal_context_admitted_summary(&[]).unwrap();
+
+        assert_eq!(summary.as_str(), "personal context admitted count 0");
+    }
+
+    #[test]
+    fn personal_context_admitted_summary_uses_safe_basenames_only() {
+        let paths = vec![
+            IdentityFileName::new("USER.md").unwrap(),
+            IdentityFileName::new("context/assistant-directives.md").unwrap(),
+        ];
+
+        let summary = personal_context_admitted_summary(&paths).unwrap();
+
+        assert_eq!(
+            summary.as_str(),
+            "personal context admitted count 2 sources USER.md assistant-directives.md"
+        );
+        assert!(!summary.as_str().contains("context/assistant-directives.md"));
+        assert!(!summary.as_str().contains('/'));
+        assert!(!summary.as_str().contains('\\'));
+    }
+
+    #[test]
+    fn personal_context_source_label_drops_empty_and_separator_only_labels() {
+        assert_eq!(
+            personal_context_source_label(r"private\USER.md").as_deref(),
+            Some("USER.md")
+        );
+        assert_eq!(
+            personal_context_source_label("context/%2Fassistant-directives.md").as_deref(),
+            Some("2Fassistant-directives.md")
+        );
+        assert_eq!(personal_context_source_label("///"), None);
     }
 }
