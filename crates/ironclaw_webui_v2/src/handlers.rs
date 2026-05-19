@@ -21,11 +21,11 @@ use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornResolveGateResponse,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornStreamEventsRequest,
-    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
-    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest,
+    ProjectionCursor, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -108,7 +108,7 @@ const LAST_EVENT_ID_HEADER: &str = "last-event-id";
 /// polls in a loop. Drain-only semantics are documented on
 /// [`RebornServicesApi::stream_events`].
 ///
-/// [`ProductOutboundEnvelope`]: ironclaw_product_adapters::ProductOutboundEnvelope
+/// [`ProductOutboundEnvelope`]: ironclaw_product_workflow::ProductOutboundEnvelope
 /// [`RebornServicesApi::stream_events`]: ironclaw_product_workflow::RebornServicesApi::stream_events
 /// [`SSE_MAX_LIFETIME`]: crate::sse_capacity::SSE_MAX_LIFETIME
 pub async fn stream_events(
@@ -241,14 +241,14 @@ fn build_sse_stream(
     }
 }
 
-fn parse_cursor_token(token: String) -> Option<ironclaw_product_adapters::ProjectionCursor> {
+fn parse_cursor_token(token: String) -> Option<ProjectionCursor> {
     // The wire form is the JSON-serialized cursor; we accept it verbatim
     // so the browser can echo back the `id` of the last SSE event it saw
     // (which is exactly that JSON).
     serde_json::from_str(&token).ok()
 }
 
-fn cursor_token(cursor: &ironclaw_product_adapters::ProjectionCursor) -> Option<String> {
+fn cursor_token(cursor: &ProjectionCursor) -> Option<String> {
     serde_json::to_string(cursor).ok()
 }
 

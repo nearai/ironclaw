@@ -252,6 +252,32 @@ impl ProjectionStream for AuthFailureProjectionStream {
     }
 }
 
+/// Projection stream that records every `drain` invocation. Used by the
+/// `stream_events` ownership regression to assert that the projection
+/// drain is never reached when the ownership probe fails — if the probe
+/// were skipped, `drain_count()` would observe the unauthorized read.
+#[derive(Default)]
+struct RecordingProjectionStream {
+    drains: Mutex<Vec<ProjectionSubscriptionRequest>>,
+}
+
+impl RecordingProjectionStream {
+    fn drain_count(&self) -> usize {
+        self.drains.lock().expect("lock").len()
+    }
+}
+
+#[async_trait]
+impl ProjectionStream for RecordingProjectionStream {
+    async fn drain(
+        &self,
+        request: ProjectionSubscriptionRequest,
+    ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
+        self.drains.lock().expect("lock").push(request);
+        Ok(Vec::new())
+    }
+}
+
 /// Stub thread service whose `list_thread_history` always returns
 /// `ThreadScopeMismatch`. Used to lock in the contract that ownership probes
 /// remap that variant to NotFound, since the current backends happen to return
@@ -900,6 +926,10 @@ async fn adapter_authentication_maps_to_unauthenticated() {
         Arc::new(FakeTurnCoordinator::default()),
     )
     .with_event_stream(Arc::new(AuthFailureProjectionStream));
+    // stream_events now ownership-probes the caller before draining; seed the
+    // thread under the caller so the probe passes and the adapter auth error
+    // is what the test observes.
+    setup_owned_thread(&services, caller(), "thread-alpha").await;
 
     let err = services
         .stream_events(
@@ -1163,6 +1193,90 @@ async fn resolve_gate_rejects_cross_user_access() {
         0,
         "turn coordinator must NOT be called for cross-user resolve"
     );
+}
+
+// Regression: stream_events shares the TurnScope shape with cancel_run /
+// resolve_gate / get_run_state — none of which carry owner_user_id — so the
+// projection drain must be gated by the same ownership probe. Without it, a
+// caller who shares the (tenant, agent, project) scope could read another
+// user's projection feed by guessing thread_id.
+#[tokio::test]
+async fn stream_events_rejects_cross_user_access() {
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let event_stream = Arc::new(RecordingProjectionStream::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        coordinator.clone(),
+    )
+    .with_event_stream(event_stream.clone());
+    let alice = caller();
+    setup_owned_thread(&services, alice.clone(), "thread-alice").await;
+
+    let bob = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("user-bob").expect("user"),
+        alice.agent_id.clone(),
+        alice.project_id.clone(),
+    );
+
+    let err = services
+        .stream_events(
+            bob,
+            RebornStreamEventsRequest {
+                thread_id: "thread-alice".to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect_err("cross-user stream_events must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
+    assert_eq!(
+        event_stream.drain_count(),
+        0,
+        "projection stream must NOT be drained when ownership probe fails"
+    );
+}
+
+// Regression: when create_thread is given an explicit `requested_thread_id`,
+// a thread that already exists under a different owner would surface as
+// `ThreadScopeMismatch` → `409 Conflict` via `map_thread_error`. That gives
+// any caller sharing the (tenant, agent, project) scope an existence oracle
+// for thread ids they did not create. Explicit-id collisions must redact to
+// the same `NotFound` outcome as the cancel_run / resolve_gate / stream_events
+// ownership probe. The auto-generated path keeps `map_thread_error` since the
+// caller cannot usefully probe deterministically-derived UUIDv5 ids.
+#[tokio::test]
+async fn create_thread_explicit_id_collision_remaps_to_not_found() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    let alice = caller();
+    setup_owned_thread(&services, alice.clone(), "thread-alice").await;
+
+    let bob = WebUiAuthenticatedCaller::new(
+        TenantId::new("tenant-alpha").expect("tenant"),
+        UserId::new("user-bob").expect("user"),
+        alice.agent_id.clone(),
+        alice.project_id.clone(),
+    );
+
+    let err = services
+        .create_thread(
+            bob,
+            serde_json::from_value::<WebUiCreateThreadRequest>(json!({
+                "client_action_id": "create-cross",
+                "requested_thread_id": "thread-alice",
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("cross-user create_thread with explicit id must be rejected");
+
+    assert_eq!(err.code, RebornServicesErrorCode::NotFound);
+    assert_eq!(err.status_code, 404);
 }
 
 // Regression: cancel_run is not gate-aware, so without a parked-on-gate check

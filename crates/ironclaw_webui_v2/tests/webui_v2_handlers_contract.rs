@@ -453,9 +453,9 @@ async fn stream_events_last_event_id_header_takes_precedence_over_query() {
     // the captured RebornStreamEventsRequest — if a future refactor flips
     // the `.or()` order, the facade will see cursor-B and this test fails.
     let header_cursor =
-        ironclaw_product_adapters::ProjectionCursor::new("cursor-from-header").expect("cursor");
+        ironclaw_product_workflow::ProjectionCursor::new("cursor-from-header").expect("cursor");
     let query_cursor =
-        ironclaw_product_adapters::ProjectionCursor::new("cursor-from-query").expect("cursor");
+        ironclaw_product_workflow::ProjectionCursor::new("cursor-from-query").expect("cursor");
     let header_json = serde_json::to_string(&header_cursor).expect("serialize header cursor");
     let query_json = serde_json::to_string(&query_cursor).expect("serialize query cursor");
     let query_encoded = url_encode(&query_json);

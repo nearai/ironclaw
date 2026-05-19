@@ -1114,6 +1114,12 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_outbound",
                 "ironclaw_processes",
+                // Single-facade boundary: route handlers consume only the
+                // `ironclaw_product_workflow` facade plus the ingress + error
+                // vocabulary. Projection types are re-exported through the
+                // facade crate so handlers never reach into the adapter
+                // surface directly.
+                "ironclaw_product_adapters",
                 "ironclaw_reborn",
                 "ironclaw_reborn_cli",
                 "ironclaw_reborn_composition",

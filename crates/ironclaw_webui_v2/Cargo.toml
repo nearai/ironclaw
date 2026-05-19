@@ -30,7 +30,11 @@ serde_json = "1"
 tracing = "0.1"
 
 ironclaw_host_api = { path = "../ironclaw_host_api", version = "0.1.0" }
-ironclaw_product_adapters = { path = "../ironclaw_product_adapters", version = "0.1.0" }
+# Deliberately no direct dependency on `ironclaw_product_adapters`. Handlers
+# must consume only the `RebornServicesApi` facade plus the ingress + error
+# vocabulary; projection types (`ProjectionCursor`, `ProductOutboundEnvelope`)
+# are re-exported through `ironclaw_product_workflow`. The architecture
+# boundary test in `ironclaw_architecture` enforces this edge.
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow", version = "0.1.0" }
 
 # Optional — only used when `webui-v2-beta` is enabled.

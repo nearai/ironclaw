@@ -117,9 +117,14 @@ impl RebornServices {
 impl RebornServicesApi for RebornServices {
     /// `requested_thread_id` makes the caller's choice authoritative.
     /// Without it, `client_action_id` deterministically derives the thread id
-    /// so a retry of the same create maps back to the same thread. Conflicting
-    /// explicit ids submitted with the same client action are not reconciled
-    /// at this layer; the thread service decides.
+    /// so a retry of the same create maps back to the same thread.
+    ///
+    /// When the caller supplies an explicit `requested_thread_id`, an
+    /// `ensure_thread` collision with a thread owned by another user is
+    /// remapped to `NotFound` rather than the underlying `409 Conflict`.
+    /// Otherwise the 400/409 distinction would be an existence oracle:
+    /// callers sharing the same (tenant, agent, project) scope could probe
+    /// for thread ids they did not create.
     async fn create_thread(
         &self,
         caller: WebUiAuthenticatedCaller,
@@ -134,6 +139,7 @@ impl RebornServicesApi for RebornServices {
         else {
             return Err(RebornServicesError::internal_invariant());
         };
+        let caller_supplied_id = requested_thread_id.is_some();
         let thread_id =
             requested_thread_id.unwrap_or_else(|| generated_thread_id(&caller, &client_action_id));
         let scope = caller.turn_scope(thread_id.clone());
@@ -148,7 +154,17 @@ impl RebornServicesApi for RebornServices {
                 metadata_json: Some(create_thread_metadata_json(&client_action_id)?),
             })
             .await
-            .map_err(map_thread_error)?;
+            .map_err(|error| {
+                if caller_supplied_id {
+                    map_ownership_probe_error(error)
+                } else {
+                    // Deterministic generated ids derive from caller scope so
+                    // a cross-user collision implies a UUIDv5 hash collision,
+                    // which is not an oracle the caller can usefully probe.
+                    // Preserve the underlying mapping for diagnosability.
+                    map_thread_error(error)
+                }
+            })?;
         Ok(RebornCreateThreadResponse { thread })
     }
 
@@ -352,13 +368,20 @@ impl RebornServicesApi for RebornServices {
         request: RebornStreamEventsRequest,
     ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
         let thread_id = parse_thread_id_field("thread_id", request.thread_id)?;
+        let scope = caller.turn_scope(thread_id);
+        let actor = caller.actor();
+        // TurnScope carries no owner_user_id and the projection stream
+        // trusts the facade boundary; without this gate any caller sharing
+        // the (tenant, agent, project) scope could read another user's
+        // projection feed by guessing thread_id.
+        assert_thread_owned_by(self.thread_service.as_ref(), &scope, &actor).await?;
         let Some(event_stream) = &self.event_stream else {
             return Err(RebornServicesError::service_unavailable(false));
         };
         let events = event_stream
             .drain(ProjectionSubscriptionRequest {
-                actor: caller.actor(),
-                scope: caller.turn_scope(thread_id),
+                actor,
+                scope,
                 after_cursor: request.after_cursor,
             })
             .await

@@ -4973,7 +4973,6 @@ dependencies = [
  "http 1.4.0",
  "http-body-util",
  "ironclaw_host_api",
- "ironclaw_product_adapters",
  "ironclaw_product_workflow",
  "ironclaw_threads",
  "ironclaw_turns",

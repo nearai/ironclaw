@@ -40,6 +40,12 @@ pub use error::ProductWorkflowError;
 pub use fakes::{FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService};
 pub use inbound_turn::{DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService};
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
+// Projection types that route handlers need to thread through SSE
+// (parse the resume cursor, emit each envelope as JSON). Re-exported so
+// `ironclaw_webui_v2` consumes them via the facade crate and does not need
+// a direct dependency on `ironclaw_product_adapters` — the single-facade
+// boundary is enforced by `ironclaw_architecture`.
+pub use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
 pub use reborn_services::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornResolveGateResponse, RebornResumeGateResponse, RebornServices,
