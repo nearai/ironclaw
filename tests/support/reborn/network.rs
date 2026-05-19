@@ -96,7 +96,7 @@ impl NetworkHttpTransport for RecordingNetworkHttpTransport {
 fn sanitize_request(request: &NetworkTransportRequest) -> SanitizedNetworkTransportRequest {
     SanitizedNetworkTransportRequest {
         method: request.method,
-        url: request.url.clone(),
+        url: sanitize_url(&request.url),
         headers: request
             .headers
             .iter()
@@ -111,6 +111,11 @@ fn sanitize_request(request: &NetworkTransportRequest) -> SanitizedNetworkTransp
         body_len: request.body.len(),
         body_sha256: hex::encode(Sha256::digest(&request.body)),
     }
+}
+
+fn sanitize_url(url: &str) -> String {
+    url.split_once('?')
+        .map_or_else(|| url.to_string(), |(base, _)| format!("{base}?<redacted>"))
 }
 
 fn is_sensitive_header(name: &str) -> bool {
