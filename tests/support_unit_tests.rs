@@ -400,12 +400,16 @@ mod reborn_support_tests {
         RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCoordinator,
         TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
         events::EventCursor,
-        run_profile::{ModelProfileId, ParentLoopOutput},
+        run_profile::{
+            CapabilityBatchInvocation, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+            LoopCapabilityPort, ModelProfileId, ParentLoopOutput, VisibleCapabilityRequest,
+        },
     };
     use tokio::sync::Barrier;
 
     use crate::reborn_support::delivery::RecordingOutboundDeliverySink;
     use crate::reborn_support::filesystem::local_filesystem;
+    use crate::reborn_support::harness::RecordingTestCapabilityPort;
     use crate::reborn_support::model_replay::{
         RebornTraceReplayError, RebornTraceReplayModelGateway,
         capability_call_from_trace_with_surface,
@@ -976,6 +980,49 @@ mod reborn_support_tests {
                 .await
                 .is_err(),
             "only the latest finalized assistant reply should be accepted"
+        );
+    }
+
+    #[tokio::test]
+    async fn recording_capability_batch_stops_after_first_suspension() {
+        let port = RecordingTestCapabilityPort::approval_then_echo();
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible capabilities");
+        let capability_id = surface.descriptors[0].capability_id.clone();
+
+        let outcome = port
+            .invoke_capability_batch(CapabilityBatchInvocation {
+                invocations: vec![
+                    CapabilityInvocation {
+                        surface_version: surface.version.clone(),
+                        capability_id: capability_id.clone(),
+                        input_ref: CapabilityInputRef::new("input:first").expect("first input"),
+                    },
+                    CapabilityInvocation {
+                        surface_version: surface.version,
+                        capability_id,
+                        input_ref: CapabilityInputRef::new("input:second").expect("second input"),
+                    },
+                ],
+                stop_on_first_suspension: true,
+            })
+            .await
+            .expect("batch outcome");
+
+        assert!(outcome.stopped_on_suspension);
+        assert!(
+            matches!(
+                outcome.outcomes.as_slice(),
+                [CapabilityOutcome::ApprovalRequired { .. }]
+            ),
+            "batch should return only the first suspension"
+        );
+        assert_eq!(
+            port.invocation_count(),
+            1,
+            "second invocation must not run after suspension"
         );
     }
 

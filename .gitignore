@@ -15,6 +15,9 @@ integrations/abound/tests/source_env_vars.sh
 # Stale insta snapshot proposals (review via `cargo insta review`)
 *.snap.new
 
+# Added by review-implementation skill
+.review/
+
 # Claude Code worktrees and lock files
 .claude/worktrees/
 .claude/scheduled_tasks.lock
