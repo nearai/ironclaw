@@ -3,7 +3,7 @@ name = "ironclaw_webui_v2"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.92"
-description = "Reborn WebChat v2 HTTP route surface (#3611). Off by default — enable with the `webui-v2-beta` feature."
+description = "Reborn WebChat v2 HTTP route surface. Off by default — enable with the `webui-v2-beta` feature."
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/nearai/ironclaw"
@@ -50,7 +50,7 @@ ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = 
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_turns = { path = "../ironclaw_turns" }
 async-trait = "0.1"
-tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time", "test-util"] }
 tower = { version = "0.5", features = ["util"] }
 http = "1"
 http-body-util = "0.1"

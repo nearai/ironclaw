@@ -1,7 +1,9 @@
 # ironclaw_webui_v2
 
-Reborn WebChat v2 HTTP route surface (#3611). Off by default — compile in
-with the `webui-v2-beta` Cargo feature.
+Reborn WebChat v2 HTTP route surface. Off by default — compile in with
+the `webui-v2-beta` Cargo feature. The descriptors and handlers in this
+crate are the route-layer; the gateway-layer (see "Host composition
+still owes" below) is a separate piece host composition must land.
 
 ## Purpose
 
@@ -11,6 +13,38 @@ public surface; host composition consumes the
 `IngressRouteDescriptor`s returned by `webui_v2_routes()` and mounts
 each handler under the matching pattern after running its own bearer
 auth, CORS, body-limit, and rate-limit middleware.
+
+## Host composition still owes
+
+Compiling this crate into a binary is not enough to expose the v2
+routes to a browser. Host composition (gateway / app startup) still
+owns:
+
+1. **Mounting the router.** Call `webui_v2_router(state)` and merge
+   the resulting `axum::Router` into the gateway's main router under
+   the same path prefix the descriptors declare.
+2. **Bearer-token middleware.** Authenticate `Authorization: Bearer
+   …` (or the matching session form) and inject a
+   `WebUiAuthenticatedCaller` as an `axum::Extension` *before* the
+   handler runs. The handlers fail closed (`500`) when this layer is
+   missing — verified by
+   `missing_caller_extension_returns_500`.
+3. **Query-token path for the SSE route.** The browser's
+   `EventSource` cannot set request headers, so
+   `/api/webchat/v2/threads/{thread_id}/events` must additionally
+   accept `?token=…` (the existing WebUI v1 gateway allowlists
+   `/api/chat/events`, `/api/logs/events`, `/api/chat/ws` for the
+   same reason — see `src/channels/web/CLAUDE.md`). The route
+   descriptor is bearer-only at the protocol layer; the gateway's
+   query-token handler converts `?token=` to the same bearer-style
+   identity before this crate's handler sees the request.
+4. **Static security headers + CORS.** Declared at the descriptor
+   policy level (`CorsPolicy::SameOriginOnly`) but enforced in the
+   gateway's middleware stack.
+
+Until those four steps land, the routes here compile and lock the
+contract host composition will mount against, but they are not yet
+browser-reachable.
 
 ## Route table
 
@@ -61,7 +95,11 @@ descriptor's per-caller request rate limit:
   via `WebUiV2State::with_sse_concurrency_limit`.
 - **Max stream lifetime** — every stream is closed after 5 minutes so
   the browser must reconnect with `Last-Event-ID`. Bounds cursor drift
-  and recycles slots even under leaked client connections.
+  and recycles slots even under leaked client connections. The drain
+  await is wrapped in `tokio::time::timeout(remaining, ...)` so a
+  stuck/never-resolving facade `stream_events` call cannot pin the
+  slot past the budget — covered by
+  `stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime`.
 
 Slots are RAII: the SSE generator owns an `SseSlot` guard that
 decrements the per-caller count on drop, so a client disconnect,
