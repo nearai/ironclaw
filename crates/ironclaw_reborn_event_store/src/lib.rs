@@ -37,10 +37,11 @@ use ironclaw_events::{
     DurableAuditLog, DurableEventLog, EventCursor, EventError, EventLogEntry, EventReplay,
     EventStreamKey, InMemoryDurableAuditLog, InMemoryDurableEventLog, ReadScope, RuntimeEvent,
 };
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{
-    AgentId, AuditEnvelope, MountAlias, MountGrant, MountPermissions, MountView, VirtualPath,
-};
+use ironclaw_host_api::{AgentId, AuditEnvelope};
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;

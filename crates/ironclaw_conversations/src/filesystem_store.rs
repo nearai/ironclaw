@@ -479,6 +479,28 @@ impl ConversationBindingService for RebornFilesystemConversationServices {
         self.inner.resolve_or_create_binding(request).await
     }
 
+    async fn resolve_or_create_binding_with_trusted_scope(
+        &self,
+        request: ResolveConversationRequest,
+        trusted_agent_id: Option<ironclaw_host_api::AgentId>,
+        trusted_project_id: Option<ironclaw_host_api::ProjectId>,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        self.inner
+            .resolve_or_create_binding_with_trusted_scope(
+                request,
+                trusted_agent_id,
+                trusted_project_id,
+            )
+            .await
+    }
+
+    async fn lookup_binding(
+        &self,
+        request: ResolveConversationRequest,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        self.inner.lookup_binding(request).await
+    }
+
     async fn link_conversation_to_thread(
         &self,
         request: LinkConversationRequest,

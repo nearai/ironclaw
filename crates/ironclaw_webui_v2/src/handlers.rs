@@ -182,18 +182,39 @@ fn build_sse_stream(
         let started_at = tokio::time::Instant::now();
         let mut after_cursor = initial_cursor.and_then(parse_cursor_token);
         loop {
-            if started_at.elapsed() >= SSE_MAX_LIFETIME {
-                // Force a clean close so the browser can reconnect with
-                // Last-Event-ID; this caps single-stream lifetime
-                // regardless of client behavior and recycles the slot.
+            // Force a clean close once the budget is exhausted so the
+            // browser can reconnect with Last-Event-ID; this caps single-
+            // stream lifetime regardless of client behavior and recycles
+            // the slot. `remaining` also bounds the await below so a
+            // stuck projection drain cannot pin the slot past the budget.
+            let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+            if remaining.is_zero() {
                 return;
             }
             let request = RebornStreamEventsRequest {
                 thread_id: thread_id.clone(),
                 after_cursor: after_cursor.clone(),
             };
-            match services.stream_events(caller.clone(), request).await {
-                Ok(response) => {
+            match tokio::time::timeout(
+                remaining,
+                services.stream_events(caller.clone(), request),
+            )
+            .await
+            {
+                Err(_elapsed) => {
+                    // The facade drain was still pending when SSE_MAX_LIFETIME
+                    // ran out. Returning here drops the generator (and the
+                    // SseSlot it owns), so the per-caller concurrency budget
+                    // recovers even under a stuck projection stream — without
+                    // this bound, an unbounded `.await` on a non-resolving
+                    // facade would pin the slot indefinitely.
+                    tracing::debug!(
+                        target = "ironclaw_webui_v2::sse",
+                        "stream_events drain pending past SSE_MAX_LIFETIME; closing stream"
+                    );
+                    return;
+                }
+                Ok(Ok(response)) => {
                     if let Some(latest) = response.events.last() {
                         after_cursor = Some(latest.projection_cursor.clone());
                     }
@@ -216,9 +237,16 @@ fn build_sse_stream(
                             }
                         }
                     }
-                    tokio::time::sleep(SSE_POLL_INTERVAL).await;
+                    // Bound the poll sleep too so we never oversleep past the
+                    // lifetime budget; the top-of-loop check then fires.
+                    let sleep_for = SSE_POLL_INTERVAL
+                        .min(SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed()));
+                    if sleep_for.is_zero() {
+                        return;
+                    }
+                    tokio::time::sleep(sleep_for).await;
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     // Surface a redacted error event and close the stream.
                     // Reconnect logic is the browser's responsibility.
                     tracing::debug!(

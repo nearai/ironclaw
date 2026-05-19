@@ -8,6 +8,7 @@
 //! `ironclaw_product_workflow`.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::Router;
@@ -567,6 +568,136 @@ async fn stream_events_caps_concurrent_streams_per_caller() {
     );
 
     drop(second);
+    drop(recovered);
+}
+
+// Regression for the "stalled facade drain" review point: SSE_MAX_LIFETIME
+// must bound the await on `services.stream_events`, not just the top-of-loop
+// check. If a projection drain stalls (e.g. an upstream wedge), an unbounded
+// `.await` would keep the `SseSlot` held even after the configured lifetime
+// elapses — defeating the per-caller concurrency recovery the cap promises.
+//
+// Drives a stub whose `stream_events` returns a future that never resolves,
+// advances Tokio's virtual time past `SSE_MAX_LIFETIME`, and asserts the
+// stream actually terminates and the slot is reusable for a new connection.
+#[tokio::test(start_paused = true)]
+async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime() {
+    /// Facade whose `stream_events` never returns; all other methods are
+    /// unreachable for this regression.
+    #[derive(Default)]
+    struct StallingServices;
+
+    #[async_trait]
+    impl RebornServicesApi for StallingServices {
+        async fn create_thread(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: WebUiCreateThreadRequest,
+        ) -> Result<RebornCreateThreadResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn submit_turn(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: WebUiSendMessageRequest,
+        ) -> Result<RebornSubmitTurnResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn get_timeline(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: RebornTimelineRequest,
+        ) -> Result<RebornTimelineResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn stream_events(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: RebornStreamEventsRequest,
+        ) -> Result<RebornStreamEventsResponse, RebornServicesError> {
+            // Never resolves — simulates a wedged projection stream.
+            std::future::pending().await
+        }
+        async fn cancel_run(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: WebUiCancelRunRequest,
+        ) -> Result<RebornCancelRunResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn resolve_gate(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: WebUiResolveGateRequest,
+        ) -> Result<RebornResolveGateResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+        async fn get_run_state(
+            &self,
+            _caller: WebUiAuthenticatedCaller,
+            _request: RebornGetRunStateRequest,
+        ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
+            unreachable!("not exercised by this test")
+        }
+    }
+
+    // Cap of 1 so we can observe slot release directly: a second open
+    // returns 429 while the first is held, and 200 once it's released.
+    let services: Arc<dyn RebornServicesApi> = Arc::new(StallingServices);
+    let router = webui_v2_router(WebUiV2State::with_sse_concurrency_limit(services, 1))
+        .layer(axum::Extension(caller()));
+
+    let open_stream = || {
+        router.clone().oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/events")
+                .body(Body::empty())
+                .expect("request"),
+        )
+    };
+
+    // First open: handler acquires the slot and constructs the SSE body.
+    let first = open_stream().await.expect("first oneshot");
+    assert_eq!(first.status(), StatusCode::OK);
+
+    // Spawn a task that drains the body so the SSE generator actually runs
+    // and reaches the `tokio::time::timeout(...)` against the stalled drain.
+    let mut first_body = first.into_body();
+    let body_task = tokio::spawn(async move { while (first_body.frame().await).is_some() {} });
+
+    // Yield so the spawned body poll runs at least once and parks inside
+    // the drain timeout future.
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+
+    // While the only stream is stalled, opening another must hit the cap.
+    let blocked = open_stream().await.expect("blocked oneshot");
+    assert_eq!(
+        blocked.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "with the only stream stalled inside the drain, the slot must be held"
+    );
+    drop(blocked);
+
+    // Advance virtual time past SSE_MAX_LIFETIME. The drain timeout fires,
+    // the generator returns, the `SseSlot` Drop releases the slot.
+    tokio::time::advance(Duration::from_secs(6 * 60)).await;
+
+    // Body task completes when the generator returns. Cap with a real
+    // timeout in case the body hangs (would surface a regression cleanly).
+    tokio::time::timeout(Duration::from_secs(2), body_task)
+        .await
+        .expect("body task must complete after SSE_MAX_LIFETIME elapses")
+        .expect("body task joined cleanly");
+
+    // Slot must now be free; a fresh open succeeds.
+    let recovered = open_stream().await.expect("oneshot after slot release");
+    assert_eq!(
+        recovered.status(),
+        StatusCode::OK,
+        "slot must be released after the lifetime budget bounds the stalled drain"
+    );
     drop(recovered);
 }
 

@@ -1,4 +1,4 @@
-//! Reborn WebChat v2 HTTP route surface (#3611).
+//! Reborn WebChat v2 HTTP route surface.
 //!
 //! This crate ships the minimal native WebUI v2 route set on top of the
 //! [`ironclaw_product_workflow::RebornServicesApi`] facade. It is off by

@@ -938,6 +938,13 @@ fn provider_schema_is_usable(schema: &serde_json::Value) -> bool {
     let Some(object) = schema.as_object() else {
         return false;
     };
+    if object
+        .get("$ref")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+    {
+        return true;
+    }
     matches!(
         object.get("type").and_then(serde_json::Value::as_str),
         Some("object")
@@ -1793,6 +1800,9 @@ mod tests {
         assert!(provider_schema_is_usable(
             &serde_json::json!({"type":"object","properties":{}})
         ));
+        assert!(provider_schema_is_usable(&serde_json::json!({
+            "$ref": "schemas/builtin/write-file.input.v1.json"
+        })));
         assert!(!provider_schema_is_usable(
             &serde_json::json!({"type":"string"})
         ));

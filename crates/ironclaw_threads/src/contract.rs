@@ -174,6 +174,8 @@ pub struct AcceptedInboundMessageReplay {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayAcceptedInboundMessageRequest {
+    pub scope: ThreadScope,
+    pub actor_id: String,
     pub source_binding_id: String,
     pub external_event_id: String,
 }

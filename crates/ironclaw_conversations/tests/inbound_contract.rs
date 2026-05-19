@@ -91,6 +91,202 @@ async fn unpaired_external_actor_returns_binding_required_before_message_or_turn
 }
 
 #[tokio::test]
+async fn lookup_binding_does_not_create_missing_conversation_binding() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+
+    let missing = services
+        .lookup_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-lookup-only", None),
+            "telegram-event-lookup-only",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(missing, InboundTurnError::BindingRequired { .. }));
+
+    let created = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-lookup-only", None),
+            "telegram-event-create-after-lookup",
+        ))
+        .await
+        .expect("lookup-only miss must not poison later create");
+    assert_eq!(created.actor.user_id, user("alice"));
+}
+
+#[tokio::test]
+async fn lookup_binding_miss_does_not_reserve_external_event_route() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+
+    let missing = services
+        .lookup_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-lookup-miss-source", None),
+            "telegram-event-lookup-miss-shared",
+        ))
+        .await
+        .unwrap_err();
+    assert!(matches!(missing, InboundTurnError::BindingRequired { .. }));
+
+    let created = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-lookup-miss-legitimate", None),
+            "telegram-event-lookup-miss-shared",
+        ))
+        .await
+        .expect("lookup-only miss must not reserve the event route");
+    assert_eq!(created.actor.user_id, user("alice"));
+}
+
+#[tokio::test]
+async fn trusted_scope_is_persisted_on_first_bind() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+
+    let first = services
+        .resolve_or_create_binding_with_trusted_scope(
+            resolve_request(
+                telegram(),
+                external_actor("telegram-user-1"),
+                external_conversation("chat-trusted-scope", None),
+                "telegram-event-trusted-scope-1",
+            ),
+            Some(AgentId::new("agent-alpha").unwrap()),
+            Some(ProjectId::new("project-alpha").unwrap()),
+        )
+        .await
+        .expect("first bind");
+    assert_eq!(
+        first.turn_scope.agent_id.as_ref().map(AgentId::as_str),
+        Some("agent-alpha")
+    );
+
+    let second = services
+        .resolve_or_create_binding_with_trusted_scope(
+            resolve_request(
+                telegram(),
+                external_actor("telegram-user-1"),
+                external_conversation("chat-trusted-scope", None),
+                "telegram-event-trusted-scope-2",
+            ),
+            Some(AgentId::new("agent-beta").unwrap()),
+            Some(ProjectId::new("project-beta").unwrap()),
+        )
+        .await
+        .expect("existing bind");
+    assert_eq!(
+        second.turn_scope.agent_id.as_ref().map(AgentId::as_str),
+        Some("agent-alpha")
+    );
+    assert_eq!(
+        second.turn_scope.project_id.as_ref().map(ProjectId::as_str),
+        Some("project-alpha")
+    );
+}
+
+#[tokio::test]
+async fn trusted_scope_rejects_existing_unscoped_binding() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-1"),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            telegram(),
+            default_installation(),
+            external_actor("telegram-user-2"),
+            user("bob"),
+        )
+        .await;
+
+    let legacy = services
+        .resolve_or_create_binding(resolve_request(
+            telegram(),
+            external_actor("telegram-user-1"),
+            external_conversation("chat-legacy-unscoped", None),
+            "telegram-event-legacy-unscoped",
+        ))
+        .await
+        .expect("legacy unscoped bind");
+    assert_eq!(legacy.turn_scope.agent_id, None);
+    assert_eq!(legacy.turn_scope.project_id, None);
+    services
+        .add_thread_participant(&tenant(), &legacy.turn_scope.thread_id, user("bob"))
+        .await
+        .expect("participant added");
+
+    let mut trusted_shared = resolve_request(
+        telegram(),
+        external_actor("telegram-user-1"),
+        external_conversation("chat-legacy-unscoped", None),
+        "telegram-event-legacy-trusted-scope",
+    );
+    trusted_shared.route_kind = ConversationRouteKind::Shared;
+    let err = services
+        .resolve_or_create_binding_with_trusted_scope(
+            trusted_shared,
+            Some(AgentId::new("agent-alpha").unwrap()),
+            Some(ProjectId::new("project-alpha").unwrap()),
+        )
+        .await
+        .expect_err("trusted scope must not reinterpret legacy bindings");
+
+    assert!(matches!(err, InboundTurnError::BindingConflict { .. }));
+
+    let mut bob_shared = resolve_request(
+        telegram(),
+        external_actor("telegram-user-2"),
+        external_conversation("chat-legacy-unscoped", None),
+        "telegram-event-legacy-bob-after-rejected-widen",
+    );
+    bob_shared.route_kind = ConversationRouteKind::Shared;
+    let err = services
+        .resolve_or_create_binding(bob_shared)
+        .await
+        .expect_err("rejected trusted resolve must not widen route access");
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+#[tokio::test]
 async fn pairing_is_scoped_by_tenant_and_adapter_installation() {
     let services = InMemoryConversationServices::default();
     services
@@ -1317,6 +1513,67 @@ async fn failed_shared_route_probe_does_not_widen_direct_binding() {
 }
 
 #[tokio::test]
+async fn lookup_binding_shared_owner_probe_does_not_widen_direct_binding() {
+    let services = InMemoryConversationServices::default();
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("alice-web"),
+            user("alice"),
+        )
+        .await;
+    services
+        .pair_external_actor(
+            tenant(),
+            web(),
+            default_installation(),
+            external_actor("bob-web"),
+            user("bob"),
+        )
+        .await;
+    let resolution = services
+        .resolve_or_create_binding(resolve_request(
+            web(),
+            external_actor("alice-web"),
+            external_conversation("alice-direct-lookup-probe", None),
+            "alice-direct-lookup-probe-event",
+        ))
+        .await
+        .unwrap();
+    services
+        .add_thread_participant(&tenant(), &resolution.turn_scope.thread_id, user("bob"))
+        .await
+        .unwrap();
+
+    let mut owner_probe = resolve_request(
+        web(),
+        external_actor("alice-web"),
+        external_conversation("alice-direct-lookup-probe", None),
+        "alice-direct-lookup-owner-shared-probe",
+    );
+    owner_probe.route_kind = ConversationRouteKind::Shared;
+    services
+        .lookup_binding(owner_probe)
+        .await
+        .expect("owner lookup may inspect shared route without widening");
+
+    let mut bob_shared = resolve_request(
+        web(),
+        external_actor("bob-web"),
+        external_conversation("alice-direct-lookup-probe", None),
+        "bob-after-lookup-owner-shared-probe",
+    );
+    bob_shared.route_kind = ConversationRouteKind::Shared;
+    let err = services
+        .resolve_or_create_binding(bob_shared)
+        .await
+        .expect_err("lookup-only shared probe must not widen direct binding");
+    assert!(matches!(err, InboundTurnError::AccessDenied { .. }));
+}
+
+#[tokio::test]
 async fn shared_route_rejects_wrong_adapter_context() {
     let services = InMemoryConversationServices::default();
     services
@@ -2427,6 +2684,22 @@ impl ConversationBindingService for DriftBindingService {
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply:shared").unwrap(),
             access: ThreadAccessDecision::Allowed,
         })
+    }
+
+    async fn resolve_or_create_binding_with_trusted_scope(
+        &self,
+        request: ironclaw_conversations::ResolveConversationRequest,
+        _trusted_agent_id: Option<AgentId>,
+        _trusted_project_id: Option<ProjectId>,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        self.resolve_or_create_binding(request).await
+    }
+
+    async fn lookup_binding(
+        &self,
+        _request: ironclaw_conversations::ResolveConversationRequest,
+    ) -> Result<ConversationBindingResolution, InboundTurnError> {
+        unimplemented!("not used by inbound facade tests")
     }
 
     async fn link_conversation_to_thread(

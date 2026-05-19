@@ -17,8 +17,8 @@ use ironclaw_host_api::{
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AppendAssistantDraftRequest, CreateSummaryArtifactRequest,
     EnsureThreadRequest, FilesystemSessionThreadService, LoadContextWindowRequest, MessageContent,
-    MessageKind, MessageStatus, RedactMessageRequest, SessionThreadService, ThreadHistoryRequest,
-    ThreadScope, UpdateAssistantDraftRequest,
+    MessageKind, MessageStatus, RedactMessageRequest, SessionThreadError, SessionThreadService,
+    ThreadHistoryRequest, ThreadScope, UpdateAssistantDraftRequest,
 };
 
 #[tokio::test]
@@ -154,6 +154,8 @@ async fn filesystem_session_thread_service_isolates_two_tenants_with_same_user_p
     // is invisible from tenant B.
     let replay = service_b
         .replay_accepted_inbound_message(ironclaw_threads::ReplayAcceptedInboundMessageRequest {
+            scope: scope_b,
+            actor_id: "actor-a".into(),
             source_binding_id: "binding".into(),
             external_event_id: "event-a".into(),
         })
@@ -163,6 +165,54 @@ async fn filesystem_session_thread_service_isolates_two_tenants_with_same_user_p
         replay.is_none(),
         "tenant B must NOT replay tenant A's inbound idempotency record"
     );
+}
+
+#[tokio::test]
+async fn filesystem_store_rejects_cross_actor_duplicate_external_event_replay() {
+    let backend = Arc::new(InMemoryBackend::new());
+    let scoped = scoped_threads_fs_at(backend, "tenant-a", "alice");
+    let service = FilesystemSessionThreadService::new(scoped);
+    let request_scope = scope("actor-replay");
+    let thread = service
+        .ensure_thread(EnsureThreadRequest {
+            scope: request_scope.clone(),
+            thread_id: Some(ThreadId::new("thread-actor-replay").unwrap()),
+            created_by_actor_id: "actor-a".into(),
+            title: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+    service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: request_scope.clone(),
+            thread_id: thread.thread_id.clone(),
+            actor_id: "actor-a".into(),
+            source_binding_id: Some("binding".into()),
+            reply_target_binding_id: None,
+            external_event_id: Some("event-actor-check".into()),
+            content: MessageContent::text("actor a event"),
+        })
+        .await
+        .unwrap();
+
+    let replay = service
+        .accept_inbound_message(AcceptInboundMessageRequest {
+            scope: request_scope,
+            thread_id: thread.thread_id,
+            actor_id: "actor-b".into(),
+            source_binding_id: Some("binding".into()),
+            reply_target_binding_id: None,
+            external_event_id: Some("event-actor-check".into()),
+            content: MessageContent::text("actor b must not replay actor a"),
+        })
+        .await;
+
+    assert!(matches!(
+        replay,
+        Err(SessionThreadError::IdempotentReplayActorMismatch { .. })
+    ));
 }
 
 /// Mirrors the legacy `durable_history_flow` from the old SQL contract

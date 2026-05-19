@@ -27,6 +27,13 @@ pub enum SessionThreadError {
         stored_thread_id: ThreadId,
         requested_thread_id: ThreadId,
     },
+    #[error(
+        "idempotent inbound event belongs to actor {stored_actor_id}, not requested actor {requested_actor_id}"
+    )]
+    IdempotentReplayActorMismatch {
+        stored_actor_id: String,
+        requested_actor_id: String,
+    },
     #[error("invalid summary range {start_sequence}..={end_sequence}")]
     InvalidSummaryRange {
         start_sequence: u64,
