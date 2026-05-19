@@ -1,6 +1,6 @@
 #![cfg(any(feature = "libsql", feature = "postgres"))]
 
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use std::sync::Arc;
 #[cfg(feature = "postgres")]
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,12 +10,13 @@ use chrono::{Duration, Utc};
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
+use ironclaw_host_api::VirtualPath;
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalEventId, ProductAdapterId, ProductInboundAck,
 };
 use ironclaw_product_workflow::{
-    ActionFingerprintKey, IdempotencyDecision, IdempotencyLedger, ProductWorkflowError,
-    SourceBindingKey,
+    ActionFingerprintKey, IdempotencyDecision, IdempotencyLedger, ProductInboundAction,
+    ProductWorkflowError, SourceBindingKey,
 };
 #[cfg(feature = "libsql")]
 use ironclaw_product_workflow_storage::RebornLibSqlIdempotencyLedger;
@@ -30,6 +31,13 @@ fn fingerprint(suffix: &str) -> ActionFingerprintKey {
             .expect("valid source binding key"),
         ExternalEventId::new(format!("evt:{suffix}")).expect("valid event"),
     )
+}
+
+fn custom_root(suffix: &str) -> VirtualPath {
+    VirtualPath::new(format!(
+        "/engine/product_workflow/idempotency/test_roots/{suffix}"
+    ))
+    .expect("valid custom ledger root")
 }
 
 #[cfg(feature = "postgres")]
@@ -199,6 +207,45 @@ async fn assert_superseded_reservation_cannot_settle(ledger: &dyn IdempotencyLed
         .expect("replacement settle");
 }
 
+async fn assert_settle_missing_reservation_returns_transient(
+    ledger: &dyn IdempotencyLedger,
+    suffix: &str,
+) {
+    let received_at = Utc::now();
+    let mut action = ProductInboundAction::begin(fingerprint(suffix), received_at);
+    action.settle(ProductInboundAck::NoOp);
+
+    let error = ledger
+        .settle(action)
+        .await
+        .expect_err("missing reservation must not settle");
+    assert!(matches!(error, ProductWorkflowError::Transient { .. }));
+}
+
+async fn assert_custom_root_isolated_from_default_root(
+    custom: &dyn IdempotencyLedger,
+    default: &dyn IdempotencyLedger,
+    suffix: &str,
+) {
+    let received_at = Utc::now();
+    let fingerprint = fingerprint(suffix);
+    let IdempotencyDecision::New(mut action) = custom
+        .begin_or_replay(fingerprint.clone(), received_at)
+        .await
+        .expect("begin in custom root")
+    else {
+        panic!("expected new custom-root action");
+    };
+    action.settle(ProductInboundAck::NoOp);
+    custom.settle(action).await.expect("settle custom root");
+
+    let default_decision = default
+        .begin_or_replay(fingerprint, received_at + Duration::seconds(1))
+        .await
+        .expect("begin in default root");
+    assert!(matches!(default_decision, IdempotencyDecision::New(_)));
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_settled_action_survives_reopen_and_replays() {
@@ -265,6 +312,33 @@ async fn libsql_superseded_reservation_cannot_settle() {
     );
 
     assert_superseded_reservation_cannot_settle(&ledger, "libsql-superseded").await;
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_settle_missing_reservation_returns_transient() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("workflow-ledger.db");
+    let ledger =
+        RebornLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path.display().to_string()).await);
+
+    assert_settle_missing_reservation_returns_transient(&ledger, "libsql-missing-settle").await;
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_custom_root_isolated_from_default_root() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("workflow-ledger.db");
+    let filesystem = libsql_filesystem(&db_path.display().to_string()).await;
+    let custom = RebornLibSqlIdempotencyLedger::with_root(
+        Arc::clone(&filesystem),
+        custom_root("libsql"),
+        Duration::seconds(60),
+    );
+    let default = RebornLibSqlIdempotencyLedger::new(filesystem);
+
+    assert_custom_root_isolated_from_default_root(&custom, &default, "libsql-custom-root").await;
 }
 
 #[cfg(feature = "postgres")]
@@ -345,6 +419,42 @@ async fn postgres_superseded_reservation_cannot_settle_when_configured() {
 
     assert_superseded_reservation_cannot_settle(&ledger, &unique_suffix("postgres-superseded"))
         .await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_settle_missing_reservation_returns_transient_when_configured() {
+    let Some(filesystem) = postgres_filesystem().await else {
+        return;
+    };
+    let ledger = RebornPostgresIdempotencyLedger::new(filesystem);
+
+    assert_settle_missing_reservation_returns_transient(
+        &ledger,
+        &unique_suffix("postgres-missing-settle"),
+    )
+    .await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_custom_root_isolated_from_default_root_when_configured() {
+    let Some(filesystem) = postgres_filesystem().await else {
+        return;
+    };
+    let custom = RebornPostgresIdempotencyLedger::with_root(
+        Arc::clone(&filesystem),
+        custom_root("postgres"),
+        Duration::seconds(60),
+    );
+    let default = RebornPostgresIdempotencyLedger::new(filesystem);
+
+    assert_custom_root_isolated_from_default_root(
+        &custom,
+        &default,
+        &unique_suffix("postgres-custom-root"),
+    )
+    .await;
 }
 
 #[cfg(feature = "postgres")]

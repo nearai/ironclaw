@@ -74,39 +74,13 @@ impl LibSqlRootFilesystem {
             .map_err(|error| infrastructure_libsql_error(FilesystemOperation::Stat, error))?;
         Ok(conn)
     }
-}
 
-#[cfg(feature = "libsql")]
-#[async_trait]
-impl RootFilesystem for LibSqlRootFilesystem {
-    fn capabilities(&self) -> BackendCapabilities {
-        // sql_typical covers read/write/append/list/stat/delete/records/query
-        // /IndexExact/IndexPrefix/CAS. The append/tail backing table is in
-        // place so Events is on; FTS5 is built into libSQL and a brute-force
-        // cosine ranker for vectors is implemented in Rust, so IndexFts and
-        // IndexVector are advertised here too.
-        BackendCapabilities::sql_typical()
-            .with(Capability::Events)
-            .with(Capability::IndexFts)
-            .with(Capability::IndexVector)
-    }
-
-    async fn put(
+    async fn put_without_child_precheck(
         &self,
         path: &VirtualPath,
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
-        // Reject writes that would clobber a directory or a path that has
-        // children (mirrors `write_file` semantics so legacy and new ops
-        // stay consistent).
-        if matches!(
-            self.exact_entry(path).await?,
-            Some((_, FileType::Directory, _))
-        ) || self.has_child_entry(path).await?
-        {
-            return Err(directory_write_error(path.clone()));
-        }
         let indexed_json = serde_json::to_string(&entry.indexed).map_err(|_| {
             FilesystemError::SerializeIndexed {
                 path: path.clone(),
@@ -231,6 +205,50 @@ impl RootFilesystem for LibSqlRootFilesystem {
                 Ok(version)
             }
         }
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[async_trait]
+impl RootFilesystem for LibSqlRootFilesystem {
+    fn capabilities(&self) -> BackendCapabilities {
+        // sql_typical covers read/write/append/list/stat/delete/records/query
+        // /IndexExact/IndexPrefix/CAS. The append/tail backing table is in
+        // place so Events is on; FTS5 is built into libSQL and a brute-force
+        // cosine ranker for vectors is implemented in Rust, so IndexFts and
+        // IndexVector are advertised here too.
+        BackendCapabilities::sql_typical()
+            .with(Capability::Events)
+            .with(Capability::IndexFts)
+            .with(Capability::IndexVector)
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        // Reject writes that would clobber a directory or a path that has
+        // children (mirrors `write_file` semantics so legacy and new ops
+        // stay consistent).
+        if matches!(
+            self.exact_entry(path).await?,
+            Some((_, FileType::Directory, _))
+        ) || self.has_child_entry(path).await?
+        {
+            return Err(directory_write_error(path.clone()));
+        }
+        self.put_without_child_precheck(path, entry, cas).await
+    }
+
+    async fn put_known_leaf(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.put_without_child_precheck(path, entry, cas).await
     }
 
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {

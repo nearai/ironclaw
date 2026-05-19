@@ -32,7 +32,7 @@ const ACTION_RECORD_KIND: &str = "product_workflow_action";
 
 struct FilesystemIdempotencyLedger {
     filesystem: Arc<dyn RootFilesystem>,
-    root: String,
+    root: VirtualPath,
     in_flight_lease: Duration,
 }
 
@@ -47,7 +47,7 @@ impl FilesystemIdempotencyLedger {
     ) -> Self {
         Self {
             filesystem,
-            root: DEFAULT_LEDGER_ROOT.to_string(),
+            root: default_ledger_root(),
             in_flight_lease,
         }
     }
@@ -59,7 +59,7 @@ impl FilesystemIdempotencyLedger {
     ) -> Self {
         Self {
             filesystem,
-            root: root.as_str().to_string(),
+            root,
             in_flight_lease,
         }
     }
@@ -73,7 +73,7 @@ impl FilesystemIdempotencyLedger {
         let action = ProductInboundAction::begin(fingerprint, received_at);
         match self
             .filesystem
-            .put(&path, entry_for_action(&action)?, CasExpectation::Absent)
+            .put_known_leaf(&path, entry_for_action(&action)?, CasExpectation::Absent)
             .await
         {
             Ok(_) => return Ok(IdempotencyDecision::New(action)),
@@ -95,7 +95,7 @@ impl FilesystemIdempotencyLedger {
             let replacement = ProductInboundAction::begin(prior.fingerprint.clone(), received_at);
             match self
                 .filesystem
-                .put(
+                .put_known_leaf(
                     &path,
                     entry_for_action(&replacement)?,
                     CasExpectation::Version(version),
@@ -134,7 +134,7 @@ impl FilesystemIdempotencyLedger {
 
             match self
                 .filesystem
-                .put(
+                .put_known_leaf(
                     &path,
                     entry_for_action(&action)?,
                     CasExpectation::Version(version),
@@ -163,7 +163,7 @@ impl FilesystemIdempotencyLedger {
             released.received_at = expired_received_at(released.received_at, self.in_flight_lease);
             match self
                 .filesystem
-                .put(
+                .put_known_leaf(
                     &path,
                     entry_for_action(&released)?,
                     CasExpectation::Version(version),
@@ -295,7 +295,12 @@ fn transient(reason: impl Into<String>) -> ProductWorkflowError {
 }
 
 fn durable_error(operation: &'static str, error: impl std::fmt::Display) -> ProductWorkflowError {
-    tracing::error!(%error, operation, "product workflow idempotency ledger failed");
+    let error_type = std::any::type_name_of_val(&error);
+    tracing::error!(
+        operation,
+        error_type,
+        "product workflow idempotency ledger failed"
+    );
     transient(format!("idempotency ledger failed to {operation}"))
 }
 
@@ -386,18 +391,22 @@ fn phase_label(phase: ActionPhase) -> &'static str {
 }
 
 fn action_path(
-    root: &str,
+    root: &VirtualPath,
     fingerprint: &ActionFingerprintKey,
 ) -> Result<VirtualPath, ProductWorkflowError> {
     let path = format!(
         "{}/{}/{}/{}/{}.json",
-        root.trim_end_matches('/'),
+        root.as_str().trim_end_matches('/'),
         hex_component(fingerprint.adapter_id.as_str()),
         hex_component(fingerprint.installation_id.as_str()),
         hex_component(fingerprint.source_binding_key.as_str()),
         hex_component(fingerprint.external_event_id.as_str())
     );
     VirtualPath::new(path).map_err(|error| durable_error("construct action path", error))
+}
+
+fn default_ledger_root() -> VirtualPath {
+    VirtualPath::new(DEFAULT_LEDGER_ROOT).expect("DEFAULT_LEDGER_ROOT is valid") // safety: hard-coded /engine virtual path literal.
 }
 
 fn hex_component(value: &str) -> String {

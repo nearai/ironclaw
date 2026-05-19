@@ -44,39 +44,14 @@ impl PostgresRootFilesystem {
             .await
             .map_err(|error| infrastructure_error(FilesystemOperation::Stat, error.to_string()))
     }
-}
 
-#[cfg(feature = "postgres")]
-#[async_trait]
-impl RootFilesystem for PostgresRootFilesystem {
-    fn capabilities(&self) -> BackendCapabilities {
-        // sql_typical: read/write/append/list/stat/delete/records/query/
-        // IndexExact/IndexPrefix/CAS. Events join the set with the V30
-        // append/tail backing table. Postgres has native `tsvector` /
-        // `plainto_tsquery` so we advertise IndexFts. Vector indexing is
-        // currently a brute-force cosine ranker against `indexed->>'key'`
-        // values stored as IndexValue::Bytes; we advertise IndexVector but
-        // do not require pgvector.
-        BackendCapabilities::sql_typical()
-            .with(Capability::Events)
-            .with(Capability::IndexFts)
-            .with(Capability::IndexVector)
-    }
-
-    async fn put(
+    async fn put_with_client(
         &self,
+        client: &tokio_postgres::Client,
         path: &VirtualPath,
         entry: Entry,
         cas: CasExpectation,
     ) -> Result<RecordVersion, FilesystemError> {
-        let client = self.client().await?;
-        if matches!(
-            self.exact_entry_with_client(&client, path).await?,
-            Some((_, FileType::Directory, _))
-        ) || self.has_child_entry_with_client(&client, path).await?
-        {
-            return Err(directory_write_error(path.clone()));
-        }
         let indexed_json = serde_json::to_value(&entry.indexed).map_err(|_| {
             FilesystemError::SerializeIndexed {
                 path: path.clone(),
@@ -111,7 +86,7 @@ impl RootFilesystem for PostgresRootFilesystem {
                         db_error(path.clone(), FilesystemOperation::WriteFile, error)
                     })?;
                 if rows == 0 {
-                    let found = self.current_version_with_client(&client, path).await?;
+                    let found = self.current_version_with_client(client, path).await?;
                     return Err(FilesystemError::VersionMismatch {
                         path: path.clone(),
                         expected: None,
@@ -148,7 +123,7 @@ impl RootFilesystem for PostgresRootFilesystem {
                         db_error(path.clone(), FilesystemOperation::WriteFile, error)
                     })?;
                 if rows == 0 {
-                    let found = self.current_version_with_client(&client, path).await?;
+                    let found = self.current_version_with_client(client, path).await?;
                     return Err(FilesystemError::VersionMismatch {
                         path: path.clone(),
                         expected: Some(expected),
@@ -193,6 +168,51 @@ impl RootFilesystem for PostgresRootFilesystem {
                 record_version_from_i64(path, version)
             }
         }
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[async_trait]
+impl RootFilesystem for PostgresRootFilesystem {
+    fn capabilities(&self) -> BackendCapabilities {
+        // sql_typical: read/write/append/list/stat/delete/records/query/
+        // IndexExact/IndexPrefix/CAS. Events join the set with the V30
+        // append/tail backing table. Postgres has native `tsvector` /
+        // `plainto_tsquery` so we advertise IndexFts. Vector indexing is
+        // currently a brute-force cosine ranker against `indexed->>'key'`
+        // values stored as IndexValue::Bytes; we advertise IndexVector but
+        // do not require pgvector.
+        BackendCapabilities::sql_typical()
+            .with(Capability::Events)
+            .with(Capability::IndexFts)
+            .with(Capability::IndexVector)
+    }
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        let client = self.client().await?;
+        if matches!(
+            self.exact_entry_with_client(&client, path).await?,
+            Some((_, FileType::Directory, _))
+        ) || self.has_child_entry_with_client(&client, path).await?
+        {
+            return Err(directory_write_error(path.clone()));
+        }
+        self.put_with_client(&client, path, entry, cas).await
+    }
+
+    async fn put_known_leaf(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        let client = self.client().await?;
+        self.put_with_client(&client, path, entry, cas).await
     }
 
     async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
