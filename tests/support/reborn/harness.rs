@@ -253,6 +253,7 @@ impl RebornBinaryE2EHarness {
         ))
     }
 
+    // arch-exempt: too_many_args, test harness composition bundle, plan #3702
     #[allow(clippy::too_many_arguments)]
     fn from_composition(
         ingress: RebornTestIngress,
@@ -564,6 +565,10 @@ impl RecordingTestCapabilityPort {
 
     fn invocations(&self) -> Vec<CapabilityInvocation> {
         self.invocations.lock().unwrap().clone()
+    }
+
+    pub fn invocation_count(&self) -> usize {
+        self.invocations.lock().unwrap().len()
     }
 
     fn completed_result(&self) -> CapabilityOutcome {
