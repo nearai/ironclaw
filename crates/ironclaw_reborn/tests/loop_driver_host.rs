@@ -6,14 +6,14 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
     CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
-    MountView, NetworkPolicy, PackageId, PermissionMode, Principal, ProcessId, ProjectId,
-    ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId, ThreadId, TrustClass,
-    UserId, VirtualPath,
+    HostPortCatalog, MountView, NetworkPolicy, PackageId, PermissionMode, Principal, ProcessId,
+    ProjectId, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId, ThreadId,
+    TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, HostRuntime,
@@ -100,8 +100,8 @@ use ironclaw_turns::{
         LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError,
         LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent,
         LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelCallOutcome,
-        NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PromptMode, SkillVisibility,
-        StageCheckpointPayloadRequest, VisibleCapabilityRequest,
+        NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PersonalContextPolicy, PromptMode,
+        SkillVisibility, StageCheckpointPayloadRequest, VisibleCapabilityRequest,
     },
     runner::{ClaimRunRequest, ClaimedTurnRun, TurnRunTransitionPort},
 };
@@ -2991,6 +2991,51 @@ async fn text_only_host_factory_threads_identity_source_to_prompt_and_model() {
 }
 
 #[tokio::test]
+async fn text_only_host_factory_excludes_personal_identity_when_profile_excludes_it() {
+    let fixture = HostFixture::new("thread-host-personal-excluded", "hello reborn").await;
+    assert_eq!(
+        fixture.context.resolved_run_profile.personal_context_policy,
+        PersonalContextPolicy::Excluded
+    );
+    let source = Arc::new(StaticIdentityContextSource::new(vec![trusted_identity(
+        "USER.md",
+        "private user profile",
+        IdentityApplicability::OnPersonalContextAllowed,
+    )]));
+    let host = fixture
+        .factory()
+        .with_identity_context_source(source)
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+
+    let prompt_bundle = host_dyn
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(prompt_bundle.identity_message_count, 0);
+    assert!(
+        prompt_bundle
+            .messages
+            .iter()
+            .all(|message| !message.content_ref.as_str().starts_with("msg:identity."))
+    );
+}
+
+#[tokio::test]
 async fn text_only_host_default_cancellation_factory_observes_durable_cancel_request() {
     let fixture = HostFixture::new("thread-host-default-cancel", "hello").await;
     let mut durable_state = fixture.claimed.state.clone();
@@ -5637,7 +5682,12 @@ fn host_runtime_visible_request_with_dispatch_grant(
 
 fn e2e_registry_with_manifest(manifest: &str) -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
-    let manifest = ExtensionManifest::parse(manifest).unwrap();
+    let manifest = ExtensionManifest::parse(
+        manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/script").unwrap(),

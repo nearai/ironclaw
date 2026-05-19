@@ -67,7 +67,7 @@ pub use model::{
     NoOpPolicyGuard,
 };
 pub use policy::{
-    CancellationPolicy, CheckpointPolicy, PrivilegedRunProfileDimension,
+    CancellationPolicy, CheckpointPolicy, PersonalContextAuthority, PrivilegedRunProfileDimension,
     RedactedRunProfileProvenance, RedactedRunProfileSource, ResourceBudgetPolicy,
     RunProfileRequestAuthority, RunProfileResolutionError, RuntimeProfileConstraints,
     SteeringPolicy,
@@ -88,5 +88,5 @@ pub use skill_context::{
     SkillTrustLevel, SkillVisibility, is_skill_snippet_model_message_ref,
     skill_snippet_model_message_ref,
 };
-pub use snapshot::ResolvedRunProfile;
+pub use snapshot::{PersonalContextPolicy, ResolvedRunProfile};
 pub use snippet_ref::memory_snippet_display_ref;

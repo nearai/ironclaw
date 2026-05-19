@@ -362,9 +362,11 @@ mod reborn_support_tests {
     };
 
     use async_trait::async_trait;
+    use ironclaw_filesystem::ScopedFilesystem;
     use ironclaw_host_api::{
-        AgentId, CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, NetworkTargetPattern,
-        ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+        AgentId, CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
+        NetworkMethod, NetworkPolicy, NetworkTargetPattern, ProjectId, ResourceScope, TenantId,
+        ThreadId, UserId, VirtualPath,
     };
     use ironclaw_loop_support::{
         HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessage,
@@ -376,11 +378,10 @@ mod reborn_support_tests {
         PolicyNetworkHttpEgress,
     };
     use ironclaw_product_adapters::{
-        AuthRequirement, DeliveryStatus, EgressRequest, EgressResponse, ExternalConversationRef,
-        FinalReplyView, OutboundDeliverySink, ProductAdapter, ProductInboundAck,
-        ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
+        AuthRequirement, DeliveryStatus, ExternalConversationRef, FakeProtocolHttpEgress,
+        FinalReplyView, OutboundDeliverySink, ProductAdapter, ProductAdapterError,
+        ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
         ProductRenderOutcome, ProductWorkflow, ProjectionCursor, ProtocolAuthEvidence,
-        ProtocolHttpEgress, ProtocolHttpEgressError,
     };
     use ironclaw_product_workflow::{
         ActionDispatchKind, ActionFingerprintKey, ConversationBindingService,
@@ -396,14 +397,18 @@ mod reborn_support_tests {
     use ironclaw_turns::{
         CancelRunRequest, CancelRunResponse, GetRunStateRequest, LoopMessageRef,
         ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-        RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,
-        TurnId, TurnRunId, TurnRunState, TurnStatus,
+        RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCoordinator,
+        TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
         events::EventCursor,
-        run_profile::{ModelProfileId, ParentLoopOutput},
+        run_profile::{
+            CapabilityBatchInvocation, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
+            LoopCapabilityPort, ModelProfileId, ParentLoopOutput, VisibleCapabilityRequest,
+        },
     };
     use tokio::sync::Barrier;
 
     use crate::reborn_support::delivery::RecordingOutboundDeliverySink;
+    use crate::reborn_support::filesystem::local_filesystem;
     use crate::reborn_support::harness::RecordingTestCapabilityPort;
     use crate::reborn_support::model_replay::{
         RebornModelReplayStep, RebornScriptedProviderToolCall, RebornTraceReplayError,
@@ -411,12 +416,14 @@ mod reborn_support_tests {
     };
     use crate::reborn_support::network::RecordingNetworkHttpTransport;
     use crate::reborn_support::product_workflow::{
-        RebornProductWorkflowHarness, RebornProductWorkflowHarnessError, resource_scope,
+        FilesystemIdempotencyLedger, RebornProductWorkflowHarness,
+        RebornProductWorkflowHarnessError, resource_scope,
     };
     use crate::reborn_support::session_thread::{RebornThreadHarness, RebornThreadHarnessError};
     use crate::reborn_support::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
     use crate::support::trace_llm::{
-        ExpectedToolResult, LlmTrace, TraceResponse, TraceStep, TraceToolCall,
+        ExpectedToolResult, LlmTrace, TraceExpects, TraceResponse, TraceStep, TraceToolCall,
+        TraceTurn,
     };
 
     #[tokio::test]
@@ -431,6 +438,87 @@ mod reborn_support_tests {
 
         assert_eq!(response.safe_text_deltas, vec!["hello"]);
         assert_eq!(gateway.requests().len(), 1);
+        gateway.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn trace_replay_replays_multiple_steps_in_order() {
+        let gateway = RebornTraceReplayModelGateway::from_trace(LlmTrace::new(
+            "trace",
+            vec![
+                TraceTurn {
+                    user_input: "first".to_string(),
+                    steps: vec![
+                        TraceStep {
+                            request_hint: None,
+                            response: TraceResponse::Text {
+                                content: "first reply".to_string(),
+                                input_tokens: 1,
+                                output_tokens: 1,
+                            },
+                            expected_tool_results: Vec::new(),
+                        },
+                        TraceStep {
+                            request_hint: None,
+                            response: TraceResponse::ToolCalls {
+                                tool_calls: vec![TraceToolCall {
+                                    id: "call-ordered".to_string(),
+                                    name: "test.echo".to_string(),
+                                    arguments: serde_json::json!({"message": "second"}),
+                                }],
+                                input_tokens: 1,
+                                output_tokens: 1,
+                            },
+                            expected_tool_results: Vec::new(),
+                        },
+                    ],
+                    expects: TraceExpects::default(),
+                },
+                TraceTurn {
+                    user_input: "second".to_string(),
+                    steps: vec![TraceStep {
+                        request_hint: None,
+                        response: TraceResponse::Text {
+                            content: "third reply".to_string(),
+                            input_tokens: 1,
+                            output_tokens: 1,
+                        },
+                        expected_tool_results: Vec::new(),
+                    }],
+                    expects: TraceExpects::default(),
+                },
+            ],
+        ))
+        .expect("trace gateway");
+
+        let first = gateway
+            .stream_model(model_request(Vec::new()))
+            .await
+            .expect("first response");
+        assert_eq!(first.safe_text_deltas, vec!["first reply"]);
+
+        let second = gateway
+            .stream_model(model_request(Vec::new()))
+            .await
+            .expect("second response");
+        let ParentLoopOutput::CapabilityCalls(calls) = second.output else {
+            panic!("expected capability calls");
+        };
+        assert_eq!(calls[0].capability_id.as_str(), "test.echo");
+        assert_eq!(
+            calls[0]
+                .provider_replay
+                .as_ref()
+                .expect("provider replay")
+                .provider_call_id,
+            "call-ordered"
+        );
+
+        let third = gateway
+            .stream_model(model_request(Vec::new()))
+            .await
+            .expect("third response");
+        assert_eq!(third.safe_text_deltas, vec!["third reply"]);
         gateway.assert_exhausted();
     }
 
@@ -855,32 +943,11 @@ mod reborn_support_tests {
     }
 
     #[test]
-    fn network_transport_execute_with_empty_queue_errors() {
-        let transport = RecordingNetworkHttpTransport::new();
-
-        let error = execute_recorded_get(&transport).expect_err("unexpected request error");
-
-        match error {
-            NetworkHttpError::Transport {
-                reason,
-                request_bytes,
-                response_bytes,
-            } => {
-                assert_eq!(reason, "unexpected HTTP request");
-                assert_eq!(request_bytes, 0);
-                assert_eq!(response_bytes, 0);
-            }
-            other => panic!("expected transport error, got {other:?}"),
-        }
-        assert_eq!(transport.requests().len(), 1);
-    }
-
-    #[test]
     fn recording_network_transport_sanitizes_sensitive_request_data() {
         let transport = RecordingNetworkHttpTransport::new();
         let _ = transport.execute(NetworkTransportRequest {
             method: NetworkMethod::Get,
-            url: "https://api.example.test/v1".to_string(),
+            url: "https://api.example.test/v1?token=secret&ok=1".to_string(),
             headers: vec![
                 ("authorization".to_string(), "Bearer secret".to_string()),
                 ("x-api-key".to_string(), "secret-key".to_string()),
@@ -894,6 +961,7 @@ mod reborn_support_tests {
         });
 
         let request = transport.requests().pop().expect("recorded request");
+        assert_eq!(request.url, "https://api.example.test/v1?<redacted>");
         assert_eq!(
             request.headers,
             vec![
@@ -905,6 +973,19 @@ mod reborn_support_tests {
         );
         assert_eq!(request.body_len, 11);
         assert_ne!(request.body_sha256, "secret body");
+    }
+
+    #[test]
+    fn recording_network_transport_errors_on_unexpected_request() {
+        let transport = RecordingNetworkHttpTransport::new();
+
+        let error = execute_recorded_get(&transport).expect_err("unexpected request should fail");
+
+        assert!(
+            matches!(&error, NetworkHttpError::Transport { reason, .. } if reason.contains("unexpected HTTP request")),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(transport.requests().len(), 1);
     }
 
     #[test]
@@ -1028,6 +1109,49 @@ mod reborn_support_tests {
     }
 
     #[tokio::test]
+    async fn recording_capability_batch_stops_after_first_suspension() {
+        let port = RecordingTestCapabilityPort::approval_then_echo();
+        let surface = port
+            .visible_capabilities(VisibleCapabilityRequest)
+            .await
+            .expect("visible capabilities");
+        let capability_id = surface.descriptors[0].capability_id.clone();
+
+        let outcome = port
+            .invoke_capability_batch(CapabilityBatchInvocation {
+                invocations: vec![
+                    CapabilityInvocation {
+                        surface_version: surface.version.clone(),
+                        capability_id: capability_id.clone(),
+                        input_ref: CapabilityInputRef::new("input:first").expect("first input"),
+                    },
+                    CapabilityInvocation {
+                        surface_version: surface.version,
+                        capability_id,
+                        input_ref: CapabilityInputRef::new("input:second").expect("second input"),
+                    },
+                ],
+                stop_on_first_suspension: true,
+            })
+            .await
+            .expect("batch outcome");
+
+        assert!(outcome.stopped_on_suspension);
+        assert!(
+            matches!(
+                outcome.outcomes.as_slice(),
+                [CapabilityOutcome::ApprovalRequired { .. }]
+            ),
+            "batch should return only the first suspension"
+        );
+        assert_eq!(
+            port.invocation_count(),
+            1,
+            "second invocation must not run after suspension"
+        );
+    }
+
+    #[tokio::test]
     async fn thread_harness_assert_final_reply_missing() {
         let harness =
             RebornThreadHarness::filesystem_temp(thread_scope("missing")).expect("thread harness");
@@ -1080,6 +1204,29 @@ mod reborn_support_tests {
             .await
             .expect("reopened binding");
         assert_eq!(reopened_binding, binding);
+
+        let mut other_scope = product_scope("tenant-a");
+        other_scope.agent_id = Some(AgentId::new("agent-other").unwrap());
+        other_scope.project_id = Some(ProjectId::new("project-other").unwrap());
+        let other_agent = harness
+            .with_scope(other_scope)
+            .expect("other-agent harness");
+        let other_agent_binding = other_agent
+            .binding_service()
+            .expect("other-agent binding service")
+            .resolve_binding(request.clone())
+            .await
+            .expect("other-agent binding");
+        assert_eq!(
+            other_agent_binding.agent_id.as_ref().unwrap().as_str(),
+            "agent-other"
+        );
+        assert_eq!(
+            other_agent_binding.project_id.as_ref().unwrap().as_str(),
+            "project-other"
+        );
+        assert_ne!(other_agent_binding.agent_id, binding.agent_id);
+        assert_ne!(other_agent_binding.project_id, binding.project_id);
 
         let tenant_b = harness
             .with_scope(product_scope("tenant-b"))
@@ -1229,7 +1376,7 @@ mod reborn_support_tests {
     }
 
     #[tokio::test]
-    async fn idempotency_release_preserves_dispatched_reservation() {
+    async fn idempotency_release_removes_dispatched_nonterminal_reservation() {
         let harness =
             RebornProductWorkflowHarness::filesystem_temp(product_scope("tenant-release"))
                 .expect("product workflow harness");
@@ -1246,12 +1393,70 @@ mod reborn_support_tests {
         action.mark_dispatched(ActionDispatchKind::NoOp);
         ledger.release(action).await.expect("release dispatched");
 
+        let IdempotencyDecision::New(_) = ledger
+            .begin_or_replay(fingerprint, received_at)
+            .await
+            .expect("released dispatched reservation should retry")
+        else {
+            panic!("released dispatched reservation should allow a new action");
+        };
+    }
+
+    #[tokio::test]
+    async fn idempotency_release_ignores_settled_and_stale_actions() {
+        let harness =
+            RebornProductWorkflowHarness::filesystem_temp(product_scope("tenant-release-guard"))
+                .expect("product workflow harness");
+        let ledger = harness.idempotency_ledger();
+        let received_at = chrono::Utc::now();
+
+        let settled_fingerprint = fingerprint_for("event-release-settled", "alice", "room-1");
+        let IdempotencyDecision::New(mut settled_action) = ledger
+            .begin_or_replay(settled_fingerprint.clone(), received_at)
+            .await
+            .expect("reserve settled action")
+        else {
+            panic!("first begin should reserve a new action");
+        };
+        settled_action.mark_dispatched(ActionDispatchKind::NoOp);
+        settled_action.settle(ProductInboundAck::NoOp);
+        ledger
+            .settle(settled_action.clone())
+            .await
+            .expect("settle action");
+        ledger
+            .release(settled_action.clone())
+            .await
+            .expect("release settled action");
+        let IdempotencyDecision::Replay(replayed) = ledger
+            .begin_or_replay(settled_fingerprint, received_at)
+            .await
+            .expect("settled action should replay")
+        else {
+            panic!("settled release should preserve replay");
+        };
+        assert_eq!(replayed.action_id, settled_action.action_id);
+
+        let stale_fingerprint = fingerprint_for("event-release-stale", "alice", "room-1");
+        let IdempotencyDecision::New(active_action) = ledger
+            .begin_or_replay(stale_fingerprint.clone(), received_at)
+            .await
+            .expect("reserve active action")
+        else {
+            panic!("first begin should reserve a new action");
+        };
+        let mut stale_action = active_action.clone();
+        stale_action.action_id = ProductActionId::new();
+        ledger
+            .release(stale_action)
+            .await
+            .expect("release stale action");
         assert!(
             ledger
-                .begin_or_replay(fingerprint, received_at)
+                .begin_or_replay(stale_fingerprint, received_at)
                 .await
                 .is_err(),
-            "dispatched reservations must not be released for duplicate processing"
+            "stale release must leave active reservation in flight"
         );
     }
 
@@ -1317,6 +1522,123 @@ mod reborn_support_tests {
     }
 
     #[tokio::test]
+    async fn standalone_filesystem_idempotency_ledgers_share_serialization_lock() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let backend = Arc::new(local_filesystem(root.path()).expect("local filesystem"));
+        let scope = product_scope("tenant-standalone-race");
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workflow").expect("valid workflow alias"),
+            VirtualPath::new(format!(
+                "/engine/tenants/{}/users/{}/standalone-workflow",
+                scope.tenant_id, scope.user_id
+            ))
+            .expect("valid workflow target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view");
+        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
+        let fingerprint = fingerprint_for("event-standalone-race", "alice", "room-1");
+        let received_at = chrono::Utc::now();
+        let start = Arc::new(Barrier::new(2));
+
+        let first_ledger = FilesystemIdempotencyLedger::new(
+            Arc::clone(&filesystem),
+            scope.clone(),
+            Duration::from_secs(60),
+        );
+        let first_start = Arc::clone(&start);
+        let first_fingerprint = fingerprint.clone();
+        let first = async move {
+            first_start.wait().await;
+            first_ledger
+                .begin_or_replay(first_fingerprint, received_at)
+                .await
+        };
+
+        let second_ledger = FilesystemIdempotencyLedger::new(
+            Arc::clone(&filesystem),
+            scope,
+            Duration::from_secs(60),
+        );
+        let second_start = Arc::clone(&start);
+        let second = async move {
+            second_start.wait().await;
+            second_ledger
+                .begin_or_replay(fingerprint, received_at)
+                .await
+        };
+
+        let (first_result, second_result) = tokio::join!(first, second);
+        let mut new_count = 0;
+        let mut rejected_count = 0;
+        for result in [first_result, second_result] {
+            match result {
+                Ok(IdempotencyDecision::New(_)) => new_count += 1,
+                Err(ProductWorkflowError::Transient { .. }) => rejected_count += 1,
+                other => panic!("unexpected concurrent standalone idempotency result: {other:?}"),
+            }
+        }
+
+        assert_eq!(new_count, 1);
+        assert_eq!(rejected_count, 1);
+    }
+
+    #[tokio::test]
+    async fn shared_backend_product_workflow_harnesses_share_serialization_lock() {
+        let root = Arc::new(tempfile::tempdir().expect("tempdir"));
+        let backend = Arc::new(local_filesystem(root.path()).expect("local filesystem"));
+        let scope = product_scope("tenant-shared-backend-race");
+        let first_harness = RebornProductWorkflowHarness::filesystem_shared_backend(
+            scope.clone(),
+            Arc::clone(&backend),
+            Arc::clone(&root),
+        )
+        .expect("first product workflow harness");
+        let second_harness = RebornProductWorkflowHarness::filesystem_shared_backend(
+            scope,
+            Arc::clone(&backend),
+            Arc::clone(&root),
+        )
+        .expect("second product workflow harness");
+        let fingerprint = fingerprint_for("event-shared-backend-race", "alice", "room-1");
+        let received_at = chrono::Utc::now();
+        let start = Arc::new(Barrier::new(2));
+
+        let first_ledger = first_harness.idempotency_ledger();
+        let first_start = Arc::clone(&start);
+        let first_fingerprint = fingerprint.clone();
+        let first = async move {
+            first_start.wait().await;
+            first_ledger
+                .begin_or_replay(first_fingerprint, received_at)
+                .await
+        };
+
+        let second_ledger = second_harness.idempotency_ledger();
+        let second_start = Arc::clone(&start);
+        let second = async move {
+            second_start.wait().await;
+            second_ledger
+                .begin_or_replay(fingerprint, received_at)
+                .await
+        };
+
+        let (first_result, second_result) = tokio::join!(first, second);
+        let mut new_count = 0;
+        let mut rejected_count = 0;
+        for result in [first_result, second_result] {
+            match result {
+                Ok(IdempotencyDecision::New(_)) => new_count += 1,
+                Err(ProductWorkflowError::Transient { .. }) => rejected_count += 1,
+                other => panic!("unexpected concurrent shared-backend result: {other:?}"),
+            }
+        }
+
+        assert_eq!(new_count, 1);
+        assert_eq!(rejected_count, 1);
+    }
+
+    #[tokio::test]
     async fn product_workflow_uses_filesystem_binding_and_idempotency_services() {
         let product_harness =
             RebornProductWorkflowHarness::filesystem_temp(product_scope("tenant-workflow"))
@@ -1347,6 +1669,44 @@ mod reborn_support_tests {
         );
     }
 
+    #[tokio::test]
+    async fn product_workflow_retries_after_filesystem_deferred_busy_release() {
+        let product_harness =
+            RebornProductWorkflowHarness::filesystem_temp(product_scope("tenant-workflow-busy"))
+                .expect("product workflow harness");
+        let thread_harness = RebornThreadHarness::filesystem_temp(thread_scope("workflow-busy"))
+            .expect("thread harness");
+        let coordinator = DryRunCapturingTurnCoordinator::default();
+        coordinator.set_busy(TurnRunId::new());
+        let inbound: Arc<dyn InboundTurnService> = Arc::new(DefaultInboundTurnService::new(
+            product_harness.binding_service().expect("binding service"),
+            thread_harness.service_instance().expect("thread service"),
+            coordinator.clone(),
+        ));
+        let ledger: Arc<dyn IdempotencyLedger> = Arc::new(product_harness.idempotency_ledger());
+        let workflow = DefaultProductWorkflow::new(inbound, ledger);
+        let envelope = test_envelope("event-workflow-busy", "alice", "room-workflow-busy", "hi");
+
+        let first = workflow
+            .accept_inbound(envelope.clone())
+            .await
+            .expect("busy accept");
+        assert!(matches!(first, ProductInboundAck::DeferredBusy { .. }));
+        assert_eq!(coordinator.submission_count(), 1);
+
+        coordinator.set_accepting();
+        let second = workflow
+            .accept_inbound(envelope)
+            .await
+            .expect("retry submit");
+        assert!(matches!(second, ProductInboundAck::Accepted { .. }));
+        assert_eq!(
+            coordinator.submission_count(),
+            2,
+            "DeferredBusy must release the idempotency reservation for immediate retry"
+        );
+    }
+
     #[test]
     fn test_adapter_parses_payload_without_minting_trusted_context() {
         let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
@@ -1361,6 +1721,59 @@ mod reborn_support_tests {
         let failed =
             ProtocolAuthEvidence::failed(ironclaw_product_adapters::ProtocolAuthFailure::Missing);
         assert!(adapter.parse_inbound(&raw, &failed).is_err());
+    }
+
+    #[test]
+    fn test_adapter_rejects_malformed_inbound_payload() {
+        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
+        let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "alice");
+        let error = adapter
+            .parse_inbound(b"not valid json", &evidence)
+            .expect_err("malformed payload");
+        assert!(matches!(
+            error,
+            ProductAdapterError::MalformedInboundPayload { .. }
+        ));
+    }
+
+    #[test]
+    fn test_adapter_rejects_semantically_invalid_inbound_payload() {
+        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
+        let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "alice");
+        let invalid_payloads = [
+            serde_json::json!({
+                "event_id": "",
+                "user_id": "alice",
+                "thread_id": "thread-1",
+                "text": "hi",
+            }),
+            serde_json::json!({
+                "event_id": "event-1",
+                "user_id": "bad\u{0000}user",
+                "thread_id": "thread-1",
+                "text": "hi",
+            }),
+            serde_json::json!({
+                "event_id": "event-1",
+                "user_id": "alice",
+                "thread_id": "",
+                "text": "hi",
+            }),
+            serde_json::json!({
+                "event_id": "event-1",
+                "user_id": "alice",
+                "thread_id": "thread-1",
+                "text": "bad\u{0000}text",
+            }),
+        ];
+
+        for payload in invalid_payloads {
+            let raw = serde_json::to_vec(&payload).expect("valid json payload");
+            assert!(
+                adapter.parse_inbound(&raw, &evidence).is_err(),
+                "payload should be rejected: {payload}"
+            );
+        }
     }
 
     #[test]
@@ -1382,39 +1795,42 @@ mod reborn_support_tests {
     #[tokio::test]
     async fn test_adapter_render_outbound_records_delivery() {
         let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
-        let reply_target = ReplyTargetBindingRef::new("reply:render-test").expect("reply target");
+        let target_ref = ReplyTargetBindingRef::new("reply-target").expect("reply target");
         let envelope = ProductOutboundEnvelope::new(
             adapter.adapter_id().clone(),
             adapter.installation_id().clone(),
             ProductOutboundTarget::new(
-                reply_target.clone(),
-                ExternalConversationRef::new(None, "thread-render", None, None)
-                    .expect("conversation ref"),
+                target_ref.clone(),
+                ExternalConversationRef::new(None, "room-1", None, None).expect("conversation ref"),
                 None,
             ),
-            ProjectionCursor::new("cursor:render-test").expect("cursor"),
+            ProjectionCursor::new("cursor:1").expect("projection cursor"),
             ProductOutboundPayload::FinalReply(FinalReplyView {
                 turn_run_id: TurnRunId::new(),
-                text: "rendered reply".to_string(),
+                text: "hello".to_string(),
                 generated_at: chrono::Utc::now(),
             }),
         );
         let attempt_id = envelope.delivery_attempt_id;
         let sink = RecordingOutboundDeliverySink::new();
+        let egress = FakeProtocolHttpEgress::new(["api.example.test".to_string()]);
+
         let outcome = adapter
-            .render_outbound(envelope, &NoopProtocolHttpEgress, &sink)
+            .render_outbound(envelope, &egress, &sink)
             .await
             .expect("render outbound");
 
-        assert!(matches!(outcome, ProductRenderOutcome::DeliveryRecorded));
-        assert_eq!(
-            sink.statuses(),
-            vec![DeliveryStatus::Delivered {
-                attempt_id,
-                target: reply_target,
+        assert_eq!(outcome, ProductRenderOutcome::DeliveryRecorded);
+        let statuses = sink.statuses();
+        assert_eq!(statuses.len(), 1);
+        assert!(matches!(
+            &statuses[0],
+            DeliveryStatus::Delivered {
+                attempt_id: actual_attempt,
+                target,
                 run_id: None,
-            }]
-        );
+            } if *actual_attempt == attempt_id && target == &target_ref
+        ));
     }
 
     fn model_request(messages: Vec<HostManagedModelMessage>) -> HostManagedModelRequest {
@@ -1440,18 +1856,6 @@ mod reborn_support_tests {
             response_body_limit: None,
             timeout_ms: None,
         })
-    }
-
-    struct NoopProtocolHttpEgress;
-
-    #[async_trait]
-    impl ProtocolHttpEgress for NoopProtocolHttpEgress {
-        async fn send(
-            &self,
-            _request: EgressRequest,
-        ) -> Result<EgressResponse, ProtocolHttpEgressError> {
-            panic!("test adapter render path should not perform HTTP egress")
-        }
     }
 
     fn tool_result_message(
@@ -1653,12 +2057,44 @@ mod reborn_support_tests {
     /// workflow, binding service, idempotency ledger, and thread service while
     /// capturing the final turn submission instead of starting the Reborn
     /// runtime loop or routing product traffic.
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct DryRunCapturingTurnCoordinator {
         submissions: Arc<Mutex<Vec<SubmitTurnRequest>>>,
+        outcome: Arc<Mutex<DryRunTurnOutcome>>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum DryRunTurnOutcome {
+        Accepted,
+        Busy { active_run_id: TurnRunId },
+    }
+
+    impl Default for DryRunCapturingTurnCoordinator {
+        fn default() -> Self {
+            Self {
+                submissions: Arc::new(Mutex::new(Vec::new())),
+                outcome: Arc::new(Mutex::new(DryRunTurnOutcome::Accepted)),
+            }
+        }
     }
 
     impl DryRunCapturingTurnCoordinator {
+        fn set_accepting(&self) {
+            *self
+                .outcome
+                .lock()
+                .expect("capturing coordinator outcome lock poisoned") =
+                DryRunTurnOutcome::Accepted;
+        }
+
+        fn set_busy(&self, active_run_id: TurnRunId) {
+            *self
+                .outcome
+                .lock()
+                .expect("capturing coordinator outcome lock poisoned") =
+                DryRunTurnOutcome::Busy { active_run_id };
+        }
+
         fn submission_count(&self) -> usize {
             self.submissions
                 .lock()
@@ -1677,16 +2113,29 @@ mod reborn_support_tests {
                 .lock()
                 .expect("capturing coordinator submissions lock poisoned")
                 .push(request.clone());
-            Ok(SubmitTurnResponse::Accepted {
-                turn_id: TurnId::new(),
-                run_id: TurnRunId::new(),
-                status: TurnStatus::Queued,
-                resolved_run_profile_id: RunProfileId::default_profile(),
-                resolved_run_profile_version: RunProfileVersion::new(1),
-                event_cursor: EventCursor::default(),
-                accepted_message_ref: request.accepted_message_ref,
-                reply_target_binding_ref: request.reply_target_binding_ref,
-            })
+            match *self
+                .outcome
+                .lock()
+                .expect("capturing coordinator outcome lock poisoned")
+            {
+                DryRunTurnOutcome::Accepted => Ok(SubmitTurnResponse::Accepted {
+                    turn_id: TurnId::new(),
+                    run_id: TurnRunId::new(),
+                    status: TurnStatus::Queued,
+                    resolved_run_profile_id: RunProfileId::default_profile(),
+                    resolved_run_profile_version: RunProfileVersion::new(1),
+                    event_cursor: EventCursor::default(),
+                    accepted_message_ref: request.accepted_message_ref,
+                    reply_target_binding_ref: request.reply_target_binding_ref,
+                }),
+                DryRunTurnOutcome::Busy { active_run_id } => {
+                    Err(TurnError::ThreadBusy(ThreadBusy {
+                        active_run_id,
+                        status: TurnStatus::Running,
+                        event_cursor: EventCursor::default(),
+                    }))
+                }
+            }
         }
 
         async fn resume_turn(

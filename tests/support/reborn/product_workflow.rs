@@ -1,4 +1,8 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -53,7 +57,8 @@ impl RebornProductWorkflowHarness {
         backend: Arc<LocalFilesystem>,
         root: Arc<tempfile::TempDir>,
     ) -> Result<Self, RebornProductWorkflowHarnessError> {
-        Self::filesystem_shared_backend_with_lock(scope, backend, root, Arc::new(Mutex::new(())))
+        let idempotency_lock = idempotency_lock_for_workflow_root(&root, &scope);
+        Self::filesystem_shared_backend_with_lock(scope, backend, root, idempotency_lock)
     }
 
     fn filesystem_shared_backend_with_lock(
@@ -138,7 +143,7 @@ impl RebornProductWorkflowHarness {
         request: &ResolveBindingRequest,
         bytes: Vec<u8>,
     ) -> Result<(), ProductWorkflowError> {
-        let path = binding_path(request)?;
+        let path = binding_path(&self.scope, request)?;
         self.filesystem
             .write_bytes(&self.scope, &path, bytes)
             .await
@@ -182,7 +187,7 @@ where
         &self,
         request: ResolveBindingRequest,
     ) -> Result<ResolvedBinding, ProductWorkflowError> {
-        let path = binding_path(&request)?;
+        let path = binding_path(&self.scope, &request)?;
         if let Some(stored) =
             read_json::<F, StoredConversationBinding>(&self.filesystem, &self.scope, &path).await?
         {
@@ -222,7 +227,8 @@ where
         scope: ResourceScope,
         lease_ttl: Duration,
     ) -> Self {
-        Self::new_with_lock(filesystem, scope, lease_ttl, Arc::new(Mutex::new(())))
+        let lock = idempotency_lock_for_filesystem(&filesystem);
+        Self::new_with_lock(filesystem, scope, lease_ttl, lock)
     }
 
     pub fn new_with_lock(
@@ -308,8 +314,7 @@ where
         else {
             return Ok(());
         };
-        if action.phase != ActionPhase::Received
-            || stored.action.phase == ActionPhase::Settled
+        if stored.action.phase == ActionPhase::Settled
             || stored.action.action_id != action.action_id
         {
             return Ok(());
@@ -320,6 +325,38 @@ where
             Err(error) => Err(fs_error("release idempotency reservation", error)),
         }
     }
+}
+
+fn idempotency_lock_for_workflow_root(
+    root: &tempfile::TempDir,
+    scope: &ResourceScope,
+) -> Arc<Mutex<()>> {
+    idempotency_lock_for_key(format!(
+        "workflow-root:{}:{}",
+        root.path().display(),
+        product_workflow_mount_target(scope)
+    ))
+}
+
+fn idempotency_lock_for_filesystem<F>(filesystem: &Arc<ScopedFilesystem<F>>) -> Arc<Mutex<()>> {
+    idempotency_lock_for_key(format!("scoped-filesystem:{:p}", Arc::as_ptr(filesystem)))
+}
+
+fn idempotency_lock_for_key(key: String) -> Arc<Mutex<()>> {
+    static IDEMPOTENCY_LOCKS: OnceLock<StdMutex<HashMap<String, Weak<Mutex<()>>>>> =
+        OnceLock::new();
+
+    let mut locks = IDEMPOTENCY_LOCKS
+        .get_or_init(|| StdMutex::new(HashMap::new()))
+        .lock()
+        .expect("idempotency lock registry poisoned");
+    if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+        return lock;
+    }
+
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(key, Arc::downgrade(&lock));
+    lock
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -406,10 +443,23 @@ where
         .map_err(|error| fs_error("write product workflow record", error))
 }
 
-fn binding_path(request: &ResolveBindingRequest) -> Result<ScopedPath, ProductWorkflowError> {
+fn binding_path(
+    scope: &ResourceScope,
+    request: &ResolveBindingRequest,
+) -> Result<ScopedPath, ProductWorkflowError> {
+    let agent_id =
+        scope
+            .agent_id
+            .as_ref()
+            .ok_or_else(|| ProductWorkflowError::BindingResolutionFailed {
+                reason: "missing agent id in binding scope".to_string(),
+            })?;
+    let project_id = scope.project_id.as_ref().map_or("", ProjectId::as_str);
     hashed_scoped_path(
         "/workflow/bindings",
         &[
+            agent_id.as_str(),
+            project_id,
             request.adapter_id.as_str(),
             request.installation_id.as_str(),
             request.external_actor_ref.kind(),
@@ -501,16 +551,20 @@ fn scoped_product_workflow_fs_at<F>(
 where
     F: RootFilesystem,
 {
-    let target = format!(
-        "/engine/tenants/{}/users/{}/product-workflow",
-        scope.tenant_id, scope.user_id
-    );
+    let target = product_workflow_mount_target(scope);
     let mounts = MountView::new(vec![MountGrant::new(
         MountAlias::new("/workflow").expect("valid product workflow alias"),
         VirtualPath::new(target).expect("valid product workflow target"),
         MountPermissions::read_write_list_delete(),
     )])?;
     Ok(Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts)))
+}
+
+fn product_workflow_mount_target(scope: &ResourceScope) -> String {
+    format!(
+        "/engine/tenants/{}/users/{}/product-workflow",
+        scope.tenant_id, scope.user_id
+    )
 }
 
 fn fs_error(operation: &str, error: FilesystemError) -> ProductWorkflowError {

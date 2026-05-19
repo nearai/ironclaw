@@ -877,6 +877,10 @@ impl RecordingTestCapabilityPort {
         self.invocations.lock().unwrap().clone()
     }
 
+    pub fn invocation_count(&self) -> usize {
+        self.invocations.lock().unwrap().len()
+    }
+
     fn completed_result(&self) -> CapabilityOutcome {
         let ordinal = self.next_result.fetch_add(1, Ordering::SeqCst);
         CapabilityOutcome::Completed(CapabilityResultMessage {

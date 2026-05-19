@@ -1,3 +1,7 @@
+mod support;
+
+use support::legacy_capability_fixture_to_v2;
+
 use async_trait::async_trait;
 use ironclaw_dispatcher::*;
 use ironclaw_extensions::*;
@@ -178,15 +182,27 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
     let wasm_root = storage.join("echo-wasm");
     std::fs::create_dir_all(&wasm_root).unwrap();
-    std::fs::write(wasm_root.join("manifest.toml"), WASM_MANIFEST).unwrap();
+    std::fs::write(
+        wasm_root.join("manifest.toml"),
+        legacy_capability_fixture_to_v2(WASM_MANIFEST),
+    )
+    .unwrap();
 
     let script_root = storage.join("echo-script");
     std::fs::create_dir_all(&script_root).unwrap();
-    std::fs::write(script_root.join("manifest.toml"), SCRIPT_MANIFEST).unwrap();
+    std::fs::write(
+        script_root.join("manifest.toml"),
+        legacy_capability_fixture_to_v2(SCRIPT_MANIFEST),
+    )
+    .unwrap();
 
     let mcp_root = storage.join("echo-mcp");
     std::fs::create_dir_all(&mcp_root).unwrap();
-    std::fs::write(mcp_root.join("manifest.toml"), MCP_MANIFEST).unwrap();
+    std::fs::write(
+        mcp_root.join("manifest.toml"),
+        legacy_capability_fixture_to_v2(MCP_MANIFEST),
+    )
+    .unwrap();
 
     let mut fs = LocalFilesystem::new();
     fs.mount_local(

@@ -77,14 +77,19 @@ Rules:
 
 ## 4. Manifest schema
 
-Minimal V1 manifest:
+Production manifests use `schema_version = "reborn.extension_manifest.v2"`.
+The older top-level `parameters_schema` manifest shape is no longer parsed on
+production discovery paths.
+
+Minimal V2 WASM manifest:
 
 ```toml
+schema_version = "reborn.extension_manifest.v2"
 id = "echo"
 name = "Echo"
 version = "0.1.0"
 description = "Echo demo extension"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "wasm"
@@ -95,40 +100,49 @@ id = "echo.say"
 description = "Echo text"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "model"
+input_schema_ref = "schemas/echo/say.input.v1.json"
+output_schema_ref = "schemas/echo/say.output.v1.json"
+prompt_doc_ref = "prompts/echo/say.md"
 ```
 
 Script/CLI manifest example:
 
 ```toml
+schema_version = "reborn.extension_manifest.v2"
 id = "project-tools"
 name = "Project Tools"
 version = "0.1.0"
 description = "Project-local CLI helpers"
-trust = "sandbox"
+trust = "untrusted"
 
 [runtime]
 kind = "script"
-runner = "sandboxed_process"
+runner = "docker"
+image = "python:3.12-slim"
 command = "pytest"
 args = ["tests/"]
 
 [[capabilities]]
 id = "project-tools.pytest"
 description = "Run pytest"
-effects = ["execute_code", "read_filesystem", "write_filesystem"]
+effects = ["execute_code"]
 default_permission = "ask"
-parameters_schema = { type = "object" }
+visibility = "model"
+input_schema_ref = "schemas/project-tools/pytest.input.v1.json"
+output_schema_ref = "schemas/project-tools/pytest.output.v1.json"
+prompt_doc_ref = "prompts/project-tools/pytest.md"
 ```
 
 MCP adapter manifest example:
 
 ```toml
+schema_version = "reborn.extension_manifest.v2"
 id = "github-mcp"
 name = "GitHub MCP"
 version = "0.1.0"
 description = "GitHub MCP adapter"
-trust = "user_trusted"
+trust = "third_party"
 
 [runtime]
 kind = "mcp"
@@ -141,10 +155,13 @@ id = "github-mcp.search_issues"
 description = "Search GitHub issues"
 effects = ["network", "dispatch_capability"]
 default_permission = "ask"
-parameters_schema = { type = "object" }
+visibility = "model"
+input_schema_ref = "schemas/github-mcp/search_issues.input.v1.json"
+output_schema_ref = "schemas/github-mcp/search_issues.output.v1.json"
+prompt_doc_ref = "prompts/github-mcp/search_issues.md"
 ```
 
-### Manifest V2 host API contracts
+### Host API contracts
 
 V2 keeps one extension identity and lets that extension implement one or more host API contracts. `host_api.id` is the only top-level contract/type discriminator; there is no separate manifest `kind`.
 
@@ -235,10 +252,16 @@ Rules:
 - capability ID must be prefixed by the provider extension ID: `<extension_id>.<name>`.
 - descriptor `provider` is always the manifest extension ID.
 - descriptor `runtime` is inherited from the manifest runtime declaration unless a future schema explicitly allows per-capability runtime overrides.
-- descriptor `trust_ceiling` is inherited from manifest `trust`.
+- descriptor `trust_ceiling` comes from the manifest's safe
+  `descriptor_trust_default`, not from effective runtime trust.
 - effects must parse as `EffectKind`.
 - default permission must parse as `PermissionMode`.
-- missing schema defaults to `{ "type": "object" }` only if explicitly chosen by implementation; otherwise missing schema should fail in V1.
+- top-level legacy capabilities must provide `input_schema_ref` and
+  `output_schema_ref`; model-visible capabilities must also provide
+  `prompt_doc_ref`.
+- during this cutover, `CapabilityDescriptor.parameters_schema` is a projection
+  placeholder of the form `{ "$ref": input_schema_ref }`. Catalog publication is
+  responsible for resolving schema/doc refs into hot per-turn tool descriptors.
 
 ---
 
@@ -392,4 +415,4 @@ failed/retry
 
 The extension registry/package source of truth is typed extension state with optional `/system/extensions/...` file projections. Extension config/state projections must validate through the typed repository and must not bypass lifecycle authorization.
 
-WASM, Script, and MCP are all first-class V1 runtime lanes; extension manifests and lifecycle state must be able to describe each lane without making dispatcher depend on concrete runtime crates.
+WASM, Script, and MCP are all first-class v2 runtime lanes; extension manifests and lifecycle state must be able to describe each lane without making dispatcher depend on concrete runtime crates.

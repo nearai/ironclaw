@@ -53,6 +53,7 @@ trace_*.json
 .claude/settings.local.json
 .worktrees/
 .ironclaw/
+.review/
 
 # Python cache
 __pycache__/

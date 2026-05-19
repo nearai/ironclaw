@@ -253,6 +253,13 @@ context/assistant-directives.md
 Kernel-mediated safety rules:
 
 - identity files are primary-scope only;
+- stable identity files (`AGENTS.md`, `SOUL.md`, `IDENTITY.md`, `TOOLS.md`,
+  and `BOOTSTRAP.md`) may be considered for default prompt assembly;
+- personal identity files (`USER.md` and `context/assistant-directives.md`) are
+  primary-scope only and excluded unless the resolved run profile explicitly
+  allows personal context;
+- `HEARTBEAT.md` is volatile routine/proactive context, not stable default-loop
+  identity context;
 - admin `SYSTEM.md` is admin-scope only and may be cached;
 - `MEMORY.md` and daily logs may read configured secondary scopes only through explicit read-scope policy;
 - group chat contexts exclude personal memory/profile/directives unless explicit policy allows them;
@@ -263,6 +270,11 @@ Kernel-mediated safety rules:
 Loop/userland assembly rules:
 
 - active loops may choose prompt order, summarization, model-specific formatting, and inclusion heuristics over authorized reads;
+- loops that admit personal context must emit safe observability metadata such
+  as admitted source count and source names, never raw file contents;
+- that admission metadata is best-effort/eventually consistent; consumers must
+  not rely on its absence before terminal turn events to prove personal context
+  was not admitted;
 - custom loops cannot bypass primary-scope identity filtering, group-chat privacy filtering, write-safety checks, or event/audit redaction;
 - reference loop prompt assemblers are replaceable behavior, not memory backend source of truth.
 

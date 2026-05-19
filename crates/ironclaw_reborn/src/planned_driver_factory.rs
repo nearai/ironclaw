@@ -194,7 +194,7 @@ pub fn default_planned_run_profile_resolver()
 mod tests {
     use ironclaw_turns::{
         RunProfileRequest, RunProfileResolutionRequest, RunProfileResolver,
-        run_profile::LoopDriverId,
+        run_profile::{LoopDriverId, PersonalContextAuthority, PersonalContextPolicy},
     };
 
     use super::*;
@@ -276,6 +276,10 @@ mod tests {
         assert_eq!(snapshot.profile_id.as_str(), PLANNED_DEFAULT_PROFILE_ID);
         assert_eq!(snapshot.loop_driver.id.as_str(), PLANNED_DRIVER_DEFAULT_ID);
         assert_eq!(
+            snapshot.personal_context_policy,
+            PersonalContextPolicy::Excluded
+        );
+        assert_eq!(
             snapshot
                 .loop_driver
                 .checkpoint_schema_id
@@ -296,6 +300,10 @@ mod tests {
 
         assert_eq!(snapshot.profile_id.as_str(), PLANNED_DEFAULT_PROFILE_ID);
         assert_eq!(snapshot.loop_driver.id.as_str(), PLANNED_DRIVER_DEFAULT_ID);
+        assert_eq!(
+            snapshot.personal_context_policy,
+            PersonalContextPolicy::Excluded
+        );
     }
 
     #[tokio::test]
@@ -314,6 +322,58 @@ mod tests {
         assert_eq!(
             snapshot.loop_driver.id,
             LoopDriverId::new("lightweight_loop").unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_authority_downgrades_allowed_to_excluded() {
+        let mut registry = InMemoryRunProfileRegistry::with_builtin_profiles();
+        let allowed_profile = planned_default_profile_definition()
+            .expect("profile should build")
+            .with_personal_context_policy(PersonalContextPolicy::Allowed);
+        registry
+            .register(allowed_profile)
+            .expect("profile should register");
+        let resolver = InMemoryRunProfileResolver::new(registry);
+        let snapshot = resolver
+            .resolve_run_profile(
+                RunProfileResolutionRequest::interactive_default()
+                    .with_requested_run_profile(
+                        RunProfileRequest::new(PLANNED_DEFAULT_PROFILE_ID).unwrap(),
+                    )
+                    .with_personal_context_authority(PersonalContextAuthority::Shared),
+            )
+            .await
+            .expect("profile should resolve");
+        assert_eq!(
+            snapshot.personal_context_policy,
+            PersonalContextPolicy::Excluded
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_authority_preserves_allowed() {
+        let mut registry = InMemoryRunProfileRegistry::with_builtin_profiles();
+        let allowed_profile = planned_default_profile_definition()
+            .expect("profile should build")
+            .with_personal_context_policy(PersonalContextPolicy::Allowed);
+        registry
+            .register(allowed_profile)
+            .expect("profile should register");
+        let resolver = InMemoryRunProfileResolver::new(registry);
+        let snapshot = resolver
+            .resolve_run_profile(
+                RunProfileResolutionRequest::interactive_default()
+                    .with_requested_run_profile(
+                        RunProfileRequest::new(PLANNED_DEFAULT_PROFILE_ID).unwrap(),
+                    )
+                    .with_personal_context_authority(PersonalContextAuthority::Direct),
+            )
+            .await
+            .expect("profile should resolve");
+        assert_eq!(
+            snapshot.personal_context_policy,
+            PersonalContextPolicy::Allowed
         );
     }
 }
