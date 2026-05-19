@@ -150,6 +150,26 @@ async fn fetch_snapshot_rejects_projection_scope_mismatch() {
 }
 
 #[tokio::test]
+async fn fetch_snapshot_rejects_projection_payload_thread_mismatch() {
+    let requested = projection_scope("thread-a");
+    let manager = EventStreamManager::new(
+        Arc::new(PayloadThreadMismatchProjectionService),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let error = manager
+        .fetch_snapshot(fetch_request(requested))
+        .await
+        .expect_err("foreign thread payload rejected");
+
+    assert!(matches!(error, ProjectionStreamError::AccessDenied));
+}
+
+#[tokio::test]
 async fn access_policy_runs_before_projection_or_live_subscription() {
     let scope = projection_scope("thread-a");
     let projection = Arc::new(FakeProjectionService::new(scope.clone()));
@@ -257,6 +277,29 @@ async fn valid_resume_rejects_projection_scope_mismatch() {
         ))
         .await
         .expect_err("scope mismatch");
+
+    assert!(matches!(error, ProjectionStreamError::AccessDenied));
+}
+
+#[tokio::test]
+async fn valid_resume_rejects_projection_payload_thread_mismatch() {
+    let requested = projection_scope("thread-a");
+    let manager = EventStreamManager::new(
+        Arc::new(PayloadThreadMismatchProjectionService),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let error = manager
+        .subscribe(subscribe_request(
+            requested.clone(),
+            Some(ProjectionCursor::for_scope(requested, EventCursor::new(1))),
+        ))
+        .await
+        .expect_err("foreign thread replay payload rejected");
 
     assert!(matches!(error, ProjectionStreamError::AccessDenied));
 }
@@ -548,6 +591,34 @@ async fn product_thread_subscription_blocks_debug_live_updates() {
             },
         ))
         .expect("publish debug payload");
+
+    match subscription.next().await.expect("access marker") {
+        ProjectionStreamItem::Lagged { reason, .. } => {
+            assert_eq!(reason, LagReason::AccessBlocked);
+        }
+        other => panic!("expected access lag marker, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn product_thread_subscription_blocks_foreign_thread_live_payload() {
+    let scope = projection_scope("thread-a");
+    let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
+    let manager = manager_with_source(scope.clone(), Arc::clone(&source));
+    let mut subscription = manager
+        .subscribe(subscribe_request(scope.clone(), None))
+        .await
+        .expect("authorized subscription");
+    assert!(matches!(
+        subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+
+    source
+        .publish(ProductProjectionEnvelope::ThreadUpdates(replay_for_thread(
+            &scope, 11, 11, "thread-b",
+        )))
+        .expect("publish foreign payload with matching cursor scope");
 
     match subscription.next().await.expect("access marker") {
         ProjectionStreamItem::Lagged { reason, .. } => {
@@ -1021,6 +1092,25 @@ impl EventProjectionService for ScopeMismatchProjectionService {
     }
 }
 
+struct PayloadThreadMismatchProjectionService;
+
+#[async_trait]
+impl EventProjectionService for PayloadThreadMismatchProjectionService {
+    async fn snapshot(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionSnapshot, ProjectionError> {
+        Ok(snapshot_for_thread(&request.scope, 10, "thread-b"))
+    }
+
+    async fn updates(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionReplay, ProjectionError> {
+        Ok(replay_for_thread(&request.scope, 2, 3, "thread-b"))
+    }
+}
+
 struct SnapshotPublishingProjectionService {
     scope: ProjectionScope,
     source: Arc<InMemoryProjectionUpdateSource>,
@@ -1329,6 +1419,18 @@ fn snapshot(scope: &ProjectionScope, cursor: u64) -> ProjectionSnapshot {
     }
 }
 
+fn snapshot_for_thread(scope: &ProjectionScope, cursor: u64, thread: &str) -> ProjectionSnapshot {
+    let mut snapshot = snapshot(scope, cursor);
+    let thread_id = Some(ThreadId::new(thread).unwrap());
+    for entry in &mut snapshot.timeline.entries {
+        entry.thread_id = thread_id.clone();
+    }
+    for run in &mut snapshot.runs {
+        run.thread_id = thread_id.clone();
+    }
+    snapshot
+}
+
 fn replay(scope: &ProjectionScope, cursor: u64, next: u64) -> ProjectionReplay {
     ProjectionReplay {
         updates: vec![timeline_entry(
@@ -1340,6 +1442,23 @@ fn replay(scope: &ProjectionScope, cursor: u64, next: u64) -> ProjectionReplay {
         next_cursor: ProjectionCursor::for_scope(scope.clone(), EventCursor::new(next)),
         truncated: false,
     }
+}
+
+fn replay_for_thread(
+    scope: &ProjectionScope,
+    cursor: u64,
+    next: u64,
+    thread: &str,
+) -> ProjectionReplay {
+    let mut replay = replay(scope, cursor, next);
+    let thread_id = Some(ThreadId::new(thread).unwrap());
+    for entry in &mut replay.updates {
+        entry.thread_id = thread_id.clone();
+    }
+    for run in &mut replay.runs {
+        run.thread_id = thread_id.clone();
+    }
+    replay
 }
 
 fn timeline_entry(scope: &ProjectionScope, cursor: u64, kind: TimelineEntryKind) -> TimelineEntry {

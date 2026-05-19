@@ -6,8 +6,8 @@
 //! directly.
 
 use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
-    hash::{Hash, Hasher},
+    collections::{HashMap, HashSet},
+    hash::Hash,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -501,7 +501,7 @@ pub struct EventStreamManager {
 
 #[derive(Clone, Default)]
 struct ProjectionValidationCache {
-    decisions: Arc<Mutex<HashMap<ProjectionValidationCacheKey, bool>>>,
+    allowed: Arc<Mutex<HashSet<ProjectionValidationCacheKey>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -509,8 +509,7 @@ struct ProjectionValidationCacheKey {
     variant: ProjectionEnvelopeKind,
     scope: ProjectionScopeKey,
     cursor: u64,
-    payload_len: usize,
-    payload_hash: u64,
+    payload: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -528,38 +527,25 @@ impl ProjectionValidationCache {
         envelope: &ProductProjectionEnvelope,
     ) -> Result<(), ProjectionStreamError> {
         let key = validation_cache_key(envelope)?;
-        if let Some(allowed) = self
-            .decisions
+        if self
+            .allowed
             .lock()
             .map_err(|_| ProjectionStreamError::Source)?
-            .get(&key)
-            .copied()
+            .contains(&key)
         {
-            return if allowed {
-                Ok(())
-            } else {
-                Err(ProjectionStreamError::Redaction)
-            };
+            return Ok(());
         }
 
-        let allowed = match validator.validate(envelope) {
-            Ok(()) => true,
-            Err(ProjectionStreamError::Redaction) => false,
-            Err(error) => return Err(error),
-        };
-        let mut decisions = self
-            .decisions
+        validator.validate(envelope)?;
+        let mut allowed = self
+            .allowed
             .lock()
             .map_err(|_| ProjectionStreamError::Source)?;
-        if decisions.len() >= MAX_VALIDATION_CACHE_ENTRIES {
-            decisions.clear();
+        if allowed.len() >= MAX_VALIDATION_CACHE_ENTRIES {
+            allowed.clear();
         }
-        decisions.insert(key, allowed);
-        if allowed {
-            Ok(())
-        } else {
-            Err(ProjectionStreamError::Redaction)
-        }
+        allowed.insert(key);
+        Ok(())
     }
 }
 
@@ -962,8 +948,47 @@ fn validate_stream_envelope(
             ProjectionTarget::Thread { thread_id },
             ProductProjectionEnvelope::ThreadSnapshot(_)
             | ProductProjectionEnvelope::ThreadUpdates(_),
-        ) if scope.read_scope.thread_id.as_ref() == Some(thread_id) => Ok(()),
+        ) if scope.read_scope.thread_id.as_ref() == Some(thread_id) => {
+            validate_product_thread_payload(envelope, thread_id)
+        }
         _ => Err(ProjectionStreamError::AccessDenied),
+    }
+}
+
+fn validate_product_thread_payload(
+    envelope: &ProductProjectionEnvelope,
+    thread_id: &ThreadId,
+) -> Result<(), ProjectionStreamError> {
+    let all_thread_entries_match = |entries: &[ironclaw_event_projections::TimelineEntry]| {
+        entries
+            .iter()
+            .all(|entry| entry.thread_id.as_ref() == Some(thread_id))
+    };
+    let all_run_statuses_match = |runs: &[ironclaw_event_projections::RunStatusProjection]| {
+        runs.iter()
+            .all(|run| run.thread_id.as_ref() == Some(thread_id))
+    };
+
+    match envelope {
+        ProductProjectionEnvelope::ThreadSnapshot(snapshot) => {
+            if all_thread_entries_match(&snapshot.timeline.entries)
+                && all_run_statuses_match(&snapshot.runs)
+            {
+                Ok(())
+            } else {
+                Err(ProjectionStreamError::AccessDenied)
+            }
+        }
+        ProductProjectionEnvelope::ThreadUpdates(replay) => {
+            if all_thread_entries_match(&replay.updates) && all_run_statuses_match(&replay.runs) {
+                Ok(())
+            } else {
+                Err(ProjectionStreamError::AccessDenied)
+            }
+        }
+        ProductProjectionEnvelope::DeliveryStatus(_) | ProductProjectionEnvelope::Debug(_) => {
+            Err(ProjectionStreamError::AccessDenied)
+        }
     }
 }
 
@@ -1076,14 +1101,11 @@ fn validation_cache_key(
         ProductProjectionEnvelope::Debug(_) => ProjectionEnvelopeKind::Debug,
     };
     let payload = serde_json::to_vec(envelope).map_err(|_| ProjectionStreamError::Source)?;
-    let mut hasher = DefaultHasher::new();
-    payload.hash(&mut hasher);
     Ok(ProjectionValidationCacheKey {
         variant,
         scope: projection_scope_key(envelope.scope()),
         cursor: envelope.cursor().runtime.as_u64(),
-        payload_len: payload.len(),
-        payload_hash: hasher.finish(),
+        payload,
     })
 }
 
