@@ -386,8 +386,8 @@ mod reborn_support_tests {
     use ironclaw_product_workflow::{
         ActionDispatchKind, ActionFingerprintKey, ConversationBindingService,
         DefaultInboundTurnService, DefaultProductWorkflow, IdempotencyDecision, IdempotencyLedger,
-        InboundTurnService, ProductActionId, ProductWorkflowError, ResolveBindingRequest,
-        SourceBindingKey,
+        InboundTurnService, ProductActionId, ProductConversationRouteKind, ProductWorkflowError,
+        ResolveBindingRequest, SourceBindingKey,
     };
     use ironclaw_threads::ProviderToolCallReferenceEnvelope;
     use ironclaw_threads::{
@@ -1646,13 +1646,15 @@ mod reborn_support_tests {
         let thread_harness =
             RebornThreadHarness::filesystem_temp(thread_scope("workflow")).expect("thread harness");
         let coordinator = DryRunCapturingTurnCoordinator::default();
+        let binding_service: Arc<dyn ConversationBindingService> =
+            Arc::new(product_harness.binding_service().expect("binding service"));
         let inbound: Arc<dyn InboundTurnService> = Arc::new(DefaultInboundTurnService::new(
-            product_harness.binding_service().expect("binding service"),
+            Arc::clone(&binding_service),
             thread_harness.service_instance().expect("thread service"),
             coordinator.clone(),
         ));
         let ledger: Arc<dyn IdempotencyLedger> = Arc::new(product_harness.idempotency_ledger());
-        let workflow = DefaultProductWorkflow::new(inbound, ledger);
+        let workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
         let envelope = test_envelope("event-workflow", "alice", "room-workflow", "hi");
 
         let first = workflow
@@ -1678,13 +1680,15 @@ mod reborn_support_tests {
             .expect("thread harness");
         let coordinator = DryRunCapturingTurnCoordinator::default();
         coordinator.set_busy(TurnRunId::new());
+        let binding_service: Arc<dyn ConversationBindingService> =
+            Arc::new(product_harness.binding_service().expect("binding service"));
         let inbound: Arc<dyn InboundTurnService> = Arc::new(DefaultInboundTurnService::new(
-            product_harness.binding_service().expect("binding service"),
+            Arc::clone(&binding_service),
             thread_harness.service_instance().expect("thread service"),
             coordinator.clone(),
         ));
         let ledger: Arc<dyn IdempotencyLedger> = Arc::new(product_harness.idempotency_ledger());
-        let workflow = DefaultProductWorkflow::new(inbound, ledger);
+        let workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
         let envelope = test_envelope("event-workflow-busy", "alice", "room-workflow-busy", "hi");
 
         let first = workflow
@@ -2039,6 +2043,8 @@ mod reborn_support_tests {
             installation_id: envelope.installation_id().clone(),
             external_actor_ref: envelope.external_actor_ref().clone(),
             external_conversation_ref: envelope.external_conversation_ref().clone(),
+            external_event_id: envelope.external_event_id().clone(),
+            route_kind: ProductConversationRouteKind::Direct,
             auth_claim: envelope.auth_claim().clone(),
         }
     }
@@ -2048,6 +2054,7 @@ mod reborn_support_tests {
         ActionFingerprintKey::new(
             envelope.adapter_id().clone(),
             envelope.installation_id().clone(),
+            envelope.external_actor_ref().clone(),
             SourceBindingKey::new(envelope.source_binding_key()).expect("source binding key"),
             envelope.external_event_id().clone(),
         )

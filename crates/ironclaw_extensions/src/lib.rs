@@ -326,15 +326,20 @@ impl ExtensionPackage {
     }
 }
 
+pub mod host_api;
 mod lifecycle;
 mod registry;
 pub mod v2;
 
+pub use host_api::capability_provider::{
+    CAPABILITY_PROVIDER_HOST_API_ID, CAPABILITY_PROVIDER_SECTION, CapabilityProviderHostApiContract,
+};
 pub use v2::{
     CapabilityDeclV2, CapabilityVisibility, ExtensionManifestV2, ExtensionRuntimeV2,
-    HostApiContractRegistry, HostApiId, HostApiManifestContract, HostApiMultiplicity, HostApiRefV2,
-    MANIFEST_SCHEMA_VERSION, MAX_MANIFEST_BYTES, ManifestSectionPath, ManifestSource,
-    ManifestV2Error, RESERVED_HOST_BUNDLED_ID_PREFIX,
+    HostApiContractRegistry, HostApiId, HostApiManifestContext, HostApiManifestContract,
+    HostApiManifestProjection, HostApiMultiplicity, HostApiRefV2, MANIFEST_SCHEMA_VERSION,
+    MAX_MANIFEST_BYTES, ManifestSectionPath, ManifestSource, ManifestV2Error,
+    RESERVED_HOST_BUNDLED_ID_PREFIX,
 };
 
 pub type CapabilityManifest = CapabilityDeclV2;

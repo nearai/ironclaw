@@ -25,26 +25,33 @@ use std::{
 };
 
 use async_trait::async_trait;
+use ironclaw_authorization::GrantAuthorizer;
+use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
-    ExtensionId, GrantConstraints, MountAlias, MountGrant, MountPermissions, MountView,
-    NetworkPolicy, Principal, ProjectId, ResourceScope, RuntimeKind, TenantId, ThreadId,
-    TrustClass, UserId, VirtualPath,
+    ExtensionId, GrantConstraints, HostPath, MountAlias, MountGrant, MountPermissions, MountView,
+    NetworkPolicy, NetworkScheme, NetworkTargetPattern, PackageId, Principal, ProjectId,
+    ResourceScope, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    RuntimeHttpEgressResponse, RuntimeKind, TenantId, ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
-    BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfacePolicy, HostRuntime, READ_FILE_CAPABILITY_ID,
-    SurfaceKind, WRITE_FILE_CAPABILITY_ID,
+    APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, CapabilitySurfacePolicy,
+    CapabilitySurfaceVersion as HostRuntimeCapabilitySurfaceVersion, GLOB_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID,
+    LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
-    HostManagedModelRequest, HostRuntimeLoopCapabilityPortFactory,
+    HostManagedModelRequest, HostRuntimeLoopCapabilityPortFactory, LoopCapabilityResultWriter,
 };
 use ironclaw_product_adapters::{ProductInboundAck, ProductWorkflow};
 use ironclaw_product_workflow::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
-    IdempotencyLedger, InboundTurnService, ResolveBindingRequest, ResolvedBinding,
+    IdempotencyLedger, InboundTurnService, ProductConversationRouteKind, ResolveBindingRequest,
+    ResolvedBinding,
 };
 use ironclaw_reborn::{
     loop_driver_host::LoopCapabilityPortFactory,
@@ -62,17 +69,19 @@ use ironclaw_reborn_composition::{
     ProductLiveCapabilityIo, ProductLiveVisibleCapabilityRequestConfig, RebornBuildInput,
     build_reborn_services, visible_capability_request_for_run,
 };
+use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_threads::{
     FilesystemSessionThreadService, SessionThreadService, ThreadHistoryRequest,
     ThreadMessageRecord, ThreadScope,
 };
 use ironclaw_trust::EffectiveTrustClass;
+use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use ironclaw_turns::{
     DefaultTurnCoordinator, FilesystemTurnStateStore, GateRef, GetLoopCheckpointRequest,
     GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore, LoopBlockedKind,
-    LoopCheckpointKind, LoopCheckpointStore, LoopGateRef, ReplyTargetBindingRef, ResumeTurnRequest,
-    SourceBindingRef, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnRunState, TurnScope,
-    TurnStateStore, TurnStatus,
+    LoopCheckpointKind, LoopCheckpointStore, LoopGateRef, LoopResultRef, ReplyTargetBindingRef,
+    ResumeTurnRequest, SourceBindingRef, TurnActor, TurnCoordinator, TurnError, TurnRunId,
+    TurnRunState, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDescriptorView,
@@ -136,6 +145,12 @@ pub struct SubmittedTurn {
     pub scope: TurnScope,
 }
 
+#[derive(Debug, Clone)]
+pub struct RecordedCapabilityResult {
+    pub capability_id: CapabilityId,
+    pub output: serde_json::Value,
+}
+
 enum HarnessCapabilityMode {
     Recording(RecordingTestCapabilityPort),
     HostRuntime(Arc<HostRuntimeCapabilityHarness>),
@@ -159,6 +174,13 @@ impl HarnessCapabilityRecorder {
         match self {
             Self::Recording(_) => None,
             Self::HostRuntime(harness) => Some(harness.workspace_file_path(relative)),
+        }
+    }
+
+    fn capability_results(&self) -> Vec<RecordedCapabilityResult> {
+        match self {
+            Self::Recording(_) => Vec::new(),
+            Self::HostRuntime(harness) => harness.capability_results(),
         }
     }
 }
@@ -192,6 +214,48 @@ impl RebornBinaryE2EHarness {
         model_gateway: RebornTraceReplayModelGateway,
     ) -> HarnessResult<Self> {
         let host_runtime = Arc::new(HostRuntimeCapabilityHarness::file_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_write_only(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::write_only().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_coding_read_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::coding_read_tools().await?);
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
+    pub async fn with_host_runtime_core_builtin_capabilities(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(HostRuntimeCapabilityHarness::core_builtin_tools().await?);
         Self::with_model_gateway_capability_mode(
             conversation_id,
             model_gateway,
@@ -296,13 +360,15 @@ impl RebornBinaryE2EHarness {
             model_budget_accountant: None,
             safety_context: None,
         })?;
+        let binding_service: Arc<dyn ConversationBindingService> =
+            Arc::new(product_harness.binding_service()?);
         let inbound: Arc<dyn InboundTurnService> = Arc::new(DefaultInboundTurnService::new(
-            product_harness.binding_service()?,
+            Arc::clone(&binding_service),
             thread_harness.service_instance()?,
             composition.coordinator.clone(),
         ));
         let ledger: Arc<dyn IdempotencyLedger> = Arc::new(product_harness.idempotency_ledger());
-        let workflow = DefaultProductWorkflow::new(inbound, ledger);
+        let workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
 
         Ok(Self::from_composition(
             ingress,
@@ -508,6 +574,10 @@ impl RebornBinaryE2EHarness {
         self.capability_recorder.invocations()
     }
 
+    pub fn capability_results(&self) -> Vec<RecordedCapabilityResult> {
+        self.capability_recorder.capability_results()
+    }
+
     pub fn host_workspace_file_path(&self, relative: &str) -> HarnessResult<PathBuf> {
         self.capability_recorder
             .workspace_file_path(relative)
@@ -648,21 +718,62 @@ struct HostRuntimeCapabilityHarness {
     mounts: MountView,
     capability_ids: Vec<CapabilityId>,
     effect_kinds: Vec<EffectKind>,
+    network_policy: NetworkPolicy,
     user_id: UserId,
     invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
+    results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
 }
 
 impl HostRuntimeCapabilityHarness {
     async fn file_tools() -> HarnessResult<Self> {
+        Self::new(
+            "reborn-e2e-builtin-tools",
+            vec![
+                CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
+                CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
+            ],
+            vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
+            UserId::new("reborn-e2e-builtin-user")?,
+        )
+        .await
+    }
+
+    async fn write_only() -> HarnessResult<Self> {
+        Self::new(
+            "reborn-e2e-write-only",
+            vec![CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?],
+            vec![EffectKind::WriteFilesystem],
+            UserId::new("reborn-e2e-write-only-user")?,
+        )
+        .await
+    }
+
+    async fn coding_read_tools() -> HarnessResult<Self> {
+        Self::new(
+            "reborn-e2e-coding-read-tools",
+            vec![
+                CapabilityId::new(LIST_DIR_CAPABILITY_ID)?,
+                CapabilityId::new(GLOB_CAPABILITY_ID)?,
+                CapabilityId::new(GREP_CAPABILITY_ID)?,
+            ],
+            vec![EffectKind::ReadFilesystem],
+            UserId::new("reborn-e2e-coding-read-user")?,
+        )
+        .await
+    }
+
+    async fn new(
+        service_label: &'static str,
+        capability_ids: Vec<CapabilityId>,
+        effect_kinds: Vec<EffectKind>,
+        user_id: UserId,
+    ) -> HarnessResult<Self> {
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
         std::fs::create_dir_all(&workspace_root)?;
-        let services = build_reborn_services(RebornBuildInput::local_dev(
-            "reborn-e2e-builtin-tools",
-            storage_root,
-        ))
-        .await?;
+        let services =
+            build_reborn_services(RebornBuildInput::local_dev(service_label, storage_root)).await?;
         let runtime = services
             .host_runtime
             .ok_or("local-dev Reborn services missing host runtime")?;
@@ -673,13 +784,50 @@ impl HostRuntimeCapabilityHarness {
             root,
             workspace_root,
             mounts,
-            capability_ids: vec![
-                CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
-                CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
-            ],
-            effect_kinds: vec![EffectKind::ReadFilesystem, EffectKind::WriteFilesystem],
-            user_id: UserId::new("reborn-e2e-builtin-user")?,
+            capability_ids,
+            effect_kinds,
+            network_policy: NetworkPolicy::default(),
+            user_id,
             invocations: Arc::new(Mutex::new(Vec::new())),
+            results: Arc::new(Mutex::new(Vec::new())),
+        })
+    }
+
+    async fn core_builtin_tools() -> HarnessResult<Self> {
+        let root = Arc::new(tempfile::tempdir()?);
+        let storage_root = root.path().join("local-dev");
+        let workspace_root = storage_root.join("workspace");
+        std::fs::create_dir_all(&workspace_root)?;
+        let runtime = local_dev_host_runtime_with_http_egress(
+            storage_root.clone(),
+            Arc::new(RecordingRuntimeHttpEgress::with_body(
+                br#"{"accepted":true}"#.to_vec(),
+            )),
+        )?;
+        let mounts = workspace_mounts(MountPermissions::read_write_list_delete())?;
+        Ok(Self {
+            runtime,
+            io: Arc::new(ProductLiveCapabilityIo::default()),
+            root,
+            workspace_root,
+            mounts,
+            capability_ids: vec![
+                CapabilityId::new(TIME_CAPABILITY_ID)?,
+                CapabilityId::new(JSON_CAPABILITY_ID)?,
+                CapabilityId::new(HTTP_CAPABILITY_ID)?,
+                CapabilityId::new(READ_FILE_CAPABILITY_ID)?,
+                CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?,
+            ],
+            effect_kinds: vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network,
+            ],
+            network_policy: http_test_policy(),
+            user_id: UserId::new("reborn-e2e-core-builtins-user")?,
+            invocations: Arc::new(Mutex::new(Vec::new())),
+            results: Arc::new(Mutex::new(Vec::new())),
         })
     }
 
@@ -695,6 +843,10 @@ impl HostRuntimeCapabilityHarness {
 
     fn invocations(&self) -> Vec<CapabilityInvocation> {
         self.invocations.lock().unwrap().clone()
+    }
+
+    fn capability_results(&self) -> Vec<RecordedCapabilityResult> {
+        self.results.lock().unwrap().clone()
     }
 
     fn workspace_file_path(&self, relative: &str) -> PathBuf {
@@ -726,6 +878,7 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
             &self.harness.capability_ids,
             self.harness.effect_kinds.clone(),
             self.harness.mounts.clone(),
+            self.harness.network_policy.clone(),
         ))
         .with_provider_trust_for_effects(
             ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER).map_err(host_runtime_harness_error)?,
@@ -736,11 +889,15 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
         let visible_request = visible_capability_request_for_run(run_context, authority)
             .map_err(host_runtime_harness_error)?;
         let milestone_sink: Arc<dyn LoopHostMilestoneSink> = self.milestone_sink.clone();
+        let result_writer = Arc::new(RecordingCapabilityResultWriter {
+            inner: self.harness.io.clone(),
+            results: Arc::clone(&self.harness.results),
+        });
         let port = HostRuntimeLoopCapabilityPortFactory::new(
             Arc::clone(&self.harness.runtime),
             visible_request,
             self.harness.io.clone(),
-            self.harness.io.clone(),
+            result_writer,
             Some(milestone_sink),
         )
         .with_execution_mounts(execution_mounts)
@@ -804,6 +961,116 @@ impl LoopCapabilityPort for RecordingDelegatingCapabilityPort {
     }
 }
 
+fn local_dev_host_runtime_with_http_egress(
+    storage_root: PathBuf,
+    egress: Arc<RecordingRuntimeHttpEgress>,
+) -> HarnessResult<Arc<dyn HostRuntime>> {
+    let mut filesystem = LocalFilesystem::new();
+    filesystem.mount_local(
+        VirtualPath::new("/projects")?,
+        HostPath::from_path_buf(storage_root),
+    )?;
+
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(builtin_first_party_package()?)?;
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry),
+        Arc::new(filesystem),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        HostRuntimeCapabilitySurfaceVersion::new("reborn-app-v1")?,
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers()?))
+    .with_runtime_http_egress(egress)
+    .with_trust_policy(Arc::new(first_party_trust_policy()?));
+
+    Ok(Arc::new(services.host_runtime_for_local_testing()))
+}
+
+fn first_party_trust_policy() -> HarnessResult<HostTrustPolicy> {
+    Ok(HostTrustPolicy::new(vec![Box::new(
+        AdminConfig::with_entries(vec![AdminEntry::for_local_manifest(
+            PackageId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
+            "/system/extensions/builtin/manifest.toml".to_string(),
+            None,
+            HostTrustAssignment::first_party(),
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::Network,
+            ],
+            None,
+        )]),
+    )])?)
+}
+
+fn http_test_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "api.example.test".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(10_000),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RecordingRuntimeHttpEgress {
+    body: Vec<u8>,
+}
+
+impl RecordingRuntimeHttpEgress {
+    fn with_body(body: Vec<u8>) -> Self {
+        Self { body }
+    }
+}
+
+impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
+    fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        Ok(RuntimeHttpEgressResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: self.body.clone(),
+            request_bytes: request.body.len() as u64,
+            response_bytes: self.body.len() as u64,
+            redaction_applied: false,
+        })
+    }
+}
+
+struct RecordingCapabilityResultWriter {
+    inner: Arc<ProductLiveCapabilityIo>,
+    results: Arc<Mutex<Vec<RecordedCapabilityResult>>>,
+}
+
+#[async_trait]
+impl LoopCapabilityResultWriter for RecordingCapabilityResultWriter {
+    async fn write_capability_result(
+        &self,
+        run_context: &LoopRunContext,
+        capability_id: &CapabilityId,
+        output: serde_json::Value,
+    ) -> Result<LoopResultRef, AgentLoopHostError> {
+        let result_ref = self
+            .inner
+            .write_capability_result(run_context, capability_id, output.clone())
+            .await?;
+        self.results.lock().unwrap().push(RecordedCapabilityResult {
+            capability_id: capability_id.clone(),
+            output,
+        });
+        Ok(result_ref)
+    }
+}
+
 fn workspace_mounts(permissions: MountPermissions) -> HarnessResult<MountView> {
     Ok(MountView::new(vec![MountGrant::new(
         MountAlias::new("/workspace")?,
@@ -817,6 +1084,7 @@ fn capability_grants(
     capabilities: &[CapabilityId],
     allowed_effects: Vec<EffectKind>,
     mounts: MountView,
+    network: NetworkPolicy,
 ) -> CapabilitySet {
     CapabilitySet {
         grants: capabilities
@@ -829,7 +1097,7 @@ fn capability_grants(
                 constraints: GrantConstraints {
                     allowed_effects: allowed_effects.clone(),
                     mounts: mounts.clone(),
-                    network: NetworkPolicy::default(),
+                    network: network.clone(),
                     secrets: Vec::new(),
                     resource_ceiling: None,
                     expires_at: None,
@@ -1054,6 +1322,8 @@ fn binding_request(
         installation_id: envelope.installation_id().clone(),
         external_actor_ref: envelope.external_actor_ref().clone(),
         external_conversation_ref: envelope.external_conversation_ref().clone(),
+        external_event_id: envelope.external_event_id().clone(),
+        route_kind: ProductConversationRouteKind::Direct,
         auth_claim: envelope.auth_claim().clone(),
     })
 }
