@@ -140,6 +140,15 @@ fn resume_wake(scope: TurnScope, response: &ResumeTurnResponse) -> TurnRunWake {
     }
 }
 
+fn cancel_wake(scope: TurnScope, response: &CancelRunResponse) -> TurnRunWake {
+    TurnRunWake {
+        scope,
+        run_id: response.run_id,
+        status: response.status,
+        event_cursor: response.event_cursor,
+    }
+}
+
 fn notify_queued_run_best_effort(notifier: &dyn TurnRunWakeNotifier, wake: TurnRunWake) {
     match catch_unwind(AssertUnwindSafe(|| notifier.notify_queued_run(wake))) {
         Ok(Ok(())) => {}
@@ -181,10 +190,50 @@ where
     }
 
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        self.store.request_cancel(request).await
+        let scope = request.scope.clone();
+        let response = self.store.request_cancel(request).await?;
+        // Wake on `CancelRequested` (the cooperative case) AND on any terminal
+        // transition. Registered handles otherwise rely solely on the polling
+        // fallback to discover a direct-to-terminal cancellation, which would
+        // leave them in the requester map until the polling task next ticks.
+        if response.status == TurnStatus::CancelRequested || response.status.is_terminal() {
+            notify_queued_run_best_effort(
+                self.wake_notifier.as_ref(),
+                cancel_wake(scope, &response),
+            );
+        }
+        Ok(response)
     }
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         self.store.get_run_state(request).await
+    }
+}
+
+#[async_trait]
+impl<C> TurnCoordinator for Arc<C>
+where
+    C: TurnCoordinator + ?Sized,
+{
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        self.as_ref().submit_turn(request).await
+    }
+
+    async fn resume_turn(
+        &self,
+        request: ResumeTurnRequest,
+    ) -> Result<ResumeTurnResponse, TurnError> {
+        self.as_ref().resume_turn(request).await
+    }
+
+    async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
+        self.as_ref().cancel_run(request).await
+    }
+
+    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
+        self.as_ref().get_run_state(request).await
     }
 }

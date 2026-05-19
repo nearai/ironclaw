@@ -75,7 +75,7 @@ const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 
 /// Anthropic provider using OAuth Bearer authentication.
-pub struct AnthropicOAuthProvider {
+pub(crate) struct AnthropicOAuthProvider {
     client: Client,
     /// OAuth token, wrapped in RwLock so it can be updated after a successful
     /// Keychain refresh (fixes #1136: stale token reuse after expiry).
@@ -88,7 +88,7 @@ pub struct AnthropicOAuthProvider {
 }
 
 impl AnthropicOAuthProvider {
-    pub fn new(config: &RegistryProviderConfig) -> Result<Self, LlmError> {
+    pub(crate) fn new(config: &RegistryProviderConfig) -> Result<Self, LlmError> {
         let token = config
             .oauth_token
             .clone()

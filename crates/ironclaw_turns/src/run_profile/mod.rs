@@ -28,21 +28,26 @@ pub use driver::{
 };
 pub use host::{
     AgentLoopDriverHost, AgentLoopHost, AgentLoopHostError, AgentLoopHostErrorKind,
-    AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft, CapabilityBatchInvocation,
-    CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied, CapabilityDeniedReasonKind,
-    CapabilityDeniedReasonKindValue, CapabilityDescriptorView, CapabilityFailure,
-    CapabilityInputRef, CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage,
-    CapabilitySurfaceVersion, FinalizeAssistantMessage, LoopCancelReasonKind, LoopCapabilityPort,
-    LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest, LoopCheckpointStateRef,
-    LoopContextBundle, LoopContextMessage, LoopContextPort, LoopContextRequest, LoopContextSnippet,
-    LoopContextSnippetMetadata, LoopDriverNoteKind, LoopInput, LoopInputBatch, LoopInputCursor,
-    LoopInputCursorToken, LoopInputPort, LoopInterruptKind, LoopModelMessage, LoopModelPort,
-    LoopModelRequest, LoopModelResponse, LoopModelRouteSnapshot, LoopProcessRef, LoopProgressEvent,
-    LoopProgressPort, LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest,
-    LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort,
-    ModelStreamChunk, ParentLoopOutput, ProcessHandleSummary, PromptMode, UpdateAssistantDraft,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
-    validate_model_route_component_value,
+    AppendCapabilityResultRef, AssistantReply, BatchPolicyKind, BeginAssistantDraft,
+    CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDenied,
+    CapabilityDeniedReasonKind, CapabilityDeniedReasonKindValue, CapabilityDescriptorView,
+    CapabilityFailure, CapabilityFailureKind, CapabilityFailureKindValue, CapabilityInputRef,
+    CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, CapabilitySurfaceVersion,
+    ConcurrencyHint, FinalizeAssistantMessage, LoadCheckpointPayloadRequest,
+    LoadedCheckpointPayload, LoopCancelReasonKind, LoopCancellationPort, LoopCancellationSignal,
+    LoopCapabilityPort, LoopCheckpointKind, LoopCheckpointPort, LoopCheckpointRequest,
+    LoopCheckpointStateRef, LoopContextBundle, LoopContextMessage, LoopContextPort,
+    LoopContextRequest, LoopContextSnippet, LoopContextSnippetMetadata, LoopDriverNoteKind,
+    LoopGateKind, LoopInlineMessage, LoopInlineMessageRole, LoopInput, LoopInputAck,
+    LoopInputAckToken, LoopInputBatch, LoopInputCursor, LoopInputCursorToken, LoopInputPort,
+    LoopInterruptKind, LoopModelCapabilityView, LoopModelMessage, LoopModelPort, LoopModelRequest,
+    LoopModelResponse, LoopModelRouteSnapshot, LoopProcessRef, LoopProgressEvent, LoopProgressPort,
+    LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleGrant, LoopPromptBundleRef,
+    LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
+    LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, ProcessHandleSummary, PromptMode,
+    ProviderToolCall, ProviderToolCallReference, ProviderToolCallReplay, ProviderToolDefinition,
+    StageCheckpointPayloadRequest, UpdateAssistantDraft, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, sanitize_model_visible_text, validate_model_route_component_value,
 };
 pub use instruction_bundle::{
     InMemoryInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,
@@ -62,7 +67,7 @@ pub use model::{
     NoOpPolicyGuard,
 };
 pub use policy::{
-    CancellationPolicy, CheckpointPolicy, PrivilegedRunProfileDimension,
+    CancellationPolicy, CheckpointPolicy, PersonalContextAuthority, PrivilegedRunProfileDimension,
     RedactedRunProfileProvenance, RedactedRunProfileSource, ResourceBudgetPolicy,
     RunProfileRequestAuthority, RunProfileResolutionError, RuntimeProfileConstraints,
     SteeringPolicy,
@@ -75,7 +80,7 @@ pub use refs::{
 };
 pub use resolver::{
     InMemoryRunProfileRegistry, InMemoryRunProfileResolver, RunProfileDefinition,
-    RunProfileResolutionRequest, RunProfileResolver,
+    RunProfileRegistryError, RunProfileResolutionRequest, RunProfileResolver,
 };
 pub use skill_context::{
     InstalledSkillSnapshot, NoopSkillContextSource, SkillContextBudget, SkillContextError,
@@ -83,5 +88,5 @@ pub use skill_context::{
     SkillTrustLevel, SkillVisibility, is_skill_snippet_model_message_ref,
     skill_snippet_model_message_ref,
 };
-pub use snapshot::ResolvedRunProfile;
+pub use snapshot::{PersonalContextPolicy, ResolvedRunProfile};
 pub use snippet_ref::memory_snippet_display_ref;

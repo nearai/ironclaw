@@ -23,6 +23,32 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Error returned by fallible provider-registry loading.
+#[derive(Debug, Error)]
+pub enum ProviderRegistryLoadError {
+    #[error("failed to read provider registry overlay `{path}`: {source}")]
+    Read {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("failed to parse provider registry overlay `{path}`: {source}")]
+    Parse {
+        path: String,
+        #[source]
+        source: serde_json::Error,
+    },
+}
+
+impl ProviderRegistryLoadError {
+    fn overlay_path(&self) -> &str {
+        match self {
+            Self::Read { path, .. } | Self::Parse { path, .. } => path,
+        }
+    }
+}
 
 /// API protocol a provider speaks.
 ///
@@ -139,7 +165,7 @@ mod unsupported_params_de {
 
     const VALID_PARAMS: &[&str] = &["temperature", "max_tokens", "stop_sequences"];
 
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+    pub(super) fn deserialize<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
     where
         D: Deserializer<'de>,
     {
@@ -161,6 +187,7 @@ mod unsupported_params_de {
 ///
 /// One JSON object in `providers.json` maps to one `ProviderDefinition`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderDefinition {
     /// Unique identifier used in `LLM_BACKEND` (e.g., "groq", "tinfoil").
     pub id: String,
@@ -214,6 +241,11 @@ pub struct ProviderRegistry {
     lookup: HashMap<String, usize>,
 }
 
+fn builtin_provider_definitions() -> Vec<ProviderDefinition> {
+    serde_json::from_str(include_str!("../../../providers.json"))
+        .expect("built-in providers.json must be valid JSON") // safety: compile-time embedded file
+}
+
 impl ProviderRegistry {
     /// Build a registry from a list of provider definitions.
     ///
@@ -229,49 +261,81 @@ impl ProviderRegistry {
         Self { providers, lookup }
     }
 
-    /// Load the default registry: built-in providers + user overrides.
+    /// Load the default registry: built-in providers + user overrides
+    /// from `~/.ironclaw/providers.json` (v1's canonical location).
     ///
-    /// User providers from `~/.ironclaw/providers.json` are appended,
-    /// with later entries overriding earlier ones by ID/alias.
+    /// Equivalent to `load_from_path(user_providers_path())`. Kept as
+    /// the v1-default entry point so existing callers don't have to
+    /// thread a path through.
     pub fn load() -> Self {
-        let builtins: Vec<ProviderDefinition> =
-            serde_json::from_str(include_str!("../../../providers.json"))
-                .expect("built-in providers.json must be valid JSON"); // safety: compile-time embedded file
+        Self::load_from_path(user_providers_path().as_deref())
+    }
 
-        let mut all = builtins;
+    /// Load the registry with a caller-supplied user-overlay path.
+    ///
+    /// Built-in providers are always loaded from the compiled-in
+    /// `providers.json`. If `user_path` is `Some` and the file exists
+    /// it is parsed and appended; later entries override earlier ones
+    /// by id/alias. If parsing fails the file is skipped with a
+    /// `tracing::warn`, preserving the v1 fail-open-with-log behavior
+    /// so a malformed user file never breaks boot.
+    ///
+    /// Reborn's standalone composition root supplies
+    /// `$IRONCLAW_REBORN_HOME/providers.json` here so the two binaries
+    /// (v1 and Reborn-standalone) can have independent user catalogs
+    /// without colliding on `~/.ironclaw/providers.json`.
+    pub fn load_from_path(user_path: Option<&std::path::Path>) -> Self {
+        match Self::try_load_from_path(user_path) {
+            Ok(registry) => registry,
+            Err(error) => {
+                tracing::warn!(
+                    path = %error.overlay_path(),
+                    error = %error,
+                    "Failed to load user providers.json, skipping"
+                );
+                Self::new(builtin_provider_definitions())
+            }
+        }
+    }
 
-        if let Some(user_path) = user_providers_path()
-            && user_path.exists()
-        {
-            match std::fs::read_to_string(&user_path) {
-                Ok(contents) => match serde_json::from_str::<Vec<ProviderDefinition>>(&contents) {
-                    Ok(user_defs) => {
-                        tracing::info!(
-                            count = user_defs.len(),
-                            path = %user_path.display(),
-                            "Loaded user provider definitions"
-                        );
-                        all.extend(user_defs);
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %user_path.display(),
-                            error = %e,
-                            "Failed to parse user providers.json, skipping"
-                        );
-                    }
-                },
-                Err(e) => {
-                    tracing::warn!(
-                        path = %user_path.display(),
-                        error = %e,
-                        "Failed to read user providers.json, skipping"
-                    );
+    /// Load the registry with a caller-supplied user-overlay path,
+    /// failing if the explicit overlay exists but cannot be read/parsed.
+    ///
+    /// Reborn uses this because operator boot config is fail-closed: if an
+    /// explicit `$IRONCLAW_REBORN_HOME/providers.json` is present, a syntax
+    /// error must not silently fall back to compiled-in defaults.
+    pub fn try_load_from_path(
+        user_path: Option<&std::path::Path>,
+    ) -> Result<Self, ProviderRegistryLoadError> {
+        let mut all = builtin_provider_definitions();
+
+        if let Some(user_path) = user_path {
+            let contents = match std::fs::read_to_string(user_path) {
+                Ok(contents) => Some(contents),
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => None,
+                Err(source) => {
+                    return Err(ProviderRegistryLoadError::Read {
+                        path: user_path.display().to_string(),
+                        source,
+                    });
                 }
+            };
+            if let Some(contents) = contents {
+                let user_defs = serde_json::from_str::<Vec<ProviderDefinition>>(&contents)
+                    .map_err(|source| ProviderRegistryLoadError::Parse {
+                        path: user_path.display().to_string(),
+                        source,
+                    })?;
+                tracing::info!(
+                    count = user_defs.len(),
+                    path = %user_path.display(),
+                    "Loaded user provider definitions"
+                );
+                all.extend(user_defs);
             }
         }
 
-        Self::new(all)
+        Ok(Self::new(all))
     }
 
     /// Look up a provider by ID or alias (case-insensitive).
@@ -343,6 +407,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn provider_registry_load_error_exposes_overlay_path() {
+        let error = ProviderRegistryLoadError::Read {
+            path: "/tmp/providers.json".to_string(),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        };
+        assert_eq!(error.overlay_path(), "/tmp/providers.json");
+    }
+
+    #[test]
     fn test_builtin_registry_loads() {
         let registry = ProviderRegistry::new(
             serde_json::from_str(include_str!("../../../providers.json")).unwrap(),
@@ -406,6 +479,35 @@ mod tests {
                 def.id
             );
         }
+    }
+
+    #[test]
+    fn rejects_unknown_provider_fields() {
+        // Compose the secret-shaped fixture at runtime so GitHub push
+        // protection does not flag a direct source literal.
+        let pasted_secret = format!("{}{}", "s", "k-proj-1234567890abcdef1234567890");
+        let with_inline_secret_field = format!(
+            r#"[
+            {{
+                "id": "custom",
+                "protocol": "open_ai_completions",
+                "default_base_url": "https://example.test/v1",
+                "api_key": "{pasted_secret}",
+                "api_key_env": "CUSTOM_API_KEY",
+                "api_key_required": true,
+                "model_env": "CUSTOM_MODEL",
+                "default_model": "custom-model",
+                "description": "Custom provider"
+            }}
+        ]"#
+        );
+
+        let err = serde_json::from_str::<Vec<ProviderDefinition>>(&with_inline_secret_field)
+            .expect_err("unknown provider catalog fields must fail closed");
+        assert!(
+            err.to_string().contains("unknown field `api_key`"),
+            "unexpected parse error: {err}"
+        );
     }
 
     #[test]

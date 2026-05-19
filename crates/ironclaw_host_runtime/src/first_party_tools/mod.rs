@@ -7,17 +7,21 @@
 
 mod coding;
 mod echo;
+mod http;
 mod json;
 mod time;
 
 use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
-use ironclaw_extensions::{ExtensionError, ExtensionManifest, ExtensionPackage, ExtensionRuntime};
+use ironclaw_extensions::{
+    CapabilityManifest, CapabilityVisibility, ExtensionError, ExtensionManifest, ExtensionPackage,
+    ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
+};
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, HostApiError, RequestedTrustClass, ResourceCeiling,
-    ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind, TrustClass,
-    VirtualPath,
+    CapabilityId, CapabilityProfileSchemaRef, EffectKind, ExtensionId, HostApiError,
+    PermissionMode, RequestedTrustClass, ResourceCeiling, ResourceEstimate, ResourceProfile,
+    ResourceUsage, RuntimeDispatchErrorKind, TrustClass, VirtualPath,
 };
 
 use crate::{
@@ -30,6 +34,7 @@ pub use coding::{
     READ_FILE_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
 };
 pub use echo::ECHO_CAPABILITY_ID;
+pub use http::HTTP_CAPABILITY_ID;
 pub use json::JSON_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
 
@@ -48,20 +53,27 @@ const FIRST_PARTY_MAX_WALL_CLOCK_MS: u64 = 5_000;
 pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError> {
     ExtensionPackage::from_manifest(
         ExtensionManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION.to_string(),
             id: ExtensionId::new(BUILTIN_FIRST_PARTY_PROVIDER)?,
             name: "Built-in first-party capabilities".to_string(),
             version: "0.1.0".to_string(),
             description: "Host-owned built-in Reborn capabilities".to_string(),
+            source: ManifestSource::HostBundled,
             requested_trust: RequestedTrustClass::FirstPartyRequested,
             // Effective first-party trust is assigned by host policy at
             // invocation/surface time. Descriptor trust stays conservative.
-            trust: TrustClass::Sandbox,
+            descriptor_trust_default: TrustClass::Sandbox,
             runtime: ExtensionRuntime::FirstParty {
                 service: "builtin".to_string(),
             },
+            host_apis: Vec::new(),
             capabilities: {
-                let mut capabilities =
-                    vec![echo::manifest()?, time::manifest()?, json::manifest()?];
+                let mut capabilities = vec![
+                    echo::manifest()?,
+                    time::manifest()?,
+                    json::manifest()?,
+                    http::manifest()?,
+                ];
                 capabilities.extend(coding::manifests()?);
                 capabilities
             },
@@ -77,6 +89,7 @@ pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, Ho
         .with_handler(CapabilityId::new(ECHO_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(TIME_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(JSON_CAPABILITY_ID)?, handler.clone())
+        .with_handler(CapabilityId::new(HTTP_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(READ_FILE_CAPABILITY_ID)?, handler.clone())
         .with_handler(
             CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
@@ -86,6 +99,35 @@ pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, Ho
         .with_handler(CapabilityId::new(GLOB_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(GREP_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(APPLY_PATCH_CAPABILITY_ID)?, handler))
+}
+
+fn first_party_capability_manifest(
+    id: &str,
+    description: &str,
+    effects: Vec<EffectKind>,
+    default_permission: PermissionMode,
+    resource_profile: Option<ResourceProfile>,
+) -> Result<CapabilityManifest, ExtensionError> {
+    let schema_name = id.strip_prefix("builtin.").unwrap_or(id).replace('.', "-");
+    Ok(CapabilityManifest {
+        id: CapabilityId::new(id)?,
+        implements: Vec::new(),
+        description: description.to_string(),
+        effects,
+        default_permission,
+        visibility: CapabilityVisibility::Model,
+        input_schema_ref: CapabilityProfileSchemaRef::new(format!(
+            "schemas/builtin/{schema_name}.input.v1.json"
+        ))?,
+        output_schema_ref: CapabilityProfileSchemaRef::new(format!(
+            "schemas/builtin/{schema_name}.output.v1.json"
+        ))?,
+        prompt_doc_ref: Some(CapabilityProfileSchemaRef::new(format!(
+            "prompts/builtin/{schema_name}.md"
+        ))?),
+        required_host_ports: Vec::new(),
+        resource_profile,
+    })
 }
 
 #[derive(Debug, Default)]
@@ -102,10 +144,16 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
         bounded_input_size(request.capability_id.as_str(), &request.input)?;
         let start = Instant::now();
+        let mut network_egress_bytes = 0;
         let output = match request.capability_id.as_str() {
             ECHO_CAPABILITY_ID => echo::dispatch(&request.input)?,
             TIME_CAPABILITY_ID => time::dispatch(&request.input)?,
             JSON_CAPABILITY_ID => json::dispatch(&request.input)?,
+            HTTP_CAPABILITY_ID => {
+                let result = http::dispatch(&request).await?;
+                network_egress_bytes = result.network_egress_bytes;
+                result.output
+            }
             READ_FILE_CAPABILITY_ID
             | WRITE_FILE_CAPABILITY_ID
             | LIST_DIR_CAPABILITY_ID
@@ -120,10 +168,22 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                 ));
             }
         };
-        let output_bytes = bounded_output_bytes(&output)?;
+        let wall_clock_ms = start.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+        let output_bytes = bounded_output_bytes(&output).map_err(|error| {
+            if network_egress_bytes > 0 {
+                error.with_usage(ResourceUsage {
+                    wall_clock_ms,
+                    network_egress_bytes,
+                    ..ResourceUsage::default()
+                })
+            } else {
+                error
+            }
+        })?;
         let usage = ResourceUsage {
-            wall_clock_ms: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+            wall_clock_ms,
             output_bytes,
+            network_egress_bytes,
             ..ResourceUsage::default()
         };
         Ok(FirstPartyCapabilityResult::new(output, usage))

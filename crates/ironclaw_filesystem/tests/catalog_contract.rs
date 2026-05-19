@@ -46,8 +46,11 @@ async fn catalog_describes_paths_by_longest_matching_mount() {
     assert_eq!(placement.backend_kind, BackendKind::MemoryDocuments);
     assert_eq!(placement.content_kind, ContentKind::MemoryDocument);
     assert_eq!(placement.index_policy, IndexPolicy::FullTextAndVector);
-    assert!(placement.capabilities.indexed);
-    assert!(placement.capabilities.embedded);
+    // Backend ops capabilities are independent of IndexPolicy — the catalog
+    // policy hint drives upstream indexing services; the capability flags
+    // describe what RootFilesystem ops the mounted backend actually serves.
+    assert!(placement.capabilities.has(Capability::Read));
+    assert!(placement.capabilities.has(Capability::Write));
 }
 
 #[tokio::test]
@@ -109,6 +112,24 @@ async fn composite_routes_filesystem_operations_to_matching_backend() {
             .await
             .unwrap(),
         b"project readme"
+    );
+    assert_eq!(
+        root.read_file_bounded(&VirtualPath::new("/memory/MEMORY.md").unwrap(), 13)
+            .await
+            .unwrap(),
+        Some(b"remember this".to_vec())
+    );
+    assert_eq!(
+        root.read_file_bounded(&VirtualPath::new("/projects/README.md").unwrap(), 14)
+            .await
+            .unwrap(),
+        Some(b"project readme".to_vec())
+    );
+    assert_eq!(
+        root.read_file_bounded(&VirtualPath::new("/projects/README.md").unwrap(), 12)
+            .await
+            .unwrap(),
+        None
     );
 
     root.write_file(
@@ -224,6 +245,13 @@ async fn missing_composite_mount_fails_without_backend_side_effects() {
         .unwrap_err();
 
     assert!(matches!(err, FilesystemError::MountNotFound { .. }));
+
+    let err = root
+        .read_file_bounded(&VirtualPath::new("/memory/MEMORY.md").unwrap(), 1024)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, FilesystemError::MountNotFound { .. }));
 }
 
 fn empty_local_backend(virtual_root: &str) -> (LocalFilesystem, tempfile::TempDir) {
@@ -253,21 +281,18 @@ fn descriptor(
         storage_class,
         content_kind,
         index_policy,
-        capabilities: BackendCapabilities {
-            read: true,
-            write: true,
-            append: true,
-            list: true,
-            stat: true,
-            delete: false,
-            indexed: matches!(
-                index_policy,
-                IndexPolicy::FullText | IndexPolicy::FullTextAndVector
-            ),
-            embedded: matches!(
-                index_policy,
-                IndexPolicy::Vector | IndexPolicy::FullTextAndVector
-            ),
-        },
+        // IndexPolicy (catalog hint about how upstream services index path
+        // content) is intentionally separate from `Capability::IndexFts` /
+        // `Capability::IndexVector` (backend op support for `ensure_index`
+        // / `query` on indexed projections). Test mounts use a LocalFilesystem
+        // which doesn't ship those record-plane ops, so the descriptor
+        // doesn't claim them — IndexPolicy on the descriptor still drives
+        // upstream behavior independently.
+        capabilities: BackendCapabilities::empty()
+            .with(Capability::Read)
+            .with(Capability::Write)
+            .with(Capability::Append)
+            .with(Capability::List)
+            .with(Capability::Stat),
     }
 }

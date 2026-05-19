@@ -5,31 +5,32 @@
 //! identifiers into canonical tenant/thread/message/binding references without
 //! asking the turn coordinator to parse raw channel payloads or store message
 //! content.
+//!
+//! Durable persistence is provided by [`FilesystemConversationStateStore`]
+//! over a [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). The
+//! `RootFilesystem` choice (libSQL-backed, PostgreSQL-backed, in-memory, or
+//! local-disk) is made at the filesystem layer — the consumer-store level
+//! no longer carries per-backend impls.
 
 mod error;
+mod filesystem_store;
 mod ids;
 mod inbound;
-#[cfg(feature = "libsql")]
-mod libsql;
 mod memory;
-#[cfg(feature = "postgres")]
-mod postgres;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
 mod state_store;
 mod traits;
 mod types;
 
 pub use error::InboundTurnError;
+pub use filesystem_store::{
+    FilesystemConversationStateStore, RebornFilesystemConversationServices,
+};
 pub use ids::{
     AdapterInstallationId, AdapterKind, ExternalActorRef, ExternalConversationIdentity,
     ExternalConversationRef, ExternalEventId, InboundMessageContentRef,
 };
 pub use inbound::InboundTurnService;
-#[cfg(feature = "libsql")]
-pub use libsql::{RebornLibSqlConversationServices, RebornLibSqlConversationStateStore};
 pub use memory::InMemoryConversationServices;
-#[cfg(feature = "postgres")]
-pub use postgres::{RebornPostgresConversationServices, RebornPostgresConversationStateStore};
 pub use traits::{ConversationBindingService, ConversationBindingServiceExt, SessionThreadService};
 pub use types::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageLookup,

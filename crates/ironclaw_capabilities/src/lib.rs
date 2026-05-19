@@ -3,6 +3,7 @@
 //! `ironclaw_capabilities` is the caller-facing capability invocation service.
 //! It coordinates authorization, approval resume, run-state transitions, and
 //! neutral runtime dispatch without depending on concrete runtime crates.
+#![warn(unreachable_pub)]
 
 mod conformance;
 mod error;

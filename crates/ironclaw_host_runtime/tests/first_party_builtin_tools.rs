@@ -1,5 +1,13 @@
-use std::{collections::BTreeMap, path::Path, sync::Arc, thread, time::Duration};
+use std::{
+    collections::BTreeMap,
+    net::{IpAddr, Ipv4Addr},
+    path::Path,
+    sync::Arc,
+    thread,
+    time::Duration,
+};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 #[cfg(feature = "libsql")]
@@ -8,13 +16,18 @@ use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
-    ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HostRuntime, HostRuntimeServices,
-    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeFailureKind, SurfaceKind, TIME_CAPABILITY_ID,
-    VisibleCapabilityAccess, VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_handlers, builtin_first_party_package,
+    ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime,
+    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, SurfaceKind,
+    TIME_CAPABILITY_ID, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
-use ironclaw_resources::InMemoryResourceGovernor;
+use ironclaw_network::{
+    NetworkHttpEgress, NetworkHttpError, NetworkHttpResponse, NetworkHttpTransport,
+    NetworkResolver, NetworkTransportRequest, NetworkUsage, PolicyNetworkHttpEgress,
+};
+use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
+use ironclaw_secrets::InMemorySecretStore;
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -249,6 +262,447 @@ async fn builtin_json_rejects_v1_tool_output_stash_refs_without_leaking_input() 
     let debug = format!("{failure:?}");
     assert!(!debug.contains("RAW_SECRET"));
     assert!(!debug.contains("sk-provider-secret"));
+}
+
+#[tokio::test]
+async fn builtin_http_invokes_through_host_runtime_egress() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        br#"{"accepted":true}"#.to_vec(),
+    ));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "method": "post",
+            "url": "https://api.example.test/v1/items",
+            "headers": {
+                "content-type": "application/json",
+                "x-request-id": "first-party-http"
+            },
+            "body": {"ok": true},
+            "response_body_limit": 4096,
+            "timeout_ms": 2500
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_or_else(|error| {
+        panic!(
+            "expected HTTP egress success, got {error:?}; recorded requests: {:?}",
+            egress.requests()
+        )
+    });
+
+    assert_eq!(output["status"], json!(200));
+    assert_eq!(output["body_text"], json!(r#"{"accepted":true}"#));
+    assert_eq!(output["request_bytes"], json!(11));
+    assert_eq!(output["response_bytes"], json!(17));
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.runtime, RuntimeKind::FirstParty);
+    assert_eq!(request.capability_id, capability_id(HTTP_CAPABILITY_ID));
+    assert_eq!(request.method, NetworkMethod::Post);
+    assert_eq!(request.url, "https://api.example.test/v1/items");
+    assert_eq!(request.body, br#"{"ok":true}"#);
+    assert_eq!(request.response_body_limit, Some(4096));
+    assert_eq!(request.timeout_ms, Some(2500));
+    assert!(request.credential_injections.is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_defaults_json_body_content_type() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(b"ok".to_vec()));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "body": {"ok": true}
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    let requests = egress.requests();
+    assert_eq!(
+        requests[0].headers,
+        vec![("content-type".to_string(), "application/json".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn builtin_http_fails_closed_without_runtime_egress() {
+    let runtime = runtime();
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/v1/items"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Network);
+}
+
+#[tokio::test]
+async fn builtin_http_rejects_ambiguous_body_zero_timeout_and_zero_response_limit() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+    let runtime = runtime_with_http_egress(egress);
+    let context = execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy());
+
+    for input in [
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "method": 123
+        }),
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "body": "plain",
+            "body_base64": "YmluYXJ5"
+        }),
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "timeout_ms": 0
+        }),
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "response_body_limit": 0
+        }),
+    ] {
+        let error = invoke_with_context(&runtime, HTTP_CAPABILITY_ID, input, context.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    }
+}
+
+#[tokio::test]
+async fn builtin_http_rejects_request_bodies_over_network_egress_cap() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+    let context = execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy());
+    let oversized = vec![b'a'; 256 * 1024 + 1];
+
+    for input in [
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "body": String::from_utf8(oversized.clone()).unwrap()
+        }),
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "body_base64": BASE64_STANDARD.encode(&oversized)
+        }),
+    ] {
+        let error = invoke_with_context(&runtime, HTTP_CAPABILITY_ID, input, context.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    }
+
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_accounts_request_bytes_when_output_is_too_large() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![
+        b'\\';
+        700 * 1024
+    ]));
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let runtime = runtime_with_http_egress_and_governor(Arc::clone(&egress), Arc::clone(&governor));
+
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "method": "post",
+            "url": "https://api.example.test/v1/items",
+            "body": "paid",
+            "response_body_limit": 700 * 1024
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::OutputTooLarge);
+    let tenant_account = ResourceAccount::tenant(TenantId::new(LOCAL_DEFAULT_TENANT_ID).unwrap());
+    assert_eq!(governor.usage_for(&tenant_account).network_egress_bytes, 4);
+}
+
+#[tokio::test]
+async fn builtin_http_returns_binary_responses_as_base64() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(vec![0, 159, 255]));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/v1/items"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["body_base64"], json!("AJ//"));
+    assert!(output.get("body_text").is_none());
+}
+
+#[tokio::test]
+async fn builtin_http_documents_mixed_utf8_response_as_binary() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        b"hello\xFFworld".to_vec(),
+    ));
+    let runtime = runtime_with_http_egress(Arc::clone(&egress));
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/v1/items"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    // Invalid UTF-8 makes the whole response binary so callers never receive
+    // split or lossy text/body fragments.
+    assert_eq!(output["body_base64"], json!("aGVsbG//d29ybGQ="));
+    assert!(output.get("body_text").is_none());
+}
+
+#[tokio::test]
+async fn builtin_http_rejects_invalid_header_names_and_oversized_header_sets() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::default());
+    let runtime = runtime_with_http_egress(egress);
+    let context = execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy());
+    let too_many_headers = (0..65)
+        .map(|index| json!({"name": format!("x-{index}"), "value": "ok"}))
+        .collect::<Vec<_>>();
+
+    for input in [
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "headers": {"x-bad": "value\0tail"}
+        }),
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "headers": [{"name": "x\0bad", "value": "ok"}]
+        }),
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "headers": [{"name": "x bad", "value": "ok"}]
+        }),
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "headers": [{"name": "x:bad", "value": "ok"}]
+        }),
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "headers": [{"name": "x-é", "value": "ok"}]
+        }),
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "headers": too_many_headers
+        }),
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "headers": {"x-large": "a".repeat(8 * 1024 + 1)}
+        }),
+    ] {
+        let error = invoke_with_context(&runtime, HTTP_CAPABILITY_ID, input, context.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    }
+}
+
+#[tokio::test]
+async fn builtin_http_maps_runtime_egress_errors_by_source() {
+    let context = execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy());
+    let cases = [
+        (
+            RuntimeHttpEgressError::Credential {
+                reason: "credential missing".to_string(),
+            },
+            RuntimeFailureKind::Backend,
+        ),
+        (
+            RuntimeHttpEgressError::Request {
+                reason: "sensitive_header_denied:authorization".to_string(),
+                request_bytes: 0,
+                response_bytes: 0,
+            },
+            RuntimeFailureKind::InvalidInput,
+        ),
+        (
+            RuntimeHttpEgressError::Network {
+                reason: "policy_denied".to_string(),
+                request_bytes: 0,
+                response_bytes: 0,
+            },
+            RuntimeFailureKind::Network,
+        ),
+        (
+            RuntimeHttpEgressError::Network {
+                reason: "response_body_limit_exceeded".to_string(),
+                request_bytes: 4,
+                response_bytes: 1024,
+            },
+            RuntimeFailureKind::OutputTooLarge,
+        ),
+        (
+            RuntimeHttpEgressError::Response {
+                reason: "response_body_limit_exceeded".to_string(),
+                request_bytes: 4,
+                response_bytes: 1024,
+            },
+            RuntimeFailureKind::OutputTooLarge,
+        ),
+        (
+            RuntimeHttpEgressError::Response {
+                reason: "response_decode_failed".to_string(),
+                request_bytes: 4,
+                response_bytes: 1024,
+            },
+            RuntimeFailureKind::InvalidInput,
+        ),
+    ];
+
+    for (error, expected) in cases {
+        let runtime =
+            runtime_with_http_egress(Arc::new(RecordingRuntimeHttpEgress::with_error(error)));
+        let actual = invoke_with_context(
+            &runtime,
+            HTTP_CAPABILITY_ID,
+            json!({"url": "https://api.example.test/v1/items"}),
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(actual, expected);
+    }
+}
+
+#[tokio::test]
+async fn builtin_http_rejects_sensitive_headers_through_host_validator() {
+    let transport = RecordingTransport::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"ok".to_vec(),
+        usage: NetworkUsage::default(),
+    });
+    let requests = transport.requests.clone();
+    let network = PolicyNetworkHttpEgress::new_with_resolver(
+        transport,
+        StaticResolver::new(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+    );
+    let runtime = runtime_with_host_http_egress(network);
+
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({
+            "url": "https://api.example.test/v1/items",
+            "headers": {"authorization": "Bearer token"}
+        }),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::InvalidInput);
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_exercises_real_policy_private_ip_rejection() {
+    let transport = RecordingTransport::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: b"ok".to_vec(),
+        usage: NetworkUsage::default(),
+    });
+    let requests = transport.requests.clone();
+    let network = PolicyNetworkHttpEgress::new_with_resolver(
+        transport,
+        StaticResolver::new(vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7))]),
+    );
+    let runtime = runtime_with_host_http_egress(network);
+
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/v1/items"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Network);
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_returns_redirects_without_following_private_location() {
+    let transport = RecordingTransport::ok(NetworkHttpResponse {
+        status: 302,
+        headers: vec![(
+            "location".to_string(),
+            "http://169.254.169.254/latest/meta-data".to_string(),
+        )],
+        body: Vec::new(),
+        usage: NetworkUsage::default(),
+    });
+    let requests = transport.requests.clone();
+    let network = PolicyNetworkHttpEgress::new_with_resolver(
+        transport,
+        StaticResolver::new(vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]),
+    );
+    let runtime = runtime_with_host_http_egress(network);
+
+    let output = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/v1/items"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["status"], json!(302));
+    let recorded = requests.lock().unwrap();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].url, "https://api.example.test/v1/items");
+}
+
+#[tokio::test]
+async fn builtin_http_runs_blocking_egress_off_tokio_worker() {
+    let egress = Arc::new(SleepingRuntimeHttpEgress {
+        delay: Duration::from_millis(100),
+    });
+    let runtime = runtime_with_http_egress(egress);
+    let invocation = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/v1/items"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    );
+    tokio::pin!(invocation);
+
+    tokio::select! {
+        _ = &mut invocation => panic!("HTTP dispatch blocked the tokio worker"),
+        _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+    }
+
+    invocation.await.unwrap();
 }
 
 #[tokio::test]
@@ -1178,6 +1632,54 @@ where
     .host_runtime_for_local_testing()
 }
 
+fn runtime_with_http_egress<T>(egress: Arc<T>) -> impl HostRuntime
+where
+    T: RuntimeHttpEgress + 'static,
+{
+    runtime_with_http_egress_and_governor(egress, Arc::new(InMemoryResourceGovernor::new()))
+}
+
+fn runtime_with_http_egress_and_governor<T>(
+    egress: Arc<T>,
+    governor: Arc<InMemoryResourceGovernor>,
+) -> impl HostRuntime
+where
+    T: RuntimeHttpEgress + 'static,
+{
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        governor,
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_http_egress(egress)
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
+fn runtime_with_host_http_egress<N>(network: N) -> impl HostRuntime
+where
+    N: NetworkHttpEgress + 'static,
+{
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_secret_store(Arc::new(InMemorySecretStore::new()))
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .try_with_host_http_egress(network)
+    .unwrap()
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
 fn registry() -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     registry
@@ -1194,11 +1696,12 @@ fn provider_id() -> ExtensionId {
     ExtensionId::new("builtin").unwrap()
 }
 
-fn all_builtin_capability_ids() -> [&'static str; 9] {
+fn all_builtin_capability_ids() -> [&'static str; 10] {
     [
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
         JSON_CAPABILITY_ID,
+        HTTP_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
         LIST_DIR_CAPABILITY_ID,
@@ -1223,6 +1726,119 @@ fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFiles
     )])
     .unwrap();
     (filesystem, mounts)
+}
+
+#[derive(Debug, Clone, Default)]
+struct RecordingRuntimeHttpEgress {
+    requests: Arc<std::sync::Mutex<Vec<RuntimeHttpEgressRequest>>>,
+    body: Vec<u8>,
+    error: Option<RuntimeHttpEgressError>,
+}
+
+impl RecordingRuntimeHttpEgress {
+    fn with_body(body: Vec<u8>) -> Self {
+        Self {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            body,
+            error: None,
+        }
+    }
+
+    fn with_error(error: RuntimeHttpEgressError) -> Self {
+        Self {
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+            body: Vec::new(),
+            error: Some(error),
+        }
+    }
+
+    fn requests(&self) -> Vec<RuntimeHttpEgressRequest> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
+    fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        self.requests.lock().unwrap().push(request.clone());
+        if let Some(error) = &self.error {
+            return Err(error.clone());
+        }
+        Ok(RuntimeHttpEgressResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "application/json".to_string())],
+            body: self.body.clone(),
+            request_bytes: request.body.len() as u64,
+            response_bytes: self.body.len() as u64,
+            redaction_applied: false,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SleepingRuntimeHttpEgress {
+    delay: Duration,
+}
+
+impl RuntimeHttpEgress for SleepingRuntimeHttpEgress {
+    fn execute(
+        &self,
+        request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        thread::sleep(self.delay);
+        Ok(RuntimeHttpEgressResponse {
+            status: 200,
+            headers: Vec::new(),
+            body: b"ok".to_vec(),
+            request_bytes: request.body.len() as u64,
+            response_bytes: 2,
+            redaction_applied: false,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RecordingTransport {
+    response: Result<NetworkHttpResponse, NetworkHttpError>,
+    requests: Arc<std::sync::Mutex<Vec<NetworkTransportRequest>>>,
+}
+
+impl RecordingTransport {
+    fn ok(response: NetworkHttpResponse) -> Self {
+        Self {
+            response: Ok(response),
+            requests: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }
+    }
+}
+
+impl NetworkHttpTransport for RecordingTransport {
+    fn execute(
+        &self,
+        request: NetworkTransportRequest,
+    ) -> Result<NetworkHttpResponse, NetworkHttpError> {
+        self.requests.lock().unwrap().push(request);
+        self.response.clone()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StaticResolver {
+    ips: Vec<IpAddr>,
+}
+
+impl StaticResolver {
+    fn new(ips: Vec<IpAddr>) -> Self {
+        Self { ips }
+    }
+}
+
+impl NetworkResolver for StaticResolver {
+    fn resolve_ips(&self, _host: &str, _port: u16) -> Result<Vec<IpAddr>, NetworkHttpError> {
+        Ok(self.ips.clone())
+    }
 }
 
 fn execution_context<const N: usize>(grants: [&str; N]) -> ExecutionContext {
@@ -1261,11 +1877,44 @@ fn execution_context_with_mounts<const N: usize>(
     .unwrap()
 }
 
+fn execution_context_with_network<const N: usize>(
+    grants: [&str; N],
+    network: NetworkPolicy,
+) -> ExecutionContext {
+    let capability_set = CapabilitySet {
+        grants: grants
+            .into_iter()
+            .map(|grant| dispatch_grant_with_network(grant, network.clone()))
+            .collect(),
+    };
+    ExecutionContext::local_default(
+        UserId::new("user").unwrap(),
+        ExtensionId::new("caller").unwrap(),
+        RuntimeKind::FirstParty,
+        TrustClass::FirstParty,
+        capability_set,
+        MountView::default(),
+    )
+    .unwrap()
+}
+
 fn dispatch_grant(capability: &str) -> CapabilityGrant {
     dispatch_grant_with_mounts(capability, MountView::default())
 }
 
 fn dispatch_grant_with_mounts(capability: &str, mounts: MountView) -> CapabilityGrant {
+    dispatch_grant_with_mounts_and_network(capability, mounts, NetworkPolicy::default())
+}
+
+fn dispatch_grant_with_network(capability: &str, network: NetworkPolicy) -> CapabilityGrant {
+    dispatch_grant_with_mounts_and_network(capability, MountView::default(), network)
+}
+
+fn dispatch_grant_with_mounts_and_network(
+    capability: &str,
+    mounts: MountView,
+    network: NetworkPolicy,
+) -> CapabilityGrant {
     CapabilityGrant {
         id: CapabilityGrantId::new(),
         capability: capability_id(capability),
@@ -1274,7 +1923,7 @@ fn dispatch_grant_with_mounts(capability: &str, mounts: MountView) -> Capability
         constraints: GrantConstraints {
             allowed_effects: builtin_effects(),
             mounts,
-            network: NetworkPolicy::default(),
+            network,
             secrets: Vec::new(),
             resource_ceiling: None,
             expires_at: None,
@@ -1288,7 +1937,20 @@ fn builtin_effects() -> Vec<EffectKind> {
         EffectKind::DispatchCapability,
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
+        EffectKind::Network,
     ]
+}
+
+fn http_test_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "api.example.test".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(10_000),
+    }
 }
 
 fn trust_policy() -> HostTrustPolicy {

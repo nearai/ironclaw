@@ -105,7 +105,7 @@ impl HostSkillContextBuildError {
     }
 }
 
-pub async fn build_skill_instruction_snippets(
+pub(crate) async fn build_skill_instruction_snippets(
     source: &(dyn HostSkillContextSource + Send + Sync),
     run_context: &LoopRunContext,
 ) -> Result<Vec<LoopContextSnippet>, AgentLoopHostError> {

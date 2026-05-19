@@ -88,6 +88,17 @@ pub(super) fn operation_allowed(
         FilesystemOperation::Delete => permissions.delete,
         FilesystemOperation::CreateDirAll => permissions.write,
         FilesystemOperation::MountLocal => false,
+        // Coding tools never use the unified record/index/txn/event surface
+        // — they are bytes-only. If a future code path routes here, treat
+        // record-plane reads as `read` and writes as `write` to stay
+        // fail-closed. `Append` (event-plane append) is distinct from
+        // `AppendFile` (byte-plane append onto a regular file) but both
+        // map to `permissions.write`.
+        FilesystemOperation::Query => permissions.read && permissions.list,
+        FilesystemOperation::EnsureIndex
+        | FilesystemOperation::BeginTxn
+        | FilesystemOperation::Append => permissions.write,
+        FilesystemOperation::Tail => permissions.read,
     }
 }
 
@@ -209,5 +220,17 @@ pub(super) fn filesystem_error(error: FilesystemError) -> FirstPartyCapabilityEr
         }
         FilesystemError::NotFound { .. } => guest_error(),
         FilesystemError::Backend { .. } => guest_error(),
+        // The unified record/index/CAS variants are surfaced when a backend
+        // declines a typed op. Coding tools only exercise bytes, so reaching
+        // here means the underlying mount is misconfigured for this caller —
+        // treat as a denial rather than leaking the typed shape.
+        FilesystemError::VersionMismatch { .. }
+        | FilesystemError::Unsupported { .. }
+        | FilesystemError::IndexConflict { .. } => {
+            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied)
+        }
+        // FilesystemError is #[non_exhaustive]; any future variant maps to a
+        // denial here until coding-tool semantics for it are designed.
+        _ => FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::FilesystemDenied),
     }
 }

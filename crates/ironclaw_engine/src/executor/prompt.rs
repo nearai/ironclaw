@@ -22,9 +22,9 @@ use crate::types::capability::{
 use crate::types::message::{MessageRole, ThreadMessage};
 use crate::types::project::ProjectId;
 
-// Runtime platform metadata lives in `ironclaw_common::platform`. Re-exported
+// Runtime platform metadata lives in `ironclaw_common`. Re-exported
 // from this module's path for back-compat with prior call sites.
-pub use ironclaw_common::platform::PlatformInfo;
+pub use ironclaw_common::PlatformInfo;
 
 /// The main instruction block (before tool listing).
 const CODEACT_PREAMBLE: &str = include_str!("../../prompts/codeact_preamble.md");

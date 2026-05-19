@@ -22,6 +22,7 @@
 //!   filtering of which surface a particular UI or upper service is allowed to
 //!   render is intentionally an upper-layer concern — the host does not bake
 //!   in upper-stack vocabulary (e.g. agent loop / adapter / admin).
+#![warn(unreachable_pub)]
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
@@ -44,6 +45,8 @@ use serde_json::Value;
 use std::{collections::BTreeMap, fmt, sync::Arc};
 use thiserror::Error;
 
+mod capability_catalog;
+mod extension_contracts;
 mod first_party;
 mod first_party_tools;
 pub mod memory_context;
@@ -54,15 +57,24 @@ mod services;
 mod surface;
 mod turn_scheduler;
 
+pub use capability_catalog::{
+    HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
+    publish_hot_capability_catalog,
+};
+pub use extension_contracts::{
+    default_host_api_contract_registry, default_host_port_catalog,
+    discover_extensions_with_default_host_api_contracts,
+    discover_extensions_with_default_host_api_contracts_and_catalog,
+};
 pub use first_party::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
 };
 pub use first_party_tools::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools,
-    ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, JSON_CAPABILITY_ID,
-    LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID,
-    builtin_first_party_handlers, builtin_first_party_package,
+    ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, TIME_CAPABILITY_ID,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, ProcessObligationLifecycleStore,
@@ -861,12 +873,22 @@ where
             let Some(value) = value else {
                 continue;
             };
-            if let Err(error) = apply_credential_injection(&mut request, &injection.target, &value)
+            // Borrow the leased plaintext only for the narrow window where the
+            // egress code needs it (header/query injection + redaction-token
+            // generation). The `SecretMaterial` stays inside the cache; the
+            // exposed `&str` does not outlive this loop iteration. Plaintext
+            // does land in `request.headers` and `redaction_values` after
+            // injection — those copies are unavoidable because the network
+            // layer and response-body scanner consume raw bytes — but the
+            // cache itself never holds a non-zeroizing copy.
+            let plaintext = value.expose_secret();
+            if let Err(error) =
+                apply_credential_injection(&mut request, &injection.target, plaintext)
             {
                 self.discard_staged_policy_for_request(&request);
                 return Err(error);
             }
-            redaction_values.extend(redaction_values_for_secret(&value));
+            redaction_values.extend(redaction_values_for_secret(plaintext));
         }
 
         let response = self
@@ -893,7 +915,12 @@ where
 
 struct RuntimeCredentialMaterialCacheEntry {
     key: RuntimeCredentialMaterialKey,
-    value: Option<String>,
+    /// Leased secret material kept inside `SecretString` so the bytes are
+    /// zeroized when this entry — and its enclosing `Vec` — is dropped at
+    /// the end of the egress call. Holding plaintext as `String` here
+    /// instead would leave the leased credential on the heap for the
+    /// duration of the request, defeating `SecretMaterial::ZeroizeOnDrop`.
+    value: Option<SecretMaterial>,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -921,31 +948,33 @@ impl RuntimeCredentialMaterialKey {
     }
 }
 
-fn credential_value_for_injection<S>(
-    cache: &mut Vec<RuntimeCredentialMaterialCacheEntry>,
+fn credential_value_for_injection<'cache, S>(
+    cache: &'cache mut Vec<RuntimeCredentialMaterialCacheEntry>,
     secrets: &S,
     secret_injections: Option<&RuntimeSecretInjectionStore>,
     request: &RuntimeHttpEgressRequest,
     injection: &RuntimeCredentialInjection,
-) -> Result<Option<String>, RuntimeHttpEgressError>
+) -> Result<Option<&'cache SecretMaterial>, RuntimeHttpEgressError>
 where
     S: SecretStore,
 {
     let key = RuntimeCredentialMaterialKey::for_injection(injection);
-    if let Some(entry) = cache.iter().find(|entry| entry.key == key) {
-        return match &entry.value {
-            Some(value) => Ok(Some(value.clone())),
-            None => missing_runtime_credential(injection.required).map(|_| None),
-        };
+    if let Some(idx) = cache.iter().position(|entry| entry.key == key) {
+        // Negative cache hit (missing optional credential on a prior pass)
+        // must still error out if *this* injection marks the same handle as
+        // required. `required` is per-injection, not per-cache-entry.
+        if cache[idx].value.is_none() && injection.required {
+            return Err(RuntimeHttpEgressError::Credential {
+                reason: "required credential is unavailable".to_string(),
+            });
+        }
+        return Ok(cache[idx].value.as_ref());
     }
 
-    let value = secret_material_for_injection(secrets, secret_injections, request, injection)?
-        .map(|material| material.expose_secret().to_string());
-    cache.push(RuntimeCredentialMaterialCacheEntry {
-        key,
-        value: value.clone(),
-    });
-    Ok(value)
+    let value = secret_material_for_injection(secrets, secret_injections, request, injection)?;
+    let pushed_index = cache.len();
+    cache.push(RuntimeCredentialMaterialCacheEntry { key, value });
+    Ok(cache[pushed_index].value.as_ref())
 }
 
 fn secret_material_for_injection<S>(
@@ -1388,3 +1417,22 @@ fn lowercase_percent_escapes(value: &str) -> String {
     }
     output
 }
+
+/// **Finding H1 — compile-time regression guard.**
+///
+/// The credential material cache value field must hold a `ZeroizeOnDrop`
+/// carrier. Holding the leased plaintext as `Option<String>` (the original
+/// bug) leaves it on the heap until the cache `Vec` is dropped at end-of-call,
+/// then frees the bytes without wiping. This `const _: fn(...) = ...`
+/// references the field's inner type through a `ZeroizeOnDrop`-bounded helper,
+/// so any refactor that downgrades the field to a non-zeroizing type (e.g.
+/// plain `Option<String>`) stops the crate from compiling rather than waiting
+/// for a test run. `String` implements `Zeroize` but not `ZeroizeOnDrop`, so
+/// the constraint fires on exactly the bug shape this guard protects against.
+/// The function is never called — only type-checked.
+const _: fn(&RuntimeCredentialMaterialCacheEntry) = |entry| {
+    fn require_zeroize_on_drop<T: ?Sized + secrecy::zeroize::ZeroizeOnDrop>(_: &T) {}
+    if let Some(value) = entry.value.as_ref() {
+        require_zeroize_on_drop(value);
+    }
+};

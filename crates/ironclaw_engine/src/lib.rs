@@ -13,6 +13,7 @@
 //! The engine defines traits for external dependencies ([`LlmBackend`],
 //! [`Store`], [`EffectExecutor`]) that the host crate implements via bridge
 //! adapters over existing infrastructure.
+#![warn(unreachable_pub)]
 
 // Security: `__regex_match__` (in `executor/orchestrator.rs`) accepts
 // arbitrary patterns from the Python orchestrator and runs them on
@@ -139,7 +140,7 @@ pub(crate) mod tests {
     ///
     /// Stores all entity types with proper CRUD semantics and filtering by
     /// project_id / user_id. Use this instead of defining per-module mocks.
-    pub struct InMemoryStore {
+    pub(crate) struct InMemoryStore {
         threads: RwLock<Vec<Thread>>,
         steps: RwLock<Vec<Step>>,
         events: RwLock<Vec<ThreadEvent>>,
@@ -151,7 +152,7 @@ pub(crate) mod tests {
     }
 
     impl InMemoryStore {
-        pub fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self {
                 threads: RwLock::new(Vec::new()),
                 steps: RwLock::new(Vec::new()),
@@ -164,7 +165,7 @@ pub(crate) mod tests {
             }
         }
 
-        pub fn with_docs(docs: Vec<MemoryDoc>) -> Self {
+        pub(crate) fn with_docs(docs: Vec<MemoryDoc>) -> Self {
             Self {
                 docs: RwLock::new(docs),
                 ..Self::new()

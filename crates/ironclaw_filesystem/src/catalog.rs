@@ -3,9 +3,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
 
+use crate::backend::{EventRecord, StorageTxn};
 use crate::{
-    BackendCapabilities, BackendId, BackendKind, ContentKind, DirEntry, FileStat, FilesystemError,
-    IndexPolicy, RootFilesystem, StorageClass, path_prefix_matches,
+    BackendCapabilities, BackendId, BackendKind, Capability, CasExpectation, ContentKind, DirEntry,
+    Entry, FileStat, FilesystemError, Filter, IndexPolicy, IndexSpec, Page, RecordVersion,
+    RootFilesystem, SeqNo, StorageClass, VersionedEntry, path_prefix_matches,
 };
 
 /// Trusted catalog record for one virtual filesystem mount.
@@ -101,6 +103,12 @@ impl CompositeRootFilesystem {
                 path: descriptor.virtual_root,
             });
         }
+        // PR #3659 reviewer fix: validate the descriptor's advertised
+        // capabilities against the backend's actual capabilities at
+        // mount time. Catalog metadata that claims query/index/event
+        // support over a backend that doesn't provide it would defeat
+        // the PR's mount-time validation guarantee — fail closed instead.
+        validate_mount_capabilities(&descriptor, backend.capabilities())?;
         self.mounts.push(CompositeMount {
             descriptor,
             backend,
@@ -122,6 +130,63 @@ impl CompositeRootFilesystem {
 impl Default for CompositeRootFilesystem {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// PR #3659 reviewer fix: reject a [`MountDescriptor`] whose advertised
+/// capabilities claim more than the backend actually delivers on the
+/// **new** capability axes (records, query, index, events, txn).
+///
+/// Scope deliberately limited to the new axes: the legacy bytes-plane
+/// flags (`read`/`write`/`list`/`stat`/`delete`/`append`) have always
+/// been descriptor-driven metadata, and many existing backends still
+/// return `BackendCapabilities::default()` (all-false) from their
+/// `capabilities()` accessor even though they implement
+/// `read_file`/`write_file` natively. The mount-time validation
+/// guarantee the reviewer asked for applies to the new capability
+/// surface that this PR introduces; downstream catalog clients are the
+/// authority for the legacy plane until each backend opts in to a more
+/// accurate `capabilities()` override.
+fn validate_mount_capabilities(
+    descriptor: &MountDescriptor,
+    backend: BackendCapabilities,
+) -> Result<(), FilesystemError> {
+    let declared = descriptor.capabilities;
+    // Only validate the **new** capability axes — legacy bytes flags stay
+    // descriptor-driven (see the function-level doc comment).
+    const NEW_AXES: &[Capability] = &[
+        Capability::Records,
+        Capability::Query,
+        Capability::IndexExact,
+        Capability::IndexPrefix,
+        Capability::IndexFts,
+        Capability::IndexVector,
+        Capability::Events,
+    ];
+    let mut shortfalls: Vec<Capability> = NEW_AXES
+        .iter()
+        .copied()
+        .filter(|cap| declared.has(*cap) && !backend.has(*cap))
+        .collect();
+    let backend_txn = txn_capability_rank(backend.txn());
+    let declared_txn = txn_capability_rank(declared.txn());
+    let txn_shortfall = declared_txn > backend_txn;
+    if shortfalls.is_empty() && !txn_shortfall {
+        Ok(())
+    } else {
+        Err(FilesystemError::DescriptorOverclaims {
+            path: descriptor.virtual_root.clone(),
+            missing: std::mem::take(&mut shortfalls),
+            txn_shortfall,
+        })
+    }
+}
+
+fn txn_capability_rank(value: crate::TxnCapability) -> u8 {
+    match value {
+        crate::TxnCapability::None => 0,
+        crate::TxnCapability::Cas => 1,
+        crate::TxnCapability::MultiKey => 2,
     }
 }
 
@@ -148,8 +213,90 @@ impl FilesystemCatalog for CompositeRootFilesystem {
 
 #[async_trait]
 impl RootFilesystem for CompositeRootFilesystem {
+    fn capabilities(&self) -> BackendCapabilities {
+        // The composite is a router, not a backend in its own right. Callers
+        // wanting per-path capabilities should consult [`describe_path`]
+        // through the [`FilesystemCatalog`] impl.
+        BackendCapabilities::default()
+    }
+
+    // ── Unified entry plane ──
+
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        entry: Entry,
+        cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .put(path, entry, cas)
+            .await
+    }
+
+    async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+        self.matching_mount(path)?.backend.get(path).await
+    }
+
+    async fn query(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .query(path, filter, page)
+            .await
+    }
+
+    async fn ensure_index(
+        &self,
+        path: &VirtualPath,
+        spec: &IndexSpec,
+    ) -> Result<(), FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .ensure_index(path, spec)
+            .await
+    }
+
+    async fn begin(&self, path: &VirtualPath) -> Result<Box<dyn StorageTxn>, FilesystemError> {
+        self.matching_mount(path)?.backend.begin(path).await
+    }
+
+    // ── Event plane ──
+
+    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .append(path, payload)
+            .await
+    }
+
+    async fn tail(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        self.matching_mount(path)?.backend.tail(path, from).await
+    }
+
+    // ── Legacy bytes plane ──
+
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
         self.matching_mount(path)?.backend.read_file(path).await
+    }
+
+    async fn read_file_bounded(
+        &self,
+        path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .read_file_bounded(path, max_bytes)
+            .await
     }
 
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {

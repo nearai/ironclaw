@@ -6,10 +6,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_loop_support::RunCancellationFactory;
 use ironclaw_threads::{
-    MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadMessageId, ThreadScope,
+    MessageKind, MessageStatus, SessionThreadService, ThreadHistory, ThreadHistoryRequest,
+    ThreadMessageId, ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope,
 };
-use ironclaw_turns::{LoopCheckpointKind, LoopMessageRef, TurnError, TurnId, TurnRunId, TurnScope};
+use ironclaw_turns::{
+    GetRunStateRequest, LoopCheckpointKind, LoopMessageRef, LoopResultRef, TurnError, TurnId,
+    TurnRunId, TurnScope, TurnStateStore, TurnStatus,
+};
 
 pub use ironclaw_turns::loop_exit::{
     BlockedEvidenceRequest, CompletionEvidenceRequest, FailureEvidenceRequest,
@@ -145,15 +150,20 @@ impl LoopExitEvidencePort for InMemoryLoopExitEvidencePort {
     }
 }
 
-/// Durable text/checkpoint-backed evidence adapter for the current Reborn
-/// text-only host. Capability-result and gate/process evidence deliberately
-/// remain untrusted until dedicated durable stores are wired.
+/// Durable text/checkpoint-backed evidence adapter for the current Reborn host.
+///
+/// Completions are trusted only when every reported reply ref and result ref is
+/// backed by same-run finalized thread evidence. Result-ref-only completions
+/// are allowed once matching finalized `ToolResultReference` records exist.
 pub struct ThreadCheckpointLoopExitEvidencePort<S>
 where
     S: SessionThreadService + ?Sized,
 {
     thread_service: Arc<S>,
+    turn_state_store: Arc<dyn TurnStateStore>,
     loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
+    thread_scope: Option<ThreadScope>,
+    cancellation_factory: Option<Arc<dyn RunCancellationFactory>>,
 }
 
 impl<S> ThreadCheckpointLoopExitEvidencePort<S>
@@ -162,12 +172,39 @@ where
 {
     pub fn new(
         thread_service: Arc<S>,
+        turn_state_store: Arc<dyn TurnStateStore>,
         loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
     ) -> Self {
         Self {
             thread_service,
+            turn_state_store,
             loop_checkpoint_store,
+            thread_scope: None,
+            cancellation_factory: None,
         }
+    }
+
+    pub fn new_with_thread_scope(
+        thread_service: Arc<S>,
+        turn_state_store: Arc<dyn TurnStateStore>,
+        loop_checkpoint_store: Arc<dyn ironclaw_turns::LoopCheckpointStore>,
+        thread_scope: ThreadScope,
+    ) -> Self {
+        Self {
+            thread_service,
+            turn_state_store,
+            loop_checkpoint_store,
+            thread_scope: Some(thread_scope),
+            cancellation_factory: None,
+        }
+    }
+
+    pub fn with_cancellation_factory(
+        mut self,
+        cancellation_factory: Arc<dyn RunCancellationFactory>,
+    ) -> Self {
+        self.cancellation_factory = Some(cancellation_factory);
+        self
     }
 }
 
@@ -180,13 +217,16 @@ where
         &self,
         request: CompletionEvidenceRequest<'_>,
     ) -> Result<bool, TurnError> {
-        if !request.result_refs.is_empty() {
-            return Ok(false);
-        }
-        if request.reply_message_refs.is_empty() {
+        if request.reply_message_refs.is_empty() && request.result_refs.is_empty() {
             return Ok(true);
         }
-        let thread_scope = thread_scope_from_turn_scope(request.scope)?;
+        let thread_scope = match &self.thread_scope {
+            Some(thread_scope) => {
+                ensure_thread_scope_matches_turn_scope(thread_scope, request.scope)?;
+                thread_scope.clone()
+            }
+            None => thread_scope_from_turn_scope(request.scope)?,
+        };
         let history = self
             .thread_service
             .list_thread_history(ThreadHistoryRequest {
@@ -198,16 +238,13 @@ where
                 reason: error.to_string(),
             })?;
         let expected_run_id = request.run_id.to_string();
-        Ok(request.reply_message_refs.iter().all(|message_ref| {
-            let Some(message_id) = message_id_from_ref(message_ref) else {
-                return false;
-            };
-            history.messages.iter().any(|message| {
-                message.message_id == message_id
-                    && message.status == MessageStatus::Finalized
-                    && message.turn_run_id.as_deref() == Some(expected_run_id.as_str())
-            })
-        }))
+        let replies_verified = request.reply_message_refs.iter().all(|message_ref| {
+            verify_reply_message_ref(&history, message_ref, expected_run_id.as_str())
+        });
+        let results_verified = request.result_refs.iter().all(|result_ref| {
+            verify_tool_result_ref(&history, result_ref, expected_run_id.as_str())
+        });
+        Ok(replies_verified && results_verified)
     }
 
     async fn verify_final_checkpoint(
@@ -251,11 +288,30 @@ where
 
     async fn is_cancellation_observed(
         &self,
-        _scope: &TurnScope,
+        scope: &TurnScope,
         _turn_id: TurnId,
-        _run_id: TurnRunId,
+        run_id: TurnRunId,
     ) -> Result<bool, TurnError> {
-        Ok(false)
+        if let Some(cancellation_factory) = self.cancellation_factory.as_ref()
+            && cancellation_factory
+                .is_product_cancellation_observed(run_id)
+                .map_err(|error| TurnError::Unavailable {
+                    reason: error.safe_summary,
+                })?
+        {
+            return Ok(true);
+        }
+        let state = self
+            .turn_state_store
+            .get_run_state(GetRunStateRequest {
+                scope: scope.clone(),
+                run_id,
+            })
+            .await?;
+        Ok(matches!(
+            state.status,
+            TurnStatus::CancelRequested | TurnStatus::Cancelled
+        ))
     }
 
     async fn latest_checkpoint_kind(
@@ -291,9 +347,76 @@ fn thread_scope_from_turn_scope(scope: &TurnScope) -> Result<ThreadScope, TurnEr
     })
 }
 
+fn ensure_thread_scope_matches_turn_scope(
+    thread_scope: &ThreadScope,
+    turn_scope: &TurnScope,
+) -> Result<(), TurnError> {
+    let Some(agent_id) = turn_scope.agent_id.as_ref() else {
+        return Err(TurnError::InvalidRequest {
+            reason: "thread checkpoint loop-exit evidence requires agent-scoped turn scope"
+                .to_string(),
+        });
+    };
+    if thread_scope.tenant_id != turn_scope.tenant_id
+        || &thread_scope.agent_id != agent_id
+        || thread_scope.project_id.as_ref() != turn_scope.project_id.as_ref()
+    {
+        return Err(TurnError::InvalidRequest {
+            reason: "thread checkpoint loop-exit evidence scope does not match turn scope"
+                .to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn message_id_from_ref(message_ref: &LoopMessageRef) -> Option<ThreadMessageId> {
     let raw = message_ref.as_str().strip_prefix("msg:")?;
     ThreadMessageId::parse(raw).ok()
+}
+
+fn verify_reply_message_ref(
+    history: &ThreadHistory,
+    message_ref: &LoopMessageRef,
+    expected_run_id: &str,
+) -> bool {
+    let Some(message_id) = message_id_from_ref(message_ref) else {
+        return false;
+    };
+    history.messages.iter().any(|message| {
+        message.message_id == message_id
+            && message.kind == MessageKind::Assistant
+            && message.status == MessageStatus::Finalized
+            && message.turn_run_id.as_deref() == Some(expected_run_id)
+    })
+}
+
+fn verify_tool_result_ref(
+    history: &ThreadHistory,
+    result_ref: &LoopResultRef,
+    expected_run_id: &str,
+) -> bool {
+    history.messages.iter().any(|message| {
+        message.kind == MessageKind::ToolResultReference
+            && message.status == MessageStatus::Finalized
+            && message.turn_run_id.as_deref() == Some(expected_run_id)
+            && message.tool_result_ref.as_deref() == Some(result_ref.as_str())
+            && message_content_matches_result_ref(message, result_ref)
+    })
+}
+
+fn message_content_matches_result_ref(
+    message: &ThreadMessageRecord,
+    result_ref: &LoopResultRef,
+) -> bool {
+    let Some(content) = message.content.as_deref() else {
+        return false;
+    };
+    // Cheap metadata checks run before this helper. Keep the envelope parse so
+    // forged or malformed transcript content cannot satisfy completion evidence.
+    let Ok(envelope) = serde_json::from_str::<ToolResultReferenceEnvelope>(content) else {
+        return false;
+    };
+    envelope.version == 1 && envelope.result_ref == result_ref.as_str()
 }
 
 #[cfg(test)]

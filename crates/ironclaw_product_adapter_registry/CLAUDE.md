@@ -2,9 +2,11 @@
 
 Owns ProductAdapter installation registry contracts for IronClaw Reborn.
 
-- This crate is the typed Reborn analog of v1 channel manifest + activation
-  state. It models adapter manifests, installations, activation state,
-  credential-handle bindings, and health snapshots; nothing else.
+- ProductAdapter declarations live in the single Extension Manifest v2 as
+  `ironclaw.product_adapter/v1` host-api sections. This crate owns the typed
+  ProductAdapter projection plus installations, activation state,
+  credential-handle bindings, and health snapshots; it must not introduce a
+  second ProductAdapter TOML manifest format.
 - Do **not** load WASM components, perform HTTP egress, route webhooks,
   resolve secret material, or write durable database state from this crate.
 - Do **not** introduce an env-var adapter list (no `REBORN_PRODUCT_ADAPTERS`
@@ -14,7 +16,7 @@ Owns ProductAdapter installation registry contracts for IronClaw Reborn.
   boundary test in `crates/ironclaw_architecture` enforces this.
 - Credential bindings store `ironclaw_host_api::SecretHandle` only. Raw
   secret material must never be stored, accepted, serialized, or logged.
-- ProductAdapter manifest parsing must:
+- ProductAdapter host-api section projection must:
   - reject unknown TOML fields (`#[serde(deny_unknown_fields)]`),
   - reject inline secret material (key denylist + value heuristics),
   - validate every egress credential handle is declared in

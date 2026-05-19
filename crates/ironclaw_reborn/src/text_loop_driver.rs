@@ -17,8 +17,8 @@ use ironclaw_turns::{
     },
 };
 
-const TEXT_ONLY_DRIVER_ID: &str = "reborn:text-only-model-reply";
-const TEXT_ONLY_DRIVER_VERSION: u64 = 1;
+pub(crate) const TEXT_ONLY_DRIVER_ID: &str = "reborn:text-only-model-reply";
+pub(crate) const TEXT_ONLY_DRIVER_VERSION: u64 = 1;
 const DEFAULT_CONTEXT_LIMIT: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +69,8 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
                 surface_version: None,
                 checkpoint_state_ref: None,
                 max_messages: Some(context_limit_hint(self.config.context_limit)),
+                inline_messages: Vec::new(),
+                capability_view: None,
             })
             .await
             .map_err(|error| map_host_error("prompt", error))?;
@@ -78,6 +80,7 @@ impl AgentLoopDriver for TextOnlyModelReplyDriver {
                 messages: prompt_bundle.messages,
                 surface_version: prompt_bundle.surface_version,
                 model_preference: None,
+                capability_view: None,
             })
             .await
             .map_err(|error| map_host_error("model", error))?;
@@ -172,11 +175,11 @@ fn map_host_error(stage: &'static str, error: AgentLoopHostError) -> AgentLoopDr
     );
 
     match error.kind {
-        AgentLoopHostErrorKind::InvalidInvocation | AgentLoopHostErrorKind::ScopeMismatch => {
-            AgentLoopDriverError::InvalidRequest {
-                reason: format!("{stage}: {}", error.kind.as_str()),
-            }
-        }
+        AgentLoopHostErrorKind::InvalidInvocation
+        | AgentLoopHostErrorKind::Invalid
+        | AgentLoopHostErrorKind::ScopeMismatch => AgentLoopDriverError::InvalidRequest {
+            reason: format!("{stage}: {}", error.kind.as_str()),
+        },
         AgentLoopHostErrorKind::Unavailable | AgentLoopHostErrorKind::Cancelled => {
             AgentLoopDriverError::Unavailable {
                 reason: format!("{stage}: {}", error.kind.as_str()),
@@ -212,9 +215,15 @@ fn loop_failure_kind_name(kind: LoopFailureKind) -> &'static str {
         LoopFailureKind::IterationLimit => "iteration_limit",
         LoopFailureKind::InvalidModelOutput => "invalid_model_output",
         LoopFailureKind::CheckpointRejected => "checkpoint_rejected",
+        LoopFailureKind::CheckpointUnavailable => "checkpoint_unavailable",
         LoopFailureKind::TranscriptWriteFailed => "transcript_write_failed",
         LoopFailureKind::DriverBug => "driver_bug",
         LoopFailureKind::InterruptedUnexpectedly => "interrupted_unexpectedly",
+        LoopFailureKind::NoProgressDetected => "no_progress_detected",
+        LoopFailureKind::PolicyDenied => "policy_denied",
+        // LoopFailureKind is `#[non_exhaustive]`; fail closed if a new variant
+        // lands in `ironclaw_turns` ahead of this matcher being updated.
+        _ => "driver_bug",
     }
 }
 

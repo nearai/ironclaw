@@ -13,6 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use thiserror::Error;
 
+use crate::error::ProductAdapterError;
 use crate::redaction::RedactedString;
 
 /// Host-only seal. Cannot be named or constructed outside this module.
@@ -56,6 +57,67 @@ pub enum AuthRequirement {
         name: String,
     },
     BearerToken,
+}
+
+impl AuthRequirement {
+    pub fn validate_metadata(&self) -> Result<(), ProductAdapterError> {
+        match self {
+            Self::RequestSignature {
+                header_name,
+                timestamp_header_name,
+            } => {
+                validate_http_token("auth.header_name", header_name)?;
+                if let Some(timestamp_header) = timestamp_header_name.as_deref() {
+                    validate_http_token("auth.timestamp_header_name", timestamp_header)?;
+                }
+            }
+            Self::SharedSecretHeader { header_name } => {
+                validate_http_token("auth.header_name", header_name)?;
+            }
+            Self::SessionCookie { name } => {
+                validate_cookie_name("auth.name", name)?;
+            }
+            Self::BearerToken => {}
+        }
+        Ok(())
+    }
+}
+
+/// RFC 7230 §3.2.6 `token` = 1*tchar. Used to syntactically guard HTTP
+/// header and cookie names against CRLF/whitespace/separator injection when
+/// adapter metadata declares where auth evidence comes from.
+fn validate_http_token(field: &'static str, value: &str) -> Result<(), ProductAdapterError> {
+    if value.is_empty() {
+        return Err(ProductAdapterError::InvalidIdentifier {
+            kind: field,
+            reason: "must not be empty".to_string(),
+        });
+    }
+    for c in value.chars() {
+        if !is_http_tchar(c) {
+            return Err(ProductAdapterError::InvalidIdentifier {
+                kind: field,
+                reason: format!(
+                    "must be an RFC 7230 token (no CTL, whitespace, or separators); got {value:?}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_http_tchar(c: char) -> bool {
+    matches!(
+        c,
+        '!' | '#' | '$' | '%' | '&' | '\'' | '*' | '+' | '-' | '.' | '^' | '_' | '`' | '|' | '~'
+    ) || c.is_ascii_alphanumeric()
+}
+
+/// RFC 6265 `cookie-name` is an HTTP `token`. Reuse the same predicate so a
+/// declared cookie name cannot smuggle CRLF, `=`, or `;` into downstream
+/// `Set-Cookie`/`Cookie` interpolation.
+fn validate_cookie_name(field: &'static str, value: &str) -> Result<(), ProductAdapterError> {
+    validate_http_token(field, value)
 }
 
 /// Verified-claim contents the workflow may consult. Fields are private so the
@@ -360,7 +422,50 @@ mod tests {
         let evidence = ProtocolAuthEvidence::host_verified(AuthRequirement::BearerToken, "alice");
         let json = serde_json::to_string(&evidence).expect("serialize");
         assert!(json.contains("\"verified\""));
+        assert!(!json.contains("seal"));
+        assert!(!json.contains("HostAuthSeal"));
         let parsed: Result<ProtocolAuthEvidence, _> = serde_json::from_str(&json);
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn auth_requirement_metadata_rejects_injection_prone_names() {
+        assert!(
+            AuthRequirement::SharedSecretHeader {
+                header_name: "X-Foo\r\nInjected".into(),
+            }
+            .validate_metadata()
+            .is_err()
+        );
+        assert!(
+            AuthRequirement::RequestSignature {
+                header_name: "X-Signature".into(),
+                timestamp_header_name: Some("X-Time;stamp".into()),
+            }
+            .validate_metadata()
+            .is_err()
+        );
+        assert!(
+            AuthRequirement::SessionCookie {
+                name: "session=id".into(),
+            }
+            .validate_metadata()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn auth_requirement_metadata_accepts_http_tokens() {
+        AuthRequirement::RequestSignature {
+            header_name: "X-Slack-Signature".into(),
+            timestamp_header_name: Some("X-Slack-Request-Timestamp".into()),
+        }
+        .validate_metadata()
+        .expect("valid request signature requirement");
+        AuthRequirement::SessionCookie {
+            name: "__Host-session".into(),
+        }
+        .validate_metadata()
+        .expect("valid cookie name");
     }
 }

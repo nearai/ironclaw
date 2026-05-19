@@ -109,10 +109,12 @@ impl DurableLoopHostMilestoneScope {
 
 /// Durable projection adapter for public AgentLoopHost milestones.
 ///
-/// The adapter writes only metadata-only model/reply milestones into the
-/// runtime event log. Raw prompts, assistant content, provider errors, message
-/// refs, host paths, and secrets stay in their owning stores and never enter
-/// runtime events.
+/// The adapter writes only metadata-only loop lifecycle milestones into the
+/// runtime event log. Progress milestones that carry useful counters or typed
+/// checkpoint/prompt metadata stay in the milestone-sink substrate rather than
+/// being collapsed into lossy `RuntimeEvent` rows. Raw prompts, assistant
+/// content, provider errors, message refs, host paths, and secrets stay in
+/// their owning stores and never enter runtime events.
 #[derive(Clone)]
 pub struct DurableLoopHostMilestoneSink {
     event_log: Arc<dyn DurableEventLog>,
@@ -195,8 +197,19 @@ impl DurableLoopHostMilestoneSink {
                 capability_id(LOOP_RUN_CAPABILITY_ID)?,
                 loop_failure_kind(reason_kind),
             ),
-            LoopHostMilestoneKind::PromptBundleBuilt { .. }
+            // PromptBundleBuilt and CheckpointCreated are suppressed here intentionally.
+            // Checkpoint durability is owned by LoopCheckpointPort::write_checkpoint; the
+            // CheckpointCreated runtime-event milestone is emitted there with the authoritative
+            // durable payload. The CheckpointWritten progress event is an advisory echo only —
+            // emitting it here would create a duplicate weaker record. Resume must rely
+            // on the checkpoint-port milestone, NOT this progress echo.
+            // Similarly, PromptBundleBuilt is emitted by LoopPromptPort with richer context.
+            LoopHostMilestoneKind::IterationStarted { .. }
+            | LoopHostMilestoneKind::PromptBundleBuilt { .. }
             | LoopHostMilestoneKind::CapabilityInvoked { .. }
+            | LoopHostMilestoneKind::CapabilityBatchStarted { .. }
+            | LoopHostMilestoneKind::CapabilityBatchCompleted { .. }
+            | LoopHostMilestoneKind::GateBlocked { .. }
             | LoopHostMilestoneKind::CheckpointCreated { .. }
             | LoopHostMilestoneKind::Blocked { .. }
             | LoopHostMilestoneKind::DriverNote { .. } => return Ok(None),
@@ -213,9 +226,15 @@ fn loop_failure_kind(reason_kind: &LoopFailureKind) -> &'static str {
         LoopFailureKind::IterationLimit => "iteration_limit",
         LoopFailureKind::InvalidModelOutput => "invalid_model_output",
         LoopFailureKind::CheckpointRejected => "checkpoint_rejected",
+        LoopFailureKind::CheckpointUnavailable => "checkpoint_unavailable",
         LoopFailureKind::TranscriptWriteFailed => "transcript_write_failed",
         LoopFailureKind::DriverBug => "driver_bug",
         LoopFailureKind::InterruptedUnexpectedly => "interrupted_unexpectedly",
+        LoopFailureKind::NoProgressDetected => "no_progress_detected",
+        LoopFailureKind::PolicyDenied => "policy_denied",
+        // LoopFailureKind is `#[non_exhaustive]`; fail closed if a new variant
+        // lands in `ironclaw_turns` ahead of this matcher being updated.
+        _ => "driver_bug",
     }
 }
 

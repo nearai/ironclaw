@@ -82,17 +82,6 @@ pub struct ExternalConversationIdentity {
     pub(crate) thread_id: Option<String>,
 }
 
-impl ExternalConversationIdentity {
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
-    pub(crate) fn conversation_fingerprint(&self) -> String {
-        length_prefixed_fingerprint(&[
-            self.space_id.as_deref().unwrap_or(""),
-            &self.conversation_id,
-            self.thread_id.as_deref().unwrap_or(""),
-        ])
-    }
-}
-
 impl ExternalConversationRef {
     pub fn new(
         space_id: Option<&str>,

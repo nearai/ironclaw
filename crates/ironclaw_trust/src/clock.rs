@@ -5,6 +5,7 @@
 //! inject a deterministic clock via [`HostTrustPolicy::with_clock`]
 //! (defined in `crate::policy`) so `evaluated_at` is reproducible across
 //! runs.
+#![allow(dead_code)] // Scaffolding; some items kept for future use.
 
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::Timestamp;
@@ -16,7 +17,7 @@ pub trait Clock: Send + Sync {
 
 /// Default production clock — reads the system wall clock.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct SystemClock;
+pub(crate) struct SystemClock;
 
 impl Clock for SystemClock {
     fn now(&self) -> Timestamp {
@@ -30,12 +31,12 @@ impl Clock for SystemClock {
 /// context where deterministic evaluation is needed (audit golden files,
 /// replay harnesses, fuzzers).
 #[derive(Debug, Clone, Copy)]
-pub struct FixedClock {
+pub(crate) struct FixedClock {
     pub instant: DateTime<Utc>,
 }
 
 impl FixedClock {
-    pub fn new(instant: DateTime<Utc>) -> Self {
+    pub(crate) fn new(instant: DateTime<Utc>) -> Self {
         Self { instant }
     }
 }

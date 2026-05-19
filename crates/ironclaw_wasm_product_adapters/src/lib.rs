@@ -1,20 +1,17 @@
-//! Stub host runtime for IronClaw Reborn WASM v2 product adapters.
+//! Host runtime glue for IronClaw Reborn WASM v2 product adapters.
 //!
 //! # Trust-model warning
 //!
 //! The native runner in this crate executes `Arc<dyn ProductAdapter>` in the
-//! host process. It is not a WASM sandbox. Only run trusted native adapters here;
-//! untrusted adapters must wait for the wasmtime component-model path.
+//! host process. It is not a WASM sandbox. Only run trusted native adapters
+//! there. Installable external adapters should use the wasmtime component-model
+//! runtime exposed by [`ProductAdapterComponentRuntime`].
 //!
 //! This crate is the boundary where the trusted host (Rust) verifies protocol
 //! authentication, normalizes egress to declared hosts, and exposes a small
-//! constrained capability set to WASM v2 components. The first-slice
-//! implementation is **deliberately runtime-free**: the wasmtime component
-//! glue lives behind a `wasmtime` feature that's not yet wired up, because
-//! the tracer-bullet PR for #3285 must boot without requiring a freshly
-//! built telegram-v2.wasm binary.
+//! constrained capability set to WASM v2 components.
 //!
-//! What this crate ships in the first slice:
+//! What this crate ships:
 //!
 //! * `WebhookAuthVerifier` — trait + helpers for HMAC + shared-secret-header
 //!   verification. Production hosts use these to mint
@@ -22,21 +19,36 @@
 //!   adapter parse step.
 //! * `WebhookAuth` — bridge that returns a `Verified` evidence constructed via
 //!   the public `mark_*_verified` helpers in `ironclaw_product_adapters::auth`.
-//! * `EgressPolicy` — declared-host + credential-handle enforcement that the
-//!   wasmtime component-model glue will compose with at later landings.
+//! * `EgressPolicy` — declared-host + credential-handle enforcement for adapter
+//!   manifests and host-mediated egress.
+//! * `ProductAdapterComponentRuntime` — wasmtime component loader for
+//!   `wit/product_adapter.wit` that reads the manifest and calls `parse-inbound`
+//!   / `render-outbound` through the component boundary.
 //! * Native `ProductAdapter` runner that wires a Rust adapter implementation
 //!   to a `ProductWorkflow` + `ProtocolHttpEgress`. Telegram v2 ships here
-//!   today; it will move into a wasmtime component once the WIT/component
-//!   tooling lands.
+//!   today; it will move into a WASM component once a component artifact lands.
 
 #![forbid(unsafe_code)]
+#![warn(unreachable_pub)]
 
-pub mod auth_verifier;
-pub mod egress_policy;
-pub mod runner;
+mod auth_verifier;
+mod bindings;
+mod component_runtime;
+mod config;
+mod egress_policy;
+mod runner;
+mod store;
 
 pub use auth_verifier::{
-    HmacWebhookAuth, SharedSecretHeaderAuth, VerificationOutcome, WebhookAuthVerifier,
+    Clock, HmacWebhookAuth, SharedSecretHeaderAuth, VerificationOutcome, WebhookAuthVerifier,
+};
+pub use component_runtime::{
+    ComponentManifest, ParsedInboundResult, PreparedProductAdapterComponent,
+    ProductAdapterComponentRuntime, RenderOutboundResult, RuntimeError,
+};
+pub use config::{
+    PRODUCT_ADAPTER_WIT_VERSION, ProductAdapterComponentLimits,
+    ProductAdapterComponentRuntimeConfig,
 };
 pub use egress_policy::{EgressPolicy, EgressPolicyError, EgressPolicyTarget};
 pub use runner::{

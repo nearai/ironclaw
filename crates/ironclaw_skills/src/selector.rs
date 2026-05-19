@@ -9,6 +9,7 @@
 //! - Keyword substring match: 5 points (capped at 30 total)
 //! - Tag match: 3 points (capped at 15 total)
 //! - Regex pattern match: 20 points (capped at 40 total)
+#![allow(dead_code)] // Scaffolding; some items kept for future use.
 
 use crate::types::LoadedSkill;
 

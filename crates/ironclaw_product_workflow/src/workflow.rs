@@ -8,19 +8,23 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload,
-    ProductRejection, ProductRejectionKind, ProductWorkflow, ProjectionSubscriptionRequest,
+    ProductRejection, ProductRejectionKind, ProductTriggerReason, ProductWorkflow,
+    ProductWorkflowRejectionKind, ProjectionSubscriptionRequest, RedactedString,
 };
-use ironclaw_turns::{AdmissionRejectionReason, TurnError, TurnErrorCategory};
+use ironclaw_turns::{
+    AdmissionRejectionReason, TurnActor, TurnError, TurnErrorCategory, TurnScope,
+};
 use tracing::debug;
 
 use crate::action::{ActionDispatchKind, ActionFingerprintKey, SourceBindingKey};
-use crate::error::ProductWorkflowError;
-use crate::inbound_turn::InboundTurnService;
-use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
-use crate::policy::{
-    BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
-    NoopBeforeInboundPolicy,
+use crate::binding::{
+    ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
+    ResolvedBinding,
 };
+use crate::error::ProductWorkflowError;
+use crate::inbound_turn::{InboundTurnService, InboundUserMessageDispatch};
+use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
+use crate::policy::{BeforeInboundPolicy, NoopBeforeInboundPolicy};
 
 /// Host-side implementation of [`ProductWorkflow`] that dispatches inbound
 /// envelopes through the idempotency ledger and routes to the appropriate
@@ -29,17 +33,20 @@ pub struct DefaultProductWorkflow {
     inbound_turn_service: Arc<dyn InboundTurnService>,
     idempotency_ledger: Arc<dyn IdempotencyLedger>,
     before_inbound_policy: Arc<dyn BeforeInboundPolicy>,
+    binding_service: Arc<dyn ConversationBindingService>,
 }
 
 impl DefaultProductWorkflow {
     pub fn new(
         inbound_turn_service: Arc<dyn InboundTurnService>,
         idempotency_ledger: Arc<dyn IdempotencyLedger>,
+        binding_service: Arc<dyn ConversationBindingService>,
     ) -> Self {
         Self {
             inbound_turn_service,
             idempotency_ledger,
             before_inbound_policy: Arc::new(NoopBeforeInboundPolicy),
+            binding_service,
         }
     }
 
@@ -65,6 +72,7 @@ impl ProductWorkflow for DefaultProductWorkflow {
         let fingerprint = ActionFingerprintKey::new(
             envelope.adapter_id().clone(),
             envelope.installation_id().clone(),
+            envelope.external_actor_ref().clone(),
             source_binding_key,
             envelope.external_event_id().clone(),
         );
@@ -153,12 +161,32 @@ impl ProductWorkflow for DefaultProductWorkflow {
 
     async fn resolve_projection_subscription(
         &self,
-        _envelope: ProductInboundEnvelope,
+        envelope: ProductInboundEnvelope,
     ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
-        Err(ProductAdapterError::Internal {
-            detail: ironclaw_product_adapters::RedactedString::new(
-                "projection subscription resolution not yet implemented",
+        let ProductInboundPayload::SubscriptionRequest(payload) = envelope.payload() else {
+            return Err(ProductAdapterError::MalformedInboundPayload {
+                reason: RedactedString::new(
+                    "projection subscription resolution requires subscription_request payload",
+                ),
+            });
+        };
+        let binding = self
+            .binding_service
+            .lookup_binding(resolve_binding_request(&envelope))
+            .await
+            .map_err(ProductAdapterError::from)?;
+        let thread_id =
+            projection_thread_id_from_binding(&binding, payload.thread_id_hint.as_deref())?;
+
+        Ok(ProjectionSubscriptionRequest {
+            actor: TurnActor::new(binding.user_id.clone()),
+            scope: TurnScope::new(
+                binding.tenant_id.clone(),
+                binding.agent_id.clone(),
+                binding.project_id.clone(),
+                thread_id,
             ),
+            after_cursor: payload.after_cursor.clone(),
         })
     }
 }
@@ -168,39 +196,79 @@ struct DispatchedAction {
     dispatch_kind: ActionDispatchKind,
 }
 
+fn resolve_binding_request(envelope: &ProductInboundEnvelope) -> ResolveBindingRequest {
+    ResolveBindingRequest {
+        adapter_id: envelope.adapter_id().clone(),
+        installation_id: envelope.installation_id().clone(),
+        external_actor_ref: envelope.external_actor_ref().clone(),
+        external_conversation_ref: envelope.external_conversation_ref().clone(),
+        external_event_id: envelope.external_event_id().clone(),
+        route_kind: route_kind_for_payload(envelope.payload()),
+        auth_claim: envelope.auth_claim().clone(),
+    }
+}
+
+fn route_kind_for_payload(payload: &ProductInboundPayload) -> ProductConversationRouteKind {
+    match payload {
+        ProductInboundPayload::UserMessage(message) => match message.trigger {
+            ProductTriggerReason::DirectChat => ProductConversationRouteKind::Direct,
+            ProductTriggerReason::BotMention
+            | ProductTriggerReason::ReplyToBot
+            | ProductTriggerReason::BotCommand
+            | ProductTriggerReason::LinkedThreadAction => ProductConversationRouteKind::Shared,
+        },
+        ProductInboundPayload::Command(command) => match command.trigger {
+            ProductTriggerReason::DirectChat => ProductConversationRouteKind::Direct,
+            ProductTriggerReason::BotMention
+            | ProductTriggerReason::ReplyToBot
+            | ProductTriggerReason::BotCommand
+            | ProductTriggerReason::LinkedThreadAction => ProductConversationRouteKind::Shared,
+        },
+        _ => ProductConversationRouteKind::Direct,
+    }
+}
+
+fn projection_thread_id_from_binding(
+    binding: &ResolvedBinding,
+    thread_id_hint: Option<&str>,
+) -> Result<ironclaw_host_api::ThreadId, ProductAdapterError> {
+    if let Some(thread_id_hint) = thread_id_hint {
+        let hinted = ironclaw_host_api::ThreadId::new(thread_id_hint).map_err(|_| {
+            ProductAdapterError::MalformedInboundPayload {
+                reason: RedactedString::new("invalid thread_id_hint"),
+            }
+        })?;
+        if hinted != binding.thread_id {
+            return Err(ProductAdapterError::WorkflowRejected {
+                kind: ProductWorkflowRejectionKind::InvalidRequest,
+                status_code: 400,
+                retryable: false,
+                reason: RedactedString::new(
+                    "thread_id_hint does not match resolved conversation binding",
+                ),
+            });
+        }
+    }
+    Ok(binding.thread_id.clone())
+}
+
 async fn dispatch_payload(
     envelope: &ProductInboundEnvelope,
     inbound_turn_service: &dyn InboundTurnService,
     before_inbound_policy: &dyn BeforeInboundPolicy,
 ) -> Result<DispatchedAction, ProductWorkflowError> {
     match envelope.payload() {
-        ProductInboundPayload::UserMessage(payload) => {
-            if let Some(outcome) = inbound_turn_service
-                .replay_accepted_user_message(envelope)
+        ProductInboundPayload::UserMessage(_) => {
+            match inbound_turn_service
+                .accept_user_message_with_before_policy(envelope, before_inbound_policy)
                 .await?
             {
-                let ack = outcome.to_ack();
-                let dispatch_kind = dispatch_kind_from_ack(&ack, envelope.payload())?;
-                return Ok(DispatchedAction { ack, dispatch_kind });
-            }
-
-            let policy_request = BeforeInboundPolicyRequest::new(envelope, payload);
-            let policy_outcome = before_inbound_policy
-                .check_user_message(policy_request)
-                .await?;
-            let dispatch_envelope;
-            let envelope_for_turn = match policy_outcome {
-                BeforeInboundPolicyOutcome::Allow => envelope,
-                BeforeInboundPolicyOutcome::RewriteUserMessage(payload) => {
-                    dispatch_envelope =
-                        envelope.with_rewritten_user_message(payload).map_err(|_| {
-                            ProductWorkflowError::TurnSubmissionRejected {
-                                reason: "invalid policy-rewritten user message".into(),
-                            }
-                        })?;
-                    &dispatch_envelope
+                InboundUserMessageDispatch::Accepted(outcome) => {
+                    let ack = outcome.to_ack();
+                    let dispatch_kind = dispatch_kind_from_ack(&ack, envelope.payload())?;
+                    Ok(DispatchedAction { ack, dispatch_kind })
                 }
-                BeforeInboundPolicyOutcome::Reject(rejection) => {
+                InboundUserMessageDispatch::Rejected(rejection) => {
                     debug!(
                         rejection_kind = ?rejection.kind,
                         disposition = ?rejection.disposition(),
@@ -208,15 +276,9 @@ async fn dispatch_payload(
                     );
                     let ack = ProductInboundAck::Rejected(rejection);
                     let dispatch_kind = dispatch_kind_from_ack(&ack, envelope.payload())?;
-                    return Ok(DispatchedAction { ack, dispatch_kind });
+                    Ok(DispatchedAction { ack, dispatch_kind })
                 }
-            };
-            let outcome = inbound_turn_service
-                .accept_user_message_skipping_policy(envelope_for_turn)
-                .await?;
-            let ack = outcome.to_ack();
-            let dispatch_kind = dispatch_kind_from_ack(&ack, envelope_for_turn.payload())?;
-            Ok(DispatchedAction { ack, dispatch_kind })
+            }
         }
         ProductInboundPayload::Command(cmd) => {
             Err(ProductWorkflowError::CommandRoutingUnavailable {
@@ -304,6 +366,27 @@ fn rejection_kind_for_turn_error(error: &TurnError) -> ProductRejectionKind {
 
 fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInboundAck> {
     match error {
+        ProductWorkflowError::UnknownInstallation => {
+            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::UnknownInstallation,
+                "unknown adapter installation",
+            )))
+        }
+        ProductWorkflowError::BindingRequired { reason } => Some(ProductInboundAck::Rejected(
+            ProductRejection::permanent(ProductRejectionKind::BindingRequired, reason.clone()),
+        )),
+        ProductWorkflowError::BindingAccessDenied => {
+            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::AccessDenied,
+                "binding access denied",
+            )))
+        }
+        ProductWorkflowError::InvalidBindingRequest { reason } => {
+            Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+                ProductRejectionKind::PolicyDenied,
+                reason.clone(),
+            )))
+        }
         ProductWorkflowError::CommandRoutingUnavailable { command } => {
             Some(ProductInboundAck::Rejected(ProductRejection::permanent(
                 ProductRejectionKind::PolicyDenied,
@@ -338,5 +421,136 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
             permanent: false, ..
         }
         | ProductWorkflowError::DuplicateAction { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_product_adapters::{ProductInboundAck, ProductInboundPayload};
+    use ironclaw_turns::{AcceptedMessageRef, AdmissionRejection, TurnRunId};
+
+    use super::*;
+
+    #[test]
+    fn dispatch_kind_from_ack_uses_submitted_or_active_run_ids() {
+        let submitted_run_id = TurnRunId::new();
+        let accepted = ProductInboundAck::Accepted {
+            accepted_message_ref: AcceptedMessageRef::new("msg:accepted").expect("valid ref"),
+            submitted_run_id,
+        };
+        assert_eq!(
+            dispatch_kind_from_ack(&accepted, &ProductInboundPayload::NoOp).expect("kind"),
+            ActionDispatchKind::UserMessageTurn {
+                run_id: submitted_run_id
+            }
+        );
+
+        let active_run_id = TurnRunId::new();
+        let deferred = ProductInboundAck::DeferredBusy {
+            accepted_message_ref: AcceptedMessageRef::new("msg:deferred").expect("valid ref"),
+            active_run_id,
+        };
+        assert_eq!(
+            dispatch_kind_from_ack(&deferred, &ProductInboundPayload::NoOp).expect("kind"),
+            ActionDispatchKind::UserMessageTurn {
+                run_id: active_run_id
+            }
+        );
+    }
+
+    #[test]
+    fn terminal_ack_for_error_settles_command_and_unsupported_actions() {
+        let command = terminal_ack_for_error(&ProductWorkflowError::CommandRoutingUnavailable {
+            command: "help".to_string(),
+        })
+        .expect("command routing failure is terminal");
+        assert!(matches!(
+            command,
+            ProductInboundAck::Rejected(rejection)
+                if rejection.kind == ProductRejectionKind::PolicyDenied
+                    && rejection.disposition()
+                        == ironclaw_product_adapters::ProductRejectionDisposition::Permanent
+        ));
+
+        let unsupported = terminal_ack_for_error(&ProductWorkflowError::UnsupportedActionKind {
+            kind: "auth_resolution".to_string(),
+        })
+        .expect("unsupported action is terminal");
+        assert!(matches!(
+            unsupported,
+            ProductInboundAck::Rejected(rejection)
+                if rejection.kind == ProductRejectionKind::PolicyDenied
+                    && rejection.disposition()
+                        == ironclaw_product_adapters::ProductRejectionDisposition::Permanent
+        ));
+    }
+
+    #[test]
+    fn terminal_ack_for_error_maps_non_retryable_turn_categories() {
+        let unauthorized = terminal_ack_for_error(&ProductWorkflowError::TurnSubmissionFailed {
+            error: TurnError::Unauthorized,
+        })
+        .expect("unauthorized turn failure is terminal");
+        assert!(matches!(
+            unauthorized,
+            ProductInboundAck::Rejected(rejection)
+                if rejection.kind == ProductRejectionKind::AccessDenied
+        ));
+
+        let missing_scope = terminal_ack_for_error(&ProductWorkflowError::TurnSubmissionFailed {
+            error: TurnError::ScopeNotFound,
+        })
+        .expect("scope-not-found turn failure is terminal");
+        assert!(matches!(
+            missing_scope,
+            ProductInboundAck::Rejected(rejection)
+                if rejection.kind == ProductRejectionKind::BindingRequired
+        ));
+
+        let admission_policy =
+            terminal_ack_for_error(&ProductWorkflowError::TurnSubmissionFailed {
+                error: TurnError::AdmissionRejected(AdmissionRejection::new(
+                    AdmissionRejectionReason::Policy,
+                )),
+            })
+            .expect("policy admission failure is terminal");
+        assert!(matches!(
+            admission_policy,
+            ProductInboundAck::Rejected(rejection)
+                if rejection.kind == ProductRejectionKind::AccessDenied
+        ));
+    }
+
+    #[test]
+    fn terminal_ack_for_error_keeps_retryable_paths_unsettled() {
+        assert!(
+            terminal_ack_for_error(&ProductWorkflowError::BindingResolutionFailed {
+                reason: "binding backend unavailable".to_string(),
+            })
+            .is_none()
+        );
+        assert!(
+            terminal_ack_for_error(&ProductWorkflowError::Transient {
+                reason: "ledger timeout".to_string(),
+            })
+            .is_none()
+        );
+        assert!(
+            terminal_ack_for_error(&ProductWorkflowError::TurnSubmissionFailed {
+                error: TurnError::Unavailable {
+                    reason: "turn store unavailable".to_string(),
+                },
+            })
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn terminal_success_ack_excludes_deferred_busy() {
+        assert!(should_settle_ack(&ProductInboundAck::NoOp));
+        assert!(!should_settle_ack(&ProductInboundAck::DeferredBusy {
+            accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("valid ref"),
+            active_run_id: TurnRunId::new(),
+        }));
     }
 }

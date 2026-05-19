@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ExternalEventId, ProductAdapterId, ProductInboundAck,
+    AdapterInstallationId, ExternalActorRef, ExternalEventId, ProductAdapterId, ProductInboundAck,
     ProductInboundPayload, ProductRejectionKind,
 };
 use ironclaw_turns::{LoopGateRef, TurnRunId};
@@ -137,6 +137,7 @@ typed_token!(
 pub struct ActionFingerprintKey {
     pub adapter_id: ProductAdapterId,
     pub installation_id: AdapterInstallationId,
+    pub external_actor_ref: ExternalActorRef,
     pub source_binding_key: SourceBindingKey,
     pub external_event_id: ExternalEventId,
 }
@@ -145,12 +146,14 @@ impl ActionFingerprintKey {
     pub fn new(
         adapter_id: ProductAdapterId,
         installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
         source_binding_key: SourceBindingKey,
         external_event_id: ExternalEventId,
     ) -> Self {
         Self {
             adapter_id,
             installation_id,
+            external_actor_ref,
             source_binding_key,
             external_event_id,
         }
@@ -271,5 +274,87 @@ impl ProductInboundAction {
             self.phase,
             ActionPhase::Settled | ActionPhase::DeduplicatedReplay
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ironclaw_product_adapters::{ProductInboundAck, ProductRejection, ProductRejectionKind};
+
+    use super::*;
+
+    fn fingerprint() -> ActionFingerprintKey {
+        ActionFingerprintKey::new(
+            ProductAdapterId::new("test_adapter").expect("valid adapter"),
+            AdapterInstallationId::new("install_alpha").expect("valid installation"),
+            ExternalActorRef::new("test", "user1", Option::<String>::None).expect("valid actor"),
+            SourceBindingKey::new("space:0:;conversation:5:conv1;topic:0:;")
+                .expect("valid source binding"),
+            ExternalEventId::new("evt:action").expect("valid event"),
+        )
+    }
+
+    #[test]
+    fn typed_tokens_reject_empty_oversized_and_control_values() {
+        assert!(SourceBindingKey::new("").is_err());
+        assert!(ProductCommandName::new("x".repeat(PRODUCT_COMMAND_NAME_MAX_BYTES + 1)).is_err());
+        assert!(AuthRequestRef::new("auth\nrequest").is_err());
+
+        let linked = LinkedThreadActionId::new("open-thread").expect("valid action id");
+        assert_eq!(linked.as_str(), "open-thread");
+        assert_eq!(linked.clone().into_inner(), "open-thread");
+        assert_eq!(String::from(linked), "open-thread");
+    }
+
+    #[test]
+    fn product_action_id_round_trips_display_and_uuid() {
+        let action_id = ProductActionId::new();
+        assert_eq!(action_id.to_string(), action_id.as_uuid().to_string());
+        assert_ne!(ProductActionId::default().as_uuid(), action_id.as_uuid());
+    }
+
+    #[test]
+    fn inbound_action_tracks_dispatch_settle_and_terminal_state() {
+        let mut action = ProductInboundAction::begin(fingerprint(), Utc::now());
+        assert_eq!(action.phase, ActionPhase::Received);
+        assert!(!action.is_terminal());
+        assert!(action.dispatch_kind.is_none());
+        assert!(action.outcome.is_none());
+
+        let run_id = TurnRunId::new();
+        action.mark_dispatched(ActionDispatchKind::UserMessageTurn { run_id });
+        assert_eq!(action.phase, ActionPhase::Dispatched);
+        assert_eq!(
+            action.dispatch_kind,
+            Some(ActionDispatchKind::UserMessageTurn { run_id })
+        );
+        assert!(!action.is_terminal());
+
+        action.settle(ProductInboundAck::NoOp);
+        assert_eq!(action.phase, ActionPhase::Settled);
+        assert_eq!(action.outcome, Some(ProductInboundAck::NoOp));
+        assert!(action.settled_at.is_some());
+        assert!(action.is_terminal());
+    }
+
+    #[test]
+    fn inbound_action_marks_deduplicated_replay_with_prior_outcome() {
+        let mut action = ProductInboundAction::begin(fingerprint(), Utc::now());
+        let prior = ProductInboundAck::Rejected(ProductRejection::permanent(
+            ProductRejectionKind::PolicyDenied,
+            "already rejected",
+        ));
+
+        action.mark_deduplicated(prior.clone());
+
+        assert_eq!(action.phase, ActionPhase::DeduplicatedReplay);
+        assert_eq!(
+            action.outcome,
+            Some(ProductInboundAck::Duplicate {
+                prior: Box::new(prior)
+            })
+        );
+        assert!(action.settled_at.is_some());
+        assert!(action.is_terminal());
     }
 }

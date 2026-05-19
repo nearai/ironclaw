@@ -133,7 +133,162 @@ pub(crate) fn system_time_from_unix_seconds(seconds: i64) -> Option<SystemTime> 
     Some(UNIX_EPOCH + Duration::from_secs(seconds as u64))
 }
 
+/// Build a [`FilesystemError::BackendInfrastructure`] for a failure that
+/// happens outside any caller-supplied path scope (pool acquisition,
+/// `run_migrations`, pragma setup, schema bootstrapping). The previous
+/// `valid_engine_path()` helper returned a `/engine` placeholder so the
+/// path-bearing [`FilesystemError::Backend`] variant could be used; that
+/// placeholder masked which subsystem actually failed, so a real failure
+/// reported a fictional path. Backends now use this helper instead, and
+/// the variant explicitly omits `path`.
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-pub(crate) fn valid_engine_path() -> VirtualPath {
-    VirtualPath::new("/engine").unwrap_or_else(|_| unreachable!("literal virtual path is valid"))
+pub(crate) fn infrastructure_error(
+    operation: FilesystemOperation,
+    reason: impl Into<String>,
+) -> FilesystemError {
+    FilesystemError::BackendInfrastructure {
+        operation,
+        reason: reason.into(),
+    }
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) fn infrastructure_pg_error(
+    operation: FilesystemOperation,
+    error: tokio_postgres::Error,
+) -> FilesystemError {
+    infrastructure_error(operation, error.to_string())
+}
+
+#[cfg(feature = "libsql")]
+pub(crate) fn infrastructure_libsql_error(
+    operation: FilesystemOperation,
+    error: libsql::Error,
+) -> FilesystemError {
+    infrastructure_error(operation, error.to_string())
+}
+
+/// Build a deterministic SQL index identifier from a mount prefix + spec
+/// name. `IndexKey`/`IndexName` are validated to `[A-Za-z_][A-Za-z0-9_]*`,
+/// so the only non-identifier characters we strip are the prefix's slashes.
+/// Length capped at 62 to fit Postgres' 63-char identifier cap so libsql
+/// and postgres share one naming convention.
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+pub(crate) fn sql_index_name(prefix: &str, name: &str) -> String {
+    let prefix_clean: String = prefix
+        .trim_matches('/')
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let raw = format!("idx_rfs_{prefix_clean}_{name}");
+    if raw.len() <= 62 {
+        return raw;
+    }
+    // PR #3679 review fix: distinct long inputs must map to distinct
+    // identifiers. Append a stable blake3 suffix before truncating so
+    // `CREATE ... IF NOT EXISTS` cannot silently reuse the wrong index.
+    let hash = blake3::hash(raw.as_bytes());
+    let hash_hex = hash.to_hex();
+    let suffix = format!("_{}", &hash_hex.as_str()[..8]);
+    let keep = 62usize.saturating_sub(suffix.len());
+    let cutoff = raw
+        .char_indices()
+        .nth(keep)
+        .map(|(i, _)| i)
+        .unwrap_or(raw.len());
+    let mut out = raw[..cutoff].to_string();
+    out.push_str(&suffix);
+    out
+}
+
+/// Escape a LIKE pattern that already contains a trailing `%` wildcard
+/// **intentionally appended by the caller** (the path-prefix scan case in
+/// `query`). The trailing `%` is preserved so it remains a wildcard;
+/// every other `%`, `_`, and `!` is escaped.
+///
+/// Reviewer note (PR #3661): this is **NOT** suitable for user-supplied
+/// LIKE input — use [`escape_like_literal`] instead, which escapes every
+/// special character including a trailing `%`.
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+pub(crate) fn escape_like_with_trailing_wildcard(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '%' if chars.peek().is_some() => out.push_str("!%"),
+            '_' => out.push_str("!_"),
+            '!' => out.push_str("!!"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Fully-literal LIKE escape for user-supplied values. PR #3661 reviewer
+/// fix: a literal prefix like `tenant:%` must not become a wildcard at
+/// query time, so every `%`, `_`, and `!` is escaped.
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+pub(crate) fn escape_like_literal(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '%' => out.push_str("!%"),
+            '_' => out.push_str("!_"),
+            '!' => out.push_str("!!"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Convert a raw `i64` version column into a [`RecordVersion`].
+///
+/// PR #3659 reviewer fix: previously sites used `version_raw.max(0) as u64`,
+/// which silently masked a corrupt negative version to `0` — indistinguishable
+/// from a legitimately fresh row. This helper surfaces the corruption as
+/// [`FilesystemError::CorruptRecordVersion`] so the operator sees it.
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+pub(crate) fn record_version_from_i64(
+    path: &VirtualPath,
+    raw: i64,
+) -> Result<crate::RecordVersion, FilesystemError> {
+    u64::try_from(raw)
+        .map(crate::RecordVersion::from_backend)
+        .map_err(|_| FilesystemError::CorruptRecordVersion {
+            path: path.clone(),
+            raw,
+        })
+}
+
+/// Convert a u64 [`RecordVersion`] value into the i64 SQL binding both
+/// backends use. Audit finding F6: the prior `expected.get() as i64` cast
+/// silently wraps for `RecordVersion` values ≥ 2^63 (a corrupt or
+/// future-large version), producing a negative bind parameter that the
+/// `WHERE version = ?` clause would never match. Surface
+/// `CorruptRecordVersion` instead of letting the write silently
+/// VersionMismatch.
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+pub(crate) fn record_version_to_i64(
+    path: &VirtualPath,
+    version: crate::RecordVersion,
+) -> Result<i64, FilesystemError> {
+    i64::try_from(version.get()).map_err(|_| FilesystemError::CorruptRecordVersion {
+        path: path.clone(),
+        raw: version.get() as i64,
+    })
+}
+
+/// Convert a u64 [`Page::offset`](crate::Page::offset) into the i64 SQL
+/// binding both backends use. Audit finding F6: `page.offset as i64`
+/// wraps for offsets ≥ 2^63, producing a negative `OFFSET` that SQLite
+/// rejects with a cryptic backend error and Postgres rejects loudly but
+/// without naming what overflowed. Surface a typed `Backend` error
+/// naming the operation and value instead.
+#[cfg(any(feature = "postgres", feature = "libsql"))]
+pub(crate) fn page_offset_to_i64(path: &VirtualPath, offset: u64) -> Result<i64, FilesystemError> {
+    i64::try_from(offset).map_err(|_| FilesystemError::Backend {
+        path: path.clone(),
+        operation: FilesystemOperation::Query,
+        reason: format!("page offset {offset} exceeds backend i64 range"),
+    })
 }

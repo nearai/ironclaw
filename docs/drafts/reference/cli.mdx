@@ -144,6 +144,145 @@ ironclaw tool install ./my-tool.wasm
 ironclaw tool remove my-tool
 ```
 
+### traces
+
+Manage opt-in trace contributions.
+
+```bash
+ironclaw traces <SUBCOMMAND>
+```
+
+Trace contribution is disabled by default. `preview` converts an existing recorded trace into a redacted contribution envelope with consent, redaction, trace-card, value-card, scorecard, replayability, revocation, and credit metadata.
+
+Autonomous submission only runs after `opt-in` configures an explicit private ingestion endpoint. `opt-in` writes both the global CLI policy and the runtime/web policy for this instance's configured `owner_id`; operators can target a hosted user scope explicitly with `--user-scope`.
+
+**Subcommands:**
+
+| Subcommand | Description |
+|------------|-------------|
+| `opt-in` | Enable autonomous submission after local redaction |
+| `opt-out` | Disable autonomous submission |
+| `status` | Show the local contribution policy |
+| `preview` | Build a redacted contribution envelope from a recorded trace |
+| `enqueue` | Queue a redacted envelope for autonomous submission |
+| `flush-queue` | Submit eligible queued envelopes |
+| `queue-status` | Show local autonomous queue diagnostics |
+| `credit` | Show local credit totals and explanations |
+| `submit` | Submit one redacted envelope to an explicit endpoint |
+| `list-submissions` | List local submission records |
+| `revoke` | Mark a submission revoked locally and optionally call a revocation endpoint |
+| `ingest-health` | Check a Trace Commons ingestion service `/health` endpoint |
+| `quarantine-list` | List centrally quarantined traces for reviewer/admin triage |
+| `active-learning-review-queue` | List active-learning central trace review work |
+| `review-decision` | Approve or reject a central quarantined trace |
+| `review-lease-claim` | Claim a DB-backed central trace review lease |
+| `review-lease-release` | Release a DB-backed central trace review lease |
+| `append-credit-event` | Append a delayed central credit ledger event |
+| `worker-utility-credit` | Append idempotent delayed utility credit through the worker route |
+| `process-evaluation-submit` | Submit process-evaluation metadata and optional idempotent training utility credit |
+| `analytics-summary` | Show central Trace Commons analytics |
+| `maintenance-run` | Request central retention/revocation propagation and DB reconciliation maintenance |
+| `worker-retention-maintenance` | Request scoped retention maintenance through the worker route |
+| `retention-jobs-list` | List DB-backed retention maintenance jobs |
+| `retention-job-items` | List DB-backed per-submission retention job actions |
+| `worker-vector-index` | Request scoped vector indexing through the worker route |
+| `benchmark-convert` | Request central benchmark conversion for approved replayable traces |
+| `worker-benchmark-convert` | Request benchmark conversion through the worker route |
+| `benchmark-lifecycle-update` | Update benchmark registry/evaluator lifecycle metadata |
+| `replay-dataset-export` | Export approved replay dataset metadata |
+| `replay-export-manifests` | List central replay export manifest metadata |
+| `config-status` | Show safe non-secret Trace Commons config cutover/status booleans |
+| `tenant-policy-get` | Read the DB-backed tenant contribution policy |
+| `tenant-policy-set` | Write the DB-backed tenant contribution policy |
+| `tenant-access-grants-list` | List DB-backed tenant access grants |
+| `tenant-principal-ref` | Derive the stored principal_ref for tenant access grants |
+| `tenant-access-grant-create` | Create a DB-backed tenant access grant |
+| `tenant-access-grant-revoke` | Revoke a DB-backed tenant access grant |
+| `ranker-training-candidates` | Export approved ranker training candidates |
+| `ranker-training-pairs` | Export approved ranker training pairs |
+| `audit-events` | List central Trace Commons audit events |
+| `list-traces` | List central trace metadata with reviewer filters |
+| `privacy-filter-canary` | Run a local Privacy Filter sidecar canary check |
+
+**Examples:**
+
+```bash
+ironclaw traces opt-in --endpoint https://trace-ingest.internal/v1/traces
+ironclaw traces opt-in --endpoint https://trace-ingest.internal/v1/traces --user-scope tenant-a:user-alice
+ironclaw traces preview --recorded-trace trace.json --output contribution.json
+ironclaw traces enqueue --envelope contribution.json
+ironclaw traces flush-queue
+ironclaw traces queue-status
+ironclaw traces queue-status --json --scope tenant-a:user-alice
+ironclaw traces credit
+ironclaw traces credit --notice --ack
+ironclaw traces credit --notice --snooze-hours 24
+ironclaw traces ingest-health --endpoint https://trace-ingest.internal
+ironclaw traces quarantine-list --endpoint https://trace-ingest.internal --bearer-token-env TRACE_COMMONS_REVIEWER_TOKEN
+ironclaw traces active-learning-review-queue --endpoint https://trace-ingest.internal --limit 25 --privacy-risk medium
+ironclaw traces review-decision 018f2b7b-0c11-72fd-95c4-1f9f98feac01 --endpoint https://trace-ingest.internal --decision approve --reason "redaction verified"
+ironclaw traces quarantine-list --endpoint https://trace-ingest.internal --lease-filter available --bearer-token-env TRACE_COMMONS_REVIEWER_TOKEN
+ironclaw traces active-learning-review-queue --endpoint https://trace-ingest.internal --lease-filter mine --bearer-token-env TRACE_COMMONS_REVIEWER_TOKEN
+ironclaw traces review-lease-claim --endpoint https://trace-ingest.internal --submission-id 018f2b7b-0c11-72fd-95c4-1f9f98feac01 --lease-ttl-seconds 900 --review-due-at 2026-04-26T12:00:00Z --bearer-token-env TRACE_COMMONS_REVIEWER_TOKEN
+ironclaw traces review-lease-release --endpoint https://trace-ingest.internal --submission-id 018f2b7b-0c11-72fd-95c4-1f9f98feac01 --bearer-token-env TRACE_COMMONS_REVIEWER_TOKEN
+ironclaw traces append-credit-event 018f2b7b-0c11-72fd-95c4-1f9f98feac01 --endpoint https://trace-ingest.internal --event-type regression-catch --credit-points-delta 2.5 --reason "Caught replay regression" --external-ref regression:trace-replay-smoke
+ironclaw traces worker-utility-credit --endpoint https://trace-ingest.internal --bearer-token-env TRACE_COMMONS_UTILITY_CREDIT_WORKER_TOKEN --event-type ranking-utility --credit-points-delta 1.25 --reason "ranking eval utility" --external-ref ranker:nightly-42 018f2b7b-0c11-72fd-95c4-1f9f98feac01
+ironclaw traces process-evaluation-submit --endpoint https://trace-ingest.internal --bearer-token-env TRACE_COMMONS_PROCESS_EVALUATION_WORKER_TOKEN --submission-id 018f2b7b-0c11-72fd-95c4-1f9f98feac01 --reason "nightly evaluator pass" --evaluator-version process-eval-2026-04-26 --tool-selection pass --verification partial --utility-credit-points-delta 0.5 --utility-external-ref process-eval:nightly:2026-04-26
+ironclaw traces analytics-summary --endpoint https://trace-ingest.internal --json
+ironclaw traces maintenance-run --endpoint https://trace-ingest.internal --purpose db-read-cutover --dry-run --backfill-db-mirror --index-vectors --reconcile-db-mirror
+ironclaw traces worker-retention-maintenance --endpoint https://trace-ingest.internal --bearer-token-env TRACE_COMMONS_RETENTION_WORKER_TOKEN --purpose retention-sweep --dry-run
+ironclaw traces retention-jobs-list --endpoint https://trace-ingest.internal --bearer-token-env TRACE_COMMONS_ADMIN_TOKEN --status complete --limit 25
+ironclaw traces retention-job-items --endpoint https://trace-ingest.internal --bearer-token-env TRACE_COMMONS_ADMIN_TOKEN 018f2b7b-0c11-72fd-95c4-1f9f98feac01 --action purge --status done
+ironclaw traces worker-vector-index --endpoint https://trace-ingest.internal --bearer-token-env TRACE_COMMONS_VECTOR_WORKER_TOKEN --purpose vector-refresh
+ironclaw traces benchmark-convert --endpoint https://trace-ingest.internal --purpose regression-suite --consent-scope benchmark-only --status accepted --privacy-risk low --limit 100
+ironclaw traces worker-benchmark-convert --endpoint https://trace-ingest.internal --bearer-token-env TRACE_COMMONS_BENCHMARK_WORKER_TOKEN --purpose benchmark-worker --consent-scope benchmark-only --status accepted --privacy-risk low --limit 100
+ironclaw traces benchmark-lifecycle-update --endpoint https://trace-ingest.internal --bearer-token-env TRACE_COMMONS_BENCHMARK_WORKER_TOKEN --conversion-id 018f2b7b-0c11-72fd-95c4-1f9f98feac01 --registry-status published --registry-ref benchmark:trace-018 --evaluation-status passed --evaluator-ref eval:nightly-42 --score 0.97 --pass-count 7 --fail-count 0 --reason "published after evaluator pass"
+ironclaw traces replay-dataset-export --endpoint https://trace-ingest.internal --purpose regression-suite --consent-scope benchmark-only --privacy-risk low --limit 100 --output replay-dataset.json
+ironclaw traces replay-export-manifests --endpoint https://trace-ingest.internal
+ironclaw traces config-status --endpoint https://trace-ingest.internal --bearer-token-env TRACE_COMMONS_ADMIN_TOKEN
+ironclaw traces tenant-policy-get --endpoint https://trace-ingest.internal --bearer-token-env TRACE_COMMONS_ADMIN_TOKEN
+ironclaw traces tenant-policy-set --endpoint https://trace-ingest.internal --bearer-token-env TRACE_COMMONS_ADMIN_TOKEN --policy-version 2026-04-26 --allowed-consent-scopes debugging-evaluation,benchmark-only,ranking-training --allowed-uses debugging,evaluation,benchmark-generation,ranking-model-training
+ironclaw traces tenant-access-grants-list --endpoint https://trace-ingest.internal --bearer-token-env TRACE_COMMONS_ADMIN_TOKEN --status active --role contributor
+ironclaw traces tenant-principal-ref --signed-tenant-id tenant-a --signed-actor-ref tenant-a-agent
+ironclaw traces tenant-access-grant-create --endpoint https://trace-ingest.internal --bearer-token-env TRACE_COMMONS_ADMIN_TOKEN --principal-ref principal_sha256:... --role contributor --allowed-consent-scopes debugging-evaluation --allowed-uses debugging --issuer https://issuer.near.com --audience trace-commons --subject tenant-a-agent --expires-at 2026-04-28T00:00:00Z --reason "hosted tenant verified" --metadata hosted_surface=near.com
+ironclaw traces tenant-access-grant-revoke --endpoint https://trace-ingest.internal --bearer-token-env TRACE_COMMONS_ADMIN_TOKEN 018f2b7b-0c11-72fd-95c4-1f9f98feac01 --reason "tenant deprovisioned"
+ironclaw traces ranker-training-candidates --endpoint https://trace-ingest.internal --consent-scope ranking-training --status accepted --privacy-risk low --limit 100 --output ranker-candidates.json
+ironclaw traces ranker-training-pairs --endpoint https://trace-ingest.internal --consent-scope ranking-training --status accepted --privacy-risk low --limit 100 --output ranker-pairs.json
+ironclaw traces audit-events --endpoint https://trace-ingest.internal --limit 50
+ironclaw traces list-traces --endpoint https://trace-ingest.internal --status accepted --privacy-risk low
+ironclaw traces privacy-filter-canary
+```
+
+**Local queue and credit behavior:**
+
+- `flush-queue` submits eligible queued traces under the standing opt-in policy after compacting duplicate envelopes and orphan held sidecars.
+- Retryable submission failures stay queued with typed, redacted backoff sidecars; due credit notices are emitted without exposing envelope bodies.
+- Standing opt-in can use `IRONCLAW_TRACE_SUBMIT_TOKEN`, or guarded upload-claim issuer settings that mint short-lived EdDSA/Ed25519 claims for queue flush, explicit submit, status sync, and remote revoke.
+- Upload-claim issuer URLs must be HTTPS, exactly host-allowlisted, redirect-free, and free of embedded credentials, query, or fragment values.
+- `queue-status` reads local scoped state only and reports readiness, capture toggles, queue/held counts, retry and manual-review holds, compaction counters, sanitized warning aggregates, safe failure classes, and local credit summary.
+- `credit --notice`, `--ack`, and `--snooze-hours` manage periodic local credit notices keyed by a safe credit fingerprint.
+- Private ingestion status sync can reflect delayed ledger deltas and credit-event counts locally.
+
+Central trace status filters accept `accepted`, `quarantined`, `rejected`, `revoked`, `expired`, and `purged`.
+
+**Central reviewer/admin commands:**
+
+- Central commands always require an explicit endpoint and `--bearer-token-env`; they do not change local opt-in defaults and do not upload raw traces.
+- Health accepts a service base URL, `/health`, or `/v1/traces`; other central commands accept a service base URL or `/v1/traces` and derive private API paths.
+- Missing credentials, non-2xx responses, and older servers that do not expose newer maintenance/review/export routes fail cleanly.
+- Production upload claims should be EdDSA/Ed25519 signed; static tokens and HS256 claims remain controlled-pilot bridge paths.
+- Ingestion services can use default/keyed EdDSA public keys, JSON/file/guarded-HTTPS keysets, activation windows, EdDSA-required auth, managed-keyset-only enforcement, and live issuer-managed keyset refresh.
+
+**Review, maintenance, and export helpers:**
+
+- `active-learning-review-queue` calls `/v1/review/active-learning` and exits normally with a not-exposed-yet message when older services return 404 or 501.
+- `quarantine-list` and `active-learning-review-queue` accept `--lease-filter all|mine|available|active|expired`; lease claim/release commands manage `/v1/review/{submission_id}/lease`.
+- `maintenance-run` posts to `/v1/admin/maintenance` with explicit `--purpose`, optional `--dry-run`, DB backfill/reconciliation/vector flags, retention purge options, and export-cache pruning controls.
+- Worker routes provide narrower retention, vector-index, benchmark-convert, utility-credit, and process-evaluation requests.
+- Benchmark, replay, ranker, analytics, config-status, audit, tenant-policy, and tenant-access commands expose compact metadata and safe readouts without raw trace bodies or secret material.
+- Delayed credit commands require explicit reasons, and downstream utility events require `--external-ref` for auditability.
+- `privacy-filter-canary` is local only; it requires `IRONCLAW_TRACE_PRIVACY_FILTER_COMMAND` and honors the documented timeout and IO-limit environment variables.
+
 ### registry
 
 Manage the tool registry.

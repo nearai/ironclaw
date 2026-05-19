@@ -40,6 +40,8 @@ Supported built-in behavior:
 
 Surface versioning returns `sha256:<lower-hex>` over canonical JSON that includes the configured base version, `SurfaceKind`, visibility policy, visibility-affecting context fields, grants, relevant provider trust ceilings, visible capability ids/providers/runtimes/effects/schemas, selected resource estimates, and visible access status. Policy allow-lists and visible capability payloads are canonicalized before hashing, so semantically equivalent allow-list ordering or registry insertion ordering does not churn the version; returned capabilities still preserve filtered registry order for deterministic rendering. The hash is stable across process runs so upper loop services can checkpoint the visible tool surface. Direct invocation remains authoritative: a capability omitted from the visible surface must still fail closed through `CapabilityHost` authorization if a caller tries to invoke it directly.
 
+The hot capability catalog resolves cold manifest refs through the package's virtual root before model/tool publication. `input_schema_ref` replaces the descriptor's `$ref`-style `parameters_schema`, while `output_schema_ref` and `prompt_doc_ref` are retained as adjacent resolved publication records. Resolution is bounded, fails closed on missing/invalid files, and remains publication metadata only: it does not grant authority, execute runtime code, or construct host-port implementations.
+
 ## FirstParty runtime adapter
 
 `HostRuntimeServices` can register host-owned first-party capability handlers through `FirstPartyCapabilityRegistry`. When a declared capability uses `RuntimeKind::FirstParty`, dispatch still follows the normal path:

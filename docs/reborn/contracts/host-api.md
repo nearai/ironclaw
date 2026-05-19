@@ -25,6 +25,7 @@ It is not a runtime, policy engine, filesystem, budget ledger, or extension mana
 - actions and decisions
 - approvals and obligations
 - resource estimates/usages
+- host-owned HTTP ingress descriptors
 - audit/event envelopes
 
 The first implementation PR should create this crate before implementing `ironclaw_filesystem`, `ironclaw_resources`, `ironclaw_extensions`, `ironclaw_wasm`, or `ironclaw_dispatcher`.
@@ -80,6 +81,7 @@ crates/ironclaw_host_api/src/
   approval.rs
   action.rs
   decision.rs
+  ingress.rs
   audit.rs
   error.rs
 ```
@@ -588,6 +590,7 @@ Rules:
 - profile schema refs are relative repository paths, never absolute paths, URLs, or traversal paths;
 - profile schema-ref equality is identity/reference matching only; it does not prove JSON-schema conformance, which is deferred to manifest/claim validation slices;
 - host-port IDs are lowercase `host.*` dotted names;
+- the initial host-runtime supported catalog entry is `host.runtime.http_egress` for mediated runtime HTTP egress validation;
 - host-port catalogs reject duplicate entries and are not runtime implementation registries;
 - host-port views reject duplicate grants and do not grant authority by themselves;
 - `HostPortGrant` remains a thin `HostPortId` grant token; future attenuation or parameter narrowing uses a separate wire type.
@@ -1043,7 +1046,59 @@ The first `ironclaw_host_api` implementation is not accepted without tests for:
 
 ---
 
-## 20. Explicit non-goals for PR 1
+## 20. Host-owned HTTP ingress contracts
+
+`ironclaw_host_api::ingress` defines route and policy vocabulary for Reborn
+product/API HTTP surfaces. It is a declaration contract, not a server.
+
+Product/API crates may expose:
+
+- complete `IngressRouteDescriptor` values;
+- request/response DTOs;
+- handlers or route fragments that receive host-provided services.
+
+Product/API crates must not:
+
+- bind sockets;
+- call `axum::serve`, `hyper::Server`, or equivalent listener/server APIs;
+- decide public exposure, bind address, or listener lifecycle;
+- bypass host-owned auth, tenant/user scope extraction, audit, body limits, rate limits, CORS, or WebSocket Origin policy;
+- execute privileged runtime/network/filesystem effects directly from ingress handlers.
+
+Each `IngressRouteDescriptor` must carry a fully resolved `IngressPolicy`:
+
+- route patterns are local absolute path patterns, already normalized by
+  rejection rather than cleanup: no URLs, query strings, fragments, backslashes,
+  NUL/control characters, leading/trailing whitespace, duplicate `/`, or `..`
+  traversal segments;
+- listener class (`LocalGateway`, `PublicWebhook`, `OAuthCallback`, `InternalWorker`, `TestOnly`);
+- auth policy, with explicit justification for public routes;
+- listener class and auth scheme are coherent: public webhooks require webhook
+  signatures, internal workers require internal tokens, effectful local gateway
+  routes require bearer/session auth, and OAuth callbacks require OAuth state
+  unless they are explicitly public no-effect callbacks;
+- scope extraction source;
+- auth policy and scope source are coherent: public routes cannot use
+  authenticated-caller scope, required-auth routes cannot use public-route
+  scope, and test-fixture scope requires a test-only listener class;
+- public-route scope is limited to no-effect and projection-only paths; product
+  workflow, turn coordination, host-port, and capability-host effects require a
+  resolved tenant/user scope source;
+- body and rate-limit policy, with explicit justification when rate limiting is disabled;
+- justification strings are clean human-readable reasons and reject leading or
+  trailing whitespace instead of normalizing it;
+- CORS and WebSocket Origin policy;
+- streaming mode;
+- audit/trace class;
+- allowed host-mediated effect path (`ProductWorkflow`, `TurnCoordinator`, `HostPort`, `CapabilityHost`, projection/no-effect).
+
+Actual enforcement lives in host composition. `ironclaw_host_api` must not import
+Axum, own route mounting, implement bearer/session/OIDC checks, apply policy
+engines, dispatch product workflow, or execute runtime effects.
+
+---
+
+## 21. Explicit non-goals for PR 1
 
 Do not implement in `ironclaw_host_api`:
 
@@ -1059,12 +1114,13 @@ Do not implement in `ironclaw_host_api`:
 - dispatcher builder
 - agent loop
 - gateway/TUI behavior
+- HTTP listener binding or route mounting
 
 If an implementation detail requires one of those, stop and move it to the owning crate contract.
 
 ---
 
-## 21. Acceptance criteria
+## 22. Acceptance criteria
 
 The host API contract is ready when:
 
@@ -1077,7 +1133,7 @@ The host API contract is ready when:
 
 ---
 
-## 22. Implementation note
+## 23. Implementation note
 
 Prefer private fields plus validated constructors for authority-bearing strings:
 

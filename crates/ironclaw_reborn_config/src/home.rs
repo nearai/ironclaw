@@ -113,6 +113,28 @@ impl RebornHome {
     pub fn source_label(&self) -> &'static str {
         self.source.label()
     }
+
+    /// Absolute path of the operator-edited boot config TOML.
+    ///
+    /// `$IRONCLAW_REBORN_HOME/config.toml`. The file is **optional**:
+    /// `RebornConfigFile::load` returns `Ok(None)` when it doesn't
+    /// exist, and the runtime falls back to compiled-in defaults.
+    pub fn config_file_path(&self) -> PathBuf {
+        self.path.join("config.toml")
+    }
+
+    /// Absolute path of the user-overlay LLM provider catalog.
+    ///
+    /// `$IRONCLAW_REBORN_HOME/providers.json`. Same JSON shape as v1's
+    /// `~/.ironclaw/providers.json` so the same editor tooling and
+    /// operator muscle memory apply. The file is **optional**: when
+    /// it's missing, the runtime uses only the compiled-in built-in
+    /// provider definitions. Loading happens in the composition root
+    /// via `ironclaw_llm::ProviderRegistry`; this accessor just hands
+    /// out the path.
+    pub fn providers_file_path(&self) -> PathBuf {
+        self.path.join("providers.json")
+    }
 }
 
 fn validate_non_empty(value: &OsString, name: &'static str) -> Result<(), RebornConfigError> {

@@ -9,3 +9,13 @@
 - Blocked/resumable runs keep the same-thread active lock until resume, cancel, fail, or complete. Running cancellation is two-phase: public cancel requests move to `CancelRequested`, and a trusted runner cancellation completion moves to terminal `Cancelled` and releases the lock exactly once.
 - Store lifecycle metadata and references only. Do not persist raw prompts, assistant content, tool input, secrets, host paths, or backend error details in turn state or events.
 - Keep concrete PostgreSQL/libSQL adapters and product projection/egress wiring out of the core contract unless a scoped follow-up explicitly adds them with parity tests.
+- Loop-framework contracts live here only when they are neutral runner/host
+  protocol: `LoopFailureKind`, `AgentLoopDriver`, `AgentLoopDriverHost`,
+  `LoopXxxPort` traits, run-profile descriptors, refs, prompt bundle contracts,
+  checkpoint load/stage contracts, progress events, and cancellation signals.
+- Implementations of those contracts live elsewhere: host adapters in
+  `ironclaw_loop_support`, driver-side integration in `ironclaw_reborn`, and
+  reusable loop mechanics in `ironclaw_agent_loop`.
+- Add a new `.rs` file before widening an existing contract file with an
+  unrelated responsibility. Do not create broad `common`, `misc`, or `helpers`
+  modules.

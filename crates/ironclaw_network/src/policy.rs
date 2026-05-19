@@ -138,7 +138,7 @@ fn authorize_static_policy(
     })
 }
 
-pub fn network_policy_allows(policy: &NetworkPolicy, target: &NetworkTarget) -> bool {
+pub(crate) fn network_policy_allows(policy: &NetworkPolicy, target: &NetworkTarget) -> bool {
     if policy.allowed_targets.is_empty() {
         return false;
     }
@@ -154,7 +154,10 @@ pub fn network_policy_allows(policy: &NetworkPolicy, target: &NetworkTarget) -> 
         .any(|pattern| target_matches_pattern(target, pattern))
 }
 
-pub fn target_matches_pattern(target: &NetworkTarget, pattern: &NetworkTargetPattern) -> bool {
+pub(crate) fn target_matches_pattern(
+    target: &NetworkTarget,
+    pattern: &NetworkTargetPattern,
+) -> bool {
     if let Some(scheme) = pattern.scheme
         && scheme != target.scheme
     {
@@ -168,7 +171,7 @@ pub fn target_matches_pattern(target: &NetworkTarget, pattern: &NetworkTargetPat
     host_matches_pattern(&target.host.to_ascii_lowercase(), &pattern.host_pattern)
 }
 
-pub fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+pub(crate) fn host_matches_pattern(host: &str, pattern: &str) -> bool {
     let host = host.to_ascii_lowercase();
     let pattern = pattern.to_ascii_lowercase();
     if let Some(suffix) = pattern.strip_prefix("*.") {
@@ -182,7 +185,7 @@ pub fn host_matches_pattern(host: &str, pattern: &str) -> bool {
     }
 }
 
-pub fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
+pub(crate) fn is_private_or_loopback_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => {
             ip.is_private()

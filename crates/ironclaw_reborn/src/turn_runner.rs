@@ -25,7 +25,8 @@ use tracing::{debug, error, warn};
 
 use ironclaw_turns::{
     AgentLoopDriverError, AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, LoopExit,
-    SanitizedFailure, TurnError, TurnLeaseToken, TurnRunId, TurnRunnerId, TurnScope, TurnStatus,
+    SanitizedFailure, TurnError, TurnLeaseToken, TurnRunId, TurnRunWake, TurnRunWakeNotifier,
+    TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStatus,
     runner::{
         ClaimRunRequest, ClaimedTurnRun, HeartbeatRequest, RecordModelRouteSnapshotRequest,
         RecordRecoveryRequiredRequest, RecoverExpiredLeasesRequest, TurnRunTransitionPort,
@@ -170,6 +171,13 @@ impl TurnRunnerWakeSender {
     /// Signal the worker that there may be new work available.
     pub fn wake(&self) {
         self.notify.notify_one();
+    }
+}
+
+impl TurnRunWakeNotifier for TurnRunnerWakeSender {
+    fn notify_queued_run(&self, _wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
+        self.wake();
+        Ok(())
     }
 }
 
@@ -410,18 +418,8 @@ impl TurnRunnerWorker {
         let run_id = claimed.state.run_id;
 
         match (status, claimed.state.checkpoint_id) {
-            (TurnStatus::Queued, _) => {
-                let request = AgentLoopDriverRunRequest {
-                    turn_id,
-                    run_id,
-                    resolved_run_profile: claimed.resolved_run_profile.clone(),
-                };
-                driver
-                    .run(request, host.as_ref())
-                    .await
-                    .map_err(DriverInvocationError::DriverError)
-            }
-            // Resumed runs have a checkpoint.
+            // Requeued blocked runs keep their checkpoint while returning to
+            // `Queued`; checkpoint identity is the resume signal.
             (_, Some(checkpoint_id)) => {
                 let request = AgentLoopDriverResumeRequest {
                     turn_id,
@@ -431,6 +429,17 @@ impl TurnRunnerWorker {
                 };
                 driver
                     .resume(request, host.as_ref())
+                    .await
+                    .map_err(DriverInvocationError::DriverError)
+            }
+            (TurnStatus::Queued, _) => {
+                let request = AgentLoopDriverRunRequest {
+                    turn_id,
+                    run_id,
+                    resolved_run_profile: claimed.resolved_run_profile.clone(),
+                };
+                driver
+                    .run(request, host.as_ref())
                     .await
                     .map_err(DriverInvocationError::DriverError)
             }

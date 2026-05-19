@@ -95,6 +95,7 @@ fn test_resolved_profile_with_driver(
             max_model_calls: 32,
             max_capability_invocations: 64,
         },
+        personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
         runtime_constraints: RuntimeProfileConstraints {
             allow_raw_runtime_backend_selection: false,
             allow_broad_capability_surface: false,
@@ -478,7 +479,7 @@ impl ironclaw_turns::run_profile::LoopInputPort for StubHost {
 
     async fn ack_inputs(
         &self,
-        _cursor: ironclaw_turns::run_profile::LoopInputCursor,
+        _tokens: Vec<ironclaw_turns::run_profile::LoopInputAckToken>,
     ) -> Result<(), AgentLoopHostError> {
         unimplemented!("stub host: never called by mock driver")
     }
@@ -545,6 +546,12 @@ impl ironclaw_turns::run_profile::LoopProgressPort for StubHost {
         _event: ironclaw_turns::run_profile::LoopProgressEvent,
     ) -> Result<(), AgentLoopHostError> {
         unimplemented!("stub host: never called by mock driver")
+    }
+}
+
+impl ironclaw_turns::run_profile::LoopCancellationPort for StubHost {
+    fn observe_cancellation(&self) -> Option<ironclaw_turns::run_profile::LoopCancellationSignal> {
+        None
     }
 }
 
@@ -818,6 +825,51 @@ async fn worker_resumes_claimed_run_with_checkpoint() {
     assert!(
         driver.run_requests().is_empty(),
         "checkpointed recovery run must not start from scratch"
+    );
+    let resume_requests = driver.resume_requests();
+    assert_eq!(resume_requests.len(), 1);
+    assert_eq!(resume_requests[0].turn_id, turn_id);
+    assert_eq!(resume_requests[0].run_id, run_id);
+    assert_eq!(resume_requests[0].checkpoint_id, checkpoint_id);
+    assert_eq!(resume_requests[0].resolved_run_profile, profile);
+}
+
+#[tokio::test]
+async fn worker_resumes_requeued_claimed_run_with_checkpoint() {
+    let desc = test_descriptor();
+    let driver = Arc::new(MockDriver::completing(desc.clone()));
+    let registry = Arc::new(setup_registry(driver.clone()));
+    let checkpoint_id = TurnCheckpointId::new();
+    let mut claimed = make_claimed_run(&desc, test_scope(), TurnStatus::Queued);
+    claimed.state.checkpoint_id = Some(checkpoint_id);
+    let turn_id = claimed.state.turn_id;
+    let run_id = claimed.state.run_id;
+    let profile = claimed.resolved_run_profile.clone();
+    let port = Arc::new(MockTransitionPort::new().with_claim_result(Ok(Some(claimed))));
+    let (_wake_sender, wake_receiver) = TurnRunnerWakeReceiver::new();
+    let worker = TurnRunnerWorker::new(
+        TurnRunnerWorkerConfig {
+            heartbeat_interval: Duration::from_secs(60),
+            poll_interval: Duration::from_secs(60),
+            scope_filter: None,
+        },
+        port.clone(),
+        make_applier(port),
+        registry,
+        Arc::new(MockHostFactory),
+        wake_receiver,
+    );
+
+    assert!(
+        worker
+            .try_claim_and_run(&CancellationToken::new())
+            .await
+            .unwrap()
+    );
+
+    assert!(
+        driver.run_requests().is_empty(),
+        "requeued checkpointed run must not start from scratch"
     );
     let resume_requests = driver.resume_requests();
     assert_eq!(resume_requests.len(), 1);

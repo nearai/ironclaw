@@ -15,17 +15,29 @@ publish = false
 [package.metadata.dist]
 dist = false
 
+[features]
+default = ["root-llm-provider"]
+# Wire a real LLM provider into the assembled runtime. Mirrors the same
+# `root-llm-provider` feature on `ironclaw_reborn_composition` /
+# `ironclaw_reborn`, so building without it produces a CLI binary that
+# can still boot the runtime substrate but will surface an "LLM gateway
+# not wired" error on the first `send_user_message`.
+root-llm-provider = ["ironclaw_reborn_composition/root-llm-provider"]
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4.5.0"
-ironclaw_reborn = { path = "../ironclaw_reborn", version = "0.1.0" }
+ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
+secrecy = "0.10"
 serde_json = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "io-std", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 [[bin]]
 name = "ironclaw-reborn"
 path = "src/main.rs"
-
-[dev-dependencies]
-tempfile = "3"

@@ -1,6 +1,9 @@
 use std::sync::{Arc, Mutex};
 
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage};
+use ironclaw_extensions::{
+    CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
+    HostApiContractRegistry, ManifestSource,
+};
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
 use ironclaw_scripts::*;
@@ -114,7 +117,13 @@ fn script_governor() -> (InMemoryResourceGovernor, ResourceAccount) {
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse(manifest).unwrap();
+    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+        manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .unwrap();
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
 }
@@ -154,6 +163,14 @@ fn script_request(input: serde_json::Value) -> ScriptExecutionRequest<'static> {
     }
 }
 
+fn capability_provider_contracts() -> HostApiContractRegistry {
+    let mut contracts = HostApiContractRegistry::new();
+    contracts
+        .register(Arc::new(CapabilityProviderHostApiContract::new().unwrap()))
+        .unwrap();
+    contracts
+}
+
 fn sample_scope() -> ResourceScope {
     ResourceScope {
         tenant_id: TenantId::new("tenant-a").unwrap(),
@@ -170,7 +187,7 @@ fn sample_account() -> ResourceAccount {
     ResourceAccount::tenant(TenantId::new("tenant-a").unwrap())
 }
 
-const SCRIPT_MANIFEST: &str = r#"
+const SCRIPT_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "script"
 name = "Script Echo"
 version = "0.1.0"
@@ -184,10 +201,18 @@ image = "alpine:latest"
 command = "script-echo"
 args = ["--json"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "script.echo"
 description = "Echo through Script"
 effects = ["dispatch_capability", "execute_code"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/script/echo.input.v1.json"
+output_schema_ref = "schemas/script/echo.output.v1.json"
 "#;

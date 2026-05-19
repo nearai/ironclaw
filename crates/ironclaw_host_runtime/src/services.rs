@@ -24,14 +24,14 @@ use ironclaw_dispatcher::{
 };
 use ironclaw_events::{
     AuditSink, DurableAuditLog, DurableAuditSink, DurableEventLog, DurableEventSink, EventSink,
-    InMemoryAuditSink, InMemoryEventSink,
+    InMemoryAuditSink, InMemoryDurableAuditLog, InMemoryDurableEventLog, InMemoryEventSink,
 };
 use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime};
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId, DispatchError,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
@@ -48,33 +48,21 @@ use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
     build_reborn_event_stores,
 };
-#[cfg(feature = "libsql")]
-use ironclaw_resources::LibSqlResourceGovernorStore;
-#[cfg(feature = "postgres")]
-use ironclaw_resources::PostgresResourceGovernorStore;
-use ironclaw_resources::{InMemoryResourceGovernor, ResourceGovernor};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_resources::{PersistentResourceGovernor, ResourceError};
-#[cfg(feature = "libsql")]
-use ironclaw_run_state::LibSqlRunStateApprovalStore;
-#[cfg(feature = "postgres")]
-use ironclaw_run_state::PostgresRunStateApprovalStore;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_run_state::RunStateError;
+use ironclaw_resources::{
+    FilesystemResourceGovernorStore, InMemoryResourceGovernor, PersistentResourceGovernor,
+    ResourceGovernor,
+};
 use ironclaw_run_state::{
-    ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
-    RunStateApprovalStore, RunStateStore,
+    ApprovalRequestStore, FilesystemApprovalRequestStore, FilesystemRunStateStore,
+    InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateApprovalStore, RunStateStore,
 };
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::{InMemorySecretStore, SecretStore};
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
-#[cfg(feature = "libsql")]
-use ironclaw_turns::LibSqlTurnStateStore;
-#[cfg(feature = "postgres")]
-use ironclaw_turns::PostgresTurnStateStore;
 use ironclaw_turns::{
-    DefaultTurnCoordinator, InMemoryTurnStateStore, NoopTurnRunWakeNotifier, TurnRunWakeNotifier,
-    TurnStateStore, runner::TurnRunTransitionPort,
+    DefaultTurnCoordinator, FilesystemTurnStateStore, InMemoryTurnStateStore,
+    NoopTurnRunWakeNotifier, RunProfileResolver, TurnRunWakeNotifier, TurnStateStore,
+    runner::TurnRunTransitionPort,
 };
 use ironclaw_wasm::{
     DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,
@@ -169,6 +157,7 @@ pub enum ProductionWiringComponent {
     WasmRuntime,
     FirstPartyRuntime,
     TurnState,
+    RunProfileResolver,
     TurnRunWakeNotifier,
 }
 
@@ -194,6 +183,7 @@ impl ProductionWiringComponent {
             Self::WasmRuntime => "wasm_runtime",
             Self::FirstPartyRuntime => "first_party_runtime",
             Self::TurnState => "turn_state",
+            Self::RunProfileResolver => "run_profile_resolver",
             Self::TurnRunWakeNotifier => "turn_run_wake_notifier",
         }
     }
@@ -275,6 +265,7 @@ struct ProductionComponentTypes {
     mcp_runtime: Option<ProductionComponentType>,
     first_party_runtime: Option<ProductionComponentType>,
     turn_state: Option<ProductionComponentType>,
+    run_profile_resolver: Option<ProductionComponentType>,
     turn_run_transition_port: Option<ProductionComponentType>,
     turn_run_transition_port_verified: bool,
     turn_run_wake_notifier: Option<ProductionComponentType>,
@@ -324,7 +315,9 @@ fn classify_component_type<T: 'static>() -> ProductionImplementationReadiness {
             || type_id == TypeId::of::<InMemoryApprovalRequestStore>()
             || type_id == TypeId::of::<InMemoryCapabilityLeaseStore>()
             || type_id == TypeId::of::<InMemoryEventSink>()
+            || type_id == TypeId::of::<InMemoryDurableEventLog>()
             || type_id == TypeId::of::<InMemoryAuditSink>()
+            || type_id == TypeId::of::<InMemoryDurableAuditLog>()
             || type_id == TypeId::of::<InMemorySecretStore>()
             || type_id == TypeId::of::<EmptyWasmRuntimeCredentials>()
             || type_id == TypeId::of::<InMemoryTurnStateStore>()
@@ -381,6 +374,7 @@ where
     first_party_runtime: Option<Arc<FirstPartyCapabilityRegistry>>,
     wasm_runtime: Option<Arc<WasmRuntimeAdapter>>,
     turn_state: Option<Arc<dyn TurnStateStore>>,
+    run_profile_resolver: Option<Arc<dyn RunProfileResolver>>,
     turn_run_transition_port: Option<Arc<dyn TurnRunTransitionPort>>,
     turn_run_wake_notifier: Option<Arc<dyn TurnRunWakeNotifier>>,
     component_types: ProductionComponentTypes,
@@ -411,7 +405,7 @@ where
         ));
         Self {
             registry,
-            trust_policy: Arc::new(HostTrustPolicy::empty()),
+            trust_policy: Arc::new(HostTrustPolicy::fail_closed()),
             trust_policy_configured: false,
             filesystem,
             governor,
@@ -436,6 +430,7 @@ where
             first_party_runtime: None,
             wasm_runtime: None,
             turn_state: None,
+            run_profile_resolver: None,
             turn_run_transition_port: None,
             turn_run_wake_notifier: None,
             component_types: ProductionComponentTypes {
@@ -460,6 +455,7 @@ where
                 mcp_runtime: None,
                 first_party_runtime: None,
                 turn_state: None,
+                run_profile_resolver: None,
                 turn_run_transition_port: None,
                 turn_run_transition_port_verified: false,
                 turn_run_wake_notifier: None,
@@ -499,6 +495,7 @@ where
             first_party_runtime,
             wasm_runtime,
             turn_state,
+            run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
             mut component_types,
@@ -531,6 +528,7 @@ where
             first_party_runtime,
             wasm_runtime,
             turn_state,
+            run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
             component_types,
@@ -553,7 +551,6 @@ where
         self.with_root_filesystem(filesystem)
     }
 
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     fn with_resource_governor<T>(self, governor: Arc<T>) -> HostRuntimeServices<F, T, S, R>
     where
         T: ResourceGovernor + 'static,
@@ -585,6 +582,7 @@ where
             first_party_runtime,
             wasm_runtime,
             turn_state,
+            run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
             mut component_types,
@@ -627,36 +625,33 @@ where
             first_party_runtime,
             wasm_runtime,
             turn_state,
+            run_profile_resolver,
             turn_run_transition_port,
             turn_run_wake_notifier,
             component_types,
         }
     }
 
-    #[cfg(feature = "libsql")]
-    pub async fn with_libsql_resource_governor(
+    /// Replace the in-memory governor with a filesystem-backed
+    /// [`PersistentResourceGovernor`] over the supplied
+    /// [`ScopedFilesystem`]. Backend choice (libSQL, Postgres, in-memory,
+    /// local disk) is a property of the underlying
+    /// [`RootFilesystem`](ironclaw_filesystem::RootFilesystem); see
+    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+    pub fn with_filesystem_resource_governor<FsBackend>(
         self,
-        db: Arc<libsql::Database>,
-    ) -> Result<
-        HostRuntimeServices<F, PersistentResourceGovernor<LibSqlResourceGovernorStore>, S, R>,
-        ResourceError,
-    > {
-        let store = LibSqlResourceGovernorStore::new(db);
-        store.run_migrations().await?;
-        Ok(self.with_resource_governor(Arc::new(PersistentResourceGovernor::new(store))))
-    }
-
-    #[cfg(feature = "postgres")]
-    pub async fn with_postgres_resource_governor(
-        self,
-        pool: deadpool_postgres::Pool,
-    ) -> Result<
-        HostRuntimeServices<F, PersistentResourceGovernor<PostgresResourceGovernorStore>, S, R>,
-        ResourceError,
-    > {
-        let store = PostgresResourceGovernorStore::new(pool);
-        store.run_migrations().await?;
-        Ok(self.with_resource_governor(Arc::new(PersistentResourceGovernor::new(store))))
+        scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
+    ) -> HostRuntimeServices<
+        F,
+        PersistentResourceGovernor<FilesystemResourceGovernorStore<FsBackend>>,
+        S,
+        R,
+    >
+    where
+        FsBackend: RootFilesystem + 'static,
+    {
+        let store = FilesystemResourceGovernorStore::new(scoped_filesystem);
+        self.with_resource_governor(Arc::new(PersistentResourceGovernor::new(store)))
     }
 
     pub fn resource_governor(&self) -> Arc<G> {
@@ -665,7 +660,7 @@ where
 
     /// Attaches the host-owned trust policy used by the produced
     /// [`DefaultHostRuntime`]. Without this, the service graph keeps the
-    /// default empty policy and capability dispatch fails closed.
+    /// default fail-closed policy and capability dispatch is denied.
     pub fn with_trust_policy<T>(mut self, trust_policy: Arc<T>) -> Self
     where
         T: TrustPolicy + 'static,
@@ -748,28 +743,41 @@ where
         self
     }
 
-    /// Builds and attaches the libSQL transactional combined run-state and
-    /// approval-request store for production/shared callers.
-    #[cfg(feature = "libsql")]
-    pub async fn with_libsql_run_state_approval_store(
+    /// Builds and attaches filesystem-backed run-state and approval-request
+    /// stores over the supplied [`ScopedFilesystem`].
+    ///
+    /// Production composition wires both `/run-state` and `/approvals` mount
+    /// aliases on the same [`ScopedFilesystem`], so a single handle is enough
+    /// to construct both stores: each takes its alias-relative subtree
+    /// through the shared `MountView`. The backend choice
+    /// (`LibSqlRootFilesystem`, `PostgresRootFilesystem`,
+    /// `InMemoryBackend`, …) happens at the `RootFilesystem` layer, not here.
+    ///
+    /// Replaces the legacy `with_libsql_run_state_approval_store` /
+    /// `with_postgres_run_state_approval_store` builders (deleted along with
+    /// the corresponding per-backend `Filesystem*Store` siblings — see
+    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`).
+    ///
+    /// Unlike the deleted SQL combined store this wiring does NOT carry an
+    /// atomic `save_pending_and_block_approval` transition: filesystem
+    /// stores ship as two independent records under distinct mount aliases.
+    /// Callers fall back to the two-step
+    /// `ApprovalRequestStore::save_pending` then
+    /// `RunStateStore::block_approval` path in
+    /// `ironclaw_capabilities::host`. Production composition should layer a
+    /// transactional wrapper (or accept the two-step semantics) when
+    /// cross-record atomicity matters.
+    pub fn with_filesystem_run_state<FsBackend>(
         self,
-        db: Arc<libsql::Database>,
-    ) -> Result<Self, RunStateError> {
-        let store = Arc::new(LibSqlRunStateApprovalStore::new(db));
-        store.run_migrations().await?;
-        Ok(self.with_run_state_approval_store(store))
-    }
-
-    /// Builds and attaches the PostgreSQL transactional combined run-state and
-    /// approval-request store for production/shared callers.
-    #[cfg(feature = "postgres")]
-    pub async fn with_postgres_run_state_approval_store(
-        self,
-        pool: deadpool_postgres::Pool,
-    ) -> Result<Self, RunStateError> {
-        let store = Arc::new(PostgresRunStateApprovalStore::new(pool));
-        store.run_migrations().await?;
-        Ok(self.with_run_state_approval_store(store))
+        scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
+    ) -> Self
+    where
+        FsBackend: RootFilesystem + 'static,
+    {
+        let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&scoped_filesystem)));
+        let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(scoped_filesystem));
+        self.with_run_state(run_state)
+            .with_approval_requests(approval_requests)
     }
 
     pub fn with_capability_leases<T>(mut self, capability_leases: Arc<T>) -> Self
@@ -817,24 +825,42 @@ where
         self
     }
 
-    #[cfg(feature = "libsql")]
-    pub async fn with_libsql_turn_state_store(
-        self,
-        db: Arc<libsql::Database>,
-    ) -> Result<Self, ironclaw_turns::TurnError> {
-        let store = Arc::new(LibSqlTurnStateStore::new(db));
-        store.run_migrations().await?;
-        Ok(self.with_turn_state_and_transition_port(store))
+    pub fn with_run_profile_resolver<T>(mut self, resolver: Arc<T>) -> Self
+    where
+        T: RunProfileResolver + 'static,
+    {
+        self.component_types.run_profile_resolver = Some(ProductionComponentType::of::<T>());
+        self.run_profile_resolver = Some(resolver);
+        self
     }
 
-    #[cfg(feature = "postgres")]
-    pub async fn with_postgres_turn_state_store(
+    /// Builds and attaches a filesystem-backed turn-state store over the
+    /// supplied [`ScopedFilesystem`].
+    ///
+    /// Production composition wires the `/turns` mount alias on the same
+    /// [`ScopedFilesystem`] that carries the other consumer-store aliases,
+    /// so a single handle is enough to construct this store: it takes its
+    /// alias-relative subtree through the shared `MountView`. The backend
+    /// choice (`LibSqlRootFilesystem`, `PostgresRootFilesystem`,
+    /// `InMemoryBackend`, …) happens at the [`RootFilesystem`] layer, not
+    /// here.
+    ///
+    /// Replaces the legacy `with_libsql_turn_state_store` /
+    /// `with_postgres_turn_state_store` builders (deleted along with the
+    /// corresponding per-backend `Filesystem*Store` siblings — see
+    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`). The
+    /// filesystem store implements both [`TurnStateStore`] and
+    /// [`TurnRunTransitionPort`], so this wiring covers production
+    /// readiness for both axes.
+    pub fn with_filesystem_turn_state_store<FsBackend>(
         self,
-        pool: deadpool_postgres::Pool,
-    ) -> Result<Self, ironclaw_turns::TurnError> {
-        let store = Arc::new(PostgresTurnStateStore::new(pool));
-        store.run_migrations().await?;
-        Ok(self.with_turn_state_and_transition_port(store))
+        scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
+    ) -> Self
+    where
+        FsBackend: RootFilesystem + 'static,
+    {
+        let store = Arc::new(FilesystemTurnStateStore::new(scoped_filesystem));
+        self.with_turn_state_and_transition_port(store)
     }
 
     pub fn with_turn_run_wake_notifier<T>(mut self, notifier: Arc<T>) -> Self
@@ -1116,6 +1142,11 @@ where
             &mut issues,
             ProductionWiringComponent::TurnState,
             self.turn_state.is_some(),
+        );
+        self.push_missing(
+            &mut issues,
+            ProductionWiringComponent::RunProfileResolver,
+            self.run_profile_resolver.is_some(),
         );
         self.push_missing(
             &mut issues,
@@ -1406,6 +1437,13 @@ where
                 None,
             ));
         };
+        let Some(run_profile_resolver) = self.run_profile_resolver.as_ref() else {
+            return Err(production_wiring_report(
+                ProductionWiringComponent::RunProfileResolver,
+                ProductionWiringIssueKind::Missing,
+                None,
+            ));
+        };
         let Some(notifier) = self.turn_run_wake_notifier.as_ref() else {
             return Err(production_wiring_report(
                 ProductionWiringComponent::TurnRunWakeNotifier,
@@ -1414,6 +1452,7 @@ where
             ));
         };
         Ok(DefaultTurnCoordinator::new(Arc::clone(turn_state))
+            .with_run_profile_resolver(Arc::clone(run_profile_resolver))
             .with_wake_notifier(Arc::clone(notifier)))
     }
 
@@ -1485,6 +1524,11 @@ where
         );
         self.push_missing(
             &mut issues,
+            ProductionWiringComponent::RunProfileResolver,
+            self.run_profile_resolver.is_some(),
+        );
+        self.push_missing(
+            &mut issues,
             ProductionWiringComponent::TurnRunWakeNotifier,
             self.turn_run_wake_notifier.is_some(),
         );
@@ -1544,6 +1588,7 @@ where
                 Arc::new(FirstPartyRuntimeAdapter::from_registry(
                     Arc::clone(runtime),
                     Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
+                    Arc::clone(&self.runtime_http_egress),
                 )),
             );
         }
@@ -1879,16 +1924,19 @@ where
 struct FirstPartyRuntimeAdapter {
     registry: Arc<FirstPartyCapabilityRegistry>,
     filesystem: Arc<dyn RootFilesystem>,
+    runtime_http_egress: SharedRuntimeHttpEgress,
 }
 
 impl FirstPartyRuntimeAdapter {
-    pub fn from_registry(
+    pub(crate) fn from_registry(
         registry: Arc<FirstPartyCapabilityRegistry>,
         filesystem: Arc<dyn RootFilesystem>,
+        runtime_http_egress: SharedRuntimeHttpEgress,
     ) -> Self {
         Self {
             registry,
             filesystem,
+            runtime_http_egress,
         }
     }
 }
@@ -1934,6 +1982,7 @@ where
             estimate: request.estimate,
             mounts: request.mounts,
             filesystem: Arc::clone(&self.filesystem),
+            runtime_http_egress: runtime_http_egress(&self.runtime_http_egress),
             input: request.input,
         }))
         .catch_unwind()
@@ -1998,7 +2047,7 @@ struct WasmRuntimeAdapter {
 }
 
 impl WasmRuntimeAdapter {
-    pub fn new(
+    pub(crate) fn new(
         runtime: WitToolRuntime,
         host: WitToolHost,
         network_policy_store: Arc<NetworkObligationPolicyStore>,
@@ -2015,7 +2064,7 @@ impl WasmRuntimeAdapter {
         }
     }
 
-    pub fn try_new(
+    pub(crate) fn try_new(
         config: WitToolRuntimeConfig,
         host: WitToolHost,
         network_policy_store: Arc<NetworkObligationPolicyStore>,
@@ -2145,7 +2194,7 @@ struct RuntimeDispatchProcessExecutor {
 }
 
 impl RuntimeDispatchProcessExecutor {
-    pub fn new(dispatcher: Arc<dyn CapabilityDispatcher>) -> Self {
+    pub(crate) fn new(dispatcher: Arc<dyn CapabilityDispatcher>) -> Self {
         Self { dispatcher }
     }
 }

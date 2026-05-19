@@ -3,7 +3,8 @@ use ironclaw_host_api::ThreadId;
 
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest,
+    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessages, ContextWindow,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextMessagesRequest,
     LoadContextWindowRequest, MessageContent, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
     ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
@@ -49,6 +50,11 @@ pub trait SessionThreadService: Send + Sync {
         request: AppendAssistantDraftRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError>;
 
+    async fn append_tool_result_reference(
+        &self,
+        request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError>;
+
     async fn update_assistant_draft(
         &self,
         request: UpdateAssistantDraftRequest,
@@ -71,6 +77,11 @@ pub trait SessionThreadService: Send + Sync {
         &self,
         request: LoadContextWindowRequest,
     ) -> Result<ContextWindow, SessionThreadError>;
+
+    async fn load_context_messages(
+        &self,
+        request: LoadContextMessagesRequest,
+    ) -> Result<ContextMessages, SessionThreadError>;
 
     async fn list_thread_history(
         &self,

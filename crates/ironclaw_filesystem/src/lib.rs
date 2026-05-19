@@ -13,30 +13,45 @@
 //! being modified between containment checks and opens. Production hardening for
 //! hostile local directories should use fd-relative traversal such as `openat2`
 //! with `RESOLVE_BENEATH`, `O_NOFOLLOW`, or a capability filesystem crate.
+#![warn(unreachable_pub)]
 
+mod backend;
 mod catalog;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 mod db;
+mod hsm;
+mod in_memory;
+mod index;
 #[cfg(feature = "libsql")]
 mod libsql;
 mod local;
 #[cfg(feature = "postgres")]
 mod postgres;
+mod record;
 mod root;
 mod scoped;
 mod types;
+mod vector;
 
+pub use backend::{EventRecord, StorageTxn};
 pub use catalog::{CompositeRootFilesystem, FilesystemCatalog, MountDescriptor, PathPlacement};
+pub use hsm::HsmBackend;
+pub use in_memory::InMemoryBackend;
+pub use index::{Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page};
 #[cfg(feature = "libsql")]
 pub use libsql::LibSqlRootFilesystem;
 pub use local::LocalFilesystem;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresRootFilesystem;
+pub use record::{
+    CasExpectation, ContentType, Entry, RecordKind, RecordVersion, SeqNo, VersionedEntry,
+};
 pub use root::RootFilesystem;
-pub use scoped::ScopedFilesystem;
+pub use scoped::{MountViewResolver, ScopedFilesystem};
 pub use types::{
-    BackendCapabilities, BackendId, BackendKind, ContentKind, DirEntry, FileStat, FileType,
-    FilesystemError, FilesystemOperation, IndexPolicy, StorageClass,
+    BackendCapabilities, BackendId, BackendKind, Capability, ContentKind, DirEntry, FileStat,
+    FileType, FilesystemError, FilesystemOperation, IndexConflictReason, IndexPolicy, StorageClass,
+    TxnCapability,
 };
 
 fn path_prefix_matches(prefix: &str, path: &str) -> bool {
