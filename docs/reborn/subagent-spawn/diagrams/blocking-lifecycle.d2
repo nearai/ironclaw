@@ -1,49 +1,63 @@
-# Blocking subagent — parent suspension & child lifecycle. Render: d2 blocking-lifecycle.d2 blocking-lifecycle.svg
-direction: right
+# Blocking subagent — parent suspension & child lifecycle. Render: d2 --layout elk blocking-lifecycle.d2 blocking-lifecycle.svg
+direction: down
+
+classes: {
+  run: {
+    shape: oval
+    style.font-size: 18
+  }
+  pause: {
+    shape: oval
+    style.fill: "#ffcc80"
+    style.font-size: 18
+  }
+  ok: {
+    shape: oval
+    style.fill: "#a5d6a7"
+    style.font-size: 18
+  }
+}
 
 title: "Blocking subagent — parent suspension and child run lifecycle" {
   near: top-center
   shape: text
-  style.font-size: 22
+  style.font-size: 24
   style.bold: true
 }
 
 parent: "Parent run" {
   style.fill: "#e3f2fd"
-  p_run: "Running" {shape: oval}
-  p_block: "Blocked — AwaitDependentRun\nworker RELEASED · thread lock KEPT" {
-    style.fill: "#ffe0b2"
-  }
-  p_resume: "Running (resumed)" {shape: oval}
-  p_done: "Completed" {
-    shape: oval
-    style.fill: "#c8e6c9"
-  }
-  p_run -> p_block: "emit N blocking spawns\n(gate recorded before submit)"
-  p_block -> p_resume: "last child terminal\nresume_turn(all N results)"
-  p_block -> p_resume: "all children already terminal\nresolve INLINE (no real block)" {
-    style.stroke-dash: 3
-  }
+  style.font-size: 20
+  p_run: "Running" {class: run}
+  p_block: "Blocked\nAwaitDependentRun\n(worker released,\nlock kept)" {class: pause}
+  p_resume: "Running\n(resumed)" {class: run}
+  p_done: "Completed" {class: ok}
+
+  p_run -> p_block: "emit N blocking spawns"
+  p_block -> p_resume: "last child terminal"
   p_resume -> p_done
 }
 
 child: "Child run  (x N, concurrent)" {
   style.fill: "#f3e5f5"
-  c_pending: "Pending" {shape: oval}
-  c_running: "Running\nsubagent family · fresh ctx ·\nattenuated tools · empty authority" {shape: oval}
-  c_term: "Completed / Failed / Cancelled" {
-    shape: oval
-    style.fill: "#c8e6c9"
-  }
-  c_pending -> c_running: "claimed by worker"
+  style.font-size: 20
+  c_pending: "Pending" {class: run}
+  c_running: "Running\n(subagent family,\nattenuated, empty authority)" {class: run}
+  c_term: "Completed /\nFailed / Cancelled" {class: ok}
+
+  c_pending -> c_running: "claimed"
   c_running -> c_term
 }
 
-parent.p_run -> child.c_pending: "submit_turn (fresh child thread_id)"
-child.c_term -> parent.p_block: "terminal TurnLifecycleEvent\nSubagentCompletionObserver marks the awaited set" {
-  style.stroke: "#6a1b9a"
+parent.p_run -> child.c_pending: "submit_turn\n(fresh thread_id)" {
+  style.font-size: 16
 }
-parent.p_block -> child.c_running: "parent CancelRequested ->\nrecursive cancel_run over the subtree" {
-  style.stroke-dash: 4
+child.c_term -> parent.p_block: "terminal event —\nobserver marks awaited set" {
+  style.stroke: "#6a1b9a"
+  style.font-size: 16
+}
+parent.p_block -> child.c_running: "parent cancel —\nrecursive subtree cancel" {
   style.stroke: "#c62828"
+  style.stroke-dash: 4
+  style.font-size: 16
 }
