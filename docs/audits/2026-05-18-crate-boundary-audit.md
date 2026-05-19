@@ -22,6 +22,80 @@ This audit is intentionally findings + proposed resolution. Each "Proposed resol
 
 ---
 
+## ⚠️ Adversarial Review — Corrections (2026-05-18, post-publication)
+
+After publishing, a 10-agent hostile review of this doc was run. Several findings turned out to be wrong, overstated, or misframed. **This section is authoritative — when it conflicts with a per-theme finding below, this section wins.** The per-theme sections are preserved for traceability, not authority.
+
+### Top severity correction — I2 should be P0
+
+The highest-impact finding in this audit is buried as a Theme I sub-bullet. `host_runtime/src/production.rs:248` destructures the caller's `trust_decision` as `_caller_trust_decision` (underscore = intentionally discarded) and re-evaluates trust locally. The re-evaluation is correct design (host is authoritative). **But the public `RuntimeCapabilityRequest.trust_decision` field is plumbed through the API and silently dropped at the consumer.** This is a maintenance trap that could mask a future security regression. **Recommend: separate security ticket; remove the dead field or rename it `_advisory_trust_decision` + add a `#[doc]` warning. Triage this before any other audit follow-up.**
+
+### Findings retracted as FALSE
+
+- **B1** "Two composition crates is ambiguous" — `ironclaw_reborn/src/lib.rs` header explicitly declares the crate internal-only. The pattern is well-documented. (B1 has a residual finding only: the architecture test enforces upward isolation but does NOT forbid substrate crates from importing `ironclaw_reborn` directly. Reframe to "complete the inverse direction test", not "rename or relabel".)
+- **D5** "SessionThreadService double-export problem" — clean re-export pattern; `ironclaw_threads` owns the trait, `ironclaw_conversations` re-exports for caller convenience. No duplication.
+- **C4** "ironclaw_safety scope is sprawling (4 concerns)" — the four are sequential stages of one concern (data-in-motion defense). Scope is cohesive and the name is fine.
+- **F3** "event_projections imports memory in production" — the imports are *trait types* (`MemorySignificantEventSink`, `PromptWriteSafetyEventSink`); projections IS the read-model layer for memory audit logs. This is correct architecture, not coupling. Retract.
+- **H1** "ironclaw_network name too broad" — scope is narrow by design and `CLAUDE.md` is explicit. Drop.
+
+### Findings significantly OVERSTATED (severity downgraded)
+
+- **A1** "ironclaw_engine gutted / near-empty" — **WRONG**. The crate has 38K LOC of state machines, types, and traits. Only its *direct dependencies* are minimal (intentionally decoupled from the host crate per its `CLAUDE.md`). The diagrams below labeling it "gutted" / "near-empty" are wrong; treat it as canonical, not orphan.
+- **A2** "src/tools/dispatch.rs and ironclaw_dispatcher compete" — they operate at **different pipeline stages** (pre-authorization vs post-authorization), not as competitors. Reframe to "v1 entry point; v2 converges downstream".
+- **A3** "no shared trait across four tool runtimes" — `EffectExecutor` trait exists in `ironclaw_engine/traits/effect.rs`. Audit missed it. Reframe to "shared trait exists; document the boundary".
+- **A4** "skills/attenuation needs `#[deprecated]` now" — `ENGINE_V2` defaults to `false`; v1 is currently load-bearing. Adding `#[deprecated]` now would be premature. Defer to v2-default cutover.
+- **A5** "src/bridge/ invisible in CLAUDE.md" — bridge IS mentioned in CLAUDE.md prose; it's only missing from the Project Structure table and Module Specs table. Two-row fix.
+- **B2** "rename event crates to `ironclaw_reborn_events*`" — substrate (events) / projections / backend (reborn_event_store) split is intentional and reborn-agnostic by design. Keep CLAUDE.md documentation suggestion only; **drop the rename**.
+- **B3** "RebornCompositionProfile should move" — placement in composition is correct (composition profiles belong in the composition crate). At most, add a convenience re-export from `reborn_config`. Don't move the type.
+- **C2** "no shared policy interface" — `ironclaw_host_api` IS the shared vocabulary; types intentionally separate by role. Reframe to "document composition order" only.
+- **C5** "runtime_policy asymmetric re-export" — intentional design (return-type ergonomics). Downgrade to a one-line doc-note fix.
+- **D4** "ProcessStatus vs RunStatus overlap" — overlap is real but both CLAUDE.mds already document scope. Downgrade.
+- **E1** "extension overloaded at 3 layers" — partially valid: the registry uses "extension" in type names that could be more explicit, but it's naming noise, not semantic confusion. The audit conflates type-name choices with three distinct concepts.
+- **F1** "host_api god-crate creep with concrete behavior" — the 5,245 LOC figure is verified, but `ingress.rs` (1,040 LOC) and `runtime_policy.rs` (849 LOC) are pure newtypes + enums + validation + serde. The *total-size* concern is valid; the "concrete behavior creeping in" claim is wrong.
+- **G2** "telegram_v2_host excluded from workspace" — the directory has *no `Cargo.toml`*; it's not in `members` and not in `exclude`. Cargo simply ignores it. The directory is orphaned/fossil, not "excluded".
+- **I4** "WasmHostTools silent escape hatch" — planned extension point with deny-by-default. Overstated risk; reframe to "document the planned wiring contract".
+- **W2** "tool WIT version not pinned (silent break risk)" — single-repo WIT-file mechanics protect against silent breaks (bindgen reads the file at compile time; all consumers rebuild). Adding a constant is documentation-only.
+
+### Findings MISSED by both passes
+
+- **`crates/AGENTS.md` and `crates/README.md` still list `ironclaw_storage` as an active crate** — it was dissolved in `06090f4e6` (cited elsewhere in this audit). **Biggest documentation drift bug in the repo** — these are the first files a new contributor reads. Fix urgency: HIGH.
+- **`ironclaw_silk_decoder`** (in `crates/`, excluded for `libclang` reason) is the cleanest precedent for how excluded directories should be documented; never named in this audit.
+- **Workspace `exclude` semantics need a taxonomy.** The audit conflates "excluded for legitimate build reasons" (fuzz, silk_decoder, channels-src, tools-src) with "directory orphaned by accident" (telegram_v2_host). A status field per excluded entry is needed.
+- **`ENGINE_V2` feature gate defaults to `false`.** Important context for A1 and A4 — v1 is shipping, not just maintained.
+- **`src/secrets/CLAUDE.md` is missing.** Higher-consequence module than most other `src/` modules; absence of local guardrails is a real gap.
+- **`src/workspace/embedding_cache.rs`** still on disk (~23 KB) despite embeddings extracted into `ironclaw_embeddings` (`1e2f9850b`) — possibly vestigial.
+- **`CapabilityHost` optional-traits builder pattern is undocumented** — risks future contributors promoting an optional trait to a required field.
+- **No reachability tests** in `crates/ironclaw_architecture/tests/` — for G1 (zero callers) and F1 (LOC/dep census). Both are ~20-line additions.
+- **Diagram 4 omits the database layer** — `ironclaw_memory` persists to dedicated reborn_memory_* tables; filesystem is not the *universal* substrate as drawn.
+- **No "directories in `crates/` not in `members` and not in `exclude`" check** — would catch G2-class fossils.
+
+### Wrong / wasteful resolutions (DROP)
+
+- **F2** "rename `host_api` → `host_contracts`, `host_runtime` → `host_composition`" — workspace-wide rename touching all 47 crates' `Cargo.toml`, every import, every CLAUDE.md, every architecture test. Wildly disproportionate to the documented "new contributor confusion" problem. Keep only the alternative: "add a Host Layer section to top-level CLAUDE.md" (10-line edit).
+- **B2** "rename events → `ironclaw_reborn_events*`" — bakes a transitional epoch into permanent crate names. Drop entirely.
+- **I1** "move `WasmRuntimeAdapter` into a new `ironclaw_wasm_runtime_adapter` crate" — would create a 4th WASM-prefixed crate, worsening E4 (which calls out the existing three WASM crates as already ambiguous). Better: move it into existing `ironclaw_wasm` + architecture test forbidding `impl RuntimeAdapter for *` in `host_runtime`.
+
+### Architecture-test matrix correction
+
+- **B1 was tagged ASSERTED — actually PARTIAL.** The 3 tests at `reborn_composition_boundaries.rs:38-105` enforce upward isolation (nothing above the composition depends on it) but do NOT forbid substrate crates from importing `ironclaw_reborn` directly without going through `_composition`. The "no ambiguity for callers" claim is only half-asserted. Add the inverse test.
+
+### Re-prioritization (replaces the original "Cross-cutting recommendations" section below)
+
+The original list pushed doc work first. Architecture tests are more durable than any doc fix. New order:
+
+1. **Triage I2 as a security review item** — separate ticket, separate owner, before any other audit follow-up.
+2. **Architecture tests** (was #5) — converts every "NEITHER" row into permanent enforcement. Cheapest wins: D1 (workspace→memory inverse), D4 (status-type duplication), G1 (zero-callers), G2 (fossil-directories), F1 (host_api LOC census), B1 (inverse-direction).
+3. **Fix `crates/AGENTS.md` + `crates/README.md` (`ironclaw_storage` drift)** — biggest doc drift, fastest fix, blocks new-contributor onboarding.
+4. **Convert the 3 `24c7051d2` deferred follow-ups into tracked issues** — secrets master-key check, authorization Arc migration, run_state unified-dispatch migration. Already scoped.
+5. **Status matrix** (was #1) — still useful for autonomous-agent legibility, but decays without enforcement.
+6. **Glossary** — still useful, lowest churn target.
+
+### Trustworthiness of this doc
+
+After review: **trustworthy as a discussion starter, not as a prioritization plan as originally framed.** Several first-pass findings were too confident; severity scale is uncalibrated; the two-pass structure left stale claims behind. With this Corrections section as the authoritative overlay, the doc is useful for async review.
+
+---
+
 ## Diagrams
 
 Color legend (used in every diagram):
