@@ -423,11 +423,50 @@ async fn redaction_gate_blocks_sentinel_payloads_at_stream_boundary() {
 }
 
 #[tokio::test]
+async fn live_validation_source_failure_is_not_reported_as_redaction() {
+    let scope = projection_scope("thread-a");
+    let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
+    let manager = TestManager {
+        inner: EventStreamManager::new(
+            Arc::new(FakeProjectionService::new(scope.clone())),
+            Arc::new(AllowAllProjectionAccessPolicy),
+            Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+            Arc::clone(&source),
+            Arc::new(SourceFailingLiveUpdateValidator),
+            Arc::new(InMemoryOutboundStateStore::default()),
+        ),
+        update_source: Arc::clone(&source),
+    };
+    let mut subscription = manager
+        .subscribe(subscribe_request(scope.clone(), None))
+        .await
+        .expect("authorized subscription");
+    assert!(matches!(
+        subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+
+    source
+        .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
+            &scope, 11, 11,
+        )))
+        .expect("publish source-failing payload");
+
+    match subscription.next().await.expect("source failure marker") {
+        ProjectionStreamItem::Lagged { reason, .. } => {
+            assert_eq!(reason, LagReason::SourceFailed);
+        }
+        other => panic!("expected source-failure lag marker, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn repeated_snapshot_subscriptions_reuse_redaction_validation_decision() {
     let scope = projection_scope("thread-a");
+    let fixed_snapshot = snapshot(&scope, 10);
     let validator = Arc::new(CountingRedactionValidator::default());
     let manager = EventStreamManager::new(
-        Arc::new(FakeProjectionService::new(scope.clone())),
+        Arc::new(StaticSnapshotProjectionService::new(fixed_snapshot)),
         Arc::new(AllowAllProjectionAccessPolicy),
         Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
         Arc::new(InMemoryProjectionUpdateSource::new(8)),
@@ -458,6 +497,36 @@ async fn repeated_snapshot_subscriptions_reuse_redaction_validation_decision() {
 }
 
 #[tokio::test]
+async fn validation_cache_revalidates_distinct_payloads_at_same_cursor() {
+    let scope = projection_scope("thread-a");
+    let manager = EventStreamManager::new(
+        Arc::new(ChangingSnapshotProjectionService::new()),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(RejectTruncatedSnapshotValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let mut first = manager
+        .subscribe(subscribe_request(scope.clone(), None))
+        .await
+        .expect("first safe subscription");
+    assert!(matches!(
+        first.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+    drop(first);
+
+    let error = manager
+        .subscribe(subscribe_request(scope, None))
+        .await
+        .expect_err("second payload with same cursor is revalidated");
+
+    assert!(matches!(error, ProjectionStreamError::Redaction));
+}
+
+#[tokio::test]
 async fn product_thread_subscription_blocks_debug_live_updates() {
     let scope = projection_scope("thread-a");
     let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
@@ -483,6 +552,65 @@ async fn product_thread_subscription_blocks_debug_live_updates() {
     match subscription.next().await.expect("access marker") {
         ProjectionStreamItem::Lagged { reason, .. } => {
             assert_eq!(reason, LagReason::AccessBlocked);
+        }
+        other => panic!("expected access lag marker, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn live_forwarding_advances_cursor_and_reports_latest_reconnect_cursor() {
+    let scope = projection_scope("thread-a");
+    let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
+    let manager = manager_with_source(scope.clone(), Arc::clone(&source));
+    let mut subscription = manager
+        .subscribe(subscribe_request(scope.clone(), None))
+        .await
+        .expect("authorized subscription");
+    assert!(matches!(
+        subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+
+    source
+        .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
+            &scope, 11, 11,
+        )))
+        .expect("publish live update");
+    source
+        .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
+            &scope, 11, 11,
+        )))
+        .expect("publish duplicate live update");
+    source
+        .publish(ProductProjectionEnvelope::Debug(
+            ironclaw_event_streams::DebugProjectionPayload {
+                cursor: ProjectionCursor::for_scope(scope, EventCursor::new(12)),
+                redacted_summary: "redacted".to_string(),
+            },
+        ))
+        .expect("publish blocked live update");
+
+    match timeout(Duration::from_secs(1), subscription.next())
+        .await
+        .expect("next live item")
+        .expect("next live item")
+    {
+        ProjectionStreamItem::Update(ProductProjectionEnvelope::ThreadUpdates(replay)) => {
+            assert_eq!(replay.next_cursor.runtime, EventCursor::new(11));
+        }
+        other => panic!("expected delivered update, got {other:?}"),
+    }
+    match timeout(Duration::from_secs(1), subscription.next())
+        .await
+        .expect("lag item")
+        .expect("lag item")
+    {
+        ProjectionStreamItem::Lagged {
+            reason,
+            snapshot_cursor,
+        } => {
+            assert_eq!(reason, LagReason::AccessBlocked);
+            assert_eq!(snapshot_cursor.runtime, EventCursor::new(11));
         }
         other => panic!("expected access lag marker, got {other:?}"),
     }
@@ -928,12 +1056,98 @@ impl EventProjectionService for SnapshotPublishingProjectionService {
     }
 }
 
+struct StaticSnapshotProjectionService {
+    snapshot: ProjectionSnapshot,
+}
+
+impl StaticSnapshotProjectionService {
+    fn new(snapshot: ProjectionSnapshot) -> Self {
+        Self { snapshot }
+    }
+}
+
+#[async_trait]
+impl EventProjectionService for StaticSnapshotProjectionService {
+    async fn snapshot(
+        &self,
+        _request: ProjectionRequest,
+    ) -> Result<ProjectionSnapshot, ProjectionError> {
+        Ok(self.snapshot.clone())
+    }
+
+    async fn updates(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionReplay, ProjectionError> {
+        Ok(replay(&request.scope, 2, 3))
+    }
+}
+
+struct ChangingSnapshotProjectionService {
+    calls: Mutex<usize>,
+}
+
+impl ChangingSnapshotProjectionService {
+    fn new() -> Self {
+        Self {
+            calls: Mutex::new(0),
+        }
+    }
+}
+
+#[async_trait]
+impl EventProjectionService for ChangingSnapshotProjectionService {
+    async fn snapshot(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionSnapshot, ProjectionError> {
+        let mut calls = self.calls.lock().unwrap();
+        let mut snapshot = snapshot(&request.scope, 10);
+        if *calls > 0 {
+            snapshot.truncated = true;
+        }
+        *calls += 1;
+        Ok(snapshot)
+    }
+
+    async fn updates(
+        &self,
+        request: ProjectionRequest,
+    ) -> Result<ProjectionReplay, ProjectionError> {
+        Ok(replay(&request.scope, 2, 3))
+    }
+}
+
 struct RejectLiveUpdateRedactionValidator;
 
 impl ProjectionRedactionValidator for RejectLiveUpdateRedactionValidator {
     fn validate(&self, envelope: &ProductProjectionEnvelope) -> Result<(), ProjectionStreamError> {
         match envelope {
             ProductProjectionEnvelope::ThreadUpdates(_) => Err(ProjectionStreamError::Redaction),
+            _ => Ok(()),
+        }
+    }
+}
+
+struct SourceFailingLiveUpdateValidator;
+
+impl ProjectionRedactionValidator for SourceFailingLiveUpdateValidator {
+    fn validate(&self, envelope: &ProductProjectionEnvelope) -> Result<(), ProjectionStreamError> {
+        match envelope {
+            ProductProjectionEnvelope::ThreadUpdates(_) => Err(ProjectionStreamError::Source),
+            _ => Ok(()),
+        }
+    }
+}
+
+struct RejectTruncatedSnapshotValidator;
+
+impl ProjectionRedactionValidator for RejectTruncatedSnapshotValidator {
+    fn validate(&self, envelope: &ProductProjectionEnvelope) -> Result<(), ProjectionStreamError> {
+        match envelope {
+            ProductProjectionEnvelope::ThreadSnapshot(snapshot) if snapshot.truncated => {
+                Err(ProjectionStreamError::Redaction)
+            }
             _ => Ok(()),
         }
     }

@@ -6,8 +6,10 @@
 //! directly.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -22,7 +24,10 @@ use ironclaw_outbound::{
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, mpsc};
+use tokio::{
+    sync::{broadcast, mpsc},
+    time::sleep,
+};
 
 mod error;
 
@@ -32,6 +37,7 @@ const DEFAULT_SUBSCRIPTION_BUFFER: usize = 16;
 const MIN_SUBSCRIPTION_BUFFER: usize = 1;
 const MAX_SUBSCRIPTION_BUFFER: usize = 128;
 const MAX_VALIDATION_CACHE_ENTRIES: usize = 1024;
+const TERMINAL_LAG_SEND_TIMEOUT_MILLIS: u64 = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionFetchRequest {
@@ -134,6 +140,7 @@ pub enum ProjectionStreamItem {
 #[serde(rename_all = "snake_case")]
 pub enum LagReason {
     SourceLagged,
+    SourceFailed,
     SubscriberBackpressure,
     RedactionBlocked,
     AccessBlocked,
@@ -263,9 +270,9 @@ impl Drop for ProjectionStreamAdmissionPermit {
 
 struct AdmissionRelease {
     state: Arc<Mutex<AdmissionState>>,
-    tenant_key: String,
-    actor_key: String,
-    scope_key: String,
+    tenant_key: TenantAdmissionKey,
+    actor_key: ActorAdmissionKey,
+    scope_key: ScopeAdmissionKey,
 }
 
 impl AdmissionRelease {
@@ -307,9 +314,41 @@ pub struct InMemoryProjectionStreamAdmissionPolicy {
 #[derive(Default)]
 struct AdmissionState {
     global: usize,
-    by_tenant: HashMap<String, usize>,
-    by_actor: HashMap<String, usize>,
-    by_scope: HashMap<String, usize>,
+    by_tenant: HashMap<TenantAdmissionKey, usize>,
+    by_actor: HashMap<ActorAdmissionKey, usize>,
+    by_scope: HashMap<ScopeAdmissionKey, usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct TenantAdmissionKey(String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ActorAdmissionKey(String);
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ScopeAdmissionKey {
+    scope: ProjectionScopeKey,
+    target: ProjectionTargetKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProjectionScopeKey {
+    tenant_id: String,
+    user_id: String,
+    agent_id: Option<String>,
+    project_id: Option<String>,
+    mission_id: Option<String>,
+    thread_id: Option<String>,
+    process_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ProjectionTargetKey {
+    Thread(String),
+    Mission(String),
+    Run(String),
+    Process(String),
+    DeliveryStatus(String),
 }
 
 impl InMemoryProjectionStreamAdmissionPolicy {
@@ -327,8 +366,8 @@ impl ProjectionStreamAdmissionPolicy for InMemoryProjectionStreamAdmissionPolicy
         &self,
         request: ProjectionStreamAdmissionRequest,
     ) -> Result<ProjectionStreamAdmissionPermit, ProjectionStreamError> {
-        let tenant_key = request.tenant_id.to_string();
-        let actor_key = request.actor.user_id.to_string();
+        let tenant_key = TenantAdmissionKey(request.tenant_id.to_string());
+        let actor_key = ActorAdmissionKey(request.actor.user_id.to_string());
         let scope_key = scope_key(&request.scope, &request.target);
         let mut state = self
             .state
@@ -462,7 +501,24 @@ pub struct EventStreamManager {
 
 #[derive(Clone, Default)]
 struct ProjectionValidationCache {
-    decisions: Arc<Mutex<HashMap<String, bool>>>,
+    decisions: Arc<Mutex<HashMap<ProjectionValidationCacheKey, bool>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProjectionValidationCacheKey {
+    variant: ProjectionEnvelopeKind,
+    scope: ProjectionScopeKey,
+    cursor: u64,
+    payload_len: usize,
+    payload_hash: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ProjectionEnvelopeKind {
+    ThreadSnapshot,
+    ThreadUpdates,
+    DeliveryStatus,
+    Debug,
 }
 
 impl ProjectionValidationCache {
@@ -471,7 +527,7 @@ impl ProjectionValidationCache {
         validator: &dyn ProjectionRedactionValidator,
         envelope: &ProductProjectionEnvelope,
     ) -> Result<(), ProjectionStreamError> {
-        let key = validation_cache_key(envelope);
+        let key = validation_cache_key(envelope)?;
         if let Some(allowed) = self
             .decisions
             .lock()
@@ -796,13 +852,19 @@ async fn forward_subscription_items(
         }
     }
 
+    let mut last_delivered_cursor = context.live_floor_cursor;
     loop {
-        match live.recv().await {
+        let received = tokio::select! {
+            _ = sender.closed() => return,
+            received = live.recv() => received,
+        };
+        match received {
             Ok(envelope) => {
                 if envelope.scope() != &context.scope {
                     continue;
                 }
-                if envelope.cursor().runtime <= context.live_floor_cursor.runtime {
+                let envelope_cursor = envelope.cursor();
+                if envelope_cursor.runtime <= last_delivered_cursor.runtime {
                     continue;
                 }
                 if validate_stream_envelope(
@@ -813,51 +875,74 @@ async fn forward_subscription_items(
                 )
                 .is_err()
                 {
-                    let _ = sender
-                        .send(ProjectionStreamItem::Lagged {
-                            reason: LagReason::AccessBlocked,
-                            snapshot_cursor: context.live_floor_cursor.clone(),
-                        })
+                    send_terminal_lag(&sender, LagReason::AccessBlocked, &last_delivered_cursor)
                         .await;
                     return;
                 }
-                if context
+                match context
                     .validation_cache
                     .validate(context.redaction_validator.as_ref(), &envelope)
-                    .is_err()
                 {
-                    let _ = sender
-                        .send(ProjectionStreamItem::Lagged {
-                            reason: LagReason::RedactionBlocked,
-                            snapshot_cursor: context.live_floor_cursor.clone(),
-                        })
+                    Ok(()) => {}
+                    Err(ProjectionStreamError::Redaction) => {
+                        send_terminal_lag(
+                            &sender,
+                            LagReason::RedactionBlocked,
+                            &last_delivered_cursor,
+                        )
                         .await;
-                    return;
+                        return;
+                    }
+                    Err(_) => {
+                        send_terminal_lag(&sender, LagReason::SourceFailed, &last_delivered_cursor)
+                            .await;
+                        return;
+                    }
                 }
                 match sender.try_send(ProjectionStreamItem::Update(envelope)) {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        last_delivered_cursor = envelope_cursor;
+                    }
                     Err(mpsc::error::TrySendError::Full(_)) => {
-                        let _ = sender
-                            .send(ProjectionStreamItem::Lagged {
-                                reason: LagReason::SubscriberBackpressure,
-                                snapshot_cursor: context.live_floor_cursor.clone(),
-                            })
-                            .await;
+                        send_terminal_lag(
+                            &sender,
+                            LagReason::SubscriberBackpressure,
+                            &last_delivered_cursor,
+                        )
+                        .await;
                         return;
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => return,
                 }
             }
             Err(broadcast::error::RecvError::Lagged(_)) => {
-                let _ = sender
-                    .send(ProjectionStreamItem::Lagged {
-                        reason: LagReason::SourceLagged,
-                        snapshot_cursor: context.live_floor_cursor.clone(),
-                    })
-                    .await;
+                send_terminal_lag(&sender, LagReason::SourceLagged, &last_delivered_cursor).await;
                 return;
             }
             Err(broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
+async fn send_terminal_lag(
+    sender: &mpsc::Sender<ProjectionStreamItem>,
+    reason: LagReason,
+    snapshot_cursor: &ProjectionCursor,
+) {
+    let item = ProjectionStreamItem::Lagged {
+        reason,
+        snapshot_cursor: snapshot_cursor.clone(),
+    };
+    match sender.try_send(item) {
+        Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+        Err(mpsc::error::TrySendError::Full(item)) => {
+            tokio::select! {
+                _ = sender.closed() => {}
+                _ = sleep(Duration::from_millis(TERMINAL_LAG_SEND_TIMEOUT_MILLIS)) => {}
+                result = sender.send(item) => {
+                    let _ = result;
+                }
+            }
         }
     }
 }
@@ -930,33 +1015,96 @@ fn map_outbound_error(error: OutboundError) -> ProjectionStreamError {
     }
 }
 
-fn scope_key(scope: &ProjectionScope, target: &ProjectionTarget) -> String {
-    format!("{scope:?}:{target:?}")
+fn scope_key(scope: &ProjectionScope, target: &ProjectionTarget) -> ScopeAdmissionKey {
+    ScopeAdmissionKey {
+        scope: projection_scope_key(scope),
+        target: target_key(target),
+    }
 }
 
-fn validation_cache_key(envelope: &ProductProjectionEnvelope) -> String {
+fn projection_scope_key(scope: &ProjectionScope) -> ProjectionScopeKey {
+    ProjectionScopeKey {
+        tenant_id: scope.stream.tenant_id.to_string(),
+        user_id: scope.stream.user_id.to_string(),
+        agent_id: scope.stream.agent_id.as_ref().map(ToString::to_string),
+        project_id: scope
+            .read_scope
+            .project_id
+            .as_ref()
+            .map(ToString::to_string),
+        mission_id: scope
+            .read_scope
+            .mission_id
+            .as_ref()
+            .map(ToString::to_string),
+        thread_id: scope.read_scope.thread_id.as_ref().map(ToString::to_string),
+        process_id: scope
+            .read_scope
+            .process_id
+            .as_ref()
+            .map(ToString::to_string),
+    }
+}
+
+fn target_key(target: &ProjectionTarget) -> ProjectionTargetKey {
+    match target {
+        ProjectionTarget::Thread { thread_id } => {
+            ProjectionTargetKey::Thread(thread_id.to_string())
+        }
+        ProjectionTarget::Mission { mission_id } => {
+            ProjectionTargetKey::Mission(mission_id.to_string())
+        }
+        ProjectionTarget::Run { invocation_id } => {
+            ProjectionTargetKey::Run(invocation_id.to_string())
+        }
+        ProjectionTarget::Process { process_id } => {
+            ProjectionTargetKey::Process(process_id.to_string())
+        }
+        ProjectionTarget::DeliveryStatus { thread_id } => {
+            ProjectionTargetKey::DeliveryStatus(thread_id.to_string())
+        }
+    }
+}
+
+fn validation_cache_key(
+    envelope: &ProductProjectionEnvelope,
+) -> Result<ProjectionValidationCacheKey, ProjectionStreamError> {
     let variant = match envelope {
-        ProductProjectionEnvelope::ThreadSnapshot(_) => "thread_snapshot",
-        ProductProjectionEnvelope::ThreadUpdates(_) => "thread_updates",
-        ProductProjectionEnvelope::DeliveryStatus(_) => "delivery_status",
-        ProductProjectionEnvelope::Debug(_) => "debug",
+        ProductProjectionEnvelope::ThreadSnapshot(_) => ProjectionEnvelopeKind::ThreadSnapshot,
+        ProductProjectionEnvelope::ThreadUpdates(_) => ProjectionEnvelopeKind::ThreadUpdates,
+        ProductProjectionEnvelope::DeliveryStatus(_) => ProjectionEnvelopeKind::DeliveryStatus,
+        ProductProjectionEnvelope::Debug(_) => ProjectionEnvelopeKind::Debug,
     };
-    format!(
-        "{variant}:{:?}:{}",
-        envelope.scope(),
-        envelope.cursor().runtime.as_u64()
-    )
+    let payload = serde_json::to_vec(envelope).map_err(|_| ProjectionStreamError::Source)?;
+    let mut hasher = DefaultHasher::new();
+    payload.hash(&mut hasher);
+    Ok(ProjectionValidationCacheKey {
+        variant,
+        scope: projection_scope_key(envelope.scope()),
+        cursor: envelope.cursor().runtime.as_u64(),
+        payload_len: payload.len(),
+        payload_hash: hasher.finish(),
+    })
 }
 
-fn count(map: &HashMap<String, usize>, key: &str) -> usize {
+fn count<K>(map: &HashMap<K, usize>, key: &K) -> usize
+where
+    K: Eq + Hash,
+{
     map.get(key).copied().unwrap_or(0)
 }
 
-fn increment(map: &mut HashMap<String, usize>, key: &str) {
-    *map.entry(key.to_string()).or_insert(0) += 1;
+fn increment<K>(map: &mut HashMap<K, usize>, key: &K)
+where
+    K: Clone + Eq + Hash,
+{
+    *map.entry(key.clone()).or_insert(0) += 1;
 }
 
-fn decrement(map: &mut HashMap<String, usize>, key: &str) {
+fn decrement<K>(map: &mut HashMap<K, usize>, key: &K)
+where
+    K: Eq + Hash,
+{
     if let Some(value) = map.get_mut(key) {
         *value = value.saturating_sub(1);
         if *value == 0 {
