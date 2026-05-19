@@ -362,9 +362,11 @@ mod reborn_support_tests {
     };
 
     use async_trait::async_trait;
+    use ironclaw_filesystem::ScopedFilesystem;
     use ironclaw_host_api::{
-        AgentId, CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, NetworkTargetPattern,
-        ProjectId, ResourceScope, TenantId, ThreadId, UserId,
+        AgentId, CapabilityId, InvocationId, MountAlias, MountGrant, MountPermissions, MountView,
+        NetworkMethod, NetworkPolicy, NetworkTargetPattern, ProjectId, ResourceScope, TenantId,
+        ThreadId, UserId, VirtualPath,
     };
     use ironclaw_loop_support::{
         HostManagedModelGateway, HostManagedModelMessage, HostManagedModelMessageRole,
@@ -376,8 +378,10 @@ mod reborn_support_tests {
         PolicyNetworkHttpEgress,
     };
     use ironclaw_product_adapters::{
-        AuthRequirement, DeliveryStatus, OutboundDeliverySink, ProductAdapter, ProductInboundAck,
-        ProductWorkflow, ProtocolAuthEvidence,
+        AuthRequirement, DeliveryStatus, ExternalConversationRef, FakeProtocolHttpEgress,
+        FinalReplyView, OutboundDeliverySink, ProductAdapter, ProductAdapterError,
+        ProductInboundAck, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
+        ProductRenderOutcome, ProductWorkflow, ProjectionCursor, ProtocolAuthEvidence,
     };
     use ironclaw_product_workflow::{
         ActionDispatchKind, ActionFingerprintKey, ConversationBindingService,
@@ -393,21 +397,23 @@ mod reborn_support_tests {
     use ironclaw_turns::{
         CancelRunRequest, CancelRunResponse, GetRunStateRequest, LoopMessageRef,
         ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
-        RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,
-        TurnId, TurnRunId, TurnRunState, TurnStatus,
+        RunProfileVersion, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnCoordinator,
+        TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
         events::EventCursor,
         run_profile::{ModelProfileId, ParentLoopOutput},
     };
     use tokio::sync::Barrier;
 
     use crate::reborn_support::delivery::RecordingOutboundDeliverySink;
+    use crate::reborn_support::filesystem::local_filesystem;
     use crate::reborn_support::model_replay::{
         RebornTraceReplayError, RebornTraceReplayModelGateway,
         capability_call_from_trace_with_surface,
     };
     use crate::reborn_support::network::RecordingNetworkHttpTransport;
     use crate::reborn_support::product_workflow::{
-        RebornProductWorkflowHarness, RebornProductWorkflowHarnessError, resource_scope,
+        FilesystemIdempotencyLedger, RebornProductWorkflowHarness,
+        RebornProductWorkflowHarnessError, resource_scope,
     };
     use crate::reborn_support::session_thread::{RebornThreadHarness, RebornThreadHarnessError};
     use crate::reborn_support::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
@@ -730,7 +736,7 @@ mod reborn_support_tests {
         let transport = RecordingNetworkHttpTransport::new();
         let _ = transport.execute(NetworkTransportRequest {
             method: NetworkMethod::Get,
-            url: "https://api.example.test/v1".to_string(),
+            url: "https://api.example.test/v1?token=secret&ok=1".to_string(),
             headers: vec![
                 ("authorization".to_string(), "Bearer secret".to_string()),
                 ("x-api-key".to_string(), "secret-key".to_string()),
@@ -744,6 +750,7 @@ mod reborn_support_tests {
         });
 
         let request = transport.requests().pop().expect("recorded request");
+        assert_eq!(request.url, "https://api.example.test/v1?<redacted>");
         assert_eq!(
             request.headers,
             vec![
@@ -1079,7 +1086,7 @@ mod reborn_support_tests {
     }
 
     #[tokio::test]
-    async fn idempotency_release_preserves_dispatched_reservation() {
+    async fn idempotency_release_removes_dispatched_nonterminal_reservation() {
         let harness =
             RebornProductWorkflowHarness::filesystem_temp(product_scope("tenant-release"))
                 .expect("product workflow harness");
@@ -1096,13 +1103,13 @@ mod reborn_support_tests {
         action.mark_dispatched(ActionDispatchKind::NoOp);
         ledger.release(action).await.expect("release dispatched");
 
-        assert!(
-            ledger
-                .begin_or_replay(fingerprint, received_at)
-                .await
-                .is_err(),
-            "dispatched reservations must not be released for duplicate processing"
-        );
+        let IdempotencyDecision::New(_) = ledger
+            .begin_or_replay(fingerprint, received_at)
+            .await
+            .expect("released dispatched reservation should retry")
+        else {
+            panic!("released dispatched reservation should allow a new action");
+        };
     }
 
     #[tokio::test]
@@ -1167,6 +1174,68 @@ mod reborn_support_tests {
     }
 
     #[tokio::test]
+    async fn standalone_filesystem_idempotency_ledgers_share_serialization_lock() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let backend = Arc::new(local_filesystem(root.path()).expect("local filesystem"));
+        let scope = product_scope("tenant-standalone-race");
+        let mounts = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/workflow").expect("valid workflow alias"),
+            VirtualPath::new(format!(
+                "/engine/tenants/{}/users/{}/standalone-workflow",
+                scope.tenant_id, scope.user_id
+            ))
+            .expect("valid workflow target"),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .expect("mount view");
+        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts));
+        let fingerprint = fingerprint_for("event-standalone-race", "alice", "room-1");
+        let received_at = chrono::Utc::now();
+        let start = Arc::new(Barrier::new(2));
+
+        let first_ledger = FilesystemIdempotencyLedger::new(
+            Arc::clone(&filesystem),
+            scope.clone(),
+            Duration::from_secs(60),
+        );
+        let first_start = Arc::clone(&start);
+        let first_fingerprint = fingerprint.clone();
+        let first = async move {
+            first_start.wait().await;
+            first_ledger
+                .begin_or_replay(first_fingerprint, received_at)
+                .await
+        };
+
+        let second_ledger = FilesystemIdempotencyLedger::new(
+            Arc::clone(&filesystem),
+            scope,
+            Duration::from_secs(60),
+        );
+        let second_start = Arc::clone(&start);
+        let second = async move {
+            second_start.wait().await;
+            second_ledger
+                .begin_or_replay(fingerprint, received_at)
+                .await
+        };
+
+        let (first_result, second_result) = tokio::join!(first, second);
+        let mut new_count = 0;
+        let mut rejected_count = 0;
+        for result in [first_result, second_result] {
+            match result {
+                Ok(IdempotencyDecision::New(_)) => new_count += 1,
+                Err(ProductWorkflowError::Transient { .. }) => rejected_count += 1,
+                other => panic!("unexpected concurrent standalone idempotency result: {other:?}"),
+            }
+        }
+
+        assert_eq!(new_count, 1);
+        assert_eq!(rejected_count, 1);
+    }
+
+    #[tokio::test]
     async fn product_workflow_uses_filesystem_binding_and_idempotency_services() {
         let product_harness =
             RebornProductWorkflowHarness::filesystem_temp(product_scope("tenant-workflow"))
@@ -1197,6 +1266,44 @@ mod reborn_support_tests {
         );
     }
 
+    #[tokio::test]
+    async fn product_workflow_retries_after_filesystem_deferred_busy_release() {
+        let product_harness =
+            RebornProductWorkflowHarness::filesystem_temp(product_scope("tenant-workflow-busy"))
+                .expect("product workflow harness");
+        let thread_harness = RebornThreadHarness::filesystem_temp(thread_scope("workflow-busy"))
+            .expect("thread harness");
+        let coordinator = DryRunCapturingTurnCoordinator::default();
+        coordinator.set_busy(TurnRunId::new());
+        let inbound: Arc<dyn InboundTurnService> = Arc::new(DefaultInboundTurnService::new(
+            product_harness.binding_service().expect("binding service"),
+            thread_harness.service_instance().expect("thread service"),
+            coordinator.clone(),
+        ));
+        let ledger: Arc<dyn IdempotencyLedger> = Arc::new(product_harness.idempotency_ledger());
+        let workflow = DefaultProductWorkflow::new(inbound, ledger);
+        let envelope = test_envelope("event-workflow-busy", "alice", "room-workflow-busy", "hi");
+
+        let first = workflow
+            .accept_inbound(envelope.clone())
+            .await
+            .expect("busy accept");
+        assert!(matches!(first, ProductInboundAck::DeferredBusy { .. }));
+        assert_eq!(coordinator.submission_count(), 1);
+
+        coordinator.set_accepting();
+        let second = workflow
+            .accept_inbound(envelope)
+            .await
+            .expect("retry submit");
+        assert!(matches!(second, ProductInboundAck::Accepted { .. }));
+        assert_eq!(
+            coordinator.submission_count(),
+            2,
+            "DeferredBusy must release the idempotency reservation for immediate retry"
+        );
+    }
+
     #[test]
     fn test_adapter_parses_payload_without_minting_trusted_context() {
         let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
@@ -1214,6 +1321,19 @@ mod reborn_support_tests {
     }
 
     #[test]
+    fn test_adapter_rejects_malformed_inbound_payload() {
+        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
+        let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "alice");
+        let error = adapter
+            .parse_inbound(b"not valid json", &evidence)
+            .expect_err("malformed payload");
+        assert!(matches!(
+            error,
+            ProductAdapterError::MalformedInboundPayload { .. }
+        ));
+    }
+
+    #[test]
     fn test_ingress_stamps_trusted_context_outside_adapter() {
         let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
         let ingress = RebornTestIngress::new(adapter);
@@ -1227,6 +1347,47 @@ mod reborn_support_tests {
         let raw = RebornTestProductAdapter::text_payload("event-2", "alice", "thread-1", "hi")
             .expect("payload");
         assert!(ingress.failed_auth_payload(&raw).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_adapter_render_outbound_records_delivery() {
+        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
+        let target_ref = ReplyTargetBindingRef::new("reply-target").expect("reply target");
+        let envelope = ProductOutboundEnvelope::new(
+            adapter.adapter_id().clone(),
+            adapter.installation_id().clone(),
+            ProductOutboundTarget::new(
+                target_ref.clone(),
+                ExternalConversationRef::new(None, "room-1", None, None).expect("conversation ref"),
+                None,
+            ),
+            ProjectionCursor::new("cursor:1").expect("projection cursor"),
+            ProductOutboundPayload::FinalReply(FinalReplyView {
+                turn_run_id: TurnRunId::new(),
+                text: "hello".to_string(),
+                generated_at: chrono::Utc::now(),
+            }),
+        );
+        let attempt_id = envelope.delivery_attempt_id;
+        let sink = RecordingOutboundDeliverySink::new();
+        let egress = FakeProtocolHttpEgress::new(["api.example.test".to_string()]);
+
+        let outcome = adapter
+            .render_outbound(envelope, &egress, &sink)
+            .await
+            .expect("render outbound");
+
+        assert_eq!(outcome, ProductRenderOutcome::DeliveryRecorded);
+        let statuses = sink.statuses();
+        assert_eq!(statuses.len(), 1);
+        assert!(matches!(
+            &statuses[0],
+            DeliveryStatus::Delivered {
+                attempt_id: actual_attempt,
+                target,
+                run_id: None,
+            } if *actual_attempt == attempt_id && target == &target_ref
+        ));
     }
 
     fn model_request(messages: Vec<HostManagedModelMessage>) -> HostManagedModelRequest {
@@ -1439,12 +1600,44 @@ mod reborn_support_tests {
     /// workflow, binding service, idempotency ledger, and thread service while
     /// capturing the final turn submission instead of starting the Reborn
     /// runtime loop or routing product traffic.
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct DryRunCapturingTurnCoordinator {
         submissions: Arc<Mutex<Vec<SubmitTurnRequest>>>,
+        outcome: Arc<Mutex<DryRunTurnOutcome>>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum DryRunTurnOutcome {
+        Accepted,
+        Busy { active_run_id: TurnRunId },
+    }
+
+    impl Default for DryRunCapturingTurnCoordinator {
+        fn default() -> Self {
+            Self {
+                submissions: Arc::new(Mutex::new(Vec::new())),
+                outcome: Arc::new(Mutex::new(DryRunTurnOutcome::Accepted)),
+            }
+        }
     }
 
     impl DryRunCapturingTurnCoordinator {
+        fn set_accepting(&self) {
+            *self
+                .outcome
+                .lock()
+                .expect("capturing coordinator outcome lock poisoned") =
+                DryRunTurnOutcome::Accepted;
+        }
+
+        fn set_busy(&self, active_run_id: TurnRunId) {
+            *self
+                .outcome
+                .lock()
+                .expect("capturing coordinator outcome lock poisoned") =
+                DryRunTurnOutcome::Busy { active_run_id };
+        }
+
         fn submission_count(&self) -> usize {
             self.submissions
                 .lock()
@@ -1463,16 +1656,29 @@ mod reborn_support_tests {
                 .lock()
                 .expect("capturing coordinator submissions lock poisoned")
                 .push(request.clone());
-            Ok(SubmitTurnResponse::Accepted {
-                turn_id: TurnId::new(),
-                run_id: TurnRunId::new(),
-                status: TurnStatus::Queued,
-                resolved_run_profile_id: RunProfileId::default_profile(),
-                resolved_run_profile_version: RunProfileVersion::new(1),
-                event_cursor: EventCursor::default(),
-                accepted_message_ref: request.accepted_message_ref,
-                reply_target_binding_ref: request.reply_target_binding_ref,
-            })
+            match *self
+                .outcome
+                .lock()
+                .expect("capturing coordinator outcome lock poisoned")
+            {
+                DryRunTurnOutcome::Accepted => Ok(SubmitTurnResponse::Accepted {
+                    turn_id: TurnId::new(),
+                    run_id: TurnRunId::new(),
+                    status: TurnStatus::Queued,
+                    resolved_run_profile_id: RunProfileId::default_profile(),
+                    resolved_run_profile_version: RunProfileVersion::new(1),
+                    event_cursor: EventCursor::default(),
+                    accepted_message_ref: request.accepted_message_ref,
+                    reply_target_binding_ref: request.reply_target_binding_ref,
+                }),
+                DryRunTurnOutcome::Busy { active_run_id } => {
+                    Err(TurnError::ThreadBusy(ThreadBusy {
+                        active_run_id,
+                        status: TurnStatus::Running,
+                        event_cursor: EventCursor::default(),
+                    }))
+                }
+            }
         }
 
         async fn resume_turn(

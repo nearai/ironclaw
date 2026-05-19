@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -222,7 +225,14 @@ where
         scope: ResourceScope,
         lease_ttl: Duration,
     ) -> Self {
-        Self::new_with_lock(filesystem, scope, lease_ttl, Arc::new(Mutex::new(())))
+        static STANDALONE_IDEMPOTENCY_LOCK: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
+
+        Self::new_with_lock(
+            filesystem,
+            scope,
+            lease_ttl,
+            Arc::clone(STANDALONE_IDEMPOTENCY_LOCK.get_or_init(|| Arc::new(Mutex::new(())))),
+        )
     }
 
     pub fn new_with_lock(
@@ -308,8 +318,7 @@ where
         else {
             return Ok(());
         };
-        if action.phase != ActionPhase::Received
-            || stored.action.phase == ActionPhase::Settled
+        if stored.action.phase == ActionPhase::Settled
             || stored.action.action_id != action.action_id
         {
             return Ok(());
