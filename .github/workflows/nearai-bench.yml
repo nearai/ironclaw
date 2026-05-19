@@ -1,0 +1,101 @@
+# Copy this file to: nearai/ironclaw/.github/workflows/nearai-bench.yml
+#
+# Slash-command dispatcher for nearai-bench on PR comments. A maintainer
+# comments `/benchmark <suite>` (optionally `--model <id>`) on a PR; this
+# workflow validates auth, resolves the PR head SHA, and delegates to
+# nearai/benchmarks/.github/workflows/bench-pr-reusable.yml.
+#
+# Requires `OPENROUTER_API_KEY` to be set as an org-level secret (or
+# inherited via repo secret). Uses `secrets: inherit` so the called
+# workflow can forward it.
+
+name: nearai-bench
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  pull-requests: write
+  issues: write
+  contents: read
+
+concurrency:
+  # Cancel any prior /benchmark on the same PR — a maintainer re-triggering
+  # almost always means "ignore the previous one."
+  group: nearai-bench-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  parse:
+    if: github.event.issue.pull_request != null && startsWith(github.event.comment.body, '/benchmark')
+    runs-on: ubuntu-latest
+    outputs:
+      suite: ${{ steps.parse.outputs.suite }}
+      model: ${{ steps.parse.outputs.model }}
+      head_sha: ${{ steps.parse.outputs.head_sha }}
+      authorized: ${{ steps.auth.outputs.authorized }}
+    steps:
+      - name: Check commenter has write permission
+        id: auth
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              username: context.payload.comment.user.login,
+            });
+            const ok = ['admin', 'write', 'maintain'].includes(data.permission);
+            core.setOutput('authorized', ok ? 'yes' : 'no');
+            if (!ok) {
+              core.notice(`Comment author @${context.payload.comment.user.login} is not authorized to trigger benchmarks (permission: ${data.permission}).`);
+            }
+
+      - name: Parse command
+        id: parse
+        if: steps.auth.outputs.authorized == 'yes'
+        env:
+          BODY: ${{ github.event.comment.body }}
+          PR: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Grammar: /benchmark <suite> [--model <model-id>]
+          # Suite name: [A-Za-z0-9_-]+
+          # Model ID:   [A-Za-z0-9_./:-]+ (allows openrouter-style "vendor/model")
+          suite=$(printf '%s' "$BODY" | sed -nE 's@^/benchmark[[:space:]]+([A-Za-z0-9_-]+)([[:space:]]+--model[[:space:]]+[A-Za-z0-9_./:-]+)?[[:space:]]*$@\1@p')
+          model=$(printf '%s' "$BODY" | sed -nE 's@^/benchmark[[:space:]]+[A-Za-z0-9_-]+[[:space:]]+--model[[:space:]]+([A-Za-z0-9_./:-]+)[[:space:]]*$@\1@p')
+          if [ -z "$suite" ]; then
+            # Tell the user what's wrong rather than failing silently.
+            gh pr comment "$PR" --repo "$REPO" --body $'Could not parse `/benchmark` command.\n\nUsage: `/benchmark <suite> [--model <model-id>]`\n\nExample: `/benchmark ironclaw-v2-smoke`'
+            echo "::error::could not parse /benchmark <suite> [--model <id>]"
+            exit 1
+          fi
+          sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
+          echo "suite=$suite" >> "$GITHUB_OUTPUT"
+          echo "model=$model" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Acknowledge with 🚀 reaction
+        if: steps.auth.outputs.authorized == 'yes' && steps.parse.outputs.suite != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api "/repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -F content=rocket
+
+  bench:
+    needs: parse
+    if: needs.parse.outputs.authorized == 'yes' && needs.parse.outputs.suite != ''
+    uses: nearai/benchmarks/.github/workflows/bench-pr-reusable.yml@main
+    with:
+      ironclaw-rev: ${{ needs.parse.outputs.head_sha }}
+      pr-repo: ${{ github.repository }}
+      pr-number: ${{ github.event.issue.number }}
+      suite-name: ${{ needs.parse.outputs.suite }}
+      model: ${{ needs.parse.outputs.model }}
+      trigger-comment-id: ${{ github.event.comment.id }}
+    secrets: inherit
