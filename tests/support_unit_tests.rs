@@ -1236,6 +1236,61 @@ mod reborn_support_tests {
     }
 
     #[tokio::test]
+    async fn shared_backend_product_workflow_harnesses_share_serialization_lock() {
+        let root = Arc::new(tempfile::tempdir().expect("tempdir"));
+        let backend = Arc::new(local_filesystem(root.path()).expect("local filesystem"));
+        let scope = product_scope("tenant-shared-backend-race");
+        let first_harness = RebornProductWorkflowHarness::filesystem_shared_backend(
+            scope.clone(),
+            Arc::clone(&backend),
+            Arc::clone(&root),
+        )
+        .expect("first product workflow harness");
+        let second_harness = RebornProductWorkflowHarness::filesystem_shared_backend(
+            scope,
+            Arc::clone(&backend),
+            Arc::clone(&root),
+        )
+        .expect("second product workflow harness");
+        let fingerprint = fingerprint_for("event-shared-backend-race", "alice", "room-1");
+        let received_at = chrono::Utc::now();
+        let start = Arc::new(Barrier::new(2));
+
+        let first_ledger = first_harness.idempotency_ledger();
+        let first_start = Arc::clone(&start);
+        let first_fingerprint = fingerprint.clone();
+        let first = async move {
+            first_start.wait().await;
+            first_ledger
+                .begin_or_replay(first_fingerprint, received_at)
+                .await
+        };
+
+        let second_ledger = second_harness.idempotency_ledger();
+        let second_start = Arc::clone(&start);
+        let second = async move {
+            second_start.wait().await;
+            second_ledger
+                .begin_or_replay(fingerprint, received_at)
+                .await
+        };
+
+        let (first_result, second_result) = tokio::join!(first, second);
+        let mut new_count = 0;
+        let mut rejected_count = 0;
+        for result in [first_result, second_result] {
+            match result {
+                Ok(IdempotencyDecision::New(_)) => new_count += 1,
+                Err(ProductWorkflowError::Transient { .. }) => rejected_count += 1,
+                other => panic!("unexpected concurrent shared-backend result: {other:?}"),
+            }
+        }
+
+        assert_eq!(new_count, 1);
+        assert_eq!(rejected_count, 1);
+    }
+
+    #[tokio::test]
     async fn product_workflow_uses_filesystem_binding_and_idempotency_services() {
         let product_harness =
             RebornProductWorkflowHarness::filesystem_temp(product_scope("tenant-workflow"))

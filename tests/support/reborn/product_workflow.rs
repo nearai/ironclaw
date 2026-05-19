@@ -56,7 +56,7 @@ impl RebornProductWorkflowHarness {
         backend: Arc<LocalFilesystem>,
         root: Arc<tempfile::TempDir>,
     ) -> Result<Self, RebornProductWorkflowHarnessError> {
-        Self::filesystem_shared_backend_with_lock(scope, backend, root, Arc::new(Mutex::new(())))
+        Self::filesystem_shared_backend_with_lock(scope, backend, root, shared_idempotency_lock())
     }
 
     fn filesystem_shared_backend_with_lock(
@@ -225,14 +225,7 @@ where
         scope: ResourceScope,
         lease_ttl: Duration,
     ) -> Self {
-        static STANDALONE_IDEMPOTENCY_LOCK: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
-
-        Self::new_with_lock(
-            filesystem,
-            scope,
-            lease_ttl,
-            Arc::clone(STANDALONE_IDEMPOTENCY_LOCK.get_or_init(|| Arc::new(Mutex::new(())))),
-        )
+        Self::new_with_lock(filesystem, scope, lease_ttl, shared_idempotency_lock())
     }
 
     pub fn new_with_lock(
@@ -329,6 +322,12 @@ where
             Err(error) => Err(fs_error("release idempotency reservation", error)),
         }
     }
+}
+
+fn shared_idempotency_lock() -> Arc<Mutex<()>> {
+    static IDEMPOTENCY_LOCK: OnceLock<Arc<Mutex<()>>> = OnceLock::new();
+
+    Arc::clone(IDEMPOTENCY_LOCK.get_or_init(|| Arc::new(Mutex::new(()))))
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
