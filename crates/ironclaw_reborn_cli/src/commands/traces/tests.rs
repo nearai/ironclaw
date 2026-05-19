@@ -1,13 +1,13 @@
 use super::*;
 use crate::cli::Cli;
 use crate::commands::Command;
+use clap::Parser;
 use ironclaw_reborn_traces::contribution::{
     ConsentMetadata, ContributorMetadata, DETERMINISTIC_REDACTION_PIPELINE_VERSION,
     IronclawTraceMetadata, OutcomeMetadata, PrivacyMetadata, ReplayMetadata, ResidualPiiRisk,
     TRACE_CONTRIBUTION_POLICY_VERSION, TRACE_CONTRIBUTION_SCHEMA_VERSION, TraceCard,
     TraceValueCard, ValueMetadata,
 };
-use clap::Parser;
 
 fn unwrap_traces_command(cli: Cli) -> TracesSubcommand {
     let Command::Traces(command) = cli.command else {
@@ -438,8 +438,10 @@ fn opt_in_writes_runtime_owner_policy_and_normalizes_selected_tools() {
     let runtime_scope = format!("trace-cli-runtime-scope-{}", Uuid::new_v4());
     let _global_policy_restore = TracePolicyFileRestore::new(policy_path());
     let _runtime_policy_restore = TracePolicyFileRestore::new(
-        ironclaw_reborn_traces::contribution::trace_contribution_dir_for_scope(Some(&runtime_scope))
-            .join("policy.json"),
+        ironclaw_reborn_traces::contribution::trace_contribution_dir_for_scope(Some(
+            &runtime_scope,
+        ))
+        .join("policy.json"),
     );
 
     opt_in(OptInOptions {
@@ -464,8 +466,7 @@ fn opt_in_writes_runtime_owner_policy_and_normalizes_selected_tools() {
     .expect("opt-in succeeds");
 
     let global = read_policy().expect("global policy reads");
-    let scoped =
-        read_trace_policy_for_scope(Some(&runtime_scope)).expect("scoped policy reads");
+    let scoped = read_trace_policy_for_scope(Some(&runtime_scope)).expect("scoped policy reads");
     assert!(global.enabled);
     assert!(scoped.enabled);
     assert_eq!(
@@ -616,4 +617,3 @@ fn cli_credit_notice_message_includes_delayed_and_event_totals() {
     assert!(message.contains("5 credit event(s) recorded"));
     assert!(message.contains("Delayed credit can change"));
 }
-

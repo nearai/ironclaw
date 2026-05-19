@@ -4741,8 +4741,6 @@ dependencies = [
  "clap",
  "clap_complete",
  "hex",
- "ironclaw_common",
- "ironclaw_llm",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
  "ironclaw_reborn_traces",

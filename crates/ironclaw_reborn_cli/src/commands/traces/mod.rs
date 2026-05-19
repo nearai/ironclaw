@@ -280,7 +280,6 @@ enum TracesSubcommand {
         #[arg(long)]
         json: bool,
     },
-
 }
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceScopeArg {
@@ -312,7 +311,6 @@ impl From<TraceScopeArg> for ConsentScope {
         }
     }
 }
-
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TraceChannelArg {
@@ -569,9 +567,10 @@ fn show_policy_status(json: bool, user_scope: Option<&str>) -> anyhow::Result<()
         policy.credit_notice_interval_hours
     );
     let queued_count = match normalized_scope.as_deref() {
-        Some(scope) => {
-            ironclaw_reborn_traces::contribution::queued_trace_envelope_paths_for_scope(Some(scope))?.len()
-        }
+        Some(scope) => ironclaw_reborn_traces::contribution::queued_trace_envelope_paths_for_scope(
+            Some(scope),
+        )?
+        .len(),
         None => queued_envelope_paths()?.len(),
     };
     println!("  queued envelopes: {queued_count}");
@@ -874,8 +873,8 @@ async fn preview_recorded_trace(options: PreviewOptions) -> anyhow::Result<()> {
             e
         )
     })?;
-    let recorded_trace: ironclaw_llm::recording::TraceFile = serde_json::from_str(&raw_json)
-        .map_err(|e| {
+    let recorded_trace: ironclaw_reborn_traces::recording::TraceFile =
+        serde_json::from_str(&raw_json).map_err(|e| {
             anyhow::anyhow!(
                 "failed to parse recorded trace {}: {}",
                 options.recorded_trace.display(),
@@ -1049,7 +1048,6 @@ async fn trace_commons_ingest_health(endpoint: &str, json: bool) -> anyhow::Resu
     Ok(())
 }
 
-
 struct TraceCommonsApiResponse {
     url: String,
     body: String,
@@ -1101,7 +1099,6 @@ async fn trace_commons_api_request(
     };
     Ok(TraceCommonsApiResponse { url, body, json })
 }
-
 
 fn trace_commons_api_url(
     endpoint: &str,
@@ -1155,12 +1152,10 @@ fn join_url_paths(prefix: &str, path: &str) -> String {
     }
 }
 
-
 fn print_trace_commons_json(response: &TraceCommonsApiResponse) -> anyhow::Result<()> {
     println!("{}", pretty_trace_commons_body(response)?);
     Ok(())
 }
-
 
 fn pretty_trace_commons_body(response: &TraceCommonsApiResponse) -> anyhow::Result<String> {
     if let Some(value) = response.json.as_ref() {
@@ -1170,9 +1165,6 @@ fn pretty_trace_commons_body(response: &TraceCommonsApiResponse) -> anyhow::Resu
         Ok(response.body.clone())
     }
 }
-
-
-
 
 fn compact_response_body(body: &str) -> String {
     let trimmed = body.trim();
@@ -1700,7 +1692,7 @@ fn queue_dir() -> PathBuf {
 }
 
 fn trace_contribution_dir() -> PathBuf {
-    ironclaw_common::paths::ironclaw_base_dir().join("trace_contributions")
+    ironclaw_reborn_traces::paths::ironclaw_base_dir().join("trace_contributions")
 }
 
 fn read_policy() -> anyhow::Result<StandingTraceContributionPolicy> {
@@ -1835,4 +1827,3 @@ fn redaction_summary(counts: &BTreeMap<String, u32>) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
-

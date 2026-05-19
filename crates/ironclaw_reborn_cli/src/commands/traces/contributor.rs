@@ -99,7 +99,9 @@ pub(super) async fn dispatch(cmd: TracesSubcommand) -> anyhow::Result<()> {
             endpoint,
             bearer_token_env,
         } => submit_envelope(&envelope, &endpoint, &bearer_token_env).await,
-        TracesSubcommand::ListSubmissions { json, summary } => list_submissions(json, summary).await,
+        TracesSubcommand::ListSubmissions { json, summary } => {
+            list_submissions(json, summary).await
+        }
         TracesSubcommand::Revoke {
             submission_id,
             endpoint,
