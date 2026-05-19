@@ -50,6 +50,22 @@ impl MountPermissions {
         }
     }
 
+    /// Full per-user owner permissions: read + write + list + delete.
+    ///
+    /// Use for `MountGrant`s that point to a caller's private
+    /// tenant/user-scoped storage (per-user secrets, per-user engine
+    /// state). Higher-level stores need delete authority to revoke
+    /// leases, expire sessions, etc.
+    pub fn read_write_list_delete() -> Self {
+        Self {
+            read: true,
+            write: true,
+            delete: true,
+            list: true,
+            execute: false,
+        }
+    }
+
     pub fn is_subset_of(&self, parent: &Self) -> bool {
         (!self.read || parent.read)
             && (!self.write || parent.write)

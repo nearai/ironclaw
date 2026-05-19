@@ -7,15 +7,16 @@ use std::collections::HashSet;
 use async_trait::async_trait;
 use ironclaw_turns::{
     LoopBlocked, LoopBlockedKind, LoopCancelled, LoopCancelledReasonKind, LoopCompleted,
-    LoopCompletionKind, LoopExit, LoopExitId, LoopFailed, LoopFailureKind,
+    LoopCompletionKind, LoopExit, LoopExitId, LoopFailed, LoopFailureKind, LoopResultRef,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef,
         BatchPolicyKind, CapabilityBatchInvocation, CapabilityCallCandidate, CapabilityFailureKind,
         CapabilityInvocation, CapabilityOutcome, CapabilityResultMessage, FinalizeAssistantMessage,
         LoopCancelReasonKind, LoopCancellationSignal, LoopCheckpointKind, LoopCheckpointRequest,
         LoopDriverNoteKind, LoopGateKind, LoopInput, LoopInputAckToken, LoopInputBatch,
-        LoopModelRequest, LoopProgressEvent, ParentLoopOutput, StageCheckpointPayloadRequest,
-        VisibleCapabilityRequest, VisibleCapabilitySurface,
+        LoopModelCapabilityView, LoopModelRequest, LoopProgressEvent, ParentLoopOutput,
+        ProviderToolCallReference, StageCheckpointPayloadRequest, VisibleCapabilityRequest,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -247,6 +248,13 @@ impl CanonicalAgentLoopExecutor {
                     stage: HostStage::Capability,
                 })?;
             apply_capability_filter(&mut surface, &surface_filter);
+            let capability_view = LoopModelCapabilityView {
+                visible_capability_ids: surface
+                    .descriptors
+                    .iter()
+                    .map(|descriptor| descriptor.capability_id.clone())
+                    .collect(),
+            };
             state.surface_version = Some(surface.version.clone());
             state = match self
                 .checkpoint_and_exit_if_cancelled_after_pending_input_ack(
@@ -262,6 +270,7 @@ impl CanonicalAgentLoopExecutor {
 
             let mut context_request = planner.context().plan_context_request(&state).await;
             context_request.surface_version = Some(surface.version.clone());
+            context_request.capability_view = Some(capability_view.clone());
             let prompt_mode = context_request.mode;
             state = match self
                 .checkpoint_and_exit_if_cancelled_after_pending_input_ack(
@@ -330,6 +339,7 @@ impl CanonicalAgentLoopExecutor {
                         messages: prompt_bundle.messages,
                         surface_version: Some(surface.version.clone()),
                         model_preference,
+                        capability_view: Some(capability_view),
                     },
                 )
                 .await?
@@ -712,24 +722,24 @@ impl CanonicalAgentLoopExecutor {
     ) -> Result<BatchStep, AgentLoopExecutorError> {
         match outcome {
             CapabilityOutcome::Completed(result) => {
-                append_capability_result_ref(host, &result).await?;
+                append_capability_result_ref(host, &call, &result).await?;
                 push_completed_result(&mut state, result);
                 Ok(BatchStep::Continue(Box::new(state)))
             }
             CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
-                self.handle_gate(planner, host, state, GateKind::Approval, gate_ref)
+                self.handle_gate(planner, host, state, call, GateKind::Approval, gate_ref)
                     .await
             }
             CapabilityOutcome::AuthRequired { gate_ref, .. } => {
-                self.handle_gate(planner, host, state, GateKind::Auth, gate_ref)
+                self.handle_gate(planner, host, state, call, GateKind::Auth, gate_ref)
                     .await
             }
             CapabilityOutcome::ResourceBlocked { gate_ref, .. } => {
-                self.handle_gate(planner, host, state, GateKind::Resource, gate_ref)
+                self.handle_gate(planner, host, state, call, GateKind::Resource, gate_ref)
                     .await
             }
             CapabilityOutcome::SpawnedProcess(handle) => {
-                self.fail_unsupported_process_wait(host, state, &handle.process_ref)
+                self.fail_unsupported_process_wait(host, state, &call, &handle.process_ref)
                     .await
             }
             CapabilityOutcome::Denied(denied) => {
@@ -778,6 +788,7 @@ impl CanonicalAgentLoopExecutor {
             {
                 RecoveryOutcome::SkipResult { recovery } => {
                     state.recovery_state = recovery;
+                    append_capability_error_ref(host, &mut state, &call, &summary).await?;
                     match self.checkpoint_and_exit_if_cancelled(host, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -789,6 +800,7 @@ impl CanonicalAgentLoopExecutor {
                     failure_kind,
                 } => {
                     state.recovery_state = recovery;
+                    append_capability_error_ref(host, &mut state, &call, &summary).await?;
                     match self.checkpoint_and_exit_if_cancelled(host, state).await? {
                         CancelCheck::Continue(next) => state = *next,
                         CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -806,6 +818,7 @@ impl CanonicalAgentLoopExecutor {
                 } => {
                     if matches!(summary.class, CapabilityErrorClass::PolicyDenied) {
                         state.recovery_state = recovery;
+                        append_capability_error_ref(host, &mut state, &call, &summary).await?;
                         match self.checkpoint_and_exit_if_cancelled(host, state).await? {
                             CancelCheck::Continue(next) => state = *next,
                             CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -848,28 +861,54 @@ impl CanonicalAgentLoopExecutor {
                         }
                         promoted => match promoted {
                             CapabilityOutcome::Completed(result) => {
-                                append_capability_result_ref(host, &result).await?;
+                                append_capability_result_ref(host, &call, &result).await?;
                                 push_completed_result(&mut state, result);
                                 return Ok(BatchStep::Continue(Box::new(state)));
                             }
                             CapabilityOutcome::ApprovalRequired { gate_ref, .. } => {
                                 return self
-                                    .handle_gate(planner, host, state, GateKind::Approval, gate_ref)
+                                    .handle_gate(
+                                        planner,
+                                        host,
+                                        state,
+                                        call,
+                                        GateKind::Approval,
+                                        gate_ref,
+                                    )
                                     .await;
                             }
                             CapabilityOutcome::AuthRequired { gate_ref, .. } => {
                                 return self
-                                    .handle_gate(planner, host, state, GateKind::Auth, gate_ref)
+                                    .handle_gate(
+                                        planner,
+                                        host,
+                                        state,
+                                        call,
+                                        GateKind::Auth,
+                                        gate_ref,
+                                    )
                                     .await;
                             }
                             CapabilityOutcome::ResourceBlocked { gate_ref, .. } => {
                                 return self
-                                    .handle_gate(planner, host, state, GateKind::Resource, gate_ref)
+                                    .handle_gate(
+                                        planner,
+                                        host,
+                                        state,
+                                        call,
+                                        GateKind::Resource,
+                                        gate_ref,
+                                    )
                                     .await;
                             }
                             CapabilityOutcome::SpawnedProcess(handle) => {
                                 return self
-                                    .fail_unsupported_process_wait(host, state, &handle.process_ref)
+                                    .fail_unsupported_process_wait(
+                                        host,
+                                        state,
+                                        &call,
+                                        &handle.process_ref,
+                                    )
                                     .await;
                             }
                             CapabilityOutcome::Denied(denied) => {
@@ -895,6 +934,7 @@ impl CanonicalAgentLoopExecutor {
             }
         }
 
+        append_capability_error_ref(host, &mut state, &call, &summary).await?;
         let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
         Ok(BatchStep::Exit(failed_exit(
             host,
@@ -909,6 +949,7 @@ impl CanonicalAgentLoopExecutor {
         planner: &dyn AgentLoopPlannerInternal,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
         mut state: LoopExecutionState,
+        call: CapabilityCallCandidate,
         kind: GateKind,
         gate_ref: ironclaw_turns::LoopGateRef,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
@@ -945,6 +986,13 @@ impl CanonicalAgentLoopExecutor {
             }
             GateOutcome::SkipAndContinue { gate } => {
                 state.gate_state = gate;
+                append_capability_safe_summary_ref(
+                    host,
+                    &mut state,
+                    &call,
+                    gate_tool_result_summary(kind, "skipped"),
+                )
+                .await?;
                 match self.checkpoint_and_exit_if_cancelled(host, state).await? {
                     CancelCheck::Continue(next) => state = *next,
                     CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -953,6 +1001,13 @@ impl CanonicalAgentLoopExecutor {
             }
             GateOutcome::Abort { gate, failure_kind } => {
                 state.gate_state = gate;
+                append_capability_safe_summary_ref(
+                    host,
+                    &mut state,
+                    &call,
+                    gate_tool_result_summary(kind, "aborted"),
+                )
+                .await?;
                 match self.checkpoint_and_exit_if_cancelled(host, state).await? {
                     CancelCheck::Continue(next) => state = *next,
                     CancelCheck::Exit(exit) => return Ok(BatchStep::Exit(exit)),
@@ -971,9 +1026,17 @@ impl CanonicalAgentLoopExecutor {
     async fn fail_unsupported_process_wait(
         &self,
         host: &(dyn AgentLoopDriverHost + Send + Sync),
-        state: LoopExecutionState,
+        mut state: LoopExecutionState,
+        call: &CapabilityCallCandidate,
         _process_ref: &ironclaw_turns::run_profile::LoopProcessRef,
     ) -> Result<BatchStep, AgentLoopExecutorError> {
+        append_capability_safe_summary_ref(
+            host,
+            &mut state,
+            call,
+            "capability process wait is not supported".to_string(),
+        )
+        .await?;
         let checked = self.checkpoint(host, state, CheckpointKind::Final).await?;
         Ok(BatchStep::Exit(failed_exit(
             host,
@@ -1582,19 +1645,9 @@ fn capability_is_visible(
 }
 
 fn apply_capability_filter(surface: &mut VisibleCapabilitySurface, filter: &CapabilityFilter) {
-    match filter {
-        CapabilityFilter::All => {}
-        CapabilityFilter::AllowOnly(allowed) => {
-            surface
-                .descriptors
-                .retain(|descriptor| allowed.contains(&descriptor.capability_id));
-        }
-        CapabilityFilter::Deny(denied) => {
-            surface
-                .descriptors
-                .retain(|descriptor| !denied.contains(&descriptor.capability_id));
-        }
-    }
+    surface
+        .descriptors
+        .retain(|descriptor| filter.permits(&descriptor.capability_id));
 }
 
 fn push_call_signature_once(
@@ -1617,15 +1670,114 @@ fn push_call_signature_once(
 
 async fn append_capability_result_ref(
     host: &(dyn AgentLoopDriverHost + Send + Sync),
+    call: &CapabilityCallCandidate,
     result: &CapabilityResultMessage,
 ) -> Result<(), AgentLoopExecutorError> {
     host.append_capability_result_ref(AppendCapabilityResultRef {
         result_ref: result.result_ref.clone(),
         safe_summary: result.safe_summary.clone(),
+        provider_call: provider_tool_call_reference(call),
     })
     .await
     .map_err(capability_host_error)?;
     Ok(())
+}
+
+fn provider_tool_call_reference(
+    call: &CapabilityCallCandidate,
+) -> Option<ProviderToolCallReference> {
+    let provider_replay = call.provider_replay.as_ref()?;
+    Some(ProviderToolCallReference {
+        provider_id: provider_replay.provider_id.clone(),
+        provider_model_id: provider_replay.provider_model_id.clone(),
+        provider_turn_id: provider_replay.provider_turn_id.clone(),
+        provider_call_id: provider_replay.provider_call_id.clone(),
+        provider_tool_name: provider_replay.provider_tool_name.clone(),
+        capability_id: call.capability_id.clone(),
+        arguments: provider_replay.arguments.clone(),
+        response_reasoning: provider_replay.response_reasoning.clone(),
+        reasoning: provider_replay.reasoning.clone(),
+        signature: provider_replay.signature.clone(),
+    })
+}
+
+async fn append_capability_error_ref(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    state: &mut LoopExecutionState,
+    call: &CapabilityCallCandidate,
+    summary: &CapabilityErrorSummary,
+) -> Result<(), AgentLoopExecutorError> {
+    append_capability_safe_summary_ref(host, state, call, summary.safe_summary.as_str().to_string())
+        .await
+}
+
+async fn append_capability_safe_summary_ref(
+    host: &(dyn AgentLoopDriverHost + Send + Sync),
+    state: &mut LoopExecutionState,
+    call: &CapabilityCallCandidate,
+    safe_summary: String,
+) -> Result<(), AgentLoopExecutorError> {
+    if call.provider_replay.is_none() {
+        return Ok(());
+    }
+    let result_ref = synthetic_provider_error_result_ref(call)?;
+    host.append_capability_result_ref(AppendCapabilityResultRef {
+        result_ref: result_ref.clone(),
+        safe_summary,
+        provider_call: provider_tool_call_reference(call),
+    })
+    .await
+    .map_err(capability_host_error)?;
+    state.result_refs.push(result_ref);
+    Ok(())
+}
+
+fn synthetic_provider_error_result_ref(
+    call: &CapabilityCallCandidate,
+) -> Result<LoopResultRef, AgentLoopExecutorError> {
+    let provider_replay =
+        call.provider_replay
+            .as_ref()
+            .ok_or(AgentLoopExecutorError::PlannerContract {
+                detail: "provider replay metadata is required for provider error result ref",
+            })?;
+    let mut suffix = format!(
+        "provider-error-{}-{}",
+        sanitize_result_ref_suffix(&provider_replay.provider_turn_id),
+        sanitize_result_ref_suffix(&provider_replay.provider_call_id)
+    );
+    suffix.truncate(240);
+    LoopResultRef::new(format!("result:{suffix}")).map_err(|_| {
+        AgentLoopExecutorError::PlannerContract {
+            detail: "provider error result ref was invalid",
+        }
+    })
+}
+
+fn sanitize_result_ref_suffix(value: &str) -> String {
+    let mut sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        sanitized.push_str("unknown");
+    }
+    sanitized
+}
+
+fn gate_tool_result_summary(kind: GateKind, outcome: &'static str) -> String {
+    let gate = match kind {
+        GateKind::Approval => "approval",
+        GateKind::Auth => "auth",
+        GateKind::Resource => "resource",
+    };
+    format!("{gate} gate {outcome}")
 }
 
 fn push_completed_result(state: &mut LoopExecutionState, result: CapabilityResultMessage) {
@@ -1660,9 +1812,10 @@ mod tests {
             LoopInterruptKind, LoopModelMessage, LoopModelResponse, LoopProcessRef,
             LoopPromptBundle, LoopPromptBundleRef, LoopPromptBundleRequest, LoopRunContext,
             LoopRunInfoPort, ModelProfileId, ModelStreamChunk, ProcessHandleSummary,
-            RedactedRunProfileProvenance, ResolvedRunProfile, ResourceBudgetPolicy,
-            ResourceBudgetTier, RunClassId, RunProfileFingerprint, RuntimeProfileConstraints,
-            SchedulingClass, StageCheckpointPayloadRequest, SteeringPolicy,
+            ProviderToolCallReplay, RedactedRunProfileProvenance, ResolvedRunProfile,
+            ResourceBudgetPolicy, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
+            RuntimeProfileConstraints, SchedulingClass, StageCheckpointPayloadRequest,
+            SteeringPolicy,
         },
     };
 
@@ -1681,6 +1834,7 @@ mod tests {
         model_responses: Arc<Mutex<VecDeque<LoopModelResponse>>>,
         model_errors: Arc<Mutex<VecDeque<AgentLoopHostError>>>,
         model_requests: Arc<Mutex<Vec<LoopModelRequest>>>,
+        prompt_requests: Arc<Mutex<Vec<LoopPromptBundleRequest>>>,
         input_batches: Arc<Mutex<VecDeque<LoopInputBatch>>>,
         acked_input_tokens: Arc<Mutex<Vec<LoopInputAckToken>>>,
         batch_outcomes: Arc<Mutex<VecDeque<ironclaw_turns::run_profile::CapabilityBatchOutcome>>>,
@@ -1689,6 +1843,7 @@ mod tests {
         batch_invocations: Arc<Mutex<Vec<CapabilityBatchInvocation>>>,
         single_invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
         staged_payloads: Arc<Mutex<Vec<StageCheckpointPayloadRequest>>>,
+        appended_result_refs: Arc<Mutex<Vec<AppendCapabilityResultRef>>>,
         events: Arc<Mutex<Vec<String>>>,
         prompt_surface_version: Option<CapabilitySurfaceVersion>,
         visible_surface_version: CapabilitySurfaceVersion,
@@ -1709,6 +1864,7 @@ mod tests {
                 model_responses: Arc::new(Mutex::new(model_responses.into())),
                 model_errors: Arc::new(Mutex::new(VecDeque::new())),
                 model_requests: Arc::new(Mutex::new(Vec::new())),
+                prompt_requests: Arc::new(Mutex::new(Vec::new())),
                 input_batches: Arc::new(Mutex::new(VecDeque::new())),
                 acked_input_tokens: Arc::new(Mutex::new(Vec::new())),
                 batch_outcomes: Arc::new(Mutex::new(VecDeque::new())),
@@ -1717,6 +1873,7 @@ mod tests {
                 batch_invocations: Arc::new(Mutex::new(Vec::new())),
                 single_invocations: Arc::new(Mutex::new(Vec::new())),
                 staged_payloads: Arc::new(Mutex::new(Vec::new())),
+                appended_result_refs: Arc::new(Mutex::new(Vec::new())),
                 events: Arc::new(Mutex::new(Vec::new())),
                 prompt_surface_version: Some(surface_version()),
                 visible_surface_version: surface_version(),
@@ -1783,12 +1940,20 @@ mod tests {
             self.model_requests.lock().expect("lock").clone()
         }
 
+        fn prompt_requests(&self) -> Vec<LoopPromptBundleRequest> {
+            self.prompt_requests.lock().expect("lock").clone()
+        }
+
         fn acked_input_tokens(&self) -> Vec<LoopInputAckToken> {
             self.acked_input_tokens.lock().expect("lock").clone()
         }
 
         fn staged_payloads(&self) -> Vec<StageCheckpointPayloadRequest> {
             self.staged_payloads.lock().expect("lock").clone()
+        }
+
+        fn appended_result_refs(&self) -> Vec<AppendCapabilityResultRef> {
+            self.appended_result_refs.lock().expect("lock").clone()
         }
 
         fn events(&self) -> Vec<String> {
@@ -1899,8 +2064,9 @@ mod tests {
     impl ironclaw_turns::run_profile::LoopPromptPort for MockHost {
         async fn build_prompt_bundle(
             &self,
-            _request: LoopPromptBundleRequest,
+            request: LoopPromptBundleRequest,
         ) -> Result<LoopPromptBundle, AgentLoopHostError> {
+            self.prompt_requests.lock().expect("lock").push(request);
             Ok(LoopPromptBundle {
                 bundle_ref: LoopPromptBundleRef::for_run(&self.context, "bundle").expect("valid"),
                 messages: vec![LoopModelMessage {
@@ -1991,6 +2157,7 @@ mod tests {
                     safe_name: "demo".to_string(),
                     safe_description: "demo capability".to_string(),
                     concurrency_hint: ironclaw_turns::run_profile::ConcurrencyHint::SafeForParallel,
+                    parameters_schema: serde_json::json!({"type":"object","properties":{"input":{"type":"string"}}}),
                 }],
             })
         }
@@ -2047,9 +2214,17 @@ mod tests {
 
         async fn append_capability_result_ref(
             &self,
-            _request: AppendCapabilityResultRef,
+            request: AppendCapabilityResultRef,
         ) -> Result<LoopMessageRef, AgentLoopHostError> {
-            Ok(LoopMessageRef::new("msg:tool-result").expect("valid"))
+            self.appended_result_refs
+                .lock()
+                .expect("lock")
+                .push(request.clone());
+            Ok(LoopMessageRef::new(format!(
+                "msg:tool-result-{}",
+                request.result_ref.as_str().trim_start_matches("result:")
+            ))
+            .expect("valid"))
         }
     }
 
@@ -2324,6 +2499,22 @@ mod tests {
         assert!(matches!(exit, LoopExit::Completed(_)));
         assert!(host.batch_invocations().is_empty());
         assert!(host.single_invocations().is_empty());
+        assert!(
+            host.model_requests()[0]
+                .capability_view
+                .as_ref()
+                .expect("model capability view")
+                .visible_capability_ids
+                .is_empty()
+        );
+        assert!(
+            host.prompt_requests()[0]
+                .capability_view
+                .as_ref()
+                .expect("prompt capability view")
+                .visible_capability_ids
+                .is_empty()
+        );
 
         let staged_states = host
             .staged_payloads()
@@ -3145,6 +3336,109 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_provider_call_appends_provider_replay_metadata() {
+        let result_ref = LoopResultRef::new("result:provider-call").expect("valid");
+        let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![
+            ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![CapabilityOutcome::Completed(CapabilityResultMessage {
+                    result_ref: result_ref.clone(),
+                    safe_summary: "provider call completed".to_string(),
+                    terminate_hint: true,
+                })],
+                stopped_on_suspension: false,
+            },
+        ]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        let appended = host.appended_result_refs();
+        assert_eq!(appended.len(), 1);
+        let provider_call = appended[0]
+            .provider_call
+            .as_ref()
+            .expect("provider replay metadata");
+        assert_eq!(provider_call.provider_turn_id, "turn_1");
+        assert_eq!(provider_call.provider_call_id, "call_1");
+        assert_eq!(provider_call.provider_tool_name, "demo__echo");
+        assert_eq!(provider_call.capability_id, capability_id());
+        assert_eq!(
+            provider_call.arguments,
+            serde_json::json!({"message":"hello"})
+        );
+        assert_eq!(
+            provider_call.response_reasoning.as_deref(),
+            Some("response reasoning")
+        );
+        assert_eq!(provider_call.reasoning.as_deref(), Some("call reasoning"));
+        assert_eq!(provider_call.signature.as_deref(), Some("sig-1"));
+    }
+
+    #[tokio::test]
+    async fn denied_provider_call_appends_failure_tool_result_for_replay() {
+        let result_ref = LoopResultRef::new("result:provider-call").expect("valid");
+        let host = MockHost::new(vec![provider_two_calls_response(), reply_response()])
+            .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+                outcomes: vec![
+                    CapabilityOutcome::Completed(CapabilityResultMessage {
+                        result_ref: result_ref.clone(),
+                        safe_summary: "provider call completed".to_string(),
+                        terminate_hint: true,
+                    }),
+                    CapabilityOutcome::Denied(ironclaw_turns::run_profile::CapabilityDenied {
+                        reason_kind:
+                            ironclaw_turns::run_profile::CapabilityDeniedReasonKind::EmptySurface,
+                        safe_summary: "provider call denied".to_string(),
+                    }),
+                ],
+                stopped_on_suspension: false,
+            }]);
+        let executor = CanonicalAgentLoopExecutor;
+        let state = LoopExecutionState::initial_for_run(host.run_context());
+
+        let exit = executor
+            .execute_family(&crate::families::default(), &host, state)
+            .await
+            .expect("execute");
+
+        let appended = host.appended_result_refs();
+        assert_eq!(appended.len(), 2);
+        assert_eq!(appended[0].result_ref, result_ref);
+        assert_eq!(appended[0].safe_summary, "provider call completed");
+        assert_eq!(appended[1].safe_summary, "provider call denied");
+        assert!(
+            appended[1]
+                .result_ref
+                .as_str()
+                .starts_with("result:provider-error-turn_1-call_2")
+        );
+        let denied_provider_call = appended[1]
+            .provider_call
+            .as_ref()
+            .expect("provider replay metadata");
+        assert_eq!(denied_provider_call.provider_turn_id, "turn_1");
+        assert_eq!(denied_provider_call.provider_call_id, "call_2");
+        assert_eq!(denied_provider_call.provider_tool_name, "demo__echo");
+        match exit {
+            LoopExit::Completed(completed) => {
+                assert_eq!(
+                    completed.result_refs,
+                    vec![result_ref.clone(), appended[1].result_ref.clone()]
+                );
+            }
+            other => panic!("expected completed, got {other:?}"),
+        }
+        assert_eq!(
+            final_staged_state(&host).result_refs,
+            vec![result_ref, appended[1].result_ref.clone()]
+        );
+    }
+
+    #[tokio::test]
     async fn cancellation_checkpoint_failure_still_cancels_for_permissive_profile() {
         let host = MockHost::new(vec![reply_response()]).fail_checkpoint(LoopCheckpointKind::Final);
         host.request_cancellation(LoopCancelReasonKind::UserRequested);
@@ -3209,7 +3503,72 @@ mod tests {
                 surface_version: surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
+                provider_replay: None,
             }]),
+            effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        }
+    }
+
+    fn provider_calls_response() -> LoopModelResponse {
+        LoopModelResponse {
+            chunks: Vec::new(),
+            output: ParentLoopOutput::CapabilityCalls(vec![CapabilityCallCandidate {
+                surface_version: surface_version(),
+                capability_id: capability_id(),
+                input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
+                provider_replay: Some(ProviderToolCallReplay {
+                    provider_id: "test-provider".to_string(),
+                    provider_model_id: "test-model".to_string(),
+                    provider_turn_id: "turn_1".to_string(),
+                    provider_call_id: "call_1".to_string(),
+                    provider_tool_name: "demo__echo".to_string(),
+                    arguments: serde_json::json!({"message":"hello"}),
+                    response_reasoning: Some("response reasoning".to_string()),
+                    reasoning: Some("call reasoning".to_string()),
+                    signature: Some("sig-1".to_string()),
+                }),
+            }]),
+            effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+        }
+    }
+
+    fn provider_two_calls_response() -> LoopModelResponse {
+        LoopModelResponse {
+            chunks: Vec::new(),
+            output: ParentLoopOutput::CapabilityCalls(vec![
+                CapabilityCallCandidate {
+                    surface_version: surface_version(),
+                    capability_id: capability_id(),
+                    input_ref: CapabilityInputRef::new("input:first").expect("valid"),
+                    provider_replay: Some(ProviderToolCallReplay {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        provider_turn_id: "turn_1".to_string(),
+                        provider_call_id: "call_1".to_string(),
+                        provider_tool_name: "demo__echo".to_string(),
+                        arguments: serde_json::json!({"message":"first"}),
+                        response_reasoning: Some("response reasoning".to_string()),
+                        reasoning: Some("first call reasoning".to_string()),
+                        signature: Some("sig-1".to_string()),
+                    }),
+                },
+                CapabilityCallCandidate {
+                    surface_version: surface_version(),
+                    capability_id: capability_id(),
+                    input_ref: CapabilityInputRef::new("input:second").expect("valid"),
+                    provider_replay: Some(ProviderToolCallReplay {
+                        provider_id: "test-provider".to_string(),
+                        provider_model_id: "test-model".to_string(),
+                        provider_turn_id: "turn_1".to_string(),
+                        provider_call_id: "call_2".to_string(),
+                        provider_tool_name: "demo__echo".to_string(),
+                        arguments: serde_json::json!({"message":"second"}),
+                        response_reasoning: Some("response reasoning".to_string()),
+                        reasoning: Some("second call reasoning".to_string()),
+                        signature: Some("sig-2".to_string()),
+                    }),
+                },
+            ]),
             effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
         }
     }
@@ -3221,6 +3580,7 @@ mod tests {
                 surface_version: stale_surface_version(),
                 capability_id: capability_id(),
                 input_ref: CapabilityInputRef::new("input:demo").expect("valid"),
+                provider_replay: None,
             }]),
             effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
         }
@@ -3234,11 +3594,13 @@ mod tests {
                     surface_version: stale_surface_version(),
                     capability_id: capability_id(),
                     input_ref: CapabilityInputRef::new("input:stale").expect("valid"),
+                    provider_replay: None,
                 },
                 CapabilityCallCandidate {
                     surface_version: surface_version(),
                     capability_id: capability_id(),
                     input_ref: CapabilityInputRef::new("input:visible").expect("valid"),
+                    provider_replay: None,
                 },
             ]),
             effective_model_profile_id: ModelProfileId::new("model").expect("valid"),

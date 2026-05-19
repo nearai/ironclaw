@@ -17,28 +17,31 @@ use ironclaw_loop_support::{
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextWindow,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
-    MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
-    SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextMessages,
+    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
+    LoadContextMessagesRequest, MessageContent, MessageKind, MessageStatus,
+    ProviderToolCallReferenceEnvelope, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
+    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
+    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
+    ToolResultReferenceEnvelope, ToolResultSafeSummary, UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
     LoopMessageRef, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver, TurnActor,
     TurnId, TurnRunId, TurnScope,
     run_profile::{
-        AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply, BeginAssistantDraft,
+        AgentLoopHostError, AgentLoopHostErrorKind, AppendCapabilityResultRef, AssistantReply,
+        BeginAssistantDraft, CapabilityBatchInvocation, CapabilityBatchOutcome, CapabilityDenied,
         CapabilityDeniedReasonKind, CapabilityInputRef, CapabilityInvocation, CapabilityOutcome,
         CapabilitySurfaceVersion, FinalizeAssistantMessage, HostManagedLoopPromptPort,
         InMemoryInstructionMaterializationStore, InMemoryLoopHostMilestoneSink,
         InMemoryRunProfileResolver, LoopCapabilityPort, LoopContextBundle, LoopContextMessage,
         LoopContextPort, LoopContextRequest, LoopContextSnippet, LoopHostMilestoneKind,
-        LoopInputCursor, LoopInputCursorToken, LoopModelMessage, LoopModelPort, LoopModelRequest,
-        LoopModelRouteSnapshot, LoopPromptBundle, LoopPromptBundleAuthority, LoopPromptBundleRef,
-        LoopPromptPort, LoopRunContext, LoopTranscriptPort, ParentLoopOutput, PromptMode,
-        PromptSkillContextMetadata, SkillVisibility, UpdateAssistantDraft,
-        VisibleCapabilityRequest,
+        LoopInputCursor, LoopInputCursorToken, LoopModelCapabilityView, LoopModelMessage,
+        LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopPromptBundle,
+        LoopPromptBundleAuthority, LoopPromptBundleRef, LoopPromptPort, LoopRunContext,
+        LoopTranscriptPort, ParentLoopOutput, PromptMode, PromptSkillContextMetadata,
+        ProviderToolCallReference, ProviderToolDefinition, SkillVisibility, UpdateAssistantDraft,
+        VisibleCapabilityRequest, VisibleCapabilitySurface,
     },
 };
 use tracing_test::traced_test;
@@ -372,6 +375,7 @@ async fn prompt_and_model_ports_materialize_trusted_identity_content() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -398,6 +402,7 @@ async fn prompt_and_model_ports_materialize_trusted_identity_content() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -408,6 +413,50 @@ async fn prompt_and_model_ports_materialize_trusted_identity_content() {
         HostManagedModelMessageRole::System
     );
     assert_eq!(calls[0].messages[0].content, "trusted identity content");
+}
+
+#[tokio::test]
+async fn model_port_limits_provider_tool_definitions_to_model_visible_capability_view() {
+    let fixture = ThreadFixture::new().await;
+    let messages = user_model_messages(&fixture);
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    let allowed_id = CapabilityId::new("demo.allowed").unwrap();
+    let hidden_id = CapabilityId::new("demo.hidden").unwrap();
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_capability_port(Arc::new(StaticToolDefinitionPort::new(vec![
+        provider_tool_definition(allowed_id.clone(), "demo__allowed"),
+        provider_tool_definition(hidden_id, "demo__hidden"),
+    ])));
+
+    model_port
+        .stream_model(LoopModelRequest {
+            messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: Some(LoopModelCapabilityView {
+                visible_capability_ids: vec![allowed_id],
+            }),
+        })
+        .await
+        .unwrap();
+
+    let tool_definition_calls = gateway.tool_definition_calls();
+    assert_eq!(tool_definition_calls.len(), 1);
+    assert_eq!(
+        tool_definition_calls[0]
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["demo__allowed"]
+    );
 }
 
 #[tokio::test]
@@ -631,6 +680,7 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -656,6 +706,7 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -721,6 +772,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -741,6 +793,7 @@ async fn prompt_and_model_ports_resolve_instruction_memory_and_identity_refs() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -800,6 +853,7 @@ async fn prompt_port_records_installed_skill_trust_metadata_without_prompt_paylo
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -860,6 +914,7 @@ async fn prompt_port_records_multiple_active_skill_metadata_in_prompt_order() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -924,6 +979,7 @@ async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -949,6 +1005,7 @@ async fn prompt_and_model_ports_keep_duplicate_skill_names_distinct() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -990,6 +1047,7 @@ async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -1014,6 +1072,7 @@ async fn model_port_rejects_skill_context_refs_when_source_changes_after_prompt_
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -1156,6 +1215,18 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
         .append_capability_result_ref(AppendCapabilityResultRef {
             result_ref: result_ref.clone(),
             safe_summary: "tool completed".to_string(),
+            provider_call: Some(ProviderToolCallReference {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                provider_turn_id: "turn_1".to_string(),
+                provider_call_id: "call_1".to_string(),
+                provider_tool_name: "demo__echo".to_string(),
+                capability_id: CapabilityId::new("demo.echo").unwrap(),
+                arguments: serde_json::json!({"message":"hello"}),
+                response_reasoning: Some("provider reasoning".to_string()),
+                reasoning: Some("provider reasoning".to_string()),
+                signature: Some("sig-1".to_string()),
+            }),
         })
         .await
         .unwrap();
@@ -1163,6 +1234,7 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
         .append_capability_result_ref(AppendCapabilityResultRef {
             result_ref: result_ref.clone(),
             safe_summary: "retry summary ignored".to_string(),
+            provider_call: None,
         })
         .await
         .unwrap();
@@ -1192,6 +1264,42 @@ async fn transcript_port_appends_tool_result_reference_envelope_idempotently() {
     assert_eq!(envelope.version, 1);
     assert_eq!(envelope.result_ref, result_ref.as_str());
     assert_eq!(envelope.safe_summary.as_str(), "tool completed");
+    assert!(records[0].tool_result_provider_call.is_none());
+    let context = fixture
+        .thread_service
+        .load_context_window(ironclaw_threads::LoadContextWindowRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            max_messages: 16,
+        })
+        .await
+        .unwrap();
+    let context_record = context
+        .messages
+        .iter()
+        .find(|message| message.kind == MessageKind::ToolResultReference)
+        .expect("tool result reference context");
+    let provider_call = context_record
+        .tool_result_provider_call
+        .as_ref()
+        .expect("provider call metadata");
+    assert_eq!(provider_call.provider_turn_id, "turn_1");
+    assert_eq!(provider_call.provider_call_id, "call_1");
+    assert_eq!(provider_call.provider_tool_name, "demo__echo");
+    assert_eq!(provider_call.capability_id.as_str(), "demo.echo");
+    assert_eq!(
+        provider_call.arguments,
+        serde_json::json!({"message":"hello"})
+    );
+    assert_eq!(
+        provider_call.response_reasoning.as_deref(),
+        Some("provider reasoning")
+    );
+    assert_eq!(
+        provider_call.reasoning.as_deref(),
+        Some("provider reasoning")
+    );
+    assert_eq!(provider_call.signature.as_deref(), Some("sig-1"));
 }
 
 #[tokio::test]
@@ -1207,6 +1315,7 @@ async fn transcript_port_rejects_unsafe_tool_result_summary() {
         .append_capability_result_ref(AppendCapabilityResultRef {
             result_ref: LoopResultRef::new("result:unsafe-tool").unwrap(),
             safe_summary: "raw tool input includes secret".to_string(),
+            provider_call: None,
         })
         .await
         .unwrap_err();
@@ -1556,6 +1665,7 @@ async fn model_port_resolves_thread_message_refs_and_delegates_to_gateway() {
             messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -1601,6 +1711,7 @@ async fn model_port_threads_resolved_model_route_snapshot_to_gateway() {
         messages,
         surface_version: None,
         model_preference: None,
+        capability_view: None,
     })
     .await
     .unwrap();
@@ -1643,12 +1754,88 @@ async fn model_port_resolves_explicit_refs_that_fall_outside_context_window() {
         messages,
         surface_version: None,
         model_preference: None,
+        capability_view: None,
     })
     .await
     .unwrap();
 
     let calls = gateway.calls.lock().unwrap();
     assert_eq!(calls[0].messages[0].content, "hello reborn");
+}
+
+#[tokio::test]
+async fn model_port_preserves_provider_metadata_for_explicit_refs_outside_context_window() {
+    let fixture = ThreadFixture::new().await;
+    let tool_result = fixture
+        .thread_service
+        .append_tool_result_reference(AppendToolResultReferenceRequest {
+            scope: fixture.thread_scope.clone(),
+            thread_id: fixture.thread_id.clone(),
+            turn_run_id: fixture.run_context.run_id.to_string(),
+            result_ref: "result:old-provider-tool".to_string(),
+            safe_summary: ToolResultSafeSummary::new("old provider tool completed").unwrap(),
+            provider_call: Some(ProviderToolCallReferenceEnvelope {
+                provider_id: "test-provider".to_string(),
+                provider_model_id: "test-model".to_string(),
+                provider_turn_id: "turn_1".to_string(),
+                provider_call_id: "call_1".to_string(),
+                provider_tool_name: "demo__echo".to_string(),
+                capability_id: CapabilityId::new("demo.echo").unwrap(),
+                arguments: serde_json::json!({"message":"hello"}),
+                response_reasoning: Some("provider response reasoning".to_string()),
+                reasoning: Some("provider call reasoning".to_string()),
+                signature: Some("sig-1".to_string()),
+            }),
+        })
+        .await
+        .unwrap();
+    for index in 0..3 {
+        fixture
+            .thread_service
+            .accept_inbound_message(AcceptInboundMessageRequest {
+                scope: fixture.thread_scope.clone(),
+                thread_id: fixture.thread_id.clone(),
+                actor_id: "user-loop-support".to_string(),
+                source_binding_id: Some("source-web".to_string()),
+                reply_target_binding_id: Some("reply-web".to_string()),
+                external_event_id: Some(format!("event-after-tool-{index}")),
+                content: MessageContent::text(format!("newer message {index}")),
+            })
+            .await
+            .unwrap();
+    }
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        1,
+    );
+    let messages = vec![LoopModelMessage {
+        role: "tool_result_reference".to_string(),
+        content_ref: LoopMessageRef::new(format!("msg:{}", tool_result.message_id)).unwrap(),
+    }];
+    issue_prompt_grant(&fixture.run_context, &messages);
+
+    port.stream_model(LoopModelRequest {
+        messages,
+        surface_version: None,
+        model_preference: None,
+        capability_view: None,
+    })
+    .await
+    .unwrap();
+
+    let calls = gateway.calls.lock().unwrap();
+    let provider_call = calls[0].messages[0]
+        .tool_result_provider_call
+        .as_ref()
+        .expect("model fallback preserves provider metadata");
+    assert_eq!(provider_call.provider_id, "test-provider");
+    assert_eq!(provider_call.provider_model_id, "test-model");
+    assert_eq!(provider_call.provider_call_id, "call_1");
+    assert_eq!(provider_call.provider_tool_name, "demo__echo");
 }
 
 #[tokio::test]
@@ -1660,6 +1847,7 @@ async fn prompt_port_builds_bundle_with_tool_result_reference_context() {
         summary_id: None,
         sequence: 1,
         kind: MessageKind::ToolResultReference,
+        tool_result_provider_call: None,
         content: "tool result content".to_string(),
     }));
     let context_port = Arc::new(ThreadBackedLoopContextPort::new(
@@ -1682,6 +1870,7 @@ async fn prompt_port_builds_bundle_with_tool_result_reference_context() {
             checkpoint_state_ref: None,
             max_messages: None,
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -1692,7 +1881,7 @@ async fn prompt_port_builds_bundle_with_tool_result_reference_context() {
 }
 
 #[tokio::test]
-async fn model_port_round_trips_tool_result_reference_context_as_system_model_input() {
+async fn model_port_round_trips_tool_result_reference_context_as_typed_model_input() {
     let fixture = ThreadFixture::new().await;
     let tool_result_ref = LoopMessageRef::new("msg:11111111-1111-1111-1111-111111111111").unwrap();
     let thread_service = Arc::new(StaticContextThreadService::new(ContextMessage {
@@ -1700,6 +1889,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_system_model_in
         summary_id: None,
         sequence: 1,
         kind: MessageKind::ToolResultReference,
+        tool_result_provider_call: None,
         content: "tool result content".to_string(),
     }));
     let context_port = ThreadBackedLoopContextPort::new(
@@ -1744,6 +1934,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_system_model_in
             messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -1751,7 +1942,7 @@ async fn model_port_round_trips_tool_result_reference_context_as_system_model_in
     let calls = gateway.calls.lock().unwrap();
     assert_eq!(
         calls[0].messages[0].role,
-        HostManagedModelMessageRole::System
+        HostManagedModelMessageRole::ToolResult
     );
     assert_eq!(calls[0].messages[0].content, "tool result content");
 }
@@ -1788,6 +1979,7 @@ async fn model_port_emits_model_milestones_without_prompt_or_output_payloads() {
                     .model_profile_id
                     .clone(),
             ),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -1844,6 +2036,7 @@ async fn model_port_emits_started_and_failed_milestones_when_gateway_fails() {
             messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -1900,6 +2093,7 @@ async fn model_port_logs_model_started_milestone_failure_without_losing_response
             messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -1939,6 +2133,7 @@ async fn model_port_logs_model_completed_milestone_failure_without_losing_respon
             messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -1976,6 +2171,7 @@ async fn model_port_rejects_message_role_that_disagrees_with_thread_record() {
             messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -2003,6 +2199,7 @@ async fn model_port_surfaces_fail_closed_gateway_policy_errors_without_raw_detai
             messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -2033,6 +2230,7 @@ async fn model_port_replaces_invalid_gateway_safe_summary_with_stable_summary() 
             messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -2235,6 +2433,18 @@ fn user_model_messages(fixture: &ThreadFixture) -> Vec<LoopModelMessage> {
         role: "user".to_string(),
         content_ref: LoopMessageRef::new(format!("msg:{}", fixture.user_message_id)).unwrap(),
     }]
+}
+
+fn provider_tool_definition(
+    capability_id: CapabilityId,
+    name: impl Into<String>,
+) -> ProviderToolDefinition {
+    ProviderToolDefinition {
+        capability_id,
+        name: name.into(),
+        description: "test provider tool".to_string(),
+        parameters: serde_json::json!({"type": "object"}),
+    }
 }
 
 fn issue_prompt_grant(context: &LoopRunContext, messages: &[LoopModelMessage]) {
@@ -2449,6 +2659,13 @@ impl SessionThreadService for GatedFinalizeThreadService {
         self.inner.load_context_window(request).await
     }
 
+    async fn load_context_messages(
+        &self,
+        request: LoadContextMessagesRequest,
+    ) -> Result<ContextMessages, SessionThreadError> {
+        self.inner.load_context_messages(request).await
+    }
+
     async fn list_thread_history(
         &self,
         request: ThreadHistoryRequest,
@@ -2560,6 +2777,16 @@ impl SessionThreadService for StaticContextThreadService {
         request: ironclaw_threads::LoadContextWindowRequest,
     ) -> Result<ContextWindow, SessionThreadError> {
         Ok(ContextWindow {
+            thread_id: request.thread_id,
+            messages: vec![self.context_message.clone()],
+        })
+    }
+
+    async fn load_context_messages(
+        &self,
+        request: LoadContextMessagesRequest,
+    ) -> Result<ContextMessages, SessionThreadError> {
+        Ok(ContextMessages {
             thread_id: request.thread_id,
             messages: vec![self.context_message.clone()],
         })
@@ -2684,6 +2911,7 @@ impl ironclaw_turns::run_profile::LoopHostMilestoneSink for FailOnModelCompleted
 
 struct RecordingGateway {
     calls: Mutex<Vec<HostManagedModelRequest>>,
+    tool_definition_calls: Mutex<Vec<Vec<ProviderToolDefinition>>>,
     response: Result<HostManagedModelResponse, HostManagedModelError>,
 }
 
@@ -2691,6 +2919,7 @@ impl RecordingGateway {
     fn reply(content: &str) -> Self {
         Self {
             calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
             response: Ok(HostManagedModelResponse::assistant_reply(
                 content.to_string(),
             )),
@@ -2700,6 +2929,7 @@ impl RecordingGateway {
     fn deny(raw_detail: &str) -> Self {
         Self {
             calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
             response: Err(HostManagedModelError::new(
                 HostManagedModelErrorKind::PolicyDenied,
                 raw_detail,
@@ -2710,11 +2940,21 @@ impl RecordingGateway {
     fn deny_with_safe_summary(safe_summary: &str) -> Self {
         Self {
             calls: Mutex::new(Vec::new()),
+            tool_definition_calls: Mutex::new(Vec::new()),
             response: Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::PolicyDenied,
                 safe_summary,
             )),
         }
+    }
+
+    fn tool_definition_calls(&self) -> Vec<Vec<ProviderToolDefinition>> {
+        self.tool_definition_calls
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect()
     }
 }
 
@@ -2726,5 +2966,74 @@ impl HostManagedModelGateway for RecordingGateway {
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         self.calls.lock().unwrap().push(request);
         self.response.clone()
+    }
+
+    async fn stream_model_with_capabilities(
+        &self,
+        request: HostManagedModelRequest,
+        capabilities: Arc<dyn LoopCapabilityPort>,
+    ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+        self.calls.lock().unwrap().push(request);
+        self.tool_definition_calls
+            .lock()
+            .unwrap()
+            .push(capabilities.tool_definitions().expect("tool definitions"));
+        self.response.clone()
+    }
+}
+
+struct StaticToolDefinitionPort {
+    definitions: Vec<ProviderToolDefinition>,
+}
+
+impl StaticToolDefinitionPort {
+    fn new(definitions: Vec<ProviderToolDefinition>) -> Self {
+        Self { definitions }
+    }
+}
+
+#[async_trait]
+impl LoopCapabilityPort for StaticToolDefinitionPort {
+    fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
+        Ok(self.definitions.clone())
+    }
+
+    async fn visible_capabilities(
+        &self,
+        _request: VisibleCapabilityRequest,
+    ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
+        Ok(VisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("surface:test").unwrap(),
+            descriptors: Vec::new(),
+        })
+    }
+
+    async fn invoke_capability(
+        &self,
+        _request: CapabilityInvocation,
+    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
+        Ok(CapabilityOutcome::Denied(CapabilityDenied {
+            reason_kind: CapabilityDeniedReasonKind::EmptySurface,
+            safe_summary: "test capability port does not execute tools".to_string(),
+        }))
+    }
+
+    async fn invoke_capability_batch(
+        &self,
+        request: CapabilityBatchInvocation,
+    ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+        Ok(CapabilityBatchOutcome {
+            outcomes: request
+                .invocations
+                .into_iter()
+                .map(|_| {
+                    CapabilityOutcome::Denied(CapabilityDenied {
+                        reason_kind: CapabilityDeniedReasonKind::EmptySurface,
+                        safe_summary: "test capability port does not execute tools".to_string(),
+                    })
+                })
+                .collect(),
+            stopped_on_suspension: false,
+        })
     }
 }

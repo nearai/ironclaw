@@ -12,4 +12,4 @@
 - Use the empty string as the DB-only absent sentinel for `agent_id` and `project_id` (safe because `MemoryDocumentScope` rejects empty supplied IDs). Do not store `_none` in the database — `_none` is the **virtual-path** sentinel only.
 - Capability declarations (`MemoryBackendCapabilities`) are enforcement inputs: unsupported file/search behavior must fail closed before backend side effects.
 - Treat document writes as committed once persistence succeeds: a derived index/embedding refresh failure after persistence must not make the write report failure.
-- Both libSQL and Postgres repositories must have real behavioral test coverage. Postgres compile-only coverage is not sufficient; use the established testcontainer/deadpool pattern when adding the harness.
+- Reborn-native memory persistence is a single `FilesystemMemoryDocumentRepository` layered on `RootFilesystem`. Backend-specific (libSQL/Postgres) behavioral coverage belongs in `ironclaw_filesystem`'s own backend contract tests; this crate's tests target `InMemoryBackend` and exercise memory-document semantics (versioning, chunk replace, metadata cascade, hybrid search fusion).

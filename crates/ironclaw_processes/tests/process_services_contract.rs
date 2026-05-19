@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
 use serde_json::json;
@@ -80,7 +80,7 @@ async fn process_services_share_cancellation_registry_between_host_and_manager()
 
 #[tokio::test]
 async fn filesystem_process_services_store_output_refs() {
-    let services = ProcessServices::filesystem(Arc::new(engine_filesystem()));
+    let services = ProcessServices::filesystem(engine_filesystem());
     let manager = services.background_manager(Arc::new(SuccessExecutor));
     let invocation_id = InvocationId::new();
     let process_id = ProcessId::new();
@@ -251,7 +251,7 @@ fn process_start(
     }
 }
 
-fn engine_filesystem() -> LocalFilesystem {
+fn engine_filesystem() -> Arc<ScopedFilesystem<LocalFilesystem>> {
     let storage = tempfile::tempdir().unwrap().keep();
     let mut fs = LocalFilesystem::new();
     fs.mount_local(
@@ -259,7 +259,23 @@ fn engine_filesystem() -> LocalFilesystem {
         HostPath::from_path_buf(storage),
     )
     .unwrap();
-    fs
+    scoped_processes_filesystem(
+        Arc::new(fs),
+        "/engine/tenants/tenant1/users/user1/processes",
+    )
+}
+
+fn scoped_processes_filesystem<F>(backend: Arc<F>, target_root: &str) -> Arc<ScopedFilesystem<F>>
+where
+    F: RootFilesystem,
+{
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/processes").expect("alias"),
+        VirtualPath::new(target_root).expect("target"),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .expect("mount view");
+    Arc::new(ScopedFilesystem::with_fixed_view(backend, mounts))
 }
 
 fn sample_scope(invocation_id: InvocationId, tenant: &str, user: &str) -> ResourceScope {

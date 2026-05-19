@@ -2,7 +2,7 @@ use ironclaw_host_api::{AgentId, MissionId, ProjectId, TenantId, ThreadId, UserI
 use serde::{Deserialize, Serialize};
 
 use crate::identifiers::{SummaryArtifactId, ThreadMessageId};
-use crate::tool_result_reference::ToolResultSafeSummary;
+use crate::tool_result_reference::{ProviderToolCallReferenceEnvelope, ToolResultSafeSummary};
 
 /// Canonical scope carried by a Reborn session thread.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -15,6 +15,28 @@ pub struct ThreadScope {
     pub owner_user_id: Option<UserId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mission_id: Option<MissionId>,
+}
+
+impl ThreadScope {
+    /// Convert into a [`ironclaw_host_api::ResourceScope`] suitable for the
+    /// per-tenant filesystem resolver. `user_id` falls back to a per-thread
+    /// system-tenant slot when `owner_user_id` is absent (system-scoped
+    /// thread infrastructure that has no owning user).
+    pub fn to_resource_scope(&self) -> ironclaw_host_api::ResourceScope {
+        ironclaw_host_api::ResourceScope {
+            tenant_id: self.tenant_id.clone(),
+            user_id: self.owner_user_id.clone().unwrap_or_else(|| {
+                ironclaw_host_api::UserId::from_trusted(
+                    ironclaw_host_api::SYSTEM_RESERVED_ID.to_string(),
+                )
+            }),
+            agent_id: Some(self.agent_id.clone()),
+            project_id: self.project_id.clone(),
+            mission_id: self.mission_id.clone(),
+            thread_id: None,
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        }
+    }
 }
 
 /// User/model-visible transcript content accepted by this boundary.
@@ -89,6 +111,10 @@ pub struct ThreadMessageRecord {
     pub turn_run_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_result_ref: Option<String>,
+    /// Internal provider replay metadata for reconstructing tool-call turns.
+    /// Product surfaces must render `content`, not this raw provider side channel.
+    #[serde(default, skip_serializing)]
+    pub tool_result_provider_call: Option<ProviderToolCallReferenceEnvelope>,
     pub content: Option<String>,
     pub redaction_ref: Option<String>,
 }
@@ -167,6 +193,7 @@ pub struct AppendToolResultReferenceRequest {
     pub turn_run_id: String,
     pub result_ref: String,
     pub safe_summary: ToolResultSafeSummary,
+    pub provider_call: Option<ProviderToolCallReferenceEnvelope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,16 +233,30 @@ pub struct LoadContextWindowRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadContextMessagesRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub message_ids: Vec<ThreadMessageId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextMessage {
     pub message_id: Option<ThreadMessageId>,
     pub summary_id: Option<SummaryArtifactId>,
     pub sequence: u64,
     pub kind: MessageKind,
+    pub tool_result_provider_call: Option<ProviderToolCallReferenceEnvelope>,
     pub content: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextWindow {
+    pub thread_id: ThreadId,
+    pub messages: Vec<ContextMessage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextMessages {
     pub thread_id: ThreadId,
     pub messages: Vec<ContextMessage>,
 }

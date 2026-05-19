@@ -13,14 +13,14 @@ use ironclaw_product_adapters::{
     ProductAdapterError, ProjectionStream, ProjectionSubscriptionRequest,
 };
 use ironclaw_threads::{
-    AcceptInboundMessageRequest, EnsureThreadRequest, MessageContent, MessageStatus,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService,
+    AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
+    MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadService,
     ThreadHistoryRequest, ThreadMessageId, ThreadScope,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, GateRef, GetRunStateRequest, ReplyTargetBindingRef, ResumeTurnRequest,
-    SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnScope,
+    AcceptedMessageRef, GateRef, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef,
+    ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
+    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId, TurnScope,
 };
 use uuid::Uuid;
 
@@ -172,15 +172,17 @@ impl RebornServicesApi for RebornServices {
         let source_binding_id = webui_source_binding_id(&scope, &actor);
         let external_event_id = client_action_id.as_str().to_string();
 
-        let handoff = if let Some(replay) = self
-            .thread_service
-            .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
-                source_binding_id: source_binding_id.clone(),
-                external_event_id: external_event_id.clone(),
-            })
-            .await
-            .map_err(map_thread_error)?
+        let handoff = if let Some((replay, replay_source_binding_id)) =
+            replay_webui_send_message(&*self.thread_service, &scope, &actor, &external_event_id)
+                .await?
         {
+            if replay.thread_id != scope.thread_id {
+                return Err(RebornServicesError::from_status(
+                    RebornServicesErrorCode::Conflict,
+                    409,
+                    false,
+                ));
+            }
             match replay.status {
                 MessageStatus::Submitted => {
                     let run_id = parse_replay_run_id(replay.turn_run_id)?;
@@ -203,9 +205,12 @@ impl RebornServicesApi for RebornServices {
                 MessageStatus::Accepted | MessageStatus::DeferredBusy => AcceptedWebUiMessage {
                     thread_id: replay.thread_id,
                     message_id: replay.message_id,
+                    source_binding_id: replay
+                        .source_binding_id
+                        .unwrap_or_else(|| replay_source_binding_id.clone()),
                     reply_target_binding_id: replay
                         .reply_target_binding_id
-                        .unwrap_or_else(|| source_binding_id.clone()),
+                        .unwrap_or(replay_source_binding_id),
                 },
                 _ => {
                     return Err(RebornServicesError::from_status(
@@ -243,12 +248,14 @@ impl RebornServicesApi for RebornServices {
             AcceptedWebUiMessage {
                 thread_id: accepted.thread_id,
                 message_id: accepted.message_id,
+                source_binding_id: source_binding_id.clone(),
                 reply_target_binding_id: source_binding_id.clone(),
             }
         };
 
         let accepted_message_ref = accepted_message_ref(handoff.message_id.to_string())?;
-        let source_binding_ref = bounded_ref::<SourceBindingRef>("webui-src", &source_binding_id)?;
+        let source_binding_ref =
+            bounded_ref::<SourceBindingRef>("webui-src", &handoff.source_binding_id)?;
         let reply_target_binding_ref =
             bounded_ref::<ReplyTargetBindingRef>("webui-reply", &handoff.reply_target_binding_id)?;
 
@@ -259,7 +266,7 @@ impl RebornServicesApi for RebornServices {
             source_binding_ref,
             reply_target_binding_ref,
             requested_run_profile: None,
-            idempotency_key: client_action_id,
+            idempotency_key: client_action_id.clone(),
             received_at: Utc::now(),
         };
 
@@ -273,16 +280,15 @@ impl RebornServicesApi for RebornServices {
                 event_cursor,
                 ..
             }) => {
-                self.thread_service
-                    .mark_message_submitted(
-                        &thread_scope,
-                        &handoff.thread_id,
-                        handoff.message_id,
-                        turn_id.to_string(),
-                        run_id.to_string(),
-                    )
-                    .await
-                    .map_err(map_thread_error)?;
+                mark_message_submitted_or_replay(
+                    &*self.thread_service,
+                    &thread_scope,
+                    &handoff,
+                    &client_action_id,
+                    turn_id.to_string(),
+                    run_id.to_string(),
+                )
+                .await?;
 
                 Ok(RebornSubmitTurnResponse::Submitted {
                     thread_id: handoff.thread_id,
@@ -296,14 +302,13 @@ impl RebornServicesApi for RebornServices {
                 })
             }
             Err(TurnError::ThreadBusy(busy)) => {
-                self.thread_service
-                    .mark_message_deferred_busy(
-                        &thread_scope,
-                        &handoff.thread_id,
-                        handoff.message_id,
-                    )
-                    .await
-                    .map_err(map_thread_error)?;
+                mark_message_deferred_busy_or_replay(
+                    &*self.thread_service,
+                    &thread_scope,
+                    &handoff,
+                    &client_action_id,
+                )
+                .await?;
 
                 Ok(RebornSubmitTurnResponse::DeferredBusy {
                     thread_id: handoff.thread_id,
@@ -489,7 +494,125 @@ impl RebornServicesApi for RebornServices {
 struct AcceptedWebUiMessage {
     thread_id: ThreadId,
     message_id: ThreadMessageId,
+    source_binding_id: String,
     reply_target_binding_id: String,
+}
+
+async fn mark_message_submitted_or_replay(
+    thread_service: &dyn SessionThreadService,
+    thread_scope: &ThreadScope,
+    handoff: &AcceptedWebUiMessage,
+    client_action_id: &IdempotencyKey,
+    turn_id: String,
+    run_id: String,
+) -> Result<(), RebornServicesError> {
+    match thread_service
+        .mark_message_submitted(
+            thread_scope,
+            &handoff.thread_id,
+            handoff.message_id,
+            turn_id,
+            run_id.clone(),
+        )
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            reconcile_terminal_duplicate(
+                thread_service,
+                handoff,
+                client_action_id,
+                |replay| {
+                    replay.status == MessageStatus::Submitted && replay.turn_run_id == Some(run_id)
+                },
+                error,
+            )
+            .await
+        }
+    }
+}
+
+async fn mark_message_deferred_busy_or_replay(
+    thread_service: &dyn SessionThreadService,
+    thread_scope: &ThreadScope,
+    handoff: &AcceptedWebUiMessage,
+    client_action_id: &IdempotencyKey,
+) -> Result<(), RebornServicesError> {
+    match thread_service
+        .mark_message_deferred_busy(thread_scope, &handoff.thread_id, handoff.message_id)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            reconcile_terminal_duplicate(
+                thread_service,
+                handoff,
+                client_action_id,
+                |replay| replay.status == MessageStatus::DeferredBusy,
+                error,
+            )
+            .await
+        }
+    }
+}
+
+async fn reconcile_terminal_duplicate(
+    thread_service: &dyn SessionThreadService,
+    handoff: &AcceptedWebUiMessage,
+    client_action_id: &IdempotencyKey,
+    matches_replay: impl FnOnce(&AcceptedInboundMessageReplay) -> bool,
+    original_error: SessionThreadError,
+) -> Result<(), RebornServicesError> {
+    let replay = thread_service
+        .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
+            source_binding_id: handoff.source_binding_id.clone(),
+            external_event_id: client_action_id.as_str().to_string(),
+        })
+        .await
+        .map_err(map_thread_error)?;
+    match replay {
+        Some(replay)
+            if replay.thread_id == handoff.thread_id
+                && replay.message_id == handoff.message_id
+                && matches_replay(&replay) =>
+        {
+            Ok(())
+        }
+        _ => Err(map_thread_error(original_error)),
+    }
+}
+
+async fn replay_webui_send_message(
+    thread_service: &dyn SessionThreadService,
+    scope: &TurnScope,
+    actor: &TurnActor,
+    external_event_id: &str,
+) -> Result<Option<(AcceptedInboundMessageReplay, String)>, RebornServicesError> {
+    let source_binding_id = webui_source_binding_id(scope, actor);
+    if let Some(replay) =
+        replay_accepted_message(thread_service, &source_binding_id, external_event_id).await?
+    {
+        return Ok(Some((replay, source_binding_id)));
+    }
+
+    let legacy_source_binding_id = legacy_webui_source_binding_id(scope, actor);
+    replay_accepted_message(thread_service, &legacy_source_binding_id, external_event_id)
+        .await
+        .map(|replay| replay.map(|replay| (replay, legacy_source_binding_id)))
+}
+
+async fn replay_accepted_message(
+    thread_service: &dyn SessionThreadService,
+    source_binding_id: &str,
+    external_event_id: &str,
+) -> Result<Option<AcceptedInboundMessageReplay>, RebornServicesError> {
+    thread_service
+        .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
+            source_binding_id: source_binding_id.to_string(),
+            external_event_id: external_event_id.to_string(),
+        })
+        .await
+        .map_err(map_thread_error)
 }
 
 /// Verify the actor owns the thread referenced by `scope` through the thread
@@ -652,6 +775,35 @@ fn bounded_ref<T: RefFactory>(prefix: &str, raw: &str) -> Result<T, RebornServic
 }
 
 fn webui_source_binding_id(scope: &TurnScope, actor: &TurnActor) -> String {
+    // WebUI retries are scoped to the authenticated caller context, not the
+    // thread id. When the caller is not project-bound, we encode that
+    // explicitly rather than collapsing onto an empty string.
+    format!(
+        "{}{}{}{}{}{}",
+        segment("surface", "webui"),
+        segment("tenant", scope.tenant_id.as_str()),
+        segment(
+            "agent",
+            scope.agent_id.as_ref().map(AgentId::as_str).unwrap_or("")
+        ),
+        segment(
+            "project_scope",
+            if scope.project_id.is_some() {
+                "bound"
+            } else {
+                "none"
+            }
+        ),
+        scope
+            .project_id
+            .as_ref()
+            .map(|project_id| segment("project", project_id.as_str()))
+            .unwrap_or_default(),
+        segment("actor", actor.user_id.as_str())
+    )
+}
+
+fn legacy_webui_source_binding_id(scope: &TurnScope, actor: &TurnActor) -> String {
     format!(
         "{}{}{}{}{}",
         segment("surface", "webui"),

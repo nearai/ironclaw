@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
 use async_trait::async_trait;
 use ironclaw_host_api::ThreadId;
@@ -8,12 +11,12 @@ use uuid::Uuid;
 use crate::identifiers::SummaryArtifactId;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
-    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextWindow,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextWindowRequest, MessageContent,
-    MessageKind, MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
-    SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
-    ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessage, ContextMessages,
+    ContextWindow, CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextMessagesRequest,
+    LoadContextWindowRequest, MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
+    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
+    SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -142,6 +145,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             turn_id: None,
             turn_run_id: None,
             tool_result_ref: None,
+            tool_result_provider_call: None,
             content: Some(request.content.into_text()),
             redaction_ref: None,
         });
@@ -253,6 +257,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             turn_id: None,
             turn_run_id: Some(request.turn_run_id),
             tool_result_ref: None,
+            tool_result_provider_call: None,
             content: Some(request.content.into_text()),
             redaction_ref: None,
         };
@@ -267,15 +272,36 @@ impl SessionThreadService for InMemorySessionThreadService {
     ) -> Result<ThreadMessageRecord, SessionThreadError> {
         let mut state = self.state.lock().await;
         let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
+        let provider_call = request.provider_call;
         let envelope = ToolResultReferenceEnvelope::new(request.result_ref, request.safe_summary)
             .map_err(SessionThreadError::Serialization)?;
-        if let Some(existing) = thread.messages.iter().find(|message| {
+        if let Some(existing) = thread.messages.iter_mut().find(|message| {
             message.kind == MessageKind::ToolResultReference
                 && message.status == MessageStatus::Finalized
                 && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
                 && message.tool_result_ref.as_deref() == Some(envelope.result_ref.as_str())
         }) {
+            if let Some(provider_call) = provider_call.as_ref() {
+                provider_call
+                    .validate()
+                    .map_err(SessionThreadError::Serialization)?;
+                match existing.tool_result_provider_call.as_ref() {
+                    None => existing.tool_result_provider_call = Some(provider_call.clone()),
+                    Some(existing_provider_call) if existing_provider_call == provider_call => {}
+                    Some(_) => {
+                        return Err(SessionThreadError::Serialization(
+                            "tool result provider metadata conflicts with existing record"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
             return Ok(existing.clone());
+        }
+        if let Some(provider_call) = &provider_call {
+            provider_call
+                .validate()
+                .map_err(SessionThreadError::Serialization)?;
         }
         let content = serde_json::to_string(&envelope)
             .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
@@ -291,6 +317,7 @@ impl SessionThreadService for InMemorySessionThreadService {
             turn_id: None,
             turn_run_id: Some(request.turn_run_id),
             tool_result_ref: Some(envelope.result_ref),
+            tool_result_provider_call: provider_call,
             content: Some(content),
             redaction_ref: None,
         };
@@ -343,6 +370,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         )?;
         message.status = MessageStatus::Redacted;
         message.content = None;
+        message.tool_result_provider_call = None;
         message.redaction_ref = Some(request.redaction_ref);
         Ok(message.clone())
     }
@@ -364,6 +392,18 @@ impl SessionThreadService for InMemorySessionThreadService {
         })
     }
 
+    async fn load_context_messages(
+        &self,
+        request: LoadContextMessagesRequest,
+    ) -> Result<ContextMessages, SessionThreadError> {
+        let state = self.state.lock().await;
+        let thread = get_thread(&state, &request.scope, &request.thread_id)?;
+        Ok(ContextMessages {
+            thread_id: request.thread_id,
+            messages: context_messages_by_id(thread, &request.message_ids),
+        })
+    }
+
     async fn list_thread_history(
         &self,
         request: ThreadHistoryRequest,
@@ -372,7 +412,7 @@ impl SessionThreadService for InMemorySessionThreadService {
         let thread = get_thread(&state, &request.scope, &request.thread_id)?;
         Ok(ThreadHistory {
             thread: thread.record.clone(),
-            messages: thread.messages.clone(),
+            messages: history_messages(thread),
             summary_artifacts: history_summary_artifacts(thread),
         })
     }
@@ -529,10 +569,11 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
         .iter()
         .filter(|summary| {
             summary.model_context_policy.as_deref() == Some("replace_range_when_selected")
+                && !summary_covers_hidden_content(thread, summary)
         })
         .collect::<Vec<_>>();
     let mut skip_through = 0;
-    let mut emitted_summaries = Vec::new();
+    let mut emitted_summaries = HashSet::new();
     let mut context = Vec::new();
     for message in thread
         .messages
@@ -546,16 +587,16 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
             summary.start_sequence <= message.sequence
                 && message.sequence <= summary.end_sequence
                 && !emitted_summaries.contains(&summary.summary_id)
-                && !summary_covers_hidden_content(thread, summary)
         }) {
             context.push(ContextMessage {
                 message_id: None,
                 summary_id: Some(summary.summary_id),
                 sequence: summary.start_sequence,
                 kind: MessageKind::Summary,
+                tool_result_provider_call: None,
                 content: summary.content.clone(),
             });
-            emitted_summaries.push(summary.summary_id);
+            emitted_summaries.insert(summary.summary_id);
             skip_through = summary.end_sequence;
             continue;
         }
@@ -565,11 +606,38 @@ fn context_messages_with_summary_replacements(thread: &StoredThread) -> Vec<Cont
                 summary_id: None,
                 sequence: message.sequence,
                 kind: message.kind,
+                tool_result_provider_call: message.tool_result_provider_call.clone(),
                 content,
             });
         }
     }
     context
+}
+
+fn context_messages_by_id(
+    thread: &StoredThread,
+    message_ids: &[ThreadMessageId],
+) -> Vec<ContextMessage> {
+    let visible_messages = thread
+        .messages
+        .iter()
+        .filter(|message| is_model_visible(message.status))
+        .map(|message| (message.message_id, message))
+        .collect::<HashMap<_, _>>();
+    message_ids
+        .iter()
+        .filter_map(|message_id| {
+            let message = visible_messages.get(message_id)?;
+            Some(ContextMessage {
+                message_id: Some(message.message_id),
+                summary_id: None,
+                sequence: message.sequence,
+                kind: message.kind,
+                tool_result_provider_call: message.tool_result_provider_call.clone(),
+                content: message.content.clone()?,
+            })
+        })
+        .collect()
 }
 
 const REDACTED_SUMMARY_CONTENT: &str = "[redacted]";
@@ -587,6 +655,29 @@ fn history_summary_artifacts(thread: &StoredThread) -> Vec<SummaryArtifact> {
             } else {
                 summary.clone()
             }
+        })
+        .collect()
+}
+
+fn history_messages(thread: &StoredThread) -> Vec<ThreadMessageRecord> {
+    thread
+        .messages
+        .iter()
+        .map(|message| ThreadMessageRecord {
+            message_id: message.message_id,
+            thread_id: message.thread_id.clone(),
+            sequence: message.sequence,
+            kind: message.kind,
+            status: message.status,
+            actor_id: message.actor_id.clone(),
+            source_binding_id: message.source_binding_id.clone(),
+            reply_target_binding_id: message.reply_target_binding_id.clone(),
+            turn_id: message.turn_id.clone(),
+            turn_run_id: message.turn_run_id.clone(),
+            tool_result_ref: message.tool_result_ref.clone(),
+            tool_result_provider_call: None,
+            content: message.content.clone(),
+            redaction_ref: message.redaction_ref.clone(),
         })
         .collect()
 }

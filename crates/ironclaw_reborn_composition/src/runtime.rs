@@ -755,8 +755,34 @@ fn parse_provider_protocol(
     }
 }
 
+fn build_stub_gateway() -> Arc<dyn ironclaw_loop_support::HostManagedModelGateway> {
+    use async_trait::async_trait;
+    use ironclaw_loop_support::{
+        HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
+        HostManagedModelRequest, HostManagedModelResponse,
+    };
+
+    #[derive(Debug, Default)]
+    struct StubGateway;
+
+    #[async_trait]
+    impl HostManagedModelGateway for StubGateway {
+        async fn stream_model(
+            &self,
+            _request: HostManagedModelRequest,
+        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
+            Err(HostManagedModelError::safe(
+                HostManagedModelErrorKind::Unavailable,
+                "no LLM gateway wired (build with `root-llm-provider` feature)",
+            ))
+        }
+    }
+
+    Arc::new(StubGateway)
+}
+
 #[cfg(test)]
-mod runtime_tests {
+mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
     use std::time::Duration;
 
@@ -843,7 +869,7 @@ mod runtime_tests {
 }
 
 #[cfg(all(test, feature = "root-llm-provider"))]
-mod tests {
+mod llm_provider_tests {
     use ironclaw_llm::ProviderProtocol;
 
     use super::parse_provider_protocol;
@@ -900,30 +926,4 @@ mod tests {
     fn rejects_unsupported_provider_protocol() {
         assert!(parse_provider_protocol("made_up_protocol").is_err());
     }
-}
-
-fn build_stub_gateway() -> Arc<dyn ironclaw_loop_support::HostManagedModelGateway> {
-    use async_trait::async_trait;
-    use ironclaw_loop_support::{
-        HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
-        HostManagedModelRequest, HostManagedModelResponse,
-    };
-
-    #[derive(Debug, Default)]
-    struct StubGateway;
-
-    #[async_trait]
-    impl HostManagedModelGateway for StubGateway {
-        async fn stream_model(
-            &self,
-            _request: HostManagedModelRequest,
-        ) -> Result<HostManagedModelResponse, HostManagedModelError> {
-            Err(HostManagedModelError::safe(
-                HostManagedModelErrorKind::Unavailable,
-                "no LLM gateway wired (build with `root-llm-provider` feature)",
-            ))
-        }
-    }
-
-    Arc::new(StubGateway)
 }

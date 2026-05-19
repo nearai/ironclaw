@@ -33,15 +33,10 @@ pub use indexer::{
 };
 pub use metadata::{CONFIG_FILE_NAME, DocumentMetadata, HygieneMetadata, MemoryWriteOptions};
 pub use path::{MemoryDocumentPath, MemoryDocumentScope};
-#[cfg(feature = "libsql")]
-pub use repo::LibSqlMemoryDocumentRepository;
-#[cfg(feature = "postgres")]
-pub use repo::PostgresMemoryDocumentRepository;
-#[cfg(feature = "libsql")]
-pub use repo::RebornLibSqlMemoryDocumentRepository;
-#[cfg(feature = "postgres")]
-pub use repo::RebornPostgresMemoryDocumentRepository;
-pub use repo::{InMemoryMemoryDocumentRepository, MemoryAppendOutcome, MemoryDocumentRepository};
+pub use repo::{
+    FilesystemMemoryDocumentRepository, InMemoryMemoryDocumentRepository, MemoryAppendOutcome,
+    MemoryDocumentRepository,
+};
 pub use safety::{
     DEFAULT_PROMPT_PROTECTED_PATHS, DefaultPromptWriteSafetyPolicy, PromptProtectedPathClass,
     PromptProtectedPathRegistry, PromptSafetyAllowanceId, PromptSafetyPolicyVersion,

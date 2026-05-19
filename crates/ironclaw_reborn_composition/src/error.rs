@@ -34,6 +34,8 @@ pub enum RebornBuildError {
     CapabilityLease(#[from] ironclaw_authorization::CapabilityLeaseError),
     #[error("reborn turn state build failed")]
     Turn(#[from] ironclaw_turns::TurnError),
+    #[error("reborn mount view construction failed")]
+    Mount(#[from] ironclaw_host_api::HostApiError),
 }
 
 impl From<ironclaw_host_runtime::ProductionWiringReport> for RebornBuildError {

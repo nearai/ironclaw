@@ -178,7 +178,7 @@ impl From<ContentType> for String {
 }
 
 /// Monotonically increasing version assigned by the backend to each successful
-/// [`put`](crate::StorageBackend::put). Opaque to consumers: only compared for
+/// [`put`](crate::RootFilesystem::put). Opaque to consumers: only compared for
 /// equality via [`CasExpectation::Version`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -233,7 +233,7 @@ impl fmt::Display for SeqNo {
     }
 }
 
-/// Compare-and-swap precondition for [`put`](crate::StorageBackend::put).
+/// Compare-and-swap precondition for [`put`](crate::RootFilesystem::put).
 ///
 /// All multi-step store operations (lease claim, lease consume, status
 /// transitions) are implemented with `CasExpectation::Version` and retry on
@@ -264,7 +264,7 @@ pub enum CasExpectation {
 /// - **Record**: `body` carries the serialized payload (typically JSON), `kind`
 ///   names the schema family (e.g. `credential_account`), and `indexed`
 ///   declares the projection that backends should expose to
-///   [`query`](crate::StorageBackend::query).
+///   [`query`](crate::RootFilesystem::query).
 ///
 /// Backends never look inside `body` for indexing; everything queryable lives
 /// in `indexed`. This keeps the indexing contract small enough to be served

@@ -13,8 +13,12 @@ use crate::record::RecordVersion;
 /// *intent* of an operation against the underlying [`MountPermissions`]
 /// surface and are reused by the unified `put`/`get` ops as their permission
 /// witness — `put` is a write, `get` is a read. The newer variants
-/// (`Query`, `EnsureIndex`, `BeginTxn`, `Tail`) describe operations that have
-/// no analogue in the legacy enum.
+/// (`Query`, `EnsureIndex`, `BeginTxn`, `Append`, `Tail`) describe operations
+/// that have no analogue in the legacy enum.
+///
+/// `AppendFile` is the legacy byte-plane append onto a regular file; `Append`
+/// is the event-plane append that assigns a [`SeqNo`](crate::SeqNo). They are
+/// distinct operations even though both map to `permissions.write`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FilesystemOperation {
     MountLocal,
@@ -28,6 +32,7 @@ pub enum FilesystemOperation {
     Query,
     EnsureIndex,
     BeginTxn,
+    Append,
     Tail,
 }
 
@@ -45,6 +50,7 @@ impl std::fmt::Display for FilesystemOperation {
             Self::Query => "query",
             Self::EnsureIndex => "ensure_index",
             Self::BeginTxn => "begin_txn",
+            Self::Append => "append",
             Self::Tail => "tail",
         })
     }
@@ -151,6 +157,17 @@ pub enum FilesystemError {
     /// path raced with the ensure_index call.
     #[error("index spec disappeared after upsert at {path}: {name}")]
     IndexSpecMissingAfterUpsert { path: VirtualPath, name: IndexName },
+    /// Backend infrastructure failure (connection pool, schema migration,
+    /// pragma setup) that has no specific [`VirtualPath`] context. Used by
+    /// backend `new`/`connect`/`run_migrations` paths where the real failure
+    /// happens before any caller-supplied path is in scope — the prior
+    /// `unwrap_or_else(unreachable!)` placeholder lost the operation context
+    /// and the underlying reason in equal measure.
+    #[error("filesystem backend infrastructure error during {operation}: {reason}")]
+    BackendInfrastructure {
+        operation: FilesystemOperation,
+        reason: String,
+    },
 }
 
 /// Reason a [`FilesystemError::IndexConflict`] was raised.
@@ -403,8 +420,21 @@ impl BackendCapabilities {
         Capability::all().iter().copied().filter(|c| self.has(*c))
     }
 
-    /// Convenience: read + write + list + stat + delete + records + query
-    /// + IndexExact + IndexPrefix + CAS — the typical SQL backend shape.
+    /// Convenience: the **minimum** SQL backend shape — read, write,
+    /// append, list, stat, delete, records, query, IndexExact,
+    /// IndexPrefix, and CAS transactions.
+    ///
+    /// Audit finding F7: this constructor deliberately omits
+    /// [`Capability::IndexFts`] and [`Capability::IndexVector`]. A SQL
+    /// backend that advertises *only* `sql_typical()` claims it does
+    /// **not** serve FTS or vector indexes — mount-time validation will
+    /// refuse to attach it to a descriptor that demands either. The
+    /// two real backends in this crate (libsql + postgres) layer
+    /// `IndexFts` and `IndexVector` on top of this base via
+    /// [`Self::with`] / [`Self::sql_typical_full`]. New hand-rolled SQL
+    /// backends should pick the variant that matches what they
+    /// genuinely implement; advertising less than you serve is harmless,
+    /// advertising more is a mount-time false-positive.
     pub const fn sql_typical() -> Self {
         Self::empty()
             .with(Capability::Read)
@@ -418,6 +448,16 @@ impl BackendCapabilities {
             .with(Capability::IndexExact)
             .with(Capability::IndexPrefix)
             .with_txn(TxnCapability::Cas)
+    }
+
+    /// Convenience: [`Self::sql_typical`] **plus** Events + IndexFts +
+    /// IndexVector — the shape the libsql and postgres backends in this
+    /// crate actually advertise.
+    pub const fn sql_typical_full() -> Self {
+        Self::sql_typical()
+            .with(Capability::Events)
+            .with(Capability::IndexFts)
+            .with(Capability::IndexVector)
     }
 
     /// Convenience: every capability the in-memory reference backend

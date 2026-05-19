@@ -5,13 +5,15 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_host_api::{
-    CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountAlias, MountGrant,
-    MountPermissions, MountView, RuntimeKind, ThreadId, TrustClass, UserId, VirtualPath,
+    CapabilityDescriptor, CapabilityId, CapabilitySet, ExecutionContext, ExtensionId, MountAlias,
+    MountGrant, MountPermissions, MountView, PermissionMode, ResourceEstimate, RuntimeKind,
+    ThreadId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfaceVersion, HostRuntime,
     HostRuntimeError, HostRuntimeHealth, HostRuntimeStatus, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeStatusRequest, SurfaceKind,
+    VisibleCapability, VisibleCapabilityAccess,
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
     VisibleCapabilitySurface as HostVisibleCapabilitySurface,
 };
@@ -23,7 +25,7 @@ use ironclaw_turns::{
     TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, LoopCapabilityPort, LoopRunContext,
-        VisibleCapabilityRequest,
+        ProviderToolCall, VisibleCapabilityRequest,
     },
 };
 
@@ -130,6 +132,70 @@ async fn visible_capability_request_rejects_caller_supplied_mounts() {
     );
 }
 
+#[tokio::test]
+async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_override() {
+    let thread_id = ThreadId::new("thread-provider-tool-input").unwrap();
+    let mut context = ExecutionContext::local_default(
+        UserId::new("user-provider-tool-input").unwrap(),
+        ExtensionId::new("loop-support-provider-tool-input").unwrap(),
+        RuntimeKind::Wasm,
+        TrustClass::UserTrusted,
+        CapabilitySet::default(),
+        MountView::default(),
+    )
+    .unwrap();
+    context.thread_id = Some(thread_id.clone());
+    context.resource_scope.thread_id = Some(thread_id.clone());
+    let run_context = loop_run_context(&context, thread_id).await;
+    let visible_request =
+        HostVisibleCapabilityRequest::new(context, SurfaceKind::new("agent_loop").unwrap());
+
+    let factory = HostRuntimeLoopCapabilityPortFactory::new(
+        Arc::new(SingleToolHostRuntime),
+        visible_request,
+        Arc::new(UnusedInputResolver),
+        Arc::new(UnusedResultWriter),
+        None,
+    );
+    let port: Arc<dyn LoopCapabilityPort> = factory.for_run_context(run_context);
+
+    port.visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .expect("surface should snapshot provider tools");
+    let candidate = port
+        .register_provider_tool_call(ProviderToolCall {
+            provider_id: "provider".to_string(),
+            provider_model_id: "model".to_string(),
+            turn_id: Some("turn_1".to_string()),
+            id: "call_1".to_string(),
+            name: "demo__echo".to_string(),
+            arguments: serde_json::json!({"message":"hello"}),
+            response_reasoning: None,
+            reasoning: None,
+            signature: None,
+        })
+        .await
+        .expect("provider tool call should stage input");
+
+    assert_eq!(
+        candidate.capability_id,
+        CapabilityId::new("demo.echo").unwrap()
+    );
+    assert!(
+        candidate
+            .input_ref
+            .as_str()
+            .starts_with("input:provider-tool-")
+    );
+    assert_eq!(
+        candidate
+            .provider_replay
+            .expect("provider replay")
+            .arguments,
+        serde_json::json!({"message":"hello"})
+    );
+}
+
 fn workspace_root() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     manifest_dir
@@ -182,6 +248,72 @@ impl HostRuntime for EmptyHostRuntime {
         Ok(HostVisibleCapabilitySurface {
             version: CapabilitySurfaceVersion::new("factory-empty:v1").unwrap(),
             capabilities: Vec::new(),
+        })
+    }
+
+    async fn cancel_work(
+        &self,
+        _request: CancelRuntimeWorkRequest,
+    ) -> Result<CancelRuntimeWorkOutcome, HostRuntimeError> {
+        Ok(CancelRuntimeWorkOutcome::default())
+    }
+
+    async fn runtime_status(
+        &self,
+        _request: RuntimeStatusRequest,
+    ) -> Result<HostRuntimeStatus, HostRuntimeError> {
+        Ok(HostRuntimeStatus::default())
+    }
+
+    async fn health(&self) -> Result<HostRuntimeHealth, HostRuntimeError> {
+        Ok(HostRuntimeHealth::default())
+    }
+}
+
+struct SingleToolHostRuntime;
+
+#[async_trait]
+impl HostRuntime for SingleToolHostRuntime {
+    async fn invoke_capability(
+        &self,
+        _request: RuntimeCapabilityRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        Err(HostRuntimeError::unavailable("not used in this test"))
+    }
+
+    async fn resume_capability(
+        &self,
+        _request: RuntimeCapabilityResumeRequest,
+    ) -> Result<RuntimeCapabilityOutcome, HostRuntimeError> {
+        Err(HostRuntimeError::unavailable("not used in this test"))
+    }
+
+    async fn visible_capabilities(
+        &self,
+        _request: HostVisibleCapabilityRequest,
+    ) -> Result<HostVisibleCapabilitySurface, HostRuntimeError> {
+        Ok(HostVisibleCapabilitySurface {
+            version: CapabilitySurfaceVersion::new("factory-single-tool:v1").unwrap(),
+            capabilities: vec![VisibleCapability {
+                descriptor: CapabilityDescriptor {
+                    id: CapabilityId::new("demo.echo").unwrap(),
+                    provider: ExtensionId::new("demo").unwrap(),
+                    runtime: RuntimeKind::Wasm,
+                    trust_ceiling: TrustClass::UserTrusted,
+                    description: "Echo input".to_string(),
+                    parameters_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "message": { "type": "string" }
+                        }
+                    }),
+                    effects: Vec::new(),
+                    default_permission: PermissionMode::Allow,
+                    resource_profile: None,
+                },
+                access: VisibleCapabilityAccess::Available,
+                estimated_resources: ResourceEstimate::default(),
+            }],
         })
     }
 

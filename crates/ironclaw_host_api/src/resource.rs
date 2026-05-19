@@ -20,6 +20,13 @@ pub const LOCAL_DEFAULT_AGENT_ID: &str = "default";
 /// Canonical local/single-user default bootstrap project id.
 pub const LOCAL_DEFAULT_PROJECT_ID: &str = "bootstrap";
 
+/// Reserved tenant/user id used by [`ResourceScope::system`] for filesystem
+/// operations that have no real per-tenant scope (migrations, admin
+/// tooling). Contains an ASCII Unit-Separator control character (`\x1f`)
+/// which `TenantId::new` / `UserId::new` reject during validation, so no
+/// caller-supplied identifier can ever collide with it.
+pub const SYSTEM_RESERVED_ID: &str = "\x1fSYSTEM\x1f";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceScope {
     pub tenant_id: TenantId,
@@ -51,6 +58,27 @@ impl ResourceScope {
             thread_id: None,
             invocation_id,
         })
+    }
+
+    /// Synthetic scope for system-level filesystem operations that have no
+    /// real per-tenant identity (master-key checks, migrations, admin
+    /// tooling). Uses [`SYSTEM_RESERVED_ID`] for both tenant and user, which
+    /// validation rejects, so no user-supplied identifier can collide.
+    pub fn system() -> Self {
+        Self {
+            tenant_id: TenantId::from_trusted(SYSTEM_RESERVED_ID.to_string()),
+            user_id: UserId::from_trusted(SYSTEM_RESERVED_ID.to_string()),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: InvocationId::new(),
+        }
+    }
+
+    /// True iff this scope is the system sentinel (see [`Self::system`]).
+    pub fn is_system(&self) -> bool {
+        self.tenant_id.as_str() == SYSTEM_RESERVED_ID && self.user_id.as_str() == SYSTEM_RESERVED_ID
     }
 }
 

@@ -19,6 +19,7 @@ mod backend;
 mod catalog;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 mod db;
+mod hsm;
 mod in_memory;
 mod index;
 #[cfg(feature = "libsql")]
@@ -30,9 +31,11 @@ mod record;
 mod root;
 mod scoped;
 mod types;
+mod vector;
 
 pub use backend::{EventRecord, StorageTxn};
 pub use catalog::{CompositeRootFilesystem, FilesystemCatalog, MountDescriptor, PathPlacement};
+pub use hsm::HsmBackend;
 pub use in_memory::InMemoryBackend;
 pub use index::{Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page};
 #[cfg(feature = "libsql")]
@@ -44,7 +47,7 @@ pub use record::{
     CasExpectation, ContentType, Entry, RecordKind, RecordVersion, SeqNo, VersionedEntry,
 };
 pub use root::RootFilesystem;
-pub use scoped::ScopedFilesystem;
+pub use scoped::{MountViewResolver, ScopedFilesystem};
 pub use types::{
     BackendCapabilities, BackendId, BackendKind, Capability, ContentKind, DirEntry, FileStat,
     FileType, FilesystemError, FilesystemOperation, IndexConflictReason, IndexPolicy, StorageClass,

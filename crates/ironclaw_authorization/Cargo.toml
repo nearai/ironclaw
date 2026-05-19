@@ -6,23 +6,17 @@ publish = false
 
 [features]
 default = []
-postgres = ["dep:deadpool-postgres", "dep:tokio-postgres"]
-libsql = ["dep:libsql"]
 
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
-deadpool-postgres = { version = "0.14", optional = true }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_trust = { path = "../ironclaw_trust" }
-libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
-tokio-postgres = { version = "0.7", optional = true }
-tracing = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
