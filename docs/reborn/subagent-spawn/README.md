@@ -58,7 +58,6 @@ exist because of that review.
 - Mission / cron / trigger loop types (future; seams only).
 - Nested parent↔child UI/event linkage (child shows as a normal standalone thread).
 - `Fork` seed mode (full parent-context copy) — enum variant reserved, unimplemented.
-- Relaying a child's approval gate into the parent conversation.
 - File-discovered, user-defined subagent flavors.
 
 ## 3. Glossary (Reborn loop terms)
@@ -73,6 +72,7 @@ exist because of that review.
 | **Loop-host port** | A `LoopXxxPort` trait the executor calls for host I/O (context, model, capability, checkpoint, …). Strategies *decide*; ports *execute*. |
 | **Gate** | A capability invocation can return a gate (`Approval`/`Auth`/`Resource`, and — new — `AwaitDependentRun`). The loop checkpoints `BeforeBlock` and returns `LoopExit::Blocked`. |
 | **`CapabilityOutcome`** | What a capability invocation yields back to the executor: a result, a gate, a spawned process — and, new, a spawned child run. |
+| **Spawn tree** | The transitive ancestor closure of a run via `parent_run_id`. Every child carries a `spawn_tree_root_run_id` for atomic per-tree accounting. |
 
 ## 4. Design principles
 
@@ -86,7 +86,8 @@ exist because of that review.
 4. **Respect crate boundaries.** The sealed loop framework stays product-agnostic;
    `ironclaw_turns` owns coordination contracts; `host_runtime` is untouched.
 5. **Fail loud, fail closed.** No silent fallbacks on store/IO; security gates
-   reject by default.
+   reject by default. Every concurrency-relevant write is durable before any
+   side-effect (no in-memory source of truth for distributed state).
 
 ## 5. Architecture
 
@@ -112,12 +113,22 @@ capability-port impl (in `ironclaw_loop_support`) recognises the `spawn_subagent
 capability id, performs the spawn, and returns a **new `CapabilityOutcome`
 variant**:
 
-- **background** → `CapabilityOutcome::SpawnedChildRun { child_run_id }` — a normal
-  capability result, threaded back as the tool result.
-- **blocking** → an `AwaitDependentRun` **gate** outcome — the executor already
-  turns a gate into `checkpoint BeforeBlock → LoopExit::Blocked`.
+- **background** →
+  `CapabilityOutcome::SpawnedChildRun { child_run_id, result_ref, safe_summary }`
+  — a normal capability result; the executor pushes `result_ref` exactly like a
+  `Completed(CapabilityResultMessage)` result while preserving the child-run id
+  for observability.
+- **blocking** →
+  `CapabilityOutcome::AwaitDependentRun { gate_ref, safe_summary }` — a gate
+  outcome; the executor maps it to `GateKind::AwaitDependentRun` and then follows
+  the existing `checkpoint BeforeBlock → LoopExit::Blocked` path.
 
-No `EffectKind` change, no executor change, no `host_runtime` involvement.
+No `EffectKind` change, no new executor routing, no `host_runtime` involvement.
+The executor only gains the mechanical `CapabilityOutcome` arms that map
+background spawns to a result ref and blocking spawns to the existing gate path.
+
+The `result_ref` payload schema is **defined** (not implicit) — see §6 row
+"Spawn-result payload".
 
 ### 5.3 What changes — by layer
 
@@ -126,11 +137,20 @@ ironclaw_agent_loop    + `subagent` LoopFamily (static composition)
 (sealed framework)     + GateKind::AwaitDependentRun (pub(crate), wire-stable)
                        (executor: unchanged)
 
-ironclaw_turns         + CapabilityOutcome::SpawnedChildRun
+ironclaw_turns         + CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}
 (coordination)         + AwaitDependentRun across LoopGateKind / LoopBlockedKind /
                          BlockedReason  and  TurnStatus::BlockedDependentRun
-                       ~ TurnRunRecord: + parent_run_id, + subagent_depth
-                       + children_of(run_id) store query
+                       ~ SubmitTurnRequest and TurnRunRecord:
+                         + parent_run_id, subagent_depth, spawn_tree_root_run_id
+                       + children_of(run_id), get_run_record(run_id),
+                         tree_descendant_count_and_reserve(root_run_id, delta)
+                         store queries / atomic admission
+                       + TurnCoordinator::prepare_turn(scope) -> reserved TurnRunId
+                         and SubmitTurnRequest.requested_run_id
+                         — caller-known run id BEFORE submit; replaces the
+                           staging-key-then-rekey workaround. Missions/cron/triggers
+                           will all need this same shape.
+                       + DefaultTurnCoordinator::with_event_sink(...)
 
 ironclaw_loop_support  + spawn handling in the capability-port impl
 (host I/O glue)        ~ prompt/context port: direction system msg + user-role goal
@@ -138,8 +158,19 @@ ironclaw_loop_support  + spawn handling in the capability-port impl
 
 ironclaw_reborn        + `subagent` PlannedDriver + run-profile→driver binding
 (composition)          + built-in subagent flavor table + direction .md files
-                       + durable, bounded subagent goal store
+                       + DURABLE subagent goal store (DB-backed; piggybacks on
+                         turn-state persistence — not an in-memory store)
                        + SubagentCompletionObserver (TurnEventSink)
+                       + RestartReconciler — startup sweep + periodic poll over
+                         terminal child runs lacking gate-resolved / delivered
+                         observer outputs (fixes the "event lost between commit
+                         and observer dispatch" hole)
+                       + SpawnTreeReservation rows (per-root atomic descendant
+                         count — concurrent admit across subtrees is rare today
+                         but the rule is "reserve before queue", durable)
+                       + AutonomousContinuationBudget (per-tree wake/turn quota
+                         + per-time-window quota to bound self-amplifying spawn
+                         cascades)
                        ~ runtime.rs wiring
 
 ironclaw_host_runtime / ironclaw_host_api   — unchanged
@@ -160,20 +191,28 @@ spawn time and keyed by the coordinator-minted `TurnRunId`.
 |---|---|
 | Execution | In-process child runs, runner-worker driven. |
 | Result modes | Blocking and background (`run_in_background` arg on the capability). |
-| Spawn surface | `spawn_subagent` capability; host port returns `SpawnedChildRun` (bg) or an `AwaitDependentRun` gate (blocking). |
+| Spawn surface | `spawn_subagent` capability; host port returns `SpawnedChildRun { child_run_id, result_ref, safe_summary }` (background) or `AwaitDependentRun { gate_ref, safe_summary }` (blocking). |
+| **Spawn-result payload (schema)** | `result_ref` resolves to a typed JSON document the parent's model receives as the tool result. Fields: `child_run_id: TurnRunId`, `child_thread_id: ThreadId`, `flavor: SubagentFlavorId`, `mode: "blocking" \| "background"`, `status: "spawned" \| "completed" \| "failed" \| "cancelled"`, `output_available: bool` (false for fresh background spawns — result will arrive later as an inbound message), `final_text: Option<String>` (populated for blocking + sanitised), `failure_summary: Option<SanitizedFailure>`. The schema is wire-stable, snake_case serde, round-trip tested. |
+| **`requested_run_id` / `prepare_turn`** | A `TurnCoordinator::prepare_turn(scope) -> TurnRunId` API mints a `TurnRunId` **before** any side-effect; `SubmitTurnRequest.requested_run_id: Option<TurnRunId>` lets the submitter pass it in so the coordinator binds the prepared id rather than minting a new one. The spawn handler uses this to **persist the goal under the real child run id from the start** — no staging key, no rekey. Generalises to missions/cron/triggers (any submitter that needs to "persist dependent state before submit"). |
 | Blocking | The `AwaitDependentRun` gate and its awaited child-run **set** are recorded **at spawn time, before `submit_turn`** — durable. The gate awaits a set; the parent resumes once, after the **last** child is terminal. If every child is already terminal when the parent would block, the gate resolves **inline** (no `Blocked`). |
+| **Blocking interruptibility** | A parent blocked on `AwaitDependentRun` is interruptible by the normal `cancel_run(parent)` path — propagates a recursive subtree cancel (§7.5). **Blocking subagents are for short, bounded work**; for long-running children prefer background mode so the parent can do other work meanwhile. |
 | Resume payload | One synthetic `GateRef`; a host-side gate-resolution store holds all N child results, mapped back to the N pending tool calls. |
 | Child failure | Failed/cancelled children produce a typed result entry; the gate waits for **all** children to reach terminal — no early resume, no sibling cancellation. |
-| Background delivery | Each child result is `accept_inbound_message`'d into the parent thread (idempotent). The follow-up parent turn is **coalescing** — `submit_turn` only if none pending; `ThreadBusy` means "already pending, message will be consumed". |
+| Background delivery | Each child result is `accept_inbound_message`'d into the parent thread (idempotent, provenance-tagged `SubagentResult`). The follow-up parent turn is **coalescing** — `submit_turn` only if none pending; `ThreadBusy` means "already pending, message will be consumed". |
+| **Autonomous-continuation budget** | To bound self-amplifying spawn cascades (parent wake → spawn more → child completes → wake again → …), a per-spawn-tree budget caps **background-wake turns per tree** and **wakes per rolling time window** (e.g. ≤16 wake-turns per tree, ≤4 per minute). Exceeding the cap suspends further wake submissions for that tree and emits a typed `AutonomousContinuationStopped` observability event for triage. Distinct from per-spawn caps (§8): a tree under the spawn cap can still go wake-loopy. |
 | Child authority | The child run starts with an **empty grant/lease set** — no inheritance of parent grants/leases. The capability allowlist is a surface *ceiling*, not authority. The child re-acquires every lease via its own `Approval` gate on its own thread. |
-| Nesting | Hard gate: a spawn from a flavor with `allow_nesting=false` is rejected regardless of surface membership. Plus a depth cap (`subagent_depth` field, checked before `submit_turn`), a per-turn fan-out cap, and a per-run-tree descendant cap. |
+| **Child approval ownership** | Child runs inherit the parent's `owner_user_id` (the human accountable for the parent). A child's `Approval` gate surfaces on the **child thread** addressed to that owner — the parent user is the approver. The child thread is user-visible in the same surface as any other thread under that user; UI nesting is the deferred linkage. |
+| Nesting | Hard gate: a spawn from a flavor with `allow_nesting=false` is rejected regardless of surface membership. Plus a depth cap (`subagent_depth` field, checked before `submit_turn`) and a per-turn fan-out cap. |
+| **Per-tree descendant atomicity** | The per-run-tree descendant cap (`MAX_TREE_DESCENDANTS`) is enforced via a **durable `SpawnTreeReservation` row keyed by `spawn_tree_root_run_id`** — `tree_descendant_count_and_reserve(root, delta)` is atomic at the store, runs **before `submit_turn`**. Concurrent admit across subtrees cannot over-admit. (Concurrent parent turns on the *same* parent thread are impossible by the per-`TurnScope` active-run lock, but a single root can have many concurrent subtrees on different threads.) |
 | Loop family | One static `subagent` `LoopFamily` (`LoopFamilyId "subagent"`); default strategies + tighter `BudgetStrategy`. Bound to a dedicated `subagent` `PlannedDriver`. |
 | Flavors | Built-in static table — v1: `general`, `researcher`. Each: direction id, tool allowlist, model, iteration + token/cost budget, `allow_nesting`. |
 | Direction prompt | Static `.md` per flavor (`include_str!`, `ironclaw_reborn/src/directions/`), selected by static match. The system message. |
 | Goal placement | The parent-injected goal + `Handoff` blob are the child's **first user message**, delimited as task data (`## Task (from parent)` / `## Context from parent`). **Never** the system message — the goal is model-generated and may carry upstream-tainted content. |
-| Goal durability | Persisted in a durable, **bounded** goal store keyed by the child `TurnRunId`. `submit_turn` mints the run id, so the goal is staged under a temporary key and **re-keyed** once `submit_turn` returns (see `phase-2-mechanisms.md`). A store miss **fails the child run loudly** — never an empty `## Task`. |
-| Lineage | `parent_run_id` + `subagent_depth` fields on `TurnRunRecord` (durable). `children_of` is a store query — no in-memory index as source of truth. |
-| Idempotency | Child `submit_turn` key = `(parent_run_id, parent_turn_id, spawn-call ordinal)` — deterministic for replay, unique per spawn call even for identical-argument siblings. |
+| **Goal durability (DB-backed)** | Persisted in a **durable, DB-backed** subagent goal store keyed by the child `TurnRunId`. Implementation piggybacks on turn-state persistence (the same backend that stores `TurnRunRecord`). The child run id is **known before** `submit_turn` via `prepare_turn` — no staging key, no rekey. Survives process restart by construction. A store miss **fails the child run loudly**. |
+| Lineage | `parent_run_id`, `subagent_depth`, and `spawn_tree_root_run_id` fields on `SubmitTurnRequest` and `TurnRunRecord` (durable). `children_of` and `get_run_record` are store queries — no in-memory index as source of truth. |
+| **Restart reconciliation** | `with_event_sink` gives live delivery, but a process crash between *child terminal commit* and *observer dispatch* would strand a parent gate or background result. `RestartReconciler` runs at startup and on a periodic timer: scans terminal child runs whose lineage points at a parent with an unresolved `AwaitDependentRun` gate or an undelivered `SubagentResult` inbound, and replays the observer action (resume / accept_inbound + submit). Idempotent via the same `external_event_id` keying the live path uses. |
+| **Cancellation tombstone** | A child completing terminal during a subtree cancel **does not silently drop**. It writes a typed `SubagentResultTombstone { child_run_id, disposition: "discarded_by_parent_cancel", terminal_status }` so reconciliation can distinguish "intentionally discarded" from "lost in the gap". |
+| Idempotency | Child `submit_turn` key = `(parent_run_id, parent_turn_id, spawn-call ordinal)` — deterministic for replay, unique per spawn call even for identical-argument siblings. The `requested_run_id` further pins which `TurnRunId` the coordinator binds for replay. |
 | Tenancy | The child `TurnScope` copies `tenant_id`/`agent_id`/`project_id` **verbatim**; only `thread_id` differs (fresh). Test-enforced invariant. |
 | Child output trust | A child result crossing back to the parent is **untrusted data** — wrapped in a delimited block, channel-edge sanitised, and safety-scanned before it enters the parent thread. |
 | Context seed | `Fresh` (goal only), `Handoff(String)` (goal + curated parent blob, re-materialised into the child scope). `Fork` reserved, unimplemented. |
@@ -202,7 +241,8 @@ port handles it and returns either `SpawnedChildRun` (background) or an
 
 In blocking mode the parent suspends on the `AwaitDependentRun` gate (releasing its
 runner worker, keeping its thread lock) while N children run concurrently, each its
-own coordinator-managed run.
+own coordinator-managed run. The parent is **interruptible** via `cancel_run` —
+blocking is not "stuck", it is "waiting under cancellation".
 
 ![Blocking subagent lifecycle](diagrams/blocking-lifecycle.svg)
 
@@ -227,11 +267,18 @@ transcript messages but only 1 queued parent turn**, which consumes all N at
 once via the normal context-load path. `ThreadBusy` from a second `submit_turn`
 is expected ("already pending — message will be consumed"), not an error.
 
-**Cascade risk** — autonomous wake can drive its own follow-up spawns
-(parent processes results → spawns more subagents → those complete → wake parent
-again → loop). Bounded by `MAX_TREE_DESCENDANTS`, `MAX_SPAWN_PER_TURN`, the
-`subagent_depth` cap, and per-flavor `max_iterations` + token/cost budget — all
-enforced **before** `submit_turn` (see §8).
+**Cascade and continuation bounds.** Autonomous wake can drive its own follow-up
+spawns (parent processes results → spawns more subagents → those complete → wake
+parent again → loop). Two independent budgets bound this:
+
+- **Per-spawn caps** (see §8): `MAX_TREE_DESCENDANTS`, `MAX_SPAWN_PER_TURN`,
+  `subagent_depth` — enforced before `submit_turn` via the atomic
+  `tree_descendant_count_and_reserve`. Bounds the *total number of spawns*.
+- **Autonomous-continuation budget**: per-tree wake-turn count + per-time-window
+  rate. Bounds the *number of background-driven parent wakes* even when each
+  individual wake spawns ≤ the per-spawn cap. Exceeding the budget suspends
+  further wake submissions for that tree and emits
+  `AutonomousContinuationStopped` for triage.
 
 ### 7.5 Cancellation
 
@@ -239,10 +286,28 @@ enforced **before** `submit_turn` (see §8).
 parent CancelRequested
  └ SubagentCompletionObserver: children_of(parent) via durable parent_run_id
       recursively cancel_run the whole lineage subtree (BFS over parent_run_id)
-      a child completing mid-cancel → its result is discarded
+      a child completing mid-cancel → writes a SubagentResultTombstone
+        { disposition: discarded_by_parent_cancel, terminal_status }
+        — NOT silently dropped; reconciliation distinguishes discarded vs lost
  a worker-released Blocked parent is driven to terminal Cancelled via the
    gate-abort path (it has no claiming worker of its own)
 ```
+
+### 7.6 Restart reconciliation
+
+The live observer path (`with_event_sink`) handles steady-state delivery. A
+process crash between a child's terminal commit and the observer's dispatch would
+otherwise strand a parent gate or background result. `RestartReconciler` closes
+that hole:
+
+- **Startup sweep:** scan terminal child runs whose lineage points at a parent
+  with an unresolved `AwaitDependentRun` gate or an undelivered `SubagentResult`
+  inbound; replay the observer action (resume for blocking, accept_inbound +
+  submit for background). Idempotent via the same `external_event_id` key.
+- **Periodic poll** (every N seconds, configurable): same query, catches any
+  in-flight event loss.
+
+Reconciliation is purely additive — it never duplicates a delivered result.
 
 ## 8. Security model
 
@@ -253,26 +318,32 @@ mitigations below are **load-bearing**, not optional.
    `CapabilityAllowSet` filters the *surface* only. A child must re-acquire every
    privileged lease through its own `Approval` gate. A subagent can never exercise
    a lease the parent obtained from a prior user approval.
-2. **Fork-bomb containment.** Depth alone is insufficient (N children each
-   spawning N → N^depth). Three caps, all enforced **before `submit_turn`**, all
-   rejecting without queuing: `MAX_SUBAGENT_DEPTH`, `MAX_SPAWN_PER_TURN`
-   (fan-out), `MAX_TREE_DESCENDANTS` (per-run-tree total).
-3. **Nesting hard gate.** `spawn_subagent` exclusion is not left to denylist-by-
+2. **Approval ownership.** The child inherits the parent's `owner_user_id` so a
+   child `Approval` gate surfaces to the same human who owns the parent — on the
+   child thread, not via parent-injection (UI nesting is the deferred linkage).
+3. **Fork-bomb containment.** Depth alone is insufficient (N children each
+   spawning N → N^depth). Three caps, all enforced **before `submit_turn`** via
+   the atomic `SpawnTreeReservation`, all rejecting without queuing:
+   `MAX_SUBAGENT_DEPTH`, `MAX_SPAWN_PER_TURN` (fan-out), `MAX_TREE_DESCENDANTS`
+   (per-spawn-tree total — atomic via `spawn_tree_root_run_id` keyed reservation).
+4. **Autonomous-continuation containment.** Per-tree wake-turn quota + rate-limit
+   (§7.4) bound self-amplifying cascades that stay under the per-spawn caps.
+5. **Nesting hard gate.** `spawn_subagent` exclusion is not left to denylist-by-
    omission in each flavor's allowlist. A `spawn_subagent` invocation from a flavor
    with `allow_nesting=false` is rejected outright, regardless of surface membership.
-4. **Prompt-injection isolation.** The goal + handoff blob are model-generated and
+6. **Prompt-injection isolation.** The goal + handoff blob are model-generated and
    may carry upstream-tainted content. They go in the child's **user** message,
    delimited as task data — never the system message. The system message is the
    static, authored direction `.md` only.
-5. **Child output is untrusted.** A child's result crossing back to the parent
+7. **Child output is untrusted.** A child's result crossing back to the parent
    (tool result or inbound message) is wrapped in a delimited block, channel-edge
    sanitised (host paths / internal identifiers stripped), and run through the
    inbound `safety_layer` scan before it is stored in the parent thread.
-6. **Tenancy invariant.** The child `TurnScope` copies `tenant_id`/`agent_id`/
+8. **Tenancy invariant.** The child `TurnScope` copies `tenant_id`/`agent_id`/
    `project_id` verbatim; a spawn whose resolved scope deviates is rejected.
-7. **Idempotency keys** are derived from `(parent_run_id, parent_turn_id, ordinal)`
+9. **Idempotency keys** are derived from `(parent_run_id, parent_turn_id, ordinal)`
    — collision-free across identical-argument sibling spawns, deterministic for
-   replay.
+   replay. The `requested_run_id` pins which `TurnRunId` the coordinator binds.
 
 ## 9. Failure & concurrency model
 
@@ -282,25 +353,30 @@ mitigations below are **load-bearing**, not optional.
 | All children finish before the parent blocks | Gate resolves **inline** — the parent never emits `Blocked`. |
 | One child fails mid-flight | Failed/cancelled child = a typed result entry; the gate still waits for all children; siblings are not cancelled. |
 | Two background completions race on the parent thread | Results are `accept_inbound_message`'d (idempotent); the follow-up turn is coalescing; `ThreadBusy` is expected, not an error. |
-| Process restart | Goal store is durable; lineage (`parent_run_id`/`subagent_depth`) is durable; `children_of` is a store query. No in-memory source of truth. A goal-store miss fails the child loudly. |
-| Identical-argument sibling spawns | Distinct idempotency keys via the per-turn ordinal. |
+| Process restart **between child terminal commit and observer dispatch** | `RestartReconciler` (§7.6) sweeps at startup + periodically and replays observer actions; idempotent via `external_event_id`. The live event sink covers steady state; the reconciler covers the gap. |
+| Process restart **general state** | Goal store is **DB-backed durable**; lineage (`parent_run_id`/`subagent_depth`/`spawn_tree_root_run_id`) is durable; `children_of` is a store query. No in-memory source of truth. A goal-store miss fails the child loudly. |
+| Identical-argument sibling spawns | Distinct idempotency keys via the per-turn ordinal; `requested_run_id` pins the bound run id. |
 | Parent cancelled | Recursive subtree cancel; worker-released Blocked parent driven to `Cancelled` via gate-abort. |
+| Child completes terminal *during* a subtree cancel | Writes a `SubagentResultTombstone` (typed: `discarded_by_parent_cancel`) so reconciliation can distinguish discarded vs lost. |
 | Child completes with no assistant message | Typed "completed, no output" result — the parent always receives N well-formed results. |
-| Partial spawn (`submit_turn` fails after thread create) | The awaited-set entry is the source of truth, written first; the half-spawn is reconciled (child absent or marked failed); fail loud. |
+| Partial spawn (`submit_turn` fails after `prepare_turn` + reservation) | The reservation + awaited-set entry are the source of truth, written first; the half-spawn is reconciled (child absent or marked failed) and the reservation is released; fail loud. |
+| **Per-tree descendant over-admit** | `tree_descendant_count_and_reserve(root, delta)` is **atomic at the store** and runs before `submit_turn`. Concurrent admit across subtrees (different threads) cannot over-admit. Concurrent admit on the same parent thread is precluded by the per-`TurnScope` active-run lock. |
+| **Autonomous-continuation runaway** | Per-tree wake-turn quota + per-time-window rate-limit; exceeded → wake submissions suspended for that tree + `AutonomousContinuationStopped` event emitted (§7.4). |
+| **Blocking parent waiting indefinitely** | Parent is interruptible: `cancel_run(parent)` cascades through the subtree (§7.5). Blocking subagents are *for short bounded work*; long children should be background. |
 
 ## 10. Crate boundary verification
 
 | Crate | Rule | This design | Verdict |
 |---|---|---|---|
-| `ironclaw_agent_loop` | sealed; product-agnostic; refs not raw prompts | one `subagent` family; `GateKind::AwaitDependentRun` is neutral; executor unchanged | ✅ |
-| `ironclaw_turns` | coordination contracts; lifecycle metadata + refs | `CapabilityOutcome` variant, blocked-kind variants, `parent_run_id`/`subagent_depth` | ✅ |
-| `ironclaw_loop_support` | host-port adapter glue; no stateful stores | spawn handling in the capability port; goal store lives in `ironclaw_reborn` | ✅ |
-| `ironclaw_reborn` | driver integration + composition | family driver, flavors, directions, goal store, observer, wiring | ✅ |
+| `ironclaw_agent_loop` | sealed; product-agnostic; refs not raw prompts | one `subagent` family; `GateKind::AwaitDependentRun` is neutral; executor gains only outcome-to-existing-gate/result mapping | ✅ |
+| `ironclaw_turns` | coordination contracts; lifecycle metadata + refs | `CapabilityOutcome` variants, blocked-kind variants, lineage fields, `prepare_turn` API, atomic descendant reservation query | ✅ |
+| `ironclaw_loop_support` | host-port adapter glue; no stateful stores | spawn handling in the capability port; goal store + reservation + reconciler live in `ironclaw_reborn` | ✅ |
+| `ironclaw_reborn` | driver integration + composition | family driver, flavors, directions, DB-backed goal store, reservation table, observer, reconciler, wiring | ✅ |
 | `ironclaw_host_runtime` / `ironclaw_host_api` | — | untouched | ✅ |
 
-Five wire-stable enums gain an `AwaitDependentRun`/`BlockedDependentRun`/
-`SpawnedChildRun` variant: `CapabilityOutcome`, `LoopGateKind`, `LoopBlockedKind`,
-`BlockedReason`, `TurnStatus`. Each new variant **matches the existing serde
+Five wire-stable enums gain `AwaitDependentRun` / `BlockedDependentRun` /
+`SpawnedChildRun` variants: `CapabilityOutcome`, `LoopGateKind`,
+`LoopBlockedKind`, `BlockedReason`, `TurnStatus`. Each new variant **matches the existing serde
 convention of its enum** — `LoopGateKind`/`LoopBlockedKind`/`CapabilityOutcome`
 are snake_case; **`TurnStatus` and `BlockedReason` serialize PascalCase today**
 (no `#[serde(rename_all)]`) and their new variants stay PascalCase to avoid
@@ -315,29 +391,41 @@ exhaustive `TurnStatus` match sites in `ironclaw_turns` `memory.rs`
 
 ## 11. Implementation phases
 
-The work is a 3-level DAG. Phase 1 and Phase 2 each contain parallel workstreams;
-Phase 3 wires everything. Each workstream is an independently reviewable PR.
+The work is a 3-level DAG. Phase 1 and Phase 2 each contain workstreams that run
+*mostly* in parallel — see the diagram for the actual edges. Each workstream is
+an independently reviewable PR.
 
 ![Implementation phase DAG](diagrams/phase-dag.svg)
 
 ```
-PHASE 1 — Contracts & isolated units   (3 parallel workstreams)
+PHASE 1 — Contracts & isolated units
   P1.A  ironclaw_turns contract additions
+          (CapabilityOutcome variants, blocked-kind variants, lineage fields,
+           prepare_turn / requested_run_id, tree-descendant-reserve query,
+           with_event_sink)
   P1.B  ironclaw_agent_loop: `subagent` family + GateKind::AwaitDependentRun
-  P1.C  ironclaw_reborn data: direction .md files, bounded goal store, flavor table
-        ── P1.A/B/C share only the agreed variant names (see phase-1 doc); they
-           touch different crates and run fully in parallel.
+          ── needs P1.A's variant names; in practice land P1.A first, then P1.B
+             can build in parallel with P1.C
+  P1.C  ironclaw_reborn data: direction .md files, DB-backed goal-store schema,
+        flavor table, SpawnTreeReservation row schema
+          ── independent of P1.A/B at the data level
 
 PHASE 2 — Mechanisms                   (4 parallel workstreams; each needs Phase 1)
   P2.A  loop_support: spawn handling in the capability-port impl   [needs P1.A, P1.C]
+          uses prepare_turn + reservation; persists goal under known child id
   P2.B  loop_support: prompt composition + attenuation             [needs P1.A, P1.C]
+          system = direction .md ; user = goal + handoff
   P2.C  ironclaw_reborn: `subagent` PlannedDriver + profile binding [needs P1.B]
+          + child runs inherit parent owner_user_id
   P2.D  ironclaw_reborn: SubagentCompletionObserver                [needs P1.A, P1.C]
-        ── P2.A and P2.B touch the same crate but different files; coordinate file
-           ownership (capability port vs prompt port).
+          live delivery; writes SubagentResultTombstone on mid-cancel completes
+        ── P2.A and P2.B touch the same crate but different files; coordinate
+           file ownership (capability port vs prompt port).
 
 PHASE 3 — Integration                  (single workstream; needs all of Phase 2)
   P3    runtime.rs wiring · spawn_subagent capability surface entry ·
+        RestartReconciler (startup + periodic) ·
+        AutonomousContinuationBudget enforcement ·
         end-to-end integration tests · quality gate
 ```
 
@@ -351,33 +439,34 @@ Detailed per-phase docs with pseudo code:
 - **Integration tests** (`crates/ironclaw_reborn/tests/`): background E2E,
   blocking E2E, parallel-blocking E2E, early-completion (all children terminate
   before the parent blocks), child-authority (a child cannot use a lease the
-  parent holds), fork-bomb (caps reject), cancellation subtree, no-deadlock
-  regression (child `thread_id` ≠ parent).
+  parent holds), child-approval-by-parent-owner, fork-bomb (caps reject — incl.
+  per-tree atomic), autonomous-continuation-budget-stop, cancellation subtree
+  + tombstone, restart-reconciliation (kill process between child terminal and
+  observer dispatch, restart, assert delivery), blocking-interruption, and
+  no-deadlock regression (child `thread_id` ≠ parent).
 - **Quality gate:** `cargo fmt`; `cargo clippy --all --benches --tests --examples
   --all-features` (zero warnings); `cargo test`.
 
 ## 13. Follow-ups (explicitly deferred)
 
 Mission / cron / trigger loop families + their submitters; parent↔child UI/event
-linkage (nested thread display); `Fork` seed mode; child-approval relay into the
-parent; file-discovered user-defined flavors; a durable goal-store backend beyond
-the bounded in-process store.
+linkage (nested thread display); `Fork` seed mode; relaying a child's approval
+into the parent conversation; file-discovered user-defined flavors.
 
-## 13a. Open question — goal-store durability vs production readiness
-
-§9 requires the goal store to survive process restart, but §13 defers a durable
-store backend. The bounded in-process store is therefore `NonDurable`, which a
-strict `Production` readiness check (`ironclaw_reborn/src/production_readiness.rs`)
-would block. **Pre-merge decision required:** either (a) ship the in-process store
-behind a `LocalDevTest`-degraded readiness flag, or (b) write the goal through to
-the durable turn-state DB in v1. `phase-3-integration.md` (Risk 10.1) carries the
-detail.
+(The goal-store durability question is **resolved** in v1: DB-backed via
+turn-state persistence — see §6 "Goal durability (DB-backed)".)
 
 ## 14. Appendix — review provenance
 
 This design was hardened by a four-reviewer pass (design, bugs, conventions,
-security) against the live crates. Findings folded in: the `EffectKind` /
-executor-routing correction (§5.2), the lost-wakeup and early-completion races
-(§9), the 5-enum blocked-kind surface (§10), the `PlannedDriver` binding
-requirement (§11 P2.C), durability of the goal store and lineage (§9), the
-idempotency-key collision fix (§6), and the entire security model (§8).
+security) and a follow-up technical review against the live crates. Findings
+folded in: the `EffectKind` / executor-routing correction (§5.2), the
+lost-wakeup and early-completion races (§9), the 5-enum blocked-kind surface
+(§10), the `PlannedDriver` binding requirement (§11 P2.C), durability of the
+goal store (§6 — now DB-backed, removing the prior "open question"), the
+`prepare_turn` / `requested_run_id` API (replacing staging+rekey), restart
+reconciliation (§7.6), the spawn-result payload schema (§6), child approval
+ownership (§6, §8), per-tree descendant atomicity via durable reservation (§6,
+§8), the autonomous-continuation budget (§7.4, §8), the cancellation tombstone
+(§6, §7.5, §9), blocking interruptibility / "short bounded only" guidance (§6,
+§9), the idempotency-key collision fix (§6), and the entire security model (§8).

@@ -8,11 +8,12 @@ title: "Implementation phases — parallel workstreams then one wiring phase" {
   style.bold: true
 }
 
-phase1: "PHASE 1 — Contracts & isolated units  (3 parallel workstreams)" {
+phase1: "PHASE 1 — Contracts & isolated units" {
   style.fill: "#e8f5e9"
-  p1a: "P1.A  ironclaw_turns\ncontract additions"
-  p1b: "P1.B  ironclaw_agent_loop\nsubagent family + gate kind"
-  p1c: "P1.C  ironclaw_reborn data\ndirection .md · goal store · flavor table"
+  p1a: "P1.A  ironclaw_turns\ncontract additions\n(land first — gate kind names)"
+  p1b: "P1.B  ironclaw_agent_loop\nsubagent family + gate kind\n(needs P1.A's variant names)"
+  p1c: "P1.C  ironclaw_reborn data\ndirection .md · DB goal store ·\nflavor table · reservation rows\n(independent)"
+  p1a -> p1b: "variant names"
 }
 
 phase2: "PHASE 2 — Mechanisms  (4 parallel workstreams)" {

@@ -26,12 +26,12 @@ spawn_seq: "spawn sequence (per call, ordinal order)" {
 }
 
 background: "BACKGROUND (run_in_background = true)" {
-  port -> parent: "CapabilityOutcome::SpawnedChildRun { child_run_id }"
+  port -> parent: "CapabilityOutcome::SpawnedChildRun\n{ child_run_id, result_ref }"
   parent -> parent: "parent turn completes normally"
 }
 
 blocking: "BLOCKING (run_in_background = false)" {
-  port -> parent: "AwaitDependentRun gate outcome"
+  port -> parent: "CapabilityOutcome::AwaitDependentRun { gate_ref }"
   parent -> parent: "checkpoint BeforeBlock -> LoopExit::Blocked\nworker RELEASED, thread lock KEPT\n(if all children already terminal: resolve INLINE)"
 }
 

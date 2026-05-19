@@ -19,7 +19,7 @@ static: "STATIC — compiled into the binary\nidentical in every deployment · n
   }
   turns: "ironclaw_turns  (contracts)" {
     style.fill: "#ffffff"
-    types: "CapabilityOutcome::SpawnedChildRun ·\nLoopGateKind / LoopBlockedKind /\nBlockedReason / TurnStatus variants ·\nchildren_of query"
+    types: "CapabilityOutcome spawn variants ·\nLoopGateKind / LoopBlockedKind /\nBlockedReason / TurnStatus variants ·\nchildren_of + get_run_record"
   }
   ls: "ironclaw_loop_support  (host glue)" {
     style.fill: "#ffffff"
@@ -41,7 +41,7 @@ dynamic: "DYNAMIC — created per spawn at runtime\none set per child run · key
   turns_d: "ironclaw_turns" {
     style.fill: "#ffffff"
     scope: "child TurnScope + TurnRunId\n(coordinator-minted)"
-    rec: "TurnRunRecord.parent_run_id\n+ subagent_depth  (durable lineage)"
+    rec: "SubmitTurnRequest + TurnRunRecord\nparent_run_id + subagent_depth"
     gateinst: "AwaitDependentRun gate +\nawaited child-run set"
   }
   reborn_d: "ironclaw_reborn" {
