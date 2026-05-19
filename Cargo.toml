@@ -242,14 +242,10 @@ insta = { version = "1.46.3", features = ["yaml"] }
 # fault-injection helpers don't ship in release binaries.
 ironclaw_llm = { path = "crates/ironclaw_llm", version = "0.1.0", features = ["testing"] }
 ironclaw_filesystem = { path = "crates/ironclaw_filesystem", version = "0.1.0" }
-ironclaw_host_runtime = { path = "crates/ironclaw_host_runtime", version = "0.1.0" }
 ironclaw_network = { path = "crates/ironclaw_network", version = "0.1.0" }
 ironclaw_product_adapters = { path = "crates/ironclaw_product_adapters", version = "0.1.0", features = ["test-support"] }
 ironclaw_product_workflow = { path = "crates/ironclaw_product_workflow", version = "0.1.0", features = ["test-support"] }
-ironclaw_reborn = { path = "crates/ironclaw_reborn", version = "0.1.0" }
-ironclaw_reborn_composition = { path = "crates/ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_threads = { path = "crates/ironclaw_threads", version = "0.1.0" }
-ironclaw_trust = { path = "crates/ironclaw_trust", version = "0.1.0" }
 
 [features]
 default = ["postgres", "libsql", "html-to-markdown", "tui"]

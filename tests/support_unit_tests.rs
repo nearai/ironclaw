@@ -418,7 +418,8 @@ mod reborn_support_tests {
     use crate::reborn_support::session_thread::{RebornThreadHarness, RebornThreadHarnessError};
     use crate::reborn_support::test_adapter::{RebornTestIngress, RebornTestProductAdapter};
     use crate::support::trace_llm::{
-        ExpectedToolResult, LlmTrace, TraceResponse, TraceStep, TraceToolCall,
+        ExpectedToolResult, LlmTrace, TraceExpects, TraceResponse, TraceStep, TraceToolCall,
+        TraceTurn,
     };
 
     #[tokio::test]
@@ -433,6 +434,87 @@ mod reborn_support_tests {
 
         assert_eq!(response.safe_text_deltas, vec!["hello"]);
         assert_eq!(gateway.requests().len(), 1);
+        gateway.assert_exhausted();
+    }
+
+    #[tokio::test]
+    async fn trace_replay_replays_multiple_steps_in_order() {
+        let gateway = RebornTraceReplayModelGateway::from_trace(LlmTrace::new(
+            "trace",
+            vec![
+                TraceTurn {
+                    user_input: "first".to_string(),
+                    steps: vec![
+                        TraceStep {
+                            request_hint: None,
+                            response: TraceResponse::Text {
+                                content: "first reply".to_string(),
+                                input_tokens: 1,
+                                output_tokens: 1,
+                            },
+                            expected_tool_results: Vec::new(),
+                        },
+                        TraceStep {
+                            request_hint: None,
+                            response: TraceResponse::ToolCalls {
+                                tool_calls: vec![TraceToolCall {
+                                    id: "call-ordered".to_string(),
+                                    name: "test.echo".to_string(),
+                                    arguments: serde_json::json!({"message": "second"}),
+                                }],
+                                input_tokens: 1,
+                                output_tokens: 1,
+                            },
+                            expected_tool_results: Vec::new(),
+                        },
+                    ],
+                    expects: TraceExpects::default(),
+                },
+                TraceTurn {
+                    user_input: "second".to_string(),
+                    steps: vec![TraceStep {
+                        request_hint: None,
+                        response: TraceResponse::Text {
+                            content: "third reply".to_string(),
+                            input_tokens: 1,
+                            output_tokens: 1,
+                        },
+                        expected_tool_results: Vec::new(),
+                    }],
+                    expects: TraceExpects::default(),
+                },
+            ],
+        ))
+        .expect("trace gateway");
+
+        let first = gateway
+            .stream_model(model_request(Vec::new()))
+            .await
+            .expect("first response");
+        assert_eq!(first.safe_text_deltas, vec!["first reply"]);
+
+        let second = gateway
+            .stream_model(model_request(Vec::new()))
+            .await
+            .expect("second response");
+        let ParentLoopOutput::CapabilityCalls(calls) = second.output else {
+            panic!("expected capability calls");
+        };
+        assert_eq!(calls[0].capability_id.as_str(), "test.echo");
+        assert_eq!(
+            calls[0]
+                .provider_replay
+                .as_ref()
+                .expect("provider replay")
+                .provider_call_id,
+            "call-ordered"
+        );
+
+        let third = gateway
+            .stream_model(model_request(Vec::new()))
+            .await
+            .expect("third response");
+        assert_eq!(third.safe_text_deltas, vec!["third reply"]);
         gateway.assert_exhausted();
     }
 
@@ -765,6 +847,19 @@ mod reborn_support_tests {
     }
 
     #[test]
+    fn recording_network_transport_errors_on_unexpected_request() {
+        let transport = RecordingNetworkHttpTransport::new();
+
+        let error = execute_recorded_get(&transport).expect_err("unexpected request should fail");
+
+        assert!(
+            matches!(&error, NetworkHttpError::Transport { reason, .. } if reason.contains("unexpected HTTP request")),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(transport.requests().len(), 1);
+    }
+
+    #[test]
     fn policy_network_egress_blocks_private_ip_before_transport() {
         let transport = RecordingNetworkHttpTransport::new();
         let _default_policy_egress = transport.policy_egress();
@@ -938,6 +1033,29 @@ mod reborn_support_tests {
             .expect("reopened binding");
         assert_eq!(reopened_binding, binding);
 
+        let mut other_scope = product_scope("tenant-a");
+        other_scope.agent_id = Some(AgentId::new("agent-other").unwrap());
+        other_scope.project_id = Some(ProjectId::new("project-other").unwrap());
+        let other_agent = harness
+            .with_scope(other_scope)
+            .expect("other-agent harness");
+        let other_agent_binding = other_agent
+            .binding_service()
+            .expect("other-agent binding service")
+            .resolve_binding(request.clone())
+            .await
+            .expect("other-agent binding");
+        assert_eq!(
+            other_agent_binding.agent_id.as_ref().unwrap().as_str(),
+            "agent-other"
+        );
+        assert_eq!(
+            other_agent_binding.project_id.as_ref().unwrap().as_str(),
+            "project-other"
+        );
+        assert_ne!(other_agent_binding.agent_id, binding.agent_id);
+        assert_ne!(other_agent_binding.project_id, binding.project_id);
+
         let tenant_b = harness
             .with_scope(product_scope("tenant-b"))
             .expect("tenant-b harness");
@@ -1110,6 +1228,64 @@ mod reborn_support_tests {
         else {
             panic!("released dispatched reservation should allow a new action");
         };
+    }
+
+    #[tokio::test]
+    async fn idempotency_release_ignores_settled_and_stale_actions() {
+        let harness =
+            RebornProductWorkflowHarness::filesystem_temp(product_scope("tenant-release-guard"))
+                .expect("product workflow harness");
+        let ledger = harness.idempotency_ledger();
+        let received_at = chrono::Utc::now();
+
+        let settled_fingerprint = fingerprint_for("event-release-settled", "alice", "room-1");
+        let IdempotencyDecision::New(mut settled_action) = ledger
+            .begin_or_replay(settled_fingerprint.clone(), received_at)
+            .await
+            .expect("reserve settled action")
+        else {
+            panic!("first begin should reserve a new action");
+        };
+        settled_action.mark_dispatched(ActionDispatchKind::NoOp);
+        settled_action.settle(ProductInboundAck::NoOp);
+        ledger
+            .settle(settled_action.clone())
+            .await
+            .expect("settle action");
+        ledger
+            .release(settled_action.clone())
+            .await
+            .expect("release settled action");
+        let IdempotencyDecision::Replay(replayed) = ledger
+            .begin_or_replay(settled_fingerprint, received_at)
+            .await
+            .expect("settled action should replay")
+        else {
+            panic!("settled release should preserve replay");
+        };
+        assert_eq!(replayed.action_id, settled_action.action_id);
+
+        let stale_fingerprint = fingerprint_for("event-release-stale", "alice", "room-1");
+        let IdempotencyDecision::New(active_action) = ledger
+            .begin_or_replay(stale_fingerprint.clone(), received_at)
+            .await
+            .expect("reserve active action")
+        else {
+            panic!("first begin should reserve a new action");
+        };
+        let mut stale_action = active_action.clone();
+        stale_action.action_id = ProductActionId::new();
+        ledger
+            .release(stale_action)
+            .await
+            .expect("release stale action");
+        assert!(
+            ledger
+                .begin_or_replay(stale_fingerprint, received_at)
+                .await
+                .is_err(),
+            "stale release must leave active reservation in flight"
+        );
     }
 
     #[tokio::test]
@@ -1386,6 +1562,46 @@ mod reborn_support_tests {
             error,
             ProductAdapterError::MalformedInboundPayload { .. }
         ));
+    }
+
+    #[test]
+    fn test_adapter_rejects_semantically_invalid_inbound_payload() {
+        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
+        let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "alice");
+        let invalid_payloads = [
+            serde_json::json!({
+                "event_id": "",
+                "user_id": "alice",
+                "thread_id": "thread-1",
+                "text": "hi",
+            }),
+            serde_json::json!({
+                "event_id": "event-1",
+                "user_id": "bad\u{0000}user",
+                "thread_id": "thread-1",
+                "text": "hi",
+            }),
+            serde_json::json!({
+                "event_id": "event-1",
+                "user_id": "alice",
+                "thread_id": "",
+                "text": "hi",
+            }),
+            serde_json::json!({
+                "event_id": "event-1",
+                "user_id": "alice",
+                "thread_id": "thread-1",
+                "text": "bad\u{0000}text",
+            }),
+        ];
+
+        for payload in invalid_payloads {
+            let raw = serde_json::to_vec(&payload).expect("valid json payload");
+            assert!(
+                adapter.parse_inbound(&raw, &evidence).is_err(),
+                "payload should be rejected: {payload}"
+            );
+        }
     }
 
     #[test]
