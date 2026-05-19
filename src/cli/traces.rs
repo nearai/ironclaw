@@ -65,6 +65,13 @@ pub enum TracesCommand {
         #[arg(long)]
         upload_token_workload_token_env: Option<String>,
 
+        /// Operator-issued pilot invite code. When set, included in upload-claim
+        /// refresh requests so the issuer's allowlist gate can match it. Required
+        /// only when the configured issuer runs with TRACE_COMMONS_ALLOWLIST_SOURCE
+        /// — omit otherwise.
+        #[arg(long)]
+        upload_token_invite_code: Option<String>,
+
         /// Upload claim issuer timeout in milliseconds
         #[arg(long, default_value_t = crate::trace_contribution::TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS)]
         upload_token_issuer_timeout_ms: u64,
@@ -1951,6 +1958,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             upload_token_audience,
             upload_token_tenant_id,
             upload_token_workload_token_env,
+            upload_token_invite_code,
             upload_token_issuer_timeout_ms,
             include_message_text,
             include_tool_payloads,
@@ -1967,6 +1975,7 @@ pub async fn run_traces_command(cmd: TracesCommand) -> anyhow::Result<()> {
             upload_token_audience,
             upload_token_tenant_id,
             upload_token_workload_token_env,
+            upload_token_invite_code,
             upload_token_issuer_timeout_ms,
             include_message_text,
             include_tool_payloads,
@@ -2772,6 +2781,7 @@ struct OptInOptions {
     upload_token_audience: Option<String>,
     upload_token_tenant_id: Option<String>,
     upload_token_workload_token_env: Option<String>,
+    upload_token_invite_code: Option<String>,
     upload_token_issuer_timeout_ms: u64,
     include_message_text: bool,
     include_tool_payloads: bool,
@@ -2795,6 +2805,10 @@ struct TraceQueueStatusDiagnostics {
     #[serde(skip_serializing_if = "Option::is_none")]
     upload_token_workload_token_env: Option<String>,
     upload_token_workload_token_present: bool,
+    /// Hash-only: true when the standing policy has an `upload_token_invite_code`
+    /// set, false otherwise. The raw code is never returned, surfaced only as
+    /// a present/absent boolean to match the rest of the diagnostics surface.
+    upload_token_invite_code_configured: bool,
     include_message_text: bool,
     include_tool_payloads: bool,
     require_manual_approval_when_pii_detected: bool,
@@ -2813,6 +2827,9 @@ fn opt_in(options: OptInOptions) -> anyhow::Result<()> {
     let workload_token_env = options
         .upload_token_workload_token_env
         .and_then(|env| (!env.trim().is_empty()).then_some(env));
+    let invite_code = options
+        .upload_token_invite_code
+        .and_then(|code| (!code.trim().is_empty()).then_some(code));
     let policy = StandingTraceContributionPolicy {
         enabled: true,
         ingestion_endpoint: Some(options.endpoint),
@@ -2831,6 +2848,7 @@ fn opt_in(options: OptInOptions) -> anyhow::Result<()> {
             .upload_token_tenant_id
             .and_then(|tenant_id| (!tenant_id.trim().is_empty()).then_some(tenant_id)),
         upload_token_workload_token_env: workload_token_env,
+        upload_token_invite_code: invite_code,
         upload_token_issuer_timeout_ms: options.upload_token_issuer_timeout_ms,
         include_message_text: options.include_message_text,
         include_tool_payloads: options.include_tool_payloads,
@@ -2917,6 +2935,17 @@ fn show_policy_status(json: bool, user_scope: Option<&str>) -> anyhow::Result<()
                 .upload_token_workload_token_env
                 .as_deref()
                 .unwrap_or("not configured")
+        );
+        // Pilot invite code: present/absent only — never echo the raw code,
+        // matching the rest of the file's hash-only stance toward
+        // operator-secret material.
+        println!(
+            "  pilot invite code: {}",
+            if policy.upload_token_invite_code.is_some() {
+                "configured"
+            } else {
+                "not configured"
+            }
         );
     }
     println!("  include message text: {}", policy.include_message_text);
@@ -3009,6 +3038,14 @@ fn show_queue_status(json: bool, scope: Option<&str>) -> anyhow::Result<()> {
                 "set"
             } else {
                 "not set"
+            }
+        );
+        println!(
+            "  pilot invite code: {}",
+            if diagnostics.upload_token_invite_code_configured {
+                "configured"
+            } else {
+                "not configured"
             }
         );
     }
@@ -3153,6 +3190,10 @@ fn trace_queue_status_diagnostics(
         .as_deref()
         .filter(|env| !env.trim().is_empty())
         .is_some_and(|env| std::env::var_os(env).is_some());
+    let upload_token_invite_code_configured = policy
+        .upload_token_invite_code
+        .as_deref()
+        .is_some_and(|code| !code.trim().is_empty());
     let issuer_credentials_ready = upload_token_issuer_configured
         && (!policy.upload_token_issuer_allowed_hosts.is_empty())
         && policy
@@ -3180,6 +3221,7 @@ fn trace_queue_status_diagnostics(
         upload_token_tenant_configured: policy.upload_token_tenant_id.is_some(),
         upload_token_workload_token_env: policy.upload_token_workload_token_env,
         upload_token_workload_token_present,
+        upload_token_invite_code_configured,
         include_message_text: policy.include_message_text,
         include_tool_payloads: policy.include_tool_payloads,
         require_manual_approval_when_pii_detected: policy.require_manual_approval_when_pii_detected,
@@ -7400,6 +7442,54 @@ mod tests {
     }
 
     #[test]
+    fn opt_in_invite_code_flag_parses_through_cli() {
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "opt-in",
+            "--endpoint",
+            "https://trace.example/v1/traces",
+            "--upload-token-issuer-url",
+            "https://issuer.example/v1/trace-upload-claim",
+            "--upload-token-issuer-allowed-hosts",
+            "issuer.example",
+            "--upload-token-invite-code",
+            "INV-PILOT-001",
+        ]);
+
+        let TracesCommand::OptIn {
+            upload_token_invite_code,
+            ..
+        } = unwrap_traces_command(cli)
+        else {
+            panic!("expected traces opt-in command");
+        };
+
+        assert_eq!(upload_token_invite_code.as_deref(), Some("INV-PILOT-001"));
+    }
+
+    #[test]
+    fn opt_in_invite_code_defaults_to_none_when_absent() {
+        let cli = parse_cli([
+            "ironclaw",
+            "traces",
+            "opt-in",
+            "--endpoint",
+            "https://trace.example/v1/traces",
+        ]);
+
+        let TracesCommand::OptIn {
+            upload_token_invite_code,
+            ..
+        } = unwrap_traces_command(cli)
+        else {
+            panic!("expected traces opt-in command");
+        };
+
+        assert!(upload_token_invite_code.is_none());
+    }
+
+    #[test]
     fn opt_in_user_scope_flag_parses_through_cli() {
         let cli = parse_cli([
             "ironclaw",
@@ -7436,6 +7526,7 @@ mod tests {
             upload_token_audience: None,
             upload_token_tenant_id: None,
             upload_token_workload_token_env: None,
+            upload_token_invite_code: None,
             upload_token_issuer_timeout_ms:
                 crate::trace_contribution::TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS,
             include_message_text: true,

@@ -645,6 +645,17 @@ pub struct StandingTraceContributionPolicy {
     pub upload_token_tenant_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upload_token_workload_token_env: Option<String>,
+    /// Operator-issued pilot invite code. When set, the trace-commons
+    /// upload-claim request includes it (mirrored into the request body;
+    /// the server-side issuer reads `WorkloadClaims.invite_code` today,
+    /// the body field is forward-compat for a later server slice). The
+    /// client surfaces the issuer's typed `PilotAllowlist*` refusals
+    /// directly — there is no local JWT pre-flight that decodes the
+    /// configured workload token to verify the embedded `invite_code`
+    /// matches this value. Off by default; only required when the issuer
+    /// is allowlist-gated. A follow-up may add the pre-flight check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upload_token_invite_code: Option<String>,
     #[serde(default = "default_trace_upload_claim_issuer_timeout_ms")]
     pub upload_token_issuer_timeout_ms: u64,
     pub include_message_text: bool,
@@ -723,6 +734,7 @@ impl Default for StandingTraceContributionPolicy {
             upload_token_audience: None,
             upload_token_tenant_id: None,
             upload_token_workload_token_env: None,
+            upload_token_invite_code: None,
             upload_token_issuer_timeout_ms: TRACE_UPLOAD_CLAIM_DEFAULT_TIMEOUT_MS,
             include_message_text: false,
             include_tool_payloads: false,
@@ -4394,6 +4406,13 @@ struct TraceUploadClaimIssuerRequest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     allowed_uses: Vec<TraceAllowedUse>,
     requested_at: DateTime<Utc>,
+    /// Pilot invite code mirrored from the standing policy. Server-side
+    /// the canonical source is `WorkloadClaims.invite_code` (signed); this
+    /// field is sent in the body as forward-compat for a future server
+    /// slice that may accept it from either source. Omitted when the
+    /// policy has no `upload_token_invite_code` set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    invite_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4664,8 +4683,12 @@ fn trace_upload_claim_cache_key(
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("Trace Commons upload token issuer URL is not configured"))?
         .trim();
+    // Include invite_code in the cache key so rotating it forces a fresh
+    // claim fetch (the issuer's mint binds a `policy_label` claim derived
+    // from the active allowlist policy; serving a cached token after the
+    // operator changed the user's invite_code would mis-attribute traces).
     Ok(format!(
-        "{}|tenant={}|audience={}|scopes={}|uses={}|workload_env={}",
+        "{}|tenant={}|audience={}|scopes={}|uses={}|workload_env={}|invite_code={}",
         issuer,
         policy.upload_token_tenant_id.as_deref().unwrap_or_default(),
         policy.upload_token_audience.as_deref().unwrap_or_default(),
@@ -4674,6 +4697,12 @@ fn trace_upload_claim_cache_key(
         policy
             .upload_token_workload_token_env
             .as_deref()
+            .unwrap_or_default(),
+        policy
+            .upload_token_invite_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .unwrap_or_default()
     ))
 }
@@ -4748,6 +4777,12 @@ async fn fetch_trace_upload_claim_from_issuer(
         consent_scopes: context.consent_scopes.clone(),
         allowed_uses: context.allowed_uses.clone(),
         requested_at: Utc::now(),
+        invite_code: policy
+            .upload_token_invite_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned),
     };
     let mut request = client
         .post(parsed.clone())
@@ -4772,12 +4807,57 @@ async fn fetch_trace_upload_claim_from_issuer(
         )
     })?;
     let status = response.status();
-    anyhow::ensure!(
-        status.is_success(),
-        "failed to fetch Trace Commons upload claim from {}: HTTP {}",
-        safe_trace_upload_claim_issuer_url_label(&parsed),
-        status.as_u16()
-    );
+    if !status.is_success() {
+        // Try to extract the issuer's typed error label so PilotAllowlist*
+        // refusals surface a clear diagnostic to the user (and don't drag
+        // raw response bodies into anyhow chains). Body size is bounded by
+        // TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES via the shared reader;
+        // error bodies are tiny so the existing cap is plenty.
+        let body_text = read_bounded_trace_upload_claim_response(response, &parsed)
+            .await
+            .unwrap_or_default();
+        let label = parse_trace_upload_claim_error_label(&body_text);
+        let label_diagnostic = match label.as_deref() {
+            Some("PilotAllowlistInviteCodeMissing") => Some(
+                "the workload token did not carry an invite_code claim. \
+                 Re-run `ironclaw traces opt-in --upload-token-invite-code <CODE> ...` with the operator-issued code, \
+                 or have your operator reissue a workload token that includes it.",
+            ),
+            Some("PilotAllowlistNotMatched") => Some(
+                "the invite code hash was not in the issuer's active allowlist. \
+                 Confirm the code with your operator; it may have been rotated or revoked.",
+            ),
+            Some("PilotAllowlistStale") => Some(
+                "the issuer's allowlist snapshot is stale and the source has not reloaded successfully. \
+                 This is transient on the issuer side — retry after the operator confirms recovery.",
+            ),
+            Some("PilotAllowlistMalformed") => Some(
+                "the issuer's allowlist source is failing to parse. \
+                 This is an operator-side problem — escalate to the issuer admin.",
+            ),
+            _ => None,
+        };
+        if let Some(ref label_str) = label
+            && let Some(diagnostic) = label_diagnostic
+        {
+            anyhow::bail!(
+                "Trace Commons upload claim refused by {} ({}): {} — {}",
+                safe_trace_upload_claim_issuer_url_label(&parsed),
+                status.as_u16(),
+                label_str,
+                diagnostic,
+            );
+        }
+        anyhow::bail!(
+            "failed to fetch Trace Commons upload claim from {}: HTTP {}{}",
+            safe_trace_upload_claim_issuer_url_label(&parsed),
+            status.as_u16(),
+            label
+                .as_deref()
+                .map(|l| format!(" ({l})"))
+                .unwrap_or_default(),
+        );
+    }
     if let Some(content_length) = response.content_length() {
         anyhow::ensure!(
             content_length <= TRACE_UPLOAD_CLAIM_MAX_RESPONSE_BYTES as u64,
@@ -4822,6 +4902,25 @@ async fn read_bounded_trace_upload_claim_response(
             safe_trace_upload_claim_issuer_url_label(issuer_url)
         )
     })
+}
+
+/// Parse the issuer's typed error label out of an error response body.
+/// The issuer returns `{"error": "<Label>"}` for refusals (see
+/// trace-commons-server `IssuerError::into_response`). Returns `None`
+/// when the body is empty, not JSON, or doesn't carry an `error` string —
+/// the caller falls back to a generic HTTP-status diagnostic in that case.
+fn parse_trace_upload_claim_error_label(body: &str) -> Option<String> {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parsed: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    parsed
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 fn validate_trace_upload_claim_response(
@@ -11835,5 +11934,110 @@ mod tests {
                 ProcessEvaluatorLabel::MissingVerification,
             ]
         );
+    }
+
+    // ----- pilot allowlist invite_code integration ----------------------
+
+    #[test]
+    fn standing_policy_serde_back_compat_when_invite_code_missing() {
+        // Existing policy files written before the invite_code field landed
+        // must continue to parse unchanged.
+        let legacy_json = r#"{
+            "enabled": true,
+            "ingestion_endpoint": "https://example/v1/traces",
+            "bearer_token_env": "IRONCLAW_TRACE_SUBMIT_TOKEN",
+            "upload_token_issuer_url": "https://issuer.example/v1/trace-upload-claim",
+            "upload_token_issuer_allowed_hosts": ["issuer.example"],
+            "upload_token_audience": "trace-commons",
+            "upload_token_tenant_id": "tenant-a",
+            "upload_token_workload_token_env": "IRONCLAW_TRACE_WORKLOAD_TOKEN",
+            "upload_token_issuer_timeout_ms": 7000,
+            "include_message_text": false,
+            "include_tool_payloads": false,
+            "auto_submit_failed_traces": true,
+            "auto_submit_high_value_traces": true,
+            "selected_tools": [],
+            "require_manual_approval_when_pii_detected": true,
+            "min_submission_score": 0.35,
+            "credit_notice_interval_hours": 168,
+            "default_scope": "debugging_evaluation"
+        }"#;
+        let policy: StandingTraceContributionPolicy =
+            serde_json::from_str(legacy_json).expect("legacy policy parses");
+        assert!(policy.upload_token_invite_code.is_none());
+        assert!(policy.enabled);
+    }
+
+    #[test]
+    fn standing_policy_serde_round_trips_invite_code_when_set() {
+        let policy = StandingTraceContributionPolicy {
+            upload_token_invite_code: Some("INV-PILOT-001".to_string()),
+            ..StandingTraceContributionPolicy::default()
+        };
+        let serialized = serde_json::to_string(&policy).expect("serializes");
+        assert!(
+            serialized.contains("\"upload_token_invite_code\":\"INV-PILOT-001\""),
+            "serialized policy carries invite code: {serialized}"
+        );
+        let round: StandingTraceContributionPolicy =
+            serde_json::from_str(&serialized).expect("round trips");
+        assert_eq!(
+            round.upload_token_invite_code.as_deref(),
+            Some("INV-PILOT-001")
+        );
+    }
+
+    #[test]
+    fn standing_policy_serde_omits_invite_code_when_none() {
+        // skip_serializing_if keeps existing-shape policies byte-identical
+        // for deployments that never configured an invite code.
+        let policy = StandingTraceContributionPolicy::default();
+        let serialized = serde_json::to_string(&policy).expect("serializes");
+        assert!(
+            !serialized.contains("upload_token_invite_code"),
+            "default policy must not emit upload_token_invite_code: {serialized}"
+        );
+    }
+
+    #[test]
+    fn cache_key_distinguishes_different_invite_codes() {
+        let make_policy = |invite: Option<&str>| StandingTraceContributionPolicy {
+            upload_token_issuer_url: Some("https://issuer.example/v1/trace-upload-claim".into()),
+            upload_token_invite_code: invite.map(str::to_string),
+            ..StandingTraceContributionPolicy::default()
+        };
+        let context = TraceUploadClaimContext::for_status_sync();
+        let key_a = trace_upload_claim_cache_key(&make_policy(Some("INV-A")), &context).unwrap();
+        let key_b = trace_upload_claim_cache_key(&make_policy(Some("INV-B")), &context).unwrap();
+        let key_none = trace_upload_claim_cache_key(&make_policy(None), &context).unwrap();
+        assert_ne!(
+            key_a, key_b,
+            "different invite codes => different cache keys"
+        );
+        assert_ne!(key_a, key_none, "with-invite vs no-invite must differ");
+    }
+
+    #[test]
+    fn parse_trace_upload_claim_error_label_handles_known_shapes() {
+        assert_eq!(
+            parse_trace_upload_claim_error_label(r#"{"error":"PilotAllowlistNotMatched"}"#)
+                .as_deref(),
+            Some("PilotAllowlistNotMatched")
+        );
+        assert_eq!(
+            parse_trace_upload_claim_error_label(
+                r#"  {"error": "  PilotAllowlistStale  ", "extra": 1}"#
+            )
+            .as_deref(),
+            Some("PilotAllowlistStale")
+        );
+        // Body with no `error` field => None (caller falls back to HTTP status).
+        assert!(parse_trace_upload_claim_error_label(r#"{"message":"oops"}"#).is_none());
+        // Empty / whitespace / non-JSON => None, never panics.
+        assert!(parse_trace_upload_claim_error_label("").is_none());
+        assert!(parse_trace_upload_claim_error_label("   ").is_none());
+        assert!(parse_trace_upload_claim_error_label("not json").is_none());
+        // `error` present but empty/whitespace-only => None (not a usable label).
+        assert!(parse_trace_upload_claim_error_label(r#"{"error":"   "}"#).is_none());
     }
 }
