@@ -66,22 +66,6 @@ pub trait RootFilesystem: Send + Sync {
         unsupported(path, FilesystemOperation::WriteFile)
     }
 
-    /// Write a caller-owned leaf record with a compare-and-swap precondition.
-    ///
-    /// This is an optimization hook for stores whose path grammar guarantees
-    /// that the target path is always a file-like leaf. The default preserves
-    /// full [`put`](Self::put) semantics. Backends may override it to skip
-    /// expensive child-directory probes while still enforcing the exact-path
-    /// CAS and never clobbering a directory entry at `path`.
-    async fn put_known_leaf(
-        &self,
-        path: &VirtualPath,
-        entry: Entry,
-        cas: CasExpectation,
-    ) -> Result<RecordVersion, FilesystemError> {
-        self.put(path, entry, cas).await
-    }
-
     /// Read the entry at `path`, returning `None` if no entry is present.
     ///
     /// Default impl is `Unsupported`. Same recursion concern as `put`:

@@ -73,7 +73,7 @@ impl FilesystemIdempotencyLedger {
         let action = ProductInboundAction::begin(fingerprint, received_at);
         match self
             .filesystem
-            .put_known_leaf(&path, entry_for_action(&action)?, CasExpectation::Absent)
+            .put(&path, entry_for_action(&action)?, CasExpectation::Absent)
             .await
         {
             Ok(_) => return Ok(IdempotencyDecision::New(action)),
@@ -95,7 +95,7 @@ impl FilesystemIdempotencyLedger {
             let replacement = ProductInboundAction::begin(prior.fingerprint.clone(), received_at);
             match self
                 .filesystem
-                .put_known_leaf(
+                .put(
                     &path,
                     entry_for_action(&replacement)?,
                     CasExpectation::Version(version),
@@ -134,7 +134,7 @@ impl FilesystemIdempotencyLedger {
 
             match self
                 .filesystem
-                .put_known_leaf(
+                .put(
                     &path,
                     entry_for_action(&action)?,
                     CasExpectation::Version(version),
@@ -163,7 +163,7 @@ impl FilesystemIdempotencyLedger {
             released.received_at = expired_received_at(released.received_at, self.in_flight_lease);
             match self
                 .filesystem
-                .put_known_leaf(
+                .put(
                     &path,
                     entry_for_action(&released)?,
                     CasExpectation::Version(version),
