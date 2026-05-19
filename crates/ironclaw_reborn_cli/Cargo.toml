@@ -36,19 +36,27 @@ webui-v2-beta = [
 
 [dependencies]
 anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4.3"
+ironclaw_llm = { path = "../ironclaw_llm", version = "0.1.0" }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4.5.0"
+ironclaw_common = { path = "../ironclaw_common", version = "0.4.1" }
 ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 ironclaw_reborn_traces = { path = "../ironclaw_reborn_traces", version = "0.1.0" }
 ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", version = "0.1.0", optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
 secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "io-std", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 
 [[bin]]
 name = "ironclaw-reborn"

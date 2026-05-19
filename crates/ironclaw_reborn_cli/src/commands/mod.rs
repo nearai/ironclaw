@@ -46,7 +46,7 @@ pub(crate) enum Command {
     /// Inspect configured Reborn skills.
     Skills(skills::SkillsCommand),
     /// Manage trace contributions to TraceCommons.
-    Traces(traces::TracesCommand),
+    Traces(Box<traces::TracesCommand>),
 }
 
 impl Command {
