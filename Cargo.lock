@@ -4647,6 +4647,8 @@ dependencies = [
  "ironclaw_loop_support",
  "ironclaw_network",
  "ironclaw_processes",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
  "ironclaw_reborn",
  "ironclaw_reborn_config",
  "ironclaw_reborn_event_store",
