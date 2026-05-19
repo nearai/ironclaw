@@ -38,6 +38,12 @@ canonical turn submission. Do not shortcut directly to `AgentLoopDriver`,
 `PlannedDriver`, host runtime services, or loop host factories from adapters or
 workflow callers.
 
+WebUI-facing facade methods must bind browser thread ids through
+`SessionThreadService` using a `ThreadScope` derived from the authenticated
+caller before accepting messages, streaming events, canceling runs, or resolving
+gates. Browser/session metadata is not authority by itself, and send-message
+must not implicitly create missing threads.
+
 ## Test support
 
 Enable `test-support` feature for in-memory fakes:

@@ -120,11 +120,7 @@ fn scoped_threads_fs_at<F>(
 where
     F: RootFilesystem,
 {
-    let user_id = scope
-        .owner_user_id
-        .as_ref()
-        .map(ToString::to_string)
-        .unwrap_or_else(|| "system".to_string());
+    let user_id = scope.to_resource_scope().user_id;
     let target = format!(
         "/engine/tenants/{}/users/{}/threads",
         scope.tenant_id, user_id
