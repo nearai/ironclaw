@@ -1,0 +1,100 @@
+use std::sync::Arc;
+
+use ironclaw_product_adapters::ProjectionStream;
+use ironclaw_product_workflow::{RebornServices as ProductRebornServices, RebornServicesApi};
+
+use crate::{RebornBuildError, RebornReadiness, RebornRuntime};
+
+/// WebUI-facing Reborn service bundle for host composition.
+///
+/// This bundle deliberately exposes only the product facade consumed by WebChat
+/// v2 routes. HTTP routing, auth middleware, static assets, and SSE transport
+/// stay in the WebUI crate; lower runtime handles stay behind the existing
+/// Reborn runtime/composition services.
+#[allow(dead_code)] // Private follow-up hook for WebUI route mounting.
+#[derive(Clone)]
+pub(crate) struct RebornWebuiBundle {
+    pub(crate) api: Arc<dyn RebornServicesApi>,
+    pub(crate) readiness: RebornReadiness,
+}
+
+impl std::fmt::Debug for RebornWebuiBundle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RebornWebuiBundle")
+            .field("api", &"Arc<dyn RebornServicesApi>")
+            .field("readiness", &self.readiness)
+            .finish()
+    }
+}
+
+/// Compose the WebUI-facing product facade from an already-built Reborn runtime.
+///
+/// This function does not create a second turn coordinator, thread service,
+/// host runtime, route server, or event stream. It reuses the runtime's existing
+/// task-level composition and accepts an optional projection stream owned by the
+/// caller's event-stream composition layer.
+#[allow(dead_code)] // Private follow-up hook for WebUI route mounting.
+pub(crate) fn build_webui_services(
+    runtime: &RebornRuntime,
+    event_stream: Option<Arc<dyn ProjectionStream>>,
+) -> Result<RebornWebuiBundle, RebornBuildError> {
+    let services = runtime.services();
+    let turn_coordinator =
+        services
+            .turn_coordinator
+            .clone()
+            .ok_or_else(|| RebornBuildError::InvalidConfig {
+                reason: "webui services require an initialized turn coordinator".to_string(),
+            })?;
+
+    let mut api = ProductRebornServices::new(runtime.webui_thread_service(), turn_coordinator);
+    if let Some(event_stream) = event_stream {
+        api = api.with_event_stream(event_stream);
+    }
+
+    Ok(RebornWebuiBundle {
+        api: Arc::new(api),
+        readiness: services.readiness,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::{
+        RebornBuildInput, RebornReadinessState, RebornRuntimeIdentity, RebornRuntimeInput,
+        TurnRunnerSettings, build_reborn_runtime,
+    };
+
+    use super::build_webui_services;
+
+    #[tokio::test]
+    async fn webui_bundle_reuses_runtime_thread_and_turn_facades() {
+        let root = tempfile::tempdir().unwrap();
+        let input = RebornRuntimeInput::from_services(RebornBuildInput::local_dev(
+            "runtime-webui-owner",
+            root.path().join("local-dev"),
+        ))
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-tenant".to_string(),
+            agent_id: "runtime-webui-agent".to_string(),
+            source_binding_id: "runtime-webui-source".to_string(),
+            reply_target_binding_id: "runtime-webui-reply".to_string(),
+        })
+        .with_runner_settings(TurnRunnerSettings {
+            heartbeat_interval: Duration::from_secs(60),
+            poll_interval: Duration::from_secs(60),
+        });
+
+        let runtime = build_reborn_runtime(input).await.unwrap();
+        let bundle = build_webui_services(&runtime, None).unwrap();
+
+        let _api = bundle.api.clone();
+        assert_eq!(bundle.readiness, runtime.services().readiness);
+        assert_eq!(bundle.readiness.state, RebornReadinessState::DevOnly);
+
+        runtime.shutdown().await.unwrap();
+    }
+}
