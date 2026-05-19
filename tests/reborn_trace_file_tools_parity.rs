@@ -20,17 +20,21 @@ const EXPECTED_CONTENT: &str = "Hello, E2E test!";
 async fn reborn_trace_file_tools_parity() {
     let write_file = CapabilityId::new(WRITE_FILE_CAPABILITY_ID).expect("valid capability id");
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
-        RebornModelReplayStep::ProviderToolCalls(vec![RebornScriptedProviderToolCall::new(
-            write_file.clone(),
-            "call_write_file_1",
-            serde_json::json!({
-                "path": "/workspace/generated/hello.txt",
-                "content": EXPECTED_CONTENT,
-            }),
-        )]),
-        RebornModelReplayStep::Response(HostManagedModelResponse::assistant_reply(
-            "file trace complete",
-        )),
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![RebornScriptedProviderToolCall::new(
+                write_file.clone(),
+                "call_write_file_1",
+                serde_json::json!({
+                    "path": "/workspace/generated/hello.txt",
+                    "content": EXPECTED_CONTENT,
+                }),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply("file trace complete"),
+            expected_tool_results: Vec::new(),
+        },
     ]);
     let mut harness = RebornBinaryE2EHarness::with_host_runtime_file_capabilities(
         "room-trace-file-tools",
