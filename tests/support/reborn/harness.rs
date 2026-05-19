@@ -45,7 +45,8 @@ use ironclaw_loop_support::{
 use ironclaw_product_adapters::{ProductInboundAck, ProductWorkflow};
 use ironclaw_product_workflow::{
     ConversationBindingService, DefaultInboundTurnService, DefaultProductWorkflow,
-    IdempotencyLedger, InboundTurnService, ResolveBindingRequest, ResolvedBinding,
+    IdempotencyLedger, InboundTurnService, ProductConversationRouteKind, ResolveBindingRequest,
+    ResolvedBinding,
 };
 use ironclaw_reborn::{
     loop_driver_host::LoopCapabilityPortFactory,
@@ -338,13 +339,15 @@ impl RebornBinaryE2EHarness {
             model_budget_accountant: None,
             safety_context: None,
         })?;
+        let binding_service: Arc<dyn ConversationBindingService> =
+            Arc::new(product_harness.binding_service()?);
         let inbound: Arc<dyn InboundTurnService> = Arc::new(DefaultInboundTurnService::new(
-            product_harness.binding_service()?,
+            Arc::clone(&binding_service),
             thread_harness.service_instance()?,
             composition.coordinator.clone(),
         ));
         let ledger: Arc<dyn IdempotencyLedger> = Arc::new(product_harness.idempotency_ledger());
-        let workflow = DefaultProductWorkflow::new(inbound, ledger);
+        let workflow = DefaultProductWorkflow::new(inbound, ledger, binding_service);
 
         Ok(Self::from_composition(
             ingress,
@@ -1171,6 +1174,8 @@ fn binding_request(
         installation_id: envelope.installation_id().clone(),
         external_actor_ref: envelope.external_actor_ref().clone(),
         external_conversation_ref: envelope.external_conversation_ref().clone(),
+        external_event_id: envelope.external_event_id().clone(),
+        route_kind: ProductConversationRouteKind::Direct,
         auth_claim: envelope.auth_claim().clone(),
     })
 }
