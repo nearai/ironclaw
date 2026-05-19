@@ -44,8 +44,13 @@ use ironclaw_embeddings::{create_provider, EmbeddingCacheConfig, ProviderDeps};
 
 // Construct an embedding provider through the factory — concrete provider
 // types (OpenAI, NEAR AI, Ollama, Bedrock) are crate-private and must be
-// reached via `create_provider`. The factory enforces SSRF base-URL checks
-// and returns `None` when embeddings are disabled or misconfigured.
+// reached via `create_provider`. The factory applies a baseline defense-
+// in-depth URL check (rejects cloud-metadata IPs and non-http(s) schemes)
+// and returns `None` when embeddings are disabled or misconfigured. The
+// full operator-tunable SSRF policy lives in the binary's resolver at
+// `src/config/embeddings.rs::resolve_embeddings_config`, which calls
+// `validate_operator_base_url` on env-driven URLs before populating
+// `EmbeddingsConfig`.
 let embeddings = create_provider(
     &config.embeddings,
     ProviderDeps { session, bedrock_setup: None },

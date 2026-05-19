@@ -453,6 +453,16 @@ fn check_embeddings(settings: &Settings) -> CheckResult {
                     .unwrap_or(false)
         }
         "ollama" => true, // local, no creds needed
+        "bedrock" => {
+            // AWS SDK credential chain — accept a named profile or static
+            // access-key + secret. Instance-role / IMDS credentials aren't
+            // visible from env and will surface here as Fail; that's
+            // acceptable for a static self-check. Mirrors the gateway's
+            // Bedrock setup-hint logic in `web/handlers/llm.rs`.
+            std::env::var("AWS_PROFILE").is_ok()
+                || (std::env::var("AWS_ACCESS_KEY_ID").is_ok()
+                    && std::env::var("AWS_SECRET_ACCESS_KEY").is_ok())
+        }
         _ => config.openai_api_key().is_some(),
     };
     if has_creds {
@@ -463,6 +473,7 @@ fn check_embeddings(settings: &Settings) -> CheckResult {
     } else {
         let hint = match config.provider.as_str() {
             "nearai" => "run `ironclaw onboard` to create a session",
+            "bedrock" => "set AWS_PROFILE or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY",
             _ => "set OPENAI_API_KEY",
         };
         CheckResult::Fail(format!(
@@ -1162,6 +1173,111 @@ mod tests {
             }
             other => panic!(
                 "expected Skip for disabled embeddings with broken LLM, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    /// Snapshot and restore an env var across a single test body — needed
+    /// because the AWS SDK env vars (`AWS_PROFILE`, `AWS_ACCESS_KEY_ID`,
+    /// `AWS_SECRET_ACCESS_KEY`) may be set on dev/CI hosts and would
+    /// otherwise leak between the two Bedrock tests below.
+    struct EnvSnapshot {
+        name: &'static str,
+        prev: Option<String>,
+    }
+    impl EnvSnapshot {
+        fn take(name: &'static str) -> Self {
+            let prev = std::env::var(name).ok();
+            // SAFETY: Under ENV_MUTEX, no concurrent env access.
+            unsafe { std::env::remove_var(name) };
+            Self { name, prev }
+        }
+    }
+    impl Drop for EnvSnapshot {
+        fn drop(&mut self) {
+            // SAFETY: Under ENV_MUTEX.
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var(self.name, v),
+                    None => std::env::remove_var(self.name),
+                }
+            }
+        }
+    }
+
+    /// Regression: PR #3739 Copilot review. `check_embeddings` used to
+    /// fall through to the `_` arm for `provider=bedrock`, treating
+    /// missing `OPENAI_API_KEY` as the credential failure. Bedrock has
+    /// its own credential chain (AWS profile or static access-key +
+    /// secret); the doctor must recognise it.
+    #[test]
+    fn check_embeddings_bedrock_with_aws_profile_passes() {
+        let _guard = crate::config::helpers::lock_env();
+        // Snapshot ambient AWS env so we restore it after the test.
+        let _aws_profile = EnvSnapshot::take("AWS_PROFILE");
+        let _aws_access = EnvSnapshot::take("AWS_ACCESS_KEY_ID");
+        let _aws_secret = EnvSnapshot::take("AWS_SECRET_ACCESS_KEY");
+        let _embed_enabled = EnvSnapshot::take("EMBEDDING_ENABLED");
+        let _embed_provider = EnvSnapshot::take("EMBEDDING_PROVIDER");
+        let _openai_key = EnvSnapshot::take("OPENAI_API_KEY");
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("EMBEDDING_ENABLED", "true");
+            std::env::set_var("EMBEDDING_PROVIDER", "bedrock");
+            std::env::set_var("AWS_PROFILE", "default");
+        }
+
+        let settings = Settings::default();
+        let result = check_embeddings(&settings);
+        match result {
+            CheckResult::Pass(msg) => {
+                assert!(
+                    msg.contains("bedrock"),
+                    "expected Pass mentioning bedrock, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Pass for Bedrock with AWS_PROFILE set, got: {}",
+                format_result(&other)
+            ),
+        }
+    }
+
+    /// Regression: PR #3739 Copilot review. The credential-missing hint
+    /// used to suggest `set OPENAI_API_KEY` for any non-nearai provider,
+    /// including Bedrock. Confirm Bedrock now surfaces an AWS-specific
+    /// hint.
+    #[test]
+    fn check_embeddings_bedrock_without_aws_creds_fails_with_aws_hint() {
+        let _guard = crate::config::helpers::lock_env();
+        let _aws_profile = EnvSnapshot::take("AWS_PROFILE");
+        let _aws_access = EnvSnapshot::take("AWS_ACCESS_KEY_ID");
+        let _aws_secret = EnvSnapshot::take("AWS_SECRET_ACCESS_KEY");
+        let _embed_enabled = EnvSnapshot::take("EMBEDDING_ENABLED");
+        let _embed_provider = EnvSnapshot::take("EMBEDDING_PROVIDER");
+        let _openai_key = EnvSnapshot::take("OPENAI_API_KEY");
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("EMBEDDING_ENABLED", "true");
+            std::env::set_var("EMBEDDING_PROVIDER", "bedrock");
+        }
+
+        let settings = Settings::default();
+        let result = check_embeddings(&settings);
+        match result {
+            CheckResult::Fail(msg) => {
+                assert!(
+                    msg.contains("AWS_PROFILE") && msg.contains("AWS_ACCESS_KEY_ID"),
+                    "expected Bedrock-specific hint, got: {msg}"
+                );
+                assert!(
+                    !msg.contains("OPENAI_API_KEY"),
+                    "Bedrock failure must not mention OPENAI_API_KEY: {msg}"
+                );
+            }
+            other => panic!(
+                "expected Fail for Bedrock with no AWS creds, got: {}",
                 format_result(&other)
             ),
         }
