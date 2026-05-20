@@ -102,6 +102,15 @@ impl SecretsCrypto {
         salt: &[u8],
         aad: &[u8],
     ) -> Result<DecryptedSecret, SecretError> {
+        DecryptedSecret::from_bytes(self.decrypt_bytes(encrypted_value, salt, aad)?)
+    }
+
+    pub fn decrypt_bytes(
+        &self,
+        encrypted_value: &[u8],
+        salt: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, SecretError> {
         if encrypted_value.len() < NONCE_SIZE + TAG_SIZE {
             return Err(SecretError::DecryptionFailed(
                 "encrypted value too short".to_string(),
@@ -121,7 +130,7 @@ impl SecretsCrypto {
                 },
             )
             .map_err(|error| SecretError::DecryptionFailed(error.to_string()))?;
-        DecryptedSecret::from_bytes(plaintext)
+        Ok(plaintext)
     }
 
     fn derive_key(&self, salt: &[u8]) -> Result<[u8; KEY_SIZE], SecretError> {
@@ -139,6 +148,27 @@ impl std::fmt::Debug for SecretsCrypto {
             .debug_struct("SecretsCrypto")
             .field("master_key", &"[REDACTED]")
             .finish()
+    }
+}
+
+impl ironclaw_filesystem::EntryCipher for SecretsCrypto {
+    fn encrypt_entry_bytes(
+        &self,
+        plaintext: &[u8],
+        aad: &[u8],
+    ) -> Result<(Vec<u8>, Vec<u8>), String> {
+        self.encrypt(plaintext, aad)
+            .map_err(|error| error.to_string())
+    }
+
+    fn decrypt_entry_bytes(
+        &self,
+        ciphertext: &[u8],
+        salt: &[u8],
+        aad: &[u8],
+    ) -> Result<Vec<u8>, String> {
+        self.decrypt_bytes(ciphertext, salt, aad)
+            .map_err(|error| error.to_string())
     }
 }
 

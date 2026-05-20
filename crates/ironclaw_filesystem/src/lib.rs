@@ -19,6 +19,7 @@ mod backend;
 mod catalog;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 mod db;
+mod encrypted;
 mod in_memory;
 mod index;
 #[cfg(feature = "libsql")]
@@ -33,6 +34,7 @@ mod types;
 
 pub use backend::{EventRecord, StorageTxn};
 pub use catalog::{CompositeRootFilesystem, FilesystemCatalog, MountDescriptor, PathPlacement};
+pub use encrypted::{EncryptedBackend, EntryCipher};
 pub use in_memory::InMemoryBackend;
 pub use index::{Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page};
 #[cfg(feature = "libsql")]

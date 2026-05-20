@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use ironclaw_filesystem::EncryptedBackend;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
@@ -17,7 +18,8 @@ pub(crate) async fn build_libsql_secret_store(
     master_key: SecretMaterial,
 ) -> Result<Arc<SharedSecretStore>, SecretError> {
     let crypto = Arc::new(SecretsCrypto::new(master_key)?);
-    let backend = Arc::new(FilesystemSecretsStore::over_root(filesystem, crypto)?);
+    let filesystem = Arc::new(EncryptedBackend::new(filesystem, crypto));
+    let backend = Arc::new(FilesystemSecretsStore::over_root(filesystem)?);
     backend.verify_can_decrypt_existing_secrets().await?;
     let store: Arc<dyn SecretStore> = Arc::new(ScopedSecretsStoreAdapter::new(backend));
     Ok(Arc::new(SharedSecretStore::new(store)))
@@ -29,7 +31,8 @@ pub(crate) async fn build_postgres_secret_store(
     master_key: SecretMaterial,
 ) -> Result<Arc<SharedSecretStore>, SecretError> {
     let crypto = Arc::new(SecretsCrypto::new(master_key)?);
-    let backend = Arc::new(FilesystemSecretsStore::over_root(filesystem, crypto)?);
+    let filesystem = Arc::new(EncryptedBackend::new(filesystem, crypto));
+    let backend = Arc::new(FilesystemSecretsStore::over_root(filesystem)?);
     backend.verify_can_decrypt_existing_secrets().await?;
     let store: Arc<dyn SecretStore> = Arc::new(ScopedSecretsStoreAdapter::new(backend));
     Ok(Arc::new(SharedSecretStore::new(store)))
