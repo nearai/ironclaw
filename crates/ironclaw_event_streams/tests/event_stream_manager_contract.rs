@@ -129,6 +129,28 @@ async fn fetch_snapshot_denied_before_projection_call() {
 }
 
 #[tokio::test]
+async fn fetch_snapshot_rejects_actor_stream_user_mismatch_before_projection_call() {
+    let scope = projection_scope_for("tenant-a", "user-b", "thread-a");
+    let projection = Arc::new(FakeProjectionService::new(scope.clone()));
+    let manager = EventStreamManager::new(
+        Arc::clone(&projection),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let error = manager
+        .fetch_snapshot(fetch_request(scope))
+        .await
+        .expect_err("actor cannot read another user's stream");
+
+    assert!(matches!(error, ProjectionStreamError::AccessDenied));
+    assert_eq!(projection.calls(), Vec::<&'static str>::new());
+}
+
+#[tokio::test]
 async fn fetch_snapshot_rejects_projection_scope_mismatch() {
     let requested = projection_scope("thread-a");
     let returned = projection_scope("thread-b");
@@ -194,6 +216,30 @@ async fn access_policy_runs_before_projection_or_live_subscription() {
 
     assert!(matches!(error, ProjectionStreamError::AccessDenied));
     assert_eq!(access.calls(), 1);
+    assert_eq!(projection.calls(), Vec::<&'static str>::new());
+    assert_eq!(update_source.calls(), 0);
+}
+
+#[tokio::test]
+async fn subscribe_rejects_actor_stream_user_mismatch_before_projection_or_live_subscription() {
+    let scope = projection_scope_for("tenant-a", "user-b", "thread-a");
+    let projection = Arc::new(FakeProjectionService::new(scope.clone()));
+    let update_source = Arc::new(CountingUpdateSource::default());
+    let manager = EventStreamManager::new(
+        Arc::clone(&projection),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::clone(&update_source),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let error = manager
+        .subscribe(subscribe_request(scope, None))
+        .await
+        .expect_err("actor cannot subscribe to another user's stream");
+
+    assert!(matches!(error, ProjectionStreamError::AccessDenied));
     assert_eq!(projection.calls(), Vec::<&'static str>::new());
     assert_eq!(update_source.calls(), 0);
 }

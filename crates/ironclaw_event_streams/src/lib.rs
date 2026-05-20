@@ -653,6 +653,7 @@ impl EventStreamManager {
             &request.target,
         )
         .await?;
+        validate_actor_stream_user(&request.actor, request.view, &request.scope)?;
         validate_product_thread_view(request.view, &request.target, &request.scope)?;
         let snapshot = self
             .projection
@@ -684,6 +685,7 @@ impl EventStreamManager {
             &request.target,
         )
         .await?;
+        validate_actor_stream_user(&request.actor, request.view, &request.scope)?;
         validate_product_thread_view(request.view, &request.target, &request.scope)?;
         let admission = self
             .admission_policy
@@ -1097,6 +1099,19 @@ fn validate_product_thread_view(
         _ => Err(ProjectionStreamError::InvalidRequest {
             reason: "projection view/target is not implemented in the first EventStreamManager slice",
         }),
+    }
+}
+
+fn validate_actor_stream_user(
+    actor: &TurnActor,
+    view: ProjectionViewClass,
+    scope: &ProjectionScope,
+) -> Result<(), ProjectionStreamError> {
+    match view {
+        ProjectionViewClass::ProductThread if actor.user_id != scope.stream.user_id => {
+            Err(ProjectionStreamError::AccessDenied)
+        }
+        _ => Ok(()),
     }
 }
 
