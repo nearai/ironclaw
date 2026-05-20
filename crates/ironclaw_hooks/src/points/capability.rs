@@ -51,7 +51,16 @@ pub struct BeforeCapabilityHookContext {
     /// dedup degrades to "every evaluation counts" semantics — appropriate
     /// for the in-memory backend without replay, but **not** for durable
     /// backends. Durable callers MUST supply a value.
-    pub caller_event_id: Option<crate::predicate_state::PredicateEventId>,
+    ///
+    /// Visibility is `pub(crate)` (henrypark133 MED on PR #3635 5-19
+    /// review): external callers must go through
+    /// [`Self::with_caller_event_id`] so the typed
+    /// [`crate::predicate_state::PredicateEventId`] boundary is the only
+    /// entry point. The previous `pub` field allowed bypassing the
+    /// setter to assign a value the validated constructor would have
+    /// rejected (e.g. via `new_unchecked`, before that constructor was
+    /// also restricted).
+    pub(crate) caller_event_id: Option<crate::predicate_state::PredicateEventId>,
 }
 
 impl BeforeCapabilityHookContext {
