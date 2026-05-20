@@ -177,7 +177,7 @@ async fn builtin_shell_delegates_command_execution_to_process_port() {
     let output = invoke_with_context(
         &runtime,
         SHELL_CAPABILITY_ID,
-        json!({"command": "echo via port", "timeout": 9}),
+        json!({"command": "echo via port", "timeout": 9, "workdir": "port-workdir"}),
         execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
     )
     .await
@@ -190,8 +190,28 @@ async fn builtin_shell_delegates_command_execution_to_process_port() {
     let requests = process_port.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].command, "echo via port");
+    assert_eq!(requests[0].workdir.as_deref(), Some("port-workdir"));
     assert_eq!(requests[0].timeout_secs, Some(9));
+    assert!(
+        requests[0]
+            .mounts
+            .as_ref()
+            .is_some_and(|mounts| mounts.mounts.is_empty())
+    );
+    assert!(requests[0].extra_env.is_empty());
     assert_eq!(requests[0].scope.user_id.as_str(), "user");
+}
+
+#[tokio::test]
+async fn builtin_shell_returns_stderr_and_nonzero_exit_without_dispatch_failure() {
+    let output = invoke_shell(json!({"command": "printf shell-error >&2; exit 7"}))
+        .await
+        .unwrap();
+
+    assert_eq!(output["exit_code"], json!(7));
+    assert_eq!(output["success"], json!(false));
+    assert_eq!(output["sandboxed"], json!(false));
+    assert_eq!(output["output"], json!("shell-error"));
 }
 
 #[tokio::test]

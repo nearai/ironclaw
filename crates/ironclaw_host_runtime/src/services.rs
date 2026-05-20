@@ -151,6 +151,7 @@ pub enum ProductionWiringComponent {
     AuditSink,
     SecretStore,
     RuntimeHttpEgress,
+    RuntimeProcessPort,
     WasmCredentialProvider,
     ScriptRuntime,
     McpRuntime,
@@ -177,6 +178,7 @@ impl ProductionWiringComponent {
             Self::AuditSink => "audit_sink",
             Self::SecretStore => "secret_store",
             Self::RuntimeHttpEgress => "runtime_http_egress",
+            Self::RuntimeProcessPort => "runtime_process_port",
             Self::WasmCredentialProvider => "wasm_credential_provider",
             Self::ScriptRuntime => "script_runtime",
             Self::McpRuntime => "mcp_runtime",
@@ -258,6 +260,7 @@ struct ProductionComponentTypes {
     secret_store: Option<ProductionComponentType>,
     runtime_http_egress: Option<ProductionComponentType>,
     runtime_http_egress_verified: bool,
+    runtime_process_port: ProductionComponentType,
     wasm_credential_provider: Option<ProductionComponentType>,
     wasm_credential_provider_verified: bool,
     wasm_runtime_credential_provider_captured: bool,
@@ -297,7 +300,7 @@ impl ProductionComponentType {
 enum ProductionImplementationReadiness {
     ProductionCandidate,
     LocalOnly,
-    ErasedDurableSinkWrapper,
+    UnverifiedProductionImplementation,
 }
 
 fn component_name(component: Option<ProductionComponentType>) -> Option<&'static str> {
@@ -321,14 +324,15 @@ fn classify_component_type<T: 'static>() -> ProductionImplementationReadiness {
             || type_id == TypeId::of::<InMemorySecretStore>()
             || type_id == TypeId::of::<EmptyWasmRuntimeCredentials>()
             || type_id == TypeId::of::<InMemoryTurnStateStore>()
-            || type_id == TypeId::of::<NoopTurnRunWakeNotifier>() =>
+            || type_id == TypeId::of::<NoopTurnRunWakeNotifier>()
+            || type_id == TypeId::of::<LocalHostProcessPort>() =>
         {
             ProductionImplementationReadiness::LocalOnly
         }
         () if type_id == TypeId::of::<DurableEventSink>()
             || type_id == TypeId::of::<DurableAuditSink>() =>
         {
-            ProductionImplementationReadiness::ErasedDurableSinkWrapper
+            ProductionImplementationReadiness::UnverifiedProductionImplementation
         }
         () => ProductionImplementationReadiness::ProductionCandidate,
     }
@@ -450,6 +454,7 @@ where
                 secret_store: None,
                 runtime_http_egress: None,
                 runtime_http_egress_verified: false,
+                runtime_process_port: ProductionComponentType::of::<LocalHostProcessPort>(),
                 wasm_credential_provider: None,
                 wasm_credential_provider_verified: false,
                 wasm_runtime_credential_provider_captured: false,
@@ -986,17 +991,23 @@ where
         self
     }
 
-    pub fn with_runtime_process_port<T>(self, process_port: Arc<T>) -> Self
+    pub fn with_runtime_process_port<T>(mut self, process_port: Arc<T>) -> Self
     where
         T: RuntimeProcessPort + 'static,
     {
-        self.with_runtime_process_port_dyn(process_port)
+        self.component_types.runtime_process_port = ProductionComponentType::of::<T>();
+        self.process_port = process_port;
+        self
     }
 
     pub fn with_runtime_process_port_dyn(
         mut self,
         process_port: Arc<dyn RuntimeProcessPort>,
     ) -> Self {
+        self.component_types.runtime_process_port = ProductionComponentType::named(
+            "dyn RuntimeProcessPort",
+            ProductionImplementationReadiness::UnverifiedProductionImplementation,
+        );
         self.process_port = process_port;
         self
     }
@@ -1279,6 +1290,13 @@ where
                 self.first_party_runtime_covers_declared_capabilities(),
             );
         }
+        if self.first_party_runtime_uses_process_port() {
+            self.push_local_only(
+                &mut issues,
+                ProductionWiringComponent::RuntimeProcessPort,
+                Some(self.component_types.runtime_process_port),
+            );
+        }
 
         self.push_local_only(
             &mut issues,
@@ -1406,12 +1424,13 @@ where
                     ProductionWiringIssueKind::LocalOnlyImplementation,
                     Some(implementation.implementation),
                 ),
-                ProductionImplementationReadiness::ErasedDurableSinkWrapper => self.push_issue(
-                    issues,
-                    component,
-                    ProductionWiringIssueKind::UnverifiedProductionImplementation,
-                    Some(implementation.implementation),
-                ),
+                ProductionImplementationReadiness::UnverifiedProductionImplementation => self
+                    .push_issue(
+                        issues,
+                        component,
+                        ProductionWiringIssueKind::UnverifiedProductionImplementation,
+                        Some(implementation.implementation),
+                    ),
                 ProductionImplementationReadiness::ProductionCandidate => {}
             }
         }
@@ -1771,6 +1790,17 @@ where
             return false;
         }
         declared.all(|descriptor| first_party_runtime.contains_handler(&descriptor.id))
+    }
+
+    fn first_party_runtime_uses_process_port(&self) -> bool {
+        let Some(first_party_runtime) = &self.first_party_runtime else {
+            return false;
+        };
+        self.registry.capabilities().any(|descriptor| {
+            descriptor.runtime == RuntimeKind::FirstParty
+                && descriptor.id.as_str() == crate::SHELL_CAPABILITY_ID
+                && first_party_runtime.contains_handler(&descriptor.id)
+        })
     }
 }
 
