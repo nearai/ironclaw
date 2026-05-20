@@ -4342,6 +4342,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "deadpool-postgres",
+ "dirs",
  "futures-util",
  "glob",
  "ironclaw_approvals",

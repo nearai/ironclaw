@@ -18,8 +18,8 @@ use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
     ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime,
     HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, SurfaceKind,
-    TIME_CAPABILITY_ID, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, SHELL_CAPABILITY_ID,
+    SurfaceKind, TIME_CAPABILITY_ID, VisibleCapabilityAccess, VisibleCapabilityRequest,
     WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_network::{
@@ -129,6 +129,32 @@ async fn builtin_echo_invokes_through_host_runtime() {
         .await
         .unwrap();
     assert_eq!(output, Value::String("hello reborn".to_string()));
+}
+
+#[tokio::test]
+async fn builtin_shell_invokes_copied_shell_core_through_host_runtime() {
+    let output = invoke(SHELL_CAPABILITY_ID, json!({"command": "echo hello reborn"}))
+        .await
+        .unwrap();
+
+    assert_eq!(output["exit_code"], json!(0));
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["sandboxed"], json!(false));
+    assert!(
+        output["output"]
+            .as_str()
+            .expect("shell output must be text")
+            .contains("hello reborn")
+    );
+}
+
+#[tokio::test]
+async fn builtin_shell_reuses_v1_shell_validation() {
+    let err = invoke(SHELL_CAPABILITY_ID, json!({"command": "cat ~/.ssh/id_rsa"}))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err, RuntimeFailureKind::Backend);
 }
 
 #[tokio::test]
@@ -1696,12 +1722,13 @@ fn provider_id() -> ExtensionId {
     ExtensionId::new("builtin").unwrap()
 }
 
-fn all_builtin_capability_ids() -> [&'static str; 10] {
+fn all_builtin_capability_ids() -> [&'static str; 11] {
     [
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
         JSON_CAPABILITY_ID,
         HTTP_CAPABILITY_ID,
+        SHELL_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
         LIST_DIR_CAPABILITY_ID,
@@ -1938,6 +1965,8 @@ fn builtin_effects() -> Vec<EffectKind> {
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
         EffectKind::Network,
+        EffectKind::SpawnProcess,
+        EffectKind::ExecuteCode,
     ]
 }
 
