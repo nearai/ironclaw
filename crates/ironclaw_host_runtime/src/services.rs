@@ -139,6 +139,7 @@ impl ProductionWiringConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProductionWiringComponent {
     RuntimeBackend,
+    RuntimePolicy,
     TrustPolicy,
     Filesystem,
     ResourceGovernor,
@@ -165,6 +166,7 @@ impl ProductionWiringComponent {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::RuntimeBackend => "runtime_backend",
+            Self::RuntimePolicy => "runtime_policy",
             Self::TrustPolicy => "trust_policy",
             Self::Filesystem => "filesystem",
             Self::ResourceGovernor => "resource_governor",
@@ -1133,6 +1135,11 @@ where
             &mut issues,
             ProductionWiringComponent::TrustPolicy,
             self.trust_policy_configured,
+        );
+        self.push_missing(
+            &mut issues,
+            ProductionWiringComponent::RuntimePolicy,
+            self.runtime_policy.is_some(),
         );
         self.push_missing(
             &mut issues,

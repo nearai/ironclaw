@@ -147,6 +147,7 @@ use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SecretHandle, VirtualPath,
+    runtime_policy::EffectiveRuntimePolicy,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
@@ -281,6 +282,7 @@ where
     pub event_store: RebornEventStoreConfig,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
+    pub runtime_policy: EffectiveRuntimePolicy,
     pub turn_run_wake_notifier: Arc<TWake>,
     pub surface_version: CapabilitySurfaceVersion,
 }
@@ -296,6 +298,7 @@ where
     pub event_store: RebornEventStoreConfig,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
+    pub runtime_policy: EffectiveRuntimePolicy,
     pub turn_run_wake_notifier: Arc<TWake>,
     pub surface_version: CapabilitySurfaceVersion,
 }
@@ -367,6 +370,7 @@ where
         config.surface_version,
     )
     .with_trust_policy(config.trust_policy)
+    .with_runtime_policy(config.runtime_policy)
     .with_capability_leases(capability_leases)
     .with_secret_store(Arc::clone(&secret_store))
     .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
@@ -431,6 +435,7 @@ where
         config.surface_version,
     )
     .with_trust_policy(config.trust_policy)
+    .with_runtime_policy(config.runtime_policy)
     .with_capability_leases(capability_leases)
     .with_secret_store(Arc::clone(&secret_store))
     .with_turn_run_wake_notifier(config.turn_run_wake_notifier)

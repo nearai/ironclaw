@@ -121,6 +121,13 @@ fn production_wiring_validation_rejects_missing_components_and_local_only_defaul
     );
     assert!(
         report.contains(
+            ProductionWiringComponent::RuntimePolicy,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing resolved runtime policy should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
             ProductionWiringComponent::RunState,
             ProductionWiringIssueKind::Missing
         ),
@@ -2586,6 +2593,59 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
 }
 
 #[tokio::test]
+async fn host_runtime_services_resume_runtime_policy_denial_fails_matching_blocked_run() {
+    let fixture = approval_resume_fixture_with_manifest(
+        SCRIPT_NETWORK_MANIFEST,
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    );
+    let runtime = fixture.services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "policy reduced before resume"});
+
+    let gate = block_for_approval(&runtime, context.clone(), estimate.clone(), input.clone()).await;
+    let lease =
+        approve_dispatch_for_services(&fixture.services, &scope, gate.approval_request_id, None)
+            .await;
+    let denied_runtime = resume_runtime_with_policy(&fixture, network_denied_runtime_policy());
+
+    let outcome = denied_runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context.clone(),
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    let failed_run = fixture
+        .run_state
+        .get(&scope, context.invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed_run.status, RunStatus::Failed);
+    assert_eq!(failed_run.approval_request_id, None);
+    assert_eq!(failed_run.error_kind.as_deref(), Some("network_denied"));
+    assert_eq!(
+        fixture
+            .capability_leases
+            .get(&scope, lease.grant.id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active,
+        "runtime-policy preflight failure must not claim or consume the approval lease"
+    );
+    assert!(fixture.events.events().is_empty());
+}
+
+#[tokio::test]
 async fn host_runtime_services_resume_without_backing_stores_fails_closed() {
     let runtime = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -4712,12 +4772,19 @@ struct ApprovalResumeFixture {
 }
 
 fn approval_resume_fixture() -> ApprovalResumeFixture {
+    approval_resume_fixture_with_manifest(SCRIPT_MANIFEST, vec![EffectKind::DispatchCapability])
+}
+
+fn approval_resume_fixture_with_manifest(
+    manifest: &str,
+    trust_effects: Vec<EffectKind>,
+) -> ApprovalResumeFixture {
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
-        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(registry_with_manifest(manifest)),
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
@@ -4726,7 +4793,7 @@ fn approval_resume_fixture() -> ApprovalResumeFixture {
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
         "script",
-        vec![EffectKind::DispatchCapability],
+        trust_effects,
     )))
     .with_run_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
@@ -4766,6 +4833,34 @@ fn resume_runtime_with_empty_registry(fixture: &ApprovalResumeFixture) -> Defaul
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
     )))
+    .host_runtime_for_local_testing()
+}
+
+fn resume_runtime_with_policy(
+    fixture: &ApprovalResumeFixture,
+    policy: EffectiveRuntimePolicy,
+) -> DefaultHostRuntime {
+    HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_NETWORK_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    )))
+    .with_run_state(Arc::clone(&fixture.run_state))
+    .with_approval_requests(Arc::clone(&fixture.approval_requests))
+    .with_capability_leases(Arc::clone(&fixture.capability_leases))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )))
+    .with_event_sink(Arc::new(fixture.events.clone()))
+    .with_runtime_policy(policy)
     .host_runtime_for_local_testing()
 }
 
@@ -5855,6 +5950,20 @@ fn trust_decision_with_dispatch_authority() -> TrustDecision {
     }
 }
 
+fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Deny,
+        secret_mode: SecretMode::BrokeredHandles,
+        approval_policy: ApprovalPolicy::AskAlways,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
 fn read_directory_text(root: &std::path::Path) -> String {
     let mut output = String::new();
     let mut stack = vec![root.to_path_buf()];
@@ -6218,6 +6327,27 @@ args = []
 id = "script.echo"
 description = "Echo through Script"
 effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const SCRIPT_NETWORK_MANIFEST: &str = r#"
+id = "script"
+name = "Script Echo"
+version = "0.1.0"
+description = "Script integration extension"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+args = []
+
+[[capabilities]]
+id = "script.echo"
+description = "Echo through Script"
+effects = ["dispatch_capability", "network"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;
