@@ -658,6 +658,152 @@ fn repl_exit_command_exits_cleanly_without_touching_v1_state() {
 }
 
 #[test]
+fn repl_resolves_codex_auth_env_without_openai_api_key() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home_dir = temp.path().join("home");
+    let codex_auth_path = temp.path().join("codex-auth.json");
+    std::fs::write(
+        &codex_auth_path,
+        r#"{
+  "auth_mode": "chatgpt",
+  "tokens": {
+    "access_token": "test-access-token",
+    "refresh_token": "test-refresh-token"
+  }
+}
+"#,
+    )
+    .expect("write codex auth fixture");
+
+    let mut child = Command::new(reborn_bin())
+        .arg("repl")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", &home_dir)
+        .env("LLM_BACKEND", "openai_codex")
+        .env("LLM_USE_CODEX_AUTH", "true")
+        .env("CODEX_AUTH_PATH", &codex_auth_path)
+        .env("OPENAI_CODEX_MODEL", "gpt-test-codex")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn repl should start");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin should be piped")
+        .write_all(b"/exit\n")
+        .expect("exit command should be written");
+    let output = child
+        .wait_with_output()
+        .expect("ironclaw-reborn repl should finish");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ironclaw-reborn: runtime started"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("no LLM selection configured"),
+        "Codex auth should prevent stub-gateway warning: {stderr}"
+    );
+}
+
+#[test]
+fn repl_resolves_codex_api_key_auth_env_without_openai_api_key() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let home_dir = temp.path().join("home");
+    let codex_auth_path = temp.path().join("codex-auth.json");
+    std::fs::write(
+        &codex_auth_path,
+        r#"{
+  "auth_mode": "apiKey",
+  "OPENAI_API_KEY": "sk-test-codex-api-key"
+}
+"#,
+    )
+    .expect("write codex auth fixture");
+
+    let mut child = Command::new(reborn_bin())
+        .arg("repl")
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("HOME", &home_dir)
+        .env("LLM_BACKEND", "openai_codex")
+        .env("LLM_USE_CODEX_AUTH", "true")
+        .env("CODEX_AUTH_PATH", &codex_auth_path)
+        .env("OPENAI_CODEX_MODEL", "gpt-test-codex")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("ironclaw-reborn repl should start");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin should be piped")
+        .write_all(b"/exit\n")
+        .expect("exit command should be written");
+    let output = child
+        .wait_with_output()
+        .expect("ironclaw-reborn repl should finish");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ironclaw-reborn: runtime started"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("no LLM selection configured"),
+        "Codex API-key auth should prevent stub-gateway warning: {stderr}"
+    );
+}
+
+#[test]
+fn run_rejects_codex_backend_when_auth_file_is_missing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let reborn_home = temp.path().join("reborn-home");
+    let missing_codex_auth_path = temp.path().join("missing-codex-auth.json");
+
+    let output = Command::new(reborn_bin())
+        .args(["run", "-m", "ping"])
+        .env_clear()
+        .env("IRONCLAW_REBORN_HOME", &reborn_home)
+        .env("LLM_BACKEND", "openai_codex")
+        .env("CODEX_AUTH_PATH", &missing_codex_auth_path)
+        .output()
+        .expect("ironclaw-reborn run should not crash");
+    assert!(
+        !output.status.success(),
+        "missing Codex auth should fail; stdout: {} stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Authentication failed for provider 'openai_codex'"),
+        "stderr should report Codex auth failure; got: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&missing_codex_auth_path.display().to_string()),
+        "stderr should not leak the Codex auth path: {stderr}"
+    );
+}
+
+#[test]
 fn repl_help_command_prints_repl_commands_and_exits_on_exit() {
     let temp = tempfile::tempdir().expect("tempdir");
 

@@ -16,10 +16,7 @@ use tracing_test::traced_test;
 #[tokio::test]
 async fn dispatcher_emits_events_for_wasm_and_script_success() {
     let fs = filesystem_with_echo_extensions();
-    let registry =
-        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
-            .await
-            .unwrap();
+    let registry = discover_legacy_fixture_registry(&fs).await;
     let governor = InMemoryResourceGovernor::new();
     let wasm_adapter = EchoAdapter::new(RuntimeKind::Wasm);
     let script_adapter = EchoAdapter::new(RuntimeKind::Script);
@@ -95,10 +92,7 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
 #[tokio::test]
 async fn dispatcher_ignores_event_sink_failures_on_success() {
     let fs = filesystem_with_echo_extensions();
-    let registry =
-        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
-            .await
-            .unwrap();
+    let registry = discover_legacy_fixture_registry(&fs).await;
     let governor = InMemoryResourceGovernor::new();
     let wasm_adapter = EchoAdapter::new(RuntimeKind::Wasm);
     let events = FailingEventSink;
@@ -128,10 +122,7 @@ async fn dispatcher_ignores_event_sink_failures_on_success() {
 #[tokio::test]
 async fn dispatcher_preserves_original_error_when_failure_event_sink_fails() {
     let fs = filesystem_with_echo_extensions();
-    let registry =
-        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
-            .await
-            .unwrap();
+    let registry = discover_legacy_fixture_registry(&fs).await;
     let governor = InMemoryResourceGovernor::new();
     let events = FailingEventSink;
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor).with_event_sink(&events);
@@ -164,10 +155,7 @@ async fn dispatcher_preserves_original_error_when_failure_event_sink_fails() {
 #[traced_test]
 async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
     let fs = filesystem_with_echo_extensions();
-    let registry =
-        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
-            .await
-            .unwrap();
+    let registry = discover_legacy_fixture_registry(&fs).await;
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let reservation = ResourceReservation {
@@ -215,10 +203,7 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
 #[tokio::test]
 async fn dispatcher_emits_redacted_runtime_error_kind_for_adapter_failure() {
     let fs = filesystem_with_echo_extensions();
-    let registry =
-        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
-            .await
-            .unwrap();
+    let registry = discover_legacy_fixture_registry(&fs).await;
     let governor = InMemoryResourceGovernor::new();
     let script_adapter =
         FailingRuntimeAdapter::new(RuntimeKind::Script, RuntimeDispatchErrorKind::ExitFailure);
@@ -303,10 +288,7 @@ async fn dispatcher_emits_events_for_mcp_success() {
 #[tokio::test]
 async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
     let fs = filesystem_with_echo_extensions();
-    let registry =
-        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
-            .await
-            .unwrap();
+    let registry = discover_legacy_fixture_registry(&fs).await;
     let governor = InMemoryResourceGovernor::new();
     let scope = sample_scope();
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
@@ -489,6 +471,18 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
     )
     .unwrap();
     fs
+}
+
+async fn discover_legacy_fixture_registry(fs: &LocalFilesystem) -> ExtensionRegistry {
+    ExtensionDiscovery::discover_with_manifest_contracts(
+        fs,
+        &VirtualPath::new("/system/extensions").unwrap(),
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+        &HostApiContractRegistry::new(),
+    )
+    .await
+    .unwrap()
 }
 
 fn write_echo_extensions(root: &std::path::Path) {

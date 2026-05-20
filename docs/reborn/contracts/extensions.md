@@ -81,7 +81,13 @@ Production manifests use `schema_version = "reborn.extension_manifest.v2"`.
 The older top-level `parameters_schema` manifest shape is no longer parsed on
 production discovery paths.
 
-Minimal V2 WASM manifest:
+Installed third-party manifests (`InstalledLocal` / `RegistryInstalled`) declare
+model-visible tools through `[[host_api]] id = "ironclaw.capability_provider/v1"`.
+Legacy top-level `[[capabilities]]` declarations are accepted only for
+`ManifestSource::HostBundled` packages such as host-owned built-ins and explicit
+compatibility fixtures.
+
+Legacy host-bundled WASM manifest:
 
 ```toml
 schema_version = "reborn.extension_manifest.v2"
@@ -106,7 +112,7 @@ output_schema_ref = "schemas/echo/say.output.v1.json"
 prompt_doc_ref = "prompts/echo/say.md"
 ```
 
-Script/CLI manifest example:
+Legacy host-bundled script/CLI manifest:
 
 ```toml
 schema_version = "reborn.extension_manifest.v2"
@@ -134,7 +140,7 @@ output_schema_ref = "schemas/project-tools/pytest.output.v1.json"
 prompt_doc_ref = "prompts/project-tools/pytest.md"
 ```
 
-MCP adapter manifest example:
+Legacy host-bundled MCP adapter manifest:
 
 ```toml
 schema_version = "reborn.extension_manifest.v2"
@@ -214,6 +220,13 @@ Rules:
 - Operational sections must be referenced by `[[host_api]]`; inert metadata may live under `[metadata.*]` or `[x.*]`.
 - Manifest validation is atomic: any invalid host API contract invalidates the extension manifest.
 - Runtime loading, handshakes, catalog publication, authority grants, and execution remain outside `ironclaw_extensions`.
+
+Migration rules:
+
+- Installed third-party extensions must move each model-visible top-level `[[capabilities]]` entry under `[[capability_provider.tools.capabilities]]` and reference it from `[[host_api]] id = "ironclaw.capability_provider/v1"`.
+- Host-bundled built-ins may keep top-level `[[capabilities]]` while first-party packaging remains synthetic/host-owned.
+- Do not mix `[[host_api]]` with top-level `[[capabilities]]` in one manifest.
+- Deprecated path scope is only legacy top-level capability declarations for installed third-party manifests; extension manifest v2 itself remains active.
 
 ---
 

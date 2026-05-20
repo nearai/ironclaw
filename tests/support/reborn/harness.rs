@@ -77,11 +77,11 @@ use ironclaw_threads::{
 use ironclaw_trust::EffectiveTrustClass;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 use ironclaw_turns::{
-    DefaultTurnCoordinator, FilesystemTurnStateStore, GateRef, GetLoopCheckpointRequest,
-    GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore, LoopBlockedKind,
-    LoopCheckpointKind, LoopCheckpointStore, LoopGateRef, LoopResultRef, ReplyTargetBindingRef,
-    ResumeTurnRequest, SourceBindingRef, TurnActor, TurnCoordinator, TurnError, TurnRunId,
-    TurnRunState, TurnScope, TurnStateStore, TurnStatus,
+    CancelRunRequest, DefaultTurnCoordinator, FilesystemTurnStateStore, GateRef,
+    GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore,
+    LoopBlockedKind, LoopCheckpointKind, LoopCheckpointStore, LoopGateRef, LoopResultRef,
+    ReplyTargetBindingRef, ResumeTurnRequest, SanitizedCancelReason, SourceBindingRef, TurnActor,
+    TurnCoordinator, TurnError, TurnRunId, TurnRunState, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostError, AgentLoopHostErrorKind, CapabilityBatchInvocation,
         CapabilityBatchOutcome, CapabilityCallCandidate, CapabilityDescriptorView,
@@ -502,6 +502,30 @@ impl RebornBinaryE2EHarness {
             .await?;
         if response.status != TurnStatus::Queued {
             return Err(format!("expected resumed run to queue, got {:?}", response.status).into());
+        }
+        Ok(())
+    }
+
+    pub async fn cancel_blocked_turn(&self, run_id: TurnRunId) -> HarnessResult<()> {
+        let response = self
+            .coordinator
+            .cancel_run(CancelRunRequest {
+                scope: self.turn_scope.clone(),
+                actor: TurnActor::new(self.binding.user_id.clone()),
+                run_id,
+                reason: SanitizedCancelReason::UserRequested,
+                idempotency_key: IdempotencyKey::new(format!("cancel-{run_id}"))?,
+            })
+            .await?;
+        if !matches!(
+            response.status,
+            TurnStatus::Cancelled | TurnStatus::CancelRequested
+        ) {
+            return Err(format!(
+                "expected run to be cancelled or cancel-requested, got {:?}",
+                response.status
+            )
+            .into());
         }
         Ok(())
     }

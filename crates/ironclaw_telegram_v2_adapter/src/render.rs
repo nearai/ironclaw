@@ -104,6 +104,7 @@ pub struct TelegramReplyTarget {
     pub reply_message_id: Option<i64>,
 }
 
+#[allow(dead_code)] // reserved for Telegram inbound reply-target construction once v2 adapter wiring stores outbound targets
 pub fn build_reply_target_binding(
     chat_id: i64,
     topic_id: Option<i64>,

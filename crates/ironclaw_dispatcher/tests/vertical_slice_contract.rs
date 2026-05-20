@@ -13,10 +13,7 @@ use serde_json::json;
 #[tokio::test]
 async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let fs = filesystem_with_echo_extensions();
-    let registry =
-        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
-            .await
-            .unwrap();
+    let registry = discover_legacy_fixture_registry(&fs).await;
     assert_eq!(registry.extensions().count(), 3);
 
     let governor = InMemoryResourceGovernor::new();
@@ -211,6 +208,18 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
     )
     .unwrap();
     fs
+}
+
+async fn discover_legacy_fixture_registry(fs: &LocalFilesystem) -> ExtensionRegistry {
+    ExtensionDiscovery::discover_with_manifest_contracts(
+        fs,
+        &VirtualPath::new("/system/extensions").unwrap(),
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+        &HostApiContractRegistry::new(),
+    )
+    .await
+    .unwrap()
 }
 
 fn sample_scope() -> ResourceScope {

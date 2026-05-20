@@ -64,7 +64,7 @@ use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInp
 use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
 
 #[cfg(feature = "root-llm-provider")]
-use crate::runtime_input::RebornLlmConfig;
+use crate::runtime_input::{ResolvedRebornLlm, ResolvedRebornLlmSource};
 
 /// Stable identifier for a Reborn CLI conversation. Wraps a `ThreadId`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -707,36 +707,37 @@ impl HostIdentityContextSource for EmptyIdentityContextSource {
 
 #[cfg(feature = "root-llm-provider")]
 fn build_llm_gateway(
-    cfg: RebornLlmConfig,
+    llm: ResolvedRebornLlm,
 ) -> Result<Arc<dyn ironclaw_loop_support::HostManagedModelGateway>, RebornRuntimeError> {
-    use ironclaw_llm::{RegistryProviderConfig, config::CacheRetention};
+    use ironclaw_llm::RegistryProviderConfig;
     use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
     use ironclaw_turns::run_profile::ModelProfileId;
 
-    let protocol = parse_provider_protocol(&cfg.protocol)?;
-    let registry_config = RegistryProviderConfig {
-        protocol,
-        provider_id: cfg.provider_id.clone(),
-        api_key: cfg.api_key.clone(),
-        base_url: cfg.base_url.clone(),
-        model: cfg.model.clone(),
-        extra_headers: cfg.extra_headers.clone(),
-        oauth_token: None,
-        is_codex_chatgpt: false,
-        refresh_token: None,
-        auth_path: None,
-        cache_retention: CacheRetention::None,
-        unsupported_params: Vec::new(),
-    };
-    let provider =
-        ironclaw_llm::create_registry_provider(&registry_config, cfg.request_timeout_secs)
-            .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
+    let model = llm.model().to_string();
+    let provider = match llm.source {
+        ResolvedRebornLlmSource::Catalog(cfg) => {
+            let protocol = parse_provider_protocol(&cfg.protocol)?;
+            let registry_config = RegistryProviderConfig::generic(
+                protocol,
+                cfg.provider_id.clone(),
+                cfg.api_key.clone(),
+                cfg.base_url.clone(),
+                cfg.model.clone(),
+            )
+            .with_extra_headers(cfg.extra_headers.clone());
+            ironclaw_llm::create_registry_provider(&registry_config, cfg.request_timeout_secs)
+        }
+        ResolvedRebornLlmSource::RegistryProvider {
+            config,
+            request_timeout_secs,
+        } => ironclaw_llm::create_registry_provider(&config, request_timeout_secs),
+    }
+    .map_err(|error| RebornRuntimeError::LlmProvider(error.to_string()))?;
 
     let model_profile_id = ModelProfileId::new("interactive_model").map_err(|reason| {
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
     })?;
-    let policy =
-        LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, Some(cfg.model.clone()));
+    let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, Some(model));
     let gateway = LlmProviderModelGateway::new(provider, policy);
     Ok(Arc::new(gateway))
 }

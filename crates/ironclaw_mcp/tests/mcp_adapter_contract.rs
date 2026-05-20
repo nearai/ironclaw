@@ -1367,14 +1367,23 @@ impl ResourceGovernor for ReleaseFailingGovernor {
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse(
+    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
         manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap();
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
+}
+
+fn capability_provider_contracts() -> HostApiContractRegistry {
+    let mut contracts = HostApiContractRegistry::new();
+    contracts
+        .register(Arc::new(CapabilityProviderHostApiContract::new().unwrap()))
+        .unwrap();
+    contracts
 }
 
 fn sample_scope() -> ResourceScope {
@@ -1408,7 +1417,7 @@ fn mcp_http_policy() -> NetworkPolicy {
     }
 }
 
-const MCP_MANIFEST: &str = r#"
+const MCP_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "github-mcp"
 name = "GitHub MCP"
 version = "0.1.0"
@@ -1420,15 +1429,23 @@ kind = "mcp"
 transport = "http"
 url = "https://mcp.example.test/mcp"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "github-mcp.search"
 description = "Search GitHub"
 effects = ["network", "dispatch_capability"]
 default_permission = "ask"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/github-mcp/search.input.v1.json"
+output_schema_ref = "schemas/github-mcp/search.output.v1.json"
 "#;
 
-const STDIO_MCP_MANIFEST: &str = r#"
+const STDIO_MCP_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "github-mcp"
 name = "GitHub MCP"
 version = "0.1.0"
@@ -1446,10 +1463,12 @@ id = "github-mcp.search"
 description = "Search GitHub"
 effects = ["network", "dispatch_capability"]
 default_permission = "ask"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/github-mcp/search.input.v1.json"
+output_schema_ref = "schemas/github-mcp/search.output.v1.json"
 "#;
 
-const SCRIPT_MANIFEST: &str = r#"
+const SCRIPT_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "script"
 name = "Script Echo"
 version = "0.1.0"
@@ -1467,5 +1486,7 @@ id = "script.echo"
 description = "Echo text"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/script/echo.input.v1.json"
+output_schema_ref = "schemas/script/echo.output.v1.json"
 "#;

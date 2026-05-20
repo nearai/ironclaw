@@ -590,6 +590,7 @@ Rules:
 - profile schema refs are relative repository paths, never absolute paths, URLs, or traversal paths;
 - profile schema-ref equality is identity/reference matching only; it does not prove JSON-schema conformance, which is deferred to manifest/claim validation slices;
 - host-port IDs are lowercase `host.*` dotted names;
+- the initial host-runtime supported catalog entry is `host.runtime.http_egress` for mediated runtime HTTP egress validation;
 - host-port catalogs reject duplicate entries and are not runtime implementation registries;
 - host-port views reject duplicate grants and do not grant authority by themselves;
 - `HostPortGrant` remains a thin `HostPortId` grant token; future attenuation or parameter narrowing uses a separate wire type.

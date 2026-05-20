@@ -36,6 +36,7 @@ pub use input::RebornBuildInput;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
     RebornLlmCatalogError, resolve_against_registry, resolve_llm_selection_against_catalog,
+    resolve_reborn_runtime_llm,
 };
 pub use product_live_adapters::{
     ProductLiveCapabilityAuthorityResolver, ProductLiveCapabilityIo, ProductLiveModelRouteSettings,
@@ -48,12 +49,12 @@ pub use readiness::{RebornFacadeReadiness, RebornReadiness, RebornReadinessState
 pub use runtime::{
     AssistantReply, ConversationId, RebornRuntime, RebornRuntimeError, build_reborn_runtime,
 };
-#[cfg(feature = "root-llm-provider")]
-pub use runtime_input::RebornLlmConfig;
 pub use runtime_input::{
     DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL, DEFAULT_TURN_RUNNER_POLL_INTERVAL, PollSettings,
     RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings,
 };
+#[cfg(feature = "root-llm-provider")]
+pub use runtime_input::{RebornLlmConfig, ResolvedRebornLlm};
 
 /// Reborn model purpose slot names exposed for diagnostic callers.
 ///

@@ -114,7 +114,7 @@ fn script_and_mcp_runtime_metadata_stays_declarative() {
 }
 
 #[tokio::test]
-async fn discovery_reads_v2_manifests_from_filesystem_virtual_root() {
+async fn discovery_reads_host_bundled_legacy_manifests_from_filesystem_virtual_root() {
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join("echo")).unwrap();
     std::fs::write(storage.path().join("echo/manifest.toml"), WASM_MANIFEST).unwrap();
@@ -126,10 +126,15 @@ async fn discovery_reads_v2_manifests_from_filesystem_virtual_root() {
     )
     .unwrap();
 
-    let registry =
-        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
-            .await
-            .unwrap();
+    let registry = ExtensionDiscovery::discover_with_manifest_contracts(
+        &fs,
+        &VirtualPath::new("/system/extensions").unwrap(),
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+        &HostApiContractRegistry::new(),
+    )
+    .await
+    .unwrap();
 
     assert!(
         registry
@@ -170,6 +175,67 @@ async fn discovery_rejects_installed_local_privileged_manifest() {
             manifest_source: ManifestSource::InstalledLocal,
             requested: RequestedTrustClass::FirstPartyRequested,
         })
+    ));
+}
+
+#[test]
+fn production_parser_rejects_installed_legacy_top_level_capabilities() {
+    let err = ExtensionManifest::parse_with_optional_host_api_contracts(
+        WASM_MANIFEST,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &HostApiContractRegistry::new(),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionError::ManifestV2(
+            ManifestV2Error::LegacyTopLevelCapabilitiesForInstalledSource {
+                manifest_source: ManifestSource::InstalledLocal,
+            }
+        )
+    ));
+}
+
+#[test]
+fn production_parser_allows_host_bundled_legacy_top_level_capabilities() {
+    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+        WASM_MANIFEST,
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+        &HostApiContractRegistry::new(),
+    )
+    .unwrap();
+
+    assert_eq!(manifest.id.as_str(), "echo");
+    assert_eq!(manifest.capabilities.len(), 1);
+}
+
+#[tokio::test]
+async fn discovery_rejects_installed_legacy_top_level_capabilities() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("echo")).unwrap();
+    std::fs::write(storage.path().join("echo/manifest.toml"), WASM_MANIFEST).unwrap();
+
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/system/extensions").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+
+    let err = ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionError::ManifestV2(
+            ManifestV2Error::LegacyTopLevelCapabilitiesForInstalledSource {
+                manifest_source: ManifestSource::InstalledLocal,
+            }
+        )
     ));
 }
 
@@ -535,7 +601,7 @@ async fn discovery_validates_capability_manifest_with_supplied_host_port_catalog
     let registry = ExtensionDiscovery::discover_with_manifest_contracts(
         &fs,
         &VirtualPath::new("/system/extensions").unwrap(),
-        ManifestSource::InstalledLocal,
+        ManifestSource::HostBundled,
         &catalog,
         &HostApiContractRegistry::new(),
     )
@@ -568,9 +634,15 @@ async fn discovery_rejects_manifest_id_mismatch_with_directory() {
     )
     .unwrap();
 
-    let err = ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
-        .await
-        .unwrap_err();
+    let err = ExtensionDiscovery::discover_with_manifest_contracts(
+        &fs,
+        &VirtualPath::new("/system/extensions").unwrap(),
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+        &HostApiContractRegistry::new(),
+    )
+    .await
+    .unwrap_err();
 
     assert!(matches!(
         err,

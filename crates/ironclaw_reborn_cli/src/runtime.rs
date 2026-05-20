@@ -226,15 +226,21 @@ fn build_runtime_input(config: &RebornBootConfig) -> anyhow::Result<RebornRuntim
 
     #[cfg(feature = "root-llm-provider")]
     {
-        match resolve_llm_config(config, config_file.as_ref())? {
-            LlmResolutionOutcome::Resolved(llm) => {
-                runtime_input = runtime_input.with_llm(llm);
+        match ironclaw_reborn_composition::resolve_reborn_runtime_llm(config, config_file.as_ref())?
+        {
+            Some(llm) => {
+                tracing::debug!(
+                    provider_id = %llm.provider_id(),
+                    model = %llm.model(),
+                    "resolved LLM selection for Reborn runtime"
+                );
+                runtime_input = runtime_input.with_resolved_llm(llm);
             }
-            LlmResolutionOutcome::NoSelectionConfigured => {
+            None => {
                 tracing::warn!(
-                    "no LLM selection configured; set `[llm.default]` in {} or export \
-                     OPENAI_API_KEY / ANTHROPIC_API_KEY / OLLAMA_BASE_URL. \
-                     Runs will fail until an LLM is wired.",
+                    "no LLM selection configured; set `[llm.default]` in {} or configure \
+                     LLM_BACKEND / provider environment variables. Runs will fail until an \
+                     LLM is wired.",
                     config.home().config_file_path().display()
                 );
             }
@@ -351,94 +357,4 @@ fn runner_settings(
         }
     }
     Ok(settings)
-}
-
-#[cfg(feature = "root-llm-provider")]
-enum LlmResolutionOutcome {
-    Resolved(ironclaw_reborn_composition::RebornLlmConfig),
-    NoSelectionConfigured,
-}
-
-#[cfg(feature = "root-llm-provider")]
-fn resolve_llm_config(
-    boot: &RebornBootConfig,
-    config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
-) -> anyhow::Result<LlmResolutionOutcome> {
-    // Preference order:
-    //   1. boot TOML [llm.default] (catalog-driven via providers.json)
-    //   2. env-only fallback (legacy: OPENAI_API_KEY etc.) for ergonomics
-    //   3. no LLM configured -> stub gateway, send fails at first message
-    if let Some(selection) = config_file.and_then(|file| file.default_llm_slot()) {
-        let providers_path = boot.home().providers_file_path();
-        let llm = ironclaw_reborn_composition::resolve_llm_selection_against_catalog(
-            selection,
-            Some(providers_path.as_path()),
-        )?;
-        tracing::info!(
-            provider_id = %llm.provider_id,
-            model = %llm.model,
-            "resolved LLM selection from config.toml against provider catalog"
-        );
-        return Ok(LlmResolutionOutcome::Resolved(llm));
-    }
-
-    if let Some(llm) = resolve_llm_config_from_env()? {
-        tracing::info!(
-            provider_id = %llm.provider_id,
-            model = %llm.model,
-            "resolved LLM selection from environment (no [llm.default] in config.toml)"
-        );
-        return Ok(LlmResolutionOutcome::Resolved(llm));
-    }
-
-    Ok(LlmResolutionOutcome::NoSelectionConfigured)
-}
-
-#[cfg(feature = "root-llm-provider")]
-fn resolve_llm_config_from_env()
--> anyhow::Result<Option<ironclaw_reborn_composition::RebornLlmConfig>> {
-    use ironclaw_reborn_composition::RebornLlmConfig;
-    use secrecy::SecretString;
-
-    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
-        let model =
-            std::env::var("IRONCLAW_REBORN_MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string());
-        let base_url = std::env::var("OPENAI_BASE_URL")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
-        return Ok(Some(RebornLlmConfig::openai_compat(
-            "openai",
-            base_url,
-            model,
-            SecretString::from(key),
-        )));
-    }
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-        let model = std::env::var("IRONCLAW_REBORN_MODEL")
-            .unwrap_or_else(|_| "claude-3-5-sonnet-latest".to_string());
-        let base_url = std::env::var("ANTHROPIC_BASE_URL")
-            .unwrap_or_else(|_| "https://api.anthropic.com/v1".to_string());
-        return Ok(Some(RebornLlmConfig {
-            provider_id: "anthropic".to_string(),
-            model,
-            base_url,
-            api_key: Some(SecretString::from(key)),
-            protocol: "anthropic".to_string(),
-            request_timeout_secs: 120,
-            extra_headers: Vec::new(),
-        }));
-    }
-    if let Ok(base_url) = std::env::var("OLLAMA_BASE_URL") {
-        let model =
-            std::env::var("IRONCLAW_REBORN_MODEL").unwrap_or_else(|_| "llama3.2".to_string());
-        return Ok(Some(RebornLlmConfig {
-            provider_id: "ollama".to_string(),
-            model,
-            base_url,
-            api_key: None,
-            protocol: "ollama".to_string(),
-            request_timeout_secs: 120,
-            extra_headers: Vec::new(),
-        }));
-    }
-    Ok(None)
 }

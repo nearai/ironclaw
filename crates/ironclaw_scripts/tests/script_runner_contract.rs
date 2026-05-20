@@ -424,14 +424,23 @@ fn wasm_package() -> ExtensionPackage {
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse(
+    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
         manifest,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
     )
     .unwrap();
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
+}
+
+fn capability_provider_contracts() -> HostApiContractRegistry {
+    let mut contracts = HostApiContractRegistry::new();
+    contracts
+        .register(Arc::new(CapabilityProviderHostApiContract::new().unwrap()))
+        .unwrap();
+    contracts
 }
 
 fn sample_scope() -> ResourceScope {
@@ -446,7 +455,7 @@ fn sample_scope() -> ResourceScope {
     }
 }
 
-const SCRIPT_MANIFEST: &str = r#"
+const SCRIPT_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "script"
 name = "Script Echo"
 version = "0.1.0"
@@ -455,20 +464,28 @@ trust = "untrusted"
 
 [runtime]
 kind = "script"
-backend = "docker"
+runner = "docker"
 image = "alpine:latest"
 command = "script-echo"
 args = ["--json"]
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "script.echo"
 description = "Echo text"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/script/echo.input.v1.json"
+output_schema_ref = "schemas/script/echo.output.v1.json"
 "#;
 
-const WASM_MANIFEST: &str = r#"
+const WASM_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "echo"
 name = "Echo"
 version = "0.1.0"
@@ -484,5 +501,7 @@ id = "echo.say"
 description = "Echo text"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/echo/say.input.v1.json"
+output_schema_ref = "schemas/echo/say.output.v1.json"
 "#;

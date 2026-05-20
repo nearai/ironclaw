@@ -465,6 +465,10 @@ pub enum ManifestV2Error {
         prefix: &'static str,
     },
     #[error(
+        "manifest source {manifest_source:?} is not allowed to use legacy top-level capabilities; declare ironclaw.capability_provider/v1 host_api instead"
+    )]
+    LegacyTopLevelCapabilitiesForInstalledSource { manifest_source: ManifestSource },
+    #[error(
         "capability {capability} declares unknown host port '{port}' (not in host-defined catalog)"
     )]
     UnknownHostPort {
@@ -594,6 +598,13 @@ impl ExtensionManifestV2 {
                 return Err(ManifestV2Error::Parse {
                     reason: format!("unknown top-level field {key:?}"),
                 });
+            }
+            if !source.allows_first_party() && !manifest.capabilities.is_empty() {
+                return Err(
+                    ManifestV2Error::LegacyTopLevelCapabilitiesForInstalledSource {
+                        manifest_source: source,
+                    },
+                );
             }
         } else {
             manifest.project_and_extend_capabilities(
