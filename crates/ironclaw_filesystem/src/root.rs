@@ -5,6 +5,7 @@ use crate::backend::{EventRecord, StorageTxn};
 use crate::{
     BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, FilesystemError,
     FilesystemOperation, Filter, IndexSpec, Page, RecordVersion, SeqNo, VersionedEntry,
+    VersionedIndexedEntry,
 };
 
 /// Unified filesystem interface over canonical virtual paths.
@@ -97,6 +98,28 @@ pub trait RootFilesystem: Send + Sync {
         unsupported(path, FilesystemOperation::Query)
     }
 
+    /// Filtered query returning only indexed projections and versions.
+    ///
+    /// Default implementation delegates to [`query`](Self::query) and drops
+    /// bodies. Backends may override to avoid loading entry bodies at all.
+    async fn query_indexed(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedIndexedEntry>, FilesystemError> {
+        Ok(self
+            .query(path, filter, page)
+            .await?
+            .into_iter()
+            .map(|entry| VersionedIndexedEntry {
+                path: entry.path,
+                indexed: entry.entry.indexed,
+                version: entry.version,
+            })
+            .collect())
+    }
+
     /// Declare an index on a mount prefix. Idempotent: re-declaring the same
     /// spec is a no-op; declaring a conflicting spec returns
     /// [`FilesystemError::IndexConflict`].
@@ -120,6 +143,19 @@ pub trait RootFilesystem: Send + Sync {
             operation: FilesystemOperation::Delete,
             reason: "delete is not supported by this backend".to_string(),
         })
+    }
+
+    /// Delete an existing entry only if it still has the supplied version.
+    ///
+    /// This is the delete-side CAS companion to [`put`](Self::put). Stores use
+    /// it for one-shot consume paths where an unconditional delete could remove
+    /// a value that was overwritten after the caller validated an older entry.
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        _version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        unsupported(path, FilesystemOperation::Delete)
     }
 
     // ─── Atomicity ────────────────────────────────────────────────────────

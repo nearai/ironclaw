@@ -5,7 +5,7 @@ use ironclaw_host_api::{MountPermissions, MountView, ScopedPath, VirtualPath};
 use crate::backend::{EventRecord, StorageTxn};
 use crate::{
     CasExpectation, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation, Filter,
-    IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
+    IndexSpec, Page, RecordVersion, RootFilesystem, SeqNo, VersionedEntry, VersionedIndexedEntry,
 };
 
 /// Invocation-scoped filesystem view over [`ScopedPath`] values.
@@ -60,6 +60,17 @@ where
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
         let virtual_path = self.resolve_with_permission(prefix, FilesystemOperation::Query)?;
         self.root.query(&virtual_path, filter, page).await
+    }
+
+    /// Filtered query over `prefix`, returning only indexed projections.
+    pub async fn query_indexed(
+        &self,
+        prefix: &ScopedPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedIndexedEntry>, FilesystemError> {
+        let virtual_path = self.resolve_with_permission(prefix, FilesystemOperation::Query)?;
+        self.root.query_indexed(&virtual_path, filter, page).await
     }
 
     /// Declare an index on the mount under `prefix`.
@@ -169,6 +180,15 @@ where
     pub async fn delete(&self, path: &ScopedPath) -> Result<(), FilesystemError> {
         let virtual_path = self.resolve_with_permission(path, FilesystemOperation::Delete)?;
         self.root.delete(&virtual_path).await
+    }
+
+    pub async fn delete_if_version(
+        &self,
+        path: &ScopedPath,
+        version: crate::RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        let virtual_path = self.resolve_with_permission(path, FilesystemOperation::Delete)?;
+        self.root.delete_if_version(&virtual_path, version).await
     }
 
     /// **DEPRECATED — the unified entry plane infers directories from path

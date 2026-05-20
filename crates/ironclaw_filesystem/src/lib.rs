@@ -34,7 +34,7 @@ mod types;
 
 pub use backend::{EventRecord, StorageTxn};
 pub use catalog::{CompositeRootFilesystem, FilesystemCatalog, MountDescriptor, PathPlacement};
-pub use encrypted::{EncryptedBackend, EntryCipher};
+pub use encrypted::{EncryptedBackend, EntryCipher, EntryCipherError};
 pub use in_memory::InMemoryBackend;
 pub use index::{Filter, IndexKey, IndexKind, IndexName, IndexSpec, IndexValue, Page};
 #[cfg(feature = "libsql")]
@@ -44,6 +44,7 @@ pub use local::LocalFilesystem;
 pub use postgres::PostgresRootFilesystem;
 pub use record::{
     CasExpectation, ContentType, Entry, RecordKind, RecordVersion, SeqNo, VersionedEntry,
+    VersionedIndexedEntry,
 };
 pub use root::RootFilesystem;
 pub use scoped::ScopedFilesystem;

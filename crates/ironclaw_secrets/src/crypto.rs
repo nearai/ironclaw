@@ -156,9 +156,9 @@ impl ironclaw_filesystem::EntryCipher for SecretsCrypto {
         &self,
         plaintext: &[u8],
         aad: &[u8],
-    ) -> Result<(Vec<u8>, Vec<u8>), String> {
+    ) -> Result<(Vec<u8>, Vec<u8>), ironclaw_filesystem::EntryCipherError> {
         self.encrypt(plaintext, aad)
-            .map_err(|error| error.to_string())
+            .map_err(|error| ironclaw_filesystem::EntryCipherError::new(error.to_string()))
     }
 
     fn decrypt_entry_bytes(
@@ -166,9 +166,9 @@ impl ironclaw_filesystem::EntryCipher for SecretsCrypto {
         ciphertext: &[u8],
         salt: &[u8],
         aad: &[u8],
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, ironclaw_filesystem::EntryCipherError> {
         self.decrypt_bytes(ciphertext, salt, aad)
-            .map_err(|error| error.to_string())
+            .map_err(|error| ironclaw_filesystem::EntryCipherError::new(error.to_string()))
     }
 }
 

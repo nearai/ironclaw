@@ -616,6 +616,32 @@ impl RootFilesystem for LibSqlRootFilesystem {
         Ok(())
     }
 
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        let conn = self.connect().await?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM root_filesystem_entries WHERE path = ?1 AND is_dir = 0 AND version = ?2",
+                libsql::params![path.as_str(), version.get() as i64],
+            )
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::Delete, error))?;
+        if deleted != 0 {
+            return Ok(());
+        }
+        match self.current_version(path).await? {
+            Some(found) => Err(FilesystemError::VersionMismatch {
+                path: path.clone(),
+                expected: Some(version),
+                found: Some(found),
+            }),
+            None => Err(not_found(path.clone(), FilesystemOperation::Delete)),
+        }
+    }
+
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let conn = self.connect().await?;
         let transaction = conn.transaction().await.map_err(|error| {

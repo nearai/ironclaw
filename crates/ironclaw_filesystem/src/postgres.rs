@@ -538,6 +538,32 @@ impl RootFilesystem for PostgresRootFilesystem {
         Ok(())
     }
 
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        let client = self.client().await?;
+        let deleted = client
+            .execute(
+                "DELETE FROM root_filesystem_entries WHERE path = $1 AND is_dir = FALSE AND version = $2",
+                &[&path.as_str(), &(version.get() as i64)],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Delete, error))?;
+        if deleted != 0 {
+            return Ok(());
+        }
+        match self.current_version_with_client(&client, path).await? {
+            Some(found) => Err(FilesystemError::VersionMismatch {
+                path: path.clone(),
+                expected: Some(version),
+                found: Some(found),
+            }),
+            None => Err(not_found(path.clone(), FilesystemOperation::Delete)),
+        }
+    }
+
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let mut client = self.client().await?;
         let transaction = client

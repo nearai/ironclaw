@@ -139,6 +139,31 @@ impl RootFilesystem for InMemoryBackend {
         Ok(())
     }
 
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        let mut state = self.state.lock().await;
+        let Some(current) = state.entries.get(path.as_str()).map(|entry| entry.version) else {
+            return Err(FilesystemError::NotFound {
+                path: path.clone(),
+                operation: FilesystemOperation::Delete,
+            });
+        };
+        if current != version {
+            return Err(FilesystemError::VersionMismatch {
+                path: path.clone(),
+                expected: Some(version),
+                found: Some(current),
+            });
+        }
+        state.entries.remove(path.as_str());
+        let prefix = with_trailing_slash(path.as_str());
+        state.entries.retain(|key, _| !key.starts_with(&prefix));
+        Ok(())
+    }
+
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
         let state = self.state.lock().await;
         let prefix = with_trailing_slash(path.as_str());

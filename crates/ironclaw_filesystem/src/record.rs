@@ -349,6 +349,18 @@ pub struct VersionedEntry {
     pub version: RecordVersion,
 }
 
+/// Query result carrying only indexed projections and version metadata.
+///
+/// Consumers that need listing or routing metadata can avoid fetching large or
+/// sensitive entry bodies. Encrypted backends still decrypt any
+/// [`IndexValue::Bytes`](crate::IndexValue) projections before returning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionedIndexedEntry {
+    pub path: ironclaw_host_api::VirtualPath,
+    pub indexed: BTreeMap<IndexKey, IndexValue>,
+    pub version: RecordVersion,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

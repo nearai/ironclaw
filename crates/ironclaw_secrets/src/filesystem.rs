@@ -19,10 +19,13 @@ use crate::legacy_store::{DecryptedSecret, Secret, SecretRef};
 use crate::{CreateSecretParams, SecretConsumeResult, SecretError, SecretsStore};
 
 const SECRET_RECORD_KIND: &str = "secret_record";
+const SECRET_VALUE_KIND: &str = "secret_value";
 const SECRET_KEY_CHECK_KIND: &str = "secret_store_key_check";
 const SECRET_STORE_KEY_CHECK_ID: &str = "active";
 const SECRET_STORE_KEY_CHECK_PLAINTEXT: &str = "reborn-secret-store-key-check-v1";
 const SECRET_ID_INDEX_KEY: &str = "secret_id";
+const SECRET_NAME_INDEX_KEY: &str = "name";
+const SECRET_PROVIDER_INDEX_KEY: &str = "provider";
 
 /// Durable [`SecretsStore`] implementation over the unified Reborn filesystem surface.
 #[derive(Debug)]
@@ -100,6 +103,14 @@ where
         self.get_optional_entry(&record_path(user_id, name)?).await
     }
 
+    async fn get_value_entry(
+        &self,
+        user_id: &str,
+        name: &str,
+    ) -> Result<Option<VersionedEntry>, SecretError> {
+        self.get_optional_entry(&value_path(user_id, name)?).await
+    }
+
     async fn get_stored_secret_record(
         &self,
         user_id: &str,
@@ -137,6 +148,24 @@ where
                 let _: StoredSecret = parse_entry(versioned)?;
             }
         }
+        for user_dir in self.list_dir_or_empty(&values_root_path()?).await? {
+            if user_dir.file_type != FileType::Directory {
+                continue;
+            }
+            let user_values_path = scoped_from_virtual(&user_dir.path)?;
+            for value_entry in self.list_dir_or_empty(&user_values_path).await? {
+                if value_entry.file_type != FileType::File {
+                    continue;
+                }
+                let Some(versioned) = self
+                    .get_optional_entry(&scoped_from_virtual(&value_entry.path)?)
+                    .await?
+                else {
+                    continue;
+                };
+                let _: StoredSecretValue = parse_entry(versioned)?;
+            }
+        }
         Ok(())
     }
 
@@ -167,6 +196,7 @@ where
         let provider = params.provider;
         let expires_at = params.expires_at;
         let path = record_path(user_id, &name)?;
+        let value_path = value_path(user_id, &name)?;
 
         loop {
             let existing = self.get_optional_entry(&path).await?;
@@ -177,7 +207,6 @@ where
                         build_stored_secret(
                             user_id,
                             &name,
-                            &value,
                             provider.clone(),
                             expires_at,
                             Some(&existing_record),
@@ -186,11 +215,21 @@ where
                     )
                 }
                 None => (
-                    build_stored_secret(user_id, &name, &value, provider.clone(), expires_at, None),
+                    build_stored_secret(user_id, &name, provider.clone(), expires_at, None),
                     CasExpectation::Absent,
                 ),
             };
-            let entry = secret_record_entry(&record)?;
+            let value_entry = record_entry(
+                SECRET_VALUE_KIND,
+                &StoredSecretValue {
+                    value: value.clone(),
+                },
+            )?;
+            self.filesystem
+                .put(&value_path, value_entry, CasExpectation::Any)
+                .await
+                .map_err(secret_filesystem_error)?;
+            let entry = secret_metadata_entry(&record)?;
             match self.filesystem.put(&path, entry, cas).await {
                 Ok(_) => return Ok(record.into()),
                 Err(FilesystemError::VersionMismatch { .. }) => continue,
@@ -209,7 +248,10 @@ where
         name: &str,
     ) -> Result<DecryptedSecret, SecretError> {
         let secret = self.get(user_id, name).await?;
-        let record = self.get_stored_secret_record(user_id, &secret.name).await?;
+        let Some(value_entry) = self.get_value_entry(user_id, &secret.name).await? else {
+            return Err(SecretError::NotFound(secret.name));
+        };
+        let record: StoredSecretValue = parse_entry(value_entry)?;
         DecryptedSecret::from_bytes(record.value.into_bytes())
     }
 
@@ -220,19 +262,36 @@ where
         expected_value: &str,
     ) -> Result<SecretConsumeResult, SecretError> {
         let name = normalize_secret_name(name);
-        let Some(entry) = self.get_secret_entry(user_id, &name).await? else {
-            return Ok(SecretConsumeResult::NotFound);
-        };
-        let secret: StoredSecret = parse_entry(entry)?;
-        ensure_stored_secret_not_expired(&secret)?;
-        if secret.value != expected_value {
-            return Ok(SecretConsumeResult::Mismatched);
+        loop {
+            let Some(metadata_entry) = self.get_secret_entry(user_id, &name).await? else {
+                return Ok(SecretConsumeResult::NotFound);
+            };
+            let secret: StoredSecret = parse_entry(metadata_entry)?;
+            ensure_stored_secret_not_expired(&secret)?;
+            let Some(value_entry) = self.get_value_entry(user_id, &name).await? else {
+                return Ok(SecretConsumeResult::NotFound);
+            };
+            let value: StoredSecretValue = parse_entry(value_entry.clone())?;
+            if value.value != expected_value {
+                return Ok(SecretConsumeResult::Mismatched);
+            }
+            match self
+                .filesystem
+                .delete_if_version(&value_path(user_id, &name)?, value_entry.version)
+                .await
+            {
+                Ok(()) => {
+                    match self.filesystem.delete(&record_path(user_id, &name)?).await {
+                        Ok(()) | Err(FilesystemError::NotFound { .. }) => {}
+                        Err(error) => return Err(secret_filesystem_error(error)),
+                    }
+                    return Ok(SecretConsumeResult::Matched);
+                }
+                Err(FilesystemError::VersionMismatch { .. }) => continue,
+                Err(FilesystemError::NotFound { .. }) => return Ok(SecretConsumeResult::NotFound),
+                Err(error) => return Err(secret_filesystem_error(error)),
+            }
         }
-        self.filesystem
-            .delete(&record_path(user_id, &name)?)
-            .await
-            .map_err(secret_filesystem_error)?;
-        Ok(SecretConsumeResult::Matched)
     }
 
     async fn exists(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
@@ -252,40 +311,39 @@ where
     async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
         let mut refs = Vec::new();
         for entry in self
-            .list_dir_or_empty(&user_records_path(user_id)?)
-            .await?
-            .into_iter()
-            .filter(|entry| entry.file_type == FileType::File)
+            .filesystem
+            .query_indexed(
+                &user_records_path(user_id)?,
+                &Filter::All,
+                Page::first(Page::MAX_LIMIT),
+            )
+            .await
+            .map_err(secret_filesystem_error)?
         {
-            let Some(versioned) = self
-                .get_optional_entry(&scoped_from_virtual(&entry.path)?)
-                .await?
-            else {
-                continue;
-            };
-            let secret: StoredSecret = parse_entry(versioned)?;
-            ensure_stored_secret_not_expired(&secret)?;
-            refs.push(SecretRef {
-                name: secret.name,
-                provider: secret.provider,
-            });
+            refs.push(secret_ref_from_indexed(&entry.indexed)?);
         }
         refs.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(refs)
     }
 
     async fn delete(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
-        match self.filesystem.delete(&record_path(user_id, name)?).await {
-            Ok(()) => Ok(true),
-            Err(FilesystemError::NotFound { .. }) => Ok(false),
-            Err(error) => Err(secret_filesystem_error(error)),
-        }
+        let deleted_metadata = match self.filesystem.delete(&record_path(user_id, name)?).await {
+            Ok(()) => true,
+            Err(FilesystemError::NotFound { .. }) => false,
+            Err(error) => return Err(secret_filesystem_error(error)),
+        };
+        let deleted_value = match self.filesystem.delete(&value_path(user_id, name)?).await {
+            Ok(()) => true,
+            Err(FilesystemError::NotFound { .. }) => false,
+            Err(error) => return Err(secret_filesystem_error(error)),
+        };
+        Ok(deleted_metadata || deleted_value)
     }
 
     async fn record_usage(&self, secret_id: Uuid) -> Result<(), SecretError> {
         let mut matches = self
             .filesystem
-            .query(
+            .query_indexed(
                 &records_root_path()?,
                 &Filter::Eq {
                     key: secret_id_index_key()?,
@@ -300,15 +358,18 @@ where
         };
 
         loop {
-            let mut secret: StoredSecret = parse_entry(versioned.clone())?;
+            let path = scoped_from_virtual(&versioned.path)?;
+            let Some(current) = self.get_optional_entry(&path).await? else {
+                return Err(SecretError::NotFound(secret_id.to_string()));
+            };
+            let mut secret: StoredSecret = parse_entry(current)?;
             if secret.id != secret_id {
                 return Err(SecretError::NotFound(secret_id.to_string()));
             }
             secret.last_used_at = Some(Utc::now());
             secret.usage_count += 1;
             secret.updated_at = Utc::now();
-            let path = scoped_from_virtual(&versioned.path)?;
-            let entry = secret_record_entry(&secret)?;
+            let entry = secret_metadata_entry(&secret)?;
             match self
                 .filesystem
                 .put(&path, entry, CasExpectation::Version(versioned.version))
@@ -319,7 +380,11 @@ where
                     let Some(fresh) = self.get_optional_entry(&path).await? else {
                         return Err(SecretError::NotFound(secret_id.to_string()));
                     };
-                    versioned = fresh;
+                    versioned = ironclaw_filesystem::VersionedIndexedEntry {
+                        path: fresh.path,
+                        indexed: fresh.entry.indexed,
+                        version: fresh.version,
+                    };
                 }
                 Err(error) => return Err(secret_filesystem_error(error)),
             }
@@ -356,13 +421,17 @@ struct StoredSecret {
     id: Uuid,
     user_id: String,
     name: String,
-    value: String,
     provider: Option<String>,
     expires_at: Option<chrono::DateTime<Utc>>,
     last_used_at: Option<chrono::DateTime<Utc>>,
     usage_count: i64,
     created_at: chrono::DateTime<Utc>,
     updated_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct StoredSecretValue {
+    value: String,
 }
 
 impl From<StoredSecret> for Secret {
@@ -391,7 +460,6 @@ struct StoredKeyCheck {
 fn build_stored_secret(
     user_id: &str,
     name: &str,
-    value: &str,
     provider: Option<String>,
     expires_at: Option<chrono::DateTime<Utc>>,
     existing: Option<&StoredSecret>,
@@ -403,7 +471,6 @@ fn build_stored_secret(
             .unwrap_or_else(Uuid::new_v4),
         user_id: user_id.to_string(),
         name: name.to_string(),
-        value: value.to_string(),
         provider,
         expires_at,
         last_used_at: existing.and_then(|secret| secret.last_used_at),
@@ -444,11 +511,55 @@ fn record_entry<T: Serialize>(kind: &str, value: &T) -> Result<Entry, SecretErro
     .map_err(|error| SecretError::Database(format!("serialize secret record: {error}")))
 }
 
-fn secret_record_entry(secret: &StoredSecret) -> Result<Entry, SecretError> {
-    Ok(record_entry(SECRET_RECORD_KIND, secret)?.with_indexed(
-        secret_id_index_key()?,
-        IndexValue::Text(secret.id.to_string()),
-    ))
+fn secret_metadata_entry(secret: &StoredSecret) -> Result<Entry, SecretError> {
+    let mut entry = record_entry(SECRET_RECORD_KIND, secret)?
+        .with_indexed(
+            secret_id_index_key()?,
+            IndexValue::Text(secret.id.to_string()),
+        )
+        .with_indexed(
+            secret_name_index_key()?,
+            IndexValue::Text(secret.name.clone()),
+        );
+    if let Some(provider) = &secret.provider {
+        entry = entry.with_indexed(
+            secret_provider_index_key()?,
+            IndexValue::Text(provider.clone()),
+        );
+    }
+    Ok(entry)
+}
+
+fn secret_ref_from_indexed(
+    indexed: &std::collections::BTreeMap<IndexKey, IndexValue>,
+) -> Result<SecretRef, SecretError> {
+    Ok(SecretRef {
+        name: indexed_text(indexed, &secret_name_index_key()?)?.to_string(),
+        provider: indexed
+            .get(&secret_provider_index_key()?)
+            .map(index_value_as_text)
+            .transpose()?
+            .map(ToString::to_string),
+    })
+}
+
+fn indexed_text<'a>(
+    indexed: &'a std::collections::BTreeMap<IndexKey, IndexValue>,
+    key: &IndexKey,
+) -> Result<&'a str, SecretError> {
+    indexed
+        .get(key)
+        .ok_or_else(|| SecretError::Database(format!("missing filesystem secret index: {key}")))
+        .and_then(index_value_as_text)
+}
+
+fn index_value_as_text(value: &IndexValue) -> Result<&str, SecretError> {
+    match value {
+        IndexValue::Text(value) => Ok(value.as_str()),
+        other => Err(SecretError::Database(format!(
+            "invalid filesystem secret text index: {other}"
+        ))),
+    }
 }
 
 fn normalize_secret_name(name: &str) -> String {
@@ -468,8 +579,20 @@ fn secret_id_index_key() -> Result<IndexKey, SecretError> {
     IndexKey::new(SECRET_ID_INDEX_KEY).map_err(secret_filesystem_error)
 }
 
+fn secret_name_index_key() -> Result<IndexKey, SecretError> {
+    IndexKey::new(SECRET_NAME_INDEX_KEY).map_err(secret_filesystem_error)
+}
+
+fn secret_provider_index_key() -> Result<IndexKey, SecretError> {
+    IndexKey::new(SECRET_PROVIDER_INDEX_KEY).map_err(secret_filesystem_error)
+}
+
 fn records_root_path() -> Result<ScopedPath, SecretError> {
     ScopedPath::new("/secrets/records").map_err(secret_filesystem_error)
+}
+
+fn values_root_path() -> Result<ScopedPath, SecretError> {
+    ScopedPath::new("/secrets/values").map_err(secret_filesystem_error)
 }
 
 fn user_records_path(user_id: &str) -> Result<ScopedPath, SecretError> {
@@ -480,6 +603,15 @@ fn user_records_path(user_id: &str) -> Result<ScopedPath, SecretError> {
 fn record_path(user_id: &str, name: &str) -> Result<ScopedPath, SecretError> {
     ScopedPath::new(format!(
         "/secrets/records/{}/{}.json",
+        encode_path_segment(user_id),
+        encode_path_segment(&normalize_secret_name(name))
+    ))
+    .map_err(secret_filesystem_error)
+}
+
+fn value_path(user_id: &str, name: &str) -> Result<ScopedPath, SecretError> {
+    ScopedPath::new(format!(
+        "/secrets/values/{}/{}.json",
         encode_path_segment(user_id),
         encode_path_segment(&normalize_secret_name(name))
     ))
@@ -554,11 +686,11 @@ mod tests {
         assert!(reopened.any_exist().await.unwrap());
 
         let raw_path =
-            VirtualPath::new(record_path("tenant-user", "openai_key").unwrap().as_str()).unwrap();
+            VirtualPath::new(value_path("tenant-user", "openai_key").unwrap().as_str()).unwrap();
         let raw = root.get(&raw_path).await.unwrap().unwrap();
         assert!(
             !String::from_utf8_lossy(&raw.entry.body).contains("sk-test-filesystem"),
-            "raw filesystem body must be encrypted by the backend decorator"
+            "raw filesystem value body must be encrypted by the backend decorator"
         );
     }
 
@@ -611,6 +743,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn filesystem_secret_store_key_check_bootstrap_scans_every_existing_user_record() {
+        let root = Arc::new(InMemoryBackend::new());
+        let first = filesystem_store(Arc::clone(&root), "01234567890123456789012345678901");
+        first
+            .create("a-user", CreateSecretParams::new("openai_key", "sk-first"))
+            .await
+            .unwrap();
+        let second = filesystem_store(Arc::clone(&root), "abcdefghijklmnopqrstuvwxyzABCDEF");
+        second
+            .create("z-user", CreateSecretParams::new("openai_key", "sk-second"))
+            .await
+            .unwrap();
+
+        let error = first
+            .verify_can_decrypt_existing_secrets()
+            .await
+            .expect_err("scan must fail when any existing record uses a different key");
+        assert!(!format!("{error:?}").contains("sk-first"));
+        assert!(!format!("{error:?}").contains("sk-second"));
+        assert!(
+            root.get(&VirtualPath::new(key_check_path().unwrap().as_str()).unwrap())
+                .await
+                .unwrap()
+                .is_none(),
+            "failed pre-sentinel scan must not install the key-check sentinel"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_secret_store_key_check_rejects_concurrent_conflict_winner_with_wrong_key() {
+        let inner = Arc::new(InMemoryBackend::new());
+        let winner_crypto = Arc::new(
+            SecretsCrypto::new(SecretString::from("abcdefghijklmnopqrstuvwxyzABCDEF")).unwrap(),
+        );
+        let conflict_backend = Arc::new(KeyCheckConflictBackend::new(
+            Arc::clone(&inner),
+            Arc::new(EncryptedBackend::new(Arc::clone(&inner), winner_crypto)),
+        ));
+        let crypto = Arc::new(
+            SecretsCrypto::new(SecretString::from("01234567890123456789012345678901")).unwrap(),
+        );
+        let store = FilesystemSecretsStore::over_root(Arc::new(EncryptedBackend::new(
+            conflict_backend,
+            crypto,
+        )))
+        .unwrap();
+
+        let error = store
+            .verify_can_decrypt_existing_secrets()
+            .await
+            .expect_err("conflict winner written with another key must fail verification");
+        assert!(!format!("{error:?}").contains(SECRET_STORE_KEY_CHECK_PLAINTEXT));
+    }
+
+    #[tokio::test]
     async fn filesystem_secret_store_preserves_metadata_on_overwrite() {
         let root = Arc::new(InMemoryBackend::new());
         let store = filesystem_store(root, "01234567890123456789012345678901");
@@ -636,6 +823,27 @@ mod tests {
                 .unwrap()
                 .expose(),
             "second"
+        );
+    }
+
+    #[tokio::test]
+    async fn filesystem_secret_store_list_returns_metadata_when_another_secret_is_expired() {
+        let root = Arc::new(InMemoryBackend::new());
+        let store = filesystem_store(root, "01234567890123456789012345678901");
+        store
+            .create("tenant-user", CreateSecretParams::new("active", "secret"))
+            .await
+            .unwrap();
+        let mut expired = CreateSecretParams::new("expired", "secret");
+        expired.expires_at = Some(Utc::now() - Duration::seconds(1));
+        store.create("tenant-user", expired).await.unwrap();
+
+        let refs = store.list("tenant-user").await.unwrap();
+        assert_eq!(
+            refs.iter()
+                .map(|secret| secret.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["active", "expired"]
         );
     }
 
@@ -745,5 +953,112 @@ mod tests {
         let crypto = Arc::new(SecretsCrypto::new(SecretString::from(key)).unwrap());
         let root = Arc::new(EncryptedBackend::new(root, crypto));
         FilesystemSecretsStore::over_root(root).unwrap()
+    }
+
+    struct KeyCheckConflictBackend {
+        inner: Arc<InMemoryBackend>,
+        winner: Arc<EncryptedBackend<InMemoryBackend, SecretsCrypto>>,
+        triggered: std::sync::atomic::AtomicBool,
+    }
+
+    impl KeyCheckConflictBackend {
+        fn new(
+            inner: Arc<InMemoryBackend>,
+            winner: Arc<EncryptedBackend<InMemoryBackend, SecretsCrypto>>,
+        ) -> Self {
+            Self {
+                inner,
+                winner,
+                triggered: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RootFilesystem for KeyCheckConflictBackend {
+        fn capabilities(&self) -> ironclaw_filesystem::BackendCapabilities {
+            self.inner.capabilities()
+        }
+
+        async fn put(
+            &self,
+            path: &VirtualPath,
+            entry: Entry,
+            cas: CasExpectation,
+        ) -> Result<ironclaw_filesystem::RecordVersion, FilesystemError> {
+            if path.as_str() == key_check_path().unwrap().as_str()
+                && !self
+                    .triggered
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                let winner_entry =
+                    record_entry(SECRET_KEY_CHECK_KIND, &build_key_check_record()).unwrap();
+                self.winner
+                    .put(path, winner_entry, CasExpectation::Absent)
+                    .await?;
+                return Err(FilesystemError::VersionMismatch {
+                    path: path.clone(),
+                    expected: None,
+                    found: Some(ironclaw_filesystem::RecordVersion::from_backend(1)),
+                });
+            }
+            self.inner.put(path, entry, cas).await
+        }
+
+        async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+            self.inner.get(path).await
+        }
+
+        async fn list_dir(
+            &self,
+            path: &VirtualPath,
+        ) -> Result<Vec<ironclaw_filesystem::DirEntry>, FilesystemError> {
+            self.inner.list_dir(path).await
+        }
+
+        async fn query(
+            &self,
+            path: &VirtualPath,
+            filter: &Filter,
+            page: Page,
+        ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+            self.inner.query(path, filter, page).await
+        }
+
+        async fn query_indexed(
+            &self,
+            path: &VirtualPath,
+            filter: &Filter,
+            page: Page,
+        ) -> Result<Vec<ironclaw_filesystem::VersionedIndexedEntry>, FilesystemError> {
+            self.inner.query_indexed(path, filter, page).await
+        }
+
+        async fn ensure_index(
+            &self,
+            path: &VirtualPath,
+            spec: &ironclaw_filesystem::IndexSpec,
+        ) -> Result<(), FilesystemError> {
+            self.inner.ensure_index(path, spec).await
+        }
+
+        async fn stat(
+            &self,
+            path: &VirtualPath,
+        ) -> Result<ironclaw_filesystem::FileStat, FilesystemError> {
+            self.inner.stat(path).await
+        }
+
+        async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            self.inner.delete(path).await
+        }
+
+        async fn delete_if_version(
+            &self,
+            path: &VirtualPath,
+            version: ironclaw_filesystem::RecordVersion,
+        ) -> Result<(), FilesystemError> {
+            self.inner.delete_if_version(path, version).await
+        }
     }
 }

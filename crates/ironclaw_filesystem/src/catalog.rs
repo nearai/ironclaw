@@ -7,7 +7,8 @@ use crate::backend::{EventRecord, StorageTxn};
 use crate::{
     BackendCapabilities, BackendId, BackendKind, Capability, CasExpectation, ContentKind, DirEntry,
     Entry, FileStat, FilesystemError, Filter, IndexPolicy, IndexSpec, Page, RecordVersion,
-    RootFilesystem, SeqNo, StorageClass, VersionedEntry, path_prefix_matches,
+    RootFilesystem, SeqNo, StorageClass, VersionedEntry, VersionedIndexedEntry,
+    path_prefix_matches,
 };
 
 /// Trusted catalog record for one virtual filesystem mount.
@@ -250,6 +251,18 @@ impl RootFilesystem for CompositeRootFilesystem {
             .await
     }
 
+    async fn query_indexed(
+        &self,
+        path: &VirtualPath,
+        filter: &Filter,
+        page: Page,
+    ) -> Result<Vec<VersionedIndexedEntry>, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .query_indexed(path, filter, page)
+            .await
+    }
+
     async fn ensure_index(
         &self,
         path: &VirtualPath,
@@ -312,6 +325,17 @@ impl RootFilesystem for CompositeRootFilesystem {
 
     async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         self.matching_mount(path)?.backend.delete(path).await
+    }
+
+    async fn delete_if_version(
+        &self,
+        path: &VirtualPath,
+        version: RecordVersion,
+    ) -> Result<(), FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .delete_if_version(path, version)
+            .await
     }
 
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
