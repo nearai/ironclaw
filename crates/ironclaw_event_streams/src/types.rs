@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ironclaw_event_projections::{
     ProjectionCursor, ProjectionReplay, ProjectionScope, ProjectionSnapshot,
 };
@@ -65,6 +67,10 @@ impl SubscriberCapabilities {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PushCandidatesForUpdateRequest {
+    pub actor: TurnActor,
+    pub projection_scope: ProjectionScope,
+    pub view: ProjectionViewClass,
+    pub target: ProjectionTarget,
     pub scope: TurnScope,
     pub turn_run_id: Option<TurnRunId>,
     pub reply_target: ReplyTargetBindingRef,
@@ -97,7 +103,7 @@ pub enum ProjectionTarget {
 #[serde(rename_all = "snake_case")]
 pub enum ProjectionStreamItem {
     Snapshot(ProductProjectionEnvelope),
-    Update(ProductProjectionEnvelope),
+    Update(Arc<ProductProjectionEnvelope>),
     RebaseRequired {
         snapshot: Box<ProductProjectionEnvelope>,
         rebased_from: Option<ProjectionCursor>,
@@ -175,7 +181,7 @@ pub struct ProjectionSubscription {
     terminal_receiver: mpsc::Receiver<ProjectionStreamItem>,
     terminated: bool,
     observed_cursor: Option<ProjectionCursor>,
-    _admission: ProjectionStreamAdmissionPermit,
+    admission: Option<ProjectionStreamAdmissionPermit>,
 }
 
 impl std::fmt::Debug for ProjectionSubscription {
@@ -183,7 +189,10 @@ impl std::fmt::Debug for ProjectionSubscription {
         formatter
             .debug_struct("ProjectionSubscription")
             .field("receiver", &"<bounded_projection_stream>")
-            .field("admission", &"<projection_stream_admission_permit>")
+            .field(
+                "admission",
+                &"<optional_projection_stream_admission_permit>",
+            )
             .finish()
     }
 }
@@ -199,7 +208,7 @@ impl ProjectionSubscription {
             terminal_receiver,
             terminated: false,
             observed_cursor: None,
-            _admission: admission,
+            admission: Some(admission),
         }
     }
 
@@ -211,6 +220,7 @@ impl ProjectionSubscription {
             Ok(item) => {
                 self.terminated = true;
                 self.receiver.close();
+                self.release_admission();
                 return Some(with_observed_terminal_cursor(
                     item,
                     self.observed_cursor.as_ref(),
@@ -225,6 +235,7 @@ impl ProjectionSubscription {
                 if let Some(item) = terminal {
                     self.terminated = true;
                     self.receiver.close();
+                    self.release_admission();
                     Some(with_observed_terminal_cursor(item, self.observed_cursor.as_ref()))
                 } else {
                     let item = self.receiver.recv().await;
@@ -240,18 +251,28 @@ impl ProjectionSubscription {
             if let Some(cursor) = observable_cursor(&item) {
                 self.observed_cursor = Some(cursor);
             }
+            if matches!(item, ProjectionStreamItem::Lagged { .. }) {
+                self.terminated = true;
+                self.receiver.close();
+                self.release_admission();
+            }
             Some(item)
         } else {
+            self.terminated = true;
+            self.release_admission();
             None
         }
+    }
+
+    fn release_admission(&mut self) {
+        self.admission.take();
     }
 }
 
 fn observable_cursor(item: &ProjectionStreamItem) -> Option<ProjectionCursor> {
     match item {
-        ProjectionStreamItem::Snapshot(envelope) | ProjectionStreamItem::Update(envelope) => {
-            Some(envelope.cursor())
-        }
+        ProjectionStreamItem::Snapshot(envelope) => Some(envelope.cursor()),
+        ProjectionStreamItem::Update(envelope) => Some(envelope.cursor()),
         ProjectionStreamItem::RebaseRequired {
             snapshot_cursor, ..
         }

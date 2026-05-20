@@ -6,7 +6,7 @@ use std::{
 
 use async_trait::async_trait;
 use ironclaw_event_projections::ProjectionScope;
-use ironclaw_host_api::TenantId;
+use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_turns::TurnActor;
 use serde::{Deserialize, Serialize};
 
@@ -119,12 +119,12 @@ struct AdmissionState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct TenantAdmissionKey(String);
+struct TenantAdmissionKey(TenantId);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ActorAdmissionKey {
-    tenant_id: String,
-    user_id: String,
+    tenant_id: TenantId,
+    user_id: UserId,
 }
 
 impl InMemoryProjectionStreamAdmissionPolicy {
@@ -142,10 +142,10 @@ impl ProjectionStreamAdmissionPolicy for InMemoryProjectionStreamAdmissionPolicy
         &self,
         request: ProjectionStreamAdmissionRequest,
     ) -> Result<ProjectionStreamAdmissionPermit, ProjectionStreamError> {
-        let tenant_key = TenantAdmissionKey(request.tenant_id.to_string());
+        let tenant_key = TenantAdmissionKey(request.tenant_id.clone());
         let actor_key = ActorAdmissionKey {
-            tenant_id: request.tenant_id.to_string(),
-            user_id: request.actor.user_id.to_string(),
+            tenant_id: request.tenant_id.clone(),
+            user_id: request.actor.user_id.clone(),
         };
         let scope_key = scope_key(&request.scope, &request.target);
         let mut state = self

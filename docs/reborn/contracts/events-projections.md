@@ -145,9 +145,10 @@ Rules:
 
 - event ids are scoped; a user cannot replay another user's stream
 - replay gaps produce an explicit snapshot/rebase, not silent data loss
+- truncated snapshot/replay pages produce an explicit lag signal before live tailing, not a cursor treated as complete
 - access policy runs before snapshot, replay, or live subscription
 - long-lived subscriptions pass admission policy and use bounded buffering
-- external push/fanout candidates are selected separately from subscribers
+- external push/fanout candidates are selected separately from subscribers and require projection access authorization for the actor/scope/target being fanned out
 - transport-specific reconnect details do not leak into core runtime services
 
 ---

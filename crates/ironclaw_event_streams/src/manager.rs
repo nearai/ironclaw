@@ -149,6 +149,7 @@ impl EventStreamManager {
             .await?;
 
         let mut initial_items = Vec::new();
+        let mut initial_terminal_item = None;
         let live_floor_cursor = match request.after_cursor.clone() {
             None => {
                 let snapshot_envelope = self
@@ -163,6 +164,9 @@ impl EventStreamManager {
                 self.validation_cache
                     .validate(self.redaction_validator.as_ref(), &snapshot_envelope)?;
                 let cursor = snapshot_envelope.cursor();
+                if envelope_is_truncated(&snapshot_envelope) {
+                    initial_terminal_item = Some(truncated_lag_item(&cursor));
+                }
                 initial_items.push(ProjectionStreamItem::Snapshot(snapshot_envelope));
                 cursor
             }
@@ -179,16 +183,20 @@ impl EventStreamManager {
                 .await
             {
                 Ok(replay) => {
-                    let update_envelope = ProductProjectionEnvelope::ThreadUpdates(replay);
+                    let update_envelope =
+                        Arc::new(ProductProjectionEnvelope::ThreadUpdates(replay));
                     validate_stream_envelope(
-                        &update_envelope,
+                        update_envelope.as_ref(),
                         request.view,
                         &request.target,
                         &request.scope,
                     )?;
                     self.validation_cache
-                        .validate(self.redaction_validator.as_ref(), &update_envelope)?;
+                        .validate(self.redaction_validator.as_ref(), update_envelope.as_ref())?;
                     let cursor = update_envelope.cursor();
+                    if envelope_is_truncated(update_envelope.as_ref()) {
+                        initial_terminal_item = Some(truncated_lag_item(&cursor));
+                    }
                     initial_items.push(ProjectionStreamItem::Update(update_envelope));
                     cursor
                 }
@@ -205,6 +213,9 @@ impl EventStreamManager {
                     self.validation_cache
                         .validate(self.redaction_validator.as_ref(), &snapshot_envelope)?;
                     let snapshot_cursor = snapshot_envelope.cursor();
+                    if envelope_is_truncated(&snapshot_envelope) {
+                        initial_terminal_item = Some(truncated_lag_item(&snapshot_cursor));
+                    }
                     initial_items.push(ProjectionStreamItem::RebaseRequired {
                         snapshot_cursor: snapshot_cursor.clone(),
                         snapshot: Box::new(snapshot_envelope),
@@ -225,6 +236,7 @@ impl EventStreamManager {
             sender,
             terminal_sender,
             initial_items,
+            initial_terminal_item,
             live,
             SubscriptionForwardContext {
                 scope: request.scope,
@@ -246,6 +258,16 @@ impl EventStreamManager {
         &self,
         request: PushCandidatesForUpdateRequest,
     ) -> Result<Vec<OutboundPushCandidate>, ProjectionStreamError> {
+        self.authorize(
+            &request.actor,
+            &request.projection_scope,
+            request.view,
+            &request.target,
+        )
+        .await?;
+        validate_actor_stream_user(&request.actor, request.view, &request.projection_scope)?;
+        validate_product_thread_view(request.view, &request.target, &request.projection_scope)?;
+        validate_push_scope_matches_projection(&request)?;
         self.outbound_store
             .plan_push_targets(OutboundPushTargetRequest {
                 scope: request.scope,
@@ -321,6 +343,7 @@ async fn forward_subscription_items(
     sender: mpsc::Sender<ProjectionStreamItem>,
     terminal_sender: mpsc::Sender<ProjectionStreamItem>,
     initial_items: Vec<ProjectionStreamItem>,
+    initial_terminal_item: Option<ProjectionStreamItem>,
     mut live: broadcast::Receiver<Arc<ProductProjectionEnvelope>>,
     context: SubscriptionForwardContext,
 ) {
@@ -328,6 +351,10 @@ async fn forward_subscription_items(
         if sender.send(item).await.is_err() {
             return;
         }
+    }
+    if let Some(item) = initial_terminal_item {
+        let _ = sender.send(item).await;
+        return;
     }
 
     let mut last_delivered_cursor = context.live_floor_cursor;
@@ -346,7 +373,7 @@ async fn forward_subscription_items(
                     continue;
                 }
                 if validate_stream_envelope(
-                    &envelope,
+                    envelope.as_ref(),
                     context.view,
                     &context.target,
                     &context.scope,
@@ -382,7 +409,7 @@ async fn forward_subscription_items(
                         return;
                     }
                 }
-                match sender.try_send(ProjectionStreamItem::Update(envelope.as_ref().clone())) {
+                match sender.try_send(ProjectionStreamItem::Update(envelope)) {
                     Ok(()) => {
                         last_delivered_cursor = envelope_cursor;
                     }
@@ -407,6 +434,21 @@ async fn forward_subscription_items(
             }
             Err(broadcast::error::RecvError::Closed) => return,
         }
+    }
+}
+
+fn truncated_lag_item(snapshot_cursor: &ProjectionCursor) -> ProjectionStreamItem {
+    ProjectionStreamItem::Lagged {
+        reason: LagReason::SourceLagged,
+        snapshot_cursor: snapshot_cursor.clone(),
+    }
+}
+
+fn envelope_is_truncated(envelope: &ProductProjectionEnvelope) -> bool {
+    match envelope {
+        ProductProjectionEnvelope::ThreadSnapshot(snapshot) => snapshot.truncated,
+        ProductProjectionEnvelope::ThreadUpdates(replay) => replay.truncated,
+        ProductProjectionEnvelope::DeliveryStatus(_) | ProductProjectionEnvelope::Debug(_) => false,
     }
 }
 
@@ -516,6 +558,24 @@ fn validate_actor_stream_user(
             Err(ProjectionStreamError::AccessDenied)
         }
         _ => Ok(()),
+    }
+}
+
+fn validate_push_scope_matches_projection(
+    request: &PushCandidatesForUpdateRequest,
+) -> Result<(), ProjectionStreamError> {
+    match &request.target {
+        ProjectionTarget::Thread { thread_id }
+            if request.scope.tenant_id == request.projection_scope.stream.tenant_id
+                && request.scope.agent_id == request.projection_scope.stream.agent_id
+                && request.scope.project_id == request.projection_scope.read_scope.project_id
+                && Some(&request.scope.thread_id)
+                    == request.projection_scope.read_scope.thread_id.as_ref()
+                && thread_id == &request.scope.thread_id =>
+        {
+            Ok(())
+        }
+        _ => Err(ProjectionStreamError::AccessDenied),
     }
 }
 
