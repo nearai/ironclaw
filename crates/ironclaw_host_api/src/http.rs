@@ -46,13 +46,12 @@ pub struct RuntimeHttpEgressRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeCredentialInjection {
     pub handle: SecretHandle,
-    #[serde(default)]
     pub source: RuntimeCredentialSource,
     pub target: RuntimeCredentialTarget,
     pub required: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum RuntimeCredentialSource {
     /// Lease and consume material directly from the scoped secret store.
@@ -60,7 +59,6 @@ pub enum RuntimeCredentialSource {
     /// This is the legacy/test compatibility path for host-derived credentials
     /// that are not backed by an already-satisfied authorization obligation.
     /// Production runtime tool egress must use [`Self::StagedObligation`].
-    #[default]
     SecretStoreLease,
     /// Consume material staged by an `InjectSecretOnce` obligation handler.
     ///

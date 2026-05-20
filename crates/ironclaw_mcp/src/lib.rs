@@ -18,8 +18,8 @@ use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, NetworkMethod, NetworkPolicy, ResourceEstimate, ResourceReservation,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialInjection,
-    RuntimeCredentialSource, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -364,11 +364,11 @@ where
         request: &McpClientRequest,
         session_key: &McpHostHttpSessionKey,
         id: Option<u64>,
-        method: &str,
+        method: McpJsonRpcMethod,
         params: Option<Value>,
     ) -> Result<McpJsonRpcExchange, String> {
         let url = request.url.as_deref().ok_or_else(request_denied)?;
-        let body = encode_json_rpc_request(id, method, params)?;
+        let body = encode_json_rpc_request(id, method.as_str(), params)?;
         let mut headers = vec![
             ("Content-Type".to_string(), "application/json".to_string()),
             (
@@ -393,8 +393,7 @@ where
 
         let response_body_limit =
             effective_mcp_response_body_limit(plan.response_body_limit, request.max_output_bytes);
-        let credential_injections =
-            mcp_credentials_for_exchange(method, plan.credential_injections);
+        let credential_injections = method.credential_injections(plan.credential_injections);
         let response = self
             .http
             .request(McpHostHttpRequest {
@@ -502,7 +501,7 @@ where
             &request,
             &session_key,
             Some(self.next_request_id()),
-            "initialize",
+            McpJsonRpcMethod::Initialize,
             Some(json_rpc_initialize_params()),
         )?;
         accumulate_usage(&mut usage, initialize.usage);
@@ -514,7 +513,7 @@ where
             &request,
             &session_key,
             None,
-            "notifications/initialized",
+            McpJsonRpcMethod::InitializedNotification,
             None,
         )?;
         accumulate_usage(&mut usage, initialized.usage);
@@ -527,7 +526,7 @@ where
             &request,
             &session_key,
             Some(self.next_request_id()),
-            "tools/call",
+            McpJsonRpcMethod::ToolsCall,
             Some(serde_json::json!({
                 "name": tool_name,
                 "arguments": request.input,
@@ -563,29 +562,37 @@ struct McpJsonRpcExchange {
     usage: ResourceUsage,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum McpJsonRpcMethod {
+    Initialize,
+    InitializedNotification,
+    ToolsCall,
+}
+
+impl McpJsonRpcMethod {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Initialize => "initialize",
+            Self::InitializedNotification => "notifications/initialized",
+            Self::ToolsCall => "tools/call",
+        }
+    }
+
+    fn credential_injections(
+        self,
+        credential_injections: Vec<RuntimeCredentialInjection>,
+    ) -> Vec<RuntimeCredentialInjection> {
+        match self {
+            Self::ToolsCall => credential_injections,
+            Self::Initialize | Self::InitializedNotification => Vec::new(),
+        }
+    }
+}
+
 fn mcp_client_http_error(error: McpHostHttpError) -> String {
     match error {
         McpHostHttpError::Egress { reason } => reason,
     }
-}
-
-fn mcp_credentials_for_exchange(
-    method: &str,
-    credential_injections: Vec<RuntimeCredentialInjection>,
-) -> Vec<RuntimeCredentialInjection> {
-    if method == "tools/call" {
-        return credential_injections;
-    }
-
-    credential_injections
-        .into_iter()
-        .filter(|injection| {
-            !matches!(
-                injection.source,
-                RuntimeCredentialSource::StagedObligation { .. }
-            )
-        })
-        .collect()
 }
 
 fn effective_mcp_response_body_limit(host_limit: Option<u64>, client_limit: u64) -> Option<u64> {

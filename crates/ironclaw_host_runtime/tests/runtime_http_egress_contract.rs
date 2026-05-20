@@ -751,6 +751,68 @@ fn host_http_egress_injects_leased_credentials_and_redacts_errors() {
 }
 
 #[test]
+fn request_policy_fallback_accepts_secret_store_lease_for_legacy_tests() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let secrets = InMemorySecretStore::new();
+    let scope = sample_scope();
+    let handle = SecretHandle::new("api-token").unwrap();
+    block_on_test(secrets.put(
+        scope.clone(),
+        handle.clone(),
+        SecretMaterial::from("sk-test-secret"),
+    ))
+    .unwrap();
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(network, secrets);
+
+    service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope,
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle,
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect("legacy/test fallback keeps direct leases available outside production wiring");
+
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0]
+            .headers
+            .iter()
+            .find(|(name, _)| name == "authorization"),
+        Some(&(
+            "authorization".to_string(),
+            "Bearer sk-test-secret".to_string()
+        ))
+    );
+}
+
+#[test]
 fn host_http_egress_requires_available_required_credentials_before_network() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,
@@ -1532,7 +1594,18 @@ async fn mcp_http_client_cannot_use_direct_secret_store_lease_with_production_eg
         .expect_err("production MCP egress must require staged credentials");
 
     assert_eq!(error, "credential_unavailable");
-    assert!(network_recorder.lock().unwrap().is_empty());
+    let requests = network_recorder.lock().unwrap();
+    assert_eq!(
+        requests.len(),
+        2,
+        "MCP handshake may run unauthenticated, but credentials must not be exposed before tools/call"
+    );
+    assert!(requests.iter().all(|request| {
+        !request
+            .headers
+            .iter()
+            .any(|(name, _)| name == "authorization")
+    }));
 }
 
 #[test]
