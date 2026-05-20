@@ -6,7 +6,11 @@ use chrono::Utc;
 #[cfg(feature = "postgres")]
 use deadpool_postgres::tokio_postgres;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_host_api::{AgentId, EffectKind, PackageId, ProjectId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{
+    AgentId, AuditMode, DeploymentMode, EffectKind, FilesystemBackendKind, NetworkMode, PackageId,
+    ProcessBackendKind, ProjectId, RuntimeProfile, SecretMode, TenantId, ThreadId, UserId,
+    runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
+};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{
     SchedulerTurnRunWakeNotifier, TurnRunExecutor, TurnRunExecutorError, TurnRunScheduler,
@@ -64,6 +68,21 @@ fn production_trust_policy() -> Arc<HostTrustPolicy> {
         ]))])
         .unwrap(),
     )
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+fn production_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    }
 }
 
 #[cfg(feature = "libsql")]
@@ -275,13 +294,43 @@ async fn production_requires_live_turn_wake_notifier() {
             None,
             test_master_key(),
         )
-        .with_production_trust_policy(production_trust_policy()),
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy()),
     )
     .await;
 
     assert!(matches!(
         result,
         Err(RebornBuildError::MissingTurnRunWakeNotifier)
+    ));
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_requires_runtime_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let (notifier, handle) = live_wake_notifier();
+
+    let result = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            db,
+            dir.path().join("events.db").to_string_lossy(),
+            None,
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_turn_run_wake_notifier(notifier),
+    )
+    .await;
+
+    handle.shutdown().await;
+
+    assert!(matches!(
+        result,
+        Err(RebornBuildError::MissingRuntimePolicy)
     ));
 }
 
@@ -306,6 +355,7 @@ async fn production_rejects_memory_libsql_event_store() {
             test_master_key(),
         )
         .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
     )
     .await;
@@ -336,6 +386,7 @@ async fn migration_dry_run_validates_libsql_shape() {
             test_master_key(),
         )
         .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
     )
     .await
@@ -384,6 +435,7 @@ async fn migration_dry_run_validates_postgres_planned_turn_profile() {
             test_master_key(),
         )
         .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
         .with_turn_run_wake_notifier(notifier),
     )
     .await

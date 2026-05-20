@@ -672,6 +672,45 @@ async fn visible_surface_version_changes_with_schema_and_policy_changes() {
 }
 
 #[tokio::test]
+async fn visible_surface_version_changes_with_runtime_policy_changes() {
+    let context = context_with_grants([(
+        capability_id("echo.say"),
+        vec![EffectKind::DispatchCapability],
+    )]);
+    let trust_policy = Arc::new(trust_policy_for([(
+        "echo",
+        "/system/extensions/echo/manifest.toml",
+        vec![EffectKind::DispatchCapability],
+    )]));
+    let runtime_a = runtime_with(
+        registry_from_manifests([(ECHO_MANIFEST, "/system/extensions/echo")]),
+        Arc::new(GrantAuthorizer),
+    )
+    .with_trust_policy(Arc::clone(&trust_policy));
+    let runtime_b = runtime_with(
+        registry_from_manifests([(ECHO_MANIFEST, "/system/extensions/echo")]),
+        Arc::new(GrantAuthorizer),
+    )
+    .with_trust_policy(trust_policy)
+    .with_runtime_policy(local_dev_runtime_policy());
+
+    let surface_a = runtime_a
+        .visible_capabilities(visible_request(context.clone()))
+        .await
+        .unwrap();
+    let surface_b = runtime_b
+        .visible_capabilities(visible_request(context))
+        .await
+        .unwrap();
+
+    assert_eq!(visible_ids(&surface_a), visible_ids(&surface_b));
+    assert_ne!(
+        surface_a.version, surface_b.version,
+        "surface version must change when runtime policy changes even if visible descriptors do not"
+    );
+}
+
+#[tokio::test]
 async fn visible_surface_version_changes_with_returned_descriptor_metadata() {
     let context = context_with_grants([(
         capability_id("echo.say"),
@@ -1016,6 +1055,20 @@ fn visible_ids(surface: &VisibleCapabilitySurface) -> Vec<CapabilityId> {
         .iter()
         .map(|capability| capability.descriptor.id.clone())
         .collect()
+}
+
+fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    }
 }
 
 fn hot_catalog_fixture(
