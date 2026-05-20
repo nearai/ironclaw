@@ -129,7 +129,13 @@ fn default_priority() -> HookPriority {
 /// `HookBindingScope::OwnCapabilities`. See finding #2.
 fn point_has_capability_context(point: HookPointSpec) -> bool {
     match point {
-        HookPointSpec::BeforeCapability | HookPointSpec::AfterCapability => true,
+        // `EventTriggered` hooks see `event.provider` (and fall back to the
+        // registry-resolved owning extension for hook-lifecycle events via
+        // `scope_provider_for_runtime_event`), so `OwnCapabilities` scope is
+        // meaningful at this point.
+        HookPointSpec::BeforeCapability
+        | HookPointSpec::AfterCapability
+        | HookPointSpec::EventTriggered => true,
         HookPointSpec::BeforePrompt
         | HookPointSpec::AfterModel
         | HookPointSpec::AfterCheckpoint => false,
@@ -159,6 +165,11 @@ pub enum HookPointSpec {
 pub struct HookRegistry {
     by_point: HashMap<HookPointSpec, Vec<HookBinding>>,
     hook_index: HashMap<HookId, (HookPointSpec, usize)>,
+    /// Index from event kind to the hook ids of event-triggered bindings
+    /// declaring that kind in their `event_kind_filter`. Populated at insert
+    /// time so the event dispatch path is O(matches) rather than O(all
+    /// event-triggered bindings) per event (PR #3640 finding C4).
+    event_kind_index: HashMap<RuntimeEventKind, Vec<HookId>>,
 }
 
 impl HookRegistry {
@@ -244,6 +255,14 @@ impl HookRegistry {
                 binding.hook_id
             )));
         }
+        if let (HookPointSpec::EventTriggered, Some(kind)) =
+            (binding.point, binding.event_kind_filter)
+        {
+            self.event_kind_index
+                .entry(kind)
+                .or_default()
+                .push(binding.hook_id);
+        }
         let hook_id = binding.hook_id;
         let point = binding.point;
         let bindings = self.by_point.entry(point).or_default();
@@ -278,6 +297,27 @@ impl HookRegistry {
             .into_iter()
             .flat_map(|v| v.iter())
             .filter(|b| !b.poisoned)
+    }
+
+    /// Active (non-poisoned) event-triggered bindings whose
+    /// `event_kind_filter` matches `kind`. Uses the per-kind index built at
+    /// install time, so dispatch is `O(matches)` rather than scanning every
+    /// event-triggered binding for every event (PR #3640 finding C4).
+    pub fn active_for_event_kind(
+        &self,
+        kind: RuntimeEventKind,
+    ) -> impl Iterator<Item = &HookBinding> {
+        let hook_ids = self.event_kind_index.get(&kind);
+        let bindings = self.by_point.get(&HookPointSpec::EventTriggered);
+        hook_ids
+            .into_iter()
+            .flat_map(move |ids| ids.iter())
+            .filter_map(move |hook_id| {
+                bindings
+                    .into_iter()
+                    .flat_map(|v| v.iter())
+                    .find(|b| b.hook_id == *hook_id && !b.poisoned)
+            })
     }
 
     /// Count of bindings whose `owning_extension` matches `extension`,

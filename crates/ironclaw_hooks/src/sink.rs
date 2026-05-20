@@ -313,30 +313,14 @@ impl ObserverSink for RecordingObserverSink {
     }
 }
 
-/// Event-triggered observer sink — intentionally mirrors [`ObserverSink`]
-/// and intentionally does not expose gate or mutator methods.
-pub trait EventTriggeredObserverSink: Send {
-    fn note(&mut self, category: NoteCategory, summary: &'static str);
-}
-
-pub(crate) struct RecordingEventTriggeredObserverSink {
-    pub(crate) facts: Vec<ObserverFact>,
-}
-
-impl RecordingEventTriggeredObserverSink {
-    pub(crate) fn new() -> Self {
-        Self { facts: Vec::new() }
-    }
-}
-
-impl EventTriggeredObserverSink for RecordingEventTriggeredObserverSink {
-    fn note(&mut self, category: NoteCategory, summary: &'static str) {
-        self.facts.push(ObserverFact::note(
-            category,
-            SanitizedReason::from_static(summary),
-        ));
-    }
-}
+// Event-triggered hooks observe durable runtime events after the originating
+// loop work has already happened. Their sink surface is intentionally
+// identical to [`ObserverSink`] — same observer-only authority, same
+// `note(category, summary)` primitive — so the trait below was removed and
+// the event-triggered hook trait now takes `&mut dyn ObserverSink` directly
+// (PR #3640 finding F14). The duplicate trait risked silent drift, where a
+// future change to one surface (e.g., a new gate method on the inline
+// observer) would not surface as a compile error on the other.
 
 // ─── Hook author traits (per point × tier) ─────────────────────────────────
 
@@ -397,11 +381,7 @@ pub trait ObserverHook: Send + Sync {
 /// replay cursor that caused the hook to fire.
 #[async_trait]
 pub trait EventTriggeredHook: Send + Sync {
-    async fn observe(
-        &self,
-        ctx: &EventTriggeredHookContext<'_>,
-        sink: &mut dyn EventTriggeredObserverSink,
-    );
+    async fn observe(&self, ctx: &EventTriggeredHookContext<'_>, sink: &mut dyn ObserverSink);
 }
 
 // ─── Dispatcher access to the internal decision ────────────────────────────
@@ -532,16 +512,17 @@ mod tests {
 
     #[tokio::test]
     async fn event_triggered_sink_is_observer_only_at_type_level() {
-        // Compile-time check: `EventTriggeredObserverSink` exposes only the
-        // observer note surface. A call like `sink.deny("nope")` would fail
-        // to compile here, which is the invariant this test documents.
+        // Compile-time check: the event-triggered hook trait takes
+        // `&mut dyn ObserverSink`, which exposes only the observer note
+        // surface. A call like `sink.deny("nope")` would fail to compile
+        // here, which is the invariant this test documents.
         struct EventOnly;
         #[async_trait]
         impl EventTriggeredHook for EventOnly {
             async fn observe(
                 &self,
                 _ctx: &EventTriggeredHookContext<'_>,
-                sink: &mut dyn EventTriggeredObserverSink,
+                sink: &mut dyn ObserverSink,
             ) {
                 sink.note(crate::kinds::observer::NoteCategory::HookFired, "observed");
             }
@@ -565,10 +546,11 @@ mod tests {
             tenant_id: tenant,
             event: &event,
             event_cursor: ironclaw_events::EventCursor::new(1),
+            is_replay: false,
         };
-        let mut recording = RecordingEventTriggeredObserverSink::new();
+        let mut recording = RecordingObserverSink::new();
         EventOnly
-            .observe(&ctx, &mut recording as &mut dyn EventTriggeredObserverSink)
+            .observe(&ctx, &mut recording as &mut dyn ObserverSink)
             .await;
         assert_eq!(recording.facts.len(), 1);
     }

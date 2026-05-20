@@ -60,9 +60,8 @@ use ironclaw_hooks::predicate::{
 };
 use ironclaw_hooks::registry::{HookBindingScope, HookPointSpec, HookRegistry};
 use ironclaw_hooks::sink::{
-    EventTriggeredHook, EventTriggeredObserverSink, ObserverHook, ObserverSink,
-    PrivilegedBeforeCapabilityHook, PrivilegedGateSink, RestrictedBeforeCapabilityHook,
-    RestrictedGateSink,
+    EventTriggeredHook, ObserverHook, ObserverSink, PrivilegedBeforeCapabilityHook,
+    PrivilegedGateSink, RestrictedBeforeCapabilityHook, RestrictedGateSink,
 };
 use ironclaw_host_api::{
     AgentId, CapabilityId, InvocationId, ProjectId, ResourceScope, RuntimeKind, TenantId, ThreadId,
@@ -462,11 +461,7 @@ struct RecordingEventTriggeredHook {
 
 #[async_trait]
 impl EventTriggeredHook for RecordingEventTriggeredHook {
-    async fn observe(
-        &self,
-        ctx: &EventTriggeredHookContext<'_>,
-        sink: &mut dyn EventTriggeredObserverSink,
-    ) {
+    async fn observe(&self, ctx: &EventTriggeredHookContext<'_>, sink: &mut dyn ObserverSink) {
         if let Some(delay) = self.delay {
             tokio::time::sleep(delay).await;
         }

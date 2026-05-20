@@ -31,8 +31,8 @@ use crate::registry::{HookBinding, HookBindingScope, HookPointSpec, HookRegistry
 use crate::sink::EventTriggeredHook;
 use crate::sink::{
     GateSinkState, ObserverHook, PrivilegedBeforeCapabilityHook, PrivilegedBeforePromptHook,
-    RecordingEventTriggeredObserverSink, RecordingGateSink, RecordingMutatorSink,
-    RecordingObserverSink, RestrictedBeforeCapabilityHook, RestrictedBeforePromptHook,
+    RecordingGateSink, RecordingMutatorSink, RecordingObserverSink, RestrictedBeforeCapabilityHook,
+    RestrictedBeforePromptHook,
 };
 use crate::telemetry;
 use crate::trust::HookTrustClass;
@@ -646,6 +646,14 @@ impl HookDispatcher {
                      observers"
                 )));
             }
+            HookPointSpec::EventTriggered => {
+                return Err(crate::error::HookError::RegistryConstruction(
+                    "event-triggered hooks must be installed via \
+                     `install_event_triggered`/`install_event_triggered_impl`, \
+                     not `install_observer_hook`"
+                        .to_string(),
+                ));
+            }
         }
         let binding = HookBinding {
             hook_id,
@@ -1146,14 +1154,38 @@ impl HookDispatcher {
         event_cursor: EventCursor,
         event: &RuntimeEvent,
     ) -> ObserverDispatchOutcome {
-        let (ordered, mut poisoned) =
-            self.ordered_bindings_with_poison_snapshot(HookPointSpec::EventTriggered);
+        self.dispatch_event_triggered_at_inner(tenant, event_cursor, event, false)
+            .await
+    }
+
+    /// Replay variant of [`Self::dispatch_event_triggered_at`]. Hooks receive
+    /// the same context with `is_replay = true` so observer side effects can
+    /// dedupe against `event.event_id` (PR #3640 finding A3).
+    pub async fn dispatch_event_triggered_replay_at(
+        &self,
+        tenant: ironclaw_host_api::TenantId,
+        event_cursor: EventCursor,
+        event: &RuntimeEvent,
+    ) -> ObserverDispatchOutcome {
+        self.dispatch_event_triggered_at_inner(tenant, event_cursor, event, true)
+            .await
+    }
+
+    async fn dispatch_event_triggered_at_inner(
+        &self,
+        tenant: ironclaw_host_api::TenantId,
+        event_cursor: EventCursor,
+        event: &RuntimeEvent,
+        is_replay: bool,
+    ) -> ObserverDispatchOutcome {
+        let (ordered, mut poisoned) = self.bindings_for_event_kind_with_poison_snapshot(event.kind);
         let mut facts = Vec::new();
         let mut failures = Vec::new();
         let ctx = EventTriggeredHookContext {
             tenant_id: tenant,
             event,
             event_cursor,
+            is_replay,
         };
         let event_scope_provider = self.scope_provider_for_runtime_event(event);
 
@@ -1161,9 +1193,9 @@ impl HookDispatcher {
             if poisoned.contains(&binding.hook_id) {
                 continue;
             }
-            if binding.event_kind_filter != Some(event.kind) {
-                continue;
-            }
+            // event_kind_filter is enforced by `bindings_for_event_kind`'s
+            // per-kind index (PR #3640 finding C4) — no per-iteration check
+            // needed here.
             if !binding.scope.permits(
                 binding.owning_extension.as_ref(),
                 event_scope_provider.as_ref(),
@@ -1259,6 +1291,30 @@ impl HookDispatcher {
             .collect();
         out.sort_by_key(|(k, _)| *k);
         out
+    }
+
+    /// Event-triggered bindings whose `event_kind_filter` matches `kind`,
+    /// pre-filtered through the registry's per-kind index (PR #3640 finding
+    /// C4), alongside an O(1)-lookup `HashSet<HookId>` snapshotting the
+    /// currently-poisoned bindings. The returned `Vec` is ordered by
+    /// `(phase, priority, hook_id)` so the dispatch loop preserves the same
+    /// deterministic ordering as inline-point dispatch. Matches the snapshot
+    /// pattern used by `ordered_bindings_with_poison_snapshot` so
+    /// event-triggered dispatch shares the O(H) hot-path behaviour with
+    /// inline observer dispatch.
+    fn bindings_for_event_kind_with_poison_snapshot(
+        &self,
+        kind: RuntimeEventKind,
+    ) -> (Vec<(HookOrderKey, HookBinding)>, HashSet<HookId>) {
+        let registry = self.registry.lock().expect("hooks registry mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
+        let mut out: Vec<_> = registry
+            .active_for_event_kind(kind)
+            .cloned()
+            .map(|b| (HookOrderKey::new(b.phase, b.priority, b.hook_id), b))
+            .collect();
+        out.sort_by_key(|(k, _)| *k);
+        let poisoned: HashSet<HookId> = registry.poisoned_ids().collect();
+        (out, poisoned)
     }
 
     async fn run_before_capability_hook(
@@ -1539,7 +1595,7 @@ impl HookDispatcher {
         let run = async {
             match hook {
                 EventTriggeredHookImpl::Any(h) => {
-                    let mut sink = RecordingEventTriggeredObserverSink::new();
+                    let mut sink = RecordingObserverSink::new();
                     AssertUnwindSafe(h.observe(ctx, &mut sink))
                         .catch_unwind()
                         .await
@@ -2522,6 +2578,7 @@ mod tests {
                 phase: HookPhase::Telemetry,
                 priority: HookPriority::DEFAULT,
                 point: HookPointSpec::AfterCapability,
+                event_kind_filter: None,
                 owning_extension: Some(owner.clone()),
                 scope: HookBindingScope::OwnCapabilities,
                 poisoned: false,

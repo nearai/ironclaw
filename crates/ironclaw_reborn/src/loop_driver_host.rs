@@ -67,7 +67,7 @@ use ironclaw_turns::{
     },
     runner::ClaimedTurnRun,
 };
-use tokio::{sync::Notify, task::JoinHandle};
+use tokio::task::JoinHandle;
 
 #[async_trait]
 pub trait LoopCapabilityPortFactory: Send + Sync {

@@ -966,6 +966,7 @@ async fn publish_loop_milestone_projects_hook_dispatched_to_runtime_event() {
             hook_id: HOOK_HEX_ID.to_string(),
             point: "before_capability".to_string(),
             trust_class: "installed".to_string(),
+            owning_extension: None,
         },
     ))
     .await
@@ -1085,6 +1086,7 @@ async fn publish_loop_milestone_projects_hook_failed_with_disposition() {
             hook_id: HOOK_HEX_ID.to_string(),
             category: "timeout".to_string(),
             disposition: "fail_closed".to_string(),
+            owning_extension: None,
         },
     ))
     .await

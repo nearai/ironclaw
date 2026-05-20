@@ -48,23 +48,28 @@ has already finished).
 // in ironclaw_hooks::points::event_triggered
 //
 // NOTE: this surface sketch uses the full `RuntimeEvent` for narrative
-// brevity; the cross-cutting constraints below recommend a narrowed
-// `HookObservableEvent` projection for Installed-tier hooks, tracked
-// as a Phase 5 follow-up (see "Phase 5 implementation notes" /
-// "Cross-cutting constraints" below).
+// brevity. The longer-term target is a narrowed `HookObservableEvent`
+// projection that strips dispatcher-internal `ResourceScope` fields
+// (tenant_id/user_id/agent_id/project_id/mission_id/thread_id/
+// invocation_id) for Installed-tier hooks. Tracked as issue #3690.
 pub struct EventHookContext<'a> {
     pub event: &'a RuntimeEvent, // or &'a HookObservableEvent post-narrowing
     pub event_cursor: EventCursor,
     pub tenant_id: TenantId,
+    /// `true` when the host is re-firing a previously delivered event
+    /// after a restart (at-least-once replay). Side-effecting hooks
+    /// dedupe by `event.event_id` to avoid double notifications.
+    pub is_replay: bool,
 }
 
-// Sink mirrors `ObserverSink::note(category, summary)` (the only
-// observer-sink primitive that exists today). Reborn's
-// `EventTriggeredObserverSink` is the same shape. No `allow`, no
-// `deny`, no `patch`.
+// Sink is `ObserverSink::note(category, summary)` — the same trait the
+// inline observer point uses. The event-triggered surface intentionally
+// reuses `ObserverSink` rather than declaring a duplicate trait so the
+// two cannot drift (PR #3640 finding F14). No `allow`, no `deny`, no
+// `patch`.
 #[async_trait]
 pub trait EventTriggeredHook: Send + Sync {
-    async fn handle(
+    async fn observe(
         &self,
         ctx: &EventHookContext<'_>,
         sink: &mut dyn ObserverSink,
@@ -103,8 +108,16 @@ emit_audit.summary = "polymarket hook failed"
   implementation (below) replays at-least-once from the persisted
   cursor; exact-once acknowledgement is a future ratification slice.
   Events emitted *before* a subscription's `start_cursor` are not
-  delivered — operators must persist the cursor before shutdown to
-  avoid gaps.
+  delivered. Concretely: the contract is at-least-once, not at-most-once;
+  on a restart from the same cursor, every event with cursor
+  `>= start_cursor` is replayed. Operators that need exactly-once
+  delivery must commit progress at hook completion and resume from
+  `last_committed_cursor + 1`. Hooks treat `ctx.is_replay = true` as a
+  signal to dedupe by `event.event_id` rather than re-firing side
+  effects. (The earlier wording "lost events acceptable" was a
+  shorthand for "events before `start_cursor` are not replayed"; it is
+  not a contradiction with the at-least-once replay semantics — see
+  PR #3640 cluster G.)
 
 ### Phase 5 implementation notes
 
@@ -117,10 +130,12 @@ emit_audit.summary = "polymarket hook failed"
   while the host is alive. Restarting from the same cursor intentionally
   gives at-least-once replay; exact-once acknowledgement is deferred.
 - Hook dispatch receives the durable `RuntimeEvent` directly. `ironclaw_hooks`
-  already depends on `ironclaw_events` (since the milestone projection landed
-  in PR #3573), so the dep direction is established; what Phase 5 adds is the
-  *consumer* side of that vocabulary. The hook crate still does not depend on
-  host runtime, dispatcher, secrets, network, WASM, or Reborn internals.
+  depends on `ironclaw_events` as of PR #3640 — the milestone projection in
+  PR #3573 covered `ironclaw_reborn`'s milestone wiring, but the hook crate
+  itself did not gain the dep until the event-triggered consumer landed. The
+  hook crate still does not depend on host runtime, dispatcher, secrets,
+  network, WASM, or Reborn internals; the `ironclaw_architecture` boundary
+  test enforces this.
 
 ## Cross-cutting constraints
 
@@ -138,9 +153,11 @@ emit_audit.summary = "polymarket hook failed"
   reuse of the existing scope-filter code).
 - **No re-emission**: event-triggered hooks must not be allowed to
   emit a new `RuntimeEvent` that would re-trigger themselves. The
-  observer-only restriction handles this by construction (sinks
-  can `note_fact` / `emit_audit` but those are scoped to the hook's
-  own audit substrate, not the runtime event log).
+  observer-only restriction handles this by construction: the
+  `ObserverSink::note(category, summary)` primitive writes to the
+  hook's audit substrate, not the runtime event log. (Earlier drafts
+  referenced `note_fact` / `emit_audit`; those names never landed —
+  the actual surface is `note`.)
 
 ## What this PR does NOT do
 
