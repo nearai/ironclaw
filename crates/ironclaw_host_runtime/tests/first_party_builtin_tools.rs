@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     net::{IpAddr, Ipv4Addr},
     path::Path,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     thread,
     time::Duration,
 };
@@ -169,7 +169,7 @@ async fn builtin_shell_invokes_copied_shell_core_through_host_runtime() {
 #[tokio::test]
 async fn builtin_shell_reuses_v1_shell_validation() {
     for input in [
-        json!({"command": "cat ~/.ssh/id_rsa"}),
+        json!({"command": "cat ~/server.key"}),
         json!({"command": "printf '\\x65\\x63\\x68\\x6f hi'|dash"}),
         json!({"command": "wc < ~/server.key"}),
     ] {
@@ -217,6 +217,67 @@ async fn builtin_shell_maps_timeout_and_spawn_failures() {
     .await
     .unwrap_err();
     assert_eq!(spawn, RuntimeFailureKind::Backend);
+}
+
+#[tokio::test]
+async fn builtin_shell_truncates_large_output_without_output_overflow() {
+    let output = invoke_shell(json!({
+        "command": "i=0; while [ $i -lt 70000 ]; do printf x; i=$((i+1)); done",
+        "timeout": 5
+    }))
+    .await
+    .unwrap();
+
+    let output = output["output"].as_str().expect("shell output is text");
+    assert!(output.contains("[truncated"));
+    assert!(output.len() <= 66_000);
+}
+
+#[tokio::test]
+async fn builtin_shell_does_not_inherit_unlisted_parent_env() {
+    static ENV_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
+    let _guard = ENV_LOCK.lock().await;
+
+    // SAFETY: test uses a crate-local mutex and a unique environment variable;
+    // no production code depends on this key.
+    unsafe {
+        std::env::set_var("IRONCLAW_SHELL_SECRET_TEST", "must_not_leak");
+    }
+    let output = invoke_shell(json!({
+        "command": "printf ${IRONCLAW_SHELL_SECRET_TEST:-missing}"
+    }))
+    .await;
+    // SAFETY: clears only the test-owned key set above.
+    unsafe {
+        std::env::remove_var("IRONCLAW_SHELL_SECRET_TEST");
+    }
+
+    let output = output.unwrap();
+    assert_eq!(output["output"], json!("missing"));
+}
+
+#[tokio::test]
+async fn builtin_shell_rejects_scoped_mount_workdir_until_process_backend_handles_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut permissions = MountPermissions::read_write();
+    permissions.execute = true;
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), permissions);
+    let runtime = runtime_with_filesystem(filesystem);
+    let error = invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "pwd", "workdir": "/workspace"}),
+        execution_context_with_mounts_and_network(
+            [SHELL_CAPABILITY_ID],
+            mounts,
+            shell_test_policy(),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Backend);
 }
 
 #[tokio::test]
@@ -1981,10 +2042,20 @@ fn execution_context_with_network<const N: usize>(
     grants: [&str; N],
     network: NetworkPolicy,
 ) -> ExecutionContext {
+    execution_context_with_mounts_and_network(grants, MountView::default(), network)
+}
+
+fn execution_context_with_mounts_and_network<const N: usize>(
+    grants: [&str; N],
+    mounts: MountView,
+    network: NetworkPolicy,
+) -> ExecutionContext {
     let capability_set = CapabilitySet {
         grants: grants
             .into_iter()
-            .map(|grant| dispatch_grant_with_network(grant, network.clone()))
+            .map(|grant| {
+                dispatch_grant_with_mounts_and_network(grant, mounts.clone(), network.clone())
+            })
             .collect(),
     };
     ExecutionContext::local_default(
@@ -1993,7 +2064,7 @@ fn execution_context_with_network<const N: usize>(
         RuntimeKind::FirstParty,
         TrustClass::FirstParty,
         capability_set,
-        MountView::default(),
+        mounts,
     )
     .unwrap()
 }
@@ -2004,10 +2075,6 @@ fn dispatch_grant(capability: &str) -> CapabilityGrant {
 
 fn dispatch_grant_with_mounts(capability: &str, mounts: MountView) -> CapabilityGrant {
     dispatch_grant_with_mounts_and_network(capability, mounts, NetworkPolicy::default())
-}
-
-fn dispatch_grant_with_network(capability: &str, network: NetworkPolicy) -> CapabilityGrant {
-    dispatch_grant_with_mounts_and_network(capability, MountView::default(), network)
 }
 
 fn dispatch_grant_with_mounts_and_network(

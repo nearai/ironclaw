@@ -256,20 +256,27 @@ fn validate_command(cmd: &str, allow_dangerous: bool) -> Result<(), ShellExecuti
 }
 
 fn blocked_reason(cmd: &str, allow_dangerous: bool) -> Option<&'static str> {
-    let normalized = cmd.to_lowercase();
+    let normalized = normalize_command_text(cmd);
     for blocked in BLOCKED_COMMANDS.iter() {
-        if normalized.contains(blocked) {
+        if normalized.contains(&normalize_command_text(blocked)) {
             return Some("Command contains blocked pattern");
         }
     }
     if !allow_dangerous {
         for pattern in DANGEROUS_PATTERNS.iter() {
-            if normalized.contains(pattern) {
+            if normalized.contains(&normalize_command_text(pattern)) {
                 return Some("Command contains potentially dangerous pattern");
             }
         }
     }
     None
+}
+
+fn normalize_command_text(cmd: &str) -> String {
+    cmd.to_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn detect_command_injection(cmd: &str) -> Option<&'static str> {
@@ -384,32 +391,55 @@ fn check_sensitive_file_access(cmd: &str) -> Option<String> {
 fn split_shell_segments(cmd: &str) -> Vec<&str> {
     let mut segments = Vec::new();
     let mut start = 0;
-    let bytes = cmd.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    while i < len {
-        let is_double =
-            (bytes[i] == b'&' || bytes[i] == b'|') && i + 1 < len && bytes[i + 1] == bytes[i];
-        let is_single = bytes[i] == b'|' || bytes[i] == b';';
-        if is_double {
-            segments.push(&cmd[start..i]);
-            i += 2;
-            start = i;
-        } else if is_single {
-            segments.push(&cmd[start..i]);
-            i += 1;
-            start = i;
-        } else {
-            i += 1;
+    let mut chars = cmd.char_indices().peekable();
+    let mut quote = ShellQuote::None;
+    let mut escaped = false;
+
+    while let Some((i, ch)) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match (quote, ch) {
+            (_, '\\') => {
+                escaped = true;
+            }
+            (ShellQuote::None, '\'') => quote = ShellQuote::Single,
+            (ShellQuote::Single, '\'') => quote = ShellQuote::None,
+            (ShellQuote::None, '"') => quote = ShellQuote::Double,
+            (ShellQuote::Double, '"') => quote = ShellQuote::None,
+            (ShellQuote::None, ';' | '|') => {
+                segments.push(&cmd[start..i]);
+                if ch == '|' && matches!(chars.peek(), Some((_, '|'))) {
+                    chars.next();
+                    start = i + 2;
+                } else {
+                    start = i + ch.len_utf8();
+                }
+            }
+            (ShellQuote::None, '&') if matches!(chars.peek(), Some((_, '&'))) => {
+                segments.push(&cmd[start..i]);
+                chars.next();
+                start = i + 2;
+            }
+            _ => {}
         }
     }
     segments.push(&cmd[start..]);
     segments
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellQuote {
+    None,
+    Single,
+    Double,
+}
+
 fn check_segment_file_commands(segment: &str) -> Option<String> {
     let segment = segment.trim().trim_start_matches('<').trim();
-    let mut tokens = segment.split_whitespace();
+    let tokens = shell_words(segment);
+    let mut tokens = tokens.iter().map(String::as_str);
     let cmd_name = tokens.next()?;
     let base_cmd = cmd_name.rsplit('/').next().unwrap_or(cmd_name);
     if !FILE_READ_COMMANDS
@@ -457,48 +487,89 @@ fn strip_shell_quotes(token: &str) -> &str {
 }
 
 fn check_redirect_target(segment: &str, operator: char, label: &str) -> Option<String> {
-    let bytes = segment.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == operator as u8 {
-            let mut after_start = i + 1;
-            if operator == '<' && after_start < bytes.len() && bytes[after_start] == b'(' {
-                if let Some(close) = segment[after_start..].find(')') {
-                    let inner = &segment[after_start + 1..after_start + close];
-                    for token in inner.split_whitespace() {
-                        let unquoted = strip_shell_quotes(token);
-                        let expanded = expand_tilde(unquoted);
-                        if is_sensitive_path(&expanded) {
-                            return Some(format!(
-                                "Access denied: process substitution targets sensitive path '{}'",
-                                unquoted
-                            ));
-                        }
-                    }
-                }
-                i = after_start + 1;
-                continue;
-            }
-            if operator == '>' && after_start < bytes.len() && bytes[after_start] == b'>' {
-                after_start += 1;
-            }
-            let after = segment[after_start..].trim();
-            let path_token = after.split_whitespace().next().unwrap_or("");
-            if !path_token.is_empty() {
-                let unquoted = strip_shell_quotes(path_token);
-                let expanded = expand_tilde(unquoted);
-                if is_sensitive_path(&expanded) {
-                    return Some(format!(
-                        "Access denied: {} targets sensitive path '{}'",
-                        label, unquoted
-                    ));
-                }
-            }
-            i = after_start;
+    for target in redirect_targets(segment, operator) {
+        let unquoted = strip_shell_quotes(&target);
+        let expanded = expand_tilde(unquoted);
+        if is_sensitive_path(&expanded) {
+            return Some(format!(
+                "Access denied: {} targets sensitive path '{}'",
+                label, unquoted
+            ));
         }
-        i += 1;
     }
     None
+}
+
+fn shell_words(segment: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = ShellQuote::None;
+    let mut escaped = false;
+    for ch in segment.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match (quote, ch) {
+            (_, '\\') => escaped = true,
+            (ShellQuote::None, '\'') => quote = ShellQuote::Single,
+            (ShellQuote::Single, '\'') => quote = ShellQuote::None,
+            (ShellQuote::None, '"') => quote = ShellQuote::Double,
+            (ShellQuote::Double, '"') => quote = ShellQuote::None,
+            (ShellQuote::None, ch) if ch.is_whitespace() => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+fn redirect_targets(segment: &str, operator: char) -> Vec<String> {
+    let mut targets = Vec::new();
+    let mut chars = segment.char_indices().peekable();
+    let mut quote = ShellQuote::None;
+    let mut escaped = false;
+    while let Some((i, ch)) = chars.next() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match (quote, ch) {
+            (_, '\\') => escaped = true,
+            (ShellQuote::None, '\'') => quote = ShellQuote::Single,
+            (ShellQuote::Single, '\'') => quote = ShellQuote::None,
+            (ShellQuote::None, '"') => quote = ShellQuote::Double,
+            (ShellQuote::Double, '"') => quote = ShellQuote::None,
+            (ShellQuote::None, ch) if ch == operator => {
+                let mut after_start = i + ch.len_utf8();
+                if operator == '>' && matches!(chars.peek(), Some((_, '>'))) {
+                    chars.next();
+                    after_start += 1;
+                }
+                if operator == '<' && matches!(chars.peek(), Some((_, '('))) {
+                    chars.next();
+                    if let Some(close) = segment[after_start + 1..].find(')') {
+                        targets.extend(shell_words(
+                            &segment[after_start + 1..after_start + 1 + close],
+                        ));
+                    }
+                    continue;
+                }
+                if let Some(target) = shell_words(&segment[after_start..]).into_iter().next() {
+                    targets.push(target);
+                }
+            }
+            _ => {}
+        }
+    }
+    targets
 }
 
 fn expand_tilde(token: &str) -> PathBuf {
@@ -524,6 +595,9 @@ async fn execute_direct_command(
         c
     };
 
+    #[cfg(unix)]
+    command.process_group(0);
+
     command.env_clear();
     for var in SAFE_ENV_VARS {
         if let Ok(val) = std::env::var(var) {
@@ -546,30 +620,16 @@ async fn execute_direct_command(
 
     let result = tokio::time::timeout(timeout, async {
         let stdout_fut = async {
-            if let Some(mut out) = stdout_handle {
-                let mut buf = Vec::new();
-                (&mut out)
-                    .take(MAX_OUTPUT_SIZE as u64)
-                    .read_to_end(&mut buf)
-                    .await
-                    .ok();
-                tokio::io::copy(&mut out, &mut tokio::io::sink()).await.ok();
-                String::from_utf8_lossy(&buf).to_string()
+            if let Some(out) = stdout_handle {
+                read_stream_limited(out).await
             } else {
                 String::new()
             }
         };
 
         let stderr_fut = async {
-            if let Some(mut err) = stderr_handle {
-                let mut buf = Vec::new();
-                (&mut err)
-                    .take(MAX_OUTPUT_SIZE as u64)
-                    .read_to_end(&mut buf)
-                    .await
-                    .ok();
-                tokio::io::copy(&mut err, &mut tokio::io::sink()).await.ok();
-                String::from_utf8_lossy(&buf).to_string()
+            if let Some(err) = stderr_handle {
+                read_stream_limited(err).await
             } else {
                 String::new()
             }
@@ -595,10 +655,49 @@ async fn execute_direct_command(
             e
         ))),
         Err(_) => {
-            let _ = child.kill().await;
+            terminate_child_tree(&mut child).await;
             Err(ShellExecutionError::Timeout(timeout))
         }
     }
+}
+
+async fn terminate_child_tree(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // SAFETY: Child was spawned into its own process group with pgid == pid.
+        // Negative pid targets only that process group; result is best-effort.
+        unsafe {
+            let _ = kill_process_group(-(pid as i32), SIGKILL);
+        }
+    }
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+}
+
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
+
+#[cfg(unix)]
+unsafe extern "C" {
+    #[link_name = "kill"]
+    fn kill_process_group(pid: i32, sig: i32) -> i32;
+}
+
+async fn read_stream_limited<R>(mut stream: R) -> String
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut buf = Vec::new();
+    (&mut stream)
+        .take((MAX_OUTPUT_SIZE + 1) as u64)
+        .read_to_end(&mut buf)
+        .await
+        .ok();
+    tokio::io::copy(&mut stream, &mut tokio::io::sink())
+        .await
+        .ok();
+    let output = String::from_utf8_lossy(&buf).to_string();
+    truncate_output(&output)
 }
 
 fn truncate_output(s: &str) -> String {
@@ -634,4 +733,32 @@ fn floor_char_boundary(s: &str, pos: usize) -> usize {
         i -= 1;
     }
     i
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_shell_segments_ignores_operators_inside_quotes() {
+        assert_eq!(
+            split_shell_segments("echo 'a;b' && cat ~/.ssh/id_rsa").len(),
+            2
+        );
+        assert_eq!(split_shell_segments("cat \"a;rm -rf /\"").len(), 1);
+    }
+
+    #[test]
+    fn blocked_reason_collapses_whitespace() {
+        assert_eq!(
+            blocked_reason("rm    -rf    /", false),
+            Some("Command contains blocked pattern")
+        );
+    }
+
+    #[test]
+    fn sensitive_path_detection_checks_shell_aware_tokens() {
+        assert!(check_sensitive_file_access("cat \"~/server key.pem\"").is_some());
+        assert!(check_sensitive_file_access("echo hi > '~/.ssh/config'").is_some());
+    }
 }

@@ -1,7 +1,9 @@
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
+use std::time::Duration;
+
 use ironclaw_host_api::{
-    EffectKind, PermissionMode, ResourceCeiling, ResourceEstimate, ResourceProfile, ResourceUsage,
-    RuntimeDispatchErrorKind, SandboxQuota,
+    EffectKind, PermissionMode, ResourceCeiling, ResourceEstimate, ResourceProfile,
+    RuntimeDispatchErrorKind, SandboxQuota, ScopedPath,
 };
 use serde_json::{Value, json};
 
@@ -56,8 +58,9 @@ pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
 
 pub(super) async fn dispatch(
     request: &FirstPartyCapabilityRequest,
-) -> Result<(Value, ResourceUsage), FirstPartyCapabilityError> {
+) -> Result<(Value, Duration), FirstPartyCapabilityError> {
     let parsed = shell_core::parse_shell_request(&request.input).map_err(shell_error)?;
+    reject_unbacked_scoped_workdir(request, parsed.workdir.as_deref())?;
     if parsed
         .timeout_secs
         .is_some_and(|timeout_secs| timeout_secs > MAX_SHELL_TIMEOUT_SECS)
@@ -80,17 +83,42 @@ pub(super) async fn dispatch(
         "success": output.success,
         "sandboxed": output.sandboxed,
     });
-    let output_bytes = serde_json::to_vec(&output_value)
-        .map(|bytes| bytes.len() as u64)
-        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::OutputDecode))?;
-    Ok((
-        output_value,
-        ResourceUsage {
-            wall_clock_ms: output.duration.as_millis().try_into().unwrap_or(u64::MAX),
-            output_bytes,
-            process_count: 1,
-            ..ResourceUsage::default()
-        },
+    Ok((output_value, output.duration))
+}
+
+fn reject_unbacked_scoped_workdir(
+    request: &FirstPartyCapabilityRequest,
+    workdir: Option<&str>,
+) -> Result<(), FirstPartyCapabilityError> {
+    let Some(mounts) = request
+        .mounts
+        .as_ref()
+        .filter(|mounts| !mounts.mounts.is_empty())
+    else {
+        return Ok(());
+    };
+
+    let Some(workdir) = workdir else {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::Client,
+        ));
+    };
+    let scoped_path = ScopedPath::new(workdir.to_string())
+        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::InputEncode))?;
+    let (_virtual_path, grant) = mounts
+        .resolve_with_grant(&scoped_path)
+        .map_err(|_| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::Client))?;
+    if !grant.permissions.execute {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::Client,
+        ));
+    }
+
+    // Shell execution still uses the local process fallback. Until the resolved
+    // process backend can receive virtual cwd + scoped mounts, fail closed rather
+    // than translating scoped paths to ambient host paths in this handler.
+    Err(FirstPartyCapabilityError::new(
+        RuntimeDispatchErrorKind::Client,
     ))
 }
 
