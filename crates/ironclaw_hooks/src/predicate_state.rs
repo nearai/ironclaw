@@ -151,8 +151,14 @@ impl PredicateEventId {
     /// Construct without per-call validation. Reserved for internal
     /// synth paths and tests that mint ids from formats already known
     /// to satisfy the contract (e.g. fixed-length hex digests).
-    /// External callers should use [`Self::new`].
-    pub fn new_unchecked(value: impl Into<String>) -> Self {
+    /// External callers must use [`Self::new`].
+    ///
+    /// Visibility is `pub(crate)` (henrypark133 HIGH on PR #3635 5-19
+    /// review): external callers can otherwise bypass the durable
+    /// UNIQUE-constraint format invariants enforced by [`Self::new`]
+    /// (non-empty, NUL-free). Restricting the constructor forces every
+    /// caller crossing the crate boundary through validated construction.
+    pub(crate) fn new_unchecked(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
@@ -166,12 +172,28 @@ impl PredicateEventId {
     /// see that path's documentation for the load-bearing semantics.
     ///
     /// The id is the hex digest of `(hook_id, capability_name,
-    /// arguments_digest, process-local counter)`. The counter guarantees
-    /// uniqueness across calls even when `(hook, ctx)` are bit-identical
-    /// (which happens routinely in tests and can happen in production
-    /// under tight loops on coarse clocks).
+    /// thread-local seed, process-local counter)`. The counter and
+    /// thread-local seed together guarantee uniqueness across calls even
+    /// when `(hook, ctx)` are bit-identical (which happens routinely in
+    /// tests and can happen in production under tight loops on coarse
+    /// clocks).
     ///
-    /// The argument shape is `(&[u8], &str, &[u8])` rather than
+    /// # Why `arguments_digest` is NOT mixed in
+    ///
+    /// An earlier revision included the caller's `arguments_digest` in
+    /// the hash. That made the resulting 64-char hex id an **equality
+    /// oracle** for argument shape: two invocations with bit-identical
+    /// arguments (same tenant or otherwise) would yield colliding hash
+    /// inputs, which a downstream observer of the event id (audit logs,
+    /// durable backend rows visible cross-tenant) could use to correlate
+    /// tenant traffic patterns. The replay-dedup contract for durable
+    /// backends is driven by the caller-supplied `caller_event_id`, NOT
+    /// by the synth path — synth only needs to be per-call unique, not
+    /// content-addressed. Dropping `arguments_digest` from the hash
+    /// closes the oracle without weakening any property the synth path
+    /// is responsible for (henrypark133 LOW on PR #3635 5-19 review).
+    ///
+    /// The argument shape is `(&[u8], &str)` rather than
     /// `&BeforeCapabilityHookContext` so this function can live in
     /// `predicate_state` next to its consumer (the backend) without
     /// inverting the module dependency graph
@@ -180,20 +202,34 @@ impl PredicateEventId {
     /// Lives here rather than in `evaluator` because the id format —
     /// 64-char lowercase hex, no NUL, never empty — is part of the
     /// backend's durable contract (henrypark133 nit on PR #3635).
-    pub(crate) fn synth(
-        hook_id_bytes: &[u8],
-        capability_name: &str,
-        arguments_digest: &[u8],
-    ) -> Self {
+    pub(crate) fn synth(hook_id_bytes: &[u8], capability_name: &str) -> Self {
         use std::fmt::Write;
+        // Process-global monotone counter. Documented hotspot
+        // (henrypark133 MED on PR #3635 5-19 review): under very high
+        // synth rates across all cores this AtomicU64 is a cache-line
+        // contention point. The synth path is only reached when callers
+        // omit `caller_event_id` (legacy / test paths), so production
+        // durable-backend traffic should not contend here in practice.
+        // We additionally combine with a thread-local nonce so the
+        // global counter does not need to be the sole uniqueness source
+        // — N threads can each advance their thread-local nonce without
+        // forcing a cross-core invalidation.
         static COUNTER: AtomicU64 = AtomicU64::new(0);
+        thread_local! {
+            static THREAD_NONCE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        }
         let seq = COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        let thread_seq = THREAD_NONCE.with(|n| {
+            let v = n.get().wrapping_add(1);
+            n.set(v);
+            v
+        });
 
         let mut hasher = blake3::Hasher::new();
         hasher.update(hook_id_bytes);
         hasher.update(capability_name.as_bytes());
-        hasher.update(arguments_digest);
         hasher.update(&seq.to_le_bytes());
+        hasher.update(&thread_seq.to_le_bytes());
         let digest = hasher.finalize();
         let mut s = String::with_capacity(64);
         for byte in digest.as_bytes() {
@@ -350,21 +386,32 @@ impl InvocationBucket {
     }
 }
 
+/// Per-key sliding-window bucket for NumericSum predicates. Holds the
+/// FIFO of `(timestamp, value, event_id)` entries, a companion dedup set,
+/// AND an incrementally-maintained `running_sum` so the public sum is
+/// O(1) per call (henrypark133 HIGH on PR #3635 5-19 review).
+///
+/// Invariant: `running_sum == entries.iter().map(|(_, v, _)| v).sum()`.
+/// Maintained by `push_back` (add) and `pop_front` (subtract) — the only
+/// two ways the deque mutates.
 #[derive(Debug, Default)]
 struct ValueBucket {
     entries: VecDeque<(Instant, Decimal, PredicateEventId)>,
     dedup_ids: HashSet<PredicateEventId>,
+    running_sum: Decimal,
 }
 
 impl ValueBucket {
     fn pop_front(&mut self) {
-        if let Some((_, _, id)) = self.entries.pop_front() {
+        if let Some((_, v, id)) = self.entries.pop_front() {
             self.dedup_ids.remove(&id);
+            self.running_sum -= v;
         }
     }
 
     fn push_back(&mut self, ts: Instant, value: Decimal, event_id: PredicateEventId) {
         self.dedup_ids.insert(event_id.clone());
+        self.running_sum += value;
         self.entries.push_back((ts, value, event_id));
     }
 }
@@ -385,6 +432,22 @@ pub(crate) struct InMemoryPredicateStateBackend {
 /// Maximum number of distinct keys retained per history map. Bounds the
 /// in-memory backend's memory footprint against threat-model finding **D5**.
 pub const MAX_HISTORY_KEYS: usize = 8_192;
+
+/// Per-tenant ceiling on distinct keys held in either history map.
+/// Defends against the cross-tenant LRU-reset attack (henrypark133 MED
+/// on PR #3635 5-19 review): without a per-tenant quota, a noisy tenant
+/// can grow its key footprint to evict a quiet tenant's bucket, which
+/// resets that tenant's rate-limit counter on the next `record_*` call.
+/// With the quota, a tenant that exceeds the cap evicts ITS OWN
+/// oldest-front bucket first, leaving other tenants' buckets untouched.
+///
+/// Chosen as `MAX_HISTORY_KEYS / 4`: a single tenant cannot consume more
+/// than 25 % of the global cap, so at least four tenants always fit
+/// concurrently regardless of insertion order. This is a defense-in-
+/// depth measure for the in-memory backend; the durable backend
+/// (separate PR) enforces per-tenant scoping at the schema level via
+/// PRIMARY KEY (tenant_id, …).
+pub const MAX_KEYS_PER_TENANT: usize = MAX_HISTORY_KEYS / 4;
 
 impl InMemoryPredicateStateBackend {
     pub fn new() -> Self {
@@ -422,8 +485,20 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if !history.contains_key(key) && history.len() >= MAX_HISTORY_KEYS {
-            evict_lru_invocation(&mut history, &self.evictions);
+        if !history.contains_key(key) {
+            // Per-tenant quota: if this tenant already holds the cap,
+            // evict their oldest-front bucket FIRST (not a global LRU
+            // pass) so noisy tenants can't push quiet tenants out.
+            // henrypark133 MED on PR #3635 5-19 review.
+            let tenant_count = history
+                .keys()
+                .filter(|k| k.tenant_id == key.tenant_id)
+                .count();
+            if tenant_count >= MAX_KEYS_PER_TENANT {
+                evict_lru_invocation_for_tenant(&mut history, &key.tenant_id, &self.evictions);
+            } else if history.len() >= MAX_HISTORY_KEYS {
+                evict_lru_invocation(&mut history, &self.evictions);
+            }
         }
         let bucket = history.entry(key.clone()).or_default();
         let cutoff = now.checked_sub(window).unwrap_or(now);
@@ -466,8 +541,16 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if !history.contains_key(key) && history.len() >= MAX_HISTORY_KEYS {
-            evict_lru_value(&mut history, &self.evictions);
+        if !history.contains_key(key) {
+            let tenant_count = history
+                .keys()
+                .filter(|k| k.tenant_id == key.tenant_id)
+                .count();
+            if tenant_count >= MAX_KEYS_PER_TENANT {
+                evict_lru_value_for_tenant(&mut history, &key.tenant_id, &self.evictions);
+            } else if history.len() >= MAX_HISTORY_KEYS {
+                evict_lru_value(&mut history, &self.evictions);
+            }
         }
         let bucket = history.entry(key.clone()).or_default();
         let cutoff = now.checked_sub(window).unwrap_or(now);
@@ -481,7 +564,11 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
         if !bucket.dedup_ids.contains(event_id) {
             bucket.push_back(now, value, event_id.clone());
         }
-        let sum: Decimal = bucket.entries.iter().map(|(_, v, _)| *v).sum();
+        // O(1): the bucket maintains `running_sum` incrementally on
+        // push/pop, so we don't re-walk the deque on every call
+        // (henrypark133 HIGH on PR #3635 5-19 review). Snapshot before
+        // the potential empty-bucket removal below.
+        let sum = bucket.running_sum;
         if bucket.entries.is_empty() {
             history.remove(key);
         }
@@ -490,6 +577,56 @@ impl PredicateStateBackend for InMemoryPredicateStateBackend {
 
     fn evictions_observed(&self) -> u64 {
         self.evictions.load(AtomicOrdering::Relaxed)
+    }
+
+    /// Drop all entries with `timestamp < cutoff` from every bucket, and
+    /// remove buckets that become empty. Returns the total number of
+    /// entries dropped across both history maps (invocation + value).
+    ///
+    /// Idle keys are otherwise only reclaimed when the bucket itself is
+    /// touched by a `record_*` call or the LRU evicts at the
+    /// `MAX_HISTORY_KEYS` cap. A reaper task pointed at the slowest
+    /// configured window keeps idle memory bounded even when no traffic
+    /// is hitting those keys (henrypark133 MED on PR #3635 5-19 review:
+    /// the default no-op was misleading because callers expected it to
+    /// reclaim memory).
+    fn evict_older_than(&self, cutoff: Instant) -> Result<u64, PredicateBackendError> {
+        let mut dropped: u64 = 0;
+        {
+            let mut history = match self.invocation_history.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            history.retain(|_, bucket| {
+                while let Some((front_ts, _)) = bucket.entries.front() {
+                    if *front_ts < cutoff {
+                        bucket.pop_front();
+                        dropped += 1;
+                    } else {
+                        break;
+                    }
+                }
+                !bucket.entries.is_empty()
+            });
+        }
+        {
+            let mut history = match self.value_history.lock() {
+                Ok(g) => g,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            history.retain(|_, bucket| {
+                while let Some((front_ts, _, _)) = bucket.entries.front() {
+                    if *front_ts < cutoff {
+                        bucket.pop_front();
+                        dropped += 1;
+                    } else {
+                        break;
+                    }
+                }
+                !bucket.entries.is_empty()
+            });
+        }
+        Ok(dropped)
     }
 }
 
@@ -525,6 +662,34 @@ fn evict_lru_invocation(
     }
 }
 
+/// Tenant-scoped variant: evict the oldest-front bucket BELONGING TO
+/// `tenant_id`. Used when a single tenant hits [`MAX_KEYS_PER_TENANT`]
+/// so the eviction stays within that tenant's footprint and cannot
+/// reach into another tenant's buckets (henrypark133 MED on PR #3635
+/// 5-19 review).
+fn evict_lru_invocation_for_tenant(
+    history: &mut HashMap<InvocationKey, InvocationBucket>,
+    tenant_id: &TenantId,
+    evictions: &AtomicU64,
+) {
+    let empty_victim = history
+        .iter()
+        .find(|(k, v)| k.tenant_id == *tenant_id && v.entries.is_empty())
+        .map(|(k, _)| k.clone());
+    let victim = empty_victim.or_else(|| {
+        history
+            .iter()
+            .filter(|(k, _)| k.tenant_id == *tenant_id)
+            .filter_map(|(k, v)| v.entries.front().map(|(ts, _)| (k.clone(), *ts)))
+            .min_by_key(|(_, ts)| *ts)
+            .map(|(k, _)| k)
+    });
+    if let Some(k) = victim {
+        history.remove(&k);
+        evictions.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+}
+
 fn evict_lru_value(history: &mut HashMap<ValueKey, ValueBucket>, evictions: &AtomicU64) {
     let empty_victim = history
         .iter()
@@ -533,6 +698,31 @@ fn evict_lru_value(history: &mut HashMap<ValueKey, ValueBucket>, evictions: &Ato
     let victim = empty_victim.or_else(|| {
         history
             .iter()
+            .filter_map(|(k, v)| v.entries.front().map(|(ts, _, _)| (k.clone(), *ts)))
+            .min_by_key(|(_, ts)| *ts)
+            .map(|(k, _)| k)
+    });
+    if let Some(k) = victim {
+        history.remove(&k);
+        evictions.fetch_add(1, AtomicOrdering::Relaxed);
+    }
+}
+
+/// Tenant-scoped variant for the value-sum map. Same rationale as
+/// [`evict_lru_invocation_for_tenant`].
+fn evict_lru_value_for_tenant(
+    history: &mut HashMap<ValueKey, ValueBucket>,
+    tenant_id: &TenantId,
+    evictions: &AtomicU64,
+) {
+    let empty_victim = history
+        .iter()
+        .find(|(k, v)| k.tenant_id == *tenant_id && v.entries.is_empty())
+        .map(|(k, _)| k.clone());
+    let victim = empty_victim.or_else(|| {
+        history
+            .iter()
+            .filter(|(k, _)| k.tenant_id == *tenant_id)
             .filter_map(|(k, v)| v.entries.front().map(|(ts, _, _)| (k.clone(), *ts)))
             .min_by_key(|(_, ts)| *ts)
             .map(|(k, _)| k)
@@ -592,13 +782,32 @@ mod tests {
     /// would break that contract without surfacing a test failure.
     #[test]
     fn synth_event_id_is_64_char_lowercase_hex() {
-        let id = PredicateEventId::synth(b"hookid-bytes", "cap.x", &[0xAB, 0xCD]);
+        let id = PredicateEventId::synth(b"hookid-bytes", "cap.x");
         let s = id.as_str();
         assert_eq!(s.len(), 64, "synth output must be exactly 64 chars");
         assert!(
             s.chars()
                 .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
             "synth output must be lowercase hex: {s}"
+        );
+    }
+
+    /// henrypark133 LOW on PR #3635 5-19 review (equality-oracle closure):
+    /// two calls with bit-identical `(hook_id_bytes, capability_name)` must
+    /// produce DISTINCT synth ids. Otherwise the 64-char hex output would be
+    /// an equality oracle: an observer of two event ids could correlate
+    /// "same hook + same capability" across tenants. The process-global
+    /// counter + thread-local nonce in the hash input must drive divergence
+    /// even when the caller's inputs collide.
+    #[test]
+    fn synth_diverges_on_identical_inputs() {
+        let a = PredicateEventId::synth(b"hookid-bytes", "cap.x");
+        let b = PredicateEventId::synth(b"hookid-bytes", "cap.x");
+        assert_ne!(
+            a.as_str(),
+            b.as_str(),
+            "synth must not be content-addressable: identical inputs would leak \
+             argument-shape equality across tenants"
         );
     }
 
@@ -912,23 +1121,21 @@ mod tests {
     }
 
     /// henrypark133 missing-coverage on PR #3635: drive the LRU eviction
-    /// path through the **public** `record_invocation` API at
-    /// `MAX_HISTORY_KEYS + 1` keys. The previous coverage manually crafted
-    /// buckets and called `evict_lru_invocation` directly; this exercises
-    /// the production code path (overflow → LRU → eviction counter
-    /// advances → cap holds). The full 8192-key sweep would be slow under
-    /// `cargo test`, so we drive it through a smaller in-process cap by
-    /// inserting `MAX_HISTORY_KEYS + 1` distinct keys and asserting the
-    /// map never exceeds `MAX_HISTORY_KEYS`.
+    /// path through the **public** `record_invocation` API. A single
+    /// tenant inserting more than [`MAX_KEYS_PER_TENANT`] distinct keys
+    /// triggers the per-tenant eviction path (henrypark133 MED on PR
+    /// #3635 5-19 review); the global [`MAX_HISTORY_KEYS`] cap is still
+    /// the outer bound but the per-tenant quota fires first when a
+    /// single tenant is the noisy one.
     #[test]
-    fn lru_eviction_via_public_api_holds_max_history_keys_cap() {
+    fn per_tenant_quota_holds_single_tenant_at_its_cap() {
         let backend = InMemoryPredicateStateBackend::new();
         let now = Instant::now();
-        // Insert MAX_HISTORY_KEYS + 1 distinct keys via the public API.
-        // Each key gets a single invocation; the (MAX_HISTORY_KEYS + 1)th
-        // record_invocation must trigger LRU eviction so the map never
-        // exceeds MAX_HISTORY_KEYS.
-        for i in 0..=MAX_HISTORY_KEYS {
+        // Insert MAX_KEYS_PER_TENANT + 1 distinct keys for a single
+        // tenant via the public API. The (MAX_KEYS_PER_TENANT + 1)th
+        // record_invocation must trigger the per-tenant eviction so the
+        // map never exceeds MAX_KEYS_PER_TENANT for that tenant.
+        for i in 0..=MAX_KEYS_PER_TENANT {
             let key = InvocationKey {
                 hook_id: hook_id(),
                 tenant_id: tenant(),
@@ -941,13 +1148,178 @@ mod tests {
         let map = backend.invocation_history.lock().expect("lock ok");
         assert_eq!(
             map.len(),
-            MAX_HISTORY_KEYS,
-            "LRU must hold the map at the configured cap after public-API overflow"
+            MAX_KEYS_PER_TENANT,
+            "per-tenant quota must hold the map at MAX_KEYS_PER_TENANT for a single tenant"
         );
         drop(map);
         assert!(
             backend.evictions_observed() >= 1,
-            "evictions counter must advance when the cap is hit via the public API"
+            "evictions counter must advance when the per-tenant cap is hit via the public API"
+        );
+    }
+
+    /// henrypark133 MED on PR #3635 5-19 review: the per-tenant quota
+    /// must guarantee that a noisy tenant cannot evict another tenant's
+    /// bucket. Tenant α fills its quota; tenant β's prior bucket must
+    /// survive.
+    #[test]
+    fn per_tenant_quota_isolates_tenants_from_each_other() {
+        let backend = InMemoryPredicateStateBackend::new();
+        let now = Instant::now();
+        let alpha = TenantId::new("alpha").expect("ok");
+        let beta = TenantId::new("beta").expect("ok");
+
+        // β records first so its bucket is the "oldest" in the global
+        // map by insertion order. Without the per-tenant quota, α's
+        // overflow would evict β's bucket as the global LRU victim.
+        let beta_key = InvocationKey {
+            hook_id: hook_id(),
+            tenant_id: beta.clone(),
+            capability: "beta.cap".to_string(),
+        };
+        backend
+            .record_invocation(&beta_key, &ev("beta-evt"), now, Duration::from_secs(60))
+            .expect("ok");
+
+        // α then floods past its per-tenant cap.
+        for i in 0..=MAX_KEYS_PER_TENANT {
+            let key = InvocationKey {
+                hook_id: hook_id(),
+                tenant_id: alpha.clone(),
+                capability: format!("alpha.cap.{i}"),
+            };
+            let _ = backend
+                .record_invocation(
+                    &key,
+                    &ev(&format!("alpha-e{i}")),
+                    now + Duration::from_millis(i as u64 + 1),
+                    Duration::from_secs(60),
+                )
+                .expect("ok");
+        }
+
+        // β's bucket must still be present — α's overflow evicted its
+        // own oldest-front bucket, not β's.
+        let map = backend.invocation_history.lock().expect("ok");
+        assert!(
+            map.contains_key(&beta_key),
+            "noisy tenant α must not evict quiet tenant β's bucket"
+        );
+        let alpha_count = map.keys().filter(|k| k.tenant_id == alpha).count();
+        assert_eq!(
+            alpha_count, MAX_KEYS_PER_TENANT,
+            "noisy tenant α must be capped at its per-tenant quota"
+        );
+    }
+
+    /// henrypark133 MED on PR #3635 5-19 review: `evict_older_than` was
+    /// previously a no-op `Ok(0)` default. The in-memory backend now
+    /// implements it to drop entries whose timestamp is strictly older
+    /// than the cutoff and remove buckets that become empty. Operator
+    /// reaper tasks rely on this to reclaim memory from idle keys.
+    #[test]
+    fn evict_older_than_drops_expired_entries_and_empty_buckets() {
+        let backend = InMemoryPredicateStateBackend::new();
+        let t0 = Instant::now();
+        let window = Duration::from_secs(3600);
+
+        let stale_key = InvocationKey {
+            hook_id: hook_id(),
+            tenant_id: tenant(),
+            capability: "cap.stale".to_string(),
+        };
+        let live_key = InvocationKey {
+            hook_id: hook_id(),
+            tenant_id: tenant(),
+            capability: "cap.live".to_string(),
+        };
+        // Two stale entries that should be reaped.
+        backend
+            .record_invocation(&stale_key, &ev("s1"), t0, window)
+            .expect("ok");
+        backend
+            .record_invocation(&stale_key, &ev("s2"), t0 + Duration::from_secs(1), window)
+            .expect("ok");
+        // One live entry from later in time.
+        backend
+            .record_invocation(&live_key, &ev("l1"), t0 + Duration::from_secs(120), window)
+            .expect("ok");
+
+        let cutoff = t0 + Duration::from_secs(60);
+        let dropped = backend.evict_older_than(cutoff).expect("evict ok");
+        assert_eq!(dropped, 2, "two stale entries must be dropped");
+
+        let map = backend.invocation_history.lock().expect("ok");
+        assert!(
+            !map.contains_key(&stale_key),
+            "fully-stale bucket must be removed after reaper drains it"
+        );
+        assert!(
+            map.contains_key(&live_key),
+            "live bucket must survive the reaper pass"
+        );
+    }
+
+    /// henrypark133 HIGH on PR #3635 5-19 review: NumericSum sums must be
+    /// O(1) per call via an incrementally-maintained `running_sum`. The
+    /// observable contract is unchanged, but the invariant is that
+    /// `running_sum` matches the deque sum after every push/pop. This
+    /// test exercises mixed insert + window-trim + replay scenarios and
+    /// confirms the reported sum tracks the actual deque content.
+    #[test]
+    fn numeric_sum_running_sum_matches_deque_after_trim_and_replay() {
+        let backend = InMemoryPredicateStateBackend::new();
+        let key = ValueKey {
+            hook_id: hook_id(),
+            tenant_id: tenant(),
+            capability: "cap.spend".to_string(),
+            field: "amount".to_string(),
+        };
+        let window = Duration::from_secs(60);
+        let t0 = Instant::now();
+
+        let s1 = backend
+            .record_value(&key, &ev("v1"), t0, Decimal::from(10), window)
+            .expect("ok");
+        assert_eq!(s1, Decimal::from(10));
+
+        let s2 = backend
+            .record_value(
+                &key,
+                &ev("v2"),
+                t0 + Duration::from_secs(1),
+                Decimal::from(25),
+                window,
+            )
+            .expect("ok");
+        assert_eq!(s2, Decimal::from(35));
+
+        // Replay v1: dedup, sum unchanged.
+        let s_replay = backend
+            .record_value(
+                &key,
+                &ev("v1"),
+                t0 + Duration::from_secs(2),
+                Decimal::from(10),
+                window,
+            )
+            .expect("ok");
+        assert_eq!(s_replay, Decimal::from(35), "replay must not double-count");
+
+        // Advance past window so both prior entries trim.
+        let s_after_trim = backend
+            .record_value(
+                &key,
+                &ev("v3"),
+                t0 + Duration::from_secs(120),
+                Decimal::from(7),
+                window,
+            )
+            .expect("ok");
+        assert_eq!(
+            s_after_trim,
+            Decimal::from(7),
+            "running_sum must subtract trimmed entries; sum is just v3"
         );
     }
 
