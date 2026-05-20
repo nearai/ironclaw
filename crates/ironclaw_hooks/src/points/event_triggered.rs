@@ -4,6 +4,16 @@
 //! loop work has already happened. They therefore get read-only event context
 //! plus an observer-only sink; they cannot gate, patch, or retroactively alter
 //! the completed behavior.
+//!
+//! # Field exposure
+//!
+//! `event` is the full [`RuntimeEvent`], including its `ResourceScope`
+//! (tenant_id, user_id, agent_id, project_id, mission_id, thread_id,
+//! invocation_id). For Installed-tier hooks this is more identifying
+//! information than the trust class warrants. The longer-term plan is to
+//! hand Installed hooks a narrowed `HookObservableEvent` projection that
+//! strips dispatcher-internal scope fields; trusted tiers may continue to
+//! receive the full event. Tracked as issue #3690.
 
 use ironclaw_events::{EventCursor, RuntimeEvent};
 use ironclaw_host_api::TenantId;

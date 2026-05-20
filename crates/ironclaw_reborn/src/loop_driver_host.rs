@@ -390,21 +390,32 @@ pub type HookDispatcherBuilderFactory =
 /// Default number of durable runtime events read per subscription poll.
 pub const DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_BATCH_LIMIT: usize = 64;
 
-/// Default delay between empty/error subscription polls. Combined with
-/// [`DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_BATCH_LIMIT`], this is the
-/// current first-line throttle for event-triggered dispatch fanout:
-/// the subscription processes at most `batch_limit` events per
-/// `poll_interval`, so a storm produced by mutual recursion between
-/// two installed hooks cycles at the poll-interval rate rather than
-/// unboundedly.
+/// Default delay between empty subscription polls when the durable log has
+/// just been drained. Under sustained idle, the subscription backs off
+/// exponentially up to [`DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_MAX_POLL_INTERVAL`]
+/// rather than polling at this rate forever (PR #3640 finding C5).
+/// Combined with [`DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_BATCH_LIMIT`], this
+/// is the first-line throttle for event-triggered dispatch fanout: the
+/// subscription processes at most `batch_limit` events per poll, so a storm
+/// produced by mutual recursion between two installed hooks cycles at the
+/// poll-interval rate rather than unboundedly.
 ///
 /// The full per-hook DoS budget Henry flagged as required for the
-/// Installed tier (henrypark133 should-fix #4 on PR #3640) — a per-
-/// hook rate cap with poisoning + milestone on overrun — is tracked
-/// as a follow-up. The existing self-trigger guard catches the most
-/// common direct-recursion pattern; the throttle here bounds indirect
-/// patterns until the proper budget design lands.
+/// Installed tier (henrypark133 should-fix #4 on PR #3640, tracked as
+/// issue #3689) — a per-hook rate cap with poisoning + milestone on
+/// overrun — is tracked as a follow-up. The existing self-trigger guard
+/// catches the most common direct-recursion pattern; the throttle here
+/// bounds indirect patterns until the proper budget design lands.
 pub const DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Maximum effective poll interval under adaptive backoff. When the
+/// subscription has seen `N` consecutive empty polls it sleeps for
+/// `min(base * 2^N, MAX)` before the next poll, so an idle stream falls
+/// back to ~1Hz instead of hammering the durable log at the configured
+/// poll interval (PR #3640 finding C5). A non-empty batch resets the
+/// streak so a producer burst restores low-latency dispatch immediately.
+pub const DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_MAX_POLL_INTERVAL: Duration =
+    Duration::from_millis(1_000);
 
 /// Pull-driven durable runtime-event subscription for event-triggered hooks.
 ///
@@ -438,6 +449,9 @@ pub struct EventTriggeredHookSubscription {
     start_cursor: EventCursor,
     batch_limit: usize,
     poll_interval: Duration,
+    /// Upper bound on the adaptive idle poll interval. See
+    /// [`DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_MAX_POLL_INTERVAL`].
+    max_poll_interval: Duration,
 }
 
 impl EventTriggeredHookSubscription {
@@ -454,6 +468,7 @@ impl EventTriggeredHookSubscription {
             start_cursor: self.start_cursor,
             batch_limit: self.batch_limit,
             poll_interval: self.poll_interval,
+            max_poll_interval: self.max_poll_interval,
         }
     }
 
@@ -470,6 +485,7 @@ impl EventTriggeredHookSubscription {
             start_cursor,
             batch_limit: DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_BATCH_LIMIT,
             poll_interval: DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_POLL_INTERVAL,
+            max_poll_interval: DEFAULT_EVENT_TRIGGERED_SUBSCRIPTION_MAX_POLL_INTERVAL,
         }
     }
 
@@ -482,6 +498,17 @@ impl EventTriggeredHookSubscription {
     #[must_use]
     pub fn with_poll_interval(mut self, poll_interval: Duration) -> Self {
         self.poll_interval = poll_interval.max(Duration::from_millis(1));
+        // Keep the max never below the base interval — otherwise the
+        // adaptive backoff would clamp below the user-configured floor.
+        if self.max_poll_interval < self.poll_interval {
+            self.max_poll_interval = self.poll_interval;
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_poll_interval(mut self, max_poll_interval: Duration) -> Self {
+        self.max_poll_interval = max_poll_interval.max(self.poll_interval);
         self
     }
 
@@ -611,6 +638,14 @@ impl EventTriggeredHookSubscription {
         milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     ) {
         let mut cursor = self.start_cursor;
+        // Adaptive backoff state (PR #3640 finding C5). `empty_streak`
+        // counts consecutive polls that returned no entries; the sleep on
+        // the next poll is `min(poll_interval << empty_streak, max_poll_interval)`.
+        // A non-empty batch resets the streak so producer bursts restore
+        // low-latency dispatch immediately. The shift is saturated at the
+        // first iteration where the resulting interval reaches the cap,
+        // which keeps the streak counter bounded.
+        let mut empty_streak: u32 = 0;
         loop {
             match self
                 .log
@@ -625,9 +660,16 @@ impl EventTriggeredHookSubscription {
                 Ok(replay) => {
                     if replay.entries.is_empty() {
                         cursor = replay.next_cursor;
-                        tokio::time::sleep(self.poll_interval).await;
+                        let sleep_for = adaptive_poll_interval(
+                            self.poll_interval,
+                            self.max_poll_interval,
+                            empty_streak,
+                        );
+                        empty_streak = empty_streak.saturating_add(1);
+                        tokio::time::sleep(sleep_for).await;
                         continue;
                     }
+                    empty_streak = 0;
                     for entry in replay.entries {
                         dispatcher
                             .dispatch_event_triggered_at(
@@ -673,6 +715,25 @@ impl EventTriggeredHookSubscription {
             }
         }
     }
+}
+
+/// Compute the next idle sleep duration for the event-triggered subscription
+/// under adaptive backoff (PR #3640 finding C5).
+///
+/// - `base` is the configured `poll_interval`.
+/// - `max` is the cap (`max_poll_interval`).
+/// - `streak` is the count of consecutive empty polls observed so far.
+///
+/// Returns `min(base * 2^streak, max)`. Saturates instead of overflowing
+/// when `streak` is large.
+fn adaptive_poll_interval(base: Duration, max: Duration, streak: u32) -> Duration {
+    // Clamp shift to 30 — `1u64 << 30` is ~1B and any `base * 2^30` would
+    // dwarf any sensible `max`, so saturating at the cap is correct here.
+    let shift = streak.min(30);
+    let base_ns = base.as_nanos() as u64;
+    let scaled = base_ns.saturating_mul(1u64 << shift);
+    let capped = scaled.min(max.as_nanos() as u64);
+    Duration::from_nanos(capped)
 }
 
 async fn emit_subscription_terminated_note(
@@ -2720,5 +2781,51 @@ mod tests {
             .expect_err("missing state payload must reject");
 
         assert_eq!(error.kind, AgentLoopHostErrorKind::Unavailable);
+    }
+
+    #[test]
+    fn adaptive_poll_interval_doubles_per_streak_until_cap() {
+        // PR #3640 finding C5: empty-poll backoff should double up to a
+        // configurable cap. Streak 0 returns the base; each subsequent
+        // empty poll doubles until clamped.
+        let base = Duration::from_millis(50);
+        let cap = Duration::from_millis(1_000);
+
+        assert_eq!(
+            adaptive_poll_interval(base, cap, 0),
+            Duration::from_millis(50)
+        );
+        assert_eq!(
+            adaptive_poll_interval(base, cap, 1),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            adaptive_poll_interval(base, cap, 2),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            adaptive_poll_interval(base, cap, 3),
+            Duration::from_millis(400)
+        );
+        assert_eq!(
+            adaptive_poll_interval(base, cap, 4),
+            Duration::from_millis(800)
+        );
+        // Streak 5 would compute 1600ms but the cap clamps it to 1000ms.
+        assert_eq!(adaptive_poll_interval(base, cap, 5), cap);
+        assert_eq!(adaptive_poll_interval(base, cap, 100), cap);
+        // Huge streak must not overflow.
+        assert_eq!(adaptive_poll_interval(base, cap, u32::MAX), cap);
+    }
+
+    #[test]
+    fn adaptive_poll_interval_respects_cap_below_base() {
+        // If `max < base` somehow slips through (it shouldn't — `with_*`
+        // builders normalize — but defense in depth), the function still
+        // returns the cap rather than overshooting.
+        let base = Duration::from_millis(200);
+        let cap = Duration::from_millis(50);
+        assert_eq!(adaptive_poll_interval(base, cap, 0), cap);
+        assert_eq!(adaptive_poll_interval(base, cap, 10), cap);
     }
 }
