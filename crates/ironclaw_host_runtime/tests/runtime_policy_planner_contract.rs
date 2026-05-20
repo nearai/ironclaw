@@ -102,6 +102,24 @@ fn local_dev_coding_alias_capabilities_plan_against_local_host_shell() {
 }
 
 #[test]
+fn script_runtime_requires_process_backend_even_when_manifest_underdeclares_effects() {
+    let policy = resolve(ResolveRequest::new(
+        DeploymentMode::LocalSingleUser,
+        RuntimeProfile::SecureDefault,
+    ))
+    .unwrap();
+    assert_eq!(policy.process_backend, ProcessBackendKind::None);
+
+    let cap = descriptor("script.echo", vec![EffectKind::DispatchCapability]);
+    let err = plan_capability(&cap, &policy).unwrap_err();
+
+    assert!(
+        err.to_string().contains("ProcessBackendKind::None"),
+        "script runtime must not execute when the policy disables process backends: {err}"
+    );
+}
+
+#[test]
 fn local_safe_approval_preset_keeps_writes_supervised() {
     // LocalSafe is the cautious local mode: the resolver maps it to
     // `ApprovalPolicy::AskWrites`. The planner doesn't gate approvals

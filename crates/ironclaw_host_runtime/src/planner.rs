@@ -21,8 +21,9 @@
 //!
 //! Fail-closed rules locked in here:
 //!
-//! - A capability that requires `SpawnProcess` / `ExecuteCode` against
-//!   a policy whose `process_backend` is `None` is rejected.
+//! - A script-runtime capability, or a capability that requires
+//!   `SpawnProcess` / `ExecuteCode`, against a policy whose
+//!   `process_backend` is `None` is rejected.
 //! - A capability that requires `Network` against `NetworkMode::Deny`
 //!   is rejected.
 //! - A capability that requires `UseSecret` against `SecretMode::Deny`
@@ -52,7 +53,7 @@
 use ironclaw_host_api::runtime_policy::{
     EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, ProcessBackendKind, SecretMode,
 };
-use ironclaw_host_api::{CapabilityDescriptor, CapabilityId, EffectKind};
+use ironclaw_host_api::{CapabilityDescriptor, CapabilityId, EffectKind, RuntimeKind};
 use thiserror::Error;
 
 /// Concrete plan derived from an `EffectiveRuntimePolicy` for a single
@@ -113,9 +114,10 @@ pub fn plan_capability(
     policy: &EffectiveRuntimePolicy,
 ) -> Result<ExecutionPlan, PlannerError> {
     let effects = &descriptor.effects;
-    let needs_process = effects
-        .iter()
-        .any(|e| matches!(e, EffectKind::SpawnProcess | EffectKind::ExecuteCode));
+    let needs_process = descriptor.runtime == RuntimeKind::Script
+        || effects
+            .iter()
+            .any(|e| matches!(e, EffectKind::SpawnProcess | EffectKind::ExecuteCode));
     if needs_process && matches!(policy.process_backend, ProcessBackendKind::None) {
         return Err(
             PlannerError::ProcessEffectsRequiredButProcessBackendIsNone {
@@ -156,10 +158,17 @@ mod tests {
     use ironclaw_host_api::{ExtensionId, PermissionMode, RuntimeKind, TrustClass};
 
     fn descriptor(effects: Vec<EffectKind>) -> CapabilityDescriptor {
+        descriptor_with_runtime(RuntimeKind::Script, effects)
+    }
+
+    fn descriptor_with_runtime(
+        runtime: RuntimeKind,
+        effects: Vec<EffectKind>,
+    ) -> CapabilityDescriptor {
         CapabilityDescriptor {
             id: CapabilityId::new("test.capability".to_string()).unwrap(),
             provider: ExtensionId::new("test_extension".to_string()).unwrap(),
-            runtime: RuntimeKind::Script,
+            runtime,
             trust_ceiling: TrustClass::UserTrusted,
             description: "test".to_string(),
             parameters_schema: serde_json::Value::Null,
@@ -266,6 +275,22 @@ mod tests {
     }
 
     #[test]
+    fn rejects_script_runtime_when_policy_disables_processes_even_without_process_effects() {
+        let desc = descriptor(vec![EffectKind::DispatchCapability]);
+        let policy = policy_with(
+            FilesystemBackendKind::ScopedVirtual,
+            ProcessBackendKind::None,
+            NetworkMode::Brokered,
+            SecretMode::BrokeredHandles,
+        );
+        let err = plan_capability(&desc, &policy).unwrap_err();
+        assert!(matches!(
+            err,
+            PlannerError::ProcessEffectsRequiredButProcessBackendIsNone { .. }
+        ));
+    }
+
+    #[test]
     fn rejects_network_capability_when_policy_denies_network() {
         let desc = descriptor(vec![EffectKind::Network]);
         let policy = policy_with(
@@ -302,7 +327,7 @@ mod tests {
         // A capability with empty `effects` (e.g. a pure
         // dispatch/observability capability) doesn't trigger any
         // fail-closed branches and just gets the policy's defaults.
-        let desc = descriptor(vec![]);
+        let desc = descriptor_with_runtime(RuntimeKind::Wasm, vec![]);
         let policy = policy_with(
             FilesystemBackendKind::ScopedVirtual,
             ProcessBackendKind::None,

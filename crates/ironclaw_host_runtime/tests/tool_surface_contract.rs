@@ -24,8 +24,8 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
     MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    SurfaceKind, VisibleCapabilityAccess, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    publish_hot_capability_catalog,
+    RuntimeFailureKind, SurfaceKind, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, publish_hot_capability_catalog,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -953,6 +953,54 @@ async fn visible_surface_requires_every_descriptor_effect_to_be_policy_allowed()
 }
 
 #[tokio::test]
+async fn runtime_policy_denied_extension_invoke_does_not_dispatch() {
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher_for_runtime: Arc<dyn CapabilityDispatcher> = dispatcher.clone();
+    let runtime = runtime_with_dispatcher(
+        registry_from_manifests([(ECHO_NETWORK_MANIFEST, "/system/extensions/echo")]),
+        Arc::new(GrantAuthorizer),
+        dispatcher_for_runtime,
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "echo",
+        "/system/extensions/echo/manifest.toml",
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    )])))
+    .with_runtime_policy(network_denied_runtime_policy());
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context_with_grants([(
+                capability_id("echo.say"),
+                vec![EffectKind::DispatchCapability, EffectKind::Network],
+            )]),
+            capability_id("echo.say"),
+            ResourceEstimate::default(),
+            json!({"message": "blocked before dispatch"}),
+            trust_decision_for(vec![EffectKind::DispatchCapability, EffectKind::Network]),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected runtime-policy failure, got {outcome:?}");
+    };
+    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert_eq!(failure.capability_id, capability_id("echo.say"));
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("NetworkMode::Deny")
+    );
+    assert!(
+        !dispatcher.has_request(),
+        "runtime-policy denial must happen before generic extension dispatch"
+    );
+}
+
+#[tokio::test]
 async fn visible_surface_rejects_invalid_execution_context() {
     let runtime = runtime_with(
         registry_from_manifests([(ECHO_MANIFEST, "/system/extensions/echo")]),
@@ -1067,6 +1115,20 @@ fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
         network_mode: NetworkMode::DirectLogged,
         secret_mode: SecretMode::ScrubbedEnv,
         approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Deny,
+        secret_mode: SecretMode::BrokeredHandles,
+        approval_policy: ApprovalPolicy::AskAlways,
         audit_mode: AuditMode::LocalMinimal,
     }
 }
@@ -1192,9 +1254,21 @@ fn runtime_with(
     registry: ExtensionRegistry,
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
 ) -> DefaultHostRuntime {
+    runtime_with_dispatcher(
+        registry,
+        authorizer,
+        Arc::new(RecordingDispatcher::default()),
+    )
+}
+
+fn runtime_with_dispatcher(
+    registry: ExtensionRegistry,
+    authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
+    dispatcher: Arc<dyn CapabilityDispatcher>,
+) -> DefaultHostRuntime {
     DefaultHostRuntime::new(
         Arc::new(registry),
-        Arc::new(RecordingDispatcher::default()),
+        dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )

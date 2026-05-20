@@ -35,7 +35,8 @@ use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId, DispatchError,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
-    RuntimeHttpEgress, RuntimeKind, runtime_policy::EffectiveRuntimePolicy,
+    RuntimeHttpEgress, RuntimeKind,
+    runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::NetworkHttpEgress;
@@ -1624,7 +1625,12 @@ where
     /// Builds the upper facade without production validation.
     #[doc(hidden)]
     pub fn host_runtime_for_local_testing(&self) -> DefaultHostRuntime {
-        self.build_host_runtime()
+        let runtime = self.build_host_runtime();
+        if self.runtime_policy.is_some() {
+            runtime
+        } else {
+            runtime.with_runtime_policy(local_testing_runtime_policy())
+        }
     }
 
     /// Builds the upper facade with the same dispatcher, process services,
@@ -1771,6 +1777,16 @@ where
         }
         declared.all(|descriptor| first_party_runtime.contains_handler(&descriptor.id))
     }
+}
+
+fn local_testing_runtime_policy() -> EffectiveRuntimePolicy {
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
+        DeploymentMode::LocalSingleUser,
+        RuntimeProfile::LocalDev,
+    ))
+    .unwrap_or_else(|error| {
+        panic!("LocalSingleUser + LocalDev runtime policy must resolve for local testing: {error}")
+    })
 }
 
 fn set_runtime_http_egress(

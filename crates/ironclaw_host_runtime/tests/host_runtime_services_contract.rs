@@ -2631,7 +2631,10 @@ async fn host_runtime_services_resume_runtime_policy_denial_fails_matching_block
         .unwrap();
     assert_eq!(failed_run.status, RunStatus::Failed);
     assert_eq!(failed_run.approval_request_id, None);
-    assert_eq!(failed_run.error_kind.as_deref(), Some("network_denied"));
+    assert_eq!(
+        failed_run.error_kind.as_deref(),
+        Some("process_backend_none")
+    );
     assert_eq!(
         fixture
             .capability_leases
