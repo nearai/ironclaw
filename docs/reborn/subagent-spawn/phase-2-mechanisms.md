@@ -104,13 +104,15 @@ pub struct TurnRunRecord {
 // real run id before submit). Replaces the staging-key+rekey workaround.
 //
 // TurnStateStore gains:
-//   async fn children_of(&self, run_id: TurnRunId)        -> Vec<TurnRunRecord>;
-//   async fn get_run_record(&self, run_id: TurnRunId)     -> Option<TurnRunRecord>;
+//   async fn children_of(&self, scope: &TurnScope, run_id: TurnRunId)
+//      -> Vec<TurnRunRecord>;
+//   async fn get_run_record(&self, scope: &TurnScope, run_id: TurnRunId)
+//      -> Option<TurnRunRecord>;
 //   // README §6 "Per-tree descendant atomicity": atomic-at-store admission.
-//   async fn tree_descendant_count_and_reserve(
-//       &self, root: TurnRunId, delta: u32,
+//   async fn reserve_tree_descendants(
+//       &self, scope: &TurnScope, root: TurnRunId, delta: u32, cap: u32,
 //   ) -> Result<TreeReservation, TreeReservationError>;
-//   async fn release_tree_descendants(&self, root: TurnRunId, delta: u32)
+//   async fn release_tree_descendants(&self, scope: &TurnScope, root: TurnRunId, delta: u32)
 //       -> Result<(), TreeReservationError>;
 //
 // pub enum TreeReservationError { WouldExceed { cap: u32, current: u32 }, … }
@@ -436,64 +438,72 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
     async fn invoke_capability_batch(&self, req: CapabilityBatchInvocation)
         -> Result<CapabilityBatchOutcome, AgentLoopHostError>
     {
-        let mut slots: Vec<Option<CapabilityOutcome>> = vec![None; req.invocations.len()];
-        let mut forwarded      = Vec::new();   // non-spawn invocations
-        let mut forwarded_idx  = Vec::new();   // their original slot indices
-
         // ── per-turn fan-out cap (README §8.2). Counted across THIS batch.
         let spawn_count = req.invocations.iter()
             .filter(|c| self.is_spawn(&c.capability_id)).count() as u32;
-        // tree budget is read ONCE for the whole batch (durable, see gate 3)
-        let mut tree = TreeBudget::for_run(&self.run_context, &self.deps).await?;
 
+        let mut outcomes = Vec::with_capacity(req.invocations.len());
         let mut spawn_ordinal = 0u32;
-        for (idx, inv) in req.invocations.iter().enumerate() {
+        let mut idx = 0usize;
+        while idx < req.invocations.len() {
+            let inv = &req.invocations[idx];
             if self.is_spawn(&inv.capability_id) {
                 let outcome = if spawn_count > self.limits.max_spawn_per_turn {
                     // reject the WHOLE batch's spawns without queuing any child
                     spawn_rejected("fanout_cap_exceeded")
                 } else {
-                    self.handle_spawn(inv, spawn_ordinal, &mut tree).await?
+                    self.handle_spawn(inv, spawn_ordinal).await?
                 };
                 spawn_ordinal += 1;
-                slots[idx] = Some(outcome);
+                let suspended = outcome.is_suspension();
+                outcomes.push(outcome);
+                if suspended && req.stop_on_first_suspension {
+                    return Ok(CapabilityBatchOutcome {
+                        outcomes,
+                        stopped_on_suspension: true,
+                    });
+                }
+                idx += 1;
             } else {
-                forwarded.push(inv.clone());
-                forwarded_idx.push(idx);
+                // Preserve original batch order and the inner port's
+                // stop_on_first_suspension semantics. Forward the contiguous
+                // non-spawn run until the next spawn or end of batch.
+                let start = idx;
+                while idx < req.invocations.len()
+                    && !self.is_spawn(&req.invocations[idx].capability_id)
+                {
+                    idx += 1;
+                }
+                let inner = self.inner.invoke_capability_batch(CapabilityBatchInvocation {
+                    invocations: req.invocations[start..idx].to_vec(),
+                    stop_on_first_suspension: req.stop_on_first_suspension,
+                }).await?;
+                let stopped = inner.stopped_on_suspension;
+                outcomes.extend(inner.outcomes);
+                if stopped && req.stop_on_first_suspension {
+                    return Ok(CapabilityBatchOutcome {
+                        outcomes,
+                        stopped_on_suspension: true,
+                    });
+                }
             }
         }
 
-        // forward the non-spawn remainder in one inner batch
-        if !forwarded.is_empty() {
-            let inner = self.inner.invoke_capability_batch(CapabilityBatchInvocation {
-                invocations: forwarded,
-                stop_on_first_suspension: req.stop_on_first_suspension,
-            }).await?;
-            for (o, orig) in inner.outcomes.into_iter().zip(forwarded_idx) {
-                slots[orig] = Some(o);
-            }
-        }
-
-        // an AwaitDependentRun outcome IS a suspension (is_suspension()==true).
-        let stopped = slots.iter().flatten().any(CapabilityOutcome::is_suspension);
-        let outcomes = slots.into_iter()
-            .map(|s| s.ok_or_else(|| internal_err("unpopulated spawn slot")))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(CapabilityBatchOutcome { outcomes, stopped_on_suspension: stopped })
+        Ok(CapabilityBatchOutcome {
+            outcomes,
+            stopped_on_suspension: false,
+        })
     }
 }
 ```
 
-> **Race/ordering note.** `stop_on_first_suspension` truncation is **not**
-> reproduced for spawn slots: a spawn either fully succeeds (producing
-> `SpawnedChildRun` / `AwaitDependentRun`) or fully rejects (producing a
-> `Denied`/`Failed` outcome). Spawns never partially suspend. The forwarded
-> inner batch keeps its own truncation semantics; because spawn outcomes are
-> computed inline *before* forwarding, they are never lost to inner truncation.
-> The simple "any slot is a suspension" check is correct here because spawn
-> outcomes occupy fixed slots. If a future change interleaves spawn + inner
-> truncation, copy `CapabilitySurfaceProfileFilter`'s slot-truncation logic
-> verbatim.
+> **Race/ordering note.** `AwaitDependentRun` is a suspension. Batch handling
+> must preserve original call order and must not execute later side-effecting
+> calls after a blocking spawn when `stop_on_first_suspension` is set. The
+> decorator processes contiguous non-spawn runs through the inner port, handles
+> spawn calls in-place, and returns immediately on the first suspension. Do not
+> collect all spawn slots first and forward all non-spawn calls later; that
+> reorders side effects and violates the host capability port contract.
 
 ### 1.6 The spawn sequence — pseudo code (README §7.2 steps a–f)
 
@@ -548,13 +558,14 @@ impl SubagentSpawnCapabilityPort {
             }
         }
 
-        // gate 3: per-run-tree descendant cap. `tree` was read once for the
-        //         batch; reserve one slot atomically here.
-        if !tree.try_reserve_one() {
-            return Ok(spawn_rejected("tree_descendant_cap_exceeded"));
-        }
+        // gate 3: owner/project binding must be known before any side effect.
+        let Some(owner_user_id) = parent_owner_user_id(parent) else {
+            return Ok(spawn_rejected("spawn_requires_owner_user"));
+        };
 
         // ─────────────────────── (b) RESOLVE FLAVOR ───────────────────────
+        // Pure validation happens before the reservation so unknown flavors or
+        // invalid profile bindings cannot leak a tree-descendant reservation.
         let Some(flavor) = self.deps.flavor_resolver.resolve(&args.flavor_id) else {
             return Ok(spawn_rejected("unknown_flavor"));
         };
@@ -562,22 +573,55 @@ impl SubagentSpawnCapabilityPort {
         let child_profile: RunProfileRequest =
             self.deps.child_profiles.profile_for(&flavor.flavor_id)?;
 
+        // gate 4: per-run-tree descendant cap. This is a durable, store-level
+        //         atomic reservation keyed by spawn_tree_root_run_id. It runs
+        //         before child thread / goal / submit side effects, and is
+        //         released if a later step fails.
+        let tree_root_run_id = spawn_tree_root_run_id(parent);
+        let _reservation = match self.deps.turn_state_store
+            .reserve_tree_descendants(
+                &parent.scope,
+                tree_root_run_id,
+                1,
+                self.limits.max_tree_descendants,
+            )
+            .await
+        {
+            Ok(reservation) => reservation,
+            Err(TurnError::CapacityExceeded(_)) => {
+                return Ok(spawn_rejected("tree_descendant_cap_exceeded"));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let mut reservation_rollback = SpawnReservationRollback::new(
+            Arc::clone(&self.deps.turn_state_store),
+            parent.scope.clone(),
+            tree_root_run_id,
+            1,
+        );
+        // From this point until submit_turn accepts the child, every fallible
+        // side effect is wrapped by the async rollback guard, which calls
+        // `release_tree_descendants(&parent.scope, tree_root_run_id, 1)` before
+        // propagating the error.
+
         // ─────────────────────── (c) ENSURE FRESH CHILD THREAD ────────────
-        // tenant/agent/project copied verbatim; thread_id = None => fresh.
+        // tenant/agent/project/owner copied verbatim; thread_id = None => fresh.
         let child_thread_scope = ThreadScope {
             tenant_id: parent.scope.tenant_id.clone(),
             agent_id,                                  // copied verbatim (gate 0 guaranteed Some)
             project_id: parent.scope.project_id.clone(),
-            owner_user_id: None,                       // subagent thread is not user-owned
+            owner_user_id: Some(owner_user_id.clone()), // copied verbatim; child approvals surface to parent owner
             mission_id: None,
         };
-        let child_thread = self.deps.thread_service.ensure_thread(EnsureThreadRequest {
-            scope: child_thread_scope.clone(),
-            thread_id: None,                           // FRESH thread — README §6 "Tenancy"
-            created_by_actor_id: subagent_actor_id(parent_run_id, ordinal),
-            title: Some(format!("subagent:{}", flavor.flavor_id)),
-            metadata_json: None,
-        }).await.map_err(thread_err)?;
+        let child_thread = reservation_rollback.guard_async(async {
+            self.deps.thread_service.ensure_thread(EnsureThreadRequest {
+                scope: child_thread_scope.clone(),
+                thread_id: None,                       // FRESH thread — README §6 "Tenancy"
+                created_by_actor_id: subagent_actor_id(parent_run_id, ordinal),
+                title: Some(format!("subagent:{}", flavor.flavor_id)),
+                metadata_json: None,
+            }).await.map_err(thread_err)
+        }).await?;
 
         // the child TurnScope: tenant/agent/project verbatim, thread_id fresh.
         let child_scope = TurnScope {
@@ -592,19 +636,23 @@ impl SubagentSpawnCapabilityPort {
         debug_assert_eq!(child_scope.project_id, parent.scope.project_id);
         debug_assert_ne!(child_scope.thread_id,  parent.scope.thread_id);
 
-        // child run id is minted here so the goal store and the gate set can
-        // be keyed by it BEFORE submit_turn.  submit_turn with a deterministic
-        // idempotency key is replay-safe even though the run id is fresh.
-        let child_run_id = TurnRunId::new();
+        // child run id is reserved through the coordinator so the goal store
+        // and gate set use the final id before submit_turn. No staging key,
+        // no rekey race.
+        let child_run_id = reservation_rollback.guard_async(async {
+            self.deps.coordinator.prepare_turn(child_scope.clone()).await
+        }).await?;
 
         // ─────────────────────── (d) PERSIST GOAL (durable) ───────────────
         // fail loud on store error — never submit a child with no goal.
-        self.deps.goal_store.put_goal(child_run_id, SubagentGoal {
-            task:    args.task.clone(),
-            handoff: args.handoff.clone(),
-        }).await.map_err(|e| AgentLoopHostError::new(
-            AgentLoopHostErrorKind::Unavailable,
-            format!("subagent goal store write failed: {}", e.category())))?;
+        reservation_rollback.guard_async(async {
+            self.deps.goal_store.put_goal(child_run_id, SubagentGoal {
+                task:    args.task.clone(),
+                handoff: args.handoff.clone(),
+            }).await.map_err(|e| AgentLoopHostError::new(
+                AgentLoopHostErrorKind::Unavailable,
+                format!("subagent goal store write failed: {}", e.category())))
+        }).await?;
 
         // ─────────────────────── (e) RECORD GATE + AWAITED SET (durable) ──
         //   ONLY for blocking spawns.  This MUST happen before submit_turn so
@@ -613,15 +661,19 @@ impl SubagentSpawnCapabilityPort {
         //   instead a "background delivery" record keyed by parent_run_id.
         let gate_ref = subagent_gate_ref(parent_run_id, parent_turn_id);  // deterministic
         if !args.run_in_background {
-            self.deps.gate_store
-                .record_awaited_child(&gate_ref, parent_run_id, child_run_id)
-                .await
-                .map_err(gate_store_err)?;     // fail loud
+            reservation_rollback.guard_async(async {
+                self.deps.gate_store
+                    .record_awaited_child(&gate_ref, parent_run_id, child_run_id)
+                    .await
+                    .map_err(gate_store_err)
+            }).await?;     // fail loud
         } else {
-            self.deps.gate_store
-                .record_background_child(parent_run_id, child_run_id)
-                .await
-                .map_err(gate_store_err)?;
+            reservation_rollback.guard_async(async {
+                self.deps.gate_store
+                    .record_background_child(parent_run_id, child_run_id)
+                    .await
+                    .map_err(gate_store_err)
+            }).await?;
         }
 
         // ─────────────────────── (f) SUBMIT THE CHILD TURN ────────────────
@@ -632,21 +684,26 @@ impl SubagentSpawnCapabilityPort {
             scope: child_scope,
             actor: TurnActor::new(/* the parent run's actor user_id */ parent_actor_user(parent)),
             accepted_message_ref: subagent_seed_message_ref(child_run_id),
-            source_binding_ref:   subagent_source_binding_ref(),
-            reply_target_binding_ref: subagent_reply_target_binding_ref(),
+            source_binding_ref: child_internal_source_binding_ref(
+                child_thread.thread_id.clone(),
+                child_run_id,
+            ),
+            reply_target_binding_ref: child_internal_reply_target_binding_ref(
+                child_thread.thread_id.clone(),
+                child_run_id,
+            ),
             requested_run_profile: Some(child_profile),     // the subagent profile (P2.C)
+            requested_run_id: Some(child_run_id),            // P1.A prepared id; no rekey
             idempotency_key: idem,
             received_at: now_utc(),
             parent_run_id: Some(parent_run_id),             // P1.A lineage field
             subagent_depth: child_depth,                    // P1.A lineage field
+            spawn_tree_root_run_id: Some(tree_root_run_id),  // P1.A lineage field
         };
         match self.deps.coordinator.submit_turn(submit).await {
             Ok(SubmitTurnResponse::Accepted { run_id, .. }) => {
-                // run_id is the coordinator-minted id.  If it differs from the
-                // pre-minted child_run_id (it will — submit_turn mints its own),
-                // we MUST re-key the goal + gate records.  See §1.7.
-                self.reconcile_run_id(child_run_id, run_id, &gate_ref,
-                                      args.run_in_background, parent_run_id).await?;
+                debug_assert_eq!(run_id, child_run_id);
+                reservation_rollback.disarm(); // the descendant now exists
                 if args.run_in_background {
                     let result_ref = self.deps.result_writer
                         .write_capability_result(
@@ -670,6 +727,7 @@ impl SubagentSpawnCapabilityPort {
             Err(TurnError::ThreadBusy(_)) => {
                 // a fresh thread can never be busy — this is an internal bug.
                 self.rollback_half_spawn(child_run_id, &gate_ref).await;
+                reservation_rollback.release_now().await;
                 Ok(spawn_rejected("child_thread_unexpectedly_busy"))
             }
             Err(e) => {
@@ -677,6 +735,7 @@ impl SubagentSpawnCapabilityPort {
                 // the awaited-set entry is the source of truth; mark it failed
                 // so the parent is not left blocked forever (README §9).
                 self.rollback_half_spawn(child_run_id, &gate_ref).await;
+                reservation_rollback.release_now().await;
                 Ok(spawn_rejected("child_submit_failed"))
             }
         }
@@ -684,29 +743,11 @@ impl SubagentSpawnCapabilityPort {
 }
 ```
 
-> **README correction — pre-minting `child_run_id`.** README §7.2 step (d)/(e)
-> says "persist goal → durable goal store[child_run_id]" and "record …
-> awaited child-run set" *before* (f) `submit_turn`. But `submit_turn` (see
-> `SubmitTurnResponse::Accepted { run_id, .. }`) mints its **own** `TurnRunId`
-> — the spawn caller cannot inject one. Two viable resolutions; **P2.A
-> implements option 2**:
->
-> 1. Add a `requested_run_id: Option<TurnRunId>` to `SubmitTurnRequest` so the
->    caller's pre-minted id is honored. *Rejected* — it widens a `ironclaw_turns`
->    contract for one consumer and risks id-collision validation.
-> 2. Pre-mint a *staging* id, key the durable goal + gate records by it, call
->    `submit_turn`, then **re-key** both records to the coordinator-minted
->    `run_id` (`reconcile_run_id`). The re-key is a single durable operation per
->    store; it runs *before* the outcome is returned, so the observer (P2.D),
->    which looks runs up by `run_id`, always finds them. The window where the
->    record is keyed by the staging id is bounded by the `submit_turn` call and
->    is not observable by the child (the child has not started). This must be
->    called out in the Phase 1 P1.C store API: `put_goal` / `record_awaited_child`
->    need a companion `rekey(staging_id, real_id)`.
->
-> Phase 3 should revisit whether option 1 is cleaner once mission/cron
-> submitters also need it. For Phase 2, option 2 keeps `ironclaw_turns`
-> untouched beyond the agreed P1.A fields.
+`prepare_turn` / `requested_run_id` is load-bearing here. The goal row, awaited
+set/background-delivery row, and spawn result all use the final child
+`TurnRunId` from the start. Do not reintroduce staging ids or `rekey(...)`; that
+creates a race where the runner can observe the child run before the goal/gate
+records are moved.
 
 ### 1.7 Concurrency & race handling (explicit)
 
@@ -715,7 +756,7 @@ impl SubagentSpawnCapabilityPort {
 | **Record gate before submit** | The `AwaitDependentRun` awaited-set entry (`record_awaited_child`) and the goal are durably written in steps (d)/(e) **before** step (f) `submit_turn`. A child that reaches terminal before the parent ever blocks is reconciled by P2.D against the durable set — see §4.5. |
 | **Idempotency key derivation** | `subagent_idempotency_key(parent_run_id, parent_turn_id, ordinal)` → a deterministic `IdempotencyKey` string, e.g. `format!("idempotency_key:subagent:{parent_run_id}:{parent_turn_id}:{ordinal}")` (validated by `IdempotencyKey::new`). Deterministic ⇒ replay-safe (re-running the parent batch produces the same key, `submit_turn` replays the prior `Accepted`). The `ordinal` makes identical-argument sibling spawns in one batch collision-free (README §8.7). |
 | **Partial spawn** | If `submit_turn` fails after the thread/goal/gate writes, `rollback_half_spawn` marks the awaited-set child entry **failed** (not deleted — LLM data retention) so the gate's "all terminal?" check can still complete and the parent is never blocked forever. `spawn_rejected(...)` is returned as the tool result for that slot. |
-| **Tree budget** | `TreeBudget::for_run` reads the durable descendant count **once per batch** via `children_of`/the gate store; `try_reserve_one` reserves slots in-process for the batch. The durable count is the floor; the in-process reservation prevents one batch from over-spawning between durable reads. A process restart re-reads the durable count — no lost budget. |
+| **Tree budget** | Every spawn calls `reserve_tree_descendants(scope, root, 1, cap)` on the durable turn-state store after pure validation and before child thread/goal/submit side effects. The reservation is atomic across concurrent subtrees, fails closed without mutation when over cap, and is released on every post-reserve failure until `submit_turn` accepts the child. No in-process batch-local reservation is accepted as the security boundary. |
 | **Fan-out cap** | Counted across the whole batch *before* any child is queued; if exceeded, **every** spawn slot in the batch rejects and **zero** children are queued (README §8.2 "rejecting without queuing"). |
 
 ### 1.8 Security (explicit, README §8)
@@ -785,11 +826,22 @@ Use a `SpyTurnCoordinator`, `SpySessionThreadService`, in-memory
 13. `partial_spawn_marks_child_failed` — `submit_turn` errors after gate write →
     `rollback_half_spawn` marks the awaited child failed; slot outcome is
     `Denied`.
-14. `run_id_rekey_after_submit` — staging id != coordinator id; assert goal +
-    gate records end up keyed by the coordinator-minted `run_id`.
+14. `requested_run_id_is_final_child_id` — `prepare_turn` returns the child id,
+    goal/gate records are keyed by that id before submit, and `submit_turn`
+    receives `requested_run_id: Some(child_run_id)`.
 15. `child_request_carries_subagent_profile_and_no_lease` — assert
     `requested_run_profile` is the subagent profile and the request exposes no
     parent lease handle.
+16. `reservation_released_on_post_reserve_failure` — inject failures at
+    `ensure_thread`, `prepare_turn`, goal-store write, gate-record write, and
+    `submit_turn`; each path calls
+    `release_tree_descendants(scope, root, 1)` exactly once. Unknown flavor and
+    invalid profile failures happen before reservation and must not call
+    release.
+17. `batch_processing_stops_after_first_blocking_spawn` — a batch with
+    non-spawn calls followed by a blocking spawn forwards the non-spawn prefix,
+    records the first blocking child, returns the blocking gate, and does not
+    queue later spawn calls in the same batch.
 
 ---
 
@@ -1371,8 +1423,8 @@ pub struct AcceptedInboundMessage {
 }
 
 // P1.A store query for lineage
-// TurnStateStore::children_of(run_id) -> Vec<TurnRunRecord>   (parent_run_id index)
-// TurnStateStore::get_run_record(run_id) -> Option<TurnRunRecord>
+// TurnStateStore::children_of(scope, run_id) -> Vec<TurnRunRecord>   (scoped parent_run_id index)
+// TurnStateStore::get_run_record(scope, run_id) -> Option<TurnRunRecord>
 ```
 
 > **`TurnStatus::is_terminal()`** — `matches!(self, Cancelled | Completed |
@@ -1429,7 +1481,7 @@ impl SubagentCompletionObserver {
 
         // is this a subagent child at all? load its record for parent_run_id.
         let child_record = self.turn_store
-            .get_run_record(child_run_id).await?;          // P1.A accessor
+            .get_run_record(&event.scope, child_run_id).await?; // P1.A scoped accessor
         let Some(parent_run_id) = child_record.parent_run_id else {
             return Ok(());                                  // not a subagent child
         };
@@ -1494,8 +1546,8 @@ impl SubagentCompletionObserver {
                     actor: TurnActor::new(self.parent_actor(parent_run_id).await?),
                     run_id: parent_run_id,
                     gate_resolution_ref: gate_ref.clone(),
-                    source_binding_ref: subagent_source_binding_ref(),
-                    reply_target_binding_ref: subagent_reply_target_binding_ref(),
+                    source_binding_ref: parent_source_binding_ref(parent_run_id).await?,
+                    reply_target_binding_ref: parent_reply_target_binding_ref(parent_run_id).await?,
                     idempotency_key: subagent_resume_idempotency_key(parent_run_id, gate_ref),
                 };
                 match self.coordinator.resume_turn(resume).await {
@@ -1573,8 +1625,8 @@ impl SubagentCompletionObserver {
             scope: parent_scope.clone(),
             actor: TurnActor::new(self.parent_actor(parent_run_id).await?),
             accepted_message_ref: accepted_message_ref_of(accepted.message_id),
-            source_binding_ref: subagent_source_binding_ref(),
-            reply_target_binding_ref: subagent_reply_target_binding_ref(),
+            source_binding_ref: parent_source_binding_ref(parent_run_id).await?,
+            reply_target_binding_ref: parent_reply_target_binding_ref(parent_run_id).await?,
             requested_run_profile: None,                  // parent's normal profile
             idempotency_key: subagent_followup_idempotency_key(
                 parent_run_id, accepted.message_id),
@@ -1609,15 +1661,17 @@ impl SubagentCompletionObserver {
     /// A run entered CancelRequested. If it is a parent of subagent children,
     /// recursively cancel the whole lineage subtree (BFS over parent_run_id).
     async fn on_cancel_requested(&self, event: &TurnLifecycleEvent) -> Result<(), TurnError> {
-        let mut queue: VecDeque<TurnRunId> = VecDeque::new();
-        queue.push_back(event.run_id);
+        let mut queue: VecDeque<(TurnScope, TurnRunId)> = VecDeque::new();
+        queue.push_back((event.scope.clone(), event.run_id));
         let mut seen: HashSet<TurnRunId> = HashSet::new();
 
-        while let Some(run_id) = queue.pop_front() {
+        while let Some((run_scope, run_id)) = queue.pop_front() {
             if !seen.insert(run_id) { continue; }          // cycle guard (defensive)
 
             // children_of is a DURABLE store query (P1.A) — no in-memory index.
-            let children = self.turn_store.children_of(run_id).await?;
+            // The scope parameter authorizes the parent run's tenant/agent/project;
+            // children are returned with their own fresh thread scopes.
+            let children = self.turn_store.children_of(&run_scope, run_id).await?;
             for child in children {
                 let child_id = child.run_id;
                 if child.status.is_terminal() { continue; } // already done
@@ -1629,7 +1683,7 @@ impl SubagentCompletionObserver {
                     reason: SanitizedCancelReason::Superseded,   // parent cancelled
                     idempotency_key: subagent_cancel_idempotency_key(event.run_id, child_id),
                 }).await;          // cancel_run is idempotent; ignore already-terminal
-                queue.push_back(child_id);                  // recurse into grandchildren
+                queue.push_back((child.scope.clone(), child_id)); // recurse into grandchildren
             }
         }
         Ok(())
@@ -1775,7 +1829,7 @@ reverse. If the two PRs land in either order, P2.A must not be *merged* before
 
 | WS | Phase 1 contracts consumed |
 |---|---|
-| P2.A | `CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}`, `SubmitTurnRequest.{parent_run_id, subagent_depth}`, `TurnStateStore.{children_of, get_run_record}`, `SubagentGoalStore` + `rekey`, `SubagentGateResolutionStore.record_*`, flavor table |
+| P2.A | `CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}`, `SubmitTurnRequest.{requested_run_id, parent_run_id, subagent_depth, spawn_tree_root_run_id}`, `TurnStateStore.{children_of, get_run_record, reserve_tree_descendants, release_tree_descendants}`, `SubagentGoalStore`, `SubagentGateResolutionStore.record_*`, flavor table |
 | P2.B | `LoopInlineMessage`/`LoopInlineMessageRole` (already in `ironclaw_turns`), `SubagentGoalStore.get_goal`, `direction_md`, flavor table, `CapabilityAllowSet`/`CapabilitySurfaceProfileFilter` (already present) |
 | P2.C | `families::subagent()` + `LoopFamilyId("subagent")`, the subagent family's checkpoint payload shape, flavor table |
 | P2.D | `TurnRunRecord.parent_run_id`, `TurnStateStore.children_of` + `get_run_record`, `DefaultTurnCoordinator::with_event_sink`, `TurnStatus::BlockedDependentRun`, `SubagentGateResolutionStore.{record_child_result, awaited_set}` |
@@ -1786,7 +1840,7 @@ reverse. If the two PRs land in either order, P2.A must not be *merged* before
 
 | Risk | Mitigation |
 |---|---|
-| **`submit_turn` mints its own `TurnRunId`** — pre-keying the goal/gate stores by a staging id then re-keying (§1.6) adds a window and a new `rekey` store op. | Bound the window to the `submit_turn` call; child is not running yet so the staging-keyed records are unobservable. Phase 1 P1.C must expose `rekey`. Phase 3 may revisit adding `requested_run_id` to `SubmitTurnRequest`. |
+| **Prepared child id rejected or collides** — `requested_run_id` is load-bearing because goal/gate rows are keyed before submit. | `prepare_turn` mints ids and `submit_turn` validates the prepared id belongs to the same scope; unknown/colliding ids fail closed before child execution. No staging id or rekey path exists. |
 | **`LoopSafeSummary` 512-byte cap** rejects model-generated goal text inline (§2.3). | Option B: goal travels as a real transcript `user` message (no cap); inline messages carry only authored framing. Coordination point §5. |
 | **`ThreadScope.agent_id` is non-optional** but `TurnScope.agent_id` is `Option`. | Gate 0 in `handle_spawn` rejects spawns from agent-less scopes before `ensure_thread`. |
 | **Lost wakeup** — child terminal before parent blocks. | Awaited set recorded durably before `submit_turn` (P2.A step e); two-sided reconciliation (observer + executor `BeforeBlock`), §4.5. |

@@ -4,7 +4,8 @@
 **Date:** 2026-05-19
 **Branch:** `subagent-spawn-design`
 **Scope:** `crates/ironclaw_agent_loop`, `crates/ironclaw_turns`,
-`crates/ironclaw_loop_support`, `crates/ironclaw_reborn`
+`crates/ironclaw_loop_support`, `crates/ironclaw_reborn`,
+`crates/ironclaw_reborn_composition`
 
 This is the **overarching design doc**. Per-phase implementation docs (detailed,
 with pseudo code) live alongside this file:
@@ -107,11 +108,15 @@ field; `EffectKind` is deliberately not propagated to the loop layer.
 
 The mechanism therefore is:
 
-`spawn_subagent` is an **ordinary capability** in the surface. The executor
-invokes it through the existing `invoke_capability_batch` path. The host's
-capability-port impl (in `ironclaw_loop_support`) recognises the `spawn_subagent`
-capability id, performs the spawn, and returns a **new `CapabilityOutcome`
-variant**:
+`spawn_subagent` is an **ordinary capability** in the visible surface. Surface
+visibility is not authority. The executor invokes it through the existing
+`invoke_capability_batch` path, and the host-side capability-port impl delegates
+to an explicit kernel-mediated subagent-spawn service before any thread, goal,
+gate, or turn side effect. That service performs the same fail-closed checks a
+first-party host capability must perform: grant/lease or approval policy,
+resource admission, scope consistency, owner/project binding, spawn-tree
+reservation, and redacted denial. Only after those checks pass does it create
+the child thread/run state and return a **new `CapabilityOutcome` variant**:
 
 - **background** →
   `CapabilityOutcome::SpawnedChildRun { child_run_id, result_ref, safe_summary }`
@@ -123,9 +128,11 @@ variant**:
   outcome; the executor maps it to `GateKind::AwaitDependentRun` and then follows
   the existing `checkpoint BeforeBlock → LoopExit::Blocked` path.
 
-No `EffectKind` change, no new executor routing, no `host_runtime` involvement.
-The executor only gains the mechanical `CapabilityOutcome` arms that map
-background spawns to a result ref and blocking spawns to the existing gate path.
+No `EffectKind` change and no new executor routing. The executor only gains the
+mechanical `CapabilityOutcome` arms that map background spawns to a result ref
+and blocking spawns to the existing gate path. The authority boundary is the
+kernel-mediated subagent-spawn service behind the loop capability port, not the
+capability surface allowlist.
 
 The `result_ref` payload schema is **defined** (not implicit) — see §6 row
 "Spawn-result payload".
@@ -142,9 +149,11 @@ ironclaw_turns         + CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}
                          BlockedReason  and  TurnStatus::BlockedDependentRun
                        ~ SubmitTurnRequest and TurnRunRecord:
                          + parent_run_id, subagent_depth, spawn_tree_root_run_id
-                       + children_of(run_id), get_run_record(run_id),
-                         tree_descendant_count_and_reserve(root_run_id, delta)
+                       + children_of(scope, run_id), get_run_record(scope, run_id),
+                         reserve_tree_descendants(scope, root_run_id, delta, cap)
                          store queries / atomic admission
+                       + SpawnTreeReservation rows (per-root atomic descendant
+                         count — "reserve before queue", durable)
                        + TurnCoordinator::prepare_turn(scope) -> reserved TurnRunId
                          and SubmitTurnRequest.requested_run_id
                          — caller-known run id BEFORE submit; replaces the
@@ -157,17 +166,20 @@ ironclaw_loop_support  + spawn handling in the capability-port impl
                        + attenuation (CapabilityAllowSet) + hard allow_nesting gate
 
 ironclaw_reborn        + `subagent` PlannedDriver + run-profile→driver binding
-(composition)          + built-in subagent flavor table + direction .md files
+(loop library)         + built-in subagent flavor table + direction .md files
                        + DURABLE subagent goal store (DB-backed; piggybacks on
                          turn-state persistence — not an in-memory store)
                        + SubagentCompletionObserver (TurnEventSink)
+
+ironclaw_reborn_composition
+(product composition)  + concrete product-live subagent assembly:
+                         DB-backed store construction, root-provided
+                         PendingGateProjectionSink adapter, composite event
+                         sink, restart-reconciler task, and runtime wiring
                        + RestartReconciler — startup sweep + periodic poll over
                          terminal child runs lacking gate-resolved / delivered
                          observer outputs (fixes the "event lost between commit
                          and observer dispatch" hole)
-                       + SpawnTreeReservation rows (per-root atomic descendant
-                         count — concurrent admit across subtrees is rare today
-                         but the rule is "reserve before queue", durable)
                        + AutonomousContinuationBudget (per-tree wake/turn quota
                          + per-time-window quota to bound self-amplifying spawn
                          cascades)
@@ -245,7 +257,7 @@ spawn time and keyed by the coordinator-minted `TurnRunId`.
 | **Child approval ownership** | Child runs inherit the parent's `owner_user_id` AND `project_id` — **enforced in spawn code** (the child `ensure_thread` + `SubmitTurnRequest` copy both verbatim from the parent run record; deviation = typed error, not silently filled). A child's `Approval` gate surfaces on the **child thread** addressed to that owner — the parent user is the approver. The child thread is user-visible in the same surface as any other thread under that user; UI nesting is the deferred linkage. |
 | **Approval surfacing (projection, not bridge)** | A turn transitioning to `TurnStatus::BlockedApproval` does NOT currently populate the engine's `PendingGateStore` that the UI queries — they are two disconnected systems. **A direct write-hook bridge in `block_run()` is fragile** (matches the split-brain shape `.claude/rules/gateway-events.md` exists to prevent). Instead: `PendingGateStore` becomes a **derived projection** of `TurnLifecycleEvent` — a projection consumer reads turn events and materialises the same read model the UI already queries. One source of truth (turn events), replayable from a cursor, restart-safe, idempotent. The UI surface is unchanged. Affects every blocked turn (not subagent-specific) — landed as prerequisite **P0** (see §11). |
 | Nesting | Hard gate: a spawn from a flavor with `allow_nesting=false` is rejected regardless of surface membership. Plus a depth cap (`subagent_depth` field, checked before `submit_turn`) and a per-turn fan-out cap. |
-| **Per-tree descendant atomicity** | The per-run-tree descendant cap (`MAX_TREE_DESCENDANTS`) is enforced via a **durable `SpawnTreeReservation` row keyed by `spawn_tree_root_run_id`** — `tree_descendant_count_and_reserve(root, delta)` is atomic at the store, runs **before `submit_turn`**. Concurrent admit across subtrees cannot over-admit. (Concurrent parent turns on the *same* parent thread are impossible by the per-`TurnScope` active-run lock, but a single root can have many concurrent subtrees on different threads.) |
+| **Per-tree descendant atomicity** | The per-run-tree descendant cap (`MAX_TREE_DESCENDANTS`) is enforced via a **durable `SpawnTreeReservation` row keyed by scoped `spawn_tree_root_run_id`** — `reserve_tree_descendants(scope, root, delta, cap)` is atomic at the store, fails closed without mutation when over cap, and runs **before `submit_turn`**. Concurrent admit across subtrees cannot over-admit. (Concurrent parent turns on the *same* parent thread are impossible by the per-`TurnScope` active-run lock, but a single root can have many concurrent subtrees on different threads.) |
 | Loop family | One static `subagent` `LoopFamily` (`LoopFamilyId "subagent"`); default strategies + tighter `BudgetStrategy`. Bound to a dedicated `subagent` `PlannedDriver`. |
 | Flavors | Built-in static table — v1: `general`, `researcher`. Each: direction id, tool allowlist, model, iteration + token/cost budget, `allow_nesting`. |
 | Direction prompt | Static `.md` per flavor (`include_str!`, `ironclaw_reborn/src/directions/`), selected by static match. The system message. |
@@ -315,7 +327,7 @@ parent again → loop). Two independent budgets bound this:
 
 - **Per-spawn caps** (see §8): `MAX_TREE_DESCENDANTS`, `MAX_SPAWN_PER_TURN`,
   `subagent_depth` — enforced before `submit_turn` via the atomic
-  `tree_descendant_count_and_reserve`. Bounds the *total number of spawns*.
+  `reserve_tree_descendants`. Bounds the *total number of spawns*.
 - **Autonomous-continuation budget**: per-tree wake-turn count + per-time-window
   rate. Bounds the *number of background-driven parent wakes* even when each
   individual wake spawns ≤ the per-spawn cap. Exceeding the budget suspends
@@ -405,7 +417,7 @@ mitigations below are **load-bearing**, not optional.
 | Child completes terminal *during* a subtree cancel | Writes a `SubagentResultTombstone` (typed: `discarded_by_parent_cancel`) so reconciliation can distinguish discarded vs lost. |
 | Child completes with no assistant message | Typed "completed, no output" result — the parent always receives N well-formed results. |
 | Partial spawn (`submit_turn` fails after `prepare_turn` + reservation) | The reservation + awaited-set entry are the source of truth, written first; the half-spawn is reconciled (child absent or marked failed) and the reservation is released; fail loud. |
-| **Per-tree descendant over-admit** | `tree_descendant_count_and_reserve(root, delta)` is **atomic at the store** and runs before `submit_turn`. Concurrent admit across subtrees (different threads) cannot over-admit. Concurrent admit on the same parent thread is precluded by the per-`TurnScope` active-run lock. |
+| **Per-tree descendant over-admit** | `reserve_tree_descendants(scope, root, delta, cap)` is **atomic at the store** and runs before `submit_turn`. Concurrent admit across subtrees (different threads) cannot over-admit. Concurrent admit on the same parent thread is precluded by the per-`TurnScope` active-run lock. |
 | **Autonomous-continuation runaway** | Per-tree wake-turn quota + per-time-window rate-limit; exceeded → wake submissions suspended for that tree + `AutonomousContinuationStopped` event emitted (§7.4). |
 | **Blocking parent waiting indefinitely** | Parent is interruptible: `cancel_run(parent)` cascades through the subtree (§7.5). Blocking subagents are *for short bounded work*; long children should be background. |
 | **Approval invisible to UI** (today, every blocked turn) | `block_run()` only writes `TurnStatus::BlockedApproval` + a `TurnLifecycleEvent` scoped to `TurnScope`; the engine's `PendingGateStore` (where the UI queries) is not populated. Fix is **prerequisite P0** (§11): make `PendingGateStore` a derived projection of `TurnLifecycleEvent`. Single source log; replayable from cursor; restart-safe; no `block_run()` dual-write. |
@@ -416,8 +428,9 @@ mitigations below are **load-bearing**, not optional.
 |---|---|---|---|
 | `ironclaw_agent_loop` | sealed; product-agnostic; refs not raw prompts | one `subagent` family; `GateKind::AwaitDependentRun` is neutral; executor gains only outcome-to-existing-gate/result mapping | ✅ |
 | `ironclaw_turns` | coordination contracts; lifecycle metadata + refs | `CapabilityOutcome` variants, blocked-kind variants, lineage fields, `prepare_turn` API, atomic descendant reservation query | ✅ |
-| `ironclaw_loop_support` | host-port adapter glue; no stateful stores | spawn handling in the capability port; goal store + reservation + reconciler live in `ironclaw_reborn` | ✅ |
-| `ironclaw_reborn` | driver integration + composition | family driver, flavors, directions, DB-backed goal store, reservation table, observer, reconciler, wiring | ✅ |
+| `ironclaw_loop_support` | host-port adapter glue; no stateful stores | spawn handling in the capability port; concrete stores, projection sinks, and background tasks are injected by composition | ✅ |
+| `ironclaw_reborn` | generic loop library; driver/profile/readiness; no root `src/` adapters | family driver, profiles, flavors, directions, Reborn-neutral goal/tombstone traits, observer/reconciler logic, and readiness metadata | ✅ |
+| `ironclaw_reborn_composition` | concrete product-live assembly; still no root `src/` imports | DB-backed store construction, root-provided `PendingGateProjectionSink`, composite event sink, runtime assembly, and background task spawning | ✅ |
 | `ironclaw_host_runtime` / `ironclaw_host_api` | — | untouched | ✅ |
 
 Five wire-stable enums gain `AwaitDependentRun` / `BlockedDependentRun` /
@@ -495,7 +508,7 @@ Detailed per-phase docs with pseudo code:
 ## 12. Verification strategy
 
 - **Unit tests** per crate — see each phase doc.
-- **Integration tests** (`crates/ironclaw_reborn/tests/`): background E2E,
+- **Integration tests** (`crates/ironclaw_reborn_composition/tests/`): background E2E,
   blocking E2E, parallel-blocking E2E, early-completion (all children terminate
   before the parent blocks), child-authority (a child cannot use a lease the
   parent holds), child-approval-by-parent-owner, fork-bomb (caps reject — incl.
@@ -505,6 +518,15 @@ Detailed per-phase docs with pseudo code:
   no-deadlock regression (child `thread_id` ≠ parent).
 - **Quality gate:** `cargo fmt`; `cargo clippy --all --benches --tests --examples
   --all-features` (zero warnings); `cargo test`.
+- **Architecture guardrails:** `cargo test -p ironclaw_architecture --test
+  reborn_dependency_boundaries` and `scripts/reborn-e2e-rust.sh architecture`
+  must pass, with any intentional boundary-rule changes reviewed in the same PR.
+- **Replay/snapshot evidence:** add deterministic subagent trace fixtures and run
+  `scripts/replay-snap.sh test` (or the current replay command for those
+  fixtures) before claiming product compatibility for background delivery,
+  blocking result payloads, and idempotent replay. Until those fixtures land,
+  implementation PRs must say subagent spawn is not yet product-compatible even
+  if unit and integration tests pass.
 
 ## 13. Follow-ups (explicitly deferred)
 

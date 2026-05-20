@@ -39,10 +39,11 @@ they are the seam.
 | New lineage fields on `TurnRunRecord` | `parent_run_id: Option<TurnRunId>`, `subagent_depth: u32`, `spawn_tree_root_run_id: Option<TurnRunId>` | P1.A | reborn submit path (P2.A), observer (P2.D), reservation table (P1.C/P2) |
 | New lineage fields on `SubmitTurnRequest` | `requested_run_id: Option<TurnRunId>`, `parent_run_id: Option<TurnRunId>`, `subagent_depth: u32`, `spawn_tree_root_run_id: Option<TurnRunId>` | P1.A | P2.A spawn path; mission/cron/trigger submitters (future) |
 | New coordinator trait method | `TurnCoordinator::prepare_turn(scope: TurnScope) -> Result<TurnRunId, TurnError>` | P1.A | P2.A spawn handler — mints child run id **before** any side-effect so goal store and reservation can be keyed by the final id |
-| New store query | `children_of(&self, run_id: TurnRunId)` | P1.A | observer cancellation subtree walk (P2.D) |
-| New store query | `get_run_record(&self, run_id: TurnRunId)` | P1.A | observer parent lookup for terminal child events (P2.D) |
-| New store atomic | `tree_descendant_count_and_reserve(root: TurnRunId, delta: u32) -> Result<u32, TurnError>` | P1.A (trait) / P1.C (`SpawnTreeReservation` row backend) | P2.A admission, before `submit_turn` |
-| New store atomic (companion) | `release_tree_descendants(root: TurnRunId, delta: u32) -> Result<(), TurnError>` | P1.A | P2.A partial-spawn rollback |
+| New store query | `children_of(&self, scope: &TurnScope, run_id: TurnRunId)` | P1.A | observer cancellation subtree walk (P2.D); the scope authorizes the parent run's tenant/agent/project and children are returned with their own fresh thread scopes; wrong tenant/agent/project reads return empty |
+| New store query | `get_run_record(&self, scope: &TurnScope, run_id: TurnRunId)` | P1.A | observer parent lookup for terminal child events (P2.D); wrong-scope reads return `None` |
+| New store atomic | `reserve_tree_descendants(scope: &TurnScope, root: TurnRunId, delta: u32, cap: u32) -> Result<SpawnTreeReservation, TurnError>` | P1.A (trait) / P1.C (`SpawnTreeReservation` row backend) | P2.A admission, before `submit_turn` |
+| New store atomic (companion) | `release_tree_descendants(scope: &TurnScope, root: TurnRunId, delta: u32) -> Result<(), TurnError>` | P1.A | P2.A partial-spawn rollback; scoped to the exact reservation key |
+| New turn error category | `TurnError::CapacityExceeded { resource: &'static str, cap: u64 }` or the equivalent existing capacity/admission variant if present at implementation time | P1.A | `reserve_tree_descendants` rejects over-cap without mutation; P2.A maps only this typed error to `tree_descendant_cap_exceeded` |
 | New coordinator hook | `DefaultTurnCoordinator::with_event_sink(Arc<dyn TurnEventSink>)` | P1.A | live `SubagentCompletionObserver` notification (P2.D/P3) |
 | New spawn-result payload struct | `SpawnedChildRunPayload { child_run_id, child_thread_id, flavor, mode, status, output_available, final_text, failure_summary }` | P1.C (`ironclaw_reborn::subagent`) | P2.A `result_ref` content; parent's model receives it as tool result |
 | New tombstone struct | `SubagentResultTombstone { child_run_id, terminal_status, disposition: SubagentResultDisposition }` + enum `SubagentResultDisposition::DiscardedByParentCancel` | P1.C (`ironclaw_reborn::subagent`) | P2.D writes on mid-cancel terminal completes; reconciler reads |
@@ -121,28 +122,50 @@ restart-safe; idempotent. No `block_run()` hook required.
 
 ### P0.3 — Contracts to add
 
-- **Read model** — `PendingGateStore` keeps its existing reader API (so the UI
-  is unchanged). Its writer API becomes internal to the projection consumer
-  (no other writers).
+- **Neutral read-model sink** — define a Reborn-neutral projection target in
+  `crates/ironclaw_event_projections/` (for example
+  `PendingGateProjectionSink`) with `upsert_pending_gate` /
+  `remove_pending_gate` methods over neutral DTOs. The existing root
+  `src/gate/pending.rs` store is adapted to that sink only from the
+  product/composition layer. `ironclaw_event_projections` must not import root
+  `src/` or engine pending-gate types.
+- **Blocked-event metadata** — extend the turn blocked lifecycle event payload
+  with redacted actor/gate metadata needed by the projection:
+  `owner_user_id`, `gate_ref`, `gate_kind`, and `sanitized_reason`. These fields
+  are metadata only; no raw prompts, tool input, secret material, host paths, or
+  backend errors may enter the event. If a block event lacks this metadata, the
+  projection fails closed for that row and emits a redacted projection error.
 - **Projection consumer** — lives in `crates/ironclaw_event_projections/`
   (the Reborn read-model boundary). Consumes `TurnLifecycleEvent`. Per event:
   - `kind = Blocked` with `status` ∈ {`BlockedApproval`, `BlockedAuth`,
     `BlockedResource`, `BlockedDependentRun` (new — from P1.A)} →
-    upsert a `PendingGate { user_id = turn_actor.user_id, thread_id =
-    scope.thread_id, run_id, gate_kind, gate_ref, sanitized_reason, blocked_at }`.
+    upsert a neutral `PendingGateProjectionRow { tenant_id = scope.tenant_id,
+    owner_user_id, thread_id = scope.thread_id, run_id, gate_kind, gate_ref,
+    sanitized_reason, blocked_at }` through the projection sink.
   - `kind ∈ {Completed, Failed, Cancelled, Resumed}` for a previously-blocked
-    run → remove the `PendingGate` row for that `(user_id, thread_id, run_id)`.
+    run → remove the pending-gate row for exactly
+    `(tenant_id, owner_user_id, thread_id, run_id)`. If terminal/resume events
+    cannot recover `owner_user_id` from the durable run record or event metadata,
+    removal fails closed and emits a redacted projection error instead of
+    deleting a broader tenant/thread row.
 - **Projection cursor** — durable `(consumer_id, last_event_cursor)` row. On
   startup the consumer resumes from `last_event_cursor`; on a fresh deployment
   it replays from the beginning. Reconciliation is purely additive — upserts
-  by `(user_id, thread_id, run_id)`, never duplicates.
+  by `(tenant_id, owner_user_id, thread_id, run_id)`, never duplicates and never
+  crosses users in the same tenant/thread namespace.
 
 Pseudo code (Rust-shaped):
 
 ```rust
 // crates/ironclaw_event_projections/src/pending_gate_projection.rs
+#[async_trait]
+pub trait PendingGateProjectionSink: Send + Sync {
+    async fn upsert_pending_gate(&self, row: PendingGateProjectionRow) -> Result<(), ProjectionError>;
+    async fn remove_pending_gate(&self, key: PendingGateProjectionKey) -> Result<(), ProjectionError>;
+}
+
 pub struct PendingGateProjection {
-    store: Arc<dyn PendingGateStore>,        // existing engine store; now write-via-projection-only
+    sink: Arc<dyn PendingGateProjectionSink>, // adapted by composition/product layer
     cursor: Arc<dyn ProjectionCursorStore>,
 }
 
@@ -151,15 +174,15 @@ impl TurnEventSink for PendingGateProjection {
     async fn publish(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
         match event.kind {
             TurnEventKind::Blocked => {
-                let row = PendingGate::from_lifecycle_event(&event);
-                self.store.upsert(row).await?;
+                let row = PendingGateProjectionRow::try_from_lifecycle_event(&event)?;
+                self.sink.upsert_pending_gate(row).await?;
             }
             TurnEventKind::Completed
             | TurnEventKind::Failed
             | TurnEventKind::Cancelled
             | TurnEventKind::Resumed => {
-                self.store
-                    .remove_for_run(event.scope.user_id_for_owner(), event.run_id)
+                self.sink
+                    .remove_pending_gate(PendingGateProjectionKey::from_lifecycle_event(&event))
                     .await?;
             }
             _ => {}
@@ -169,17 +192,18 @@ impl TurnEventSink for PendingGateProjection {
 }
 ```
 
-(`from_lifecycle_event` pulls `user_id` from `TurnActor`, `gate_ref` from the
-event payload, etc. Idempotent because the underlying store upsert is keyed by
-`(user_id, thread_id, run_id)`.)
+(`try_from_lifecycle_event` pulls `owner_user_id`, `gate_ref`, and `gate_kind`
+from the blocked-event metadata added above. Idempotent because the underlying
+sink upsert and removal are keyed by
+`(tenant_id, owner_user_id, thread_id, run_id)`.)
 
 ### P0.4 — Wiring (Phase 3 dependency)
 
-Phase 3's `subagent_runtime.rs` registers this projection alongside the
-`SubagentCompletionObserver` via the new `DefaultTurnCoordinator::with_event_sink`
+Phase 3 composition registers this projection alongside the
+`SubagentCompletionObserver` through a composite `TurnEventSink` / event bus
 (P1.A). At that point any subagent child run blocking on `Approval` (or any
-future loop type's blocked turn) appears in `PendingGateStore` and is queryable
-by the parent owner via the existing UI surface.
+future loop type's blocked turn) appears in the product pending-gate read model
+and is queryable by the parent owner via the existing UI surface.
 
 ### P0.5 — Tests
 
@@ -225,9 +249,9 @@ durable lineage fields on `TurnRunRecord`, and a `children_of` store query.
 | `crates/ironclaw_turns/src/status.rs` | + `TurnStatus::BlockedDependentRun`; + `BlockedReason::DependentRun`; update `is_terminal`, `keeps_active_lock` (no behavior change, but re-verify); update `BlockedReason::status` / `gate_ref` |
 | `crates/ironclaw_turns/src/loop_exit.rs` | + `LoopBlockedKind::AwaitDependentRun`; update `LoopBlockedKind::to_blocked_reason` |
 | `crates/ironclaw_turns/src/request.rs` | + `requested_run_id`, `parent_run_id`, `subagent_depth`, `spawn_tree_root_run_id` on `SubmitTurnRequest` (all `#[serde(default)]`) |
-| `crates/ironclaw_turns/src/store.rs` | + `parent_run_id`, `subagent_depth`, `spawn_tree_root_run_id` on `TurnRunRecord`; + `children_of`, `get_run_record`, `tree_descendant_count_and_reserve`, `release_tree_descendants` on `TurnStateStore` trait |
+| `crates/ironclaw_turns/src/store.rs` | + `parent_run_id`, `subagent_depth`, `spawn_tree_root_run_id` on `TurnRunRecord`; + scoped `children_of`, scoped `get_run_record`, `reserve_tree_descendants`, `release_tree_descendants` on `TurnStateStore` trait |
 | `crates/ironclaw_turns/src/coordinator.rs` | + `prepare_turn(scope) -> TurnRunId` on `TurnCoordinator` trait + `DefaultTurnCoordinator` impl; + optional `TurnEventSink` on `DefaultTurnCoordinator`; publish submit/resume/cancel lifecycle events best-effort; `submit_turn` must honour `requested_run_id` (bind instead of mint) |
-| `crates/ironclaw_turns/src/memory.rs` | + `parent_run_id`/`subagent_depth`/`spawn_tree_root_run_id` on `RunRecord`; thread through `persistence_record`; impl `children_of`, `get_run_record`, `tree_descendant_count_and_reserve`, `release_tree_descendants`; honour `requested_run_id` in `submit_turn`; update blocked-status `match` arms (resume + cancel) |
+| `crates/ironclaw_turns/src/memory.rs` | + `parent_run_id`/`subagent_depth`/`spawn_tree_root_run_id` on `RunRecord`; thread through `persistence_record`; impl scoped `children_of`, scoped `get_run_record`, `reserve_tree_descendants`, `release_tree_descendants`; honour `requested_run_id` in `submit_turn`; update blocked-status `match` arms (resume + cancel) |
 | `crates/ironclaw_turns/src/run_profile/milestones.rs` | no code change — `LoopHostMilestoneKind::GateBlocked` carries `LoopGateKind` opaquely; verify it still compiles |
 | `crates/ironclaw_turns/src/db.rs` | no schema change — `TurnRunRecord` is stored as a JSON payload; verify the round-trip test still passes |
 | `crates/ironclaw_turns/tests/…` | new unit + contract tests (§1.9) |
@@ -820,48 +844,49 @@ pub trait TurnStateStore: Send + Sync {
     async fn request_cancel(/* … */) -> Result<CancelRunResponse, TurnError>;
     async fn get_run_state(/* … */) -> Result<TurnRunState, TurnError>;
 
-    /// Return every run whose `parent_run_id == Some(run_id)`.
+    /// Return every run in `scope` whose `parent_run_id == Some(run_id)`.
     ///
     /// Used by the subagent completion observer to walk a run-tree subtree for
     /// recursive cancellation. Order is unspecified. An unknown `run_id`
     /// returns an empty `Vec` (NOT an error) — a parent with no children is a
-    /// valid, common state.
-    async fn children_of(&self, run_id: TurnRunId)
+    /// valid, common state. A run that exists only in a different scope also
+    /// returns empty; wrong-scope reads must look unknown.
+    async fn children_of(&self, scope: &TurnScope, run_id: TurnRunId)
         -> Result<Vec<TurnRunRecord>, TurnError>;
 
-    /// Return the durable run record for `run_id`, or `Ok(None)` if unknown.
+    /// Return the durable run record for `run_id` in `scope`, or `Ok(None)` if
+    /// unknown. Wrong-scope records return `Ok(None)`.
     ///
     /// Used by the completion observer to determine whether a terminal event is
     /// for a child run and, if so, which parent run should receive the result.
-    async fn get_run_record(&self, run_id: TurnRunId)
+    async fn get_run_record(&self, scope: &TurnScope, run_id: TurnRunId)
         -> Result<Option<TurnRunRecord>, TurnError>;
 
-    /// Atomically reserve `delta` additional descendant slots in the spawn
-    /// tree rooted at `root_run_id` and return the **post-reservation** count
-    /// (i.e. the new total descendant count including this reservation).
+    /// Atomically reserve `delta` additional descendant slots in the scoped
+    /// spawn tree rooted at `root_run_id`.
     ///
     /// Backed by a durable `SpawnTreeReservation` row keyed by
-    /// `(tenant_id, spawn_tree_root_run_id)`; the increment is done under a
-    /// store-level lock / atomic UPDATE so concurrent admit across subtrees on
-    /// different threads cannot over-admit. The caller compares the returned
-    /// count against `MAX_TREE_DESCENDANTS` (Phase 2 policy constant); the
-    /// store itself does not enforce the cap — admission policy does.
+    /// `(tenant_id, agent_id, project_id, spawn_tree_root_run_id)`; the
+    /// compare-and-increment is done under a store-level lock / atomic UPDATE so
+    /// concurrent admit across subtrees on different threads cannot over-admit.
+    /// The store checks `current_count + delta <= cap` inside the same atomic
+    /// mutation. Over-cap requests fail closed and do not mutate durable state.
     ///
     /// Runs **before** `submit_turn` in P2.A. On `submit_turn` failure the
-    /// caller MUST `release_tree_descendants(root, delta)` to roll back.
+    /// caller MUST `release_tree_descendants(scope, root, delta)` to roll back.
     ///
-    /// Returns `TurnError::Conflict` if the row is being mutated concurrently
-    /// in an incompatible way (store-implementation-specific). NEVER returns a
-    /// `WouldExceed` itself — the cap is policy, not store-enforced — but
-    /// admission/spawn handler turns the returned count > cap into a typed
-    /// rejection.
-    async fn tree_descendant_count_and_reserve(
+    /// Returns `TurnError::CapacityExceeded` without changing the row when the
+    /// cap would be exceeded. Returns `TurnError::Conflict` if the row is being
+    /// mutated concurrently in an incompatible way.
+    async fn reserve_tree_descendants(
         &self,
+        scope: &TurnScope,
         root_run_id: TurnRunId,
         delta: u32,
-    ) -> Result<u32, TurnError>;
+        cap: u32,
+    ) -> Result<SpawnTreeReservation, TurnError>;
 
-    /// Companion to `tree_descendant_count_and_reserve` — atomically decrement
+    /// Companion to `reserve_tree_descendants` — atomically decrement
     /// the descendant count for partial-spawn rollback. Called by P2.A when
     /// `submit_turn` of a reserved child fails between reservation and queue.
     /// Idempotent at the row level via the same atomic-update pattern; an
@@ -870,6 +895,7 @@ pub trait TurnStateStore: Send + Sync {
     /// which is worse).
     async fn release_tree_descendants(
         &self,
+        scope: &TurnScope,
         root_run_id: TurnRunId,
         delta: u32,
     ) -> Result<(), TurnError>;
@@ -882,30 +908,39 @@ same persistence backend as `TurnRunRecord` (libSQL / Postgres):
 | Column | Type | Notes |
 |---|---|---|
 | `tenant_id` | text (PK part) | from the root run's `TurnScope.tenant_id` — tenant isolation |
+| `agent_id` | text nullable sentinel (PK part) | from `TurnScope.agent_id`; use the existing scope-key encoding so `None` does not collide |
+| `project_id` | text nullable sentinel (PK part) | from `TurnScope.project_id`; use the existing scope-key encoding so `None` does not collide |
 | `spawn_tree_root_run_id` | uuid (PK part) | the root `TurnRunId`; equals the run's own id when its `spawn_tree_root_run_id` field is `None` |
-| `descendant_count` | bigint (u64 in Rust) | total reserved descendants under this root; atomically incremented by `tree_descendant_count_and_reserve` |
+| `descendant_count` | bigint (u64 in Rust) | total reserved descendants under this root; atomically admitted by `reserve_tree_descendants` |
 | `created_at` | timestamptz | first reservation time; helps reconciliation age-out orphaned rows |
 | `updated_at` | timestamptz | last reservation/release time |
 
-Primary key: `(tenant_id, spawn_tree_root_run_id)`. The atomic increment is a
-single `UPDATE … SET descendant_count = descendant_count + $1 RETURNING
-descendant_count` (Postgres) or its libSQL equivalent. Row is INSERTed with
-count = `delta` when it does not yet exist (`ON CONFLICT … DO UPDATE`). This
-keeps the operation atomic without a separate `SELECT` round-trip.
+Primary key: `(tenant_id, agent_id, project_id, spawn_tree_root_run_id)`. The
+atomic admission is one compare-and-update statement. PostgreSQL shape:
+`INSERT ... SELECT ..., $delta WHERE $delta <= $cap ON CONFLICT ... DO UPDATE
+SET descendant_count = descendant_count + $delta WHERE descendant_count +
+$delta <= $cap RETURNING descendant_count`; no returned row means over cap and
+maps to `CapacityExceeded` without mutation. The initial insert must use
+`INSERT ... SELECT ... WHERE $delta <= $cap`, not a blind insert, otherwise the
+first reservation can over-admit when `delta > cap`. libSQL uses the same
+transaction shape:
+`BEGIN IMMEDIATE`, read the row under the write lock, only insert/update if
+within cap, commit. There is no increment-first / caller-rollback admission path.
 
 > **[CORRECTION]** The overarching doc says `children_of(run_id)` returns a
 > store query result without specifying the element type. It must return
 > `Vec<TurnRunRecord>` (not `TurnRunState`) because the caller (P2.D observer)
-> needs `parent_run_id`/`status`/`run_id` to BFS the subtree, and only
-> `TurnRunRecord` carries `parent_run_id`. `TurnRunState` deliberately does not.
-> The same reason requires `get_run_record(run_id)` for single terminal child
-> events; `get_run_state` is not enough.
+> needs `parent_run_id`/`status`/`run_id` and each child's fresh `scope` to BFS
+> the subtree, and only `TurnRunRecord` carries `parent_run_id`. `TurnRunState`
+> deliberately does not.
+> The same reason requires `get_run_record(&child_scope, run_id)` for single
+> terminal child events; `get_run_state` is not enough.
 
 **`InMemoryTurnStateStore` impl** (`memory.rs`, inside `impl TurnStateStore for
 InMemoryTurnStateStore`, lines 351+):
 
 ```rust
-async fn children_of(&self, run_id: TurnRunId)
+async fn children_of(&self, scope: &TurnScope, run_id: TurnRunId)
     -> Result<Vec<TurnRunRecord>, TurnError>
 {
     let inner = match self.inner.lock() {
@@ -915,41 +950,52 @@ async fn children_of(&self, run_id: TurnRunId)
     let children = inner
         .records
         .values()
-        .filter(|record| record.parent_run_id == Some(run_id))
+        .filter(|record| record.scope == *scope && record.parent_run_id == Some(run_id))
         .map(RunRecord::persistence_record)
         .collect();
     Ok(children)
 }
 
-async fn get_run_record(&self, run_id: TurnRunId)
+async fn get_run_record(&self, scope: &TurnScope, run_id: TurnRunId)
     -> Result<Option<TurnRunRecord>, TurnError>
 {
     let inner = match self.inner.lock() {
         Ok(inner) => inner,
         Err(poisoned) => poisoned.into_inner(),
     };
-    Ok(inner.records.get(&run_id).map(RunRecord::persistence_record))
+    Ok(inner
+        .records
+        .get(&run_id)
+        .filter(|record| record.scope == *scope)
+        .map(RunRecord::persistence_record))
 }
 
-async fn tree_descendant_count_and_reserve(
+async fn reserve_tree_descendants(
     &self,
+    scope: &TurnScope,
     root_run_id: TurnRunId,
     delta: u32,
-) -> Result<u32, TurnError> {
+    cap: u32,
+) -> Result<SpawnTreeReservation, TurnError> {
     let mut inner = match self.inner.lock() {
         Ok(inner) => inner,
         Err(poisoned) => poisoned.into_inner(),
     };
-    // `Inner` gains a `tree_reservations: HashMap<TurnRunId, u32>` field
-    // (in-memory mirror of the `SpawnTreeReservation` row keyed by root id;
-    // the in-memory store is single-tenant so no tenant key needed).
-    let entry = inner.tree_reservations.entry(root_run_id).or_insert(0);
-    *entry = entry.saturating_add(delta);
-    Ok(*entry)
+    let key = SpawnTreeReservationKey::from_scope(scope, root_run_id);
+    let current = *inner.tree_reservations.get(&key).unwrap_or(&0);
+    let next = current
+        .checked_add(delta)
+        .ok_or_else(|| TurnError::capacity_exceeded("spawn tree descendant count overflow"))?;
+    if next > cap {
+        return Err(TurnError::capacity_exceeded("spawn tree descendant cap exceeded"));
+    }
+    inner.tree_reservations.insert(key, next);
+    Ok(SpawnTreeReservation { scope: scope.clone(), root_run_id, count: next })
 }
 
 async fn release_tree_descendants(
     &self,
+    scope: &TurnScope,
     root_run_id: TurnRunId,
     delta: u32,
 ) -> Result<(), TurnError> {
@@ -957,7 +1003,8 @@ async fn release_tree_descendants(
         Ok(inner) => inner,
         Err(poisoned) => poisoned.into_inner(),
     };
-    if let Some(entry) = inner.tree_reservations.get_mut(&root_run_id) {
+    let key = SpawnTreeReservationKey::from_scope(scope, root_run_id);
+    if let Some(entry) = inner.tree_reservations.get_mut(&key) {
         let prev = *entry;
         *entry = entry.saturating_sub(delta);
         if prev < delta {
@@ -969,7 +1016,7 @@ async fn release_tree_descendants(
             );
         }
         if *entry == 0 {
-            inner.tree_reservations.remove(&root_run_id);
+            inner.tree_reservations.remove(&key);
         }
     }
     Ok(())
@@ -978,21 +1025,20 @@ async fn release_tree_descendants(
 
 (`Inner::records` is the `HashMap<TurnRunId, RunRecord>` — confirm field name
 when implementing; `take_record` already indexes it. `Inner::tree_reservations`
-is the new in-memory mirror of the `SpawnTreeReservation` durable table.)
+is the scoped in-memory mirror of the `SpawnTreeReservation` durable table.)
 
 **`LibSqlTurnStateStore` / `PostgresTurnStateStore`** (`db.rs`). `TurnRunRecord`
 is stored as an opaque JSON payload (`libsql_load_payloads::<TurnRunRecord>` /
 `postgres_load_payloads::<TurnRunRecord>`, lines 1060 / 1358) — the new fields
 serialize into that payload with **no schema migration**. For `children_of` and
-`get_run_record`,
-the simplest correct Phase 1 implementation is a **load-then-filter** mirroring
-the in-memory store (load run payloads, filter by `run_id` or by
-`parent_run_id == Some(run_id)`). A dedicated indexed column is a deferred
-optimization (README §13 "durable goal-store backend beyond the bounded
-store" is the analogous deferral) — note it as a follow-up in the PR; do not
-add a migration in Phase 1. If `db.rs` proves to have no whole-table load
-helper, the acceptable Phase-1 fallback is a JSON-path `WHERE` filter; either
-way it is a contained `db.rs` change.
+`get_run_record`, the simplest correct Phase 1 implementation is a
+**load-then-filter** mirroring the in-memory store: load run payloads, filter by
+exact `TurnScope`, then by `run_id` or `parent_run_id == Some(run_id)`. A
+dedicated indexed column is a deferred optimization — note it as a follow-up in
+the PR; do not add a migration just for these lookups in Phase 1. If `db.rs`
+proves to have no whole-table load helper, the acceptable Phase-1 fallback is a
+JSON-path `WHERE` filter; either way it is a contained `db.rs` change. Add
+wrong-scope tests for both backends.
 
 ### 1.8 `TurnCoordinator::prepare_turn` + `SubmitTurnRequest.requested_run_id` binding
 
@@ -1246,10 +1292,11 @@ Place in the existing `crates/ironclaw_turns/tests/` integration tests and/or
 10. **`children_of` / `get_run_record` semantics** (in-memory store contract test, in
    `turn_coordinator_contract.rs` style) — submit a parent run; submit two child
    runs using `SubmitTurnRequest.parent_run_id = Some(parent)`. Assert
-   `children_of(parent)` returns exactly the two children;
-   `children_of(unknown_run_id)` returns `Ok(vec![])`; `children_of(child)`
-   returns `Ok(vec![])`; `get_run_record(child)` returns the durable child
-   record; `get_run_record(unknown_run_id)` returns `Ok(None)`.
+   `children_of(&parent_scope, parent)` returns exactly the two children;
+   `children_of(&parent_scope, unknown_run_id)` returns `Ok(vec![])`;
+   `children_of(&child_scope, child)` returns `Ok(vec![])`;
+   `get_run_record(&child_scope, child)` returns the durable child record;
+   `get_run_record(&child_scope, unknown_run_id)` returns `Ok(None)`.
 
 11. **Resume of a `BlockedDependentRun` run** — drive a `RunRecord` to
    `BlockedDependentRun` (via `block_claimed_record` with a
@@ -1595,11 +1642,12 @@ In `strategies/gate.rs` `#[cfg(test)] mod tests`:
 
 ---
 
-## 3. P1.C — `ironclaw_reborn` data: directions, bounded goal store, flavor table
+## 3. P1.C — `ironclaw_reborn` data: directions, goal stores, flavor table
 
 **Goal:** land the *pure data* the subagent feature needs in `ironclaw_reborn` —
-direction prompt `.md` files, a durable bounded goal store, and the static
-built-in flavor table. No driver, no observer, no wiring (those are Phase 2).
+direction prompt `.md` files, the goal-store contract plus production/test
+implementations, and the static built-in flavor table. No driver, no observer,
+no runtime wiring (those are Phase 2/3).
 
 ### 3.1 Files to create
 
@@ -1610,7 +1658,7 @@ built-in flavor table. No driver, no observer, no wiring (those are Phase 2).
 | `crates/ironclaw_reborn/src/directions/researcher.md` | direction prompt for the `researcher` flavor |
 | `crates/ironclaw_reborn/src/subagent/mod.rs` | module hub: re-exports flavor table + goal store |
 | `crates/ironclaw_reborn/src/subagent/flavors.rs` | static built-in subagent flavor table |
-| `crates/ironclaw_reborn/src/subagent/goal_store.rs` | durable, bounded subagent goal store |
+| `crates/ironclaw_reborn/src/subagent/goal_store.rs` | `SubagentGoalStore` trait, DB-backed production implementation, bounded in-memory test implementation |
 | `crates/ironclaw_reborn/src/lib.rs` | + `pub mod directions;` + `pub mod subagent;` |
 
 > **[NOTE]** `ironclaw_reborn/src` is currently a *flat* directory of modules
@@ -1826,29 +1874,29 @@ Design notes baked in:
 - `model: "default"` is a placeholder string; P2.C maps it to a real
   `ModelProfileId`. Keeping it `&'static str` keeps the whole table `const`.
 
-### 3.4 `subagent/goal_store.rs` — durable, bounded goal store
+### 3.4 `subagent/goal_store.rs` — goal store trait + production/test implementations
 
 The goal store holds the parent-injected goal (+ optional `Handoff` blob) keyed
-by **child `TurnRunId`**. README §6 / §9: durable, **bounded** (hard entry cap +
-eviction), a store miss fails the child run loudly.
+by **child `TurnRunId`**. README §6 / §9: production is durable and DB-backed,
+with bounded payload size and fail-loud misses. The in-memory store is helper /
+test-only and must not satisfy product-live readiness.
 
-Phase 1 ships the **bounded in-process store** (README §13 explicitly defers "a
-durable goal-store backend beyond the bounded in-process store"). "Durable"
-here means: it survives within the process lifetime and is the *single source
-of truth* (not a cache that can silently lose entries) — a real disk/DB backend
-is a deferred follow-up. The Phase 1 store is in-memory but **fail-loud and
-bounded**.
+Phase 1 ships the trait, the DB-backed production store, and a bounded in-memory
+implementation for unit tests and local harnesses. The DB-backed store
+piggybacks on the same persistence backend as `TurnRunRecord` and must support
+both PostgreSQL and libSQL through the Reborn turn-state persistence layer. There
+is no staging key and no rekey: P1.A's `prepare_turn` gives the spawn handler
+the final child `TurnRunId` before the goal row is written.
 
 ```rust
-//! `subagent/goal_store.rs` — bounded subagent goal store.
+//! `subagent/goal_store.rs` — subagent goal store contract.
 //!
 //! Holds the parent-injected goal for a child run, keyed by the child's
 //! `TurnRunId`. Bounded: a hard entry cap with eviction of the oldest entry.
 //! A `get` miss is an error, never an empty goal (design §6 goal durability:
 //! a miss "fails the child run loudly").
 
-use std::collections::HashMap;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 use ironclaw_turns::TurnRunId;
@@ -1890,13 +1938,42 @@ pub enum SubagentGoalStoreError {
     PayloadTooLarge { bytes: usize, max: usize },
     #[error("subagent goal for run {run_id} already stored")]
     DuplicateKey { run_id: TurnRunId },
+    #[error("subagent goal store backend failed: {reason}")]
+    Backend { reason: String },
 }
 
-/// Bounded, in-process, fail-loud subagent goal store.
+#[async_trait::async_trait]
+pub trait SubagentGoalStore: Send + Sync {
+    async fn put_goal(
+        &self,
+        run_id: TurnRunId,
+        goal: SubagentGoal,
+    ) -> Result<(), SubagentGoalStoreError>;
+
+    async fn get_goal(&self, run_id: TurnRunId) -> Result<SubagentGoal, SubagentGoalStoreError>;
+
+    /// Delete the goal during rollback / final cleanup. Missing rows are
+    /// idempotently accepted so retry cleanup is safe.
+    async fn delete_goal(&self, run_id: TurnRunId) -> Result<(), SubagentGoalStoreError>;
+}
+
+/// Production goal store. Backs `SubagentGoalStore` with the same DB substrate
+/// that persists turn-state records, so a child goal survives process restart.
+///
+/// Implementation note: add the goal row/table beside turn persistence for both
+/// libSQL and PostgreSQL, or add a typed extension table to the existing
+/// turn-state DB adapter. Do not hide this behind a generic filesystem mount.
+pub struct DbBackedSubagentGoalStore {
+    // Concrete backend handle added by the implementer.
+}
+
+/// Bounded, in-process, fail-loud subagent goal store for unit tests and local
+/// harnesses only. This implementation is not restart-durable and must be
+/// marked `NonDurable` in production-readiness checks.
 ///
 /// Thread-safe (`Mutex`). The `insertion_order` deque tracks FIFO eviction
 /// order so the cap is enforced in O(1) amortized.
-pub struct SubagentGoalStore {
+pub struct BoundedSubagentGoalStore {
     inner: Mutex<GoalStoreInner>,
 }
 
@@ -1905,7 +1982,7 @@ struct GoalStoreInner {
     insertion_order: VecDeque<TurnRunId>,
 }
 
-impl SubagentGoalStore {
+impl BoundedSubagentGoalStore {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(GoalStoreInner {
@@ -1968,9 +2045,30 @@ impl SubagentGoalStore {
     }
 }
 
-impl Default for SubagentGoalStore {
+impl Default for BoundedSubagentGoalStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl SubagentGoalStore for BoundedSubagentGoalStore {
+    async fn put_goal(
+        &self,
+        run_id: TurnRunId,
+        goal: SubagentGoal,
+    ) -> Result<(), SubagentGoalStoreError> {
+        self.put(run_id, goal)
+    }
+
+    async fn get_goal(&self, run_id: TurnRunId) -> Result<SubagentGoal, SubagentGoalStoreError> {
+        self.get(run_id)
+    }
+
+    async fn delete_goal(&self, run_id: TurnRunId) -> Result<(), SubagentGoalStoreError> {
+        let mut inner = lock(&self.inner);
+        inner.goals.remove(&run_id);
+        Ok(())
     }
 }
 
@@ -1988,9 +2086,10 @@ Design decisions:
 - **`get` borrows-and-clones, does not remove.** README §6 says `put`/`get`;
   it does not say `get` consumes. A child may need its goal more than once
   (e.g. recovery re-materialisation), and a process restart must be able to
-  re-read it. Eviction is by cap, not by read. (If Phase 2 finds it genuinely
+  re-read it from the DB-backed implementation. Eviction is by cap in the
+  in-memory test implementation, not by read. (If Phase 2 finds it genuinely
   needs a one-shot `take`, add it then — but the contract here is non-consuming
-  `get`.)
+  `get_goal`.)
 - **`DuplicateKey` is an error.** Child `TurnRunId`s are freshly minted per
   spawn; a duplicate `put` means a wiring bug — fail loud.
 - `tracing::debug!` for eviction, never `info!`/`warn!` (project rule: `info!`
@@ -2029,22 +2128,22 @@ currently listed (the crate uses `serde`, `tracing`, etc.). **Add
 `thiserror = "1"`** to `[dependencies]` as part of P1.C (every other crate in
 the workspace pins `thiserror = "1"` per `error.rs` convention).
 
-### 3.6 Unit tests to add (P1.C)
+### 3.6 Unit and backend contract tests to add (P1.C)
 
 In `subagent/goal_store.rs` `#[cfg(test)] mod tests`:
 
-1. **`put_then_get_round_trips`** — `put(run_id, goal)`; `get(run_id)` returns an
+1. **`put_then_get_round_trips`** — `put_goal(run_id, goal)`; `get_goal(run_id)` returns an
    equal `SubagentGoal` (both `Fresh` — `handoff: None` — and `Handoff` —
    `handoff: Some(..)` — cases).
 
-2. **`get_miss_is_not_found_error`** — `get(unknown_run_id)` returns
+2. **`get_miss_is_not_found_error`** — `get_goal(unknown_run_id)` returns
    `Err(SubagentGoalStoreError::NotFound { .. })`. (Proves the fail-loud
    contract — design §6.)
 
-3. **`put_rejects_oversized_payload`** — `put` a goal whose `byte_len()` exceeds
+3. **`put_rejects_oversized_payload`** — `put_goal` a goal whose `byte_len()` exceeds
    `MAX_GOAL_BYTES` → `Err(PayloadTooLarge { .. })`.
 
-4. **`put_rejects_duplicate_key`** — `put` twice for the same `run_id` → second
+4. **`put_rejects_duplicate_key`** — `put_goal` twice for the same `run_id` → second
    call `Err(DuplicateKey { .. })`.
 
 5. **`bounded_store_evicts_oldest`** — insert `MAX_GOAL_ENTRIES + 1` goals;
@@ -2057,11 +2156,39 @@ In `subagent/goal_store.rs` `#[cfg(test)] mod tests`:
    a `#[cfg(test)] fn len(&self)` or assert via successful/missed `get`s).
 
 7. **`goal_store_is_send_sync`** — `fn assert_send_sync<T: Send + Sync>(){}`;
-   `assert_send_sync::<SubagentGoalStore>()` — Phase 2 shares it via `Arc`.
+   `assert_send_sync::<Arc<dyn SubagentGoalStore>>()` — Phase 2 shares it via
+   `Arc`.
+
+Shared `SubagentGoalStore` contract tests must run against:
+
+8. `BoundedSubagentGoalStore` (unit/helper backend)
+9. `DbBackedSubagentGoalStore` over libSQL
+10. `DbBackedSubagentGoalStore` over PostgreSQL, behind the repo's normal
+    integration-test feature/env gate
+
+The shared contract covers:
+
+- `put_goal` / `get_goal` round trip
+- miss returns `NotFound`, never an empty goal
+- duplicate key returns `DuplicateKey`
+- oversized payload returns `PayloadTooLarge`
+- `delete_goal` is idempotent and removes the row
+
+Backend parity commands:
+
+```bash
+cargo test -p ironclaw_reborn subagent_goal_store_contract
+cargo test -p ironclaw_reborn subagent_goal_store_contract --features libsql
+cargo test -p ironclaw_reborn subagent_goal_store_contract --features postgres
+```
+- restart/reopen: write a goal through the DB-backed store, drop/recreate the
+  store over the same backend, then `get_goal` returns the same value
+- backend parity: libSQL and PostgreSQL serialize the same JSON shape and error
+  categories
 
 In `subagent/flavors.rs` `#[cfg(test)] mod tests`:
 
-8. **`builtin_table_has_general_and_researcher`** — `BUILTIN_SUBAGENT_FLAVORS`
+11. **`builtin_table_has_general_and_researcher`** — `BUILTIN_SUBAGENT_FLAVORS`
    has exactly 2 entries; `lookup_flavor(General)` and `lookup_flavor(Researcher)`
    both `Some`.
 
@@ -2164,7 +2291,8 @@ Phase 1 is done when, per workstream:
   and `cargo test -p ironclaw_agent_loop` green; `SUBAGENT_FAMILY_DIGEST`
   filled in with the real hash; all §2.6 tests passing.
 - **P1.C** — `ironclaw_reborn` compiles; `cargo test -p ironclaw_reborn` green;
-  all §3.6 tests passing; `thiserror` added to `Cargo.toml`.
+  all §3.6 tests passing across bounded, libSQL, and PostgreSQL backends;
+  `thiserror` added to `Cargo.toml`.
 - Workspace-wide `cargo fmt` clean and `cargo clippy --all --benches --tests
   --examples --all-features` zero-warnings **per crate touched** (the
   workspace-wide clippy should be green once the P1.B executor arms from §2.5
