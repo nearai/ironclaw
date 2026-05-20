@@ -821,6 +821,55 @@ mod tests {
         );
     }
 
+    /// PR #3640 finding D10: the round-trip tests above pass `None` for the
+    /// `owning_extension` argument so they never exercise the `provider`
+    /// projection on hook-meta events. This test pins the property that
+    /// when an `owning_extension` is supplied, it appears on `event.provider`
+    /// (and survives serde) for each of the three hook-meta event kinds —
+    /// the lookup that scope filtering depends on.
+    #[test]
+    fn hook_meta_events_round_trip_owning_extension_as_provider() {
+        let owner = ExtensionId::new("ext.polymarket").expect("valid extension id");
+
+        let dispatched = RuntimeEvent::hook_dispatched(
+            scope(),
+            capability(),
+            hook_id_hex(),
+            "before_capability",
+            "installed",
+            Some(owner.clone()),
+        );
+        assert_eq!(dispatched.provider.as_ref(), Some(&owner));
+        let decoded: RuntimeEvent =
+            serde_json::from_str(&serde_json::to_string(&dispatched).expect("ser")).expect("de");
+        assert_eq!(decoded.provider, Some(owner.clone()));
+
+        let decision = RuntimeEvent::hook_decision_emitted(
+            scope(),
+            capability(),
+            hook_id_hex(),
+            "deny",
+            Some(owner.clone()),
+        );
+        assert_eq!(decision.provider.as_ref(), Some(&owner));
+        let decoded: RuntimeEvent =
+            serde_json::from_str(&serde_json::to_string(&decision).expect("ser")).expect("de");
+        assert_eq!(decoded.provider, Some(owner.clone()));
+
+        let failed = RuntimeEvent::hook_failed(
+            scope(),
+            capability(),
+            hook_id_hex(),
+            "timeout",
+            "fail_isolated",
+            Some(owner.clone()),
+        );
+        assert_eq!(failed.provider.as_ref(), Some(&owner));
+        let decoded: RuntimeEvent =
+            serde_json::from_str(&serde_json::to_string(&failed).expect("ser")).expect("de");
+        assert_eq!(decoded.provider, Some(owner));
+    }
+
     #[test]
     fn hook_label_outside_safe_shape_collapses_to_unclassified() {
         let event = RuntimeEvent::hook_dispatched(

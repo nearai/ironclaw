@@ -614,4 +614,63 @@ mod tests {
         );
         assert!(registry.is_poisoned(id));
     }
+
+    /// PR #3640 finding D9: non-event-triggered bindings carrying an
+    /// `event_kind_filter` must be rejected at install time. The dispatcher
+    /// only consults the filter on the event-triggered path, so silently
+    /// accepting it elsewhere would let a misconfigured manifest believe
+    /// it had narrowed dispatch when in fact the filter was ignored.
+    #[test]
+    fn rejects_non_event_binding_with_event_kind_filter() {
+        let mut registry = HookRegistry::new();
+        let mut binding =
+            installed_binding("alpha", HookPhase::Policy, HookPointSpec::BeforeCapability);
+        binding.event_kind_filter = Some(RuntimeEventKind::HookFailed);
+        match registry.insert(binding) {
+            Err(HookError::RegistryConstruction(msg)) => {
+                assert!(msg.contains("event_kind_filter"), "unexpected msg: {msg}");
+                assert!(msg.contains("BeforeCapability"), "unexpected msg: {msg}");
+            }
+            other => panic!("expected rejection, got {other:?}"),
+        }
+    }
+
+    /// PR #3640 finding C4: per-kind index returns only bindings whose
+    /// declared filter matches.
+    #[test]
+    fn event_kind_index_partitions_bindings_by_filter() {
+        let mut registry = HookRegistry::new();
+        let mut a = installed_binding("alpha", HookPhase::Telemetry, HookPointSpec::EventTriggered);
+        a.event_kind_filter = Some(RuntimeEventKind::HookFailed);
+        registry.insert(a).expect("alpha insert");
+        let mut b = installed_binding("beta", HookPhase::Telemetry, HookPointSpec::EventTriggered);
+        b.event_kind_filter = Some(RuntimeEventKind::DispatchSucceeded);
+        registry.insert(b).expect("beta insert");
+
+        let failed: Vec<_> = registry
+            .active_for_event_kind(RuntimeEventKind::HookFailed)
+            .collect();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(
+            failed[0].event_kind_filter,
+            Some(RuntimeEventKind::HookFailed)
+        );
+
+        let succeeded: Vec<_> = registry
+            .active_for_event_kind(RuntimeEventKind::DispatchSucceeded)
+            .collect();
+        assert_eq!(succeeded.len(), 1);
+        assert_eq!(
+            succeeded[0].event_kind_filter,
+            Some(RuntimeEventKind::DispatchSucceeded)
+        );
+
+        // A kind no binding declared returns empty.
+        assert_eq!(
+            registry
+                .active_for_event_kind(RuntimeEventKind::ModelStarted)
+                .count(),
+            0
+        );
+    }
 }
