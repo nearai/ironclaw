@@ -280,7 +280,8 @@ impl HookRegistrar {
                     ))
                 })?;
                 let wasm_identity_version =
-                    wasm_hook_identity_version(extension_version, &prepared.module_digest_hex());
+                    WasmVersionMaterial::new(extension_version, &prepared.module_digest_hex())
+                        .to_string();
                 let hook_id = HookId::derive(
                     identity_extension,
                     &wasm_identity_version,
@@ -328,8 +329,35 @@ impl HookRegistrar {
     }
 }
 
-fn wasm_hook_identity_version(extension_version: &str, module_digest_hex: &str) -> String {
-    format!("{extension_version}+wasm:{module_digest_hex}")
+/// Identity material for a WASM-bodied hook. `HookId::derive` hashes a
+/// `&str` for its version material, but the registrar always composes
+/// the extension version with the compiled module digest in a fixed
+/// shape — `"{extension_version}+wasm:{module_digest_hex}"` — so the
+/// concatenated string never floats free as a stringly-typed argument
+/// (henrypark133 LOW #20 on PR #3634).
+#[derive(Debug, Clone)]
+struct WasmVersionMaterial {
+    extension_version: String,
+    module_digest_hex: String,
+}
+
+impl WasmVersionMaterial {
+    fn new(extension_version: &str, module_digest_hex: &str) -> Self {
+        Self {
+            extension_version: extension_version.to_string(),
+            module_digest_hex: module_digest_hex.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for WasmVersionMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}+wasm:{}",
+            self.extension_version, self.module_digest_hex
+        )
+    }
 }
 
 /// Map the manifest-declared scope to the dispatcher's runtime scope. The
