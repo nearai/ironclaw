@@ -43,7 +43,10 @@ const HOST_CTX_IMPORT_MODULE: &str = "ic:hooks/context@1";
 /// Upper bound on compiled modules retained in the cache. Each entry is an
 /// `Arc<Module>`; wasmtime modules themselves are small after compile, but
 /// large extension catalogs would otherwise grow the cache unboundedly.
-const MODULE_CACHE_CAPACITY: usize = 128;
+const MODULE_CACHE_CAPACITY: NonZeroUsize = match NonZeroUsize::new(128) {
+    Some(n) => n,
+    None => unreachable!(),
+};
 
 /// Runtime-visible request for a hook WASM module.
 #[derive(Debug)]
@@ -205,12 +208,10 @@ impl WasmHookRuntime {
         let engine = Engine::new(&config)
             .map_err(|error| WasmHookRuntimeError::Engine(error.to_string()))?;
         let epoch_ticker = spawn_epoch_ticker(engine.clone())?;
-        let capacity = NonZeroUsize::new(MODULE_CACHE_CAPACITY)
-            .expect("MODULE_CACHE_CAPACITY constant is nonzero");
         Ok(Self {
             engine,
             resolver,
-            modules: Mutex::new(LruCache::new(capacity)),
+            modules: Mutex::new(LruCache::new(MODULE_CACHE_CAPACITY)),
             epoch_ticker,
         })
     }
