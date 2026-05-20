@@ -18,8 +18,8 @@ use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, NetworkMethod, NetworkPolicy, ResourceEstimate, ResourceReservation,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialInjection,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeKind,
+    RuntimeCredentialSource, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    RuntimeHttpEgressResponse, RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -583,7 +583,15 @@ impl McpJsonRpcMethod {
         credential_injections: Vec<RuntimeCredentialInjection>,
     ) -> Vec<RuntimeCredentialInjection> {
         match self {
-            Self::ToolsCall => credential_injections,
+            Self::ToolsCall => credential_injections
+                .into_iter()
+                .filter(|injection| {
+                    matches!(
+                        injection.source,
+                        RuntimeCredentialSource::StagedObligation { .. }
+                    )
+                })
+                .collect(),
             Self::Initialize | Self::InitializedNotification => Vec::new(),
         }
     }

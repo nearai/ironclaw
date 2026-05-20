@@ -244,15 +244,17 @@ async fn concrete_mcp_http_client_routes_json_rpc_through_shared_egress() {
 async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange() {
     let scope = sample_scope();
     let mut plan = host_http_plan();
-    plan.credential_injections = vec![RuntimeCredentialInjection {
-        handle: SecretHandle::new("github-token").unwrap(),
+    let staged_obligation = plan.credential_injections[0].clone();
+    let secret_store_lease = RuntimeCredentialInjection {
+        handle: SecretHandle::new("legacy-token").unwrap(),
         source: RuntimeCredentialSource::SecretStoreLease,
         target: RuntimeCredentialTarget::Header {
             name: "Authorization".to_string(),
             prefix: Some("Bearer ".to_string()),
         },
         required: true,
-    }];
+    };
+    plan.credential_injections = vec![secret_store_lease, staged_obligation.clone()];
     let egress = RecordingRuntimeEgress::json_rpc();
     let client = McpHostHttpClient::new(
         McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
@@ -283,7 +285,8 @@ async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange(
     );
     assert_eq!(
         requests[2].credential_injections,
-        plan.credential_injections
+        vec![staged_obligation],
+        "MCP tools/call must only receive credentials staged by satisfied obligations"
     );
 }
 

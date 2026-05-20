@@ -584,6 +584,51 @@ async fn production_libsql_services_wire_first_party_runtime_http_egress() {
     );
 }
 
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn production_postgres_services_wire_first_party_runtime_http_egress() {
+    let Some((_container, pool, database_url)) = postgres_pool_or_skip().await else {
+        return;
+    };
+    let (notifier, handle) = live_wake_notifier();
+
+    let services = build_reborn_services(
+        RebornBuildInput::postgres(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            pool,
+            SecretMaterial::from(database_url),
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(notifier)
+        .with_required_runtime_backends([RuntimeKind::FirstParty])
+        .require_runtime_http_egress(),
+    )
+    .await
+    .unwrap();
+
+    let health = services
+        .host_runtime
+        .as_ref()
+        .expect("production must expose host runtime")
+        .health()
+        .await
+        .unwrap();
+
+    handle.shutdown().await;
+
+    assert_eq!(
+        services.readiness.state,
+        RebornReadinessState::ProductionValidated
+    );
+    assert!(
+        health.ready,
+        "first-party runtime and production HTTP egress should satisfy Postgres production wiring: {health:?}"
+    );
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn migration_dry_run_validates_libsql_shape() {

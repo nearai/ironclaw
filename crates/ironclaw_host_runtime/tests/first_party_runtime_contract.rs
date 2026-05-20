@@ -187,6 +187,137 @@ async fn first_party_handler_uses_staged_secret_through_production_host_egress()
 }
 
 #[tokio::test]
+async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
+    let cases = [
+        (
+            RuntimeHttpEgressError::Credential {
+                reason: "missing staged credential".to_string(),
+            },
+            RuntimeFailureKind::Backend,
+        ),
+        (
+            RuntimeHttpEgressError::Request {
+                reason: "request denied".to_string(),
+                request_bytes: 11,
+                response_bytes: 0,
+            },
+            RuntimeFailureKind::InvalidInput,
+        ),
+        (
+            RuntimeHttpEgressError::Network {
+                reason: "network blocked".to_string(),
+                request_bytes: 11,
+                response_bytes: 0,
+            },
+            RuntimeFailureKind::Network,
+        ),
+        (
+            RuntimeHttpEgressError::Response {
+                reason: "bad response".to_string(),
+                request_bytes: 11,
+                response_bytes: 22,
+            },
+            RuntimeFailureKind::InvalidInput,
+        ),
+        (
+            RuntimeHttpEgressError::Response {
+                reason: RUNTIME_HTTP_REASON_RESPONSE_BODY_LIMIT_EXCEEDED.to_string(),
+                request_bytes: 11,
+                response_bytes: 4097,
+            },
+            RuntimeFailureKind::InvalidInput,
+        ),
+    ];
+
+    for (error, expected_kind) in cases {
+        let handle = SecretHandle::new("api-token").unwrap();
+        let runtime = http_first_party_services(&handle)
+            .with_runtime_http_egress(Arc::new(FailingRuntimeHttpEgress { error }))
+            .with_trust_policy(Arc::new(first_party_trust_policy()))
+            .host_runtime_for_local_testing();
+
+        let outcome = invoke_http_fixture(
+            &runtime,
+            execution_context(CapabilitySet {
+                grants: vec![dispatch_grant_with_secret(&handle)],
+            }),
+            json!({"url":"https://api.example.test/v1/native"}),
+        )
+        .await;
+
+        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+            panic!("expected failed first-party HTTP fixture, got {outcome:?}");
+        };
+        assert_eq!(failure.kind, expected_kind);
+    }
+
+    let handle = SecretHandle::new("api-token").unwrap();
+    let runtime = http_first_party_services(&handle)
+        .with_trust_policy(Arc::new(first_party_trust_policy()))
+        .host_runtime_for_local_testing();
+    let outcome = invoke_http_fixture(
+        &runtime,
+        execution_context(CapabilitySet {
+            grants: vec![dispatch_grant_with_secret(&handle)],
+        }),
+        json!({"url":"https://api.example.test/v1/native"}),
+    )
+    .await;
+    let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected missing egress to fail, got {outcome:?}");
+    };
+    assert_eq!(failure.kind, RuntimeFailureKind::Network);
+
+    let handle = SecretHandle::new("api-token").unwrap();
+    let runtime = http_first_party_services(&handle)
+        .with_runtime_http_egress(Arc::new(UnreachableRuntimeHttpEgress))
+        .with_trust_policy(Arc::new(first_party_trust_policy()))
+        .host_runtime_for_local_testing();
+    let outcome = invoke_http_fixture(
+        &runtime,
+        execution_context(CapabilitySet {
+            grants: vec![dispatch_grant_with_secret(&handle)],
+        }),
+        json!({"missing_url": true}),
+    )
+    .await;
+    let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected missing URL to fail, got {outcome:?}");
+    };
+    assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+}
+
+#[test]
+fn http_error_kind_maps_all_reason_codes() {
+    let cases = [
+        (
+            RuntimeHttpEgressReasonCode::CredentialUnavailable,
+            RuntimeDispatchErrorKind::Client,
+        ),
+        (
+            RuntimeHttpEgressReasonCode::RequestDenied,
+            RuntimeDispatchErrorKind::InputEncode,
+        ),
+        (
+            RuntimeHttpEgressReasonCode::NetworkError,
+            RuntimeDispatchErrorKind::NetworkDenied,
+        ),
+        (
+            RuntimeHttpEgressReasonCode::ResponseError,
+            RuntimeDispatchErrorKind::OutputDecode,
+        ),
+        (
+            RuntimeHttpEgressReasonCode::ResponseBodyLimitExceeded,
+            RuntimeDispatchErrorKind::OutputDecode,
+        ),
+    ];
+
+    for (reason, expected_kind) in cases {
+        assert_eq!(http_error_kind(reason), expected_kind);
+    }
+}
+
+#[tokio::test]
 async fn production_wiring_rejects_first_party_registry_without_declared_handler() {
     let services = HostRuntimeServices::new(
         Arc::new(first_party_registry()),
@@ -596,6 +727,52 @@ fn http_error_kind(reason: RuntimeHttpEgressReasonCode) -> RuntimeDispatchErrorK
     }
 }
 
+fn http_first_party_services(
+    handle: &SecretHandle,
+) -> HostRuntimeServices<
+    LocalFilesystem,
+    InMemoryResourceGovernor,
+    ironclaw_processes::InMemoryProcessStore,
+    ironclaw_processes::InMemoryProcessResultStore,
+> {
+    let handler = Arc::new(HttpFirstPartyHandler {
+        handle: handle.clone(),
+    });
+    let first_party =
+        FirstPartyCapabilityRegistry::new().with_handler(capability_id(), Arc::clone(&handler));
+
+    HostRuntimeServices::new(
+        Arc::new(first_party_registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(first_party))
+}
+
+async fn invoke_http_fixture(
+    runtime: &impl HostRuntime,
+    context: ExecutionContext,
+    input: Value,
+) -> RuntimeCapabilityOutcome {
+    runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context,
+            capability_id(),
+            ResourceEstimate {
+                network_egress_bytes: Some(100),
+                output_bytes: Some(1024),
+                ..ResourceEstimate::default()
+            },
+            input,
+            trust_decision(),
+        ))
+        .await
+        .unwrap()
+}
+
 fn execution_context(grants: CapabilitySet) -> ExecutionContext {
     ExecutionContext::local_default(
         UserId::new("user").unwrap(),
@@ -710,6 +887,30 @@ fn assert_event_kinds(events: &InMemoryEventSink, expected: &[RuntimeEventKind])
 #[derive(Debug, Clone, Default)]
 struct RecordingNetworkHttpEgress {
     requests: Arc<Mutex<Vec<NetworkHttpRequest>>>,
+}
+
+struct FailingRuntimeHttpEgress {
+    error: RuntimeHttpEgressError,
+}
+
+struct UnreachableRuntimeHttpEgress;
+
+impl RuntimeHttpEgress for FailingRuntimeHttpEgress {
+    fn execute(
+        &self,
+        _request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        Err(self.error.clone())
+    }
+}
+
+impl RuntimeHttpEgress for UnreachableRuntimeHttpEgress {
+    fn execute(
+        &self,
+        _request: RuntimeHttpEgressRequest,
+    ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
+        panic!("runtime HTTP egress should not be called before URL validation")
+    }
 }
 
 impl NetworkHttpEgress for RecordingNetworkHttpEgress {
