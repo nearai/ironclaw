@@ -841,20 +841,23 @@ fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGove
     governor
 }
 
-fn dispatch_request(capability: &str, input: Value) -> CapabilityDispatchRequest {
-    CapabilityDispatchRequest {
-        capability_id: CapabilityId::new(capability).unwrap(),
-        scope: sample_scope(),
-        estimate: ResourceEstimate {
-            concurrency_slots: Some(1),
-            process_count: Some(1),
-            output_bytes: Some(10_000),
-            ..ResourceEstimate::default()
+fn dispatch_request(capability: &str, input: Value) -> AuthorizedDispatchRequest {
+    AuthorizedDispatchRequest::new(
+        CapabilityDispatchRequest {
+            capability_id: CapabilityId::new(capability).unwrap(),
+            scope: sample_scope(),
+            estimate: ResourceEstimate {
+                concurrency_slots: Some(1),
+                process_count: Some(1),
+                output_bytes: Some(10_000),
+                ..ResourceEstimate::default()
+            },
+            mounts: None,
+            resource_reservation: None,
+            input,
         },
-        mounts: None,
-        resource_reservation: None,
-        input,
-    }
+        DispatchAuthorityProof::test(),
+    )
 }
 
 fn sample_scope() -> ResourceScope {

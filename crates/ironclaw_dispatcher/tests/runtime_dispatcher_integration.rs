@@ -53,18 +53,21 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
 
     let result = dispatch_port
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("echo.say").unwrap(),
-            scope: scope.clone(),
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("echo.say").unwrap(),
+                scope: scope.clone(),
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    output_bytes: Some(10_000),
+                    ..ResourceEstimate::default()
+                },
+                mounts: Some(mounts.clone()),
+                resource_reservation: None,
+                input: json!({"message": "hello through public seam"}),
             },
-            mounts: Some(mounts.clone()),
-            resource_reservation: None,
-            input: json!({"message": "hello through public seam"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap();
 
@@ -118,18 +121,21 @@ async fn runtime_dispatcher_fails_closed_for_missing_backend_before_reservation_
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
 
     let err = dispatch_port
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("script.echo").unwrap(),
-            scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("script.echo").unwrap(),
+                scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    process_count: Some(1),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "blocked"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "blocked"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap_err();
 

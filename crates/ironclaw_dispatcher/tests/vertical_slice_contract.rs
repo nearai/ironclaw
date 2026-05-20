@@ -29,18 +29,21 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let wasm_scope = scope.clone();
     let wasm_account = ResourceAccount::tenant(wasm_scope.tenant_id.clone());
     let wasm = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
-            scope: wasm_scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
+                scope: wasm_scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    output_bytes: Some(10_000),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "hello wasm"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "hello wasm"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap();
 
@@ -56,19 +59,22 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let script_scope = scope.clone();
     let script_account = ResourceAccount::tenant(script_scope.tenant_id.clone());
     let script = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("echo-script.say").unwrap(),
-            scope: script_scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("echo-script.say").unwrap(),
+                scope: script_scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    process_count: Some(1),
+                    output_bytes: Some(10_000),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "hello script"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "hello script"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap();
 
@@ -86,19 +92,22 @@ async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let mcp_scope = scope;
     let mcp_account = ResourceAccount::tenant(mcp_scope.tenant_id.clone());
     let mcp = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("echo-mcp.say").unwrap(),
-            scope: mcp_scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("echo-mcp.say").unwrap(),
+                scope: mcp_scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    process_count: Some(1),
+                    output_bytes: Some(10_000),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "hello mcp"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "hello mcp"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap();
 

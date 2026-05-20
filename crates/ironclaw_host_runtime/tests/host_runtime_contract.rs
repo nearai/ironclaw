@@ -1221,8 +1221,9 @@ impl CountingDispatcher {
 impl CapabilityDispatcher for CountingDispatcher {
     async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
+        let request = request.into_request();
         *self.count.lock().unwrap_or_else(|p| p.into_inner()) += 1;
         Ok(CapabilityDispatchResult {
             capability_id: request.capability_id,
@@ -1276,8 +1277,9 @@ impl RecordingDispatcher {
 impl CapabilityDispatcher for RecordingDispatcher {
     async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
+        let request = request.into_request();
         *self
             .request
             .lock()

@@ -181,8 +181,9 @@ impl CountingDispatcher {
 impl CapabilityDispatcher for CountingDispatcher {
     async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
+        let request = request.into_request();
         *self
             .count
             .lock()

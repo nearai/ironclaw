@@ -1,8 +1,9 @@
 use ironclaw_authorization::{CapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer};
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
-    CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher, Decision,
-    DenyReason, ExecutionContext, Obligation, ProcessId, ResourceEstimate,
+    AuthorizedDispatchRequest, CapabilityDispatchRequest, CapabilityDispatchResult,
+    CapabilityDispatcher, Decision, DenyReason, DispatchAuthorityProof, ExecutionContext,
+    Obligation, ProcessId, ResourceEstimate,
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
@@ -362,14 +363,14 @@ where
 
         let dispatch = match self
             .dispatcher
-            .dispatch_json(CapabilityDispatchRequest {
+            .dispatch_json(authorize_dispatch_request(CapabilityDispatchRequest {
                 capability_id: request.capability_id.clone(),
                 scope: scope.clone(),
                 estimate: request.estimate.clone(),
                 mounts: obligation_outcome.mounts.clone(),
                 resource_reservation: obligation_outcome.resource_reservation.clone(),
                 input: request.input,
-            })
+            }))
             .await
         {
             Ok(dispatch) => dispatch,
@@ -693,14 +694,14 @@ where
 
         let dispatch = match self
             .dispatcher
-            .dispatch_json(CapabilityDispatchRequest {
+            .dispatch_json(authorize_dispatch_request(CapabilityDispatchRequest {
                 capability_id: request.capability_id.clone(),
                 scope: scope.clone(),
                 estimate: request.estimate.clone(),
                 mounts: obligation_outcome.mounts.clone(),
                 resource_reservation: obligation_outcome.resource_reservation.clone(),
                 input: request.input,
-            })
+            }))
             .await
         {
             Ok(dispatch) => dispatch,
@@ -1533,6 +1534,10 @@ where
             );
         }
     }
+}
+
+fn authorize_dispatch_request(request: CapabilityDispatchRequest) -> AuthorizedDispatchRequest {
+    AuthorizedDispatchRequest::new(request, DispatchAuthorityProof::capability_host())
 }
 
 fn obligation_error_to_invocation(

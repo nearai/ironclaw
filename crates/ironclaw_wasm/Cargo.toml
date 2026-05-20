@@ -18,6 +18,7 @@ ironclaw_dispatcher = { path = "../ironclaw_dispatcher" }
 ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_extensions = { path = "../ironclaw_extensions" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
+ironclaw_host_api = { path = "../ironclaw_host_api", features = ["test-support"] }
 ironclaw_resources = { path = "../ironclaw_resources" }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt"] }

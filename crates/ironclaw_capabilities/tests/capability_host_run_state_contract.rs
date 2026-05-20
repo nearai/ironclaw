@@ -1249,7 +1249,7 @@ struct FailingDispatcher;
 impl CapabilityDispatcher for FailingDispatcher {
     async fn dispatch_json(
         &self,
-        _request: CapabilityDispatchRequest,
+        _request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
         Err(DispatchError::Wasm {
             kind: RuntimeDispatchErrorKind::Backend,

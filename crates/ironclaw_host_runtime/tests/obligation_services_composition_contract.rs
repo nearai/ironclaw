@@ -214,8 +214,9 @@ impl ObligationAwareDispatcher {
 impl CapabilityDispatcher for ObligationAwareDispatcher {
     async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
+        let request = request.into_request();
         let egress_response = self
             .egress
             .execute(RuntimeHttpEgressRequest {

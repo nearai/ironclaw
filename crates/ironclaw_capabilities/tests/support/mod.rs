@@ -36,8 +36,9 @@ impl RecordingDispatcher {
 impl CapabilityDispatcher for RecordingDispatcher {
     async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
+        let request = request.into_request();
         *self
             .request
             .lock()

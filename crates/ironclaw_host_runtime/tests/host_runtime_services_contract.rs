@@ -5559,7 +5559,7 @@ struct NoopDispatcher;
 impl CapabilityDispatcher for NoopDispatcher {
     async fn dispatch_json(
         &self,
-        _request: CapabilityDispatchRequest,
+        _request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
         panic!("spawn tests must not invoke the foreground dispatcher")
     }

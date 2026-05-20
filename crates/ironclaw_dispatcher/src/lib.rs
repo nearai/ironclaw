@@ -11,13 +11,13 @@ use async_trait::async_trait;
 use ironclaw_events::{EventSink, RuntimeEvent};
 use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
 use ironclaw_filesystem::RootFilesystem;
+pub use ironclaw_host_api::{
+    AuthorizedDispatchRequest, CapabilityDispatchRequest, CapabilityDispatchResult,
+    CapabilityDispatcher, DispatchAuthorityProof, DispatchError, RuntimeDispatchErrorKind,
+};
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt,
     ResourceReservation, ResourceScope, ResourceUsage, RuntimeKind,
-};
-pub use ironclaw_host_api::{
-    CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher, DispatchError,
-    RuntimeDispatchErrorKind,
 };
 use ironclaw_resources::ResourceGovernor;
 use serde_json::Value;
@@ -172,8 +172,9 @@ where
 
     pub async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
+        let request = request.into_request();
         let scope = request.scope.clone();
         let capability_id = request.capability_id.clone();
         self.emit_event(RuntimeEvent::dispatch_requested(
@@ -354,7 +355,7 @@ where
 {
     async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
         RuntimeDispatcher::dispatch_json(self, request).await
     }

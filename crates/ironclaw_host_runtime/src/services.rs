@@ -33,9 +33,9 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
-    CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId, DispatchError,
-    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
-    RuntimeHttpEgress, RuntimeKind,
+    AuthorizedDispatchRequest, CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId,
+    DispatchAuthorityProof, DispatchError, ResourceReservationId, ResourceScope, ResourceUsage,
+    RuntimeDispatchErrorKind, RuntimeHttpEgress, RuntimeKind,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::NetworkHttpEgress;
@@ -2210,14 +2210,17 @@ impl ProcessExecutor for RuntimeDispatchProcessExecutor {
         }
         let result = self
             .dispatcher
-            .dispatch_json(CapabilityDispatchRequest {
-                capability_id: request.capability_id,
-                scope: request.scope,
-                estimate: request.estimate,
-                mounts: Some(request.mounts),
-                resource_reservation: request.resource_reservation,
-                input: request.input,
-            })
+            .dispatch_json(AuthorizedDispatchRequest::new(
+                CapabilityDispatchRequest {
+                    capability_id: request.capability_id,
+                    scope: request.scope,
+                    estimate: request.estimate,
+                    mounts: Some(request.mounts),
+                    resource_reservation: request.resource_reservation,
+                    input: request.input,
+                },
+                DispatchAuthorityProof::host_process_executor(),
+            ))
             .await
             .map_err(|error| ProcessExecutionError::new(dispatch_error_kind(&error)))?;
         if request.cancellation.is_cancelled() {

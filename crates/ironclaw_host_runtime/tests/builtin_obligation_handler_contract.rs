@@ -1086,7 +1086,7 @@ struct PanicDispatcher;
 impl CapabilityDispatcher for PanicDispatcher {
     async fn dispatch_json(
         &self,
-        _request: CapabilityDispatchRequest,
+        _request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
         panic!("dispatcher must not be called for unsupported resource-ceiling obligations")
     }
@@ -1096,8 +1096,9 @@ impl CapabilityDispatcher for PanicDispatcher {
 impl CapabilityDispatcher for RecordingDispatcher {
     async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
+        let request = request.into_request();
         Ok(CapabilityDispatchResult {
             capability_id: request.capability_id,
             provider: ExtensionId::new("echo").unwrap(),

@@ -93,6 +93,83 @@ fn reborn_crate_dependency_boundaries_hold() {
 }
 
 #[test]
+fn reborn_dispatch_authority_is_sealed_to_authorized_request() {
+    let root = workspace_root();
+    let host_api_dispatch =
+        std::fs::read_to_string(root.join("crates/ironclaw_host_api/src/dispatch.rs"))
+            .expect("host API dispatch contract must be readable");
+    let host_api_dispatch_tokens = compact_rust_tokens(&host_api_dispatch);
+    assert!(
+        host_api_dispatch_tokens.contains("request:AuthorizedDispatchRequest"),
+        "CapabilityDispatcher must accept only AuthorizedDispatchRequest"
+    );
+    assert!(
+        !host_api_dispatch_tokens.contains("request:CapabilityDispatchRequest)->Result"),
+        "CapabilityDispatcher must not accept raw CapabilityDispatchRequest"
+    );
+
+    let mut violations = Vec::new();
+    collect_dispatch_authority_violations(&root.join("crates"), &root, &mut violations);
+
+    assert!(
+        violations.is_empty(),
+        "raw dispatch authority must stay sealed to approved host paths:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn dispatch_authority_allowlist_is_scope_specific() {
+    let host_runtime_services = r#"
+impl ProcessExecutor for RuntimeDispatchProcessExecutor {
+    async fn execute(&self) {
+        DispatchAuthorityProof::host_process_executor();
+    }
+}
+
+fn unrelated_host_runtime_helper() {
+    DispatchAuthorityProof::host_process_executor();
+}
+"#;
+    let process_pattern = "DispatchAuthorityProof::host_process_executor()";
+    assert!(is_approved_dispatch_authority_usage(
+        "crates/ironclaw_host_runtime/src/services.rs",
+        host_runtime_services,
+        line_number_containing(host_runtime_services, process_pattern, 1),
+        process_pattern,
+    ));
+    assert!(!is_approved_dispatch_authority_usage(
+        "crates/ironclaw_host_runtime/src/services.rs",
+        host_runtime_services,
+        line_number_containing(host_runtime_services, process_pattern, 2),
+        process_pattern,
+    ));
+
+    let capability_host = r#"
+fn authorize_dispatch_request() {
+    DispatchAuthorityProof::capability_host();
+}
+
+fn unrelated_capability_helper() {
+    DispatchAuthorityProof::capability_host();
+}
+"#;
+    let capability_pattern = "DispatchAuthorityProof::capability_host()";
+    assert!(is_approved_dispatch_authority_usage(
+        "crates/ironclaw_capabilities/src/host.rs",
+        capability_host,
+        line_number_containing(capability_host, capability_pattern, 1),
+        capability_pattern,
+    ));
+    assert!(!is_approved_dispatch_authority_usage(
+        "crates/ironclaw_capabilities/src/host.rs",
+        capability_host,
+        line_number_containing(capability_host, capability_pattern, 2),
+        capability_pattern,
+    ));
+}
+
+#[test]
 fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     let metadata = cargo_metadata();
     let packages = metadata["packages"]
@@ -1072,6 +1149,135 @@ fn collect_forbidden_turns_identifier_uses(
             }
         }
     }
+}
+
+fn compact_rust_tokens(contents: &str) -> String {
+    contents
+        .chars()
+        .filter(|char| !char.is_whitespace() && *char != ',')
+        .collect()
+}
+
+fn collect_dispatch_authority_violations(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    violations: &mut Vec<String>,
+) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|err| panic!("failed to read dir entry: {err}"));
+        let path = entry.path();
+        if path.is_dir() {
+            collect_dispatch_authority_violations(&path, root, violations);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let relative_path = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        if relative_path.contains("/tests/") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+        for pattern in [
+            ".dispatch_json(CapabilityDispatchRequest",
+            "DispatchAuthorityProof::capability_host()",
+            "DispatchAuthorityProof::host_process_executor()",
+            "DispatchAuthorityProof::test()",
+        ] {
+            for (line_index, line) in contents.lines().enumerate() {
+                let line_number = line_index + 1;
+                if !line.contains(pattern)
+                    || is_approved_dispatch_authority_usage(
+                        &relative_path,
+                        &contents,
+                        line_number,
+                        pattern,
+                    )
+                {
+                    continue;
+                }
+                violations.push(format!(
+                    "{}:{line_number} contains forbidden dispatch authority pattern `{pattern}`",
+                    relative_path
+                ));
+            }
+        }
+    }
+}
+
+fn is_approved_dispatch_authority_usage(
+    relative_path: &str,
+    contents: &str,
+    line_number: usize,
+    pattern: &str,
+) -> bool {
+    if relative_path == "crates/ironclaw_host_api/src/dispatch.rs" {
+        return true;
+    }
+    matches!(
+        (relative_path, pattern),
+        (
+            "crates/ironclaw_capabilities/src/host.rs",
+            "DispatchAuthorityProof::capability_host()"
+        ) if line_is_inside_block(contents, line_number, "fn authorize_dispatch_request(")
+    ) || matches!(
+        (relative_path, pattern),
+        (
+            "crates/ironclaw_host_runtime/src/services.rs",
+            "DispatchAuthorityProof::host_process_executor()"
+        ) if line_is_inside_block(
+            contents,
+            line_number,
+            "impl ProcessExecutor for RuntimeDispatchProcessExecutor"
+        )
+    )
+}
+
+fn line_is_inside_block(contents: &str, line_number: usize, block_start_marker: &str) -> bool {
+    let lines = contents.lines().collect::<Vec<_>>();
+    let Some(start) = lines
+        .iter()
+        .position(|line| line.contains(block_start_marker))
+    else {
+        return false;
+    };
+
+    let mut depth = 0_i32;
+    let mut saw_open_brace = false;
+    for (index, line) in lines.iter().enumerate().skip(start) {
+        for char in line.chars() {
+            match char {
+                '{' => {
+                    saw_open_brace = true;
+                    depth += 1;
+                }
+                '}' => {
+                    depth -= 1;
+                    if saw_open_brace && depth == 0 {
+                        return (start + 1..=index + 1).contains(&line_number);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+fn line_number_containing(contents: &str, pattern: &str, occurrence: usize) -> usize {
+    contents
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| line.contains(pattern).then_some(index + 1))
+        .nth(occurrence - 1)
+        .unwrap_or_else(|| panic!("pattern {pattern:?} occurrence {occurrence} must exist"))
 }
 
 struct BoundaryRule {

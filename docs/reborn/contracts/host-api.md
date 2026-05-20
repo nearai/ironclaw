@@ -667,6 +667,8 @@ pub struct CapabilityDispatchRequest {
     pub resource_reservation: Option<ResourceReservation>,
     pub input: serde_json::Value,
 }
+pub struct AuthorizedDispatchRequest;
+pub struct DispatchAuthorityProof;
 pub struct CapabilityDispatchResult;
 pub trait CapabilityDispatcher;
 pub enum DispatchError;
@@ -675,7 +677,7 @@ pub enum RuntimeDispatchErrorKind;
 
 Rules:
 
-- `CapabilityDispatchRequest` is already authorized; grant checks and approvals happen before this boundary. Optional `mounts` and `resource_reservation` fields are prepared obligation effects, not new authority grants.
+- `CapabilityDispatcher::dispatch_json` accepts only `AuthorizedDispatchRequest`. `CapabilityDispatchRequest` is raw payload data; grant checks, approvals, obligation preparation, and resource reservation happen before it is sealed with `DispatchAuthorityProof`. Production code must not expose reusable proof handles from sealed requests; only the authority source may be inspected for diagnostics. Optional `mounts` and `resource_reservation` fields are prepared obligation effects, not new authority grants.
 - `CapabilityDispatchResult` exposes normalized host facts: capability ID, provider, runtime, output, usage, and resource receipt.
 - `DispatchError` uses stable control-plane variants for registry/routing failures and `RuntimeDispatchErrorKind` for WASM/Script/MCP failures.
 - Runtime/backend detail strings, stderr, host paths, and secret-bearing messages must not cross this port.

@@ -155,6 +155,43 @@ fn dispatch_errors_preserve_typed_failure_kind() {
 }
 
 #[test]
+fn authorized_dispatch_request_exposes_only_authority_source() {
+    let request = CapabilityDispatchRequest {
+        capability_id: CapabilityId::new("test.cap").unwrap(),
+        scope: ResourceScope::system(),
+        estimate: ResourceEstimate::default(),
+        mounts: None,
+        resource_reservation: None,
+        input: json!({"ok": true}),
+    };
+    let authorized =
+        AuthorizedDispatchRequest::new(request.clone(), DispatchAuthorityProof::capability_host());
+
+    assert_eq!(authorized.request(), &request);
+    assert_eq!(
+        authorized.authority_source(),
+        DispatchAuthoritySource::CapabilityHost
+    );
+    assert_eq!(authorized.into_request(), request);
+
+    let process_authorized = AuthorizedDispatchRequest::new(
+        CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("test.process").unwrap(),
+            scope: ResourceScope::system(),
+            estimate: ResourceEstimate::default(),
+            mounts: None,
+            resource_reservation: None,
+            input: json!({}),
+        },
+        DispatchAuthorityProof::host_process_executor(),
+    );
+    assert_eq!(
+        process_authorized.authority_source(),
+        DispatchAuthoritySource::HostProcessExecutor
+    );
+}
+
+#[test]
 fn dispatch_failure_kind_display_preserves_stable_literals() {
     assert_eq!(
         DispatchFailureKind::UnknownCapability.as_str(),

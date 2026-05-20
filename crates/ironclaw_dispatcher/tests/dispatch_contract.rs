@@ -37,18 +37,21 @@ async fn dispatcher_routes_wasm_capability_through_registered_adapter() {
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
         .with_runtime_adapter(RuntimeKind::Wasm, &adapter);
     let result = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("echo.say").unwrap(),
-            scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("echo.say").unwrap(),
+                scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    output_bytes: Some(10_000),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "hello dispatcher"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "hello dispatcher"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap();
 
@@ -102,19 +105,22 @@ async fn dispatcher_routes_script_capability_through_registered_adapter() {
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
         .with_runtime_adapter(RuntimeKind::Script, &adapter);
     let result = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("script.echo").unwrap(),
-            scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("script.echo").unwrap(),
+                scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    process_count: Some(1),
+                    output_bytes: Some(10_000),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "hello script dispatcher"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "hello script dispatcher"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap();
 
@@ -156,19 +162,22 @@ async fn dispatcher_redacts_runtime_adapter_failure_details() {
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
         .with_runtime_adapter(RuntimeKind::Script, &adapter);
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("script.echo").unwrap(),
-            scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("script.echo").unwrap(),
+                scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    process_count: Some(1),
+                    output_bytes: Some(10_000),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "redact stderr"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "redact stderr"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap_err();
 
@@ -214,19 +223,22 @@ async fn dispatcher_routes_mcp_capability_through_registered_adapter() {
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
         .with_runtime_adapter(RuntimeKind::Mcp, &adapter);
     let result = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
-            scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+                scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    process_count: Some(1),
+                    output_bytes: Some(10_000),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"query": "ironclaw"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"query": "ironclaw"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap();
 
@@ -254,17 +266,20 @@ async fn dispatcher_fails_unknown_capability_without_reserving_resources() {
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor)
         .with_runtime_adapter(RuntimeKind::Wasm, &adapter);
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("missing.say").unwrap(),
-            scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("missing.say").unwrap(),
+                scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "nope"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "nope"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap_err();
 
@@ -290,14 +305,17 @@ async fn dispatcher_releases_prepared_reservation_when_validation_fails_before_a
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("missing.say").unwrap(),
-            scope,
-            estimate,
-            mounts: None,
-            resource_reservation: Some(reservation),
-            input: json!({"message": "release on validation failure"}),
-        })
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("missing.say").unwrap(),
+                scope,
+                estimate,
+                mounts: None,
+                resource_reservation: Some(reservation),
+                input: json!({"message": "release on validation failure"}),
+            },
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap_err();
 
@@ -319,18 +337,21 @@ async fn dispatcher_requires_mcp_backend_before_reserving_resources() {
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
-            scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+                scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    process_count: Some(1),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"query": "blocked"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"query": "blocked"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap_err();
 
@@ -357,18 +378,21 @@ async fn dispatcher_requires_script_backend_before_reserving_resources() {
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("script.echo").unwrap(),
-            scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("script.echo").unwrap(),
+                scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    process_count: Some(1),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "blocked"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "blocked"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap_err();
 
@@ -395,17 +419,20 @@ async fn dispatcher_requires_wasm_backend_before_reserving_resources() {
 
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("echo.say").unwrap(),
-            scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("echo.say").unwrap(),
+                scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "blocked"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "blocked"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap_err();
 

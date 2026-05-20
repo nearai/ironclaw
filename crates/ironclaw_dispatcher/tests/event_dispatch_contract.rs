@@ -27,35 +27,41 @@ async fn dispatcher_emits_events_for_wasm_and_script_success() {
         .with_event_sink(&events);
 
     dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
-            scope: sample_scope(),
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
+                scope: sample_scope(),
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    output_bytes: Some(10_000),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "hello wasm"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "hello wasm"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap();
 
     dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("echo-script.say").unwrap(),
-            scope: sample_scope(),
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("echo-script.say").unwrap(),
+                scope: sample_scope(),
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    process_count: Some(1),
+                    output_bytes: Some(10_000),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "hello script"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "hello script"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap();
 
@@ -101,18 +107,21 @@ async fn dispatcher_ignores_event_sink_failures_on_success() {
         .with_event_sink(&events);
 
     let result = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
-            scope: sample_scope(),
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("echo-wasm.say").unwrap(),
+                scope: sample_scope(),
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    output_bytes: Some(10_000),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "event sink fails"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "event sink fails"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap();
 
@@ -128,18 +137,21 @@ async fn dispatcher_preserves_original_error_when_failure_event_sink_fails() {
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor).with_event_sink(&events);
 
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("echo-script.say").unwrap(),
-            scope: sample_scope(),
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("echo-script.say").unwrap(),
+                scope: sample_scope(),
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    process_count: Some(1),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "missing backend"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "missing backend"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap_err();
 
@@ -170,18 +182,21 @@ async fn dispatcher_logs_release_failure_without_masking_dispatch_error() {
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor);
 
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("echo-script.say").unwrap(),
-            scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("echo-script.say").unwrap(),
+                scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    process_count: Some(1),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: Some(reservation.clone()),
+                input: json!({"message": "missing backend"}),
             },
-            mounts: None,
-            resource_reservation: Some(reservation.clone()),
-            input: json!({"message": "missing backend"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .instrument(tracing::info_span!(
             "dispatcher_logs_release_failure_without_masking_dispatch_error"
         ))
@@ -213,18 +228,21 @@ async fn dispatcher_emits_redacted_runtime_error_kind_for_adapter_failure() {
         .with_event_sink(&events);
 
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("echo-script.say").unwrap(),
-            scope: sample_scope(),
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("echo-script.say").unwrap(),
+                scope: sample_scope(),
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    process_count: Some(1),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "adapter fails"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "adapter fails"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap_err();
 
@@ -256,19 +274,22 @@ async fn dispatcher_emits_events_for_mcp_success() {
         .with_event_sink(&events);
 
     dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
-            scope: sample_scope(),
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                output_bytes: Some(10_000),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+                scope: sample_scope(),
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    process_count: Some(1),
+                    output_bytes: Some(10_000),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"query": "ironclaw"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"query": "ironclaw"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap();
 
@@ -296,18 +317,21 @@ async fn dispatcher_emits_failed_event_for_missing_backend_without_reserving() {
     let dispatcher = RuntimeDispatcher::new(&registry, &fs, &governor).with_event_sink(&events);
 
     let err = dispatcher
-        .dispatch_json(CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("echo-script.say").unwrap(),
-            scope,
-            estimate: ResourceEstimate {
-                concurrency_slots: Some(1),
-                process_count: Some(1),
-                ..ResourceEstimate::default()
+        .dispatch_json(AuthorizedDispatchRequest::new(
+            CapabilityDispatchRequest {
+                capability_id: CapabilityId::new("echo-script.say").unwrap(),
+                scope,
+                estimate: ResourceEstimate {
+                    concurrency_slots: Some(1),
+                    process_count: Some(1),
+                    ..ResourceEstimate::default()
+                },
+                mounts: None,
+                resource_reservation: None,
+                input: json!({"message": "blocked"}),
             },
-            mounts: None,
-            resource_reservation: None,
-            input: json!({"message": "blocked"}),
-        })
+            DispatchAuthorityProof::test(),
+        ))
         .await
         .unwrap_err();
 

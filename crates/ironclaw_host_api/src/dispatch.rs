@@ -13,7 +13,12 @@ use crate::{
     ResourceScope, ResourceUsage, RuntimeKind,
 };
 
-/// Request for one already-authorized declared capability dispatch.
+/// Raw request data for one declared capability dispatch.
+///
+/// This payload is not sufficient authority to invoke a runtime. Dispatcher
+/// ports accept only [`AuthorizedDispatchRequest`], which is minted after the
+/// capability host has completed authorization, obligation preparation, and
+/// resource reservation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapabilityDispatchRequest {
     pub capability_id: CapabilityId,
@@ -22,6 +27,86 @@ pub struct CapabilityDispatchRequest {
     pub mounts: Option<MountView>,
     pub resource_reservation: Option<ResourceReservation>,
     pub input: Value,
+}
+
+/// Opaque proof that a dispatch request came through an approved authority path.
+///
+/// Rust cannot restrict a constructor to one sibling crate, so production code
+/// must keep minting at the capability-host boundary and architecture tests
+/// guard that invariant. The source is intentionally diagnostic only; it does
+/// not leave the sealed request as a reusable authority handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DispatchAuthorityProof {
+    source: DispatchAuthoritySource,
+    _private: (),
+}
+
+impl DispatchAuthorityProof {
+    /// Mint proof after capability-host authorization and obligation checks.
+    #[doc(hidden)]
+    pub const fn capability_host() -> Self {
+        Self {
+            source: DispatchAuthoritySource::CapabilityHost,
+            _private: (),
+        }
+    }
+
+    /// Mint proof for host-owned process execution of previously authorized work.
+    #[doc(hidden)]
+    pub const fn host_process_executor() -> Self {
+        Self {
+            source: DispatchAuthoritySource::HostProcessExecutor,
+            _private: (),
+        }
+    }
+
+    /// Mint proof for contract tests that exercise dispatcher behavior directly.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub const fn test() -> Self {
+        Self {
+            source: DispatchAuthoritySource::Test,
+            _private: (),
+        }
+    }
+
+    pub const fn source(self) -> DispatchAuthoritySource {
+        self.source
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchAuthoritySource {
+    CapabilityHost,
+    HostProcessExecutor,
+    #[cfg(any(test, feature = "test-support"))]
+    Test,
+}
+
+/// Capability dispatch request sealed with authority proof.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuthorizedDispatchRequest {
+    request: CapabilityDispatchRequest,
+    authority: DispatchAuthorityProof,
+}
+
+impl AuthorizedDispatchRequest {
+    /// Seal raw request data after the caller has proved dispatch authority.
+    pub fn new(request: CapabilityDispatchRequest, authority: DispatchAuthorityProof) -> Self {
+        Self { request, authority }
+    }
+
+    pub fn request(&self) -> &CapabilityDispatchRequest {
+        &self.request
+    }
+
+    pub const fn authority_source(&self) -> DispatchAuthoritySource {
+        self.authority.source()
+    }
+
+    pub fn into_request(self) -> CapabilityDispatchRequest {
+        self.request
+    }
 }
 
 /// Normalized dispatch result returned by a runtime dispatcher.
@@ -202,9 +287,9 @@ impl DispatchError {
 /// Interface for already-authorized runtime dispatch.
 #[async_trait]
 pub trait CapabilityDispatcher: Send + Sync {
-    /// Dispatches one already-authorized JSON capability request and must not perform caller-facing authorization or approval resolution.
+    /// Dispatches one sealed, already-authorized JSON capability request and must not perform caller-facing authorization or approval resolution.
     async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError>;
 }

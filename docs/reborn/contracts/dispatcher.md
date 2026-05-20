@@ -25,6 +25,8 @@ The dispatch port contracts live in `ironclaw_host_api`:
 
 ```rust
 CapabilityDispatchRequest
+AuthorizedDispatchRequest
+DispatchAuthorityProof
 CapabilityDispatchResult
 CapabilityDispatcher
 DispatchError
@@ -37,7 +39,7 @@ RuntimeDispatchErrorKind
 
 ## 2. Inputs
 
-The dispatcher receives an already-authorized `CapabilityDispatchRequest`:
+The dispatcher receives an `AuthorizedDispatchRequest`, not raw request data. `CapabilityDispatchRequest` carries payload fields; `AuthorizedDispatchRequest` seals that payload with authority proof minted by the capability host or host-owned process executor after authorization. Production callers must not receive reusable proof handles from sealed requests; diagnostics may observe only the proof source:
 
 ```rust
 pub struct CapabilityDispatchRequest {
@@ -46,6 +48,9 @@ pub struct CapabilityDispatchRequest {
     pub estimate: ResourceEstimate,
     pub input: serde_json::Value,
 }
+
+pub struct AuthorizedDispatchRequest;
+pub struct DispatchAuthorityProof;
 ```
 
 The dispatcher can be constructed from borrowed service boundaries for request-scoped composition:

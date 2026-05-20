@@ -559,8 +559,9 @@ impl OutputDispatcher {
 impl CapabilityDispatcher for OutputDispatcher {
     async fn dispatch_json(
         &self,
-        request: CapabilityDispatchRequest,
+        request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
+        let request = request.into_request();
         Ok(CapabilityDispatchResult {
             capability_id: request.capability_id,
             provider: extension_id(),

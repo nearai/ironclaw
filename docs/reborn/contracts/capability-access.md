@@ -133,7 +133,7 @@ CapabilityHost::spawn_json(...)
 
 Authorization denial happens before runtime dispatch, process creation, and resource reservation.
 
-The dispatcher remains auth-unaware: it receives already-authorized `CapabilityDispatchRequest` values from `CapabilityHost` or another trusted host service.
+The dispatcher remains auth-unaware: it receives `AuthorizedDispatchRequest` values sealed by `CapabilityHost` or another trusted host service after authorization. Raw `CapabilityDispatchRequest` payloads are not dispatch authority.
 
 ---
 
