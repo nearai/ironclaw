@@ -245,6 +245,29 @@ fn production_wiring_validation_rejects_local_only_runtime_policy() {
 }
 
 #[test]
+fn production_wiring_validation_rejects_each_local_only_runtime_policy_field() {
+    let mut host_workspace = hosted_dev_runtime_policy();
+    host_workspace.filesystem_backend = FilesystemBackendKind::HostWorkspace;
+    assert_local_only_runtime_policy_rejected(host_workspace, "host_workspace_filesystem");
+
+    let mut local_process = hosted_dev_runtime_policy();
+    local_process.process_backend = ProcessBackendKind::LocalHost;
+    assert_local_only_runtime_policy_rejected(local_process, "local_host_process");
+
+    let mut direct_network = hosted_dev_runtime_policy();
+    direct_network.network_mode = NetworkMode::Direct;
+    assert_local_only_runtime_policy_rejected(direct_network, "direct_network");
+
+    let mut scrubbed_secrets = hosted_dev_runtime_policy();
+    scrubbed_secrets.secret_mode = SecretMode::ScrubbedEnv;
+    assert_local_only_runtime_policy_rejected(scrubbed_secrets, "local_secret_environment");
+
+    let mut inherited_secrets = hosted_dev_runtime_policy();
+    inherited_secrets.secret_mode = SecretMode::InheritedEnv;
+    assert_local_only_runtime_policy_rejected(inherited_secrets, "local_secret_environment");
+}
+
+#[test]
 fn production_wiring_validation_accepts_production_safe_runtime_policy_shape() {
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -6043,6 +6066,34 @@ fn hosted_dev_runtime_policy() -> EffectiveRuntimePolicy {
         approval_policy: ApprovalPolicy::AskDestructive,
         audit_mode: AuditMode::Standard,
     }
+}
+
+fn assert_local_only_runtime_policy_rejected(
+    runtime_policy: EffectiveRuntimePolicy,
+    expected_implementation: &'static str,
+) {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_policy(runtime_policy);
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("local-only runtime-policy field must not pass production validation");
+
+    assert!(
+        report.issues().iter().any(|issue| {
+            issue.component() == ProductionWiringComponent::RuntimePolicy
+                && issue.kind() == ProductionWiringIssueKind::LocalOnlyImplementation
+                && issue.implementation() == Some(expected_implementation)
+        }),
+        "runtime policy should report {expected_implementation}: {report:?}"
+    );
 }
 
 fn read_directory_text(root: &std::path::Path) -> String {

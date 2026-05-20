@@ -593,6 +593,7 @@ async fn hidden_capability_direct_invoke_still_fails_closed_through_authorizatio
         dispatcher.clone(),
         Arc::new(GrantAuthorizer),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_dev_runtime_policy(),
     )
     .with_trust_policy(Arc::new(trust_policy_for([(
         "echo",
@@ -1015,6 +1016,33 @@ async fn visible_surface_hides_script_when_policy_denies_processes_even_if_effec
 }
 
 #[tokio::test]
+async fn visible_surface_hides_secret_when_policy_denies_secrets() {
+    let runtime = runtime_with(
+        registry_from_manifests([(SECRET_MANIFEST, "/system/extensions/secret-tool")]),
+        Arc::new(PanicAuthorizer),
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "secret-tool",
+        "/system/extensions/secret-tool/manifest.toml",
+        vec![EffectKind::UseSecret],
+    )])))
+    .with_runtime_policy(secret_denied_runtime_policy());
+
+    let surface = runtime
+        .visible_capabilities(request_with_provider_trust(
+            context_with_secret_grant(),
+            vec![("secret-tool", vec![EffectKind::UseSecret])],
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        surface.capabilities.is_empty(),
+        "SecretMode::Deny must hide tools that require secret access"
+    );
+}
+
+#[tokio::test]
 async fn runtime_policy_denied_extension_invoke_does_not_dispatch() {
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let dispatcher_for_runtime: Arc<dyn CapabilityDispatcher> = dispatcher.clone();
@@ -1059,6 +1087,51 @@ async fn runtime_policy_denied_extension_invoke_does_not_dispatch() {
     assert!(
         !dispatcher.has_request(),
         "runtime-policy denial must happen before generic extension dispatch"
+    );
+}
+
+#[tokio::test]
+async fn runtime_policy_denied_secret_invoke_does_not_dispatch() {
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher_for_runtime: Arc<dyn CapabilityDispatcher> = dispatcher.clone();
+    let runtime = runtime_with_dispatcher(
+        registry_from_manifests([(SECRET_MANIFEST, "/system/extensions/secret-tool")]),
+        Arc::new(GrantAuthorizer),
+        dispatcher_for_runtime,
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "secret-tool",
+        "/system/extensions/secret-tool/manifest.toml",
+        vec![EffectKind::UseSecret],
+    )])))
+    .with_runtime_policy(secret_denied_runtime_policy());
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context_with_secret_grant(),
+            capability_id("secret-tool.read"),
+            ResourceEstimate::default(),
+            json!({}),
+            trust_decision_for(vec![EffectKind::UseSecret]),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected runtime-policy failure, got {outcome:?}");
+    };
+    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert_eq!(failure.capability_id, capability_id("secret-tool.read"));
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("SecretMode::Deny")
+    );
+    assert!(
+        !dispatcher.has_request(),
+        "runtime-policy secret denial must happen before generic extension dispatch"
     );
 }
 
@@ -1243,6 +1316,20 @@ fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
     }
 }
 
+fn secret_denied_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Deny,
+        secret_mode: SecretMode::Deny,
+        approval_policy: ApprovalPolicy::AskAlways,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
 fn hot_catalog_fixture(
     input_schema: Option<&str>,
     output_schema: &str,
@@ -1381,6 +1468,7 @@ fn runtime_with_dispatcher(
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_dev_runtime_policy(),
     )
 }
 

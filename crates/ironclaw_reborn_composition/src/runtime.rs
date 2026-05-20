@@ -798,7 +798,10 @@ fn build_stub_gateway() -> Arc<dyn ironclaw_loop_support::HostManagedModelGatewa
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use std::time::Duration;
 
     use async_trait::async_trait;
@@ -854,6 +857,11 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
+    struct FailingSkillContextSource {
+        calls: AtomicUsize,
+    }
+
+    #[derive(Debug, Default)]
     struct ToolCallingGateway {
         calls: StdMutex<usize>,
         stream_model_calls: StdMutex<usize>,
@@ -899,6 +907,17 @@ mod tests {
             Ok(HostManagedModelResponse::assistant_reply(
                 self.reply.clone(),
             ))
+        }
+    }
+
+    #[async_trait]
+    impl HostSkillContextSource for FailingSkillContextSource {
+        async fn load_skill_context_candidates(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(HostSkillContextBuildError::SourceUnavailable)
         }
     }
 
@@ -1142,6 +1161,61 @@ mod tests {
                 .expect("recording gateway requests lock poisoned")
                 .len(),
             1
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn send_user_message_uses_caller_supplied_skill_context_source() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "should not reach model".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let skill_context_source = Arc::new(FailingSkillContextSource::default());
+        let skill_context_source_for_input: Arc<dyn HostSkillContextSource> =
+            skill_context_source.clone();
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-skill-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-skill-tenant".to_string(),
+            agent_id: "runtime-skill-agent".to_string(),
+            source_binding_id: "runtime-skill-source".to_string(),
+            reply_target_binding_id: "runtime-skill-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_skill_context_source(skill_context_source_for_input)
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.send_user_message(&conversation, "ping"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+
+        assert_ne!(reply.status, TurnStatus::Completed);
+        assert_eq!(
+            skill_context_source.calls.load(Ordering::SeqCst),
+            1,
+            "composition should pass caller-supplied skill context into the planned runtime"
+        );
+        assert!(
+            requests
+                .lock()
+                .expect("recording gateway requests lock poisoned")
+                .is_empty(),
+            "skill context failure should stop before model dispatch"
         );
 
         runtime.shutdown().await.expect("runtime shutdown");

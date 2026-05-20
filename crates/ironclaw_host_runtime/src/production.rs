@@ -25,7 +25,7 @@ use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
     PackageSource, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind,
-    runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
+    runtime_policy::EffectiveRuntimePolicy,
 };
 use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
@@ -89,6 +89,7 @@ impl DefaultHostRuntime {
         dispatcher: Arc<dyn CapabilityDispatcher>,
         authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
         surface_version: CapabilitySurfaceVersion,
+        runtime_policy: EffectiveRuntimePolicy,
     ) -> Self {
         Self {
             registry,
@@ -106,7 +107,7 @@ impl DefaultHostRuntime {
             runtime_health: None,
             obligation_handler: None,
             surface_version,
-            runtime_policy: default_runtime_policy(),
+            runtime_policy,
         }
     }
 
@@ -921,16 +922,6 @@ fn runtime_policy_failure_kind(error: &RuntimePolicyEvaluationError) -> RuntimeF
         RuntimePolicyEvaluationError::UnknownCapability => RuntimeFailureKind::MissingRuntime,
         RuntimePolicyEvaluationError::Denied(_) => RuntimeFailureKind::Authorization,
     }
-}
-
-fn default_runtime_policy() -> EffectiveRuntimePolicy {
-    let request = ironclaw_runtime_policy::ResolveRequest::new(
-        DeploymentMode::LocalSingleUser,
-        RuntimeProfile::SecureDefault,
-    );
-    ironclaw_runtime_policy::resolve(request).unwrap_or_else(|error| {
-        panic!("LocalSingleUser + SecureDefault runtime policy must resolve: {error}")
-    })
 }
 
 fn trust_evaluation_failure_kind(error: TrustEvaluationError) -> RuntimeFailureKind {

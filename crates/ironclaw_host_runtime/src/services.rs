@@ -1638,12 +1638,7 @@ where
     /// Builds the upper facade without production validation.
     #[doc(hidden)]
     pub fn host_runtime_for_local_testing(&self) -> DefaultHostRuntime {
-        let runtime = self.build_host_runtime();
-        if self.runtime_policy.is_some() {
-            runtime
-        } else {
-            runtime.with_runtime_policy(local_testing_runtime_policy())
-        }
+        self.build_host_runtime()
     }
 
     /// Builds the upper facade with the same dispatcher, process services,
@@ -1693,12 +1688,17 @@ where
                 self.registered_runtime_backends(),
             ))
         });
+        let runtime_policy = self
+            .runtime_policy
+            .clone()
+            .unwrap_or_else(local_testing_runtime_policy);
 
         let mut runtime = DefaultHostRuntime::new(
             Arc::clone(&self.registry),
             dispatcher,
             Arc::clone(&self.authorizer),
             self.surface_version.clone(),
+            runtime_policy,
         )
         .with_trust_policy_dyn(Arc::clone(&self.trust_policy))
         .with_process_manager(process_manager)
@@ -1720,10 +1720,6 @@ where
         if let Some(capability_leases) = &self.capability_leases {
             runtime = runtime.with_capability_leases(Arc::clone(capability_leases));
         }
-        if let Some(runtime_policy) = &self.runtime_policy {
-            runtime = runtime.with_runtime_policy(runtime_policy.clone());
-        }
-
         runtime.with_obligation_handler(Arc::new(self.builtin_obligation_handler()))
     }
 
