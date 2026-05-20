@@ -317,6 +317,11 @@ async fn broadcast_lag_emits_explicit_lagged_item() {
         .await
         .expect("authorized subscription");
 
+    assert!(matches!(
+        subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+
     source
         .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
             &scope, 2, 2,
@@ -333,23 +338,11 @@ async fn broadcast_lag_emits_explicit_lagged_item() {
         )))
         .unwrap();
 
-    assert!(matches!(
-        subscription.next().await,
-        Some(ProjectionStreamItem::Snapshot(_))
-    ));
-    let mut lagged = None;
-    for _ in 0..3 {
-        let item = timeout(Duration::from_secs(1), subscription.next())
-            .await
-            .expect("next stream item")
-            .expect("next stream item");
-        if matches!(item, ProjectionStreamItem::Lagged { .. }) {
-            lagged = Some(item);
-            break;
-        }
-    }
-
-    match lagged.expect("lag marker") {
+    match timeout(Duration::from_secs(1), subscription.next())
+        .await
+        .expect("terminal lag item")
+        .expect("terminal lag item")
+    {
         ProjectionStreamItem::Lagged { reason, .. } => {
             assert_eq!(reason, LagReason::SourceLagged);
         }
@@ -387,6 +380,45 @@ async fn stream_admission_denial_is_structured_and_product_safe() {
         .expect_err("second subscription rejected");
 
     assert!(matches!(error, ProjectionStreamError::AdmissionDenied));
+}
+
+#[tokio::test]
+async fn per_actor_admission_is_scoped_by_tenant() {
+    let scope_a = projection_scope_for("tenant-a", "user-a", "thread-a");
+    let scope_b = projection_scope_for("tenant-b", "user-a", "thread-b");
+    let admission = Arc::new(InMemoryProjectionStreamAdmissionPolicy::new(
+        ProjectionStreamLimits {
+            per_tenant: 1,
+            per_actor: 1,
+            per_scope: 1,
+            global: 2,
+        },
+    ));
+    let manager_a = EventStreamManager::new(
+        Arc::new(FakeProjectionService::new(scope_a.clone())),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::clone(&admission),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+    let manager_b = EventStreamManager::new(
+        Arc::new(FakeProjectionService::new(scope_b.clone())),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::clone(&admission),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let _tenant_a = manager_a
+        .subscribe(subscribe_request(scope_a, None))
+        .await
+        .expect("tenant A subscription admitted");
+    let _tenant_b = manager_b
+        .subscribe(subscribe_request(scope_b, None))
+        .await
+        .expect("same user id in tenant B remains admitted");
 }
 
 #[tokio::test]
@@ -647,6 +679,17 @@ async fn live_forwarding_advances_cursor_and_reports_latest_reconnect_cursor() {
             &scope, 11, 11,
         )))
         .expect("publish live update");
+    match timeout(Duration::from_secs(1), subscription.next())
+        .await
+        .expect("next live item")
+        .expect("next live item")
+    {
+        ProjectionStreamItem::Update(ProductProjectionEnvelope::ThreadUpdates(replay)) => {
+            assert_eq!(replay.next_cursor.runtime, EventCursor::new(11));
+        }
+        other => panic!("expected delivered update, got {other:?}"),
+    }
+
     source
         .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
             &scope, 11, 11,
@@ -661,16 +704,6 @@ async fn live_forwarding_advances_cursor_and_reports_latest_reconnect_cursor() {
         ))
         .expect("publish blocked live update");
 
-    match timeout(Duration::from_secs(1), subscription.next())
-        .await
-        .expect("next live item")
-        .expect("next live item")
-    {
-        ProjectionStreamItem::Update(ProductProjectionEnvelope::ThreadUpdates(replay)) => {
-            assert_eq!(replay.next_cursor.runtime, EventCursor::new(11));
-        }
-        other => panic!("expected delivered update, got {other:?}"),
-    }
     match timeout(Duration::from_secs(1), subscription.next())
         .await
         .expect("lag item")
@@ -743,16 +776,26 @@ async fn slow_subscriber_gets_backpressure_lag_marker() {
         )))
         .expect("publish update");
 
-    assert!(matches!(
-        subscription.next().await,
-        Some(ProjectionStreamItem::Snapshot(_))
-    ));
-    match subscription.next().await.expect("backpressure marker") {
-        ProjectionStreamItem::Lagged { reason, .. } => {
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    match timeout(Duration::from_secs(1), subscription.next())
+        .await
+        .expect("terminal backpressure marker")
+        .expect("terminal backpressure marker")
+    {
+        ProjectionStreamItem::Lagged {
+            reason,
+            snapshot_cursor,
+        } => {
             assert_eq!(reason, LagReason::SubscriberBackpressure);
+            assert_eq!(snapshot_cursor.runtime, EventCursor::new(10));
         }
         other => panic!("expected backpressure marker, got {other:?}"),
     }
+    assert!(
+        subscription.next().await.is_none(),
+        "terminal lag should close the observable stream"
+    );
 }
 
 #[tokio::test]
@@ -1494,11 +1537,15 @@ fn run_status(scope: &ProjectionScope, cursor: u64) -> RunStatusProjection {
 }
 
 fn projection_scope(thread: &str) -> ProjectionScope {
+    projection_scope_for("tenant-a", "user-a", thread)
+}
+
+fn projection_scope_for(tenant: &str, user: &str, thread: &str) -> ProjectionScope {
     let thread_id = ThreadId::new(thread).unwrap();
     ProjectionScope {
         stream: EventStreamKey::new(
-            TenantId::new("tenant-a").unwrap(),
-            UserId::new("user-a").unwrap(),
+            TenantId::new(tenant).unwrap(),
+            UserId::new(user).unwrap(),
             None,
         ),
         read_scope: ReadScope {

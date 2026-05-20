@@ -9,7 +9,6 @@ use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -17,17 +16,16 @@ use ironclaw_event_projections::{
     EventProjectionService, ProjectionCursor, ProjectionError, ProjectionReplay, ProjectionRequest,
     ProjectionScope, ProjectionSnapshot,
 };
-use ironclaw_host_api::{InvocationId, MissionId, ProcessId, TenantId, ThreadId};
+use ironclaw_host_api::{
+    InvocationId, MissionId, ProcessId, TenantId, ThreadId, sha256_digest_token,
+};
 use ironclaw_outbound::{
     OutboundError, OutboundPushCandidate, OutboundPushKind, OutboundPushTargetRequest,
     OutboundStateStore, ProjectionUpdateRef,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnActor, TurnRunId, TurnScope};
 use serde::{Deserialize, Serialize};
-use tokio::{
-    sync::{broadcast, mpsc},
-    time::sleep,
-};
+use tokio::sync::{broadcast, mpsc};
 
 mod error;
 
@@ -37,7 +35,6 @@ const DEFAULT_SUBSCRIPTION_BUFFER: usize = 16;
 const MIN_SUBSCRIPTION_BUFFER: usize = 1;
 const MAX_SUBSCRIPTION_BUFFER: usize = 128;
 const MAX_VALIDATION_CACHE_ENTRIES: usize = 1024;
-const TERMINAL_LAG_SEND_TIMEOUT_MILLIS: u64 = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectionFetchRequest {
@@ -198,6 +195,9 @@ pub struct DebugProjectionPayload {
 
 pub struct ProjectionSubscription {
     receiver: mpsc::Receiver<ProjectionStreamItem>,
+    terminal_receiver: mpsc::Receiver<ProjectionStreamItem>,
+    terminated: bool,
+    observed_cursor: Option<ProjectionCursor>,
     _admission: ProjectionStreamAdmissionPermit,
 }
 
@@ -213,7 +213,46 @@ impl std::fmt::Debug for ProjectionSubscription {
 
 impl ProjectionSubscription {
     pub async fn next(&mut self) -> Option<ProjectionStreamItem> {
-        self.receiver.recv().await
+        if self.terminated {
+            return None;
+        }
+        match self.terminal_receiver.try_recv() {
+            Ok(item) => {
+                self.terminated = true;
+                self.receiver.close();
+                return Some(with_observed_terminal_cursor(
+                    item,
+                    self.observed_cursor.as_ref(),
+                ));
+            }
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {}
+        }
+
+        tokio::select! {
+            biased;
+            terminal = self.terminal_receiver.recv() => {
+                if let Some(item) = terminal {
+                    self.terminated = true;
+                    self.receiver.close();
+                    Some(with_observed_terminal_cursor(item, self.observed_cursor.as_ref()))
+                } else {
+                    let item = self.receiver.recv().await;
+                    self.observe_item(item)
+                }
+            }
+            item = self.receiver.recv() => self.observe_item(item),
+        }
+    }
+
+    fn observe_item(&mut self, item: Option<ProjectionStreamItem>) -> Option<ProjectionStreamItem> {
+        if let Some(item) = item {
+            if let Some(cursor) = observable_cursor(&item) {
+                self.observed_cursor = Some(cursor);
+            }
+            Some(item)
+        } else {
+            None
+        }
     }
 }
 
@@ -323,7 +362,10 @@ struct AdmissionState {
 struct TenantAdmissionKey(String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct ActorAdmissionKey(String);
+struct ActorAdmissionKey {
+    tenant_id: String,
+    user_id: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ScopeAdmissionKey {
@@ -367,7 +409,10 @@ impl ProjectionStreamAdmissionPolicy for InMemoryProjectionStreamAdmissionPolicy
         request: ProjectionStreamAdmissionRequest,
     ) -> Result<ProjectionStreamAdmissionPermit, ProjectionStreamError> {
         let tenant_key = TenantAdmissionKey(request.tenant_id.to_string());
-        let actor_key = ActorAdmissionKey(request.actor.user_id.to_string());
+        let actor_key = ActorAdmissionKey {
+            tenant_id: request.tenant_id.to_string(),
+            user_id: request.actor.user_id.to_string(),
+        };
         let scope_key = scope_key(&request.scope, &request.target);
         let mut state = self
             .state
@@ -509,7 +554,8 @@ struct ProjectionValidationCacheKey {
     variant: ProjectionEnvelopeKind,
     scope: ProjectionScopeKey,
     cursor: u64,
-    payload: Vec<u8>,
+    payload_len: usize,
+    payload_digest: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -730,10 +776,12 @@ impl EventStreamManager {
 
         let capacity = request.capabilities.bounded_buffer_capacity()?;
         let (sender, receiver) = mpsc::channel(capacity);
+        let (terminal_sender, terminal_receiver) = mpsc::channel(1);
         let redaction_validator = Arc::clone(&self.redaction_validator);
         let validation_cache = self.validation_cache.clone();
         tokio::spawn(forward_subscription_items(
             sender,
+            terminal_sender,
             initial_items,
             live,
             SubscriptionForwardContext {
@@ -747,6 +795,9 @@ impl EventStreamManager {
         ));
         Ok(ProjectionSubscription {
             receiver,
+            terminal_receiver,
+            terminated: false,
+            observed_cursor: None,
             _admission: admission,
         })
     }
@@ -828,6 +879,7 @@ struct SubscriptionForwardContext {
 
 async fn forward_subscription_items(
     sender: mpsc::Sender<ProjectionStreamItem>,
+    terminal_sender: mpsc::Sender<ProjectionStreamItem>,
     initial_items: Vec<ProjectionStreamItem>,
     mut live: broadcast::Receiver<ProductProjectionEnvelope>,
     context: SubscriptionForwardContext,
@@ -861,8 +913,11 @@ async fn forward_subscription_items(
                 )
                 .is_err()
                 {
-                    send_terminal_lag(&sender, LagReason::AccessBlocked, &last_delivered_cursor)
-                        .await;
+                    send_terminal_lag(
+                        &terminal_sender,
+                        LagReason::AccessBlocked,
+                        &last_delivered_cursor,
+                    );
                     return;
                 }
                 match context
@@ -872,16 +927,18 @@ async fn forward_subscription_items(
                     Ok(()) => {}
                     Err(ProjectionStreamError::Redaction) => {
                         send_terminal_lag(
-                            &sender,
+                            &terminal_sender,
                             LagReason::RedactionBlocked,
                             &last_delivered_cursor,
-                        )
-                        .await;
+                        );
                         return;
                     }
                     Err(_) => {
-                        send_terminal_lag(&sender, LagReason::SourceFailed, &last_delivered_cursor)
-                            .await;
+                        send_terminal_lag(
+                            &terminal_sender,
+                            LagReason::SourceFailed,
+                            &last_delivered_cursor,
+                        );
                         return;
                     }
                 }
@@ -891,18 +948,21 @@ async fn forward_subscription_items(
                     }
                     Err(mpsc::error::TrySendError::Full(_)) => {
                         send_terminal_lag(
-                            &sender,
+                            &terminal_sender,
                             LagReason::SubscriberBackpressure,
                             &last_delivered_cursor,
-                        )
-                        .await;
+                        );
                         return;
                     }
                     Err(mpsc::error::TrySendError::Closed(_)) => return,
                 }
             }
             Err(broadcast::error::RecvError::Lagged(_)) => {
-                send_terminal_lag(&sender, LagReason::SourceLagged, &last_delivered_cursor).await;
+                send_terminal_lag(
+                    &terminal_sender,
+                    LagReason::SourceLagged,
+                    &last_delivered_cursor,
+                );
                 return;
             }
             Err(broadcast::error::RecvError::Closed) => return,
@@ -910,7 +970,7 @@ async fn forward_subscription_items(
     }
 }
 
-async fn send_terminal_lag(
+fn send_terminal_lag(
     sender: &mpsc::Sender<ProjectionStreamItem>,
     reason: LagReason,
     snapshot_cursor: &ProjectionCursor,
@@ -921,15 +981,41 @@ async fn send_terminal_lag(
     };
     match sender.try_send(item) {
         Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
-        Err(mpsc::error::TrySendError::Full(item)) => {
-            tokio::select! {
-                _ = sender.closed() => {}
-                _ = sleep(Duration::from_millis(TERMINAL_LAG_SEND_TIMEOUT_MILLIS)) => {}
-                result = sender.send(item) => {
-                    let _ = result;
-                }
-            }
+        Err(mpsc::error::TrySendError::Full(_)) => {}
+    }
+}
+
+fn observable_cursor(item: &ProjectionStreamItem) -> Option<ProjectionCursor> {
+    match item {
+        ProjectionStreamItem::Snapshot(envelope) | ProjectionStreamItem::Update(envelope) => {
+            Some(envelope.cursor())
         }
+        ProjectionStreamItem::RebaseRequired {
+            snapshot_cursor, ..
+        }
+        | ProjectionStreamItem::Lagged {
+            snapshot_cursor, ..
+        } => Some(snapshot_cursor.clone()),
+        ProjectionStreamItem::KeepAlive => None,
+    }
+}
+
+fn with_observed_terminal_cursor(
+    item: ProjectionStreamItem,
+    observed_cursor: Option<&ProjectionCursor>,
+) -> ProjectionStreamItem {
+    match (item, observed_cursor) {
+        (
+            ProjectionStreamItem::Lagged {
+                reason,
+                snapshot_cursor,
+            },
+            Some(observed),
+        ) if observed.scope == snapshot_cursor.scope => ProjectionStreamItem::Lagged {
+            reason,
+            snapshot_cursor: observed.clone(),
+        },
+        (item, _) => item,
     }
 }
 
@@ -1101,11 +1187,14 @@ fn validation_cache_key(
         ProductProjectionEnvelope::Debug(_) => ProjectionEnvelopeKind::Debug,
     };
     let payload = serde_json::to_vec(envelope).map_err(|_| ProjectionStreamError::Source)?;
+    let payload_len = payload.len();
+    let payload_digest = sha256_digest_token(&payload);
     Ok(ProjectionValidationCacheKey {
         variant,
         scope: projection_scope_key(envelope.scope()),
         cursor: envelope.cursor().runtime.as_u64(),
-        payload,
+        payload_len,
+        payload_digest,
     })
 }
 
