@@ -82,6 +82,11 @@ jobs:
           PR: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Pinned reviewed commit on nearai/benchmarks main. Must match
+          # the SHA in the `bench` job's `uses:` below — bump in both
+          # places together. Used here to validate the requested suite
+          # exists at the same SHA we'd actually run against.
+          BENCH_PIN: 67effacd8c8a7f6f43b422e30a1810822b9d6d5f
         run: |
           set -euo pipefail
           # Grammar: /benchmark <suite> [--model <model-id>]
@@ -94,6 +99,16 @@ jobs:
             # (exit 0 keeps the Actions tab green; bad syntax isn't infra
             # failure).
             gh pr comment "$PR" --repo "$REPO" --body $'Could not parse `/benchmark` command.\n\nUsage: `/benchmark <suite> [--model <model-id>]`\n\nExample: `/benchmark ironclaw-smoke`'
+            exit 0
+          fi
+          # Pre-dispatch suite check: refuse unknown suite names before
+          # we acknowledge with 🚀 or spend any LLM credit. Cheap GitHub
+          # API lookup against the pinned benchmarks SHA so the user gets
+          # the same answer the dispatched workflow would.
+          if ! gh api "repos/nearai/benchmarks/contents/suites/${suite}.toml?ref=${BENCH_PIN}" --silent >/dev/null 2>&1; then
+            available=$(gh api "repos/nearai/benchmarks/contents/suites?ref=${BENCH_PIN}" \
+              --jq '[.[] | select(.name | endswith(".toml")) | .name | rtrimstr(".toml")] | sort | join(", ")')
+            gh pr comment "$PR" --repo "$REPO" --body "Unknown suite \`${suite}\`. Available: ${available}"
             exit 0
           fi
           sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
@@ -113,6 +128,17 @@ jobs:
   bench:
     needs: parse
     if: needs.parse.outputs.authorized == 'yes' && needs.parse.outputs.suite != ''
+    # Job-scoped writes so the called workflow can post the result
+    # comment + toggle the trigger-comment reaction. Called workflows
+    # can only DOWNGRADE the caller's GITHUB_TOKEN, so the workflow-level
+    # `pull-requests: read` (which the parse job uses for `gh pr view`)
+    # would otherwise leave the called workflow without write to publish
+    # results. The parse job stays on read; only this authorized,
+    # post-auth job grants writes.
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
     # Concurrency lives on the authorized job, not the workflow root —
     # otherwise an unauthorized commenter typing `/benchmark whatever`
     # would acquire the per-PR group and cancel an in-flight maintainer
