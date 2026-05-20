@@ -3654,7 +3654,7 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
 }
 
 #[tokio::test]
-async fn host_runtime_services_wasm_http_secret_store_lease_uses_graph_secret_store() {
+async fn host_runtime_services_wasm_http_rejects_secret_store_lease_before_transport() {
     let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
     let component = tool_component(HTTP_TOOL_WAT);
     let filesystem = Arc::new(
@@ -3715,18 +3715,10 @@ async fn host_runtime_services_wasm_http_secret_store_lease_uses_graph_secret_st
         .unwrap();
 
     assert_completed_outcome(outcome, &capability_id);
-    let requests = network.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].policy, policy);
     assert_eq!(
-        requests[0]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-graph-store-secret".to_string(),
-        ))
+        network.requests(),
+        Vec::new(),
+        "direct secret-store lease credentials must be rejected before network transport"
     );
 }
 

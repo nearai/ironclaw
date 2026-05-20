@@ -485,6 +485,7 @@ async fn default_runtime_status_redacts_process_filesystem_errors() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_process_store(process_store);
 
