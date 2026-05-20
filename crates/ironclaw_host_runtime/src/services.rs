@@ -35,7 +35,7 @@ use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId, DispatchError,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
-    RuntimeHttpEgress, RuntimeKind,
+    RuntimeHttpEgress, RuntimeKind, runtime_policy::EffectiveRuntimePolicy,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::NetworkHttpEgress;
@@ -369,6 +369,7 @@ where
     runtime_http_egress: SharedRuntimeHttpEgress,
     wasm_credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
+    runtime_policy: Option<EffectiveRuntimePolicy>,
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
     first_party_runtime: Option<Arc<FirstPartyCapabilityRegistry>>,
@@ -425,6 +426,7 @@ where
             runtime_http_egress: Arc::new(Mutex::new(None)),
             wasm_credential_provider: None,
             runtime_health: None,
+            runtime_policy: None,
             script_runtime: None,
             mcp_runtime: None,
             first_party_runtime: None,
@@ -490,6 +492,7 @@ where
             runtime_http_egress,
             wasm_credential_provider,
             runtime_health,
+            runtime_policy,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -523,6 +526,7 @@ where
             runtime_http_egress,
             wasm_credential_provider,
             runtime_health,
+            runtime_policy,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -577,6 +581,7 @@ where
             runtime_http_egress,
             wasm_credential_provider,
             runtime_health,
+            runtime_policy,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -620,6 +625,7 @@ where
             runtime_http_egress,
             wasm_credential_provider,
             runtime_health,
+            runtime_policy,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -1006,6 +1012,11 @@ where
         T: RuntimeBackendHealth + 'static,
     {
         self.runtime_health = Some(runtime_health);
+        self
+    }
+
+    pub fn with_runtime_policy(mut self, policy: EffectiveRuntimePolicy) -> Self {
+        self.runtime_policy = Some(policy);
         self
     }
 
@@ -1682,6 +1693,9 @@ where
         }
         if let Some(capability_leases) = &self.capability_leases {
             runtime = runtime.with_capability_leases(Arc::clone(capability_leases));
+        }
+        if let Some(runtime_policy) = &self.runtime_policy {
+            runtime = runtime.with_runtime_policy(runtime_policy.clone());
         }
 
         runtime.with_obligation_handler(Arc::new(self.builtin_obligation_handler()))

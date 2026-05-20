@@ -2,13 +2,14 @@ use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityGrant, Decision, EffectKind, ResourceEstimate, RuntimeKind,
-    canonical_json_v1, sha256_digest_token,
+    canonical_json_v1, runtime_policy::EffectiveRuntimePolicy, sha256_digest_token,
 };
 use ironclaw_trust::TrustDecision;
 use serde_json::{Value, json};
 
 use crate::{
     CapabilitySurfaceVersion, HostRuntimeError, VisibleCapabilityRequest, VisibleCapabilitySurface,
+    plan_capability,
 };
 
 const ALL_RUNTIME_KINDS: &[RuntimeKind] = &[
@@ -115,6 +116,7 @@ pub(crate) struct CapabilityCatalog<'a> {
     registry: &'a ExtensionRegistry,
     authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
     base_version: &'a CapabilitySurfaceVersion,
+    runtime_policy: &'a EffectiveRuntimePolicy,
 }
 
 impl<'a> CapabilityCatalog<'a> {
@@ -122,11 +124,13 @@ impl<'a> CapabilityCatalog<'a> {
         registry: &'a ExtensionRegistry,
         authorizer: &'a dyn TrustAwareCapabilityDispatchAuthorizer,
         base_version: &'a CapabilitySurfaceVersion,
+        runtime_policy: &'a EffectiveRuntimePolicy,
     ) -> Self {
         Self {
             registry,
             authorizer,
             base_version,
+            runtime_policy,
         }
     }
 
@@ -148,6 +152,9 @@ impl<'a> CapabilityCatalog<'a> {
             if !request.policy.allows_runtime(descriptor.runtime)
                 || !request.policy.allows_effects(&descriptor.effects)
             {
+                continue;
+            }
+            if plan_capability(descriptor, self.runtime_policy).is_err() {
                 continue;
             }
             let Some(trust_decision) = request.provider_trust.get(&descriptor.provider) else {
@@ -179,7 +186,12 @@ impl<'a> CapabilityCatalog<'a> {
             });
         }
 
-        let version = surface_version(self.base_version, &request, &capabilities)?;
+        let version = surface_version(
+            self.base_version,
+            &request,
+            self.runtime_policy,
+            &capabilities,
+        )?;
         Ok(VisibleCapabilitySurface {
             version,
             capabilities,
@@ -190,6 +202,7 @@ impl<'a> CapabilityCatalog<'a> {
 fn surface_version(
     base_version: &CapabilitySurfaceVersion,
     request: &VisibleCapabilityRequest,
+    runtime_policy: &EffectiveRuntimePolicy,
     capabilities: &[VisibleCapability],
 ) -> Result<CapabilitySurfaceVersion, HostRuntimeError> {
     let context_payload = context_version_payload(request)?;
@@ -229,6 +242,7 @@ fn surface_version(
             "include_requires_approval": request.policy.include_requires_approval,
             "max_capabilities": request.policy.max_capabilities,
         },
+        "runtime_policy": runtime_policy,
         "capabilities": capability_payload,
     });
     let canonical = canonical_json_v1(&payload).map_err(host_api_error)?;
