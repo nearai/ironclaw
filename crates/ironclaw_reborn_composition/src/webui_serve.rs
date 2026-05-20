@@ -4,10 +4,24 @@
 //! `RebornServicesApi` but is deliberately unaware of bearer tokens,
 //! OIDC, CORS, body limits, and static security headers — its CLAUDE.md
 //! lists these as "host composition still owes". This module is the
-//! Reborn-side home for that work: the standalone `ironclaw-reborn`
-//! binary's `serve` subcommand calls [`serve_webui_v2`]; tests and
-//! future Reborn ingress paths reuse [`webui_v2_app`] to drive the
-//! composed router directly.
+//! Reborn-side home for that work: it exposes [`webui_v2_app`], the
+//! fully-composed axum [`Router`] (auth + rate limit + CORS + body
+//! limit + security headers + v2 route surface). Tests drive it
+//! through `tower::ServiceExt::oneshot`; the standalone
+//! `ironclaw-reborn serve` subcommand (on a follow-up PR) consumes the
+//! same `Router` and owns the listener lifecycle on the host side.
+//!
+//! ### Why no serve-and-bind helper here
+//!
+//! `ironclaw_reborn_composition` sits in the Reborn product/API
+//! boundary enforced by
+//! `crates/ironclaw_architecture/tests/reborn_dependency_boundaries.rs::
+//! reborn_product_api_crates_do_not_bind_http_ingress`. Product/API
+//! crates may expose `Router` / `IngressRouteDescriptor`, but they may
+//! NOT bind `TcpListener`s, drive the axum `serve` future, or
+//! otherwise own server lifecycle — that responsibility lives in
+//! host-owned code. So the seam this PR provides is the `Router`; the
+//! consuming host binary writes the listener-binding line itself.
 //!
 //! Everything in this module is gated on the `webui-v2-beta` Cargo
 //! feature. Substrate-only callers (v1 `AppBuilder`, diagnostic
@@ -19,7 +33,6 @@
 //! surfaces to keep host auth host-owned and route/body/CORS security
 //! in gateway-owned code; the Reborn binary owns this stack itself.
 
-use std::future::Future;
 use std::sync::Arc;
 
 use axum::{
@@ -112,15 +125,18 @@ impl WebuiServeConfig {
     }
 }
 
-/// Errors composing or serving the WebChat v2 gateway.
+/// Errors raised while composing the WebChat v2 gateway `Router`.
+///
+/// No I/O variant: this crate sits in the Reborn product/API boundary
+/// and never binds a listener or drives the axum serve loop. Host
+/// composition owns the I/O lifecycle and surfaces its own errors
+/// there.
 #[derive(Debug, thiserror::Error)]
 pub enum WebuiServeError {
     #[error("invalid CSP header value: {0}")]
     InvalidCspHeader(String),
     #[error("rate-limit composition failed: {0}")]
     RateLimit(#[from] crate::webui_rate_limit::RateLimitConfigError),
-    #[error("axum bind / serve failed: {0}")]
-    Io(#[from] std::io::Error),
 }
 
 /// Build the fully-composed Reborn WebChat v2 axum app:
@@ -136,10 +152,14 @@ pub enum WebuiServeError {
 ///   60/60, read 120/60, stream 12/60 per `(tenant, user)` today)
 /// - WebChat v2 route set from `ironclaw_webui_v2::webui_v2_router`
 ///
-/// Callers that own their own `axum::serve` (e.g. tests, future
-/// multi-listener deployments) can drive this `Router` directly with
-/// `tower::ServiceExt::oneshot`; callers that just want a running HTTP
-/// listener should prefer [`serve_webui_v2`].
+/// The returned [`Router`] is the seam between this composition crate
+/// and host-owned ingress code: tests drive it via
+/// `tower::ServiceExt::oneshot`, and the standalone `ironclaw-reborn
+/// serve` subcommand on a follow-up PR will hand it to axum's serve
+/// loop from a host-owned listener. This crate intentionally never
+/// binds a socket or drives the serve loop itself — that boundary is
+/// enforced by `reborn_product_api_crates_do_not_bind_http_ingress`
+/// in `ironclaw_architecture`.
 pub fn webui_v2_app(
     bundle: RebornWebuiBundle,
     config: WebuiServeConfig,
@@ -212,22 +232,6 @@ pub fn webui_v2_app(
         ));
 
     Ok(app)
-}
-
-/// Bind the supplied listener and serve the WebChat v2 gateway. The
-/// future returns when `shutdown` resolves; the standalone Reborn
-/// `serve` subcommand can wire this to a Ctrl+C handler.
-pub async fn serve_webui_v2(
-    listener: tokio::net::TcpListener,
-    bundle: RebornWebuiBundle,
-    config: WebuiServeConfig,
-    shutdown: impl Future<Output = ()> + Send + 'static,
-) -> Result<(), WebuiServeError> {
-    let app = webui_v2_app(bundle, config)?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await
-        .map_err(WebuiServeError::from)
 }
 
 // ─── auth middleware ──────────────────────────────────────────────────

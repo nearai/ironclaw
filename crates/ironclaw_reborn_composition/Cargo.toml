@@ -34,7 +34,6 @@ webui-v2-beta = [
     "dep:axum",
     "dep:tower",
     "dep:tower-http",
-    "dep:futures",
     "dep:lru",
 ]
 libsql = [
@@ -86,7 +85,6 @@ libsql = { version = "0.6", optional = true, default-features = false, features 
 axum = { version = "0.8", optional = true }
 tower = { version = "0.5", optional = true }
 tower-http = { version = "0.6", optional = true, features = ["cors", "set-header", "limit", "catch-panic"] }
-futures = { version = "0.3", optional = true }
 lru = { version = "0.16", optional = true }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }

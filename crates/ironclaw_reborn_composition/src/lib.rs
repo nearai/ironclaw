@@ -63,9 +63,7 @@ pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;
 #[cfg(feature = "webui-v2-beta")]
-pub use webui_serve::{
-    WebuiAuthenticator, WebuiServeConfig, WebuiServeError, serve_webui_v2, webui_v2_app,
-};
+pub use webui_serve::{WebuiAuthenticator, WebuiServeConfig, WebuiServeError, webui_v2_app};
 
 /// Reborn model purpose slot names exposed for diagnostic callers.
 ///

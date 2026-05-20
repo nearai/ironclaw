@@ -23,9 +23,8 @@ middleware with v1's `src/channels/web/`.
 | `RebornWebuiBundle` (in [`src/webui.rs`](src/webui.rs)) | `{ api: Arc<dyn RebornServicesApi>, readiness }` — the v2 facade plus readiness snapshot |
 | `build_webui_services(runtime, event_stream)` | Compose a `RebornWebuiBundle` from an already-built `RebornRuntime`; reuses the runtime's thread service / turn coordinator (no second turn loop) |
 | `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<UserId>` |
-| `WebuiServeConfig { tenant_id, authenticator, max_body_bytes, allowed_origins, csp_header }` | Required config for `webui_v2_app` / `serve_webui_v2`; no defaults that silently disable security |
-| `webui_v2_app(bundle, config) -> Router` | Build the fully-composed axum `Router`; useful for tests and any future ingress that wants its own listener loop |
-| `serve_webui_v2(listener, bundle, config, shutdown)` | Bind the listener and `axum::serve` until shutdown resolves; the `ironclaw-reborn serve` subcommand calls this |
+| `WebuiServeConfig { tenant_id, authenticator, max_body_bytes, allowed_origins, csp_header }` | Required config for `webui_v2_app`; no defaults that silently disable security |
+| `webui_v2_app(bundle, config) -> Router` | Build the fully-composed axum `Router`. This is the seam between this product/API crate and host-owned HTTP ingress: tests drive it via `tower::ServiceExt::oneshot`; the `ironclaw-reborn serve` subcommand (follow-up PR) hands it to `axum::serve` from a host-owned listener |
 
 ### Middleware stack composed by `webui_v2_app`
 
@@ -125,7 +124,9 @@ The `serve` subcommand on `feat/reborn-cli-serve` currently bails with
 site:
 
 ```rust
-// Inside `crates/ironclaw_reborn_cli/src/commands/serve.rs`
+// Inside a host-owned ingress crate / binary (NOT in this crate —
+// `reborn_product_api_crates_do_not_bind_http_ingress` forbids
+// product/API crates from owning server lifecycle).
 let runtime = build_reborn_runtime(input).await?;
 let bundle = build_webui_services(&runtime, None)?;
 let config = WebuiServeConfig::new(
@@ -133,14 +134,17 @@ let config = WebuiServeConfig::new(
     Arc::new(MyHostAuthenticator::new(...)),
     same_origin_allowlist(bound_addr),
 );
+let app = webui_v2_app(bundle, config)?;
 let listener = tokio::net::TcpListener::bind(addr).await?;
-serve_webui_v2(listener, bundle, config, shutdown).await?;
+axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
 ```
 
-Until that PR lands, `webui_v2_app` is reachable through tests
-(`crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs`) and by
-any other Reborn ingress crate that wants to mount the same routes
-under a different listener.
+Until that host-side wiring lands, `webui_v2_app` is reachable
+through tests
+(`crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs` —
+drives the `Router` via `tower::ServiceExt::oneshot`) and by any
+host-owned Reborn ingress crate that wants to mount the same routes
+under its own listener.
 
 ### Tests
 
