@@ -1099,6 +1099,13 @@ mod tests {
         format!("---\nname: {name}\ndescription: {description}\n---\n\n{prompt}")
     }
 
+    fn recorded_request_count(requests: &StdMutex<Vec<HostManagedModelRequest>>) -> usize {
+        requests
+            .lock()
+            .expect("recording gateway requests lock poisoned")
+            .len()
+    }
+
     #[tokio::test]
     async fn send_user_message_returns_completed_assistant_text_with_recording_gateway() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -1155,13 +1162,7 @@ mod tests {
 
         assert_eq!(reply.status, TurnStatus::Completed);
         assert_eq!(reply.text.as_deref(), Some("recorded runtime reply"));
-        let request_count = {
-            let requests = requests
-                .lock()
-                .expect("recording gateway requests lock poisoned");
-            requests.len()
-        };
-        assert_eq!(request_count, 1);
+        assert_eq!(recorded_request_count(&requests), 1);
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
