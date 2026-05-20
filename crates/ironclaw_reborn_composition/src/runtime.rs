@@ -1155,13 +1155,13 @@ mod tests {
 
         assert_eq!(reply.status, TurnStatus::Completed);
         assert_eq!(reply.text.as_deref(), Some("recorded runtime reply"));
-        assert_eq!(
-            requests
+        let request_count = {
+            let requests = requests
                 .lock()
-                .expect("recording gateway requests lock poisoned")
-                .len(),
-            1
-        );
+                .expect("recording gateway requests lock poisoned");
+            requests.len()
+        };
+        assert_eq!(request_count, 1);
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
