@@ -74,6 +74,8 @@ const TEST_HTTP_REWRITE_MAP_ENV: &str = "IRONCLAW_TEST_HTTP_REWRITE_MAP";
 const WEBSOCKET_EVENT_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue";
 const WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH: &str = "state/gateway_event_queue_processing";
 const WEBSOCKET_EVENT_QUEUE_MAX_ITEMS: usize = 100;
+const WEBSOCKET_OUTBOUND_QUEUE_CAPACITY: usize = 32;
+const WEBSOCKET_OUTBOUND_MAX_FRAME_BYTES: usize = 2 * 1024 * 1024;
 const WECHAT_CHANNEL_NAME: &str = "wechat";
 const CHANNEL_BOUND_USER_ID_CONFIG_KEY: &str = "bound_user_id";
 #[cfg(any(test, debug_assertions))]
@@ -129,7 +131,7 @@ struct ChannelStoreData {
     /// Pairing store for DM pairing (guest access control).
     pairing_store: Arc<PairingStore>,
     /// Optional websocket outbound sender for channels with a managed runtime.
-    websocket_outbound_tx: Option<mpsc::UnboundedSender<String>>,
+    websocket_outbound_tx: Option<mpsc::Sender<String>>,
     /// Dedicated tokio runtime for HTTP requests, lazily initialized.
     /// Reused across multiple `http_request` calls within one execution.
     http_runtime: Option<tokio::runtime::Runtime>,
@@ -143,7 +145,7 @@ impl ChannelStoreData {
         credentials: HashMap<String, String>,
         host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
-        websocket_outbound_tx: Option<mpsc::UnboundedSender<String>>,
+        websocket_outbound_tx: Option<mpsc::Sender<String>>,
     ) -> Self {
         // Create a minimal WASI context (no filesystem, no env vars for security)
         let wasi = WasiCtxBuilder::new().build();
@@ -352,9 +354,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .websocket_outbound_tx
             .as_ref()
             .ok_or_else(|| "websocket runtime not available for this channel".to_string())?;
-        sender
-            .send(payload)
-            .map_err(|_| "websocket runtime is not accepting outbound frames".to_string())
+        queue_websocket_outbound_frame(sender, payload)
     }
 
     fn http_request(
@@ -827,7 +827,7 @@ pub struct WasmChannel {
 
     /// Host-managed websocket outbound sender used by `on_respond` and
     /// `on_poll` to emit protocol-specific websocket frames.
-    websocket_outbound_tx: Arc<RwLock<Option<mpsc::UnboundedSender<String>>>>,
+    websocket_outbound_tx: Arc<RwLock<Option<mpsc::Sender<String>>>>,
 
     /// Serializes websocket-triggered poll executions.
     websocket_poll_lock: Arc<Mutex<()>>,
@@ -1523,14 +1523,8 @@ impl WasmChannel {
         let websocket_secrets_store = self.secrets_store.clone();
         let websocket_poll_lock = Arc::clone(&self.websocket_poll_lock);
         let websocket_outbound_tx_state = Arc::clone(&self.websocket_outbound_tx);
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<String>();
 
         tokio::spawn(async move {
-            {
-                let mut guard = websocket_outbound_tx_state.write().await;
-                *guard = Some(outbound_tx.clone());
-            }
-
             let mut shutdown = std::pin::pin!(shutdown_rx);
             let mut reconnect_attempt = 0u32;
 
@@ -1672,6 +1666,13 @@ impl WasmChannel {
                             break 'reconnect;
                         }
                     }
+                }
+
+                let (outbound_tx, mut outbound_rx) =
+                    mpsc::channel::<String>(WEBSOCKET_OUTBOUND_QUEUE_CAPACITY);
+                {
+                    let mut guard = websocket_outbound_tx_state.write().await;
+                    *guard = Some(outbound_tx.clone());
                 }
 
                 loop {
@@ -1849,6 +1850,7 @@ impl WasmChannel {
                     break 'reconnect;
                 }
 
+                *websocket_outbound_tx_state.write().await = None;
                 let backoff = websocket_reconnect_backoff(reconnect_attempt);
                 reconnect_attempt = reconnect_attempt.saturating_add(1);
                 tracing::info!(
@@ -1877,7 +1879,7 @@ impl WasmChannel {
         credentials: HashMap<String, String>,
         host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
-        websocket_outbound_tx: Option<mpsc::UnboundedSender<String>>,
+        websocket_outbound_tx: Option<mpsc::Sender<String>>,
     ) -> Result<Store<ChannelStoreData>, WasmChannelError> {
         let engine = runtime.engine();
         let limits = &prepared.limits;
@@ -3410,7 +3412,7 @@ impl WasmChannel {
         credentials: &RwLock<HashMap<String, String>>,
         host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
-        websocket_outbound_tx: Option<mpsc::UnboundedSender<String>>,
+        websocket_outbound_tx: Option<mpsc::Sender<String>>,
         workspace_store: &Arc<ChannelWorkspaceStore>,
         callback_lock: &Arc<tokio::sync::Mutex<()>>,
         settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
@@ -4092,6 +4094,28 @@ fn websocket_processing_queue_path(channel_name: &str) -> String {
     format!("channels/{channel_name}/{WEBSOCKET_EVENT_PROCESSING_QUEUE_RELATIVE_PATH}")
 }
 
+fn queue_websocket_outbound_frame(
+    sender: &mpsc::Sender<String>,
+    payload: String,
+) -> Result<(), String> {
+    let payload_len = payload.len();
+    if payload_len > WEBSOCKET_OUTBOUND_MAX_FRAME_BYTES {
+        return Err(format!(
+            "websocket outbound frame exceeds max size: {payload_len} > {WEBSOCKET_OUTBOUND_MAX_FRAME_BYTES} bytes"
+        ));
+    }
+
+    match sender.try_send(payload) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            Err("websocket outbound queue is full".to_string())
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            Err("websocket runtime is disconnected".to_string())
+        }
+    }
+}
+
 async fn resolve_websocket_auth(
     config: &WebsocketRuntimeConfig,
     store: Option<&(dyn SecretsStore + Send + Sync)>,
@@ -4679,7 +4703,7 @@ struct WebsocketPollContext {
     channel_bound_user_id: Arc<RwLock<Option<String>>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     protocol_kind: WebsocketProtocolKind,
-    outbound_tx: mpsc::UnboundedSender<String>,
+    outbound_tx: mpsc::Sender<String>,
     queue_path: String,
     processing_queue_path: String,
     callback_timeout: Duration,
@@ -4761,6 +4785,17 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
                 }
                 Err(error) => {
                     tracing::warn!(channel = %ctx.channel_name, error = %error, "Websocket-triggered poll failed");
+                    if let Err(restore_error) = ctx.workspace_store.restore_json_text_queue(
+                        &ctx.queue_path,
+                        &ctx.processing_queue_path,
+                        WEBSOCKET_EVENT_QUEUE_MAX_ITEMS,
+                    ) {
+                        tracing::warn!(
+                            channel = %ctx.channel_name,
+                            error = %restore_error,
+                            "Failed to restore websocket queue after poll failure"
+                        );
+                    }
                 }
             }
 
@@ -4770,7 +4805,13 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
                 ctx.workspace_store.as_ref(),
                 ctx.pairing_store.as_ref(),
             ) {
-                let _ = ctx.outbound_tx.send(payload);
+                if let Err(error) = queue_websocket_outbound_frame(&ctx.outbound_tx, payload) {
+                    tracing::warn!(
+                        channel = %ctx.channel_name,
+                        error = %error,
+                        "Failed to queue websocket post-poll update"
+                    );
+                }
             }
         }
     });
@@ -6028,16 +6069,45 @@ mod tests {
         )
     }
 
-    async fn create_wecom_component_test_channel() -> Option<WasmChannel> {
+    fn load_or_build_wecom_component_wasm() -> Vec<u8> {
+        let fixture_path = std::path::Path::new("channels-src/wecom/wecom.wasm");
+        if let Ok(bytes) = std::fs::read(fixture_path)
+            && !bytes.is_empty()
+        {
+            return bytes;
+        }
+
+        let status = std::process::Command::new("cargo")
+            .args([
+                "build",
+                "--manifest-path",
+                "channels-src/wecom/Cargo.toml",
+                "--target",
+                "wasm32-wasip2",
+                "--release",
+            ])
+            .status()
+            .expect("failed to invoke cargo to build WeCom wasm fixture");
+        assert!(
+            status.success(),
+            "failed to build WeCom wasm fixture for component tests"
+        );
+
+        let built_path = std::path::Path::new(
+            "channels-src/wecom/target/wasm32-wasip2/release/wecom_channel.wasm",
+        );
+        std::fs::read(built_path).unwrap_or_else(|err| {
+            panic!(
+                "WeCom component fixture is missing and built artifact could not be read at {}: {err}",
+                built_path.display()
+            )
+        })
+    }
+
+    async fn create_wecom_component_test_channel() -> WasmChannel {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
-        let wasm_bytes = match std::fs::read("channels-src/wecom/wecom.wasm") {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                eprintln!("skipping wecom websocket sender test: missing wasm fixture: {err}");
-                return None;
-            }
-        };
+        let wasm_bytes = load_or_build_wecom_component_wasm();
         let prepared = runtime
             .prepare(
                 "wecom",
@@ -6049,7 +6119,7 @@ mod tests {
             .expect("prepare wecom wasm");
         let capabilities = wecom_websocket_capabilities().with_path("/webhook/wecom");
 
-        Some(WasmChannel::new(
+        WasmChannel::new(
             runtime,
             prepared,
             capabilities,
@@ -6057,7 +6127,7 @@ mod tests {
             "{}".to_string(),
             Arc::new(PairingStore::new_noop()),
             None,
-        ))
+        )
     }
 
     #[cfg(feature = "libsql")]
@@ -6608,6 +6678,24 @@ mod tests {
         assert_eq!(actions.len(), 2);
         assert!(matches!(actions[0], WebsocketFrameAction::Enqueue(_)));
         assert!(matches!(actions[1], WebsocketFrameAction::StopRuntime));
+    }
+
+    #[test]
+    fn test_websocket_outbound_queue_rejects_oversized_and_full_frames() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+
+        let too_large = "x".repeat(super::WEBSOCKET_OUTBOUND_MAX_FRAME_BYTES + 1);
+        let err = super::queue_websocket_outbound_frame(&tx, too_large)
+            .expect_err("oversized frame should be rejected");
+        assert!(err.contains("exceeds max size"));
+
+        super::queue_websocket_outbound_frame(&tx, "first".to_string())
+            .expect("first frame should fit");
+        let err = super::queue_websocket_outbound_frame(&tx, "second".to_string())
+            .expect_err("bounded queue should reject when full");
+        assert!(err.contains("queue is full"));
+
+        assert_eq!(rx.try_recv().expect("queued frame"), "first");
     }
 
     #[test]
@@ -7898,10 +7986,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_on_respond_uses_websocket_runtime_sender_for_wecom_component() {
-        let Some(channel) = create_wecom_component_test_channel().await else {
-            return;
-        };
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let channel = create_wecom_component_test_channel().await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(super::WEBSOCKET_OUTBOUND_QUEUE_CAPACITY);
         *channel.websocket_outbound_tx.write().await = Some(tx);
 
         let metadata_json = serde_json::json!({
@@ -7946,10 +8032,8 @@ mod tests {
     async fn test_image_generated_status_defers_until_wecom_final_response() {
         use crate::channels::IncomingMessage;
 
-        let Some(channel) = create_wecom_component_test_channel().await else {
-            return;
-        };
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let channel = create_wecom_component_test_channel().await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(super::WEBSOCKET_OUTBOUND_QUEUE_CAPACITY);
         *channel.websocket_outbound_tx.write().await = Some(tx);
 
         let metadata = serde_json::json!({
@@ -8007,10 +8091,8 @@ mod tests {
             remove_staged_generated_image_attachments, stage_generated_image_data_url,
         };
 
-        let Some(channel) = create_wecom_component_test_channel().await else {
-            return;
-        };
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let channel = create_wecom_component_test_channel().await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(super::WEBSOCKET_OUTBOUND_QUEUE_CAPACITY);
         *channel.websocket_outbound_tx.write().await = Some(tx);
 
         let metadata = serde_json::json!({

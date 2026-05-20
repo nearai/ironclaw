@@ -739,7 +739,19 @@ fn send_pairing_reply(route: &PairingReplyRoute, code: &str) -> Result<(), Strin
 }
 
 fn pairing_route_is_group(route: &PairingReplyRoute) -> bool {
-    normalize_chat_type(route.chat_type.as_deref()).as_deref() == Some("group")
+    chat_type_is_group(route.chat_type.as_deref())
+}
+
+fn chat_type_is_group(chat_type: Option<&str>) -> bool {
+    normalize_chat_type(chat_type).as_deref() == Some("group")
+}
+
+fn chat_type_is_private(chat_type: Option<&str>) -> bool {
+    normalize_chat_type(chat_type).as_deref() == Some("private")
+}
+
+fn dm_policy_allows_sender_without_allowlist(dm_policy: DmPolicy, chat_type: Option<&str>) -> bool {
+    dm_policy == DmPolicy::Open && chat_type_is_private(chat_type)
 }
 
 fn should_send_pairing_reply(route: &PairingReplyRoute, created: bool) -> bool {
@@ -767,6 +779,7 @@ fn pairing_reply_text(route: &PairingReplyRoute, code: &str) -> String {
 
 fn is_sender_allowed(
     sender_id: &str,
+    chat_type: Option<&str>,
     pairing_reply: Option<PairingReplyRoute>,
 ) -> Result<bool, String> {
     let owner_id = channel_host::workspace_read(OWNER_ID_PATH).filter(|s| !s.is_empty());
@@ -775,7 +788,7 @@ fn is_sender_allowed(
     }
 
     let dm_policy = load_dm_policy();
-    if dm_policy == DmPolicy::Open {
+    if dm_policy_allows_sender_without_allowlist(dm_policy, chat_type) {
         return Ok(true);
     }
 
@@ -1167,6 +1180,31 @@ fn send_status_notification(metadata: &WecomMessageMetadata, content: &str) -> R
     }
 
     Err("WeCom Bot status update missing websocket route metadata".to_string())
+}
+
+fn status_update_is_sensitive(update: &StatusUpdate) -> bool {
+    matches!(
+        &update.status,
+        StatusType::ApprovalNeeded | StatusType::AuthRequired | StatusType::AuthCompleted
+    )
+}
+
+fn metadata_is_group_chat(metadata: &WecomMessageMetadata) -> bool {
+    chat_type_is_group(
+        metadata
+            .ws_chat_type
+            .as_deref()
+            .or(metadata.chat_type.as_deref()),
+    )
+}
+
+fn safe_group_status_content(update: &StatusUpdate, content: String) -> String {
+    if status_update_is_sensitive(update) {
+        "This action needs a private authorization step. Please DM the bot to continue."
+            .to_string()
+    } else {
+        content
+    }
 }
 
 fn build_websocket_command_payload(
@@ -2163,6 +2201,7 @@ fn handle_websocket_message_frame(frame: WecomWsFrame<WecomWsMessageBody>) {
     let sender_id = body.from.userid;
     match is_sender_allowed(
         &sender_id,
+        body.chattype.as_deref(),
         Some(PairingReplyRoute {
             req_id: frame.headers.req_id.clone(),
             reply_cmd: WECOM_WS_REPLY_CMD.to_string(),
@@ -2284,6 +2323,7 @@ fn handle_websocket_event_frame(frame: WecomWsFrame<WecomWsEventBody>) {
     let sender_id = body.from.userid;
     match is_sender_allowed(
         &sender_id,
+        body.chattype.as_deref(),
         Some(PairingReplyRoute {
             req_id: frame.headers.req_id.clone(),
             reply_cmd: reply_cmd.to_string(),
@@ -2573,6 +2613,11 @@ impl Guest for WecomChannel {
                 );
                 return;
             }
+        };
+        let content = if metadata_is_group_chat(&metadata) {
+            safe_group_status_content(&update, content)
+        } else {
+            content
         };
         if let Err(error) = send_status_notification(&metadata, &content) {
             channel_host::log(
@@ -3067,6 +3112,47 @@ mod tests {
             classify_status_update(&interrupted).as_deref(),
             Some("Request interrupted. Please try again.")
         );
+    }
+
+    #[test]
+    fn dm_policy_open_only_bypasses_allowlist_for_private_chats() {
+        assert!(dm_policy_allows_sender_without_allowlist(
+            DmPolicy::Open,
+            Some("single")
+        ));
+        assert!(dm_policy_allows_sender_without_allowlist(
+            DmPolicy::Open,
+            Some("private")
+        ));
+        assert!(!dm_policy_allows_sender_without_allowlist(
+            DmPolicy::Open,
+            Some("group")
+        ));
+        assert!(!dm_policy_allows_sender_without_allowlist(
+            DmPolicy::Open,
+            None
+        ));
+        assert!(!dm_policy_allows_sender_without_allowlist(
+            DmPolicy::Pairing,
+            Some("single")
+        ));
+    }
+
+    #[test]
+    fn sensitive_status_uses_generic_group_chat_message() {
+        let approval = StatusUpdate {
+            status: StatusType::ApprovalNeeded,
+            message: "Approve tool call with secret context".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        let safe = safe_group_status_content(
+            &approval,
+            classify_status_update(&approval).expect("approval status content"),
+        );
+
+        assert!(safe.contains("private authorization"));
+        assert!(!safe.contains("secret context"));
     }
 
     #[test]

@@ -622,6 +622,53 @@ impl ChannelWorkspaceStore {
         data.insert(dest_path.to_string(), raw_queue);
         Ok(true)
     }
+
+    /// Restore frames from a processing queue back to the live queue.
+    ///
+    /// Processing frames are prepended before any newly arrived live frames so
+    /// retries preserve original websocket delivery order as much as possible.
+    pub fn restore_json_text_queue(
+        &self,
+        source_path: &str,
+        dest_path: &str,
+        max_items: usize,
+    ) -> Result<bool, String> {
+        let mut data = self
+            .data
+            .write()
+            .map_err(|_| "workspace store lock poisoned".to_string())?;
+
+        let Some(raw_processing_queue) = data.get(dest_path).cloned() else {
+            return Ok(false);
+        };
+
+        let mut restored: Vec<String> =
+            serde_json::from_str(&raw_processing_queue).map_err(|error| {
+                format!("failed to deserialize websocket processing queue: {error}")
+            })?;
+        let mut live: Vec<String> = data
+            .get(source_path)
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or_default();
+
+        restored.append(&mut live);
+        if restored.len() > max_items {
+            let overflow = restored.len() - max_items;
+            restored.drain(0..overflow);
+        }
+
+        if restored.is_empty() {
+            data.remove(source_path);
+        } else {
+            let serialized = serde_json::to_string(&restored).map_err(|error| {
+                format!("failed to serialize restored websocket queue: {error}")
+            })?;
+            data.insert(source_path.to_string(), serialized);
+        }
+        data.remove(dest_path);
+
+        Ok(true)
+    }
 }
 
 impl crate::tools::wasm::WorkspaceReader for ChannelWorkspaceStore {
@@ -944,6 +991,45 @@ mod tests {
             .unwrap();
         let live: Vec<String> = serde_json::from_str(&store.read(live_path).unwrap()).unwrap();
         assert_eq!(live, vec!["frame-3".to_string()]);
+    }
+
+    #[test]
+    fn test_channel_workspace_store_restore_json_text_queue_retries_processing_first() {
+        use crate::channels::wasm::host::ChannelWorkspaceStore;
+        use crate::tools::wasm::WorkspaceReader;
+
+        let store = ChannelWorkspaceStore::new();
+        let live_path = "channels/discord/state/gateway_event_queue";
+        let drain_path = "channels/discord/state/gateway_event_queue_processing";
+
+        store
+            .append_json_text_queue(live_path, "frame-1", 4)
+            .unwrap();
+        store
+            .append_json_text_queue(live_path, "frame-2", 4)
+            .unwrap();
+        assert!(store.move_json_text_queue(live_path, drain_path).unwrap());
+
+        store
+            .append_json_text_queue(live_path, "frame-3", 4)
+            .unwrap();
+
+        assert!(
+            store
+                .restore_json_text_queue(live_path, drain_path, 4)
+                .unwrap()
+        );
+        assert_eq!(store.read(drain_path), None);
+
+        let restored: Vec<String> = serde_json::from_str(&store.read(live_path).unwrap()).unwrap();
+        assert_eq!(
+            restored,
+            vec![
+                "frame-1".to_string(),
+                "frame-2".to_string(),
+                "frame-3".to_string()
+            ]
+        );
     }
 
     // === QA Plan P2 - 2.3: WASM channel lifecycle tests ===
