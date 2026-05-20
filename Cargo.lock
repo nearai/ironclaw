@@ -4670,6 +4670,7 @@ dependencies = [
  "ironclaw_reborn_event_store",
  "ironclaw_resources",
  "ironclaw_run_state",
+ "ironclaw_runtime_policy",
  "ironclaw_secrets",
  "ironclaw_skills",
  "ironclaw_threads",

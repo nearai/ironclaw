@@ -59,6 +59,7 @@ ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
+ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_trust = { path = "../ironclaw_trust" }
