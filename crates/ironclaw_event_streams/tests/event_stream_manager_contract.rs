@@ -429,6 +429,77 @@ async fn stream_admission_denial_is_structured_and_product_safe() {
 }
 
 #[tokio::test]
+async fn tenant_admission_limit_is_enforced_independently() {
+    let first = projection_scope_for("tenant-a", "user-a", "thread-a");
+    let second = projection_scope_for("tenant-a", "user-b", "thread-b");
+
+    assert_second_subscription_denied_by_admission(
+        ProjectionStreamLimits {
+            per_tenant: 1,
+            per_actor: 10,
+            per_scope: 10,
+            global: 10,
+        },
+        first,
+        second,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn actor_admission_limit_is_enforced_independently() {
+    let first = projection_scope_for("tenant-a", "user-a", "thread-a");
+    let second = projection_scope_for("tenant-a", "user-a", "thread-b");
+
+    assert_second_subscription_denied_by_admission(
+        ProjectionStreamLimits {
+            per_tenant: 10,
+            per_actor: 1,
+            per_scope: 10,
+            global: 10,
+        },
+        first,
+        second,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn scope_admission_limit_is_enforced_independently() {
+    let scope = projection_scope_for("tenant-a", "user-a", "thread-a");
+
+    assert_second_subscription_denied_by_admission(
+        ProjectionStreamLimits {
+            per_tenant: 10,
+            per_actor: 10,
+            per_scope: 1,
+            global: 10,
+        },
+        scope.clone(),
+        scope,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn global_admission_limit_is_enforced_independently() {
+    let first = projection_scope_for("tenant-a", "user-a", "thread-a");
+    let second = projection_scope_for("tenant-b", "user-b", "thread-b");
+
+    assert_second_subscription_denied_by_admission(
+        ProjectionStreamLimits {
+            per_tenant: 10,
+            per_actor: 10,
+            per_scope: 10,
+            global: 1,
+        },
+        first,
+        second,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn per_actor_admission_is_scoped_by_tenant() {
     let scope_a = projection_scope_for("tenant-a", "user-a", "thread-a");
     let scope_b = projection_scope_for("tenant-b", "user-a", "thread-b");
@@ -468,6 +539,46 @@ async fn per_actor_admission_is_scoped_by_tenant() {
 }
 
 #[tokio::test]
+async fn subscribe_error_after_admission_releases_permit() {
+    let scope = projection_scope("thread-a");
+    let admission = Arc::new(InMemoryProjectionStreamAdmissionPolicy::new(
+        ProjectionStreamLimits {
+            per_tenant: 1,
+            per_actor: 1,
+            per_scope: 1,
+            global: 1,
+        },
+    ));
+    let failing_manager = EventStreamManager::new(
+        Arc::new(FakeProjectionService::new(scope.clone())),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::clone(&admission),
+        Arc::new(FailingUpdateSource),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let error = failing_manager
+        .subscribe(subscribe_request(scope.clone(), None))
+        .await
+        .expect_err("update source failure");
+    assert!(matches!(error, ProjectionStreamError::Source));
+
+    let healthy_manager = EventStreamManager::new(
+        Arc::new(FakeProjectionService::new(scope.clone())),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::clone(&admission),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+    let _subscription = healthy_manager
+        .subscribe(subscribe_request(scope, None))
+        .await
+        .expect("admission permit was released after source failure");
+}
+
+#[tokio::test]
 async fn dropping_subscription_releases_admission_permit() {
     let scope = projection_scope("thread-a");
     let manager = EventStreamManager::new(
@@ -503,6 +614,34 @@ async fn dropping_subscription_releases_admission_permit() {
         .subscribe(subscribe_request(scope, None))
         .await
         .expect("replacement subscription admitted after drop");
+}
+
+#[tokio::test]
+async fn no_exposure_validator_rejects_sentinel_payloads() {
+    let scope = projection_scope("thread-a");
+    let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
+    let manager = manager_with_source(scope.clone(), Arc::clone(&source));
+    let mut subscription = manager
+        .subscribe(subscribe_request(scope.clone(), None))
+        .await
+        .expect("authorized subscription");
+    assert!(matches!(
+        subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+
+    source
+        .publish(ProductProjectionEnvelope::ThreadUpdates(
+            replay_with_error_kind(&scope, 11, 11, "RAW_PROMPT_SENTINEL"),
+        ))
+        .expect("publish sentinel payload");
+
+    match subscription.next().await.expect("redaction marker") {
+        ProjectionStreamItem::Lagged { reason, .. } => {
+            assert_eq!(reason, LagReason::RedactionBlocked);
+        }
+        other => panic!("expected redaction lag marker, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -1063,6 +1202,32 @@ fn manager_with_source(
     }
 }
 
+async fn assert_second_subscription_denied_by_admission(
+    limits: ProjectionStreamLimits,
+    first: ProjectionScope,
+    second: ProjectionScope,
+) {
+    let manager = EventStreamManager::new(
+        Arc::new(FakeProjectionService::new(first.clone())),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::new(limits)),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let _first = manager
+        .subscribe(subscribe_request_for_stream_user(first, None))
+        .await
+        .expect("first subscription admitted");
+    let error = manager
+        .subscribe(subscribe_request_for_stream_user(second, None))
+        .await
+        .expect_err("second subscription rejected by targeted admission limit");
+
+    assert!(matches!(error, ProjectionStreamError::AdmissionDenied));
+}
+
 #[derive(Default)]
 struct DenyingAccessPolicy {
     calls: Mutex<usize>,
@@ -1107,6 +1272,19 @@ impl ProjectionUpdateSource for CountingUpdateSource {
         Ok(InMemoryProjectionUpdateSource::new(1)
             .subscribe(request)
             .await?)
+    }
+}
+
+struct FailingUpdateSource;
+
+#[async_trait]
+impl ProjectionUpdateSource for FailingUpdateSource {
+    async fn subscribe(
+        &self,
+        _request: ProjectionLiveUpdateRequest,
+    ) -> Result<tokio::sync::broadcast::Receiver<ProductProjectionEnvelope>, ProjectionStreamError>
+    {
+        Err(ProjectionStreamError::Source)
     }
 }
 
@@ -1471,6 +1649,23 @@ fn subscribe_request(
     }
 }
 
+fn subscribe_request_for_stream_user(
+    scope: ProjectionScope,
+    after_cursor: Option<ProjectionCursor>,
+) -> ProjectionSubscribeRequest {
+    ProjectionSubscribeRequest {
+        actor: TurnActor::new(scope.stream.user_id.clone()),
+        target: ProjectionTarget::Thread {
+            thread_id: scope.read_scope.thread_id.clone().unwrap(),
+        },
+        scope,
+        view: ProjectionViewClass::ProductThread,
+        after_cursor,
+        limit: 16,
+        capabilities: SubscriberCapabilities { buffer_capacity: 2 },
+    }
+}
+
 fn fetch_request(scope: ProjectionScope) -> ProjectionFetchRequest {
     ProjectionFetchRequest {
         actor: actor("user-a"),
@@ -1531,6 +1726,22 @@ fn replay(scope: &ProjectionScope, cursor: u64, next: u64) -> ProjectionReplay {
         next_cursor: ProjectionCursor::for_scope(scope.clone(), EventCursor::new(next)),
         truncated: false,
     }
+}
+
+fn replay_with_error_kind(
+    scope: &ProjectionScope,
+    cursor: u64,
+    next: u64,
+    error_kind: &str,
+) -> ProjectionReplay {
+    let mut replay = replay(scope, cursor, next);
+    for entry in &mut replay.updates {
+        entry.error_kind = Some(error_kind.to_string());
+    }
+    for run in &mut replay.runs {
+        run.error_kind = Some(error_kind.to_string());
+    }
+    replay
 }
 
 fn replay_for_thread(
