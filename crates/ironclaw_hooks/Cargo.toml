@@ -36,3 +36,4 @@ wasmtime = "44.0.2"
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 toml = "0.8"
+wat = "1"

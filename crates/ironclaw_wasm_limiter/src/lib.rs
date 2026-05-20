@@ -118,4 +118,27 @@ mod tests {
         assert!(limiter.memory_growing(0, 64 * 1024, None).unwrap());
         assert!(!limiter.memory_growing(0, 64 * 1024, None).unwrap());
     }
+
+    #[test]
+    fn memory_grow_failed_rolls_back_pending_growth() {
+        // Test #15 on PR #3634: when wasmtime approves a `memory_growing`
+        // request, the limiter stages the growth in `pending_memory_growth`
+        // and bumps `memory_used`. If the OS-level grow then fails (for
+        // example, mmap returns ENOMEM), wasmtime calls `memory_grow_failed`
+        // to let the limiter unwind. Without rollback, subsequent grows
+        // would see an inflated `memory_used` and be denied even though no
+        // actual memory was committed.
+        let mut limiter = WasmResourceLimiter::new(64 * 1024);
+        // Stage an approved grow.
+        assert!(limiter.memory_growing(0, 32 * 1024, None).unwrap());
+        // wasmtime reports the OS-level grow failed.
+        let _ = limiter.memory_grow_failed(wasmtime::Error::msg("simulated ENOMEM"));
+        // A second grow that would exceed the limit if the first attempt
+        // were still counted must now succeed: the first attempt's
+        // bookkeeping must have rolled back to zero.
+        assert!(
+            limiter.memory_growing(0, 64 * 1024, None).unwrap(),
+            "memory_grow_failed must release the pending growth so a retry up to the full ceiling can succeed"
+        );
+    }
 }

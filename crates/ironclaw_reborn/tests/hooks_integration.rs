@@ -29,6 +29,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -498,6 +499,16 @@ fn wasm_dispatcher_from_wat(
     wat_source: &str,
     budget: WasmBudget,
 ) -> (Arc<HookDispatcher>, HookId) {
+    wasm_dispatcher_from_wat_with_timeout(local_id, kind, wat_source, budget, None)
+}
+
+fn wasm_dispatcher_from_wat_with_timeout(
+    local_id: &str,
+    kind: HookManifestKind,
+    wat_source: &str,
+    budget: WasmBudget,
+    dispatcher_timeout: Option<Duration>,
+) -> (Arc<HookDispatcher>, HookId) {
     let resolver = Arc::new(InMemoryWasmHookModules::with_wat(local_id, wat_source));
     let runtime = Arc::new(WasmHookRuntime::new(resolver).expect("wasm runtime"));
     let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()))
@@ -510,7 +521,10 @@ fn wasm_dispatcher_from_wat(
     let entry = HookManifestEntry::new(HookLocalId(local_id.to_string()), kind, body)
         .with_scope(HookManifestScope::SameTenant)
         .with_requires_grant("integration-test-wasm-hooks");
-    let builder = HookDispatcherBuilder::new(HookRegistry::new());
+    let mut builder = HookDispatcherBuilder::new(HookRegistry::new());
+    if let Some(timeout) = dispatcher_timeout {
+        builder = builder.with_timeout(timeout);
+    }
     let (builder, ids) = registrar
         .install(
             ironclaw_host_api::ExtensionId::new("integration-tests").expect("valid ext id"),
@@ -585,6 +599,32 @@ const WASM_MEMORY_EXHAUSTION: &str = r#"
       unreachable
     end
     call $pass
+    drop)
+)
+"#;
+
+/// Observer-shaped sibling of `WASM_MEMORY_EXHAUSTION`. Importing
+/// `before-capability::pass` from an observer-point linker fails at
+/// install time (correctly), so observer memory-exhaustion tests use this
+/// module instead. The body asks for 64 pages (4 MiB) — well beyond the
+/// 1 MiB observer budget the test installs — and traps via `unreachable`
+/// when wasmtime denies the grow. The trap is what the test asserts gets
+/// classified as FailIsolated.
+const WASM_OBSERVER_MEMORY_EXHAUSTION: &str = r#"
+(module
+  (import "ic:hooks/observer@1" "note" (func $note (param i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (func (export "evaluate")
+    i32.const 64
+    memory.grow
+    i32.const -1
+    i32.eq
+    if
+      unreachable
+    end
+    i32.const 0
+    i32.const 0
+    call $note
     drop)
 )
 "#;
@@ -1092,6 +1132,137 @@ async fn wasm_memory_exhaustion_fails_closed_for_gate() {
     assert!(
         inner.invocations().is_empty(),
         "memory-exhausted gate hook must fail closed before inner port"
+    );
+}
+
+#[tokio::test]
+async fn wasm_wall_clock_timeout_fires_for_gate() {
+    // Test #11 on PR #3634: the dispatcher's outer `tokio::time::timeout`
+    // arm was previously unreachable because the synchronous wasmtime call
+    // ran on the tokio executor itself, blocking the timer that would
+    // otherwise fire it. After moving to `spawn_blocking`, that arm IS
+    // reachable — this test exercises it by giving the WASM module a wide
+    // wasmtime budget (so wasmtime's own epoch-interrupt + fuel cap do NOT
+    // fire first) and the dispatcher a tight timeout.
+    let fixture = Fixture::new().await;
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let surface_version = fixture.surface_version.clone();
+    let (dispatcher, _hook_id) = wasm_dispatcher_from_wat_with_timeout(
+        "wasm-wallclock-gate",
+        HookManifestKind::BeforeCapability,
+        WASM_INFINITE_LOOP,
+        WasmBudget {
+            fuel: 1_000_000_000,
+            memory_mb: 4,
+            wall_ms: 5_000,
+        },
+        Some(Duration::from_millis(20)),
+    );
+
+    let host = fixture
+        .factory()
+        .with_hook_dispatcher(dispatcher)
+        .build_text_only_host_with_capabilities(fixture.request(), inner.clone())
+        .await
+        .expect("host builds with wall-clock-bound wasm gate hook installed");
+
+    let outcome = host
+        .invoke_capability(invocation(&surface_version, "cap.blocked"))
+        .await
+        .expect("invoke_capability returns denied outcome");
+
+    expect_denied_with(outcome, "hook_denied");
+    assert!(
+        inner.invocations().is_empty(),
+        "wall-clock-timeout gate hook must fail closed before inner port"
+    );
+}
+
+#[tokio::test]
+async fn wasm_wall_clock_timeout_fires_for_observer() {
+    // Test #12 on PR #3634: parallels the gate wall-clock test for the
+    // observer dispatch path. Observer failures are FailIsolated so the
+    // outer capability still completes.
+    let fixture = Fixture::new().await;
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let surface_version = fixture.surface_version.clone();
+    let (dispatcher, _hook_id) = wasm_dispatcher_from_wat_with_timeout(
+        "wasm-wallclock-observer",
+        HookManifestKind::AfterCapability,
+        WASM_INFINITE_LOOP,
+        WasmBudget {
+            fuel: 1_000_000_000,
+            memory_mb: 4,
+            wall_ms: 5_000,
+        },
+        Some(Duration::from_millis(20)),
+    );
+
+    let host = fixture
+        .factory()
+        .with_hook_dispatcher(dispatcher)
+        .build_text_only_host_with_capabilities(fixture.request(), inner.clone())
+        .await
+        .expect("host builds with wall-clock-bound wasm observer installed");
+
+    let outcome = host
+        .invoke_capability(invocation(&surface_version, "cap.allowed"))
+        .await
+        .expect("invoke_capability returns completed outcome");
+
+    assert!(
+        matches!(outcome, CapabilityOutcome::Completed(_)),
+        "observer wall-clock timeout must be isolated; got {outcome:?}"
+    );
+    assert_eq!(
+        inner.invocations().len(),
+        1,
+        "observer wall-clock failure must not block the inner capability call"
+    );
+}
+
+#[tokio::test]
+async fn wasm_memory_exhaustion_fails_isolated_for_observer() {
+    // Test #13 on PR #3634: parallels `wasm_memory_exhaustion_fails_closed_for_gate`
+    // for the observer dispatch path. Observers run after the capability
+    // completes, so the failure-policy matrix turns a trap from a wasm
+    // observer into FailIsolated (the outer capability still succeeds) —
+    // exactly the symmetry the threat model documents but that the existing
+    // test set didn't exercise.
+    let fixture = Fixture::new().await;
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let surface_version = fixture.surface_version.clone();
+    let (dispatcher, _hook_id) = wasm_dispatcher_from_wat(
+        "wasm-memory-observer",
+        HookManifestKind::AfterCapability,
+        WASM_OBSERVER_MEMORY_EXHAUSTION,
+        WasmBudget {
+            fuel: 100_000,
+            memory_mb: 1,
+            wall_ms: 50,
+        },
+    );
+
+    let host = fixture
+        .factory()
+        .with_hook_dispatcher(dispatcher)
+        .build_text_only_host_with_capabilities(fixture.request(), inner.clone())
+        .await
+        .expect("host builds with memory-exhausting wasm observer installed");
+
+    let outcome = host
+        .invoke_capability(invocation(&surface_version, "cap.allowed"))
+        .await
+        .expect("invoke_capability returns completed outcome");
+
+    assert!(
+        matches!(outcome, CapabilityOutcome::Completed(_)),
+        "observer memory exhaustion must be isolated; got {outcome:?}"
+    );
+    assert_eq!(
+        inner.invocations().len(),
+        1,
+        "observer memory failure must not block the inner capability call"
     );
 }
 

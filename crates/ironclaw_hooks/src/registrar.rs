@@ -421,6 +421,86 @@ mod tests {
         assert!(!outcome.decision.permits());
     }
 
+    /// Registrar happy-path test for a WASM body: a valid module that
+    /// satisfies the host-import surface installs, returns a hook id, and
+    /// places exactly one active binding into the resulting registry.
+    /// Companion to the existing `install_wasm_body_requires_runtime`
+    /// negative case. Test #16 on PR #3634.
+    #[test]
+    fn install_wasm_body_with_runtime_succeeds_and_produces_binding() {
+        use crate::wasm::{WasmHookModuleRequest, WasmHookModuleResolver, WasmHookRuntime};
+        use std::sync::Mutex as StdMutex;
+
+        const WASM_PASS: &str = r#"
+(module
+  (import "ic:hooks/before-capability@1" "pass" (func $pass (result i32)))
+  (func (export "evaluate")
+    call $pass
+    drop)
+)
+"#;
+
+        struct StaticResolver {
+            bytes: StdMutex<Vec<u8>>,
+        }
+        impl WasmHookModuleResolver for StaticResolver {
+            fn resolve_module(
+                &self,
+                _request: &WasmHookModuleRequest<'_>,
+            ) -> Result<Vec<u8>, crate::wasm::WasmHookRuntimeError> {
+                Ok(self.bytes.lock().expect("resolver lock").clone())
+            }
+        }
+
+        let bytes = wat::parse_str(WASM_PASS).expect("wat parses");
+        let resolver = Arc::new(StaticResolver {
+            bytes: StdMutex::new(bytes),
+        });
+        let runtime = Arc::new(WasmHookRuntime::new(resolver).expect("runtime"));
+        let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()))
+            .with_wasm_runtime(runtime)
+            .with_verified_grants(["installed-wasm-happy".to_string()]);
+        let entry = HookManifestEntry {
+            id: HookLocalId("wasm-happy".to_string()),
+            kind: HookManifestKind::BeforeCapability,
+            scope: HookManifestScope::SameTenant,
+            phase: HookPhase::Policy,
+            priority: HookPriority::DEFAULT,
+            description: None,
+            requires_grant: Some("installed-wasm-happy".to_string()),
+            body: HookManifestBody::Wasm {
+                export: "evaluate".to_string(),
+                budget: WasmBudget::default(),
+            },
+        };
+        let builder = HookDispatcherBuilder::new(HookRegistry::new());
+        let (builder, ids) = registrar
+            .install(extension(), "0.1.0".to_string(), vec![entry], builder)
+            .expect("wasm install ok");
+        assert_eq!(ids.len(), 1, "exactly one binding produced");
+        let dispatcher = builder.build_arc();
+        // Round-trip the dispatcher: the installed hook is *findable* via
+        // its hook id and the binding is not yet poisoned. This proves the
+        // registrar didn't quietly drop the binding after install-time
+        // validation.
+        assert!(
+            dispatcher
+                .registry_for_test()
+                .lock()
+                .expect("registry lock")
+                .contains_hook(ids[0]),
+            "installed wasm binding must be visible in the registry"
+        );
+        assert!(
+            !dispatcher
+                .registry_for_test()
+                .lock()
+                .expect("registry lock")
+                .is_poisoned(ids[0]),
+            "fresh install must not be poisoned"
+        );
+    }
+
     #[test]
     fn install_wasm_body_requires_runtime() {
         let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
