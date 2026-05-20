@@ -97,6 +97,21 @@ fn production_runtime_policy() -> EffectiveRuntimePolicy {
 }
 
 #[cfg(feature = "libsql")]
+fn local_only_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+#[cfg(feature = "libsql")]
 fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
     EffectiveRuntimePolicy {
         deployment: DeploymentMode::LocalSingleUser,
@@ -448,6 +463,44 @@ async fn production_requires_runtime_policy() {
         result,
         Err(RebornBuildError::MissingRuntimePolicy)
     ));
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn production_rejects_local_only_runtime_policy() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = libsql_db_at(dir.path().join("reborn.db")).await;
+    let (notifier, handle) = live_wake_notifier();
+
+    let result = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::Production,
+            "test-owner",
+            db,
+            dir.path().join("events.db").to_string_lossy(),
+            None,
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(local_only_runtime_policy())
+        .with_turn_run_wake_notifier(notifier),
+    )
+    .await;
+
+    handle.shutdown().await;
+
+    let Err(RebornBuildError::ProductionWiring { report }) = result else {
+        panic!(
+            "expected production wiring rejection for local-only runtime policy, got {result:?}"
+        );
+    };
+    assert!(
+        report.contains(
+            ironclaw_host_runtime::ProductionWiringComponent::RuntimePolicy,
+            ironclaw_host_runtime::ProductionWiringIssueKind::LocalOnlyImplementation,
+        ),
+        "local-only runtime policy should fail production wiring: {report:?}"
+    );
 }
 
 #[cfg(feature = "libsql")]

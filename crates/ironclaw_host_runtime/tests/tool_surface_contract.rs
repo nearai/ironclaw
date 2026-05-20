@@ -693,7 +693,7 @@ async fn visible_surface_version_changes_with_runtime_policy_changes() {
         Arc::new(GrantAuthorizer),
     )
     .with_trust_policy(trust_policy)
-    .with_runtime_policy(local_dev_runtime_policy());
+    .with_runtime_policy(secret_denied_runtime_policy());
 
     let surface_a = runtime_a
         .visible_capabilities(visible_request(context.clone()))
