@@ -1,13 +1,17 @@
-# Copy this file to: nearai/ironclaw/.github/workflows/nearai-bench.yml
-#
 # Slash-command dispatcher for nearai-bench on PR comments. A maintainer
-# comments `/benchmark <suite>` (optionally `--model <id>`) on a PR; this
-# workflow validates auth, resolves the PR head SHA, and delegates to
-# nearai/benchmarks/.github/workflows/bench-pr-reusable.yml.
+# (write/maintain/admin permission) comments `/benchmark <suite>`
+# (optionally `--model <id>`) on a PR; this workflow validates auth,
+# parses the command, resolves the PR head SHA, reacts with 🚀, then
+# delegates to nearai/benchmarks's reusable workflow which builds the
+# harness against the PR's ironclaw SHA, runs the suite, compares against
+# a baseline, and posts a markdown comment back here.
 #
-# Requires `OPENROUTER_API_KEY` to be set as an org-level secret (or
-# inherited via repo secret). Uses `secrets: inherit` so the called
-# workflow can forward it.
+# Setup / usage docs:
+# https://github.com/nearai/benchmarks/blob/main/docs/ci/README.md
+#
+# Requires `OPENROUTER_API_KEY` as an org-level (or repo-level) secret.
+# Only that one secret is forwarded — `secrets: inherit` is intentionally
+# NOT used (supply-chain hardening).
 
 name: nearai-bench
 
@@ -15,20 +19,26 @@ on:
   issue_comment:
     types: [created]
 
+# Minimum surface for what this workflow actually does. The called
+# reusable workflow (in nearai/benchmarks) declares its own ceiling
+# (pull-requests:write + issues:write); the effective permissions in the
+# called job are the intersection of these two, so a hostile change in
+# the benchmarks repo can't acquire writes we didn't grant here.
 permissions:
-  pull-requests: write
-  issues: write
+  pull-requests: read   # gh pr view --json headRefOid (PR metadata only)
+  issues: write         # gh pr comment + gh api .../reactions (PR comments are issue comments)
   contents: read
-
-concurrency:
-  # Cancel any prior /benchmark on the same PR — a maintainer re-triggering
-  # almost always means "ignore the previous one."
-  group: nearai-bench-${{ github.event.issue.number }}
-  cancel-in-progress: true
 
 jobs:
   parse:
-    if: github.event.issue.pull_request != null && startsWith(github.event.comment.body, '/benchmark')
+    # Tightened from `startsWith(body, '/benchmark')` to whole-word
+    # match — `/benchmarking-something` no longer enters the parse path.
+    if: >-
+      github.event.issue.pull_request != null
+      && (
+        startsWith(github.event.comment.body, '/benchmark ')
+        || github.event.comment.body == '/benchmark'
+      )
     runs-on: ubuntu-latest
     outputs:
       suite: ${{ steps.parse.outputs.suite }}
@@ -38,18 +48,30 @@ jobs:
     steps:
       - name: Check commenter has write permission
         id: auth
-        uses: actions/github-script@v7
+        # SHA-pinned to v7.0.1 to match the rest of this repo's workflows.
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.0.1
         with:
           script: |
-            const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              username: context.payload.comment.user.login,
-            });
-            const ok = ['admin', 'write', 'maintain'].includes(data.permission);
+            // `getCollaboratorPermissionLevel` throws 404 for users who
+            // aren't collaborators at all (external contributors), and we
+            // want to silently drop those rather than fail the workflow
+            // with a noisy red run. Rethrow anything else.
+            let permission = 'none';
+            try {
+              const { data } = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                username: context.payload.comment.user.login,
+              });
+              permission = data.permission;
+            } catch (err) {
+              if (err.status !== 404) throw err;
+              // 404 → not a collaborator → unauthorized.
+            }
+            const ok = ['admin', 'write', 'maintain'].includes(permission);
             core.setOutput('authorized', ok ? 'yes' : 'no');
             if (!ok) {
-              core.notice(`Comment author @${context.payload.comment.user.login} is not authorized to trigger benchmarks (permission: ${data.permission}).`);
+              core.notice(`Comment author @${context.payload.comment.user.login} is not authorized to trigger benchmarks (permission: ${permission}).`);
             }
 
       - name: Parse command
@@ -68,10 +90,11 @@ jobs:
           suite=$(printf '%s' "$BODY" | sed -nE 's@^/benchmark[[:space:]]+([A-Za-z0-9_-]+)([[:space:]]+--model[[:space:]]+[A-Za-z0-9_./:-]+)?[[:space:]]*$@\1@p')
           model=$(printf '%s' "$BODY" | sed -nE 's@^/benchmark[[:space:]]+[A-Za-z0-9_-]+[[:space:]]+--model[[:space:]]+([A-Za-z0-9_./:-]+)[[:space:]]*$@\1@p')
           if [ -z "$suite" ]; then
-            # Tell the user what's wrong rather than failing silently.
-            gh pr comment "$PR" --repo "$REPO" --body $'Could not parse `/benchmark` command.\n\nUsage: `/benchmark <suite> [--model <model-id>]`\n\nExample: `/benchmark ironclaw-v2-smoke`'
-            echo "::error::could not parse /benchmark <suite> [--model <id>]"
-            exit 1
+            # User-input error — post a helpful reply and exit cleanly
+            # (exit 0 keeps the Actions tab green; bad syntax isn't infra
+            # failure).
+            gh pr comment "$PR" --repo "$REPO" --body $'Could not parse `/benchmark` command.\n\nUsage: `/benchmark <suite> [--model <model-id>]`\n\nExample: `/benchmark ironclaw-smoke`'
+            exit 0
           fi
           sha=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
           echo "suite=$suite" >> "$GITHUB_OUTPUT"
@@ -90,7 +113,17 @@ jobs:
   bench:
     needs: parse
     if: needs.parse.outputs.authorized == 'yes' && needs.parse.outputs.suite != ''
-    uses: nearai/benchmarks/.github/workflows/bench-pr-reusable.yml@main
+    # Concurrency lives on the authorized job, not the workflow root —
+    # otherwise an unauthorized commenter typing `/benchmark whatever`
+    # would acquire the per-PR group and cancel an in-flight maintainer
+    # run before failing auth.
+    concurrency:
+      group: nearai-bench-${{ github.event.issue.number }}
+      cancel-in-progress: true
+    # Pinned to a reviewed commit on nearai/benchmarks main — mutable @main
+    # + secrets: inherit was the supply-chain hole. Bump this SHA in a
+    # deliberate PR when nearai/benchmarks ships a new reusable workflow.
+    uses: nearai/benchmarks/.github/workflows/bench-pr-reusable.yml@67effacd8c8a7f6f43b422e30a1810822b9d6d5f
     with:
       ironclaw-rev: ${{ needs.parse.outputs.head_sha }}
       pr-repo: ${{ github.repository }}
@@ -98,4 +131,8 @@ jobs:
       suite-name: ${{ needs.parse.outputs.suite }}
       model: ${{ needs.parse.outputs.model }}
       trigger-comment-id: ${{ github.event.comment.id }}
-    secrets: inherit
+    # Scope inherited secrets to only what the reusable workflow needs.
+    # Replaces `secrets: inherit`, which gave the called workflow access
+    # to every secret available here.
+    secrets:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
