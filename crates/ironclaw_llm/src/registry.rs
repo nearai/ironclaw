@@ -169,6 +169,12 @@ pub enum SetupHint {
         /// URL where the user can manually obtain a session token.
         #[serde(default)]
         key_url: Option<String>,
+        /// Whether this provider supports `/v1/models` listing.
+        /// NEAR AI's `/v1/models` endpoint works with either a session
+        /// token or an API key, so the configure UI should expose the
+        /// Fetch models button.
+        #[serde(default)]
+        can_list_models: bool,
     },
 }
 
@@ -196,10 +202,12 @@ impl SetupHint {
             Self::OpenAiCompatible {
                 can_list_models, ..
             } => *can_list_models,
+            Self::SessionToken {
+                can_list_models, ..
+            } => *can_list_models,
             Self::AwsCredentials { .. }
             | Self::OAuthDeviceCode { .. }
-            | Self::FileBasedCredentials { .. }
-            | Self::SessionToken { .. } => false,
+            | Self::FileBasedCredentials { .. } => false,
         }
     }
 
@@ -557,6 +565,55 @@ mod tests {
         let registry = ProviderRegistry::new(all);
         let tf = registry.find("tinfoil").expect("tinfoil should exist");
         assert_eq!(tf.default_model, "custom-model", "user override should win");
+    }
+
+    /// Regression for nearai/ironclaw#3734: NEAR AI is a dual-auth
+    /// (session token + API key) provider whose `/v1/models` endpoint
+    /// accepts either credential. Its `SetupHint::SessionToken` entry
+    /// in `providers.json` must carry `can_list_models: true` so the
+    /// configure UI exposes the "Fetch available models" button. Layer
+    /// C (PR #3416) silently lost this when NEAR AI moved into the
+    /// generic registry path because `SessionToken` did not yet expose
+    /// the `can_list_models` field.
+    #[test]
+    fn test_nearai_setup_hint_can_list_models() {
+        let registry = ProviderRegistry::new(
+            serde_json::from_str(include_str!("../../../providers.json")).unwrap(),
+        );
+        let def = registry.find("nearai").expect("nearai should exist");
+        let setup = def
+            .setup
+            .as_ref()
+            .expect("nearai must carry a SetupHint after Layer C");
+        assert!(
+            matches!(setup, SetupHint::SessionToken { .. }),
+            "nearai setup hint must remain SessionToken"
+        );
+        assert!(
+            setup.can_list_models(),
+            "nearai setup must report can_list_models=true so the \
+             configure UI shows the Fetch models button (issue #3734)",
+        );
+    }
+
+    /// SessionToken's `can_list_models` field has to be honoured by the
+    /// `SetupHint::can_list_models()` accessor — the handler reads
+    /// through that method, not the field directly.
+    #[test]
+    fn test_session_token_can_list_models_accessor() {
+        let with = SetupHint::SessionToken {
+            display_name: "T".into(),
+            key_url: None,
+            can_list_models: true,
+        };
+        assert!(with.can_list_models());
+
+        let without = SetupHint::SessionToken {
+            display_name: "T".into(),
+            key_url: None,
+            can_list_models: false,
+        };
+        assert!(!without.can_list_models());
     }
 
     #[test]

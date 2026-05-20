@@ -15,7 +15,8 @@
     "setup": {
       "kind": "session_token",
       "display_name": "NEAR AI",
-      "key_url": "https://app.near.ai"
+      "key_url": "https://app.near.ai",
+      "can_list_models": true
     }
   },
   {
