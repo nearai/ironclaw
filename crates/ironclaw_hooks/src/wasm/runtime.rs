@@ -1,7 +1,10 @@
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use lru::LruCache;
 use wasmtime::{Caller, Config, Engine, Instance, Linker, Module, Store};
 
 // Shared resource limiter extracted into `ironclaw_wasm_limiter` so both
@@ -35,6 +38,12 @@ const STATUS_REJECTED: i32 = -1;
 const BEFORE_CAPABILITY_IMPORT_MODULE: &str = "ic:hooks/before-capability@1";
 const BEFORE_PROMPT_IMPORT_MODULE: &str = "ic:hooks/before-prompt@1";
 const OBSERVER_IMPORT_MODULE: &str = "ic:hooks/observer@1";
+const HOST_CTX_IMPORT_MODULE: &str = "ic:hooks/context@1";
+
+/// Upper bound on compiled modules retained in the cache. Each entry is an
+/// `Arc<Module>`; wasmtime modules themselves are small after compile, but
+/// large extension catalogs would otherwise grow the cache unboundedly.
+const MODULE_CACHE_CAPACITY: usize = 128;
 
 /// Runtime-visible request for a hook WASM module.
 #[derive(Debug)]
@@ -178,7 +187,12 @@ impl WasmHookPoint {
 pub struct WasmHookRuntime {
     engine: Engine,
     resolver: Arc<dyn WasmHookModuleResolver>,
-    modules: Mutex<HashMap<blake3::Hash, Arc<Module>>>,
+    modules: Mutex<LruCache<blake3::Hash, Arc<Module>>>,
+    /// Held for its `Drop` impl: signals the background epoch ticker to
+    /// stop and joins the thread so the engine clone the ticker carried is
+    /// released alongside this runtime.
+    #[allow(dead_code)]
+    epoch_ticker: EpochTickerHandle,
 }
 
 impl WasmHookRuntime {
@@ -190,11 +204,14 @@ impl WasmHookRuntime {
         config.debug_info(false);
         let engine = Engine::new(&config)
             .map_err(|error| WasmHookRuntimeError::Engine(error.to_string()))?;
-        spawn_epoch_ticker(engine.clone())?;
+        let epoch_ticker = spawn_epoch_ticker(engine.clone())?;
+        let capacity = NonZeroUsize::new(MODULE_CACHE_CAPACITY)
+            .expect("MODULE_CACHE_CAPACITY constant is nonzero");
         Ok(Self {
             engine,
             resolver,
-            modules: Mutex::new(HashMap::new()),
+            modules: Mutex::new(LruCache::new(capacity)),
+            epoch_ticker,
         })
     }
 
@@ -205,27 +222,36 @@ impl WasmHookRuntime {
     ) -> Result<PreparedWasmHook, WasmHookRuntimeError> {
         let bytes = self.resolver.resolve_module(request)?;
         let digest = blake3::hash(&bytes);
-        let cached = self
-            .modules
-            .lock()
-            .map_err(|_| WasmHookRuntimeError::CachePoisoned)?
-            .get(&digest)
-            .cloned();
-        let module = match cached {
-            Some(module) => module,
-            None => {
-                let module = Arc::new(
-                    Module::new(&self.engine, &bytes)
-                        .map_err(|error| WasmHookRuntimeError::Compilation(error.to_string()))?,
-                );
-                let mut modules = self
-                    .modules
-                    .lock()
-                    .map_err(|_| WasmHookRuntimeError::CachePoisoned)?;
-                modules
-                    .entry(digest)
-                    .or_insert_with(|| Arc::clone(&module))
-                    .clone()
+        // Fast path: lookup under the cache lock; the LRU `get` updates
+        // recency so cache-hot modules stay resident.
+        let cached_hit = {
+            let mut modules = self
+                .modules
+                .lock()
+                .map_err(|_| WasmHookRuntimeError::CachePoisoned)?;
+            modules.get(&digest).map(Arc::clone)
+        };
+        let module = if let Some(module) = cached_hit {
+            module
+        } else {
+            // Slow path: compile outside the lock so concurrent installs of
+            // distinct modules don't serialize on the cache mutex.
+            let compiled = Arc::new(
+                Module::new(&self.engine, &bytes)
+                    .map_err(|error| WasmHookRuntimeError::Compilation(error.to_string()))?,
+            );
+            // Double-check under the lock: a parallel call may have populated
+            // the slot while we compiled. The `Arc` retained in the cache is
+            // the one we return; any locally compiled copy is dropped here.
+            let mut modules = self
+                .modules
+                .lock()
+                .map_err(|_| WasmHookRuntimeError::CachePoisoned)?;
+            if let Some(existing) = modules.get(&digest) {
+                Arc::clone(existing)
+            } else {
+                modules.put(digest, Arc::clone(&compiled));
+                compiled
             }
         };
         let limits: WasmHookLimits = budget.try_into()?;
@@ -248,9 +274,10 @@ impl WasmHookRuntime {
     pub(crate) fn execute_gate(
         &self,
         prepared: &PreparedWasmHook,
-        _ctx: &BeforeCapabilityHookContext,
+        ctx: &BeforeCapabilityHookContext,
     ) -> Result<GateHookOutcome, WasmHookFailure> {
-        let mut output = self.execute(prepared, WasmHookPoint::BeforeCapability)?;
+        let ctx_blob = serialize_gate_ctx(ctx);
+        let mut output = self.execute(prepared, WasmHookPoint::BeforeCapability, ctx_blob)?;
         match output.gate.take() {
             Some(GateWasmDecision::Pass) => Ok(GateHookOutcome::Pass),
             Some(GateWasmDecision::Deny(reason)) => Ok(GateHookOutcome::Decision {
@@ -280,9 +307,10 @@ impl WasmHookRuntime {
     pub(crate) fn execute_prompt(
         &self,
         prepared: &PreparedWasmHook,
-        _ctx: &BeforePromptHookContext,
+        ctx: &BeforePromptHookContext,
     ) -> Result<Vec<HookPatch>, WasmHookFailure> {
-        let output = self.execute(prepared, WasmHookPoint::BeforePrompt)?;
+        let ctx_blob = serialize_prompt_ctx(ctx);
+        let output = self.execute(prepared, WasmHookPoint::BeforePrompt, ctx_blob)?;
         Ok(output.patches)
     }
 
@@ -290,9 +318,10 @@ impl WasmHookRuntime {
         &self,
         prepared: &PreparedWasmHook,
         point: HookPointSpec,
-        _ctx: &ObserverHookContext,
+        ctx: &ObserverHookContext,
     ) -> Result<Vec<ObserverFact>, WasmHookFailure> {
-        let output = self.execute(prepared, WasmHookPoint::Observer(point))?;
+        let ctx_blob = serialize_observer_ctx(ctx);
+        let output = self.execute(prepared, WasmHookPoint::Observer(point), ctx_blob)?;
         Ok(output.facts)
     }
 
@@ -300,11 +329,17 @@ impl WasmHookRuntime {
         &self,
         prepared: &PreparedWasmHook,
         point: WasmHookPoint,
+        ctx_blob: Vec<u8>,
     ) -> Result<WasmHookOutput, WasmHookFailure> {
         let started = Instant::now();
         let mut store = Store::new(
             &self.engine,
-            HookStoreData::new(prepared.limits.memory_bytes, prepared.limits.wall, point),
+            HookStoreData::new(
+                prepared.limits.memory_bytes,
+                prepared.limits.wall,
+                point,
+                ctx_blob,
+            ),
         );
         configure_store(&mut store, &prepared.limits).map_err(|_| WasmHookFailure::trap())?;
         let linker = create_linker(&self.engine, point).map_err(|_| WasmHookFailure::trap())?;
@@ -314,13 +349,17 @@ impl WasmHookRuntime {
                 WasmHookFailure::malformed("wasm hook imports do not match host surface")
             })?;
         let export = get_export(&mut store, &instance, &prepared.export)?;
+        // Only classify as a timeout when the call ERRORED and the deadline
+        // is exceeded. Bug #9 on PR #3634: the prior post-Ok deadline check
+        // raced the epoch ticker — a hook that returned successfully on its
+        // last fuel-tick could be reclassified as a timeout if the wall
+        // clock crossed the deadline during the host-side return. The
+        // wasmtime epoch interrupt is the authoritative wall-clock signal;
+        // if the guest returned Ok, the call completed in time.
         match export.call(&mut store, ()) {
             Ok(()) => {}
             Err(_) if store.data().deadline_exceeded() => return Err(WasmHookFailure::timeout()),
             Err(_) => return Err(WasmHookFailure::trap()),
-        }
-        if store.data().deadline_exceeded() {
-            return Err(WasmHookFailure::timeout());
         }
         if let Some(failure) = store.data_mut().failure.take() {
             return Err(failure);
@@ -417,10 +456,15 @@ struct HookStoreData {
     budget: HostImportBudget,
     output: WasmHookOutput,
     failure: Option<WasmHookFailure>,
+    /// JSON-serialized hook context blob exposed to the guest via the
+    /// `ic:hooks/context@1` host imports. Each invocation receives a fresh
+    /// blob built from the corresponding `*HookContext` value; the runtime
+    /// itself never reads back into the guest.
+    ctx_blob: Vec<u8>,
 }
 
 impl HookStoreData {
-    fn new(memory_limit: u64, timeout: Duration, point: WasmHookPoint) -> Self {
+    fn new(memory_limit: u64, timeout: Duration, point: WasmHookPoint, ctx_blob: Vec<u8>) -> Self {
         Self {
             limiter: WasmResourceLimiter::new(memory_limit),
             deadline: Instant::now().checked_add(timeout),
@@ -428,6 +472,7 @@ impl HookStoreData {
             budget: HostImportBudget::default(),
             output: WasmHookOutput::default(),
             failure: None,
+            ctx_blob,
         }
     }
 
@@ -477,17 +522,47 @@ enum GateWasmDecision {
     PauseAuth(&'static str),
 }
 
-fn spawn_epoch_ticker(engine: Engine) -> Result<(), WasmHookRuntimeError> {
-    std::thread::Builder::new()
+/// Background ticker that drives `wasmtime` epoch-based interruption. The
+/// handle is held by the runtime so the ticker thread is joined and the
+/// engine clone it carries is dropped when the runtime itself is dropped.
+/// HIGH #2 on PR #3634: prior to this, the ticker ran an unkillable
+/// infinite loop and leaked an `Engine` clone on every runtime drop.
+struct EpochTickerHandle {
+    shutdown: Arc<AtomicBool>,
+    join: Option<JoinHandle<()>>,
+}
+
+impl Drop for EpochTickerHandle {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Release);
+        // The ticker sleeps for at most `EPOCH_TICK_INTERVAL` before
+        // re-checking the flag, so the join completes promptly.
+        if let Some(handle) = self.join.take() {
+            // A panic on the ticker thread would surface here; we
+            // deliberately swallow it so a single stuck runtime drop
+            // can't poison the process. The shutdown flag is already
+            // set, so any subsequent runtime drop also no-ops cleanly.
+            let _ = handle.join();
+        }
+    }
+}
+
+fn spawn_epoch_ticker(engine: Engine) -> Result<EpochTickerHandle, WasmHookRuntimeError> {
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_ticker = Arc::clone(&shutdown);
+    let join = std::thread::Builder::new()
         .name("reborn-hook-wasm-epoch-ticker".into())
         .spawn(move || {
-            loop {
+            while !shutdown_ticker.load(Ordering::Acquire) {
                 std::thread::sleep(EPOCH_TICK_INTERVAL);
                 engine.increment_epoch();
             }
         })
-        .map(|_| ())
-        .map_err(|error| WasmHookRuntimeError::Engine(error.to_string()))
+        .map_err(|error| WasmHookRuntimeError::Engine(error.to_string()))?;
+    Ok(EpochTickerHandle {
+        shutdown,
+        join: Some(join),
+    })
 }
 
 fn configure_store(
@@ -509,12 +584,124 @@ fn create_linker(
     point: WasmHookPoint,
 ) -> Result<Linker<HookStoreData>, WasmHookRuntimeError> {
     let mut linker = Linker::new(engine);
+    // Every hook point gets the read-only `ic:hooks/context@1` imports so
+    // guests can read the JSON-serialized context blob the dispatcher passes
+    // per invocation. Modules that don't import these continue to work
+    // (linker imports are looked up by guest, not host-side, so unused
+    // host imports are harmless). Critical #1 on PR #3634.
+    add_context_imports(&mut linker)?;
     match point {
         WasmHookPoint::BeforeCapability => add_gate_imports(&mut linker)?,
         WasmHookPoint::BeforePrompt => add_prompt_imports(&mut linker)?,
         WasmHookPoint::Observer(_) => add_observer_imports(&mut linker)?,
     }
     Ok(linker)
+}
+
+fn add_context_imports(linker: &mut Linker<HookStoreData>) -> Result<(), WasmHookRuntimeError> {
+    linker
+        .func_wrap(
+            HOST_CTX_IMPORT_MODULE,
+            "ctx_size",
+            |caller: Caller<'_, HookStoreData>| -> i32 {
+                // i32::MAX is the wasmtime-imposed ceiling for typed funcs that
+                // return i32. Larger blobs trip the malformed path.
+                i32::try_from(caller.data().ctx_blob.len()).unwrap_or(-1)
+            },
+        )
+        .map_err(|error| WasmHookRuntimeError::Execution(error.to_string()))?;
+    linker
+        .func_wrap(
+            HOST_CTX_IMPORT_MODULE,
+            "ctx_read",
+            |mut caller: Caller<'_, HookStoreData>, ptr: i32, len: i32| -> i32 {
+                read_context_into_guest(&mut caller, ptr, len)
+            },
+        )
+        .map_err(|error| WasmHookRuntimeError::Execution(error.to_string()))?;
+    Ok(())
+}
+
+/// Copy up to `len` bytes of the hook context blob into guest memory at
+/// `ptr`. Returns the number of bytes actually copied (always
+/// `min(len, ctx_blob.len())`), or `-1` if the destination range is invalid
+/// or the guest has no exported `memory`. The host blob itself is never
+/// truncated — the guest can call `ctx_size` first to size its buffer
+/// correctly, and a short read leaves the unread bytes available for a
+/// follow-up call (callers typically do a single full read).
+fn read_context_into_guest(caller: &mut Caller<'_, HookStoreData>, ptr: i32, len: i32) -> i32 {
+    let Some(ptr) = usize::try_from(ptr).ok() else {
+        return -1;
+    };
+    let Some(len) = usize::try_from(len).ok() else {
+        return -1;
+    };
+    let Some(memory_export) = caller.get_export("memory") else {
+        return -1;
+    };
+    let Some(memory) = memory_export.into_memory() else {
+        return -1;
+    };
+    let blob_len = caller.data().ctx_blob.len();
+    let copy_len = blob_len.min(len);
+    let Some(end) = ptr.checked_add(copy_len) else {
+        return -1;
+    };
+    // Split the borrow: the source is from immutable HookStoreData; the
+    // destination is the guest memory view, which we mutably borrow via
+    // `data_mut`. `wasmtime::Memory::data_mut` re-borrows the store, so we
+    // first stage the source bytes into a small owned slice, then write.
+    // copy_len is bounded by the guest's request (typically ctx_size), so
+    // this stage allocation is also bounded.
+    let src: Vec<u8> = caller.data().ctx_blob[..copy_len].to_vec();
+    let memory_view = memory.data_mut(&mut *caller);
+    let Some(dst) = memory_view.get_mut(ptr..end) else {
+        return -1;
+    };
+    dst.copy_from_slice(&src);
+    i32::try_from(copy_len).unwrap_or(-1)
+}
+
+fn serialize_gate_ctx(ctx: &BeforeCapabilityHookContext) -> Vec<u8> {
+    let payload = serde_json::json!({
+        "point": "before_capability",
+        "tenant_id": ctx.tenant_id.as_str(),
+        "capability_name": ctx.capability_name,
+        "provider": ctx.provider.as_ref().map(|p| p.as_str()),
+        "arguments_resolved": ctx.arguments.is_resolved(),
+    });
+    serialize_payload(&payload)
+}
+
+fn serialize_prompt_ctx(ctx: &BeforePromptHookContext) -> Vec<u8> {
+    let payload = serde_json::json!({
+        "point": "before_prompt",
+        "tenant_id": ctx.tenant_id.as_str(),
+        "remaining_snippet_byte_budget": ctx.remaining_snippet_byte_budget,
+    });
+    serialize_payload(&payload)
+}
+
+fn serialize_observer_ctx(ctx: &ObserverHookContext) -> Vec<u8> {
+    let observed_kind = match ctx.observed_kind {
+        crate::points::ObservedKind::AfterModel => "after_model",
+        crate::points::ObservedKind::AfterCapability => "after_capability",
+        crate::points::ObservedKind::AfterCheckpoint => "after_checkpoint",
+    };
+    let payload = serde_json::json!({
+        "point": "observer",
+        "tenant_id": ctx.tenant_id.as_str(),
+        "observed_kind": observed_kind,
+        "provider": ctx.provider.as_ref().map(|p| p.as_str()),
+    });
+    serialize_payload(&payload)
+}
+
+fn serialize_payload(value: &serde_json::Value) -> Vec<u8> {
+    // serde_json::to_vec on a Value never fails; if the encoder ever changes,
+    // the fallback to an empty blob is safe — the guest will observe `len=0`
+    // and skip its read path.
+    serde_json::to_vec(value).unwrap_or_default()
 }
 
 fn wasm_point_for_kind(kind: HookManifestKind) -> WasmHookPoint {
@@ -545,7 +732,7 @@ fn validate_module_abi(
 ) -> Result<(), WasmHookRuntimeError> {
     let mut store = Store::new(
         engine,
-        HookStoreData::new(limits.memory_bytes, limits.wall, point),
+        HookStoreData::new(limits.memory_bytes, limits.wall, point, Vec::new()),
     );
     // Configure fuel/epoch the same way `execute()` does. Instantiation does
     // not consume fuel, but the limiter API rejects stores without resource
@@ -753,9 +940,13 @@ fn add_milestone_metadata(
             "wasm hook supplied an invalid metadata key",
         ));
     };
+    // Bug #10 on PR #3634: distinguish "value too large to express as u32"
+    // from the byte-budget overflow we hit below. The previous code
+    // misreported the former as the latter, making malformed-hook triage
+    // harder.
     let Some(byte_count) = u32::try_from(value.len()).ok() else {
         return caller.data_mut().fail(WasmHookFailure::malformed(
-            "wasm hook exceeded total prompt-patch byte budget",
+            "wasm hook metadata value exceeds the u32 byte-length ceiling",
         ));
     };
     let data = caller.data_mut();

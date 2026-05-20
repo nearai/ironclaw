@@ -500,8 +500,9 @@ fn wasm_dispatcher_from_wat(
 ) -> (Arc<HookDispatcher>, HookId) {
     let resolver = Arc::new(InMemoryWasmHookModules::with_wat(local_id, wat_source));
     let runtime = Arc::new(WasmHookRuntime::new(resolver).expect("wasm runtime"));
-    let registrar =
-        HookRegistrar::new(Arc::new(PredicateEvaluator::new())).with_wasm_runtime(runtime);
+    let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()))
+        .with_wasm_runtime(runtime)
+        .with_verified_grants(["integration-test-wasm-hooks".to_string()]);
     let body = HookManifestBody::Wasm {
         export: "evaluate".to_string(),
         budget,
@@ -528,8 +529,9 @@ fn wasm_before_prompt_dispatcher_from_wat(
 ) -> Arc<HookDispatcher> {
     let resolver = Arc::new(InMemoryWasmHookModules::with_wat(local_id, wat_source));
     let runtime = Arc::new(WasmHookRuntime::new(resolver).expect("wasm runtime"));
-    let registrar =
-        HookRegistrar::new(Arc::new(PredicateEvaluator::new())).with_wasm_runtime(runtime);
+    let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()))
+        .with_wasm_runtime(runtime)
+        .with_verified_grants(["integration-test-wasm-hooks".to_string()]);
     let body = HookManifestBody::Wasm {
         export: "evaluate".to_string(),
         budget,
@@ -654,6 +656,49 @@ const WASM_UNSUPPORTED_IMPORT: &str = r#"
   (import "ic:hooks/before-capability@1" "not_allowed" (func $not_allowed))
   (func (export "evaluate")
     call $not_allowed)
+)
+"#;
+
+/// Reads the host-supplied context blob via the `ic:hooks/context@1`
+/// imports, then denies. The size check serves two purposes: it asserts
+/// that the host populates a non-empty blob, and it forces a real
+/// `ctx_read` invocation (whose return value is asserted in the read
+/// path). If either contract regresses, the module falls through to the
+/// `(unreachable)` trap, which the dispatcher classifies as a `Panic`
+/// rather than the expected `Decision::Deny` — the test then fails.
+/// Critical #1 on PR #3634.
+const WASM_CTX_READ_THEN_DENY: &str = r#"
+(module
+  (import "ic:hooks/context@1" "ctx_size" (func $ctx_size (result i32)))
+  (import "ic:hooks/context@1" "ctx_read"
+    (func $ctx_read (param i32 i32) (result i32)))
+  (import "ic:hooks/before-capability@1" "deny"
+    (func $deny (param i32) (result i32)))
+  (memory (export "memory") 1)
+  (func (export "evaluate")
+    (local $size i32)
+    (local $read i32)
+    call $ctx_size
+    local.set $size
+    local.get $size
+    i32.const 1
+    i32.lt_s
+    if
+      unreachable
+    end
+    i32.const 0
+    local.get $size
+    call $ctx_read
+    local.set $read
+    local.get $read
+    local.get $size
+    i32.ne
+    if
+      unreachable
+    end
+    i32.const 1
+    call $deny
+    drop)
 )
 "#;
 
@@ -905,6 +950,43 @@ async fn wasm_before_capability_hook_denies_through_factory() {
 }
 
 #[tokio::test]
+async fn wasm_before_capability_hook_reads_context_blob() {
+    // Critical #1 on PR #3634: the dispatcher MUST plumb the hook context
+    // through to the guest. This module asks `ctx_size` for the context
+    // blob's byte length, reads it via `ctx_read`, and only denies if both
+    // host imports report a non-empty, fully-readable payload. A regression
+    // (e.g., empty blob, wrong return value) traps before reaching `deny`,
+    // which the dispatcher classifies as a panic — failing this assertion.
+    let fixture = Fixture::new().await;
+    let inner = Arc::new(RecordingCapabilityPort::new());
+    let surface_version = fixture.surface_version.clone();
+    let (dispatcher, _hook_id) = wasm_dispatcher_from_wat(
+        "wasm-ctx-read",
+        HookManifestKind::BeforeCapability,
+        WASM_CTX_READ_THEN_DENY,
+        WasmBudget::default(),
+    );
+
+    let host = fixture
+        .factory()
+        .with_hook_dispatcher(dispatcher)
+        .build_text_only_host_with_capabilities(fixture.request(), inner.clone())
+        .await
+        .expect("host builds with wasm hook dispatcher installed");
+
+    let outcome = host
+        .invoke_capability(invocation(&surface_version, "cap.blocked"))
+        .await
+        .expect("invoke_capability returns denied outcome");
+
+    expect_denied_with_summary(outcome, "hook_denied", "hook_predicate_denied");
+    assert!(
+        inner.invocations().is_empty(),
+        "inner port must NOT be invoked when wasm hook denies after reading context"
+    );
+}
+
+#[tokio::test]
 async fn wasm_fuel_exhaustion_fails_closed_for_gate() {
     let fixture = Fixture::new().await;
     let inner = Arc::new(RecordingCapabilityPort::new());
@@ -1135,8 +1217,9 @@ async fn wasm_unsupported_host_import_is_rejected_at_install_time() {
         WASM_UNSUPPORTED_IMPORT,
     ));
     let runtime = Arc::new(WasmHookRuntime::new(resolver).expect("wasm runtime"));
-    let registrar =
-        HookRegistrar::new(Arc::new(PredicateEvaluator::new())).with_wasm_runtime(runtime);
+    let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()))
+        .with_wasm_runtime(runtime)
+        .with_verified_grants(["integration-test-wasm-hooks".to_string()]);
     let entry = HookManifestEntry::new(
         HookLocalId("wasm-bad-import".to_string()),
         HookManifestKind::BeforeCapability,
@@ -1185,8 +1268,9 @@ async fn wasm_missing_export_is_rejected_at_install_time() {
         WASM_MISSING_EXPORT,
     ));
     let runtime = Arc::new(WasmHookRuntime::new(resolver).expect("wasm runtime"));
-    let registrar =
-        HookRegistrar::new(Arc::new(PredicateEvaluator::new())).with_wasm_runtime(runtime);
+    let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()))
+        .with_wasm_runtime(runtime)
+        .with_verified_grants(["integration-test-wasm-hooks".to_string()]);
     let entry = HookManifestEntry::new(
         HookLocalId("wasm-missing-export".to_string()),
         HookManifestKind::BeforeCapability,
