@@ -953,6 +953,34 @@ async fn visible_surface_requires_every_descriptor_effect_to_be_policy_allowed()
 }
 
 #[tokio::test]
+async fn visible_surface_hides_mcp_http_when_policy_denies_network_even_if_effect_underdeclared() {
+    let runtime = runtime_with(
+        registry_from_manifests([(MCP_UNDERDECLARED_NETWORK_MANIFEST, "/system/extensions/mcp")]),
+        Arc::new(GrantAuthorizer),
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "mcp",
+        "/system/extensions/mcp/manifest.toml",
+        vec![EffectKind::DispatchCapability],
+    )])))
+    .with_runtime_policy(network_denied_runtime_policy());
+
+    let context = context_with_grants([(
+        capability_id("mcp.search"),
+        vec![EffectKind::DispatchCapability],
+    )]);
+    let surface = runtime
+        .visible_capabilities(visible_request(context))
+        .await
+        .unwrap();
+
+    assert!(
+        surface.capabilities.is_empty(),
+        "NetworkMode::Deny must hide HTTP/SSE MCP even if the manifest omits the network effect"
+    );
+}
+
+#[tokio::test]
 async fn runtime_policy_denied_extension_invoke_does_not_dispatch() {
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let dispatcher_for_runtime: Arc<dyn CapabilityDispatcher> = dispatcher.clone();
@@ -997,6 +1025,54 @@ async fn runtime_policy_denied_extension_invoke_does_not_dispatch() {
     assert!(
         !dispatcher.has_request(),
         "runtime-policy denial must happen before generic extension dispatch"
+    );
+}
+
+#[tokio::test]
+async fn runtime_policy_denied_mcp_http_invoke_does_not_dispatch_when_effect_underdeclared() {
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher_for_runtime: Arc<dyn CapabilityDispatcher> = dispatcher.clone();
+    let runtime = runtime_with_dispatcher(
+        registry_from_manifests([(MCP_UNDERDECLARED_NETWORK_MANIFEST, "/system/extensions/mcp")]),
+        Arc::new(GrantAuthorizer),
+        dispatcher_for_runtime,
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "mcp",
+        "/system/extensions/mcp/manifest.toml",
+        vec![EffectKind::DispatchCapability],
+    )])))
+    .with_runtime_policy(network_denied_runtime_policy());
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context_with_grants([(
+                capability_id("mcp.search"),
+                vec![EffectKind::DispatchCapability],
+            )]),
+            capability_id("mcp.search"),
+            ResourceEstimate::default(),
+            json!({"query": "blocked before mcp dispatch"}),
+            trust_decision_for(vec![EffectKind::DispatchCapability]),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected runtime-policy failure, got {outcome:?}");
+    };
+    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert_eq!(failure.capability_id, capability_id("mcp.search"));
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("NetworkMode::Deny")
+    );
+    assert!(
+        !dispatcher.has_request(),
+        "runtime-policy denial must happen before MCP dispatch"
     );
 }
 
@@ -1558,6 +1634,26 @@ module = "echo.wasm"
 id = "echo.say"
 description = "Echoes input over network"
 effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+parameters_schema = {}
+"#;
+
+const MCP_UNDERDECLARED_NETWORK_MANIFEST: &str = r#"
+id = "mcp"
+name = "MCP Search"
+version = "0.1.0"
+description = "MCP integration extension"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://mcp.example.test/rpc"
+
+[[capabilities]]
+id = "mcp.search"
+description = "Search through MCP"
+effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = {}
 "#;

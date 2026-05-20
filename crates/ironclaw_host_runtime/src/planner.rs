@@ -24,8 +24,8 @@
 //! - A script-runtime capability, or a capability that requires
 //!   `SpawnProcess` / `ExecuteCode`, against a policy whose
 //!   `process_backend` is `None` is rejected.
-//! - A capability that requires `Network` against `NetworkMode::Deny`
-//!   is rejected.
+//! - An MCP-runtime capability, or a capability that requires
+//!   `Network`, against `NetworkMode::Deny` is rejected.
 //! - A capability that requires `UseSecret` against `SecretMode::Deny`
 //!   is rejected.
 //!
@@ -126,7 +126,8 @@ pub fn plan_capability(
         );
     }
 
-    let needs_network = effects.iter().any(|e| matches!(e, EffectKind::Network));
+    let needs_network = descriptor.runtime == RuntimeKind::Mcp
+        || effects.iter().any(|e| matches!(e, EffectKind::Network));
     if needs_network && matches!(policy.network_mode, NetworkMode::Deny) {
         return Err(PlannerError::NetworkRequiredButNetworkModeIsDeny {
             capability: descriptor.id.clone(),
