@@ -83,6 +83,32 @@ impl PredicateEvaluator {
         self.backend.evictions_observed()
     }
 
+    /// Emit a startup `warn!` flagging that the active backend is the
+    /// in-memory implementation, which has two production limitations
+    /// (henrypark133 HIGH + MED on PR #3635 5-19 review):
+    ///
+    /// 1. Replay dedup is **process-local**: an `event_id` recorded on
+    ///    host A is unknown to host B. A multi-host deployment will
+    ///    double-count and let rate caps drift past `max`.
+    /// 2. The `MAX_HISTORY_KEYS = 8192` LRU is **shared across
+    ///    tenants**: a noisy tenant can evict a quiet tenant's bucket,
+    ///    resetting the quiet tenant's counter.
+    ///
+    /// Hosts that intend to run in multi-host or multi-tenant
+    /// production MUST swap the backend for the durable equivalent
+    /// (Postgres / libSQL, tracked in successor doc
+    /// `03-persistent-counter.md`). Call this at host startup when the
+    /// in-memory backend is active so the limitation is visible in
+    /// operator logs rather than silently in effect.
+    pub fn warn_in_memory_backend_active_in_production(&self) {
+        tracing::warn!(
+            "predicate evaluator is using the in-memory backend: replay dedup is \
+             process-local and the LRU cap is shared across tenants. \
+             Multi-host or multi-tenant production deployments MUST swap to the \
+             durable backend (see crates/ironclaw_hooks/docs/successors/03-persistent-counter.md)."
+        );
+    }
+
     /// Evaluate `spec` against the given context. Mutates internal counters
     /// for stateful predicates.
     pub fn evaluate(
@@ -258,12 +284,11 @@ fn resolve_event_id(hook_id: HookId, ctx: &BeforeCapabilityHookContext) -> Predi
     // consumes the id format (henrypark133 nit on PR #3635). Pass raw
     // bytes/&str rather than a `&BeforeCapabilityHookContext` so the
     // helper stays in `predicate_state` (a leaf module below `points`)
-    // without inverting the module dependency.
-    PredicateEventId::synth(
-        hook_id.as_bytes(),
-        &ctx.capability_name,
-        &ctx.arguments_digest,
-    )
+    // without inverting the module dependency. `arguments_digest` is
+    // intentionally NOT mixed into the synth hash — see
+    // `PredicateEventId::synth` docs for the equality-oracle threat
+    // (henrypark133 LOW on PR #3635 5-19 review).
+    PredicateEventId::synth(hook_id.as_bytes(), &ctx.capability_name)
 }
 
 impl Default for PredicateEvaluator {
