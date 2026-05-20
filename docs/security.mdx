@@ -91,7 +91,7 @@ The blocklist is a fixed list of destructive commands and sensitive paths. Any c
 rm -rf /            # full destruction
 :(){ :|:& };:       # fork bomb
 chmod -R 777 /      # permission wipe
-curl … | sh         # pipe-to-shell installer
+curl | sh           # pipe-to-shell installer
 
 # Sensitive paths
 /etc/passwd         # any reference, anywhere in the command

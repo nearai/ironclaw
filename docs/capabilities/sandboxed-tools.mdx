@@ -153,8 +153,8 @@ WASM modules can call the following host functions provided by IronClaw:
 | `log(level, message)` | Write to the IronClaw log at the given severity level |
 | `now_millis()` | Return the current Unix timestamp in milliseconds |
 | `workspace_read(path)` | Read a document from the workspace (capability-gated) |
-| `http_request(method, url, headers, body, timeout)` | Make an HTTP request; the host validates the destination, injects credentials, and scans the response for secrets before returning |
-| `tool_invoke(alias, params)` | Declared in the WIT interface but not yet implemented for WASM tools; the host currently returns an error. |
+| `http_request(method, url, headers_json, body, timeout_ms)` | Make an HTTP request; the host validates the destination, injects credentials, and scans the response for secrets before returning |
+| `tool_invoke(alias, params_json)` | Declared in the WIT interface but not yet implemented for WASM tools; the host currently returns an error. |
 | `secret_exists(name)` | Check whether a secret is present and accessible to this tool. Returns a boolean only — never the value |
 
 These are the only host capabilities available. A WASM tool cannot call arbitrary OS functions, fork processes, or access the network directly — all network access goes through the host boundary via the `http_request` host function.
@@ -170,7 +170,7 @@ WASM tools are discovered at startup from two locations:
 
 Each tool directory must contain:
 - `<toolname>.wasm` — The compiled WebAssembly module
-- `capabilities.json` — The capability declaration
+- `<toolname>.capabilities.json` — The capability declaration
 
 ---
 
