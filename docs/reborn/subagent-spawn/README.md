@@ -242,7 +242,8 @@ spawn time and keyed by the coordinator-minted `TurnRunId`.
 | Background delivery | Each child result is `accept_inbound_message`'d into the parent thread (idempotent, provenance-tagged `SubagentResult`). The follow-up parent turn is **coalescing** — `submit_turn` only if none pending; `ThreadBusy` means "already pending, message will be consumed". |
 | **Autonomous-continuation budget** | To bound self-amplifying spawn cascades (parent wake → spawn more → child completes → wake again → …), a per-spawn-tree budget caps **background-wake turns per tree** and **wakes per rolling time window** (e.g. ≤16 wake-turns per tree, ≤4 per minute). Exceeding the cap suspends further wake submissions for that tree and emits a typed `AutonomousContinuationStopped` observability event for triage. Distinct from per-spawn caps (§8): a tree under the spawn cap can still go wake-loopy. |
 | Child authority | The child run starts with an **empty grant/lease set** — no inheritance of parent grants/leases. The capability allowlist is a surface *ceiling*, not authority. The child re-acquires every lease via its own `Approval` gate on its own thread. |
-| **Child approval ownership** | Child runs inherit the parent's `owner_user_id` (the human accountable for the parent). A child's `Approval` gate surfaces on the **child thread** addressed to that owner — the parent user is the approver. The child thread is user-visible in the same surface as any other thread under that user; UI nesting is the deferred linkage. |
+| **Child approval ownership** | Child runs inherit the parent's `owner_user_id` AND `project_id` — **enforced in spawn code** (the child `ensure_thread` + `SubmitTurnRequest` copy both verbatim from the parent run record; deviation = typed error, not silently filled). A child's `Approval` gate surfaces on the **child thread** addressed to that owner — the parent user is the approver. The child thread is user-visible in the same surface as any other thread under that user; UI nesting is the deferred linkage. |
+| **Approval surfacing (projection, not bridge)** | A turn transitioning to `TurnStatus::BlockedApproval` does NOT currently populate the engine's `PendingGateStore` that the UI queries — they are two disconnected systems. **A direct write-hook bridge in `block_run()` is fragile** (matches the split-brain shape `.claude/rules/gateway-events.md` exists to prevent). Instead: `PendingGateStore` becomes a **derived projection** of `TurnLifecycleEvent` — a projection consumer reads turn events and materialises the same read model the UI already queries. One source of truth (turn events), replayable from a cursor, restart-safe, idempotent. The UI surface is unchanged. Affects every blocked turn (not subagent-specific) — landed as prerequisite **P0** (see §11). |
 | Nesting | Hard gate: a spawn from a flavor with `allow_nesting=false` is rejected regardless of surface membership. Plus a depth cap (`subagent_depth` field, checked before `submit_turn`) and a per-turn fan-out cap. |
 | **Per-tree descendant atomicity** | The per-run-tree descendant cap (`MAX_TREE_DESCENDANTS`) is enforced via a **durable `SpawnTreeReservation` row keyed by `spawn_tree_root_run_id`** — `tree_descendant_count_and_reserve(root, delta)` is atomic at the store, runs **before `submit_turn`**. Concurrent admit across subtrees cannot over-admit. (Concurrent parent turns on the *same* parent thread are impossible by the per-`TurnScope` active-run lock, but a single root can have many concurrent subtrees on different threads.) |
 | Loop family | One static `subagent` `LoopFamily` (`LoopFamilyId "subagent"`); default strategies + tighter `BudgetStrategy`. Bound to a dedicated `subagent` `PlannedDriver`. |
@@ -359,9 +360,12 @@ mitigations below are **load-bearing**, not optional.
    `CapabilityAllowSet` filters the *surface* only. A child must re-acquire every
    privileged lease through its own `Approval` gate. A subagent can never exercise
    a lease the parent obtained from a prior user approval.
-2. **Approval ownership.** The child inherits the parent's `owner_user_id` so a
-   child `Approval` gate surfaces to the same human who owns the parent — on the
-   child thread, not via parent-injection (UI nesting is the deferred linkage).
+2. **Approval ownership.** The child inherits the parent's `owner_user_id` AND
+   `project_id` (enforced in spawn code — deviation is a typed error), so a child
+   `Approval` gate surfaces to the same human who owns the parent — on the child
+   thread, via the **pending-gate projection** of `TurnLifecycleEvent` (§6 row
+   "Approval surfacing"). No parent-injection (UI nesting is the deferred
+   linkage); no write-hook bridge to `PendingGateStore` (split-brain).
 3. **Fork-bomb containment.** Depth alone is insufficient (N children each
    spawning N → N^depth). Three caps, all enforced **before `submit_turn`** via
    the atomic `SpawnTreeReservation`, all rejecting without queuing:
@@ -404,6 +408,7 @@ mitigations below are **load-bearing**, not optional.
 | **Per-tree descendant over-admit** | `tree_descendant_count_and_reserve(root, delta)` is **atomic at the store** and runs before `submit_turn`. Concurrent admit across subtrees (different threads) cannot over-admit. Concurrent admit on the same parent thread is precluded by the per-`TurnScope` active-run lock. |
 | **Autonomous-continuation runaway** | Per-tree wake-turn quota + per-time-window rate-limit; exceeded → wake submissions suspended for that tree + `AutonomousContinuationStopped` event emitted (§7.4). |
 | **Blocking parent waiting indefinitely** | Parent is interruptible: `cancel_run(parent)` cascades through the subtree (§7.5). Blocking subagents are *for short bounded work*; long children should be background. |
+| **Approval invisible to UI** (today, every blocked turn) | `block_run()` only writes `TurnStatus::BlockedApproval` + a `TurnLifecycleEvent` scoped to `TurnScope`; the engine's `PendingGateStore` (where the UI queries) is not populated. Fix is **prerequisite P0** (§11): make `PendingGateStore` a derived projection of `TurnLifecycleEvent`. Single source log; replayable from cursor; restart-safe; no `block_run()` dual-write. |
 
 ## 10. Crate boundary verification
 
@@ -432,14 +437,27 @@ exhaustive `TurnStatus` match sites in `ironclaw_turns` `memory.rs`
 
 ## 11. Implementation phases
 
-The work is a 3-level DAG. Phase 1 and Phase 2 each contain workstreams that run
-*mostly* in parallel — see the diagram for the actual edges. Each workstream is
-an independently reviewable PR.
+The work is a 4-level DAG with a prerequisite (P0) that closes a general
+"approval-invisible-to-UI" gap (not subagent-specific). Phase 1 and Phase 2 each
+contain workstreams that run *mostly* in parallel — see the diagram for the
+actual edges. Each workstream is an independently reviewable PR.
 
 ![Implementation phase DAG](diagrams/phase-dag.svg)
 
 ```
-PHASE 1 — Contracts & isolated units
+PHASE 0 — PREREQUISITE (general, not subagent-specific)
+  P0    Pending-gate projection over TurnLifecycleEvent
+          Make engine PendingGateStore a derived read model projected from
+          TurnLifecycleEvent (single source log). Closes the "block_run writes
+          BlockedApproval but UI sees nothing" gap for every blocked turn —
+          system-issued cancellation turns today, all future loop types
+          (subagent, cron, mission, trigger). Replayable from cursor.
+          Lives in ironclaw_event_projections (consumer) + the existing
+          PendingGateStore reader surface (unchanged for UI).
+          ── must land before Phase 2's subagent paths are useful in production;
+             can be built in parallel with Phase 1.
+
+PHASE 1 — Contracts & isolated units                                [needs none]
   P1.A  ironclaw_turns contract additions
           (CapabilityOutcome variants, blocked-kind variants, lineage fields,
            prepare_turn / requested_run_id, tree-descendant-reserve query,

@@ -1,11 +1,16 @@
 # Implementation phase DAG. Render: d2 phase-dag.d2 phase-dag.svg
 direction: down
 
-title: "Implementation phases — parallel workstreams then one wiring phase" {
+title: "Implementation phases — P0 prerequisite, Phase 1 & 2 parallel, Phase 3 wires" {
   near: top-center
   shape: text
   style.font-size: 22
   style.bold: true
+}
+
+phase0: "PHASE 0 — PREREQUISITE (general, not subagent-specific)" {
+  style.fill: "#fce4ec"
+  p0: "P0  PendingGateStore projection over TurnLifecycleEvent\nfixes block_run → UI gap for every blocked turn\n(replayable from cursor, single source log)"
 }
 
 phase1: "PHASE 1 — Contracts & isolated units" {
@@ -40,3 +45,5 @@ phase2.p2a -> phase3
 phase2.p2b -> phase3
 phase2.p2c -> phase3
 phase2.p2d -> phase3
+
+phase0.p0 -> phase3: "approvals usable in prod"

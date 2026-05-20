@@ -83,6 +83,134 @@ other enum gains one. The serialized wire strings are frozen here:
 
 ---
 
+## P0 — Pending-gate projection over `TurnLifecycleEvent` (PREREQUISITE)
+
+**Not subagent-specific. Must land before Phase 2's subagent paths are useful in
+production.** Can be built in parallel with Phase 1 (no shared files).
+
+### P0.1 — The gap this closes
+
+`block_run()` (`crates/ironclaw_turns/src/memory.rs:688-705`) only:
+1. Updates the run's `TurnStatus` to `BlockedApproval` / `BlockedAuth` / `BlockedResource`.
+2. Pushes a `TurnLifecycleEvent { kind: Blocked, … }` to the turn event buffer
+   scoped to `TurnScope`.
+
+The web UI surfaces approvals by querying the engine-level **`PendingGateStore`**
+(`/src/gate/pending.rs`) keyed by `(user_id, thread_id)`. **Nothing today
+populates `PendingGateStore` from a turn block.** A blocked turn is therefore
+**invisible to the UI** — affects every blocked turn today (system-issued
+cancellation turns, future cron/triggers, and subagents the moment this design
+ships). Closing this gap is a prerequisite for the design's "child approval
+resolves on the child thread" guarantee (README §6 "Approval surfacing").
+
+### P0.2 — Why a projection, not a write-hook bridge
+
+A direct write hook in `block_run()` that *also* inserts into `PendingGateStore`
+is the smallest patch but the wrong shape: it is a dual-write between two
+authoritative stores. Any code path that blocks without going through the hook
+silently orphans the gate; any approval resolved on the engine side without
+notifying turns leaves turn state stale. This is the **split-brain shape**
+`.claude/rules/gateway-events.md` exists to prevent (incident references in that
+rule). The rule's mandate: "every `AppEvent` projects from exactly one typed
+source log."
+
+`TurnLifecycleEvent` is already that typed source log. Make `PendingGateStore` a
+**derived projection** of it. The UI's query surface is unchanged; the underlying
+store is materialised by a projection consumer with a cursor. Replayable;
+restart-safe; idempotent. No `block_run()` hook required.
+
+### P0.3 — Contracts to add
+
+- **Read model** — `PendingGateStore` keeps its existing reader API (so the UI
+  is unchanged). Its writer API becomes internal to the projection consumer
+  (no other writers).
+- **Projection consumer** — lives in `crates/ironclaw_event_projections/`
+  (the Reborn read-model boundary). Consumes `TurnLifecycleEvent`. Per event:
+  - `kind = Blocked` with `status` ∈ {`BlockedApproval`, `BlockedAuth`,
+    `BlockedResource`, `BlockedDependentRun` (new — from P1.A)} →
+    upsert a `PendingGate { user_id = turn_actor.user_id, thread_id =
+    scope.thread_id, run_id, gate_kind, gate_ref, sanitized_reason, blocked_at }`.
+  - `kind ∈ {Completed, Failed, Cancelled, Resumed}` for a previously-blocked
+    run → remove the `PendingGate` row for that `(user_id, thread_id, run_id)`.
+- **Projection cursor** — durable `(consumer_id, last_event_cursor)` row. On
+  startup the consumer resumes from `last_event_cursor`; on a fresh deployment
+  it replays from the beginning. Reconciliation is purely additive — upserts
+  by `(user_id, thread_id, run_id)`, never duplicates.
+
+Pseudo code (Rust-shaped):
+
+```rust
+// crates/ironclaw_event_projections/src/pending_gate_projection.rs
+pub struct PendingGateProjection {
+    store: Arc<dyn PendingGateStore>,        // existing engine store; now write-via-projection-only
+    cursor: Arc<dyn ProjectionCursorStore>,
+}
+
+#[async_trait]
+impl TurnEventSink for PendingGateProjection {
+    async fn publish(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
+        match event.kind {
+            TurnEventKind::Blocked => {
+                let row = PendingGate::from_lifecycle_event(&event);
+                self.store.upsert(row).await?;
+            }
+            TurnEventKind::Completed
+            | TurnEventKind::Failed
+            | TurnEventKind::Cancelled
+            | TurnEventKind::Resumed => {
+                self.store
+                    .remove_for_run(event.scope.user_id_for_owner(), event.run_id)
+                    .await?;
+            }
+            _ => {}
+        }
+        self.cursor.advance(PROJECTION_ID, event.cursor).await
+    }
+}
+```
+
+(`from_lifecycle_event` pulls `user_id` from `TurnActor`, `gate_ref` from the
+event payload, etc. Idempotent because the underlying store upsert is keyed by
+`(user_id, thread_id, run_id)`.)
+
+### P0.4 — Wiring (Phase 3 dependency)
+
+Phase 3's `subagent_runtime.rs` registers this projection alongside the
+`SubagentCompletionObserver` via the new `DefaultTurnCoordinator::with_event_sink`
+(P1.A). At that point any subagent child run blocking on `Approval` (or any
+future loop type's blocked turn) appears in `PendingGateStore` and is queryable
+by the parent owner via the existing UI surface.
+
+### P0.5 — Tests
+
+- Unit: feed synthetic `TurnLifecycleEvent { Blocked }` → assert `PendingGate`
+  row exists with correct keys; feed `{ Resumed | Cancelled | Completed }` →
+  assert row gone.
+- Unit: replay the same event stream twice → idempotent (one row, same content).
+- Unit: cursor advance + crash-mid-batch → assert no row leaks, no row missed.
+- Integration: block a real turn (e.g. via an `ApprovalRequired` capability
+  outcome), assert `PendingGate` populated, resolve via existing
+  `/api/chat/gate/resolve`, assert row removed and turn resumes.
+
+### P0.6 — Migration of existing writers
+
+Grep the worktree for current `PendingGateStore::{insert, upsert, remove}` call
+sites outside the projection consumer. Each call site is one of:
+- A legacy direct-write that this projection replaces — remove it (the
+  projection now covers it because every direct-write call site is paired with
+  a turn block that emits a `TurnLifecycleEvent`).
+- A consumer we missed — list it and decide per-case whether it migrates to a
+  read-only query or feeds the same projection.
+
+Land P0 with the writer surface narrowed to the projection consumer only.
+
+### P0.7 — Owner
+
+Lives in `crates/ironclaw_event_projections/` (new module
+`pending_gate_projection.rs`). Reader surface remains in `/src/gate/pending.rs`.
+
+---
+
 ## 1. P1.A — `ironclaw_turns` contract additions
 
 **Goal:** add the coordination-layer types the spawn mechanism needs: a new
