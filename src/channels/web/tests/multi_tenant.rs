@@ -192,8 +192,8 @@ fn make_sandbox_job(user_id: &str, task: &str) -> crate::history::SandboxJobReco
 mod workspace_pool {
     use super::*;
     use crate::config::{WorkspaceConfig, WorkspaceSearchConfig};
-    use crate::workspace::EmbeddingCacheConfig;
     use crate::workspace::layer::{LayerSensitivity, MemoryLayer};
+    use ironclaw_embeddings::EmbeddingCacheConfig;
 
     #[tokio::test]
     async fn test_workspace_pool_applies_search_config() {
@@ -1368,7 +1368,7 @@ mod admin_tool_policy {
         let pool = WorkspacePool::new(
             Arc::clone(&db),
             None,
-            crate::workspace::EmbeddingCacheConfig::default(),
+            ironclaw_embeddings::EmbeddingCacheConfig::default(),
             crate::config::WorkspaceSearchConfig::default(),
             crate::config::WorkspaceConfig::default(),
         );

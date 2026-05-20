@@ -299,7 +299,33 @@ impl TestRig {
     /// Resolve an OAuth-style gate by submitting a typed
     /// `Submission::ExternalCallback`.
     pub async fn send_external_callback(&self, request_id: uuid::Uuid) {
-        let submission = ironclaw::agent::submission::Submission::ExternalCallback { request_id };
+        let submission = ironclaw::agent::submission::Submission::ExternalCallback {
+            request_id,
+            payload: None,
+        };
+        let msg = ironclaw::channels::IncomingMessage::new(
+            self.channel.channel_name(),
+            self.channel.user_id(),
+            "",
+        )
+        .with_structured_submission(submission);
+        self.channel.send_incoming(msg).await;
+    }
+
+    /// Resolve a caller-tool external gate (Responses API path) with a
+    /// JSON resolution payload. The payload becomes
+    /// `GateResolution::ExternalCallback { payload }` after submission;
+    /// the engine then has to materialise it back into an `ActionResult`
+    /// the LLM can see.
+    pub async fn send_external_callback_with_payload(
+        &self,
+        request_id: uuid::Uuid,
+        payload: serde_json::Value,
+    ) {
+        let submission = ironclaw::agent::submission::Submission::ExternalCallback {
+            request_id,
+            payload: Some(payload),
+        };
         let msg = ironclaw::channels::IncomingMessage::new(
             self.channel.channel_name(),
             self.channel.user_id(),

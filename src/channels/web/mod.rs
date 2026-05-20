@@ -63,7 +63,8 @@ use crate::error::ChannelError;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
-use crate::workspace::{EmbeddingCacheConfig, EmbeddingProvider, Workspace};
+use crate::workspace::Workspace;
+use ironclaw_embeddings::{EmbeddingCacheConfig, EmbeddingProvider};
 use ironclaw_skills::catalog::SkillCatalog;
 use ironclaw_skills::registry::SkillRegistry;
 

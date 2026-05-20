@@ -217,6 +217,7 @@ I18n.register('en', {
   'logs.clientLevel': 'Client Log Level',
   'logs.pause': 'Pause',
   'logs.resume': 'Resume',
+  'logs.download': 'Download',
   'logs.clear': 'Clear',
   'logs.autoScroll': 'Auto-scroll',
   'logs.filter': 'Filter logs...',

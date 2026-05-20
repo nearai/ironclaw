@@ -17,6 +17,12 @@ AUTH_FULL_TESTS = AUTH_SMOKE_TESTS + [
     "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_wasm_tool_oauth_exchange_failure_leaves_extension_unauthed",
     "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_wasm_tool_first_chat_auth_attempt_emits_auth_url",
     "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_chat_first_gmail_installs_prompts_and_retries",
+    # ironclaw#3533 — chat-driven `tool_install` raises an approval gate,
+    # user approves via the approval card, then the auth card surfaces.
+    # Pairs with `test_chat_first_gmail_installs_prompts_and_retries`
+    # (auto-approve variant); both must stay green so the regression that
+    # made "connect my telegram" narrate manual UI steps can't ship again.
+    "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_chat_install_approval_then_auth_card",
     "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_settings_first_gmail_auth_then_chat_runs",
     "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_settings_first_custom_mcp_auth_then_chat_runs",
     "tests/e2e/scenarios/test_v2_auth_oauth_matrix.py::test_wasm_tool_oauth_refresh_on_demand",

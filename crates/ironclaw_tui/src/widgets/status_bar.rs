@@ -199,7 +199,10 @@ impl TuiWidget for StatusBarWidget {
         left_spans.push(sep);
         left_spans.push(Span::styled(duration_str, self.theme.dim_style()));
 
-        let right_text = "^L logs  ^B sidebar  ^C quit";
+        let right_text = match state.active_tab {
+            ActiveTab::Logs => "^S save  ^L logs  ^B sidebar  ^C quit",
+            ActiveTab::Conversation => "^L logs  ^B sidebar  ^C quit",
+        };
         let right_span = Span::styled(format!("{right_text}  "), self.theme.dim_style());
 
         // Render left-aligned portion
