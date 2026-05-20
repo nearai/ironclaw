@@ -71,7 +71,7 @@ impl SseCapacity {
             tenant_id: tenant_id.clone(),
             user_id: user_id.clone(),
         };
-        let mut state = self.state.lock().expect("SseCapacity state lock poisoned"); // safety: only this module locks; no nested locks; release is infallible
+        let mut state = lock_state(&self.state);
         let entry = state.entry(key.clone()).or_insert(0);
         if *entry >= self.max_per_caller {
             return None;
@@ -84,7 +84,7 @@ impl SseCapacity {
     }
 
     fn release(&self, key: &CallerKey) {
-        let mut state = self.state.lock().expect("SseCapacity state lock poisoned"); // safety: only this module locks; no nested locks
+        let mut state = lock_state(&self.state);
         if let Some(count) = state.get_mut(key) {
             *count = count.saturating_sub(1);
             if *count == 0 {
@@ -99,9 +99,34 @@ impl SseCapacity {
             tenant_id: tenant_id.clone(),
             user_id: user_id.clone(),
         };
-        let state = self.state.lock().expect("SseCapacity state lock poisoned"); // safety: test-only inspection
+        let state = lock_state(&self.state);
         state.get(&key).copied().unwrap_or(0)
     }
+}
+
+/// Acquire the slot-count map without ever panicking on a poisoned
+/// mutex.
+///
+/// `SseSlot::drop` calls `SseCapacity::release`, so if any code path on
+/// this lock had previously panicked while holding the guard, an
+/// `expect`-on-poison would re-panic *inside* a Drop. During unwinding
+/// from another panic that becomes a double-panic and the process
+/// aborts — which is exactly the failure mode we never want for a
+/// per-connection cleanup hook.
+///
+/// Recovering with `into_inner()` is safe here because the only data
+/// behind the lock is a `HashMap<CallerKey, usize>` and every critical
+/// section is a few lines of straight-line code that mutates a single
+/// counter — there is no compound invariant for a mid-mutation panic to
+/// break. The worst case is a single caller's count being off by one,
+/// which `SSE_MAX_LIFETIME`-driven slot recycling self-heals within
+/// minutes.
+fn lock_state(
+    mutex: &Mutex<HashMap<CallerKey, usize>>,
+) -> std::sync::MutexGuard<'_, HashMap<CallerKey, usize>> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// RAII reservation for one SSE stream slot.
@@ -169,6 +194,53 @@ mod tests {
             0,
             "rejected open must not store a HashMap entry"
         );
+    }
+
+    // Regression for the SSE-slot Drop poison-abort review (Medium):
+    // `SseSlot::drop` calls `release`, and if `release`'s lock acquire
+    // ever `expect`-ed on a poisoned mutex, a panic-while-unwinding
+    // would double-panic and abort the process. Poison the mutex
+    // deliberately via a panicking thread, then exercise both `release`
+    // (via `SseSlot::drop`) and `try_acquire` to make sure neither
+    // re-panics.
+    #[test]
+    fn poisoned_lock_does_not_double_panic_on_release_or_acquire() {
+        let cap = Arc::new(SseCapacity::new(2));
+        let alice = user("alice");
+        let slot = cap.try_acquire(&tenant(), &alice).expect("first slot");
+
+        // Poison the mutex by panicking while holding the guard. We
+        // catch the panic so the test process survives — the goal is
+        // to leave the mutex in `PoisonError`, not to crash the test.
+        {
+            let cap = Arc::clone(&cap);
+            let join = std::thread::spawn(move || {
+                let _guard = cap.state.lock().expect("acquire to poison");
+                panic!("intentional panic to poison SseCapacity mutex");
+            });
+            let result = join.join();
+            assert!(
+                result.is_err(),
+                "poisoning thread should have panicked, not returned"
+            );
+        }
+        assert!(
+            cap.state.is_poisoned(),
+            "test prerequisite: the mutex must actually be poisoned for the regression to be meaningful"
+        );
+
+        // Drop the live slot — without poison recovery, `release` would
+        // `expect`-panic here while we are *not* unwinding, which would
+        // fail the test. With recovery, the slot returns cleanly.
+        drop(slot);
+
+        // And a fresh acquire on the poisoned lock must also succeed
+        // rather than panic; this is the call-site that runs on every
+        // new SSE open.
+        let recovered = cap
+            .try_acquire(&tenant(), &alice)
+            .expect("try_acquire must recover from a poisoned lock");
+        drop(recovered);
     }
 
     #[test]
