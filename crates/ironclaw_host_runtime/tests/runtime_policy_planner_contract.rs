@@ -26,7 +26,9 @@ use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, EffectKind, ExtensionId, PermissionMode, RuntimeKind,
     TrustClass,
 };
-use ironclaw_host_runtime::plan_capability;
+use ironclaw_host_runtime::{
+    PlannerError, SHELL_CAPABILITY_ID, builtin_first_party_package, plan_capability,
+};
 use ironclaw_runtime_policy::{OrgPolicyConstraints, ResolveRequest, resolve};
 
 fn descriptor(id: &str, effects: Vec<EffectKind>) -> CapabilityDescriptor {
@@ -41,6 +43,15 @@ fn descriptor(id: &str, effects: Vec<EffectKind>) -> CapabilityDescriptor {
         default_permission: PermissionMode::Allow,
         resource_profile: None,
     }
+}
+
+fn builtin_shell_descriptor() -> CapabilityDescriptor {
+    builtin_first_party_package()
+        .unwrap()
+        .capabilities
+        .into_iter()
+        .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+        .expect("built-in shell descriptor must be registered")
 }
 
 // -- PR 6: Local profile vertical slice -------------------------------------
@@ -102,6 +113,31 @@ fn local_dev_coding_alias_capabilities_plan_against_local_host_shell() {
 }
 
 #[test]
+fn local_dev_builtin_shell_manifest_plans_against_local_host_direct_network() {
+    // `builtin.shell` is the real copied shell tool descriptor. Under the
+    // LocalDev profile its declared process/network effects must resolve to
+    // the local host/direct logged backend family.
+    let policy = resolve(ResolveRequest::new(
+        DeploymentMode::LocalSingleUser,
+        RuntimeProfile::LocalDev,
+    ))
+    .unwrap();
+
+    let shell = builtin_shell_descriptor();
+    assert!(shell.effects.contains(&EffectKind::SpawnProcess));
+    assert!(shell.effects.contains(&EffectKind::ExecuteCode));
+    assert!(shell.effects.contains(&EffectKind::Network));
+
+    let plan = plan_capability(&shell, &policy).unwrap();
+    assert_eq!(plan.process_backend, ProcessBackendKind::LocalHost);
+    assert_eq!(
+        plan.filesystem_backend,
+        FilesystemBackendKind::HostWorkspace
+    );
+    assert_eq!(plan.network_mode, NetworkMode::DirectLogged);
+}
+
+#[test]
 fn local_safe_approval_preset_keeps_writes_supervised() {
     // LocalSafe is the cautious local mode: the resolver maps it to
     // `ApprovalPolicy::AskWrites`. The planner doesn't gate approvals
@@ -136,7 +172,7 @@ fn hosted_dev_shell_run_never_plans_against_local_host() {
     ))
     .unwrap();
 
-    let shell = descriptor("shell.run", vec![EffectKind::SpawnProcess]);
+    let shell = builtin_shell_descriptor();
     let plan = plan_capability(&shell, &policy).unwrap();
     assert_eq!(plan.process_backend, ProcessBackendKind::TenantSandbox);
     assert_ne!(plan.process_backend, ProcessBackendKind::LocalHost);
@@ -144,6 +180,21 @@ fn hosted_dev_shell_run_never_plans_against_local_host() {
         plan.filesystem_backend,
         FilesystemBackendKind::HostWorkspace
     );
+}
+
+#[test]
+fn secure_default_builtin_shell_fails_closed_without_process_backend() {
+    let policy = resolve(ResolveRequest::new(
+        DeploymentMode::LocalSingleUser,
+        RuntimeProfile::SecureDefault,
+    ))
+    .unwrap();
+
+    let error = plan_capability(&builtin_shell_descriptor(), &policy).unwrap_err();
+    assert!(matches!(
+        error,
+        PlannerError::ProcessEffectsRequiredButProcessBackendIsNone { .. }
+    ));
 }
 
 #[test]

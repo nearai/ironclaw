@@ -16,6 +16,7 @@ pub const SHELL_CAPABILITY_ID: &str = "builtin.shell";
 
 const DEFAULT_SHELL_WALL_CLOCK_MS: u64 = 120_000;
 const MAX_SHELL_WALL_CLOCK_MS: u64 = 120_000;
+const MAX_SHELL_TIMEOUT_SECS: u64 = MAX_SHELL_WALL_CLOCK_MS / 1000;
 const DEFAULT_SHELL_OUTPUT_BYTES: u64 = shell_core::MAX_OUTPUT_SIZE as u64;
 
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
@@ -28,12 +29,14 @@ pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
             EffectKind::ExecuteCode,
             EffectKind::ReadFilesystem,
             EffectKind::WriteFilesystem,
+            EffectKind::Network,
         ],
         PermissionMode::Ask,
         Some(ResourceProfile {
             default_estimate: ResourceEstimate {
                 wall_clock_ms: Some(DEFAULT_SHELL_WALL_CLOCK_MS),
                 output_bytes: Some(DEFAULT_SHELL_OUTPUT_BYTES),
+                process_count: Some(1),
                 ..ResourceEstimate::default()
             },
             hard_ceiling: Some(ResourceCeiling {
@@ -55,6 +58,14 @@ pub(super) async fn dispatch(
     request: &FirstPartyCapabilityRequest,
 ) -> Result<(Value, ResourceUsage), FirstPartyCapabilityError> {
     let parsed = shell_core::parse_shell_request(&request.input).map_err(shell_error)?;
+    if parsed
+        .timeout_secs
+        .is_some_and(|timeout_secs| timeout_secs > MAX_SHELL_TIMEOUT_SECS)
+    {
+        return Err(FirstPartyCapabilityError::new(
+            RuntimeDispatchErrorKind::Resource,
+        ));
+    }
     let output = shell_core::ShellExecutor::new()
         .execute_direct(shell_core::ShellExecutionRequest {
             extra_env: Default::default(),
@@ -77,6 +88,7 @@ pub(super) async fn dispatch(
         ResourceUsage {
             wall_clock_ms: output.duration.as_millis().try_into().unwrap_or(u64::MAX),
             output_bytes,
+            process_count: 1,
             ..ResourceUsage::default()
         },
     ))

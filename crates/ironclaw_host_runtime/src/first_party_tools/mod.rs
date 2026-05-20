@@ -161,12 +161,9 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
             SHELL_CAPABILITY_ID => {
                 let (output, usage) = shell::dispatch(&request).await?;
                 let output_bytes = bounded_output_bytes(&output).map_err(|error| {
-                    error.with_usage(ResourceUsage {
-                        wall_clock_ms: usage.wall_clock_ms,
-                        output_bytes: usage.output_bytes,
-                        network_egress_bytes,
-                        ..ResourceUsage::default()
-                    })
+                    let mut usage = usage.clone();
+                    usage.network_egress_bytes = network_egress_bytes;
+                    error.with_usage(usage)
                 })?;
                 return Ok(FirstPartyCapabilityResult::new(
                     output,

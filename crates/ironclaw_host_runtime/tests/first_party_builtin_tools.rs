@@ -83,6 +83,12 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
             .iter()
             .all(|capability| capability.estimated_resources.output_bytes.is_some())
     );
+    let shell = surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+        .expect("shell capability must be visible");
+    assert_eq!(shell.estimated_resources.process_count, Some(1));
 }
 
 #[tokio::test]
@@ -133,10 +139,21 @@ async fn builtin_echo_invokes_through_host_runtime() {
 
 #[tokio::test]
 async fn builtin_shell_invokes_copied_shell_core_through_host_runtime() {
-    let output = invoke(SHELL_CAPABILITY_ID, json!({"command": "echo hello reborn"}))
+    let outcome = runtime()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+            capability_id(SHELL_CAPABILITY_ID),
+            ResourceEstimate::default(),
+            json!({"command": "echo hello reborn"}),
+            trust_decision(),
+        ))
         .await
         .unwrap();
 
+    let RuntimeCapabilityOutcome::Completed(completed) = outcome else {
+        panic!("expected completed shell invocation, got {outcome:?}");
+    };
+    let output = &completed.output;
     assert_eq!(output["exit_code"], json!(0));
     assert_eq!(output["success"], json!(true));
     assert_eq!(output["sandboxed"], json!(false));
@@ -146,15 +163,60 @@ async fn builtin_shell_invokes_copied_shell_core_through_host_runtime() {
             .expect("shell output must be text")
             .contains("hello reborn")
     );
+    assert_eq!(completed.usage.process_count, 1);
 }
 
 #[tokio::test]
 async fn builtin_shell_reuses_v1_shell_validation() {
-    let err = invoke(SHELL_CAPABILITY_ID, json!({"command": "cat ~/.ssh/id_rsa"}))
+    for input in [
+        json!({"command": "cat ~/.ssh/id_rsa"}),
+        json!({"command": "printf '\\x65\\x63\\x68\\x6f hi'|dash"}),
+        json!({"command": "wc < ~/server.key"}),
+    ] {
+        let err = invoke_shell(input).await.unwrap_err();
+
+        assert_eq!(err, RuntimeFailureKind::Backend);
+    }
+}
+
+#[tokio::test]
+async fn builtin_shell_rejects_invalid_inputs_before_spawn() {
+    for input in [
+        json!({}),
+        json!({"command": 123}),
+        json!({"command": "echo hi", "workdir": 123}),
+        json!({"command": "echo hi", "timeout": 0}),
+        json!({"command": "echo hi", "timeout": "1"}),
+    ] {
+        let err = invoke_shell(input).await.unwrap_err();
+
+        assert_eq!(err, RuntimeFailureKind::InvalidInput);
+    }
+}
+
+#[tokio::test]
+async fn builtin_shell_rejects_timeout_above_manifest_ceiling() {
+    let err = invoke_shell(json!({"command": "echo hi", "timeout": 121}))
         .await
         .unwrap_err();
 
-    assert_eq!(err, RuntimeFailureKind::Backend);
+    assert_eq!(err, RuntimeFailureKind::Resource);
+}
+
+#[tokio::test]
+async fn builtin_shell_maps_timeout_and_spawn_failures() {
+    let timeout = invoke_shell(json!({"command": "sleep 2", "timeout": 1}))
+        .await
+        .unwrap_err();
+    assert_eq!(timeout, RuntimeFailureKind::Resource);
+
+    let spawn = invoke_shell(json!({
+            "command": "echo missing",
+            "workdir": "/definitely/missing/ironclaw-shell-test"
+    }))
+    .await
+    .unwrap_err();
+    assert_eq!(spawn, RuntimeFailureKind::Backend);
 }
 
 #[tokio::test]
@@ -1614,6 +1676,17 @@ async fn invoke(capability: &str, input: Value) -> Result<Value, RuntimeFailureK
     invoke_with_context(&runtime, capability, input, execution_context([capability])).await
 }
 
+async fn invoke_shell(input: Value) -> Result<Value, RuntimeFailureKind> {
+    let runtime = runtime();
+    invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        input,
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await
+}
+
 async fn invoke_with_context<R: HostRuntime + ?Sized>(
     runtime: &R,
     capability: &str,
@@ -1979,6 +2052,18 @@ fn http_test_policy() -> NetworkPolicy {
         }],
         deny_private_ip_ranges: true,
         max_egress_bytes: Some(10_000),
+    }
+}
+
+fn shell_test_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: None,
+            host_pattern: "*".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: false,
+        max_egress_bytes: None,
     }
 }
 
