@@ -9,16 +9,16 @@ But all of these capabilities are only possible by accessing **your credentials*
 
 Your API keys, OAuth tokens, database passwords, and SSH access all sit between two untrusted layers: a model that treats its context as instructions, and tools that are arbitrary code. If either the model or a tool can read a credential, that credential is one clever prompt-injected email or one bad dependency away from being turned against you.
 
-IronClaw is built around this problem. Credential handling isn't a feature add on - it's the core of the system. The principle is simple: **models and tools should never see your raw credentials**
+IronClaw is built around this problem. Credential handling isn't a feature add-on — it's the core of the system. The principle is simple: **models and tools should never see your raw credentials**.
 
 Everything below exists to make that hold up in practice.
 
-<CardGroup cols={1}>
-  <Card title="Encrypted at rest" icon="lock">
+<CardGroup cols={2}>
+  <Card title="Encrypted at Rest" icon="lock">
     Secrets are encrypted at rest and are injected at the host boundary for approved endpoints.
   </Card>
 
-  <Card title="Sandboxed execution" icon="cubes">
+  <Card title="Sandboxed Execution" icon="cubes">
     WASM tools run sandboxed by wasmtime, are resource limited, and can only contact allowlisted endpoints.
   </Card>
 
@@ -29,7 +29,6 @@ Everything below exists to make that hold up in practice.
   <Card title="Leak Detection" icon="shield">
     Outbound traffic is scanned in real time. Secret-like data is blocked before exfiltration.
   </Card>
-
 </CardGroup>
 
 ---
@@ -62,20 +61,20 @@ None of these layers replaces the model itself. Modern frontier models are train
 
 ## Leak Detector
 
-IronClaw scans all input going to the LLM for potential leaks of sensitive information. This can be either user input or the result of running a tool.
+Before any tool output reaches the model, IronClaw scans it for known secret shapes. If a credential ends up in a tool response — an API echoing back its own token in an error message, for example — the leak detector catches it at the boundary. A separate redaction pass runs on agent reasoning that streams to your UI, so verbose-only observability events don't leak credentials to subscribers.
 
-The leak detector uses a combination of regex patterns and heuristic checks to identify potential secrets:
+The detector ships with around twenty regex patterns, grouped by category:
 
-| Pattern            | Example                           |
-|--------------------|-----------------------------------|
-| API keys           | `sk-...`, `ak-...`                |
-| Tokens             | `ghp_...`, `sess-...`             |
-| Private keys       | `-----BEGIN RSA PRIVATE KEY-----` |
-| Connection strings | `postgres://user:pass@...`        |
-| AWS credentials    | `AKIA...`                         |
-| GitHub tokens      | `ghp_...`                         |
+| Category | Patterns |
+|----------|----------|
+| LLM provider keys | OpenAI (`sk-...`), Anthropic API (`sk-ant-api...`), Anthropic OAuth (`sk-ant-oat##-...`), OpenRouter (`sk-or-v1-...`), Groq (`gsk_...`), near.ai session (`sess_...`) |
+| Cloud credentials | AWS access key (`AKIA...`), Google API key (`AIza...`) |
+| Developer platforms | GitHub token, classic (`ghp_...`, `gho_...`, `ghu_...`, `ghs_...`, `ghr_...`) and fine-grained PAT (`github_pat_...`) |
+| Payment / messaging | Stripe (`sk_live_...`, `sk_test_...`), Slack (`xoxb-...`, `xoxp-...`, …), Twilio API key (`SK<hex>`), SendGrid (`SG.<...>.<...>`), Telegram bot (`<digits>:AA<chars>`) |
+| Private keys | PEM (`-----BEGIN [RSA] PRIVATE KEY-----`), OpenSSH/EC/DSA (`-----BEGIN OPENSSH PRIVATE KEY-----`, …) |
+| Generic structures | `Bearer <token>` in text, `Authorization:` headers, 64-character high-entropy hex blobs |
 
-When a pattern matches, IronClaw blocks the response, redacts the matched span, or logs a warning depending on severity. The scan runs on tool output before it enters the model's context — see [Secrets & Sandboxing](/security/secrets-and-sandboxing#the-leak-detector) for the full action breakdown and where this sits in the tool-execution path.
+When a pattern matches, IronClaw blocks the response, redacts the matched span, or logs a warning depending on the pattern's configured severity. See [Secrets & Sandboxing](/security/secrets-and-sandboxing#the-leak-detector) for the full action breakdown and where this scan sits in the tool-execution path.
 
 ---
 
@@ -119,13 +118,16 @@ Both layers run *before* the command reaches the sandbox. A command can be block
 
 ---
 
-## Credential Management
+## Tool Capability Declarations
 
-Tools cannot read secrets directly. They declare which credentials they need and which hosts those credentials apply to; the host process matches outbound requests against those declarations and injects the credential at the host boundary, before the request leaves IronClaw. The WASM module's address space never holds the plaintext value.
+When you install a tool, you're approving a `capabilities.json` file that declares exactly what the tool is allowed to reach. The host enforces these declarations at runtime — a tool can't make HTTP requests to hosts it didn't declare, use credentials it didn't list, or read workspace paths outside its declared prefixes. Tools never read secrets directly; the host matches outbound requests against the declarations and injects the credential at the host boundary, before the request leaves IronClaw.
 
 ```json
 {
   "http": {
+    "allowlist": [
+      { "host": "gmail.googleapis.com", "methods": ["GET", "POST"] }
+    ],
     "credentials": {
       "google_oauth_token": {
         "secret_name": "google_oauth_token",
@@ -136,28 +138,22 @@ Tools cannot read secrets directly. They declare which credentials they need and
   },
   "secrets": {
     "allowed_names": ["google_oauth_token"]
+  },
+  "workspace": {
+    "allowed_prefixes": ["email/"]
   }
 }
 ```
+
+Three things this file controls:
+
+- **`http.allowlist`** — every outbound HTTP destination. Anything not listed is rejected before the connection opens.
+- **`http.credentials` + `secrets.allowed_names`** — which secrets the host injects into requests, and which the tool is permitted to use at all. The tool itself never sees the plaintext value.
+- **`workspace.allowed_prefixes`** — which workspace path prefixes the tool can read via `workspace_read`.
+
+For the full schema and per-field reference, see [Sandboxed Tools](/capabilities/sandboxed-tools).
 
 <Card title="Deep dive: how credentials are injected at runtime" href="/security/secrets-and-sandboxing" icon="arrow-right">
   Step-by-step walkthrough of the injection flow, why the WASM sandbox makes the "tool never sees the credential" guarantee enforceable, and what this model doesn't defend against.
 </Card>
-
----
-
-### Limited Network Access
-
-Tools must be explicit about which external services they can contact. This is configured in the `capabilities` section of your agent config:
-
-```json
-{
-  "network": {
-    "allowed_hosts": ["api.example.com"]
-  },
-  "workspace": {
-    "allowed_prefixes": ["telegram/"]
-  }
-}
-```
 
