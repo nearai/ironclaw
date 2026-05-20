@@ -1072,7 +1072,10 @@ mod tests {
 
     use super::*;
     use ironclaw_capabilities::CapabilityInvocationError;
-    use ironclaw_host_api::{CapabilityId, DispatchFailureKind, RuntimeDispatchErrorKind};
+    use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
+    use ironclaw_host_api::{
+        CapabilityId, DispatchFailureKind, RuntimeDispatchErrorKind, VirtualPath,
+    };
 
     fn cap() -> CapabilityId {
         CapabilityId::new("test.cap").unwrap()
@@ -1294,7 +1297,11 @@ mod tests {
             other => panic!("expected Unavailable, got {other:?}"),
         }
 
-        let error = ProcessError::Filesystem("connection refused at /tmp/processes.db".to_string());
+        let error = ProcessError::Filesystem(FilesystemError::Backend {
+            path: VirtualPath::new("/users/user1/processes.db").unwrap(),
+            operation: FilesystemOperation::ReadFile,
+            reason: "connection refused at /tmp/processes.db".to_string(),
+        });
         let host_error = unavailable_from_process_error(error);
         match host_error {
             HostRuntimeError::Unavailable { reason } => {

@@ -11,10 +11,14 @@ use ironclaw_host_runtime::{
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
 use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
+use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_turns::InMemoryRunProfileResolver;
-use ironclaw_turns::{DefaultTurnCoordinator, InMemoryTurnStateStore};
+use ironclaw_turns::{
+    DefaultTurnCoordinator, InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore,
+    InMemoryTurnStateStore,
+};
 
 use crate::input::RebornStorageInput;
 use crate::{
@@ -26,6 +30,14 @@ pub struct RebornServices {
     pub host_runtime: Option<Arc<dyn ironclaw_host_runtime::HostRuntime>>,
     pub turn_coordinator: Option<Arc<dyn ironclaw_turns::TurnCoordinator>>,
     pub readiness: RebornReadiness,
+    pub(crate) local_runtime: Option<Arc<RebornLocalRuntimeServices>>,
+}
+
+pub(crate) struct RebornLocalRuntimeServices {
+    pub(crate) turn_state: Arc<InMemoryTurnStateStore>,
+    pub(crate) checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
+    pub(crate) loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
+    pub(crate) thread_service: Arc<InMemorySessionThreadService>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -35,6 +47,7 @@ impl std::fmt::Debug for RebornServices {
             .field("host_runtime", &self.host_runtime.is_some())
             .field("turn_coordinator", &self.turn_coordinator.is_some())
             .field("readiness", &self.readiness)
+            .field("local_runtime", &self.local_runtime.is_some())
             .finish()
     }
 }
@@ -45,6 +58,7 @@ impl RebornServices {
             host_runtime: None,
             turn_coordinator: None,
             readiness: RebornReadiness::disabled(),
+            local_runtime: None,
         }
     }
 }
@@ -83,7 +97,11 @@ fn production_config(
 }
 
 async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, RebornBuildError> {
-    let RebornStorageInput::LocalDev { root } = input.storage else {
+    let RebornStorageInput::LocalDev {
+        root,
+        workspace_root,
+    } = input.storage
+    else {
         return Err(RebornBuildError::InvalidConfig {
             reason: "local-dev profile requires local-dev storage input".to_string(),
         });
@@ -91,20 +109,38 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     std::fs::create_dir_all(&root).map_err(|_| RebornBuildError::InvalidConfig {
         reason: "local-dev storage root could not be initialized".to_string(),
     })?;
+    let workspace_root = workspace_root.unwrap_or_else(|| root.join("workspace"));
+    std::fs::create_dir_all(&workspace_root).map_err(|_| RebornBuildError::InvalidConfig {
+        reason: "local-dev workspace root could not be initialized".to_string(),
+    })?;
     let mut filesystem = LocalFilesystem::new();
     let projects_root = ironclaw_host_api::VirtualPath::new("/projects").map_err(|error| {
         RebornBuildError::InvalidConfig {
             reason: error.to_string(),
         }
     })?;
+    let workspace_virtual_root = ironclaw_host_api::VirtualPath::new("/projects/workspace")
+        .map_err(|error| RebornBuildError::InvalidConfig {
+            reason: error.to_string(),
+        })?;
     filesystem.mount_local(
         projects_root,
         ironclaw_host_api::HostPath::from_path_buf(root),
+    )?;
+    filesystem.mount_local(
+        workspace_virtual_root,
+        ironclaw_host_api::HostPath::from_path_buf(workspace_root),
     )?;
 
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let turn_state = Arc::new(InMemoryTurnStateStore::default());
+    let local_runtime = Arc::new(RebornLocalRuntimeServices {
+        turn_state: Arc::clone(&turn_state),
+        checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
+        loop_checkpoint_store: Arc::new(InMemoryLoopCheckpointStore::default()),
+        thread_service: Arc::new(InMemorySessionThreadService::default()),
+    });
 
     let services = HostRuntimeServices::new(
         Arc::new(local_dev_extension_registry()?),
@@ -129,6 +165,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         host_runtime: Some(host_runtime),
         turn_coordinator: Some(turn_coordinator),
         readiness: readiness_for(input.profile, true, true),
+        local_runtime: Some(local_runtime),
     })
 }
 
@@ -349,6 +386,7 @@ async fn build_libsql_production(
         host_runtime: Some(host_runtime),
         turn_coordinator: Some(turn_coordinator),
         readiness: readiness_for(profile, true, true),
+        local_runtime: None,
     })
 }
 
@@ -411,6 +449,7 @@ async fn build_postgres_production(
         host_runtime: Some(host_runtime),
         turn_coordinator: Some(turn_coordinator),
         readiness: readiness_for(profile, true, true),
+        local_runtime: None,
     })
 }
 
@@ -432,5 +471,36 @@ fn readiness_for(
             host_runtime,
             turn_coordinator,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn local_dev_services_include_repl_runtime_substrate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let services = build_reborn_services(RebornBuildInput::local_dev(
+            "local-dev-substrate-owner",
+            dir.path().join("local-dev"),
+        ))
+        .await
+        .expect("local-dev services build");
+
+        assert!(services.host_runtime.is_some());
+        assert!(services.turn_coordinator.is_some());
+        assert!(services.local_runtime.is_some());
+        assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
+    }
+
+    #[test]
+    fn disabled_services_do_not_include_repl_runtime_substrate() {
+        let services = RebornServices::disabled();
+
+        assert!(services.host_runtime.is_none());
+        assert!(services.turn_coordinator.is_none());
+        assert!(services.local_runtime.is_none());
+        assert_eq!(services.readiness.state, RebornReadinessState::Disabled);
     }
 }

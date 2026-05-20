@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::{
     LoopDiagnosticRef, LoopGateRef, LoopMessageRef, LoopResultRef, RedactedCheckpointPayload,
-    RunProfileVersion, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
+    RunProfileVersion, TurnActor, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
 };
 
 use super::{
@@ -476,6 +476,8 @@ fn token_contains_sensitive_marker(token: &str, marker: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopRunContext {
     pub scope: TurnScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<TurnActor>,
     pub thread_id: ThreadId,
     pub turn_id: TurnId,
     pub run_id: TurnRunId,
@@ -502,6 +504,7 @@ impl LoopRunContext {
         let checkpoint_schema_version = resolved_run_profile.checkpoint_schema_version;
         Self {
             scope,
+            actor: None,
             thread_id,
             turn_id,
             run_id,
@@ -512,6 +515,15 @@ impl LoopRunContext {
             checkpoint_schema_id,
             checkpoint_schema_version,
         }
+    }
+
+    pub fn with_actor(mut self, actor: TurnActor) -> Self {
+        self.actor = Some(actor);
+        self
+    }
+
+    pub fn actor(&self) -> Option<&TurnActor> {
+        self.actor.as_ref()
     }
 
     pub fn with_resolved_model_route(mut self, snapshot: LoopModelRouteSnapshot) -> Self {

@@ -6297,6 +6297,7 @@ impl HostFixture {
         let run_id = TurnRunId::new();
         let state = ironclaw_turns::TurnRunState {
             scope: turn_scope.clone(),
+            actor: Some(TurnActor::new(user_id.clone())),
             turn_id,
             run_id,
             status: TurnStatus::Running,

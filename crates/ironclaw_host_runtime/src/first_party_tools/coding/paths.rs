@@ -187,6 +187,8 @@ pub(super) fn is_workspace_path(path: &str) -> bool {
     let scoped = scoped_path_input(path);
     let normalized = scoped.trim_start_matches('/');
     let relative = normalized.strip_prefix("workspace/").unwrap_or(normalized);
+    // This intentionally protects only root workspace memory files. Project
+    // docs such as README.md remain writable through the scoped filesystem.
     (!relative.contains('/') && WORKSPACE_FILES.contains(&relative))
         || relative.starts_with("daily/")
         || relative.starts_with("context/")

@@ -37,11 +37,28 @@ impl RebornTestProductAdapter {
         thread_id: &str,
         text: &str,
     ) -> Result<Vec<u8>, ProductAdapterError> {
+        Self::text_payload_with_trigger(
+            event_id,
+            user_id,
+            thread_id,
+            text,
+            ProductTriggerReason::DirectChat,
+        )
+    }
+
+    pub fn text_payload_with_trigger(
+        event_id: &str,
+        user_id: &str,
+        thread_id: &str,
+        text: &str,
+        trigger: ProductTriggerReason,
+    ) -> Result<Vec<u8>, ProductAdapterError> {
         serde_json::to_vec(&RebornTestInboundPayload {
             event_id,
             user_id,
             thread_id,
             text,
+            trigger,
         })
         .map_err(|error| ProductAdapterError::MalformedInboundPayload {
             reason: ironclaw_product_adapters::RedactedString::new(error.to_string()),
@@ -101,7 +118,7 @@ impl ProductAdapter for RebornTestProductAdapter {
             ProductInboundPayload::UserMessage(UserMessagePayload::new(
                 payload.text,
                 Vec::new(),
-                ProductTriggerReason::DirectChat,
+                payload.trigger,
             )?),
         )
     }
@@ -148,8 +165,27 @@ impl RebornTestIngress {
         thread_id: &str,
         text: &str,
     ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
+        self.verified_text_envelope_with_trigger(
+            event_id,
+            user_id,
+            thread_id,
+            text,
+            ProductTriggerReason::DirectChat,
+        )
+    }
+
+    pub fn verified_text_envelope_with_trigger(
+        &self,
+        event_id: &str,
+        user_id: &str,
+        thread_id: &str,
+        text: &str,
+        trigger: ProductTriggerReason,
+    ) -> Result<ProductInboundEnvelope, ProductAdapterError> {
         let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, user_id);
-        let raw = RebornTestProductAdapter::text_payload(event_id, user_id, thread_id, text)?;
+        let raw = RebornTestProductAdapter::text_payload_with_trigger(
+            event_id, user_id, thread_id, text, trigger,
+        )?;
         let parsed = self.adapter.parse_inbound(&raw, &evidence)?;
         let context = TrustedInboundContext::from_verified_evidence(
             self.adapter.adapter_id().clone(),
@@ -175,6 +211,7 @@ struct RebornTestInboundPayload<'a> {
     user_id: &'a str,
     thread_id: &'a str,
     text: &'a str,
+    trigger: ProductTriggerReason,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,4 +220,5 @@ struct OwnedRebornTestInboundPayload {
     user_id: String,
     thread_id: String,
     text: String,
+    trigger: ProductTriggerReason,
 }

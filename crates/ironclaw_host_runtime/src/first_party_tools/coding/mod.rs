@@ -1,21 +1,19 @@
 //! First-party coding capability handlers.
 //!
-//! Keep each capability in its own module. Shared path/text/input/state helpers
-//! preserve the Reborn host contract: capabilities receive scoped paths and use
-//! `RootFilesystem` only; local kernel access stays inside filesystem backends.
+//! Keep v1-compatible coding families in narrow modules. Shared
+//! path/text/input/state helpers preserve the Reborn host contract:
+//! capabilities receive scoped paths and use `RootFilesystem` only; local
+//! kernel access stays inside filesystem backends.
 
-mod apply_patch;
 mod config;
-mod glob;
-mod grep;
+mod file;
+mod glob_tool;
+mod grep_tool;
 mod inputs;
-mod list_dir;
 mod paths;
-mod read_file;
 mod state;
 mod text;
 mod types;
-mod write_file;
 
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{EffectKind, PermissionMode, RuntimeDispatchErrorKind};
@@ -96,14 +94,12 @@ pub(super) async fn dispatch(
     edit_locks: &SharedCodingEditLocks,
 ) -> Result<Value, FirstPartyCapabilityError> {
     match request.capability_id.as_str() {
-        READ_FILE_CAPABILITY_ID => read_file::read_file(request, read_state).await,
-        WRITE_FILE_CAPABILITY_ID => write_file::write_file(request, read_state, edit_locks).await,
-        LIST_DIR_CAPABILITY_ID => list_dir::list_dir(request).await,
-        GLOB_CAPABILITY_ID => glob::glob(request).await,
-        GREP_CAPABILITY_ID => grep::grep(request).await,
-        APPLY_PATCH_CAPABILITY_ID => {
-            apply_patch::apply_patch(request, read_state, edit_locks).await
-        }
+        READ_FILE_CAPABILITY_ID => file::read_file(request, read_state).await,
+        WRITE_FILE_CAPABILITY_ID => file::write_file(request, read_state, edit_locks).await,
+        LIST_DIR_CAPABILITY_ID => file::list_dir(request).await,
+        GLOB_CAPABILITY_ID => glob_tool::glob(request).await,
+        GREP_CAPABILITY_ID => grep_tool::grep(request).await,
+        APPLY_PATCH_CAPABILITY_ID => file::apply_patch(request, read_state, edit_locks).await,
         _ => Err(FirstPartyCapabilityError::new(
             RuntimeDispatchErrorKind::UndeclaredCapability,
         )),

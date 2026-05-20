@@ -1078,8 +1078,21 @@ async fn builtin_coding_blocks_relative_workspace_protected_paths() {
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
 
+    let root_readme_write = invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "./README.md", "content": "changed\n"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(root_readme_write["success"], json!(true));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("README.md")).unwrap(),
+        "changed\n"
+    );
+
     for (tool_path, host_path) in [
-        ("./README.md", "README.md"),
         ("./daily/note.md", "daily/note.md"),
         ("./context/session.md", "context/session.md"),
     ] {

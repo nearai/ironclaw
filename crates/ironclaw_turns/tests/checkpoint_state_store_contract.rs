@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_turns::{
     AcceptedMessageRef, CheckpointSchemaId, CheckpointStateRecord, CheckpointStateStore,
     EventCursor, GateRef, GetCheckpointStateRequest, GetLoopCheckpointRequest,
@@ -8,7 +8,7 @@ use ironclaw_turns::{
     InMemoryTurnStateStoreLimits, LoopCheckpointStateRef, LoopCheckpointStore,
     MAX_CHECKPOINT_STATE_PAYLOAD_BYTES, PutCheckpointStateRequest, PutLoopCheckpointRequest,
     RedactedCheckpointPayload, ReplyTargetBindingRef, RunProfileId, RunProfileVersion,
-    SourceBindingRef, TurnCheckpointId, TurnCheckpointRecord, TurnEventKind, TurnId,
+    SourceBindingRef, TurnActor, TurnCheckpointId, TurnCheckpointRecord, TurnEventKind, TurnId,
     TurnLifecycleEvent, TurnPersistenceSnapshot, TurnRunId, TurnRunState, TurnScope, TurnStatus,
     TurnTimestamp, run_profile::LoopCheckpointKind,
 };
@@ -410,6 +410,47 @@ fn redacted_checkpoint_payload_is_not_serializable() {
 }
 
 #[test]
+fn turn_run_state_actor_is_serde_backward_compatible() {
+    let actor = TurnActor::new(UserId::new("user-run-state-serde").unwrap());
+    let state = TurnRunState {
+        scope: turn_scope("thread-run-state-serde"),
+        actor: None,
+        turn_id: TurnId::new(),
+        run_id: TurnRunId::new(),
+        status: TurnStatus::Running,
+        accepted_message_ref: AcceptedMessageRef::new("accepted-run-state-serde").unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-run-state-serde").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-run-state-serde").unwrap(),
+        resolved_run_profile_id: RunProfileId::default_profile(),
+        resolved_run_profile_version: RunProfileVersion::new(1),
+        resolved_model_route: None,
+        received_at: fixed_time(),
+        checkpoint_id: None,
+        gate_ref: None,
+        failure: None,
+        event_cursor: EventCursor(1),
+    };
+
+    let legacy_wire = serde_json::to_value(&state).unwrap();
+    assert!(
+        !legacy_wire.as_object().unwrap().contains_key("actor"),
+        "actor: None must stay omitted for legacy wire compatibility"
+    );
+    let decoded: TurnRunState = serde_json::from_value(legacy_wire).unwrap();
+    assert!(decoded.actor.is_none());
+
+    let decoded_with_actor: TurnRunState = serde_json::from_value(
+        serde_json::to_value(TurnRunState {
+            actor: Some(actor.clone()),
+            ..state
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(decoded_with_actor.actor, Some(actor));
+}
+
+#[test]
 fn turn_checkpoint_public_status_does_not_expose_checkpoint_payload() {
     let payload = b"RAW_CHECKPOINT_PAYLOAD sk-secret /host/path tool_input".to_vec();
     let payload = RedactedCheckpointPayload::new(payload).unwrap();
@@ -419,6 +460,9 @@ fn turn_checkpoint_public_status_does_not_expose_checkpoint_payload() {
 
     let state = TurnRunState {
         scope: scope.clone(),
+        actor: Some(TurnActor::new(
+            UserId::new("user-checkpoint-public").unwrap(),
+        )),
         turn_id: TurnId::new(),
         run_id,
         status: TurnStatus::BlockedApproval,

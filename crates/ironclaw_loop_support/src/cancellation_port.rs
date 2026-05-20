@@ -469,14 +469,14 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::Utc;
-    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
     use ironclaw_turns::run_profile::{LoopCancelReasonKind, LoopCancellationPort};
     use ironclaw_turns::{
         AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
         ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
         RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
-        SubmitTurnResponse, TurnAdmissionPolicy, TurnError, TurnId, TurnRunId, TurnRunState,
-        TurnRunWake, TurnRunWakeNotifier, TurnScope, TurnStateStore, TurnStatus,
+        SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnError, TurnId, TurnRunId,
+        TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnScope, TurnStateStore, TurnStatus,
         run_profile::AgentLoopHostError,
     };
 
@@ -551,6 +551,7 @@ mod tests {
         let thread_id = ThreadId::new("thread-cancel-factory").unwrap();
         TurnRunState {
             scope: TurnScope::new(tenant_id, Some(agent_id), Some(project_id), thread_id),
+            actor: Some(TurnActor::new(UserId::new("user-cancel-factory").unwrap())),
             turn_id: TurnId::new(),
             run_id: TurnRunId::new(),
             status,

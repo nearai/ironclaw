@@ -10,8 +10,8 @@ use std::{
 use async_trait::async_trait;
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_filesystem::{
-    DirEntry, FileStat, FilesystemError, FilesystemOperation, InMemoryBackend, LocalFilesystem,
-    RootFilesystem, ScopedFilesystem,
+    CasExpectation, DirEntry, Entry, FileStat, FilesystemError, FilesystemOperation,
+    InMemoryBackend, LocalFilesystem, RecordVersion, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::*;
 use ironclaw_processes::*;
@@ -1409,7 +1409,7 @@ async fn background_process_manager_stores_filesystem_output_ref() {
 }
 
 #[tokio::test]
-async fn filesystem_process_store_propagates_backend_errors_that_mention_not_found() {
+async fn filesystem_process_store_preserves_typed_backend_errors_that_mention_not_found() {
     let fs = scoped_processes_filesystem(
         Arc::new(BackendErrorFilesystem),
         &default_mount_target_string(),
@@ -1422,9 +1422,62 @@ async fn filesystem_process_store_propagates_backend_errors_that_mention_not_fou
     let err = store.get(&scope, process_id).await.unwrap_err();
 
     assert!(matches!(
-        err,
-        ProcessError::Filesystem(reason) if reason.contains("database index not found")
+        &err,
+        ProcessError::Filesystem(FilesystemError::Backend { reason, .. })
+            if reason.contains("database index not found")
     ));
+    assert!(!err.is_filesystem_not_found());
+}
+
+#[tokio::test]
+async fn filesystem_process_result_store_preserves_typed_backend_write_errors() {
+    let fs = scoped_processes_filesystem(
+        Arc::new(BackendErrorFilesystem),
+        &default_mount_target_string(),
+    );
+    let store = FilesystemProcessResultStore::new(fs);
+    let invocation_id = InvocationId::new();
+    let process_id = ProcessId::new();
+    let scope = sample_scope(invocation_id, "tenant1", "user1");
+
+    let err = store
+        .complete(&scope, process_id, serde_json::json!({"ok": true}))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        &err,
+        ProcessError::Filesystem(FilesystemError::Backend { operation, reason, .. })
+            if *operation == FilesystemOperation::WriteFile
+                && reason.contains("database index not found")
+    ));
+    assert!(!err.is_filesystem_not_found());
+}
+
+#[test]
+fn process_error_filesystem_not_found_predicate_distinguishes_backend_errors() {
+    let path = VirtualPath::new("/users/user1/processes/missing.json").unwrap();
+    let not_found = ProcessError::from(FilesystemError::NotFound {
+        path: path.clone(),
+        operation: FilesystemOperation::ReadFile,
+    });
+    let backend = ProcessError::from(FilesystemError::Backend {
+        path,
+        operation: FilesystemOperation::ReadFile,
+        reason: "database index not found while backend is unavailable".to_string(),
+    });
+
+    assert!(not_found.is_filesystem_not_found());
+    assert!(!backend.is_filesystem_not_found());
+
+    let wrapped_not_found = ProcessError::ResourceCleanupFailed {
+        original: Box::new(not_found),
+        cleanup: ResourceError::UnknownReservation {
+            id: ResourceReservationId::new(),
+        },
+    };
+
+    assert!(wrapped_not_found.is_filesystem_not_found());
 }
 
 #[tokio::test]
@@ -2064,6 +2117,15 @@ struct BackendErrorFilesystem;
 
 #[async_trait]
 impl RootFilesystem for BackendErrorFilesystem {
+    async fn put(
+        &self,
+        path: &VirtualPath,
+        _entry: Entry,
+        _cas: CasExpectation,
+    ) -> Result<RecordVersion, FilesystemError> {
+        Err(backend_error(path, FilesystemOperation::WriteFile))
+    }
+
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError> {
         Err(backend_error(path, FilesystemOperation::ReadFile))
     }

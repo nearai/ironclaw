@@ -16,6 +16,7 @@ use ironclaw_authorization::{
     GrantAuthorizer, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CancelReason, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
@@ -24,8 +25,8 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest,
 };
 use ironclaw_processes::{
-    InMemoryProcessResultStore, InMemoryProcessStore, ProcessCancellationRegistry,
-    ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
+    InMemoryProcessResultStore, InMemoryProcessStore, ProcessCancellationRegistry, ProcessError,
+    ProcessRecord, ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{
     ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
@@ -449,6 +450,43 @@ async fn default_runtime_status_propagates_unavailable_on_run_state_error() {
                 "sanitized reason must not leak filesystem paths, got {reason:?}"
             );
             assert_eq!(reason, "run-state filesystem unavailable");
+        }
+        other => panic!("expected HostRuntimeError::Unavailable, got {:?}", other),
+    }
+}
+
+#[tokio::test]
+async fn default_runtime_status_redacts_process_filesystem_errors() {
+    let registry = Arc::new(ExtensionRegistry::new());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let process_store: Arc<dyn ProcessStore> = Arc::new(FailingRecordsProcessStore {
+        inner: Arc::new(InMemoryProcessStore::new()),
+    });
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_process_store(process_store);
+
+    let context = execution_context_with_dispatch_grant();
+    let error = runtime
+        .runtime_status(RuntimeStatusRequest::new(
+            context.resource_scope,
+            context.correlation_id,
+        ))
+        .await
+        .expect_err("process records_for_scope outage must surface as host runtime error");
+
+    match error {
+        HostRuntimeError::Unavailable { reason } => {
+            assert!(
+                !reason.contains("/tmp"),
+                "sanitized reason must not leak filesystem paths, got {reason:?}"
+            );
+            assert_eq!(reason, "process filesystem unavailable");
         }
         other => panic!("expected HostRuntimeError::Unavailable, got {:?}", other),
     }
@@ -978,6 +1016,65 @@ impl RunStateStore for FailingRecordsRunStateStore {
         Err(RunStateError::Filesystem(
             "simulated read failure: /private/users/secret/runstate.db".to_string(),
         ))
+    }
+}
+
+/// Wraps an [`InMemoryProcessStore`] but fails every `records_for_scope` call
+/// so runtime-status exercises process-store error sanitization through the
+/// public host-runtime path.
+struct FailingRecordsProcessStore {
+    inner: Arc<InMemoryProcessStore>,
+}
+
+#[async_trait]
+impl ProcessStore for FailingRecordsProcessStore {
+    async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
+        self.inner.start(start).await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        self.inner.complete(scope, process_id).await
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        error_kind: String,
+    ) -> Result<ProcessRecord, ProcessError> {
+        self.inner.fail(scope, process_id, error_kind).await
+    }
+
+    async fn kill(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        self.inner.kill(scope, process_id).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<ProcessRecord>, ProcessError> {
+        self.inner.get(scope, process_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<ProcessRecord>, ProcessError> {
+        Err(FilesystemError::Backend {
+            path: VirtualPath::new("/users/user1/processes").unwrap(),
+            operation: FilesystemOperation::ListDir,
+            reason: "simulated read failure: /tmp/processes.db connection refused".to_string(),
+        }
+        .into())
     }
 }
 

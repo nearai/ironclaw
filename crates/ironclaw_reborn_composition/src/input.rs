@@ -21,6 +21,7 @@ pub(crate) enum RebornStorageInput {
     Disabled,
     LocalDev {
         root: PathBuf,
+        workspace_root: Option<PathBuf>,
     },
     #[cfg(feature = "libsql")]
     Libsql {
@@ -61,8 +62,22 @@ impl RebornBuildInput {
         Self::new(
             RebornCompositionProfile::LocalDev,
             owner_id,
-            RebornStorageInput::LocalDev { root },
+            RebornStorageInput::LocalDev {
+                root,
+                workspace_root: None,
+            },
         )
+    }
+
+    pub fn with_local_dev_workspace_root(mut self, workspace_root: PathBuf) -> Self {
+        if let RebornStorageInput::LocalDev {
+            workspace_root: root,
+            ..
+        } = &mut self.storage
+        {
+            *root = Some(workspace_root);
+        }
+        self
     }
 
     #[cfg(feature = "libsql")]

@@ -21,7 +21,8 @@
 
 - Add a new runtime service module when the service has its own authority,
   readiness, or resource accounting boundary.
-- Add a first-party tool file per capability.
+- Add a first-party tool file per capability, except for tightly-coupled
+  v1-compatible coding-tool families that share one legacy surface contract.
 - Keep readiness checks near the runtime service they validate; driver/product
   readiness belongs in `ironclaw_reborn`.
 

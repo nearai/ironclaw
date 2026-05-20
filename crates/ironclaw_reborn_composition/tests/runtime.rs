@@ -8,6 +8,22 @@ use ironclaw_turns::TurnStatus;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
+async fn runtime_rejects_disabled_profile_before_local_substrate_lookup() {
+    let input =
+        RebornRuntimeInput::from_services(RebornBuildInput::disabled("runtime-disabled-owner"));
+
+    let error = match build_reborn_runtime(input).await {
+        Ok(_) => panic!("disabled profile is not a runnable REPL runtime"),
+        Err(error) => error,
+    };
+
+    let RebornRuntimeError::InvalidArgument { reason } = error else {
+        panic!("expected invalid argument, got {error:?}");
+    };
+    assert!(reason.contains("profile=disabled is not yet wired end-to-end"));
+}
+
+#[tokio::test]
 async fn stub_gateway_send_cancels_recovery_required_and_releases_conversation() {
     let root = tempfile::tempdir().unwrap();
     let input = RebornRuntimeInput::from_services(RebornBuildInput::local_dev(

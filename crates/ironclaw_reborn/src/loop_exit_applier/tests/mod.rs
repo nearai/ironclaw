@@ -1077,6 +1077,7 @@ fn claimed_run() -> ClaimedTurnRun {
     ClaimedTurnRun {
         state: TurnRunState {
             scope,
+            actor: None,
             turn_id: TurnId::new(),
             run_id: TurnRunId::new(),
             status: TurnStatus::Running,
@@ -1331,6 +1332,7 @@ fn state_for_mapping(
             None,
             ThreadId::new("thread").expect("valid"),
         ),
+        actor: None,
         turn_id: TurnId::new(),
         run_id,
         status,

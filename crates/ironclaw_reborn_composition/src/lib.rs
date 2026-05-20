@@ -28,6 +28,7 @@ mod profile;
 mod readiness;
 mod runtime;
 mod runtime_input;
+mod webui;
 
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
