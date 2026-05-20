@@ -1266,8 +1266,10 @@ impl ProjectionUpdateSource for CountingUpdateSource {
     async fn subscribe(
         &self,
         request: ProjectionLiveUpdateRequest,
-    ) -> Result<tokio::sync::broadcast::Receiver<ProductProjectionEnvelope>, ProjectionStreamError>
-    {
+    ) -> Result<
+        tokio::sync::broadcast::Receiver<Arc<ProductProjectionEnvelope>>,
+        ProjectionStreamError,
+    > {
         *self.calls.lock().unwrap() += 1;
         Ok(InMemoryProjectionUpdateSource::new(1)
             .subscribe(request)
@@ -1282,8 +1284,10 @@ impl ProjectionUpdateSource for FailingUpdateSource {
     async fn subscribe(
         &self,
         _request: ProjectionLiveUpdateRequest,
-    ) -> Result<tokio::sync::broadcast::Receiver<ProductProjectionEnvelope>, ProjectionStreamError>
-    {
+    ) -> Result<
+        tokio::sync::broadcast::Receiver<Arc<ProductProjectionEnvelope>>,
+        ProjectionStreamError,
+    > {
         Err(ProjectionStreamError::Source)
     }
 }

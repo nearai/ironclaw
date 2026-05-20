@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use ironclaw_event_projections::ProjectionScope;
 use ironclaw_turns::TurnActor;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use crate::{
@@ -14,7 +15,7 @@ pub trait ProjectionUpdateSource: Send + Sync {
     async fn subscribe(
         &self,
         request: ProjectionLiveUpdateRequest,
-    ) -> Result<broadcast::Receiver<ProductProjectionEnvelope>, ProjectionStreamError>;
+    ) -> Result<broadcast::Receiver<Arc<ProductProjectionEnvelope>>, ProjectionStreamError>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,7 +27,7 @@ pub struct ProjectionLiveUpdateRequest {
 }
 
 pub struct InMemoryProjectionUpdateSource {
-    sender: broadcast::Sender<ProductProjectionEnvelope>,
+    sender: broadcast::Sender<Arc<ProductProjectionEnvelope>>,
 }
 
 impl InMemoryProjectionUpdateSource {
@@ -40,7 +41,7 @@ impl InMemoryProjectionUpdateSource {
         envelope: ProductProjectionEnvelope,
     ) -> Result<usize, ProjectionStreamError> {
         self.sender
-            .send(envelope)
+            .send(Arc::new(envelope))
             .map_err(|_| ProjectionStreamError::Source)
     }
 }
@@ -50,7 +51,7 @@ impl ProjectionUpdateSource for InMemoryProjectionUpdateSource {
     async fn subscribe(
         &self,
         _request: ProjectionLiveUpdateRequest,
-    ) -> Result<broadcast::Receiver<ProductProjectionEnvelope>, ProjectionStreamError> {
+    ) -> Result<broadcast::Receiver<Arc<ProductProjectionEnvelope>>, ProjectionStreamError> {
         Ok(self.sender.subscribe())
     }
 }

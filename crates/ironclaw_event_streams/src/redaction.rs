@@ -1,6 +1,6 @@
 use std::{
-    collections::HashSet,
-    sync::{Arc, Mutex},
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex, Weak},
 };
 
 use ironclaw_host_api::sha256_digest_token;
@@ -51,6 +51,8 @@ const MAX_VALIDATION_CACHE_ENTRIES: usize = 1024;
 #[derive(Clone, Default)]
 pub(crate) struct ProjectionValidationCache {
     allowed: Arc<Mutex<HashSet<ProjectionValidationCacheKey>>>,
+    live_allowed:
+        Arc<Mutex<HashMap<ProjectionValidationLiveCacheKey, Weak<ProductProjectionEnvelope>>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -60,6 +62,14 @@ struct ProjectionValidationCacheKey {
     cursor: u64,
     payload_len: usize,
     payload_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProjectionValidationLiveCacheKey {
+    variant: ProjectionEnvelopeKind,
+    scope: ProjectionScopeKey,
+    cursor: u64,
+    pointer: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -97,25 +107,76 @@ impl ProjectionValidationCache {
         allowed.insert(key);
         Ok(())
     }
+
+    pub(crate) fn validate_shared(
+        &self,
+        validator: &dyn ProjectionRedactionValidator,
+        envelope: &Arc<ProductProjectionEnvelope>,
+    ) -> Result<(), ProjectionStreamError> {
+        let key = validation_live_cache_key(envelope);
+        {
+            let mut live_allowed = self
+                .live_allowed
+                .lock()
+                .map_err(|_| ProjectionStreamError::Source)?;
+            if let Some(cached) = live_allowed.get(&key) {
+                if let Some(cached) = cached.upgrade()
+                    && Arc::ptr_eq(&cached, envelope)
+                {
+                    return Ok(());
+                }
+                live_allowed.remove(&key);
+            }
+        }
+
+        self.validate(validator, envelope.as_ref())?;
+
+        let mut live_allowed = self
+            .live_allowed
+            .lock()
+            .map_err(|_| ProjectionStreamError::Source)?;
+        if live_allowed.len() >= MAX_VALIDATION_CACHE_ENTRIES {
+            live_allowed.retain(|_, cached| cached.strong_count() > 0);
+            if live_allowed.len() >= MAX_VALIDATION_CACHE_ENTRIES {
+                live_allowed.clear();
+            }
+        }
+        live_allowed.insert(key, Arc::downgrade(envelope));
+        Ok(())
+    }
 }
 
 fn validation_cache_key(
     envelope: &ProductProjectionEnvelope,
 ) -> Result<ProjectionValidationCacheKey, ProjectionStreamError> {
-    let variant = match envelope {
-        ProductProjectionEnvelope::ThreadSnapshot(_) => ProjectionEnvelopeKind::ThreadSnapshot,
-        ProductProjectionEnvelope::ThreadUpdates(_) => ProjectionEnvelopeKind::ThreadUpdates,
-        ProductProjectionEnvelope::DeliveryStatus(_) => ProjectionEnvelopeKind::DeliveryStatus,
-        ProductProjectionEnvelope::Debug(_) => ProjectionEnvelopeKind::Debug,
-    };
     let payload = serde_json::to_vec(envelope).map_err(|_| ProjectionStreamError::Source)?;
     let payload_len = payload.len();
     let payload_digest = sha256_digest_token(&payload);
     Ok(ProjectionValidationCacheKey {
-        variant,
+        variant: envelope_kind(envelope),
         scope: projection_scope_key(envelope.scope()),
         cursor: envelope.cursor().runtime.as_u64(),
         payload_len,
         payload_digest,
     })
+}
+
+fn validation_live_cache_key(
+    envelope: &Arc<ProductProjectionEnvelope>,
+) -> ProjectionValidationLiveCacheKey {
+    ProjectionValidationLiveCacheKey {
+        variant: envelope_kind(envelope.as_ref()),
+        scope: projection_scope_key(envelope.scope()),
+        cursor: envelope.cursor().runtime.as_u64(),
+        pointer: Arc::as_ptr(envelope) as usize,
+    }
+}
+
+fn envelope_kind(envelope: &ProductProjectionEnvelope) -> ProjectionEnvelopeKind {
+    match envelope {
+        ProductProjectionEnvelope::ThreadSnapshot(_) => ProjectionEnvelopeKind::ThreadSnapshot,
+        ProductProjectionEnvelope::ThreadUpdates(_) => ProjectionEnvelopeKind::ThreadUpdates,
+        ProductProjectionEnvelope::DeliveryStatus(_) => ProjectionEnvelopeKind::DeliveryStatus,
+        ProductProjectionEnvelope::Debug(_) => ProjectionEnvelopeKind::Debug,
+    }
 }

@@ -321,7 +321,7 @@ async fn forward_subscription_items(
     sender: mpsc::Sender<ProjectionStreamItem>,
     terminal_sender: mpsc::Sender<ProjectionStreamItem>,
     initial_items: Vec<ProjectionStreamItem>,
-    mut live: broadcast::Receiver<ProductProjectionEnvelope>,
+    mut live: broadcast::Receiver<Arc<ProductProjectionEnvelope>>,
     context: SubscriptionForwardContext,
 ) {
     for item in initial_items {
@@ -362,7 +362,7 @@ async fn forward_subscription_items(
                 }
                 match context
                     .validation_cache
-                    .validate(context.redaction_validator.as_ref(), &envelope)
+                    .validate_shared(context.redaction_validator.as_ref(), &envelope)
                 {
                     Ok(()) => {}
                     Err(ProjectionStreamError::Redaction) => {
@@ -382,7 +382,7 @@ async fn forward_subscription_items(
                         return;
                     }
                 }
-                match sender.try_send(ProjectionStreamItem::Update(envelope)) {
+                match sender.try_send(ProjectionStreamItem::Update(envelope.as_ref().clone())) {
                     Ok(()) => {
                         last_delivered_cursor = envelope_cursor;
                     }
