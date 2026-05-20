@@ -31,6 +31,14 @@ use ironclaw_trust::{
 };
 use serde_json::{Value, json};
 
+fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
+        ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
+        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev,
+    ))
+    .unwrap()
+}
+
 #[tokio::test]
 async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_and_events() {
     let adapter = Arc::new(RecordingRuntimeAdapter::new(json!({"via":"host-runtime"})));
@@ -43,6 +51,7 @@ async fn default_host_runtime_invokes_through_runtime_dispatcher_with_resources_
         dispatcher,
         authorizer.clone(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
     .with_run_state(run_state.clone());
@@ -114,6 +123,7 @@ async fn default_host_runtime_fails_unsupported_obligations_before_runtime_dispa
         dispatcher,
         Arc::new(ObligatingAuthorizer),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone());
     let context = execution_context(CapabilitySet {

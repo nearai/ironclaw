@@ -24,8 +24,8 @@ use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
     MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
-    SurfaceKind, VisibleCapabilityAccess, VisibleCapabilityRequest, VisibleCapabilitySurface,
-    publish_hot_capability_catalog,
+    RuntimeFailureKind, SurfaceKind, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, publish_hot_capability_catalog,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -593,6 +593,7 @@ async fn hidden_capability_direct_invoke_still_fails_closed_through_authorizatio
         dispatcher.clone(),
         Arc::new(GrantAuthorizer),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_dev_runtime_policy(),
     )
     .with_trust_policy(Arc::new(trust_policy_for([(
         "echo",
@@ -669,6 +670,45 @@ async fn visible_surface_version_changes_with_schema_and_policy_changes() {
         .await
         .unwrap();
     assert_ne!(surface_a.version, narrowed.version);
+}
+
+#[tokio::test]
+async fn visible_surface_version_changes_with_runtime_policy_changes() {
+    let context = context_with_grants([(
+        capability_id("echo.say"),
+        vec![EffectKind::DispatchCapability],
+    )]);
+    let trust_policy = Arc::new(trust_policy_for([(
+        "echo",
+        "/system/extensions/echo/manifest.toml",
+        vec![EffectKind::DispatchCapability],
+    )]));
+    let runtime_a = runtime_with(
+        registry_from_manifests([(ECHO_MANIFEST, "/system/extensions/echo")]),
+        Arc::new(GrantAuthorizer),
+    )
+    .with_trust_policy(Arc::clone(&trust_policy));
+    let runtime_b = runtime_with(
+        registry_from_manifests([(ECHO_MANIFEST, "/system/extensions/echo")]),
+        Arc::new(GrantAuthorizer),
+    )
+    .with_trust_policy(trust_policy)
+    .with_runtime_policy(secret_denied_runtime_policy());
+
+    let surface_a = runtime_a
+        .visible_capabilities(visible_request(context.clone()))
+        .await
+        .unwrap();
+    let surface_b = runtime_b
+        .visible_capabilities(visible_request(context))
+        .await
+        .unwrap();
+
+    assert_eq!(visible_ids(&surface_a), visible_ids(&surface_b));
+    assert_ne!(
+        surface_a.version, surface_b.version,
+        "surface version must change when runtime policy changes even if visible descriptors do not"
+    );
 }
 
 #[tokio::test]
@@ -914,6 +954,236 @@ async fn visible_surface_requires_every_descriptor_effect_to_be_policy_allowed()
 }
 
 #[tokio::test]
+async fn visible_surface_hides_mcp_http_when_policy_denies_network_even_if_effect_underdeclared() {
+    let runtime = runtime_with(
+        registry_from_manifests([(MCP_UNDERDECLARED_NETWORK_MANIFEST, "/system/extensions/mcp")]),
+        Arc::new(GrantAuthorizer),
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "mcp",
+        "/system/extensions/mcp/manifest.toml",
+        vec![EffectKind::DispatchCapability],
+    )])))
+    .with_runtime_policy(network_denied_runtime_policy());
+
+    let context = context_with_grants([(
+        capability_id("mcp.search"),
+        vec![EffectKind::DispatchCapability],
+    )]);
+    let surface = runtime
+        .visible_capabilities(visible_request(context))
+        .await
+        .unwrap();
+
+    assert!(
+        surface.capabilities.is_empty(),
+        "NetworkMode::Deny must hide HTTP/SSE MCP even if the manifest omits the network effect"
+    );
+}
+
+#[tokio::test]
+async fn visible_surface_hides_script_when_policy_denies_processes_even_if_effect_underdeclared() {
+    let runtime = runtime_with(
+        registry_from_manifests([(
+            SCRIPT_UNDERDECLARED_PROCESS_MANIFEST,
+            "/system/extensions/scripts",
+        )]),
+        Arc::new(PanicAuthorizer),
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "scripts",
+        "/system/extensions/scripts/manifest.toml",
+        vec![EffectKind::DispatchCapability],
+    )])))
+    .with_runtime_policy(network_denied_runtime_policy());
+
+    let context = context_with_grants([(
+        capability_id("scripts.run"),
+        vec![EffectKind::DispatchCapability],
+    )]);
+    let surface = runtime
+        .visible_capabilities(request_with_provider_trust(
+            context,
+            vec![("scripts", vec![EffectKind::DispatchCapability])],
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        surface.capabilities.is_empty(),
+        "ProcessBackendKind::None must hide script tools even if the manifest omits process effects"
+    );
+}
+
+#[tokio::test]
+async fn visible_surface_hides_secret_when_policy_denies_secrets() {
+    let runtime = runtime_with(
+        registry_from_manifests([(SECRET_MANIFEST, "/system/extensions/secret-tool")]),
+        Arc::new(PanicAuthorizer),
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "secret-tool",
+        "/system/extensions/secret-tool/manifest.toml",
+        vec![EffectKind::UseSecret],
+    )])))
+    .with_runtime_policy(secret_denied_runtime_policy());
+
+    let surface = runtime
+        .visible_capabilities(request_with_provider_trust(
+            context_with_secret_grant(),
+            vec![("secret-tool", vec![EffectKind::UseSecret])],
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        surface.capabilities.is_empty(),
+        "SecretMode::Deny must hide tools that require secret access"
+    );
+}
+
+#[tokio::test]
+async fn runtime_policy_denied_extension_invoke_does_not_dispatch() {
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher_for_runtime: Arc<dyn CapabilityDispatcher> = dispatcher.clone();
+    let runtime = runtime_with_dispatcher(
+        registry_from_manifests([(ECHO_NETWORK_MANIFEST, "/system/extensions/echo")]),
+        Arc::new(GrantAuthorizer),
+        dispatcher_for_runtime,
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "echo",
+        "/system/extensions/echo/manifest.toml",
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    )])))
+    .with_runtime_policy(network_denied_runtime_policy());
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context_with_grants([(
+                capability_id("echo.say"),
+                vec![EffectKind::DispatchCapability, EffectKind::Network],
+            )]),
+            capability_id("echo.say"),
+            ResourceEstimate::default(),
+            json!({"message": "blocked before dispatch"}),
+            trust_decision_for(vec![EffectKind::DispatchCapability, EffectKind::Network]),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected runtime-policy failure, got {outcome:?}");
+    };
+    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert_eq!(failure.capability_id, capability_id("echo.say"));
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("NetworkMode::Deny")
+    );
+    assert!(
+        !dispatcher.has_request(),
+        "runtime-policy denial must happen before generic extension dispatch"
+    );
+}
+
+#[tokio::test]
+async fn runtime_policy_denied_secret_invoke_does_not_dispatch() {
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher_for_runtime: Arc<dyn CapabilityDispatcher> = dispatcher.clone();
+    let runtime = runtime_with_dispatcher(
+        registry_from_manifests([(SECRET_MANIFEST, "/system/extensions/secret-tool")]),
+        Arc::new(GrantAuthorizer),
+        dispatcher_for_runtime,
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "secret-tool",
+        "/system/extensions/secret-tool/manifest.toml",
+        vec![EffectKind::UseSecret],
+    )])))
+    .with_runtime_policy(secret_denied_runtime_policy());
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context_with_secret_grant(),
+            capability_id("secret-tool.read"),
+            ResourceEstimate::default(),
+            json!({}),
+            trust_decision_for(vec![EffectKind::UseSecret]),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected runtime-policy failure, got {outcome:?}");
+    };
+    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert_eq!(failure.capability_id, capability_id("secret-tool.read"));
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("SecretMode::Deny")
+    );
+    assert!(
+        !dispatcher.has_request(),
+        "runtime-policy secret denial must happen before generic extension dispatch"
+    );
+}
+
+#[tokio::test]
+async fn runtime_policy_denied_mcp_http_invoke_does_not_dispatch_when_effect_underdeclared() {
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher_for_runtime: Arc<dyn CapabilityDispatcher> = dispatcher.clone();
+    let runtime = runtime_with_dispatcher(
+        registry_from_manifests([(MCP_UNDERDECLARED_NETWORK_MANIFEST, "/system/extensions/mcp")]),
+        Arc::new(GrantAuthorizer),
+        dispatcher_for_runtime,
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "mcp",
+        "/system/extensions/mcp/manifest.toml",
+        vec![EffectKind::DispatchCapability],
+    )])))
+    .with_runtime_policy(network_denied_runtime_policy());
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context_with_grants([(
+                capability_id("mcp.search"),
+                vec![EffectKind::DispatchCapability],
+            )]),
+            capability_id("mcp.search"),
+            ResourceEstimate::default(),
+            json!({"query": "blocked before mcp dispatch"}),
+            trust_decision_for(vec![EffectKind::DispatchCapability]),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected runtime-policy failure, got {outcome:?}");
+    };
+    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert_eq!(failure.capability_id, capability_id("mcp.search"));
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("NetworkMode::Deny")
+    );
+    assert!(
+        !dispatcher.has_request(),
+        "runtime-policy denial must happen before MCP dispatch"
+    );
+}
+
+#[tokio::test]
 async fn visible_surface_rejects_invalid_execution_context() {
     let runtime = runtime_with(
         registry_from_manifests([(ECHO_MANIFEST, "/system/extensions/echo")]),
@@ -1016,6 +1286,48 @@ fn visible_ids(surface: &VisibleCapabilitySurface) -> Vec<CapabilityId> {
         .iter()
         .map(|capability| capability.descriptor.id.clone())
         .collect()
+}
+
+fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Deny,
+        secret_mode: SecretMode::BrokeredHandles,
+        approval_policy: ApprovalPolicy::AskAlways,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn secret_denied_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Deny,
+        secret_mode: SecretMode::Deny,
+        approval_policy: ApprovalPolicy::AskAlways,
+        audit_mode: AuditMode::LocalMinimal,
+    }
 }
 
 fn hot_catalog_fixture(
@@ -1139,11 +1451,24 @@ fn runtime_with(
     registry: ExtensionRegistry,
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
 ) -> DefaultHostRuntime {
+    runtime_with_dispatcher(
+        registry,
+        authorizer,
+        Arc::new(RecordingDispatcher::default()),
+    )
+}
+
+fn runtime_with_dispatcher(
+    registry: ExtensionRegistry,
+    authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
+    dispatcher: Arc<dyn CapabilityDispatcher>,
+) -> DefaultHostRuntime {
     DefaultHostRuntime::new(
         Arc::new(registry),
-        Arc::new(RecordingDispatcher::default()),
+        dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_dev_runtime_policy(),
     )
 }
 
@@ -1435,6 +1760,26 @@ default_permission = "allow"
 parameters_schema = {}
 "#;
 
+const MCP_UNDERDECLARED_NETWORK_MANIFEST: &str = r#"
+id = "mcp"
+name = "MCP Search"
+version = "0.1.0"
+description = "MCP integration extension"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://mcp.example.test/rpc"
+
+[[capabilities]]
+id = "mcp.search"
+description = "Search through MCP"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = {}
+"#;
+
 const ECHO_MANIFEST_WITH_SCHEMA: &str = r#"
 id = "echo"
 name = "Echo"
@@ -1547,6 +1892,27 @@ args = ["tests/"]
 id = "scripts.run"
 description = "Runs a script"
 effects = ["execute_code"]
+default_permission = "allow"
+parameters_schema = {}
+"#;
+
+const SCRIPT_UNDERDECLARED_PROCESS_MANIFEST: &str = r#"
+id = "scripts"
+name = "Scripts"
+version = "0.1.0"
+description = "Script runner"
+trust = "third_party"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "pytest"
+args = ["tests/"]
+
+[[capabilities]]
+id = "scripts.run"
+description = "Runs a script"
+effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = {}
 "#;

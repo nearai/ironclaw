@@ -22,6 +22,14 @@ use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde_json::json;
 
+fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
+        ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
+        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev,
+    ))
+    .unwrap()
+}
+
 #[tokio::test]
 async fn default_runtime_installs_configured_builtin_obligation_services() {
     let registry = Arc::new(registry_with_echo_capability());
@@ -64,6 +72,7 @@ async fn default_runtime_installs_configured_builtin_obligation_services() {
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_builtin_obligation_services(&services);
 

@@ -16,6 +16,7 @@ use ironclaw_authorization::{
     GrantAuthorizer, InMemoryCapabilityLeaseStore, TrustAwareCapabilityDispatchAuthorizer,
 };
 use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
+use ironclaw_filesystem::{FilesystemError, FilesystemOperation};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CancelReason, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
@@ -24,8 +25,8 @@ use ironclaw_host_runtime::{
     VisibleCapabilityRequest,
 };
 use ironclaw_processes::{
-    InMemoryProcessResultStore, InMemoryProcessStore, ProcessCancellationRegistry,
-    ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
+    InMemoryProcessResultStore, InMemoryProcessStore, ProcessCancellationRegistry, ProcessError,
+    ProcessRecord, ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{
     ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
@@ -36,6 +37,14 @@ use ironclaw_trust::{
     HostTrustPolicy, TrustDecision, TrustProvenance,
 };
 use serde_json::json;
+
+fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
+        ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
+        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev,
+    ))
+    .unwrap()
+}
 
 #[test]
 fn bounded_contract_strings_share_validation_semantics() {
@@ -69,6 +78,7 @@ async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
     .with_run_state(run_state.clone())
@@ -111,6 +121,7 @@ async fn default_runtime_surfaces_approval_required_with_persisted_request_id() 
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone())
     .with_approval_requests(approval_requests.clone())
@@ -155,6 +166,7 @@ async fn default_runtime_uses_combined_store_for_atomic_approval_block() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state_approval_store(combined_store.clone())
     .with_capability_leases(leases);
@@ -223,6 +235,7 @@ async fn default_runtime_propagates_unavailable_when_run_state_lookup_fails_duri
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state)
     .with_approval_requests(approval_requests)
@@ -262,6 +275,7 @@ async fn default_runtime_returns_failed_for_unknown_capability() {
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone());
 
@@ -314,6 +328,7 @@ async fn default_runtime_surfaces_authorization_failure_when_authorizer_denies()
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     );
 
     let context = execution_context_with_dispatch_grant();
@@ -355,6 +370,7 @@ async fn default_runtime_idempotency_key_is_advisory_and_does_not_dedupe() {
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()));
 
@@ -401,6 +417,7 @@ async fn default_runtime_status_returns_default_when_no_run_state_attached() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     );
 
     let context = execution_context_with_dispatch_grant();
@@ -430,6 +447,7 @@ async fn default_runtime_status_propagates_unavailable_on_run_state_error() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state);
 
@@ -455,6 +473,44 @@ async fn default_runtime_status_propagates_unavailable_on_run_state_error() {
 }
 
 #[tokio::test]
+async fn default_runtime_status_redacts_process_filesystem_errors() {
+    let registry = Arc::new(ExtensionRegistry::new());
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> = Arc::new(GrantAuthorizer);
+    let process_store: Arc<dyn ProcessStore> = Arc::new(FailingRecordsProcessStore {
+        inner: Arc::new(InMemoryProcessStore::new()),
+    });
+    let runtime = DefaultHostRuntime::new(
+        registry,
+        dispatcher,
+        authorizer,
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
+    )
+    .with_process_store(process_store);
+
+    let context = execution_context_with_dispatch_grant();
+    let error = runtime
+        .runtime_status(RuntimeStatusRequest::new(
+            context.resource_scope,
+            context.correlation_id,
+        ))
+        .await
+        .expect_err("process records_for_scope outage must surface as host runtime error");
+
+    match error {
+        HostRuntimeError::Unavailable { reason } => {
+            assert!(
+                !reason.contains("/tmp"),
+                "sanitized reason must not leak filesystem paths, got {reason:?}"
+            );
+            assert_eq!(reason, "process filesystem unavailable");
+        }
+        other => panic!("expected HostRuntimeError::Unavailable, got {:?}", other),
+    }
+}
+
+#[tokio::test]
 async fn default_runtime_status_filters_to_running_records_only() {
     // Pins the filter: completed/failed/blocked records must not appear in
     // active_work. Surfacing terminal records as "active" would mislead
@@ -469,6 +525,7 @@ async fn default_runtime_status_filters_to_running_records_only() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone());
 
@@ -528,6 +585,7 @@ async fn default_runtime_visible_capabilities_returns_empty_descriptors_for_empt
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     );
 
     let context = execution_context_with_dispatch_grant();
@@ -554,6 +612,7 @@ async fn default_runtime_returns_versioned_visible_surface_with_registry_descrip
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()));
 
@@ -581,6 +640,7 @@ async fn default_runtime_status_reports_running_invocations_only() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone());
 
@@ -622,6 +682,7 @@ async fn default_runtime_cancel_reports_running_invocations_as_unsupported() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone());
 
@@ -664,6 +725,7 @@ async fn default_runtime_cancel_kills_running_processes_and_cancels_tokens() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_process_store(process_store.clone())
     .with_process_cancellation_registry(cancellation_registry.clone());
@@ -708,6 +770,7 @@ async fn default_runtime_status_includes_running_processes_from_process_store() 
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_process_store(process_store.clone());
 
@@ -748,6 +811,7 @@ async fn default_runtime_cancel_writes_killed_process_result_record() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_process_store(process_store.clone())
     .with_process_result_store(result_store.clone())
@@ -794,6 +858,7 @@ async fn default_runtime_status_does_not_duplicate_process_backed_invocations() 
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone())
     .with_process_store(process_store.clone());
@@ -838,6 +903,7 @@ async fn default_runtime_health_reports_ready_when_registry_requires_no_backends
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     );
 
     let health = runtime.health().await.unwrap();
@@ -856,6 +922,7 @@ async fn default_runtime_health_without_probe_reports_required_runtimes_missing(
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     );
 
     let health = runtime.health().await.unwrap();
@@ -874,6 +941,7 @@ async fn default_runtime_health_uses_configured_backend_probe() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_runtime_health(Arc::new(HealthyRuntimeProbe));
 
@@ -978,6 +1046,65 @@ impl RunStateStore for FailingRecordsRunStateStore {
         Err(RunStateError::Filesystem(
             "simulated read failure: /private/users/secret/runstate.db".to_string(),
         ))
+    }
+}
+
+/// Wraps an [`InMemoryProcessStore`] but fails every `records_for_scope` call
+/// so runtime-status exercises process-store error sanitization through the
+/// public host-runtime path.
+struct FailingRecordsProcessStore {
+    inner: Arc<InMemoryProcessStore>,
+}
+
+#[async_trait]
+impl ProcessStore for FailingRecordsProcessStore {
+    async fn start(&self, start: ProcessStart) -> Result<ProcessRecord, ProcessError> {
+        self.inner.start(start).await
+    }
+
+    async fn complete(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        self.inner.complete(scope, process_id).await
+    }
+
+    async fn fail(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+        error_kind: String,
+    ) -> Result<ProcessRecord, ProcessError> {
+        self.inner.fail(scope, process_id, error_kind).await
+    }
+
+    async fn kill(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<ProcessRecord, ProcessError> {
+        self.inner.kill(scope, process_id).await
+    }
+
+    async fn get(
+        &self,
+        scope: &ResourceScope,
+        process_id: ProcessId,
+    ) -> Result<Option<ProcessRecord>, ProcessError> {
+        self.inner.get(scope, process_id).await
+    }
+
+    async fn records_for_scope(
+        &self,
+        _scope: &ResourceScope,
+    ) -> Result<Vec<ProcessRecord>, ProcessError> {
+        Err(FilesystemError::Backend {
+            path: VirtualPath::new("/users/user1/processes").unwrap(),
+            operation: FilesystemOperation::ListDir,
+            reason: "simulated read failure: /tmp/processes.db connection refused".to_string(),
+        }
+        .into())
     }
 }
 

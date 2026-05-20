@@ -31,11 +31,15 @@ use ironclaw_host_runtime::{
 };
 use ironclaw_runtime_policy::{OrgPolicyConstraints, ResolveRequest, resolve};
 
-fn descriptor(id: &str, effects: Vec<EffectKind>) -> CapabilityDescriptor {
+fn descriptor_with_runtime(
+    id: &str,
+    runtime: RuntimeKind,
+    effects: Vec<EffectKind>,
+) -> CapabilityDescriptor {
     CapabilityDescriptor {
         id: CapabilityId::new(id.to_string()).unwrap(),
         provider: ExtensionId::new("test_extension".to_string()).unwrap(),
-        runtime: RuntimeKind::Script,
+        runtime,
         trust_ceiling: TrustClass::UserTrusted,
         description: format!("test capability {id}"),
         parameters_schema: serde_json::Value::Null,
@@ -52,6 +56,10 @@ fn builtin_shell_descriptor() -> CapabilityDescriptor {
         .into_iter()
         .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
         .expect("built-in shell descriptor must be registered")
+}
+
+fn descriptor(id: &str, effects: Vec<EffectKind>) -> CapabilityDescriptor {
+    descriptor_with_runtime(id, RuntimeKind::Script, effects)
 }
 
 // -- PR 6: Local profile vertical slice -------------------------------------
@@ -135,6 +143,47 @@ fn local_dev_builtin_shell_manifest_plans_against_local_host_direct_network() {
         FilesystemBackendKind::HostWorkspace
     );
     assert_eq!(plan.network_mode, NetworkMode::DirectLogged);
+}
+
+#[test]
+fn script_runtime_requires_process_backend_even_when_manifest_underdeclares_effects() {
+    let policy = resolve(ResolveRequest::new(
+        DeploymentMode::LocalSingleUser,
+        RuntimeProfile::SecureDefault,
+    ))
+    .unwrap();
+    assert_eq!(policy.process_backend, ProcessBackendKind::None);
+
+    let cap = descriptor("script.echo", vec![EffectKind::DispatchCapability]);
+    let err = plan_capability(&cap, &policy).unwrap_err();
+
+    assert!(
+        err.to_string().contains("ProcessBackendKind::None"),
+        "script runtime must not execute when the policy disables process backends: {err}"
+    );
+}
+
+#[test]
+fn mcp_runtime_requires_network_even_when_manifest_underdeclares_effects() {
+    let mut policy = resolve(ResolveRequest::new(
+        DeploymentMode::LocalSingleUser,
+        RuntimeProfile::SecureDefault,
+    ))
+    .unwrap();
+    policy.network_mode = NetworkMode::Deny;
+    assert_eq!(policy.network_mode, NetworkMode::Deny);
+
+    let cap = descriptor_with_runtime(
+        "mcp.search",
+        RuntimeKind::Mcp,
+        vec![EffectKind::DispatchCapability],
+    );
+    let err = plan_capability(&cap, &policy).unwrap_err();
+
+    assert!(
+        err.to_string().contains("NetworkMode::Deny"),
+        "MCP HTTP/SSE runtime must not execute when the policy denies network even if the manifest under-declares effects: {err}"
+    );
 }
 
 #[test]
