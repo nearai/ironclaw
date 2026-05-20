@@ -79,8 +79,9 @@ use crate::obligations::{
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
-    LocalHostProcessPort, ProcessObligationLifecycleStore, RuntimeBackendHealth,
-    RuntimeProcessPort, TurnRunExecutor, TurnRunScheduler, TurnRunSchedulerConfig,
+    InvocationServices, LocalHostProcessPort, ProcessObligationLifecycleStore,
+    RuntimeBackendHealth, RuntimeProcessPort, TurnRunExecutor, TurnRunScheduler,
+    TurnRunSchedulerConfig,
 };
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
@@ -2006,9 +2007,11 @@ where
             scope: request.scope.clone(),
             estimate: request.estimate,
             mounts: request.mounts,
-            filesystem: Arc::clone(&self.filesystem),
-            runtime_http_egress: runtime_http_egress(&self.runtime_http_egress),
-            process: Arc::clone(&self.process_port),
+            services: InvocationServices {
+                filesystem: Arc::clone(&self.filesystem),
+                runtime_http_egress: runtime_http_egress(&self.runtime_http_egress),
+                process: Arc::clone(&self.process_port),
+            },
             input: request.input,
         }))
         .catch_unwind()

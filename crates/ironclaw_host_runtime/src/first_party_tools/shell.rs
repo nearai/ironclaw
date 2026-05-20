@@ -74,6 +74,7 @@ pub(super) async fn dispatch(
     }
     shell_core::validate_command(&parsed.command, false).map_err(shell_error)?;
     let output = request
+        .services
         .process
         .run_command(CommandExecutionRequest {
             scope: request.scope.clone(),
