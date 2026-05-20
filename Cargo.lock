@@ -4652,8 +4652,12 @@ name = "ironclaw_reborn_composition"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum 0.8.9",
  "chrono",
  "deadpool-postgres",
+ "futures",
+ "http 1.4.0",
+ "http-body-util",
  "ironclaw_authorization",
  "ironclaw_extensions",
  "ironclaw_filesystem",
@@ -4675,7 +4679,9 @@ dependencies = [
  "ironclaw_threads",
  "ironclaw_trust",
  "ironclaw_turns",
+ "ironclaw_webui_v2",
  "libsql",
+ "lru 0.16.4",
  "secrecy",
  "serde",
  "serde_json",
@@ -4684,6 +4690,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
+ "tower 0.5.3",
+ "tower-http 0.6.10",
  "tracing",
  "uuid",
 ]

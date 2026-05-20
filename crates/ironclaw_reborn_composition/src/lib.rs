@@ -29,6 +29,10 @@ mod readiness;
 mod runtime;
 mod runtime_input;
 mod webui;
+#[cfg(feature = "webui-v2-beta")]
+mod webui_rate_limit;
+#[cfg(feature = "webui-v2-beta")]
+mod webui_serve;
 
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
@@ -55,6 +59,13 @@ pub use runtime_input::{
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornLlmConfig, ResolvedRebornLlm};
+pub use webui::{RebornWebuiBundle, build_webui_services};
+#[cfg(feature = "webui-v2-beta")]
+pub use webui_rate_limit::RateLimitConfigError;
+#[cfg(feature = "webui-v2-beta")]
+pub use webui_serve::{
+    WebuiAuthenticator, WebuiServeConfig, WebuiServeError, serve_webui_v2, webui_v2_app,
+};
 
 /// Reborn model purpose slot names exposed for diagnostic callers.
 ///
