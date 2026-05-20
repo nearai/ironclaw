@@ -867,7 +867,7 @@ impl McpClient {
             if self.tool_requires_delegation(name).await? {
                 self.inject_t3n_delegation_credential(arguments).await?
             } else {
-                strip_delegation_fields_if_present(name, arguments)
+                strip_delegation_fields_if_present(name, arguments)?
             }
         } else {
             arguments
@@ -962,30 +962,78 @@ impl McpClient {
     }
 }
 
+/// FE-emitted placeholder marking a delegation field that t3-claw must
+/// substitute server-side. Anchored in two places: the chat prompt
+/// (`t3-apps/apps/trinity/app/(private)/delegations/new/helpers.ts`) and the
+/// `runPayroll` tool description shipped by `t3n-mcp`. Seeing it here means
+/// the FE explicitly requested delegated mode.
+const FE_INJECT_PLACEHOLDER: &str = "__inject__";
+
+fn is_inject_placeholder(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s == FE_INJECT_PLACEHOLDER)
+}
+
 /// Strip any delegation credential fields from `arguments` if the agent supplied
 /// them for a tool that does not declare `requiresDelegation: true`.
 ///
-/// This defends against prompt-injection attacks that try to force credential
-/// fields into a non-delegating tool's call. When fields are removed a `warn!`
-/// is emitted with the tool name so the anomaly is observable; the call then
-/// proceeds without them so that legitimate non-delegating tools are unaffected.
+/// Two shapes the input can take when this runs:
+///
+/// 1. The agent prompt-injected credential-shaped fields onto a tool that
+///    legitimately does not delegate — defence-in-depth strip + `error!` log.
+/// 2. The FE-emitted `__inject__` placeholder reached us — meaning the FE
+///    asked for delegated mode but t3-claw's view of the tool says it does
+///    not advertise `requiresDelegation: true`. This is a config/deploy bug
+///    (typically a sidecar/t3-claw version skew where the sidecar image
+///    predates the metadata commit that added the annotation). Silently
+///    stripping turns this into an opaque downstream zod error; we surface
+///    it as a typed `ToolError` instead so the operator sees the cause.
 fn strip_delegation_fields_if_present(
     tool_name: &str,
     mut arguments: serde_json::Value,
-) -> serde_json::Value {
-    if let Some(obj) = arguments.as_object_mut() {
-        let had_cred = obj.remove("credential_jcs_b64u").is_some();
-        let had_sig = obj.remove("user_sig_b64u").is_some();
-        let had_org_did = obj.remove("org_did").is_some();
-        if had_cred || had_sig || had_org_did {
-            tracing::warn!(
-                tool = %tool_name,
-                "delegation credential fields stripped from a tool that does not declare \
-                 requiresDelegation — possible prompt-injection attempt"
-            );
-        }
+) -> Result<serde_json::Value, ToolError> {
+    let Some(obj) = arguments.as_object_mut() else {
+        return Ok(arguments);
+    };
+
+    let fe_requested_delegation = is_inject_placeholder(obj.get("credential_jcs_b64u"))
+        || is_inject_placeholder(obj.get("user_sig_b64u"));
+
+    let had_cred = obj.remove("credential_jcs_b64u").is_some();
+    let had_sig = obj.remove("user_sig_b64u").is_some();
+    let had_org_did = obj.remove("org_did").is_some();
+
+    if fe_requested_delegation {
+        tracing::error!(
+            tool = %tool_name,
+            "FE emitted `__inject__` for credential_jcs_b64u/user_sig_b64u but the t3n-mcp \
+             sidecar's tools/list response does not advertise requiresDelegation:true for \
+             this tool — almost always a sidecar / t3-claw version skew. Redeploy the \
+             sidecar against current Trinity main."
+        );
+        return Err(ToolError::ExternalService(format!(
+            "t3n-mcp: tool '{tool_name}' was invoked with the `__inject__` delegation \
+             placeholder, but t3-claw sees this tool as non-delegating (its tools/list \
+             entry lacks `requiresDelegation: true`). This is a config/deploy skew — \
+             redeploy the t3n-mcp sidecar from current Trinity main, or call the tool \
+             in direct mode by omitting `credential_jcs_b64u` and `user_sig_b64u`."
+        )));
     }
-    arguments
+
+    if had_cred || had_sig || had_org_did {
+        tracing::error!(
+            tool = %tool_name,
+            stripped_credential = had_cred,
+            stripped_signature = had_sig,
+            stripped_org_did = had_org_did,
+            "delegation-shaped fields stripped from a non-delegating tool — possible \
+             prompt-injection attempt, or sidecar/t3-claw skew if the FE intended \
+             delegated mode"
+        );
+    }
+
+    Ok(arguments)
 }
 
 /// Clone the client, resetting the tools cache and initialization state.
@@ -2857,6 +2905,51 @@ mod tests {
             args.get("org_did").is_none(),
             "org_did must be stripped from a non-delegating tool call so an agent \
              cannot smuggle an arbitrary org_did past the delegation gate"
+        );
+    }
+
+    /// FE-emitted `__inject__` placeholder on a non-delegating tool ⇒ hard error.
+    ///
+    /// The placeholder is a positive signal that the FE asked for delegated
+    /// mode. If it reaches the strip path, the sidecar's `tools/list` entry
+    /// does not advertise `requiresDelegation: true` — almost always a
+    /// sidecar/t3-claw version skew. Silently stripping turns this into an
+    /// opaque downstream zod error; the contract is that the call fails fast
+    /// with a typed error naming the cause.
+    #[tokio::test]
+    async fn call_tool_errors_when_fe_placeholder_meets_non_delegating_tool() {
+        let store = make_test_secrets_store();
+        let transport = make_capturing_transport("runPayroll", false);
+        let client = make_t3n_client_with_store(Arc::clone(&transport), store);
+
+        let err = client
+            .call_tool(
+                "runPayroll",
+                serde_json::json!({
+                    "org_did": TEST_ORG_DID,
+                    "cycle_id": "2025-01",
+                    "credential_jcs_b64u": "__inject__",
+                    "user_sig_b64u": "__inject__"
+                }),
+            )
+            .await
+            .expect_err(
+                "FE-emitted __inject__ on a non-delegating tool must surface as a typed error",
+            );
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("__inject__") && msg.contains("requiresDelegation"),
+            "error must name the placeholder and the missing annotation so operators \
+             can diagnose the skew at a glance; got: {msg}"
+        );
+
+        // The call must not have been forwarded to the sidecar — failing closed
+        // keeps the malformed dispatch off the wire entirely.
+        let requests = transport.requests.lock().unwrap();
+        assert!(
+            !requests.iter().any(|r| r.method == "tools/call"),
+            "no tools/call must reach the sidecar when the strip path detects skew"
         );
     }
 
