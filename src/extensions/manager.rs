@@ -10351,6 +10351,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_configure_wasm_channel_validation_endpoint_rejects_loopback_url() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let channels_dir = write_test_channel(
+            dir.path(),
+            "loopback-channel",
+            r#"{
+                "version": "0.1.0",
+                "wit_version": "0.3.1",
+                "type": "channel",
+                "name": "loopback-channel",
+                "setup": {
+                    "required_secrets": [
+                        {
+                            "name": "sample_bot_token",
+                            "prompt": "Sample bot token used only by this validation test.",
+                            "optional": false
+                        }
+                    ],
+                    "validation_endpoint": "http://127.0.0.1:9/validate?token={sample_bot_token}"
+                }
+            }"#,
+        );
+        let tools_dir = dir.path().join("tools");
+        let mgr = make_test_manager_with_dirs(None, tools_dir, channels_dir, None);
+        let secrets = std::collections::HashMap::from([(
+            "sample_bot_token".to_string(),
+            "should-not-persist".to_string(),
+        )]);
+
+        let err = match mgr
+            .configure(
+                "loopback-channel",
+                &secrets,
+                &std::collections::HashMap::new(),
+                "test-user",
+            )
+            .await
+        {
+            Ok(_) => panic!("loopback validation endpoint should be blocked"),
+            Err(err) => err,
+        };
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SSRF blocked"),
+            "unexpected error message: {msg}"
+        );
+        assert!(
+            !mgr.secrets
+                .exists("test-user", "sample_bot_token")
+                .await
+                .expect("secret existence check"),
+            "validation failure must not persist the submitted token"
+        );
+    }
+
+    #[tokio::test]
     async fn test_configure_rejects_disallowed_setting_path() {
         let dir = tempfile::tempdir().expect("temp dir");
         let (store, _db_dir) = make_test_store().await;

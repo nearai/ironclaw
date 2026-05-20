@@ -264,6 +264,36 @@ async fn build_outgoing_response_for_thread(
     response
 }
 
+async fn submission_response_to_handle_outcome(
+    session: &Arc<tokio::sync::Mutex<crate::agent::session::Session>>,
+    thread_id: Uuid,
+    content: String,
+    attachments: Vec<String>,
+) -> HandleOutcome {
+    let has_attachments = !attachments.is_empty();
+
+    // Suppress silent replies only when there is truly nothing else to deliver.
+    // Image-only generated responses intentionally have empty text plus staged
+    // attachments, and must still reach the originating channel.
+    if ironclaw_llm::is_silent_reply(&content) {
+        if !has_attachments {
+            tracing::debug!("Suppressing silent reply token");
+            return HandleOutcome::Shutdown;
+        }
+        return HandleOutcome::Respond(
+            build_outgoing_response_for_thread(session, thread_id, "", attachments).await,
+        );
+    }
+
+    if content.is_empty() && !has_attachments {
+        HandleOutcome::NoResponse
+    } else {
+        HandleOutcome::Respond(
+            build_outgoing_response_for_thread(session, thread_id, content, attachments).await,
+        )
+    }
+}
+
 async fn resolve_channel_notification_user(
     extension_manager: Option<&Arc<ExtensionManager>>,
     channel: Option<&str>,
@@ -2290,26 +2320,13 @@ impl Agent {
             SubmissionResult::Response {
                 content,
                 attachments,
-            } => {
-                // Suppress silent replies (e.g. from group chat "nothing to say" responses).
-                // Silent replies exit single-message REPL invocations.
-                if ironclaw_llm::is_silent_reply(&content) {
-                    tracing::debug!("Suppressing silent reply token");
-                    Ok(HandleOutcome::Shutdown)
-                } else if content.is_empty() {
-                    Ok(HandleOutcome::NoResponse)
-                } else {
-                    Ok(HandleOutcome::Respond(
-                        build_outgoing_response_for_thread(
-                            &session,
-                            thread_id,
-                            content,
-                            attachments,
-                        )
-                        .await,
-                    ))
-                }
-            }
+            } => Ok(submission_response_to_handle_outcome(
+                &session,
+                thread_id,
+                content,
+                attachments,
+            )
+            .await),
             SubmissionResult::Ok {
                 message: output_message,
             } => {
@@ -2872,6 +2889,36 @@ mod tests {
         );
         assert_eq!(response.inline_attachments[0].mime_type, "image/png");
         assert_eq!(response.inline_attachments[0].data, b"png-bytes");
+    }
+
+    #[tokio::test]
+    async fn empty_submission_response_with_attachments_is_delivered() {
+        use super::submission_response_to_handle_outcome;
+        use crate::agent::session::Session;
+        use std::sync::Arc;
+
+        let session: Arc<tokio::sync::Mutex<Session>> =
+            Arc::new(tokio::sync::Mutex::new(Session::new("user-123")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread(None).id
+        };
+
+        let outcome = submission_response_to_handle_outcome(
+            &session,
+            thread_id,
+            String::new(),
+            vec!["/tmp/generated-image.png".to_string()],
+        )
+        .await;
+
+        match outcome {
+            HandleOutcome::Respond(response) => {
+                assert!(response.content.is_empty());
+                assert_eq!(response.attachments, vec!["/tmp/generated-image.png"]);
+            }
+            other => panic!("expected attachment response, got {other:?}"),
+        }
     }
 
     #[tokio::test]

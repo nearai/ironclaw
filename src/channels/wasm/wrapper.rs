@@ -5944,16 +5944,16 @@ mod tests {
     use crate::channels::wasm::wrapper::{
         DiscordGatewayWebsocketConfig, EmitDispatchContext, HttpResponse,
         TELEGRAM_TEST_API_BASE_ENV, TEST_HTTP_REWRITE_MAP_ENV, WasmChannel, WebsocketAuthPreflight,
-        WebsocketCloseDisposition, WebsocketProtocolConfig, WebsocketRuntimeConfig,
-        WebsocketStartDecision, build_discord_gateway_presence_update,
-        build_websocket_identify_message, build_websocket_resume_message,
-        build_wecom_aibot_ping_message, build_wecom_aibot_subscribe_message,
-        classify_websocket_close_code, discord_gateway_presence_status, drain_guest_logs,
-        parse_websocket_invalid_session, parse_websocket_ready_session, parse_wecom_aibot_frame,
-        prepare_response_attachments, resolve_websocket_identify_message,
-        rewrite_http_url_for_testing, should_warn_on_heartbeat_interval,
-        uses_owner_broadcast_target, websocket_auth_preflight, websocket_heartbeat_sleep_duration,
-        websocket_reconnect_backoff, websocket_start_decision,
+        WebsocketCloseDisposition, WebsocketFrameAction, WebsocketProtocolConfig,
+        WebsocketRuntimeConfig, WebsocketStartDecision, WecomAibotSessionState,
+        build_discord_gateway_presence_update, build_websocket_identify_message,
+        build_websocket_resume_message, build_wecom_aibot_ping_message,
+        build_wecom_aibot_subscribe_message, classify_websocket_close_code,
+        discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
+        parse_websocket_ready_session, parse_wecom_aibot_frame, prepare_response_attachments,
+        resolve_websocket_identify_message, rewrite_http_url_for_testing,
+        should_warn_on_heartbeat_interval, uses_owner_broadcast_target, websocket_auth_preflight,
+        websocket_heartbeat_sleep_duration, websocket_reconnect_backoff, websocket_start_decision,
     };
     use crate::channels::{OutgoingAttachment, OutgoingResponse};
     use crate::pairing::PairingStore;
@@ -6553,6 +6553,61 @@ mod tests {
             parse_wecom_aibot_frame(&disconnected_event.to_string()),
             super::WecomAibotIncomingFrame::Event { disconnected: true }
         ));
+    }
+
+    #[test]
+    fn test_wecom_aibot_session_process_text_frame_handles_auth_ping_and_disconnect() {
+        let mut state = WecomAibotSessionState::new(45_000, 3);
+
+        let subscribe_ok = serde_json::json!({
+            "headers": { "req_id": "aibot_subscribe-123" },
+            "errcode": 0,
+            "errmsg": "ok"
+        });
+        let actions = state.process_text_frame(&subscribe_ok.to_string(), "wecom");
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            actions[0],
+            WebsocketFrameAction::SetHeartbeat {
+                interval_ms: 45_000
+            }
+        ));
+
+        state.missed_heartbeat_acks = 2;
+        let ping_ok = serde_json::json!({
+            "headers": { "req_id": "ping-1" },
+            "errcode": 0,
+            "errmsg": "ok"
+        });
+        assert!(
+            state
+                .process_text_frame(&ping_ok.to_string(), "wecom")
+                .is_empty()
+        );
+        assert_eq!(state.missed_heartbeat_acks, 0);
+
+        let subscribe_error = serde_json::json!({
+            "headers": { "req_id": "aibot_subscribe-456" },
+            "errcode": 40001,
+            "errmsg": "invalid secret"
+        });
+        let actions = state.process_text_frame(&subscribe_error.to_string(), "wecom");
+        assert_eq!(actions.len(), 1);
+        assert!(matches!(
+            actions[0],
+            WebsocketFrameAction::Reconnect {
+                reset_session: false
+            }
+        ));
+
+        let disconnected_event = serde_json::json!({
+            "cmd": "aibot_event_callback",
+            "body": { "event": { "eventtype": "disconnected_event" } }
+        });
+        let actions = state.process_text_frame(&disconnected_event.to_string(), "wecom");
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(actions[0], WebsocketFrameAction::Enqueue(_)));
+        assert!(matches!(actions[1], WebsocketFrameAction::StopRuntime));
     }
 
     #[test]
