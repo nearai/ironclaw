@@ -140,6 +140,10 @@ impl RebornBuildInput {
         self
     }
 
+    pub fn runtime_policy(&self) -> Option<&EffectiveRuntimePolicy> {
+        self.runtime_policy.as_ref()
+    }
+
     pub fn with_turn_run_wake_notifier(
         mut self,
         notifier: Arc<SchedulerTurnRunWakeNotifier>,
