@@ -33,10 +33,11 @@ use axum::extract::{Request, State};
 use axum::http::{Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use ironclaw_host_api::NetworkMethod;
 use ironclaw_host_api::ingress::{IngressRouteDescriptor, RateLimitPolicy, RateLimitScope};
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 use lru::LruCache;
+
+use crate::webui_route_match::{network_method_to_axum, parse_pattern, segments_match};
 
 /// Hard cap on the number of `(route, caller)` counter entries kept in
 /// memory. Sized to comfortably cover ~1300 distinct callers across all
@@ -173,52 +174,6 @@ fn resolve_policy(
             }),
         },
     }
-}
-
-fn network_method_to_axum(method: NetworkMethod) -> Method {
-    match method {
-        NetworkMethod::Get => Method::GET,
-        NetworkMethod::Post => Method::POST,
-        NetworkMethod::Put => Method::PUT,
-        NetworkMethod::Patch => Method::PATCH,
-        NetworkMethod::Delete => Method::DELETE,
-        NetworkMethod::Head => Method::HEAD,
-    }
-}
-
-/// Split a descriptor pattern (e.g. `/api/webchat/v2/threads/{id}/events`)
-/// into segments. `None` marks a `{name}` wildcard.
-fn parse_pattern(pattern: &str) -> Vec<Option<String>> {
-    pattern
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .map(|segment| {
-            if segment.starts_with('{') && segment.ends_with('}') {
-                None
-            } else {
-                Some(segment.to_string())
-            }
-        })
-        .collect()
-}
-
-fn segments_match(pattern: &[Option<String>], path: &str) -> bool {
-    let mut iter = path.split('/').filter(|segment| !segment.is_empty());
-    for expected in pattern {
-        match iter.next() {
-            None => return false,
-            Some(actual) => match expected {
-                Some(literal) if literal == actual => {}
-                Some(_) => return false,
-                None => {
-                    if actual.is_empty() {
-                        return false;
-                    }
-                }
-            },
-        }
-    }
-    iter.next().is_none()
 }
 
 /// Build the `(method, path)` → route index lookup for one request.
@@ -363,40 +318,6 @@ mod tests {
         )
     }
 
-    #[test]
-    fn pattern_parser_handles_literal_and_wildcard_segments() {
-        assert_eq!(
-            parse_pattern("/api/webchat/v2/threads/{thread_id}/events"),
-            vec![
-                Some("api".into()),
-                Some("webchat".into()),
-                Some("v2".into()),
-                Some("threads".into()),
-                None,
-                Some("events".into())
-            ]
-        );
-    }
-
-    #[test]
-    fn segments_match_matches_literal_and_wildcard() {
-        let pattern = parse_pattern("/api/webchat/v2/threads/{id}/events");
-        assert!(segments_match(
-            &pattern,
-            "/api/webchat/v2/threads/abc/events"
-        ));
-        assert!(!segments_match(
-            &pattern,
-            "/api/webchat/v2/threads/abc/timeline"
-        ));
-        assert!(!segments_match(
-            &pattern,
-            "/api/webchat/v2/threads/abc/events/extra"
-        ));
-        // Empty wildcard segment.
-        assert!(!segments_match(&pattern, "/api/webchat/v2/threads//events"));
-    }
-
     fn limited_state(max: u32, window_secs: u32) -> RateLimitState {
         let route = RouteLimit {
             route_id: "test.route".into(),
@@ -480,5 +401,61 @@ mod tests {
             descriptors.len(),
             "every descriptor produced a RouteLimit entry",
         );
+    }
+
+    #[test]
+    fn unsupported_scope_is_rejected_at_composition() {
+        // Regression guard for the fail-closed branch in
+        // `resolve_policy`: a descriptor whose rate-limit scope is not
+        // `PerCaller` must abort composition rather than silently
+        // degrade to no enforcement. Without this test, a future v2
+        // descriptor flipping `send_message` to e.g. `PerTenant` would
+        // skip the limiter entirely.
+        use ironclaw_host_api::NetworkMethod;
+        use ironclaw_host_api::ingress::{
+            AllowedEffectPath, AuditTraceClass, BodyLimitPolicy, CorsPolicy, IngressAuthPolicy,
+            IngressAuthScheme, IngressPolicy, IngressPolicyParts, IngressRouteDescriptor,
+            IngressScopeSource, ListenerClass, StreamingMode, WebSocketOriginPolicy,
+        };
+        use std::num::{NonZeroU32, NonZeroU64};
+
+        let policy = IngressPolicy::new(IngressPolicyParts {
+            listener_class: ListenerClass::LocalGateway,
+            auth: IngressAuthPolicy::Required {
+                schemes: vec![IngressAuthScheme::BearerToken],
+            },
+            scope_source: IngressScopeSource::AuthenticatedCaller,
+            body_limit: BodyLimitPolicy::Limited {
+                max_bytes: NonZeroU64::new(1024).expect("nz"),
+            },
+            rate_limit: RateLimitPolicy::Limited {
+                scope: RateLimitScope::PerTenant,
+                max_requests: NonZeroU32::new(60).expect("nz"),
+                window_seconds: NonZeroU32::new(60).expect("nz"),
+            },
+            cors: CorsPolicy::SameOriginOnly,
+            websocket_origin: WebSocketOriginPolicy::NotApplicable,
+            streaming: StreamingMode::None,
+            audit: AuditTraceClass::UserAction,
+            effect_path: AllowedEffectPath::ProductWorkflow,
+        })
+        .expect("policy must construct");
+
+        let descriptor = IngressRouteDescriptor::new(
+            "test.unsupported_scope".to_string(),
+            NetworkMethod::Post,
+            "/api/test".to_string(),
+            policy,
+        )
+        .expect("descriptor must construct");
+
+        let err =
+            build_rate_limit_state(&[descriptor]).expect_err("PerTenant scope must be rejected");
+        match err {
+            RateLimitConfigError::UnsupportedScope { route_id, scope } => {
+                assert_eq!(route_id, "test.unsupported_scope");
+                assert!(matches!(scope, RateLimitScope::PerTenant));
+            }
+        }
     }
 }

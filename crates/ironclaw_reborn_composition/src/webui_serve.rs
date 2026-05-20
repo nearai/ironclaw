@@ -50,6 +50,7 @@ use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::webui::RebornWebuiBundle;
+use crate::webui_body_limit::{build_body_limit_state, enforce_body_limit};
 use crate::webui_rate_limit::{build_rate_limit_state, enforce_rate_limit};
 use ironclaw_product_workflow::WebUiAuthenticatedCaller;
 
@@ -96,7 +97,13 @@ pub struct WebuiServeConfig {
     pub tenant_id: TenantId,
     /// Bearer-token verifier supplied by host composition.
     pub authenticator: Arc<dyn WebuiAuthenticator>,
-    /// Per-request body cap. Defaults to [`DEFAULT_WEBUI_MAX_BODY_BYTES`].
+    /// Outer per-request body cap applied as defense in depth for
+    /// paths that don't match any v2 descriptor (e.g. axum's 404
+    /// fallback). v2 routes are additionally enforced against the
+    /// per-route [`BodyLimitPolicy`](ironclaw_host_api::ingress::BodyLimitPolicy)
+    /// declared in `ironclaw_webui_v2::webui_v2_routes()`; that
+    /// descriptor cap is always strictly tighter than this global
+    /// fallback. Defaults to [`DEFAULT_WEBUI_MAX_BODY_BYTES`].
     pub max_body_bytes: usize,
     /// CORS allow-origin list. Empty means "no cross-origin requests
     /// accepted at all" — explicitly fail-closed; pre-flight checks
@@ -144,7 +151,11 @@ pub enum WebuiServeError {
 /// - panic catch (outer)
 /// - static security headers (`X-Content-Type-Options`, `X-Frame-Options`, CSP)
 /// - CORS allow-origin list
-/// - request body limit
+/// - outer global request body limit (defense in depth for unmatched paths)
+/// - per-route body limit, resolved from the
+///   `ironclaw_webui_v2::webui_v2_routes()` descriptors (16 KiB for
+///   create_thread, 1 MiB for send_message, 4 KiB for cancel_run /
+///   resolve_gate, NoBody for timeline / SSE)
 /// - bearer auth (+ `?token=` on the v2 SSE path) → injects
 ///   [`WebUiAuthenticatedCaller`]
 /// - per-route rate limit, resolved from the
@@ -191,6 +202,7 @@ pub fn webui_v2_app(
 
     let descriptors = ironclaw_webui_v2::webui_v2_routes();
     let rate_limit_state = build_rate_limit_state(&descriptors)?;
+    let body_limit_state = build_body_limit_state(&descriptors);
 
     // Inner: the v2 route surface, retagged to `Router<()>` so it can
     // merge into the outer stateless router. `webui_v2_router` has
@@ -200,11 +212,13 @@ pub fn webui_v2_app(
 
     // Layer order matters. `route_layer` stacks inside-out from the
     // bottom of the chain up: enforce_rate_limit is closest to the
-    // handler, authenticate_request wraps it. That gives the inbound
-    // flow:
-    //   auth → rate-limit check → handler
-    // Auth must run first so rate-limit has a real caller to key on;
-    // an unauthenticated request never spends a rate-limit slot.
+    // handler, authenticate_request wraps it, enforce_body_limit wraps
+    // that. That gives the inbound flow:
+    //   per-route body limit → auth → rate-limit check → handler
+    // Body limit runs before auth so an oversized payload never spends
+    // a bearer-validation step. Auth runs before rate-limit so the
+    // limiter has a real caller to key on and an unauthenticated
+    // request never burns a rate-limit slot.
     let app = Router::new()
         .merge(v2_inner)
         .route_layer(middleware::from_fn_with_state(
@@ -215,6 +229,13 @@ pub fn webui_v2_app(
             auth_state,
             authenticate_request,
         ))
+        .route_layer(middleware::from_fn_with_state(
+            body_limit_state,
+            enforce_body_limit,
+        ))
+        // Outer global cap: applies to unmatched paths (e.g. 404 fallback)
+        // as defense in depth. v2 routes are tighter via the per-route
+        // body-limit middleware above.
         .layer(RequestBodyLimitLayer::new(config.max_body_bytes))
         .layer(CatchPanicLayer::custom(panic_handler))
         .layer(cors)

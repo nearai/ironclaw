@@ -557,6 +557,109 @@ async fn mutation_route_returns_429_after_descriptor_rate_limit_exhausted() {
 }
 
 #[tokio::test]
+async fn oversized_mutation_body_is_rejected_with_413_before_facade() {
+    // `create_thread`'s descriptor caps the body at 16 KiB. Send 16 KiB
+    // + 1 of JSON and expect 413 from the per-route body limit, with
+    // the facade untouched (the limit middleware sits in front of both
+    // auth and the v2 handler).
+    let (app, services) = build_app();
+    let payload = format!(
+        "{{\"client_action_id\":\"act-1\",\"padding\":\"{}\"}}",
+        "x".repeat(16 * 1024 + 1)
+    );
+    assert!(
+        payload.len() > 16 * 1024,
+        "fixture must exceed the create_thread cap; got {} bytes",
+        payload.len()
+    );
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = read_body_string(response).await;
+    assert!(
+        body.contains("Request body exceeds the route's body limit."),
+        "413 body should explain the cap, got: {body}",
+    );
+    assert!(
+        services
+            .create_thread_calls
+            .lock()
+            .expect("lock")
+            .is_empty(),
+        "facade must not be reached on an oversized request",
+    );
+}
+
+#[tokio::test]
+async fn mutation_body_within_descriptor_cap_reaches_facade() {
+    // Companion to the oversized test: a payload that fits inside the
+    // 16 KiB `create_thread` cap should pass through to the facade.
+    // Locks the contract that the limit is "above max", not "above
+    // some-fraction-of-max".
+    let (app, services) = build_app();
+    let payload = format!(
+        "{{\"client_action_id\":\"act-1\",\"padding\":\"{}\"}}",
+        "x".repeat(8 * 1024)
+    );
+    assert!(payload.len() < 16 * 1024);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/threads")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(payload))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        services.create_thread_calls.lock().expect("lock").len(),
+        1,
+        "facade should be reached for in-budget payload",
+    );
+}
+
+#[tokio::test]
+async fn timeline_route_rejects_nonempty_body_with_413() {
+    // `get_timeline`'s descriptor declares `BodyLimitPolicy::NoBody`.
+    // A GET with a non-empty body must be rejected upfront — regardless
+    // of bearer-token validity — so that the v2 handler never observes
+    // a body shape its descriptor said wouldn't arrive.
+    let (app, _services) = build_app();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/webchat/v2/threads/thread-x/timeline")
+                .header(header::AUTHORIZATION, format!("Bearer {VALID_TOKEN}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("body-not-allowed"))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    let body = read_body_string(response).await;
+    assert!(
+        body.contains("Request body not allowed for this route."),
+        "413 body should name the NoBody policy, got: {body}",
+    );
+}
+
+#[tokio::test]
 async fn rate_limit_is_independent_per_caller() {
     // Two distinct authenticators / users — alice exhausts her budget
     // but bob's requests still get through.

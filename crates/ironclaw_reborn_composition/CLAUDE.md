@@ -35,23 +35,40 @@ Inbound order (outer → inner → handler):
 2. `CorsLayer` — allow-origin from `config.allowed_origins`; empty list
    means fail-closed (no echoing attacker-supplied origin).
 3. `CatchPanicLayer` — panic boundary, logs truncated detail.
-4. `RequestBodyLimitLayer` — `config.max_body_bytes` (14 MiB default).
-5. **Bearer auth + `?token=` shim** (`webui_serve::authenticate_request`)
+4. **Outer `RequestBodyLimitLayer`** — `config.max_body_bytes` (14 MiB
+   default). Defense in depth for paths that don't match any v2
+   descriptor (e.g. axum's 404 fallback). v2 routes are additionally
+   capped, strictly tighter, by the per-route limit below.
+5. **Descriptor-driven per-route body limit**
+   (`webui_body_limit::enforce_body_limit`) — reads each route's
+   `BodyLimitPolicy` from `ironclaw_webui_v2::webui_v2_routes()` at
+   composition time and enforces it before auth runs (so an oversized
+   payload never spends a bearer-validation step). Today:
+   `create_thread` 16 KiB, `send_message` 1 MiB, `cancel_run` and
+   `resolve_gate` 4 KiB, `get_timeline` and `stream_events` `NoBody`.
+   `BodyLimitPolicy` is an exhaustive `match`, so a new variant added
+   upstream fails the build rather than silently disabling
+   enforcement.
+6. **Bearer auth + `?token=` shim** (`webui_serve::authenticate_request`)
    — `Authorization: Bearer <token>` for every route; `?token=` is
    honored ONLY on `GET /api/webchat/v2/threads/{id}/events` because
    the browser's `EventSource` cannot set headers. Mutations and
    timeline reads stay bearer-only. On success the middleware inserts
    a `WebUiAuthenticatedCaller` extension built from
    `config.tenant_id` plus the authenticator's `UserId`.
-6. **Descriptor-driven per-route rate limit**
+7. **Descriptor-driven per-route rate limit**
    (`webui_rate_limit::enforce_rate_limit`) — reads
    `ironclaw_webui_v2::webui_v2_routes()` at composition time and
    enforces the declared `RateLimitPolicy` per `(route, caller)` with a
    sliding window. Today every v2 descriptor declares
    `RateLimitScope::PerCaller`; composition fails closed if a future
    descriptor declares an unsupported scope.
-7. `webui_v2_router(WebUiV2State::new(bundle.api))` — the six v2
+8. `webui_v2_router(WebUiV2State::new(bundle.api))` — the six v2
    handlers from `ironclaw_webui_v2`.
+
+`webui_route_match` is the shared matcher both the body-limit and
+rate-limit middlewares consume so the two enforcers cannot drift on
+which request belongs to which descriptor.
 
 ### Entrypoint inventory (#3580)
 
@@ -88,8 +105,14 @@ rows are inventoried here, not implemented in the current PR.
   Reborn `serve` subcommand should set this to the bound listener's
   same-origin URL set; an empty allowlist rejects every cross-origin
   preflight.
-- **Body limit** — `RequestBodyLimitLayer` at `config.max_body_bytes`
-  (14 MiB default).
+- **Body limit** — descriptor-driven per-route via
+  `webui_body_limit::enforce_body_limit`. Caps come from
+  `ironclaw_webui_v2::webui_v2_routes()`: `create_thread` 16 KiB,
+  `send_message` 1 MiB, `cancel_run` / `resolve_gate` 4 KiB,
+  `get_timeline` / `stream_events` `NoBody`. The outer
+  `RequestBodyLimitLayer` at `config.max_body_bytes` (14 MiB default)
+  is kept as defense in depth for paths that don't match any v2
+  descriptor.
 - **Rate limit** — descriptor-driven; the v2 crate declares mutation
   60/60, read 120/60, stream 12/60 per `(tenant, user)`. Reading and
   enforcing happens in `webui_rate_limit::build_rate_limit_state`.
@@ -148,15 +171,26 @@ under its own listener.
 
 ### Tests
 
-- `tests/webui_v2_serve.rs` — 12 caller-level tests driving the
-  composed `Router` through `tower::ServiceExt::oneshot`: bearer
-  happy path, missing/invalid bearer 401, SSE `?token=`, timeline
-  rejects `?token=`, security headers, CORS allow + reject,
-  malformed-id rejection, rate-limit 429 after descriptor budget
-  exhausted, per-caller rate-limit independence.
+- `tests/webui_v2_serve.rs` — caller-level tests driving the composed
+  `Router` through `tower::ServiceExt::oneshot`: bearer happy path,
+  missing/invalid bearer 401, SSE `?token=`, timeline rejects `?token=`,
+  security headers, CORS allow + reject, malformed-id rejection,
+  rate-limit 429 after descriptor budget exhausted, per-caller
+  rate-limit independence, descriptor-driven body-limit 413 on
+  oversized mutation payload, in-budget mutation reaches facade, and
+  NoBody policy rejecting a non-empty body on a read route.
 - `src/webui_serve.rs::tests` — unit tests for `is_v2_sse_event_request`
   matcher and query-token extraction.
+- `src/webui_route_match.rs::tests` — unit tests for the pattern
+  parser and segment matcher shared by both descriptor-driven
+  middlewares.
 - `src/webui_rate_limit.rs::tests` — unit tests for the sliding-window
-  policy resolver and pattern matcher, plus a regression test that
-  `build_rate_limit_state` accepts every descriptor returned by
-  `ironclaw_webui_v2::webui_v2_routes()`.
+  policy resolver, a regression test that `build_rate_limit_state`
+  accepts every descriptor returned by
+  `ironclaw_webui_v2::webui_v2_routes()`, and
+  `unsupported_scope_is_rejected_at_composition` locking the
+  fail-closed branch for non-`PerCaller` scopes.
+- `src/webui_body_limit.rs::tests` — composition-time tests that
+  `build_body_limit_state` accepts every v2 descriptor and preserves
+  the per-route caps (regression guard against silently widening the
+  `send_message` cap or relaxing a `NoBody` policy).

@@ -30,7 +30,11 @@ mod runtime;
 mod runtime_input;
 mod webui;
 #[cfg(feature = "webui-v2-beta")]
+mod webui_body_limit;
+#[cfg(feature = "webui-v2-beta")]
 mod webui_rate_limit;
+#[cfg(feature = "webui-v2-beta")]
+mod webui_route_match;
 #[cfg(feature = "webui-v2-beta")]
 mod webui_serve;
 
