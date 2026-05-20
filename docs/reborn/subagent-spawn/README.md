@@ -176,7 +176,48 @@ ironclaw_reborn        + `subagent` PlannedDriver + run-profile→driver binding
 ironclaw_host_runtime / ironclaw_host_api   — unchanged
 ```
 
-### 5.4 Static vs dynamic — ownership boundaries
+### 5.4 Considered alternative — why not `Process`
+
+A natural question is whether `crates/ironclaw_processes/` (the Reborn kernel's
+existing `Process` abstraction, reachable today via `CapabilityHost::spawn_json`
++ `EffectKind::SpawnProcess` + `CapabilityOutcome::SpawnedProcess`) is the right
+substrate for a subagent. **It is not.**
+
+`Process` is for **OS-level capability invocations** — external subprocesses,
+WASM sandbox runs, etc. The shape it provides:
+
+- `ProcessRecord` carries `parent_process_id` (process-to-process lineage),
+  `runtime: RuntimeKind`, `grants: CapabilitySet`, `mounts`, `extension_id`.
+  **No `TurnScope`, no `TurnRunId`, no `parent_run_id`.**
+- Status enum: `Running | Completed | Failed | Killed`. **No gate states** — no
+  Approval / Auth / Resource / AwaitDependentRun equivalent.
+- `ProcessManager::spawn` is fire-and-forget; the manager does not hold blocking
+  / resumable lifecycle.
+- `ProcessResultStore::complete/fail/kill` has **no observer or wake signal** —
+  nothing equivalent to `SubagentCompletionObserver` resuming a parent or
+  submitting a follow-up turn.
+- Cancellation = a cooperative token per process. **No subtree cascade.**
+- Authority = explicit `grants` passed at spawn time. **No "surface ceiling"
+  attenuation, no inheritance discipline.**
+
+A subagent needs all of: `TurnRunId`-keyed identity, `parent_run_id` +
+`spawn_tree_root_run_id` lineage, blocking gate (`AwaitDependentRun`), checkpoint
+state, loop-family + run-profile selection, prompt composition via the loop-host
+ports, autonomous-wake delivery into the parent thread transcript, restart
+reconciliation, recursive subtree cancellation with tombstones, and per-tree
+durable descendant reservation. Wiring those onto `Process` would require
+duplicating the entire turn-coordination layer (and its store schema) inside
+`ironclaw_processes`. That violates crate boundaries — `ironclaw_turns` owns
+turn execution; `ironclaw_processes` owns OS-level work — and produces more
+code, not less.
+
+**Conclusion:** a child agent loop is **not** an OS process. It is a
+`TurnRunId`-keyed run driven by the same `TurnRunnerWorker` pool that drives the
+parent, selected by the `subagent` `LoopFamily`. `Process` and the subagent
+mechanism are **peer effect kinds** (each with its own `CapabilityOutcome`
+variant), not stacked layers.
+
+### 5.5 Static vs dynamic — ownership boundaries
 
 Everything that defines *what subagents exist* is **static** — compiled into the
 binary, identical in every deployment, no plugin loader, no runtime swapping. Only

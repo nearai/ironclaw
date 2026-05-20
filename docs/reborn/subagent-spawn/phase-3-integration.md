@@ -18,15 +18,22 @@ Phase 3 writes **no new mechanism**. If a test below needs behaviour that does
 not exist, that behaviour is a Phase 2 gap — fix it there, not here.
 
 > **Note on the overarching doc.** §11 of `README.md` says Phase 3 is
-> "runtime.rs wiring". That is accurate but incomplete: the real `runtime.rs`
-> today is a *generic, library-style composition* (`build_default_planned_runtime`
-> / `build_product_live_planned_runtime`) parameterised over `T`, `S`, `G`. It
+> "runtime.rs wiring · spawn_subagent capability surface entry · RestartReconciler
+> (startup + periodic) · AutonomousContinuationBudget enforcement · end-to-end
+> integration tests · quality gate". The real `runtime.rs` today is a *generic,
+> library-style composition* (`build_default_planned_runtime` /
+> `build_product_live_planned_runtime`) parameterised over `T`, `S`, `G`. It
 > does **not** construct concrete stores, observers, or capability ports — those
 > arrive through `DefaultPlannedRuntimeParts`. Phase 3 therefore (a) extends the
 > generic composition with the family/driver/observer wiring that is genuinely
-> generic, and (b) adds a *concrete* subagent assembly seam. See §1 and §3 for
-> the corrected split. Where this doc and `README.md` disagree, this doc wins
-> and the divergence is called out inline.
+> generic, (b) adds a *concrete* subagent assembly seam (`subagent_runtime.rs`)
+> that constructs the durable DB-backed goal store, the durable tombstone store,
+> the autonomous-continuation budget, the spawn-capable capability port, the
+> completion observer, and spawns the `RestartReconciler` periodic task, and
+> (c) declares the `spawn_subagent` capability surface entry with its typed
+> `SpawnedChildRun` result payload schema. See §1, §3, and §3a for the corrected
+> split. Where this doc and `README.md` disagree, this doc wins and the
+> divergence is called out inline.
 
 ---
 
@@ -36,20 +43,21 @@ not exist, that behaviour is a Phase 2 gap — fix it there, not here.
 
 | File | Change |
 |---|---|
-| `crates/ironclaw_reborn/src/runtime.rs` | Extend `DefaultPlannedRuntimeParts` with subagent fields; wire the `subagent` family + driver into `build_default_planned_runtime`; register `SubagentCompletionObserver` as a `TurnEventSink`; thread the goal store and spawn-capable capability port. New `ProductLiveRuntimeReadinessComponent` variants for the subagent components. |
+| `crates/ironclaw_reborn/src/runtime.rs` | Extend `DefaultPlannedRuntimeParts` with subagent fields (durable goal store, completion observer, tombstone store, autonomous-continuation budget); wire the `subagent` family + driver into `build_default_planned_runtime`; register `SubagentCompletionObserver` as a `TurnEventSink`; thread the goal store, tombstone store, autonomous budget, and spawn-capable capability port. New `ProductLiveRuntimeReadinessComponent` variants for the subagent components. |
 | `crates/ironclaw_reborn/src/app_loop_family.rs` | `build_loop_family_registry()` now registers **two** families: `families::default()` and `families::subagent()`. |
 | `crates/ironclaw_reborn/src/planned_driver_factory.rs` | Add `register_subagent_planned_driver`, `subagent_planned_driver_descriptor`, `subagent_planned_profile_definition`, and fold the subagent profile into `default_planned_run_profile_resolver`. |
-| `crates/ironclaw_reborn/src/production_readiness.rs` | Add `RebornLoopProductionComponent::SubagentGoalStore` and `::SubagentCompletionObserver`; extend `RebornLoopComponentGraphReadiness` with the two fields; add `subagent_driver_requirements()`. |
-| `crates/ironclaw_reborn/src/lib.rs` | `pub mod` the new `subagent_runtime` module (see §1.2). |
-| `crates/ironclaw_reborn/CLAUDE.md` | One line under "Main entry points": `subagent_runtime.rs` composes the concrete subagent assembly. |
+| `crates/ironclaw_reborn/src/production_readiness.rs` | Add `RebornLoopProductionComponent::SubagentGoalStore`, `::SubagentCompletionObserver`, `::SubagentResultTombstoneStore`, `::SubagentRestartReconciler`, `::SubagentAutonomousContinuationBudget`; extend `RebornLoopComponentGraphReadiness` with the five fields; add `subagent_driver_requirements()`. |
+| `crates/ironclaw_reborn/src/lib.rs` | `pub mod` the new `subagent_runtime` and `subagent_restart_reconciler` modules (see §1.2). |
+| `crates/ironclaw_reborn/CLAUDE.md` | Two lines under "Main entry points": `subagent_runtime.rs` composes the concrete subagent assembly; `subagent_restart_reconciler.rs` runs the startup sweep + periodic poll that closes the gap between child terminal commit and live observer dispatch. |
 
 ### 1.2 Files created
 
 | File | Purpose |
 |---|---|
-| `crates/ironclaw_reborn/src/subagent_runtime.rs` | The **concrete subagent assembly seam**. Owns `SubagentRuntimeParts` and `build_subagent_runtime`, which builds the durable bounded goal store, the spawn-capable capability port, the `SubagentCompletionObserver`, and returns a fully wired `RebornRuntimeLoopComposition` with the observer registered as a `TurnEventSink`. Keeps `runtime.rs` free of concrete-store construction (CLAUDE.md: "Keep `runtime.rs` limited to planned-runtime composition"). |
-| `crates/ironclaw_reborn/tests/subagent_spawn_e2e.rs` | All eight end-to-end integration tests (§4). |
-| `crates/ironclaw_reborn/tests/subagent_runtime_wiring.rs` | Composition-level tests: family/driver registration, profile resolution, observer-as-event-sink registration, production readiness for the subagent family. |
+| `crates/ironclaw_reborn/src/subagent_runtime.rs` | The **concrete subagent assembly seam**. Owns `SubagentRuntimeParts` and `build_subagent_runtime`, which builds the durable DB-backed goal store, the durable tombstone store, the autonomous-continuation budget, the spawn-capable capability port, the `SubagentCompletionObserver`, spawns the `RestartReconciler` periodic task, and returns a fully wired `RebornRuntimeLoopComposition` with the observer registered as a `TurnEventSink`. Keeps `runtime.rs` free of concrete-store construction (CLAUDE.md: "Keep `runtime.rs` limited to planned-runtime composition"). |
+| `crates/ironclaw_reborn/src/subagent_restart_reconciler.rs` | The `RestartReconciler` itself — `run_once()` (startup sweep) and `spawn_periodic(interval)` returning a `JoinHandle<()>`. Pure replay logic; idempotent via the same `external_event_id` the live observer uses. Wired by `subagent_runtime.rs`. |
+| `crates/ironclaw_reborn/tests/subagent_spawn_e2e.rs` | All end-to-end integration tests (§5). |
+| `crates/ironclaw_reborn/tests/subagent_runtime_wiring.rs` | Composition-level tests: family/driver registration, profile resolution, observer-as-event-sink registration, reconciler periodic-task spawn, budget injection, tombstone-store injection, DB-backed goal store, production readiness for the subagent family. |
 
 > The `subagent_runtime.rs` split exists because `crates/ironclaw_reborn/CLAUDE.md`
 > explicitly forbids growing `runtime.rs` into a "composition catch-all" and
@@ -72,8 +80,9 @@ divergence is logged in the PR description.
 | **P2.C** | `subagent_planned_driver()` building a `PlannedDriver` over the `subagent` family with its own descriptor + checkpoint schema | `planned_driver_factory.rs` |
 | **P2.A** | The spawn-capable capability port type (call it `SpawnCapableLoopCapabilityPort` / its factory) and its `spawn_subagent` capability-id constant | `subagent_runtime.rs` |
 | **P2.B** | prompt composition (direction system message + `## Task` user message) — internal to the capability port / context port; Phase 3 only asserts the *effect* (child sees the goal) |
-| **P1.C** | `SubagentFlavorTable` (built-in static table: `general`, `researcher`), direction `.md` files, and the **durable bounded goal store** type (call it `BoundedSubagentGoalStore`) keyed by child `TurnRunId` | `subagent_runtime.rs` |
-| **P2.D** | `SubagentCompletionObserver` implementing `TurnEventSink`, constructed from `(coordinator, turn_state_store, thread_service, goal_store, safety_layer)` | `subagent_runtime.rs` |
+| **P1.C** | `SubagentFlavorTable` (built-in static table: `general`, `researcher`), direction `.md` files, the `SubagentGoalStore` trait, the in-process `BoundedSubagentGoalStore`, and the **durable, DB-backed** `DbBackedSubagentGoalStore` (piggybacks on the turn-state DB connection — README §6 "Goal durability (DB-backed)"). Also the `SubagentResultTombstoneStore` trait + DB-backed impl (`DbBackedSubagentResultTombstoneStore`) keyed by child `TurnRunId` (README §6, §7.5). | `subagent_runtime.rs` |
+| **P2.D** | `SubagentCompletionObserver` implementing `TurnEventSink`, constructed from `(coordinator, turn_state_store, thread_service, goal_store, tombstone_store, autonomous_continuation_budget, safety_layer)`. The observer (i) emits `AutonomousContinuationStopped` via the existing typed source-log event surface when the budget halts a tree, (ii) writes a `SubagentResultTombstone` via the tombstone store when a child completes terminal mid-cancel. | `subagent_runtime.rs` |
+| **P2.D** | `AutonomousContinuationBudget` type (per-tree wake-turn quota + per-rolling-window rate-limit). Constructed in `subagent_runtime.rs` from configuration; injected into the observer (README §7.4, §8). | `subagent_runtime.rs` |
 
 If a Phase 2 type name is still open at integration time, Phase 3 uses the name
 in this table and Phase 2 conforms.
@@ -247,18 +256,35 @@ where
 {
     // ... all existing fields unchanged ...
 
-    /// Durable bounded goal store keyed by child `TurnRunId` (P1.C).
-    /// `build_product_live_planned_runtime` fails closed when `None`.
+    /// Durable, DB-backed goal store keyed by child `TurnRunId` (P1.C).
+    /// `build_product_live_planned_runtime` fails closed when `None`. In
+    /// product-live composition this is the `DbBackedSubagentGoalStore` that
+    /// piggybacks on the turn-state DB connection.
     pub subagent_goal_store: Option<Arc<dyn SubagentGoalStore>>,
 
+    /// Durable tombstone store (P1.C) — the observer writes a
+    /// `SubagentResultTombstone { child_run_id, disposition, terminal_status }`
+    /// when a child completes terminal mid-cancel (README §6, §7.5).
+    /// `build_product_live_planned_runtime` fails closed when `None`.
+    pub subagent_tombstone_store: Option<Arc<dyn SubagentResultTombstoneStore>>,
+
+    /// Per-spawn-tree autonomous-continuation budget (README §7.4, §8).
+    /// Caps background-wake turns per tree + wakes per rolling time window.
+    /// `build_product_live_planned_runtime` fails closed when `None`.
+    pub subagent_autonomous_continuation_budget: Option<Arc<AutonomousContinuationBudget>>,
+
     /// Completion observer for child runs (P2.D). When present it is
-    /// registered as a `TurnEventSink` on the coordinator.
+    /// registered as a `TurnEventSink` on the coordinator. Owns the
+    /// (goal_store, tombstone_store, budget) it was constructed with.
     pub subagent_completion_observer: Option<Arc<SubagentCompletionObserver>>,
 }
 ```
 
 `SubagentGoalStore` is the durable-store trait from P1.C;
-`BoundedSubagentGoalStore` is its bounded in-process implementation.
+`DbBackedSubagentGoalStore` is the production implementation (piggybacks on the
+turn-state DB connection — README §6); `BoundedSubagentGoalStore` is the
+in-process variant used by helper tests. `SubagentResultTombstoneStore` and
+`AutonomousContinuationBudget` are P1.C / P2.D types.
 `SubagentCompletionObserver` is the P2.D type.
 
 > **Divergence from README §5.3.** README lists the observer and goal store
@@ -321,8 +347,10 @@ pub enum ProductLiveRuntimeReadinessComponent {
     ModelPolicyGuard,
     ModelBudgetAccountant,
     SafetyContext,
-    SubagentGoalStore,            // ◄ new
-    SubagentCompletionObserver,   // ◄ new
+    SubagentGoalStore,                       // ◄ new
+    SubagentTombstoneStore,                  // ◄ new
+    SubagentAutonomousContinuationBudget,    // ◄ new
+    SubagentCompletionObserver,              // ◄ new
 }
 
 impl ProductLiveRuntimeReadinessComponent {
@@ -330,6 +358,8 @@ impl ProductLiveRuntimeReadinessComponent {
         match self {
             // ... existing ...
             Self::SubagentGoalStore => "subagent_goal_store",
+            Self::SubagentTombstoneStore => "subagent_tombstone_store",
+            Self::SubagentAutonomousContinuationBudget => "subagent_autonomous_continuation_budget",
             Self::SubagentCompletionObserver => "subagent_completion_observer",
         }
     }
@@ -342,6 +372,16 @@ And in `build_product_live_planned_runtime`, after the `safety_context` check:
     if parts.subagent_goal_store.is_none() {
         return Err(ProductLiveRuntimeBuildError::Missing(
             ProductLiveRuntimeReadinessComponent::SubagentGoalStore,
+        ));
+    }
+    if parts.subagent_tombstone_store.is_none() {
+        return Err(ProductLiveRuntimeBuildError::Missing(
+            ProductLiveRuntimeReadinessComponent::SubagentTombstoneStore,
+        ));
+    }
+    if parts.subagent_autonomous_continuation_budget.is_none() {
+        return Err(ProductLiveRuntimeBuildError::Missing(
+            ProductLiveRuntimeReadinessComponent::SubagentAutonomousContinuationBudget,
         ));
     }
     if parts.subagent_completion_observer.is_none() {
@@ -382,12 +422,40 @@ use crate::{
 /// Concrete dependencies for the subagent assembly. The caller still supplies
 /// the generic runtime parts; this struct adds the subagent-specific knobs.
 pub struct SubagentRuntimeParts {
-    /// Bound on the durable goal store (fork-bomb / memory containment).
+    /// Bound on the in-process goal store (fork-bomb / memory containment).
+    /// In product-live composition the `DbBackedSubagentGoalStore` is used
+    /// instead — see `goal_store_backend` below; this bound applies only when
+    /// `goal_store_backend == SubagentGoalStoreBackend::InProcess`.
     pub goal_store_capacity: usize,
+
+    /// Which goal-store backend to construct. `DbBacked` reuses the same DB
+    /// connection that already backs the `TurnStateStore` (piggybacking
+    /// pattern from README §6 "Goal durability (DB-backed)"). `InProcess` is
+    /// for helper tests only — it does **not** survive restart and the
+    /// product-live readiness check rejects it.
+    pub goal_store_backend: SubagentGoalStoreBackend,
+
     /// Built-in static flavor table (`general`, `researcher`).
     pub flavor_table: Arc<SubagentFlavorTable>,
+
     /// Caps enforced before `submit_turn` (README §8.2).
     pub spawn_caps: SubagentSpawnCaps,
+
+    /// Per-tree autonomous-continuation budget configuration (README §7.4).
+    pub autonomous_continuation: AutonomousContinuationConfig,
+
+    /// Restart-reconciler poll interval. Bounded; clamped to `[5s, 5min]`.
+    /// Used to spawn the periodic sweep task in step 6.
+    pub reconciler_poll_interval: Duration,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SubagentGoalStoreBackend {
+    /// Production: durable, survives restart. Piggybacks on the turn-state DB.
+    DbBacked,
+    /// Helper-test only: in-process `BoundedSubagentGoalStore`. Fails the
+    /// product-live readiness check because it is `NonDurable`.
+    InProcess,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -395,6 +463,17 @@ pub struct SubagentSpawnCaps {
     pub max_subagent_depth: u32,
     pub max_spawn_per_turn: u32,
     pub max_tree_descendants: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct AutonomousContinuationConfig {
+    /// Max background-wake turns admitted per spawn-tree root before the
+    /// budget halts further wakes (README §7.4 example: 16).
+    pub max_wake_turns_per_tree: u32,
+    /// Rolling rate-limit window (e.g. 60s) and max wakes within it
+    /// (README §7.4 example: 4 per minute).
+    pub rate_window: Duration,
+    pub max_wakes_per_window: u32,
 }
 
 /// Build a fully wired Reborn runtime composition with subagent spawn enabled.

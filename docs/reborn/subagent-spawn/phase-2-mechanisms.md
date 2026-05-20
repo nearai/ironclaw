@@ -80,15 +80,40 @@ pub enum BlockedReason {
 }
 pub enum TurnStatus { /* … */ BlockedDependentRun } // P1.A persisted-enum migration
 
-// store.rs — TurnRunRecord gains lineage fields
+// store.rs — TurnRunRecord gains lineage fields (README §6 "Lineage")
 pub struct TurnRunRecord {
     /* … existing … */
-    #[serde(default)] pub parent_run_id: Option<TurnRunId>,    // P1.A
-    #[serde(default)] pub subagent_depth: u32,                 // P1.A
+    #[serde(default)] pub parent_run_id: Option<TurnRunId>,         // P1.A
+    #[serde(default)] pub subagent_depth: u32,                      // P1.A
+    #[serde(default)] pub spawn_tree_root_run_id: Option<TurnRunId>,// P1.A — None on roots
 }
-// SubmitTurnRequest gains the same two fields (defaulted), and TurnStateStore
-// gains `children_of(run_id) -> Vec<TurnRunRecord>` plus
-// `get_run_record(run_id) -> Option<TurnRunRecord>`.
+// SubmitTurnRequest gains the same three lineage fields (defaulted) plus the
+// caller-known-id field (README §6 "requested_run_id / prepare_turn"):
+//
+//   #[serde(default)] pub parent_run_id: Option<TurnRunId>,
+//   #[serde(default)] pub subagent_depth: u32,
+//   #[serde(default)] pub spawn_tree_root_run_id: Option<TurnRunId>,
+//   #[serde(default)] pub requested_run_id: Option<TurnRunId>,
+//
+// TurnCoordinator gains:
+//   async fn prepare_turn(&self, scope: TurnScope) -> Result<TurnRunId, TurnError>;
+// mints a `TurnRunId` *before* any side-effect. When `SubmitTurnRequest.
+// requested_run_id == Some(id)`, the coordinator binds `id` instead of minting
+// a new one (and replays Accepted on re-submit). Generalises to missions /
+// cron / triggers (any submitter that must persist dependent state under the
+// real run id before submit). Replaces the staging-key+rekey workaround.
+//
+// TurnStateStore gains:
+//   async fn children_of(&self, run_id: TurnRunId)        -> Vec<TurnRunRecord>;
+//   async fn get_run_record(&self, run_id: TurnRunId)     -> Option<TurnRunRecord>;
+//   // README §6 "Per-tree descendant atomicity": atomic-at-store admission.
+//   async fn tree_descendant_count_and_reserve(
+//       &self, root: TurnRunId, delta: u32,
+//   ) -> Result<TreeReservation, TreeReservationError>;
+//   async fn release_tree_descendants(&self, root: TurnRunId, delta: u32)
+//       -> Result<(), TreeReservationError>;
+//
+// pub enum TreeReservationError { WouldExceed { cap: u32, current: u32 }, … }
 ```
 
 ### P1.C — `ironclaw_reborn` data (assumed present)
@@ -107,7 +132,11 @@ pub struct SubagentFlavor {
 pub fn resolve_flavor(id: &SubagentFlavorId) -> Option<&'static SubagentFlavor>;
 pub fn direction_md(direction_id: &DirectionId) -> &'static str;   // include_str!
 
-// ironclaw_reborn/src/subagent/goal_store.rs  (P1.C)
+// ironclaw_reborn/src/subagent/goal_store.rs  (P1.C — DB-BACKED in v1)
+//
+// README §6 "Goal durability (DB-backed)": persisted store keyed by the child
+// `TurnRunId`. The child id is known BEFORE submit_turn via prepare_turn — no
+// staging key, no rekey. A miss => Err(NotFound) (fail loud).
 pub struct SubagentGoal { pub task: String, pub handoff: Option<String> }
 #[async_trait]
 pub trait SubagentGoalStore: Send + Sync {
@@ -115,13 +144,82 @@ pub trait SubagentGoalStore: Send + Sync {
         -> Result<(), SubagentGoalStoreError>;
     async fn get_goal(&self, run_id: TurnRunId)
         -> Result<SubagentGoal, SubagentGoalStoreError>;   // miss => Err(NotFound)
+    async fn delete_goal(&self, run_id: TurnRunId)
+        -> Result<(), SubagentGoalStoreError>;             // rollback on submit failure
 }
-// BoundedSubagentGoalStore — durable, bounded, in-process v1 impl.
+// Note: no `rekey(staging, real)` — `prepare_turn` makes it unnecessary.
 
 // ironclaw_reborn/src/subagent/gate_resolution.rs  (P1.C)
 //   - AwaitedChildSet: the set of child run ids one gate awaits, + recorded
 //     child results; persisted; supports "all terminal?" reconciliation.
 //   - SubagentGateResolutionStore trait with the awaited-set + result ops.
+
+// ironclaw_reborn/src/subagent/tombstone_store.rs  (P1.C)
+//
+// README §6 "Cancellation tombstone": a child terminal during a parent-cancel
+// sweep writes a typed disposition so the reconciler distinguishes "discarded
+// by parent cancel" from "lost in the gap between commit and observer dispatch".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentTombstoneDisposition { DiscardedByParentCancel }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentResultTombstone {
+    pub child_run_id:    TurnRunId,
+    pub disposition:     SubagentTombstoneDisposition,
+    pub terminal_status: TurnStatus,        // the status the child actually reached
+    pub recorded_at:     TurnTimestamp,
+}
+#[async_trait]
+pub trait SubagentResultTombstoneStore: Send + Sync {
+    async fn write_tombstone(&self, t: SubagentResultTombstone)
+        -> Result<(), TombstoneStoreError>;
+    async fn read_tombstone(&self, child_run_id: TurnRunId)
+        -> Result<Option<SubagentResultTombstone>, TombstoneStoreError>;
+}
+
+// ironclaw_reborn/src/subagent/spawn_result_payload.rs  (P1.C — schema)
+//
+// README §6 "Spawn-result payload (schema)": the wire-stable typed JSON the
+// parent's model receives as the `spawn_subagent` tool result. Snake_case
+// serde, round-trip tested.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SpawnedChildRunPayload {
+    pub child_run_id:    TurnRunId,
+    pub child_thread_id: ThreadId,
+    pub flavor:          SubagentFlavorId,
+    pub mode:            SubagentSpawnMode,        // "blocking" | "background"
+    pub status:          SubagentSpawnStatus,      // "spawned"|"completed"|"failed"|"cancelled"
+    pub output_available: bool,                    // false for fresh background spawns
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_text:      Option<String>,           // populated for blocking + sanitised
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_summary: Option<SanitizedFailure>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentSpawnMode { Blocking, Background }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentSpawnStatus { Spawned, Completed, Failed, Cancelled }
+
+// ironclaw_reborn/src/subagent/continuation_budget.rs  (P1.C)
+//
+// README §6 + §7.4 "Autonomous-continuation budget": bounds per-spawn-tree
+// wake-turn count and per-time-window rate, keyed by `spawn_tree_root_run_id`.
+#[async_trait]
+pub trait AutonomousContinuationBudget: Send + Sync {
+    /// Returns Allowed if the wake-turn quota *and* the per-window rate both
+    /// have headroom; otherwise Suspended (further wakes for this tree must
+    /// not be submitted; emit `AutonomousContinuationStopped` once).
+    async fn check_and_reserve_wake(&self, tree_root: TurnRunId)
+        -> Result<ContinuationDecision, ContinuationBudgetError>;
+}
+pub enum ContinuationDecision {
+    Allowed,
+    Suspended { reason_kind: SuspendedReasonKind },   // "wake_quota" | "rate_window"
+}
 ```
 
 P1.B (the `subagent` `LoopFamily` and `GateKind::AwaitDependentRun` inside the
@@ -185,6 +283,12 @@ pub trait LoopCapabilityPort: Send + Sync {
 pub trait TurnCoordinator: Send + Sync {
     async fn submit_turn(&self, request: SubmitTurnRequest) -> Result<SubmitTurnResponse, TurnError>;
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError>;
+    /// P1.A — mint a `TurnRunId` BEFORE any side-effect so the submitter can
+    /// persist dependent state (e.g. the subagent goal, the awaited-child set,
+    /// the per-tree reservation) under the real id from the start. The id is
+    /// honored by a subsequent `submit_turn` whose `requested_run_id == Some(id)`.
+    /// Replaces the staging-key-then-rekey workaround.
+    async fn prepare_turn(&self, scope: TurnScope) -> Result<TurnRunId, TurnError>;
     /* resume_turn, cancel_run … */
 }
 pub struct SubmitTurnRequest {
@@ -195,7 +299,14 @@ pub struct SubmitTurnRequest {
     pub requested_run_profile: Option<RunProfileRequest>,
     pub idempotency_key: IdempotencyKey,
     pub received_at: TurnTimestamp,
-    // P1.A: pub parent_run_id: Option<TurnRunId>, pub subagent_depth: u32,
+    // P1.A additions:
+    #[serde(default)] pub parent_run_id: Option<TurnRunId>,
+    #[serde(default)] pub subagent_depth: u32,
+    #[serde(default)] pub spawn_tree_root_run_id: Option<TurnRunId>,
+    /// If Some(id), the coordinator binds `id` (previously minted by
+    /// `prepare_turn`) instead of minting a fresh one. Re-submit with the same
+    /// id replays Accepted (idempotent). README §6 "requested_run_id".
+    #[serde(default)] pub requested_run_id: Option<TurnRunId>,
 }
 pub struct TurnScope { pub tenant_id: TenantId, pub agent_id: Option<AgentId>,
                        pub project_id: Option<ProjectId>, pub thread_id: ThreadId }
@@ -386,11 +497,14 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
 
 ### 1.6 The spawn sequence — pseudo code (README §7.2 steps a–f)
 
-`handle_spawn` is the heart of P2.A. The order is **load-bearing**: gates →
-flavor → thread → goal → **gate record (durable)** → `submit_turn`. The
-`AwaitDependentRun` set is written to durable storage *before* `submit_turn`
-so a child that finishes before the parent blocks cannot be lost (README §9
-"lost wakeup").
+`handle_spawn` is the heart of P2.A. The order is **load-bearing**:
+gates → flavor → **`prepare_turn` (mint real `child_run_id`)** → thread →
+**atomic per-tree reserve** → goal (real id) → **gate record (durable)** →
+`submit_turn { requested_run_id: Some(child_run_id) }`. Every durable write
+keyed by `child_run_id` is written *before* `submit_turn`, so a child that
+finishes before the parent blocks cannot be lost (README §9 "lost wakeup")
+and a per-tree over-admit cannot occur (README §6, §8.3, §9
+"per-tree descendant over-admit"). There is no staging id, no rekey.
 
 ```rust
 impl SubagentSpawnCapabilityPort {

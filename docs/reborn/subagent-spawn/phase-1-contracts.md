@@ -36,10 +36,16 @@ they are the seam.
 | New `TurnStatus` variant | `BlockedDependentRun` | P1.A | store, coordinator (P2/P3) |
 | New `GateKind` variant (`ironclaw_agent_loop`) | `AwaitDependentRun` | P1.B | executor `handle_gate` (P3) |
 | New `LoopFamilyId` value | `"subagent"` (wire string) | P1.B | reborn driver binding (P2.C) |
-| New lineage fields on `TurnRunRecord` | `parent_run_id: Option<TurnRunId>`, `subagent_depth: u32` | P1.A | reborn submit path (P2.A), observer (P2.D) |
+| New lineage fields on `TurnRunRecord` | `parent_run_id: Option<TurnRunId>`, `subagent_depth: u32`, `spawn_tree_root_run_id: Option<TurnRunId>` | P1.A | reborn submit path (P2.A), observer (P2.D), reservation table (P1.C/P2) |
+| New lineage fields on `SubmitTurnRequest` | `requested_run_id: Option<TurnRunId>`, `parent_run_id: Option<TurnRunId>`, `subagent_depth: u32`, `spawn_tree_root_run_id: Option<TurnRunId>` | P1.A | P2.A spawn path; mission/cron/trigger submitters (future) |
+| New coordinator trait method | `TurnCoordinator::prepare_turn(scope: TurnScope) -> Result<TurnRunId, TurnError>` | P1.A | P2.A spawn handler — mints child run id **before** any side-effect so goal store and reservation can be keyed by the final id |
 | New store query | `children_of(&self, run_id: TurnRunId)` | P1.A | observer cancellation subtree walk (P2.D) |
 | New store query | `get_run_record(&self, run_id: TurnRunId)` | P1.A | observer parent lookup for terminal child events (P2.D) |
+| New store atomic | `tree_descendant_count_and_reserve(root: TurnRunId, delta: u32) -> Result<u32, TurnError>` | P1.A (trait) / P1.C (`SpawnTreeReservation` row backend) | P2.A admission, before `submit_turn` |
+| New store atomic (companion) | `release_tree_descendants(root: TurnRunId, delta: u32) -> Result<(), TurnError>` | P1.A | P2.A partial-spawn rollback |
 | New coordinator hook | `DefaultTurnCoordinator::with_event_sink(Arc<dyn TurnEventSink>)` | P1.A | live `SubagentCompletionObserver` notification (P2.D/P3) |
+| New spawn-result payload struct | `SpawnedChildRunPayload { child_run_id, child_thread_id, flavor, mode, status, output_available, final_text, failure_summary }` | P1.C (`ironclaw_reborn::subagent`) | P2.A `result_ref` content; parent's model receives it as tool result |
+| New tombstone struct | `SubagentResultTombstone { child_run_id, terminal_status, disposition: SubagentResultDisposition }` + enum `SubagentResultDisposition::DiscardedByParentCancel` | P1.C (`ironclaw_reborn::subagent`) | P2.D writes on mid-cancel terminal completes; reconciler reads |
 
 ### 0.2 Wire-string contract for the new enum variants
 
@@ -90,10 +96,10 @@ durable lineage fields on `TurnRunRecord`, and a `children_of` store query.
 | `crates/ironclaw_turns/src/run_profile/host.rs` | + `CapabilityOutcome::{SpawnedChildRun, AwaitDependentRun}`; + `LoopGateKind::AwaitDependentRun`; update `CapabilityOutcome::is_suspension` |
 | `crates/ironclaw_turns/src/status.rs` | + `TurnStatus::BlockedDependentRun`; + `BlockedReason::DependentRun`; update `is_terminal`, `keeps_active_lock` (no behavior change, but re-verify); update `BlockedReason::status` / `gate_ref` |
 | `crates/ironclaw_turns/src/loop_exit.rs` | + `LoopBlockedKind::AwaitDependentRun`; update `LoopBlockedKind::to_blocked_reason` |
-| `crates/ironclaw_turns/src/request.rs` | + `parent_run_id`, `subagent_depth` on `SubmitTurnRequest` |
-| `crates/ironclaw_turns/src/store.rs` | + `parent_run_id`, `subagent_depth` on `TurnRunRecord`; + `children_of` on `TurnStateStore` trait |
-| `crates/ironclaw_turns/src/coordinator.rs` | + optional `TurnEventSink` on `DefaultTurnCoordinator`; publish submit/resume/cancel lifecycle events best-effort |
-| `crates/ironclaw_turns/src/memory.rs` | + `parent_run_id`/`subagent_depth` on `RunRecord`; thread through `persistence_record`; impl `children_of`; update blocked-status `match` arms (resume + cancel) |
+| `crates/ironclaw_turns/src/request.rs` | + `requested_run_id`, `parent_run_id`, `subagent_depth`, `spawn_tree_root_run_id` on `SubmitTurnRequest` (all `#[serde(default)]`) |
+| `crates/ironclaw_turns/src/store.rs` | + `parent_run_id`, `subagent_depth`, `spawn_tree_root_run_id` on `TurnRunRecord`; + `children_of`, `get_run_record`, `tree_descendant_count_and_reserve`, `release_tree_descendants` on `TurnStateStore` trait |
+| `crates/ironclaw_turns/src/coordinator.rs` | + `prepare_turn(scope) -> TurnRunId` on `TurnCoordinator` trait + `DefaultTurnCoordinator` impl; + optional `TurnEventSink` on `DefaultTurnCoordinator`; publish submit/resume/cancel lifecycle events best-effort; `submit_turn` must honour `requested_run_id` (bind instead of mint) |
+| `crates/ironclaw_turns/src/memory.rs` | + `parent_run_id`/`subagent_depth`/`spawn_tree_root_run_id` on `RunRecord`; thread through `persistence_record`; impl `children_of`, `get_run_record`, `tree_descendant_count_and_reserve`, `release_tree_descendants`; honour `requested_run_id` in `submit_turn`; update blocked-status `match` arms (resume + cancel) |
 | `crates/ironclaw_turns/src/run_profile/milestones.rs` | no code change — `LoopHostMilestoneKind::GateBlocked` carries `LoopGateKind` opaquely; verify it still compiles |
 | `crates/ironclaw_turns/src/db.rs` | no schema change — `TurnRunRecord` is stored as a JSON payload; verify the round-trip test still passes |
 | `crates/ironclaw_turns/tests/…` | new unit + contract tests (§1.9) |
@@ -516,9 +522,9 @@ existing variants and avoid a silent wire break on already-persisted records.
 
 ### 1.7 `TurnRunRecord` lineage fields + `children_of`
 
-**`SubmitTurnRequest` lineage input.** Add the same two fields to
+**`SubmitTurnRequest` lineage + reserved-id input.** Add four fields to
 `request.rs::SubmitTurnRequest` so callers can create child runs with durable
-lineage:
+lineage **and** pre-mint the run id via `prepare_turn`:
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -531,15 +537,39 @@ pub struct SubmitTurnRequest {
     pub requested_run_profile: Option<RunProfileRequest>,
     pub idempotency_key: IdempotencyKey,
     pub received_at: TurnTimestamp,
+    /// Pre-minted `TurnRunId` from `TurnCoordinator::prepare_turn(scope)`. When
+    /// `Some`, the coordinator/store MUST bind this id to the new run rather
+    /// than mint a fresh one — used by the spawn handler so the goal store and
+    /// `SpawnTreeReservation` row can be keyed by the final child id **before**
+    /// `submit_turn`. When `None`, the store mints a fresh id (legacy path).
+    /// Mismatch with a coordinator-claimed id is `TurnError::Conflict` (see
+    /// §1.10 — load-bearing for replay determinism).
+    #[serde(default)]
+    pub requested_run_id: Option<TurnRunId>,
+    /// Parent run that spawned this run as a subagent child. `None` for
+    /// top-level (user-initiated) runs.
     #[serde(default)]
     pub parent_run_id: Option<TurnRunId>,
+    /// Depth in the subagent run tree. `0` for top-level; child =
+    /// `parent.subagent_depth + 1`.
     #[serde(default)]
     pub subagent_depth: u32,
+    /// Spawn-tree root for per-tree atomic accounting. `None` for top-level
+    /// runs **and** for the immediate child of a top-level run (the root run
+    /// is its own root — represented as `None`, not `Some(self_id)`, because
+    /// the root's id is the row key in `SpawnTreeReservation`). For depth ≥ 2,
+    /// the child inherits `parent.spawn_tree_root_run_id.unwrap_or(parent.run_id)`.
+    #[serde(default)]
+    pub spawn_tree_root_run_id: Option<TurnRunId>,
 }
 ```
 
-Top-level submitters leave both fields at their defaults. P2.A is the first
-caller that sets them.
+Top-level submitters leave all four fields at their defaults. P2.A is the first
+caller that sets them — it calls `prepare_turn(child_scope)` to obtain
+`requested_run_id`, then derives lineage from the parent record.
+
+Back-compat: all four are `#[serde(default)]`, so every persisted/legacy request
+JSON without these keys deserialises with `None`/`0` — wire-stable.
 
 **Current** (`store.rs` lines 79–101):
 
@@ -605,36 +635,46 @@ pub struct TurnRunRecord {
     /// before `submit_turn` (Phase 2).
     #[serde(default)]
     pub subagent_depth: u32,
+    /// Spawn-tree root for per-tree atomic descendant accounting. The
+    /// `SpawnTreeReservation` row is keyed by this id (when `Some`) or by
+    /// `run_id` (when `None` — the run is its own root). A top-level run
+    /// always has `spawn_tree_root_run_id == None`. P2.A derives this from
+    /// the parent record at spawn time and writes it into `SubmitTurnRequest`.
+    #[serde(default)]
+    pub spawn_tree_root_run_id: Option<TurnRunId>,
 }
 ```
 
 - `Option<TurnRunId>` `#[serde(default)]` → `None`. `u32` `#[serde(default)]` →
-  `0`. Both legacy-safe.
+  `0`. All three legacy-safe.
 - Do **not** add `skip_serializing_if` — always serialize them so a top-level
   run round-trips an explicit `parent_run_id: null, subagent_depth: 0` and a
   forensic read never has to distinguish "absent" from "top-level". (The
   existing `resolved_model_route` uses `skip_serializing_if` because it is large
   and genuinely optional; lineage is small and always meaningful.)
 
-**Mirror field on the in-memory `RunRecord`** (`memory.rs` lines 109–130). Add:
+**Mirror fields on the in-memory `RunRecord`** (`memory.rs` lines 109–130). Add:
 
 ```rust
 struct RunRecord {
     // … existing fields …
     parent_run_id: Option<TurnRunId>,
     subagent_depth: u32,
+    spawn_tree_root_run_id: Option<TurnRunId>,
 }
 ```
 
 Thread them through:
-- `persistence_record()` (`memory.rs` line 1821) — copy both fields into the
-  emitted `TurnRunRecord`.
+- `persistence_record()` (`memory.rs` line 1821) — copy all three fields into
+  the emitted `TurnRunRecord`.
 - `from_persistence_snapshot` reconstruction — when rebuilding `RunRecord` from a
-  `TurnRunRecord`, copy `parent_run_id` / `subagent_depth` across.
+  `TurnRunRecord`, copy `parent_run_id` / `subagent_depth` /
+  `spawn_tree_root_run_id` across.
 - `RunRecord` construction in `submit_turn` (`memory.rs` ~line 476/499/512) —
-  copy `request.parent_run_id` and `request.subagent_depth` into the record.
-  Top-level callers get legacy behavior through the request fields' serde/default
-  values (`None`, `0`).
+  copy `request.parent_run_id`, `request.subagent_depth`, and
+  `request.spawn_tree_root_run_id` into the record. Top-level callers get
+  legacy behavior through the request fields' serde/default values
+  (`None`/`0`/`None`).
 - `state()` (`TurnRunState`, line 1845) — **not modified.** `TurnRunState` does
   not gain lineage fields in Phase 1; the observer reads lineage via
   `children_of` / the record, not via run state. Keeping `TurnRunState` stable
@@ -667,8 +707,63 @@ pub trait TurnStateStore: Send + Sync {
     /// for a child run and, if so, which parent run should receive the result.
     async fn get_run_record(&self, run_id: TurnRunId)
         -> Result<Option<TurnRunRecord>, TurnError>;
+
+    /// Atomically reserve `delta` additional descendant slots in the spawn
+    /// tree rooted at `root_run_id` and return the **post-reservation** count
+    /// (i.e. the new total descendant count including this reservation).
+    ///
+    /// Backed by a durable `SpawnTreeReservation` row keyed by
+    /// `(tenant_id, spawn_tree_root_run_id)`; the increment is done under a
+    /// store-level lock / atomic UPDATE so concurrent admit across subtrees on
+    /// different threads cannot over-admit. The caller compares the returned
+    /// count against `MAX_TREE_DESCENDANTS` (Phase 2 policy constant); the
+    /// store itself does not enforce the cap — admission policy does.
+    ///
+    /// Runs **before** `submit_turn` in P2.A. On `submit_turn` failure the
+    /// caller MUST `release_tree_descendants(root, delta)` to roll back.
+    ///
+    /// Returns `TurnError::Conflict` if the row is being mutated concurrently
+    /// in an incompatible way (store-implementation-specific). NEVER returns a
+    /// `WouldExceed` itself — the cap is policy, not store-enforced — but
+    /// admission/spawn handler turns the returned count > cap into a typed
+    /// rejection.
+    async fn tree_descendant_count_and_reserve(
+        &self,
+        root_run_id: TurnRunId,
+        delta: u32,
+    ) -> Result<u32, TurnError>;
+
+    /// Companion to `tree_descendant_count_and_reserve` — atomically decrement
+    /// the descendant count for partial-spawn rollback. Called by P2.A when
+    /// `submit_turn` of a reserved child fails between reservation and queue.
+    /// Idempotent at the row level via the same atomic-update pattern; an
+    /// underflow saturates at 0 and logs at `debug!` (a release of a slot we
+    /// never reserved is a bug, but losing the row would orphan capacity
+    /// which is worse).
+    async fn release_tree_descendants(
+        &self,
+        root_run_id: TurnRunId,
+        delta: u32,
+    ) -> Result<(), TurnError>;
 }
 ```
+
+**`SpawnTreeReservation` row schema** (durable, backend-mirrored). Lives in the
+same persistence backend as `TurnRunRecord` (libSQL / Postgres):
+
+| Column | Type | Notes |
+|---|---|---|
+| `tenant_id` | text (PK part) | from the root run's `TurnScope.tenant_id` — tenant isolation |
+| `spawn_tree_root_run_id` | uuid (PK part) | the root `TurnRunId`; equals the run's own id when its `spawn_tree_root_run_id` field is `None` |
+| `descendant_count` | bigint (u64 in Rust) | total reserved descendants under this root; atomically incremented by `tree_descendant_count_and_reserve` |
+| `created_at` | timestamptz | first reservation time; helps reconciliation age-out orphaned rows |
+| `updated_at` | timestamptz | last reservation/release time |
+
+Primary key: `(tenant_id, spawn_tree_root_run_id)`. The atomic increment is a
+single `UPDATE … SET descendant_count = descendant_count + $1 RETURNING
+descendant_count` (Postgres) or its libSQL equivalent. Row is INSERTed with
+count = `delta` when it does not yet exist (`ON CONFLICT … DO UPDATE`). This
+keeps the operation atomic without a separate `SELECT` round-trip.
 
 > **[CORRECTION]** The overarching doc says `children_of(run_id)` returns a
 > store query result without specifying the element type. It must return
@@ -707,10 +802,55 @@ async fn get_run_record(&self, run_id: TurnRunId)
     };
     Ok(inner.records.get(&run_id).map(RunRecord::persistence_record))
 }
+
+async fn tree_descendant_count_and_reserve(
+    &self,
+    root_run_id: TurnRunId,
+    delta: u32,
+) -> Result<u32, TurnError> {
+    let mut inner = match self.inner.lock() {
+        Ok(inner) => inner,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    // `Inner` gains a `tree_reservations: HashMap<TurnRunId, u32>` field
+    // (in-memory mirror of the `SpawnTreeReservation` row keyed by root id;
+    // the in-memory store is single-tenant so no tenant key needed).
+    let entry = inner.tree_reservations.entry(root_run_id).or_insert(0);
+    *entry = entry.saturating_add(delta);
+    Ok(*entry)
+}
+
+async fn release_tree_descendants(
+    &self,
+    root_run_id: TurnRunId,
+    delta: u32,
+) -> Result<(), TurnError> {
+    let mut inner = match self.inner.lock() {
+        Ok(inner) => inner,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if let Some(entry) = inner.tree_reservations.get_mut(&root_run_id) {
+        let prev = *entry;
+        *entry = entry.saturating_sub(delta);
+        if prev < delta {
+            tracing::debug!(
+                root = %root_run_id,
+                attempted = delta,
+                available = prev,
+                "tree descendant release underflowed; saturated at 0"
+            );
+        }
+        if *entry == 0 {
+            inner.tree_reservations.remove(&root_run_id);
+        }
+    }
+    Ok(())
+}
 ```
 
 (`Inner::records` is the `HashMap<TurnRunId, RunRecord>` — confirm field name
-when implementing; `take_record` already indexes it.)
+when implementing; `take_record` already indexes it. `Inner::tree_reservations`
+is the new in-memory mirror of the `SpawnTreeReservation` durable table.)
 
 **`LibSqlTurnStateStore` / `PostgresTurnStateStore`** (`db.rs`). `TurnRunRecord`
 is stored as an opaque JSON payload (`libsql_load_payloads::<TurnRunRecord>` /
@@ -726,7 +866,171 @@ add a migration in Phase 1. If `db.rs` proves to have no whole-table load
 helper, the acceptable Phase-1 fallback is a JSON-path `WHERE` filter; either
 way it is a contained `db.rs` change.
 
-### 1.8 `DefaultTurnCoordinator` event sink
+### 1.8 `TurnCoordinator::prepare_turn` + `SubmitTurnRequest.requested_run_id` binding
+
+The spawn handler (P2.A) needs the **child `TurnRunId` before any side-effect**
+so the goal store row and the `SpawnTreeReservation` row can be keyed by the
+final id — no staging key, no rekey. README §6 ("Goal durability (DB-backed)")
+and §11 design table ("`requested_run_id` / `prepare_turn`") make this the
+mechanism. The same shape generalises to missions/cron/triggers (any submitter
+that needs to "persist dependent state before submit").
+
+**Add to the `TurnCoordinator` trait:**
+
+```rust
+#[async_trait]
+pub trait TurnCoordinator: Send + Sync {
+    /// Mint a fresh `TurnRunId` for a future `submit_turn(scope, ...)` call,
+    /// **without** any store side-effect. The caller passes the returned id
+    /// back via `SubmitTurnRequest.requested_run_id`; the coordinator/store
+    /// binds it instead of minting a new one.
+    ///
+    /// Used by the subagent spawn handler so the durable goal store and the
+    /// `SpawnTreeReservation` row can be keyed by the final child id before
+    /// `submit_turn`. Idempotent in the sense that the same caller calling
+    /// twice yields two distinct ids — there is no de-dup; the caller owns
+    /// the id from this point.
+    async fn prepare_turn(&self, scope: TurnScope) -> Result<TurnRunId, TurnError>;
+
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError>;
+
+    // … existing methods unchanged …
+}
+```
+
+**`DefaultTurnCoordinator` impl** (pseudo code):
+
+```rust
+#[async_trait]
+impl<S> TurnCoordinator for DefaultTurnCoordinator<S>
+where
+    S: TurnStateStore + ?Sized + 'static,
+{
+    async fn prepare_turn(&self, _scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        // Pure id mint — no store I/O, no admission check, no lock.
+        // `_scope` is taken for forward-compat (a future tenant-scoped id
+        // policy may want it) but currently unused.
+        Ok(TurnRunId::new())
+    }
+
+    async fn submit_turn(
+        &self,
+        request: SubmitTurnRequest,
+    ) -> Result<SubmitTurnResponse, TurnError> {
+        // … existing flow, with one new precondition propagated into the
+        // store: when `request.requested_run_id == Some(id)`, the store
+        // binds `id` to the new run rather than minting a fresh one.
+        // If the store has already claimed `id` for a different scope, the
+        // store returns `TurnError::Conflict { reason: "requested_run_id
+        // already bound to a different run" }`.
+        let scope = request.scope.clone();
+        let response = self
+            .store
+            .submit_turn(
+                request,
+                self.admission_policy.as_ref(),
+                self.run_profile_resolver.as_ref(),
+            )
+            .await?;
+        notify_queued_run_best_effort(self.wake_notifier.as_ref(), submit_wake(scope, &response));
+        Ok(response)
+    }
+}
+
+#[async_trait]
+impl<C> TurnCoordinator for Arc<C>
+where
+    C: TurnCoordinator + ?Sized,
+{
+    async fn prepare_turn(&self, scope: TurnScope) -> Result<TurnRunId, TurnError> {
+        self.as_ref().prepare_turn(scope).await
+    }
+    // … existing forwards unchanged …
+}
+```
+
+**Store-level binding rule** (`memory.rs`, `db.rs`):
+
+- When `submit_turn` sees `request.requested_run_id == Some(id)`, the new
+  `RunRecord` / `TurnRunRecord` has `run_id = id`. The id is NOT validated
+  against any prior `prepare_turn` call — `prepare_turn` is pure id-mint, the
+  store does not track outstanding mints.
+- If `id` collides with an existing `RunRecord`, the store returns
+  `TurnError::Conflict { reason: "requested_run_id already bound" }`. Callers
+  treat this as fatal (idempotency keys still apply for replay; collision
+  means the caller's id-mint is broken).
+- When `requested_run_id == None`, legacy behavior: store mints via
+  `TurnRunId::new()`.
+
+**Default trait impl pseudo code** — note `prepare_turn` does NOT have a
+default impl on the trait (every coordinator must opt in explicitly); the
+`Arc<C>` blanket forwards, which keeps existing tests / mock coordinators
+working only after they implement it. This is intentional fail-loud: a
+coordinator that returns a non-unique id would silently break replay.
+
+**Unit-test stub (P1.A):**
+
+```rust
+#[tokio::test]
+async fn prepare_turn_mints_unique_run_ids_without_side_effects() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coord = DefaultTurnCoordinator::new(store.clone());
+    let scope = test_scope();
+
+    let id_a = coord.prepare_turn(scope.clone()).await.unwrap();
+    let id_b = coord.prepare_turn(scope.clone()).await.unwrap();
+    assert_ne!(id_a, id_b, "prepare_turn must mint distinct ids");
+
+    // No `RunRecord` was created — prepare_turn is side-effect free.
+    let state = store
+        .get_run_state(GetRunStateRequest { scope: scope.clone(), run_id: id_a })
+        .await;
+    assert!(matches!(state, Err(TurnError::ScopeNotFound)));
+}
+
+#[tokio::test]
+async fn submit_turn_with_requested_run_id_binds_that_id() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coord = DefaultTurnCoordinator::new(store.clone());
+    let scope = test_scope();
+
+    let reserved = coord.prepare_turn(scope.clone()).await.unwrap();
+    let req = SubmitTurnRequest {
+        // … other fields …
+        requested_run_id: Some(reserved),
+        parent_run_id: None,
+        subagent_depth: 0,
+        spawn_tree_root_run_id: None,
+        scope: scope.clone(),
+        // … rest …
+    };
+    let resp = coord.submit_turn(req).await.unwrap();
+    let SubmitTurnResponse::Accepted { run_id, .. } = resp else { panic!() };
+    assert_eq!(run_id, reserved, "coordinator must bind requested_run_id");
+}
+
+#[tokio::test]
+async fn submit_turn_rejects_requested_run_id_collision() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let coord = DefaultTurnCoordinator::new(store.clone());
+    let scope = test_scope();
+    let reserved = coord.prepare_turn(scope.clone()).await.unwrap();
+
+    // First submit binds the id.
+    let _ = coord.submit_turn(req_with_id(scope.clone(), reserved)).await.unwrap();
+    // Second submit with the SAME id must fail loud.
+    let err = coord
+        .submit_turn(req_with_id(scope.clone(), reserved))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, TurnError::Conflict { .. }));
+}
+```
+
+### 1.9 `DefaultTurnCoordinator` event sink
 
 `TurnEventSink` already exists in `ironclaw_turns::events`, and the stores
 already persist `TurnLifecycleEvent`s. The missing live seam is that
