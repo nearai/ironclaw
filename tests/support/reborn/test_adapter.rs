@@ -107,6 +107,20 @@ impl ProductAdapter for RebornTestProductAdapter {
                     reason: ironclaw_product_adapters::RedactedString::new(error.to_string()),
                 }
             })?;
+        let claim = auth_evidence
+            .claim()
+            .ok_or(ProductAdapterError::Authentication(
+                ProtocolAuthFailure::Missing,
+            ))?;
+        if claim.subject() != payload.user_id {
+            return Err(ProductAdapterError::Authentication(
+                ProtocolAuthFailure::Other {
+                    detail: ironclaw_product_adapters::RedactedString::new(
+                        "verified subject does not match inbound actor",
+                    ),
+                },
+            ));
+        }
         ParsedProductInbound::new(
             ExternalEventId::new(payload.event_id)?,
             ExternalActorRef::new(

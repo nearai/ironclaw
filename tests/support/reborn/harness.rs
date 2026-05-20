@@ -150,6 +150,32 @@ pub struct SubmittedTurn {
     pub actor: TurnActor,
 }
 
+#[derive(Clone)]
+pub struct RebornHarnessSharedStorage {
+    product_backend: Arc<LocalFilesystem>,
+    product_root: Arc<tempfile::TempDir>,
+    thread_backend: Arc<LocalFilesystem>,
+    thread_root: Arc<tempfile::TempDir>,
+    turn_backend: Arc<LocalFilesystem>,
+    turn_root: Arc<tempfile::TempDir>,
+}
+
+impl RebornHarnessSharedStorage {
+    pub fn new() -> HarnessResult<Self> {
+        let product_root = Arc::new(tempfile::tempdir()?);
+        let thread_root = Arc::new(tempfile::tempdir()?);
+        let turn_root = Arc::new(tempfile::tempdir()?);
+        Ok(Self {
+            product_backend: Arc::new(local_filesystem(product_root.path())?),
+            product_root,
+            thread_backend: Arc::new(local_filesystem(thread_root.path())?),
+            thread_root,
+            turn_backend: Arc::new(local_filesystem(turn_root.path())?),
+            turn_root,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RecordedCapabilityResult {
     pub capability_id: CapabilityId,
@@ -225,6 +251,27 @@ impl RebornBinaryE2EHarness {
             capability_port,
             false,
             false,
+        )
+        .await
+    }
+
+    pub async fn with_model_gateway_scope_shared_storage_unscoped_worker(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+        capability_port: RecordingTestCapabilityPort,
+        scope: ResourceScope,
+        shared_storage: RebornHarnessSharedStorage,
+    ) -> HarnessResult<Self> {
+        Self::with_model_gateway_capability_mode_identity_source_trigger_worker_scope_and_storage(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::Recording(capability_port),
+            false,
+            false,
+            ProductTriggerReason::DirectChat,
+            Arc::new(EmptyIdentityContextSource),
+            scope,
+            Some(shared_storage),
         )
         .await
     }
@@ -468,9 +515,42 @@ impl RebornBinaryE2EHarness {
         initial_trigger: ProductTriggerReason,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
+        Self::with_model_gateway_capability_mode_identity_source_trigger_worker_scope_and_storage(
+            conversation_id,
+            model_gateway,
+            capability_mode,
+            accept_harness_blocked_evidence,
+            restrict_worker_to_initial_scope,
+            initial_trigger,
+            identity_context_source,
+            product_scope(),
+            None,
+        )
+        .await
+    }
+
+    async fn with_model_gateway_capability_mode_identity_source_trigger_worker_scope_and_storage(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+        capability_mode: HarnessCapabilityMode,
+        accept_harness_blocked_evidence: bool,
+        restrict_worker_to_initial_scope: bool,
+        initial_trigger: ProductTriggerReason,
+        identity_context_source: Arc<dyn HostIdentityContextSource>,
+        product_scope: ResourceScope,
+        shared_storage: Option<RebornHarnessSharedStorage>,
+    ) -> HarnessResult<Self> {
         let adapter = RebornTestProductAdapter::new("reborn-test", "install-1")?;
         let ingress = RebornTestIngress::new(adapter);
-        let product_harness = RebornProductWorkflowHarness::filesystem_temp(product_scope())?;
+        let product_harness = if let Some(storage) = shared_storage.as_ref() {
+            RebornProductWorkflowHarness::filesystem_shared_backend(
+                product_scope.clone(),
+                Arc::clone(&storage.product_backend),
+                Arc::clone(&storage.product_root),
+            )?
+        } else {
+            RebornProductWorkflowHarness::filesystem_temp(product_scope)?
+        };
         let binding = product_harness
             .binding_service()?
             .resolve_binding(binding_request_with_trigger(
@@ -489,10 +569,26 @@ impl RebornBinaryE2EHarness {
             binding.project_id.clone(),
             binding.thread_id.clone(),
         );
-        let thread_harness = RebornThreadHarness::filesystem_temp(thread_scope.clone())?;
-        let turn_root = Arc::new(tempfile::tempdir()?);
+        let thread_harness = if let Some(storage) = shared_storage.as_ref() {
+            RebornThreadHarness::filesystem_shared_backend(
+                thread_scope.clone(),
+                Arc::clone(&storage.thread_backend),
+                Arc::clone(&storage.thread_root),
+            )?
+        } else {
+            RebornThreadHarness::filesystem_temp(thread_scope.clone())?
+        };
+        let (turn_backend, turn_root) = if let Some(storage) = shared_storage.as_ref() {
+            (
+                Arc::clone(&storage.turn_backend),
+                Arc::clone(&storage.turn_root),
+            )
+        } else {
+            let turn_root = Arc::new(tempfile::tempdir()?);
+            (Arc::new(local_filesystem(turn_root.path())?), turn_root)
+        };
         let turn_store = Arc::new(FilesystemTurnStateStore::new(scoped_turns_fs(
-            Arc::new(local_filesystem(turn_root.path())?),
+            turn_backend,
             &binding,
         )?));
         let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
@@ -1604,11 +1700,20 @@ impl HostIdentityContextSource for EmptyIdentityContextSource {
 }
 
 fn product_scope() -> ResourceScope {
+    test_product_scope("tenant-e2e", "host-user", "agent-e2e", Some("project-e2e"))
+}
+
+pub fn test_product_scope(
+    tenant_id: &str,
+    host_user_id: &str,
+    agent_id: &str,
+    project_id: Option<&str>,
+) -> ResourceScope {
     resource_scope(
-        TenantId::new("tenant-e2e").expect("valid tenant"),
-        UserId::new("host-user").expect("valid user"),
-        AgentId::new("agent-e2e").expect("valid agent"),
-        Some(ProjectId::new("project-e2e").expect("valid project")),
+        TenantId::new(tenant_id).expect("valid tenant"),
+        UserId::new(host_user_id).expect("valid user"),
+        AgentId::new(agent_id).expect("valid agent"),
+        project_id.map(|id| ProjectId::new(id).expect("valid project")),
     )
 }
 
