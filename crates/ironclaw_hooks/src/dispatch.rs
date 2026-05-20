@@ -1043,19 +1043,23 @@ impl HookDispatcher {
     ) -> Result<GateHookOutcome, HookFailureRecord> {
         let timeout = self.timeout;
         if let BeforeCapabilityHookImpl::RestrictedWasm(h) = hook {
-            let run = AssertUnwindSafe(async { h.evaluate(ctx) }).catch_unwind();
-            return match tokio::time::timeout(timeout, run).await {
-                Ok(Ok(Ok(outcome))) => Ok(outcome),
-                Ok(Ok(Err(failure))) => Err(self.classify_wasm_failure(binding, failure)),
-                Ok(Err(_panic)) => {
-                    Err(self.classify_failure(binding, FailureCategory::Panic, "hook panicked"))
-                }
-                Err(_elapsed) => Err(self.classify_failure(
+            // HIGH #3 on PR #3634: wasmtime execution is synchronous and
+            // cannot be cancelled by `tokio::time::timeout` on its own. The
+            // outer timeout still applies (so a stuck blocking task doesn't
+            // pin a tokio caller), but the actual mid-WASM wall-clock cancel
+            // is the wasmtime epoch-interrupt set up by the runtime. We run
+            // the call on a blocking pool slot to avoid stalling the
+            // executor, then join via timeout.
+            let hook = h.clone();
+            let ctx = ctx.clone();
+            return self
+                .run_wasm_blocking(
                     binding,
-                    FailureCategory::Timeout,
+                    timeout,
+                    move || hook.evaluate(&ctx),
                     "hook exceeded dispatch timeout",
-                )),
-            };
+                )
+                .await;
         }
 
         let run = async {
@@ -1130,19 +1134,19 @@ impl HookDispatcher {
     ) -> Result<Vec<HookPatch>, HookFailureRecord> {
         let timeout = self.timeout;
         if let BeforePromptHookImpl::RestrictedWasm(h) = hook {
-            let run = AssertUnwindSafe(async { h.evaluate(ctx) }).catch_unwind();
-            return match tokio::time::timeout(timeout, run).await {
-                Ok(Ok(Ok(patches))) => Ok(patches),
-                Ok(Ok(Err(failure))) => Err(self.classify_wasm_failure(binding, failure)),
-                Ok(Err(_panic)) => {
-                    Err(self.classify_failure(binding, FailureCategory::Panic, "hook panicked"))
-                }
-                Err(_elapsed) => Err(self.classify_failure(
+            // HIGH #3 on PR #3634: run synchronous wasmtime work on the
+            // blocking pool so the tokio executor isn't pinned and the
+            // outer wall-clock timeout actually engages.
+            let hook = h.clone();
+            let ctx = ctx.clone();
+            return self
+                .run_wasm_blocking(
                     binding,
-                    FailureCategory::Timeout,
+                    timeout,
+                    move || hook.evaluate(&ctx),
                     "hook exceeded dispatch timeout",
-                )),
-            };
+                )
+                .await;
         }
 
         let run = async {
@@ -1200,21 +1204,18 @@ impl HookDispatcher {
     ) -> Result<Vec<ObserverFact>, HookFailureRecord> {
         let timeout = self.timeout;
         if let ObserverHookImpl::Wasm(h) = hook {
-            let run = AssertUnwindSafe(async { h.observe(ctx) }).catch_unwind();
-            return match tokio::time::timeout(timeout, run).await {
-                Ok(Ok(Ok(facts))) => Ok(facts),
-                Ok(Ok(Err(failure))) => Err(self.classify_wasm_failure(binding, failure)),
-                Ok(Err(_panic)) => Err(self.classify_failure(
+            // HIGH #3 on PR #3634: same blocking-pool pattern as the gate
+            // and prompt dispatch paths.
+            let hook = h.clone();
+            let ctx = ctx.clone();
+            return self
+                .run_wasm_blocking(
                     binding,
-                    FailureCategory::Panic,
-                    "observer hook panicked",
-                )),
-                Err(_elapsed) => Err(self.classify_failure(
-                    binding,
-                    FailureCategory::Timeout,
+                    timeout,
+                    move || hook.observe(&ctx),
                     "observer hook exceeded dispatch timeout",
-                )),
-            };
+                )
+                .await;
         }
 
         let run = async {
@@ -1253,6 +1254,52 @@ impl HookDispatcher {
                 FailureCategory::Timeout,
                 "observer hook exceeded dispatch timeout",
             )),
+        }
+    }
+
+    /// Run a synchronous WASM hook closure on a blocking-pool slot and
+    /// observe a wall-clock timeout. `f` returns the per-point output type;
+    /// the caller's `T` is whatever `WasmHookFailure::Result` produces
+    /// (e.g., `GateHookOutcome`, `Vec<HookPatch>`, `Vec<ObserverFact>`).
+    ///
+    /// The blocking task is spawned via `tokio::task::spawn_blocking`. The
+    /// outer `tokio::time::timeout` only governs *when this future resolves*
+    /// — wasmtime epoch-interrupt is the authoritative in-WASM cancel signal
+    /// (configured per-store at `EPOCH_TICK_INTERVAL`). If the blocking task
+    /// is still running when the timeout fires, the result is dropped on
+    /// the floor and the runtime continues without it; the wasmtime side
+    /// will trap shortly after on its own epoch deadline.
+    async fn run_wasm_blocking<T, F>(
+        &self,
+        binding: &HookBinding,
+        timeout: Duration,
+        f: F,
+        timeout_reason: &'static str,
+    ) -> Result<T, HookFailureRecord>
+    where
+        F: FnOnce() -> Result<T, crate::wasm::WasmHookFailure> + Send + 'static,
+        T: Send + 'static,
+    {
+        let join = tokio::task::spawn_blocking(move || {
+            // catch_unwind here so a wasmtime host-import panic surfaces as
+            // a structured `HookFailureRecord::Panic` rather than aborting
+            // the blocking-pool worker.
+            std::panic::catch_unwind(AssertUnwindSafe(f))
+        });
+        match tokio::time::timeout(timeout, join).await {
+            Ok(Ok(Ok(Ok(value)))) => Ok(value),
+            Ok(Ok(Ok(Err(failure)))) => Err(self.classify_wasm_failure(binding, failure)),
+            Ok(Ok(Err(_panic))) => {
+                Err(self.classify_failure(binding, FailureCategory::Panic, "hook panicked"))
+            }
+            Ok(Err(_join_error)) => Err(self.classify_failure(
+                binding,
+                FailureCategory::Panic,
+                "hook blocking task aborted",
+            )),
+            Err(_elapsed) => {
+                Err(self.classify_failure(binding, FailureCategory::Timeout, timeout_reason))
+            }
         }
     }
 
