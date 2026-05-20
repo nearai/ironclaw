@@ -800,6 +800,97 @@ fn host_http_egress_requires_available_required_credentials_before_network() {
 }
 
 #[test]
+fn host_http_egress_blocks_redactable_request_body_before_network() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(
+        network,
+        InMemorySecretStore::new(),
+    );
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: br#"{"authorization":"Bearer abcdefghij0123456789"}"#.to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("redactable request body leaks should fail before network dispatch");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Request { .. }
+    ));
+    assert!(!error.to_string().contains("Bearer abcdefghij0123456789"));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
+fn host_http_egress_blocks_secret_like_header_names_before_network() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let service = HostHttpEgressService::new_with_request_policy_for_tests(
+        network,
+        InMemorySecretStore::new(),
+    );
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::Script,
+            scope: sample_scope(),
+            capability_id: sample_capability_id(),
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![(
+                "sk-proj-test1234567890abcdefghij".to_string(),
+                "value".to_string(),
+            )],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("secret-like header names should fail before network dispatch");
+
+    assert!(matches!(
+        error,
+        ironclaw_host_api::RuntimeHttpEgressError::Request { .. }
+    ));
+    assert!(
+        !error
+            .to_string()
+            .contains("sk-proj-test1234567890abcdefghij")
+    );
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
 fn host_http_egress_injects_and_redacts_url_encoded_query_credentials() {
     let network = UrlEchoNetwork::new();
     let network_recorder = network.requests.clone();

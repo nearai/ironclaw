@@ -37,7 +37,7 @@ use ironclaw_host_api::{
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse,
 };
-use ironclaw_safety::{LeakDetector, params_contain_manual_credentials};
+use ironclaw_safety::params_contain_manual_credentials;
 use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
 use ironclaw_trust::TrustDecision;
 use secrecy::ExposeSecret;
@@ -50,6 +50,7 @@ mod extension_contracts;
 mod first_party;
 mod first_party_tools;
 pub mod memory_context;
+mod no_exposure_guard;
 mod obligations;
 mod planner;
 mod production;
@@ -76,10 +77,11 @@ pub use first_party_tools::{
     JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, TIME_CAPABILITY_ID,
     WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
+pub use no_exposure_guard::{ExposureBoundary, NoExposureGuard, NoExposureViolation};
 pub use obligations::{
-    BuiltinObligationHandler, BuiltinObligationServices, ProcessObligationLifecycleStore,
+    BuiltinObligationHandler, BuiltinObligationServices, NetworkObligationPolicyStore,
+    ProcessObligationLifecycleStore, RuntimeSecretInjectionStore, RuntimeSecretInjectionStoreError,
 };
-use obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use production::DefaultHostRuntime;
 pub use services::{
@@ -732,6 +734,7 @@ enum NetworkPolicySource {
 pub struct HostHttpEgressService<N, S> {
     network: N,
     secrets: S,
+    no_exposure_guard: Arc<NoExposureGuard>,
     secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
     network_policy_store: Option<Arc<NetworkObligationPolicyStore>>,
     network_policy_source: NetworkPolicySource,
@@ -748,6 +751,7 @@ impl<N, S> HostHttpEgressService<N, S> {
         Self {
             network,
             secrets,
+            no_exposure_guard: Arc::new(NoExposureGuard::new()),
             secret_injections: None,
             network_policy_store: None,
             network_policy_source: NetworkPolicySource::StagedObligation,
@@ -764,24 +768,28 @@ impl<N, S> HostHttpEgressService<N, S> {
         Self {
             network,
             secrets,
+            no_exposure_guard: Arc::new(NoExposureGuard::new()),
             secret_injections: None,
             network_policy_store: None,
             network_policy_source: NetworkPolicySource::RequestPolicyFallback,
         }
     }
 
-    pub(crate) fn with_secret_injection_store(
-        mut self,
-        store: Arc<RuntimeSecretInjectionStore>,
-    ) -> Self {
+    pub fn with_no_exposure_guard(mut self, guard: Arc<NoExposureGuard>) -> Self {
+        self.no_exposure_guard = guard;
+        self
+    }
+
+    pub fn no_exposure_guard(&self) -> &NoExposureGuard {
+        &self.no_exposure_guard
+    }
+
+    pub fn with_secret_injection_store(mut self, store: Arc<RuntimeSecretInjectionStore>) -> Self {
         self.secret_injections = Some(store);
         self
     }
 
-    pub(crate) fn with_network_policy_store(
-        mut self,
-        store: Arc<NetworkObligationPolicyStore>,
-    ) -> Self {
+    pub fn with_network_policy_store(mut self, store: Arc<NetworkObligationPolicyStore>) -> Self {
         self.network_policy_store = Some(store);
         self.network_policy_source = NetworkPolicySource::StagedObligation;
         self
@@ -848,7 +856,7 @@ where
         mut request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         let network_policy = self.network_policy_for_request(&mut request)?;
-        if let Err(error) = validate_runtime_request(&request) {
+        if let Err(error) = validate_runtime_request(&request, self.no_exposure_guard()) {
             self.discard_staged_policy_for_request(&request);
             return Err(error);
         }
@@ -905,7 +913,8 @@ where
             })
             .map_err(runtime_network_error)?;
         let credentials_injected = !redaction_values.is_empty();
-        let (response, response_redacted) = sanitize_runtime_response(response, &redaction_values)?;
+        let (response, response_redacted) =
+            sanitize_runtime_response(response, &redaction_values, self.no_exposure_guard())?;
         Ok(runtime_response(
             response,
             credentials_injected || response_redacted,
@@ -1163,6 +1172,7 @@ fn runtime_network_error(error: NetworkHttpError) -> RuntimeHttpEgressError {
 
 fn validate_runtime_request(
     request: &RuntimeHttpEgressRequest,
+    guard: &NoExposureGuard,
 ) -> Result<(), RuntimeHttpEgressError> {
     if let Some((name, _)) = request
         .headers
@@ -1184,11 +1194,15 @@ fn validate_runtime_request(
         });
     }
 
-    let detector = LeakDetector::new();
-    detector
-        .scan_http_request(&request.url, &request.headers, Some(&request.body))
+    guard
+        .check_http_request(
+            ExposureBoundary::PublicApi,
+            &request.url,
+            &request.headers,
+            Some(&request.body),
+        )
         .map_err(|_| runtime_request_leak_error())?;
-    scan_decoded_url_for_leaks(&detector, &request.url)?;
+    scan_decoded_url_for_leaks(guard, &request.url)?;
     Ok(())
 }
 
@@ -1206,42 +1220,42 @@ fn runtime_request_contains_manual_credentials(request: &RuntimeHttpEgressReques
 }
 
 fn scan_decoded_url_for_leaks(
-    detector: &LeakDetector,
+    guard: &NoExposureGuard,
     raw_url: &str,
 ) -> Result<(), RuntimeHttpEgressError> {
     let Ok(parsed) = url::Url::parse(raw_url) else {
         return Ok(());
     };
 
-    scan_component_for_leaks(detector, parsed.path())?;
+    scan_component_for_leaks(guard, parsed.path())?;
     if let Some(query) = parsed.query() {
-        scan_component_for_leaks(detector, query)?;
+        scan_component_for_leaks(guard, query)?;
     }
     if !parsed.username().is_empty() {
-        scan_component_for_leaks(detector, parsed.username())?;
+        scan_component_for_leaks(guard, parsed.username())?;
     }
     if let Some(password) = parsed.password() {
-        scan_component_for_leaks(detector, password)?;
+        scan_component_for_leaks(guard, password)?;
     }
     for (name, value) in parsed.query_pairs() {
-        detector
-            .scan_and_clean(name.as_ref())
+        guard
+            .check_text(ExposureBoundary::PublicApi, name.as_ref())
             .map_err(|_| runtime_request_leak_error())?;
-        detector
-            .scan_and_clean(value.as_ref())
+        guard
+            .check_text(ExposureBoundary::PublicApi, value.as_ref())
             .map_err(|_| runtime_request_leak_error())?;
     }
     Ok(())
 }
 
 fn scan_component_for_leaks(
-    detector: &LeakDetector,
+    guard: &NoExposureGuard,
     component: &str,
 ) -> Result<(), RuntimeHttpEgressError> {
     let decoded = percent_decode_lossy(component);
     if decoded != component {
-        detector
-            .scan_and_clean(&decoded)
+        guard
+            .check_text(ExposureBoundary::PublicApi, &decoded)
             .map_err(|_| runtime_request_leak_error())?;
     }
     Ok(())
@@ -1287,6 +1301,7 @@ fn runtime_request_leak_error() -> RuntimeHttpEgressError {
 fn sanitize_runtime_response(
     response: NetworkHttpResponse,
     redaction_values: &[String],
+    guard: &NoExposureGuard,
 ) -> Result<(NetworkHttpResponse, bool), RuntimeHttpEgressError> {
     let NetworkHttpResponse {
         status,
@@ -1296,7 +1311,6 @@ fn sanitize_runtime_response(
     } = response;
     let mut redaction_applied = false;
     let mut sanitized_headers = Vec::new();
-    let detector = LeakDetector::new();
 
     for (name, value) in headers {
         if is_sensitive_runtime_response_header(&name) {
@@ -1307,13 +1321,13 @@ fn sanitize_runtime_response(
         if exact_redacted.contains("[REDACTED]") {
             redaction_applied = true;
         }
-        let cleaned = detector.scan_and_clean(&exact_redacted).map_err(|_| {
-            RuntimeHttpEgressError::Response {
+        let cleaned = guard
+            .check_text(ExposureBoundary::PublicApi, &exact_redacted)
+            .map_err(|_| RuntimeHttpEgressError::Response {
                 reason: "response_leak_blocked".to_string(),
                 request_bytes: usage.request_bytes,
                 response_bytes: usage.response_bytes,
-            }
-        })?;
+            })?;
         if cleaned != exact_redacted {
             redaction_applied = true;
         }
@@ -1326,14 +1340,13 @@ fn sanitize_runtime_response(
     if exact_body_redacted {
         redaction_applied = true;
     }
-    let cleaned =
-        detector
-            .scan_and_clean(&exact_redacted)
-            .map_err(|_| RuntimeHttpEgressError::Response {
-                reason: "response_leak_blocked".to_string(),
-                request_bytes: usage.request_bytes,
-                response_bytes: usage.response_bytes,
-            })?;
+    let cleaned = guard
+        .check_text(ExposureBoundary::PublicApi, &exact_redacted)
+        .map_err(|_| RuntimeHttpEgressError::Response {
+            reason: "response_leak_blocked".to_string(),
+            request_bytes: usage.request_bytes,
+            response_bytes: usage.response_bytes,
+        })?;
     let leak_detector_redacted = cleaned != exact_redacted;
     if leak_detector_redacted {
         redaction_applied = true;

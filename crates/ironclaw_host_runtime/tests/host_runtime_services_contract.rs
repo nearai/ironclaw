@@ -2719,6 +2719,47 @@ async fn host_runtime_services_installs_builtin_obligation_handler_with_audit_si
 }
 
 #[tokio::test]
+async fn host_runtime_services_redacts_output_through_builtin_obligation_handler() {
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![Obligation::RedactOutput]));
+    let script_runtime = Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    ));
+    let leaked = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_script_runtime(script_runtime);
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_dispatch_grant(script_capability_id()),
+            script_capability_id(),
+            ResourceEstimate::default(),
+            json!({"authorization": leaked}),
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    match outcome {
+        RuntimeCapabilityOutcome::Completed(completed) => {
+            let serialized = serde_json::to_string(&completed.output).unwrap();
+            assert!(serialized.contains("[REDACTED]"));
+            assert!(!serialized.contains(leaked));
+        }
+        other => panic!("expected completed outcome, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn host_runtime_services_maps_script_exit_failure_through_private_adapter() {
     let script_runtime = Arc::new(ScriptRuntime::new(
         ScriptRuntimeConfig::for_testing(),

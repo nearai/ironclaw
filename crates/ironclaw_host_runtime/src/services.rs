@@ -78,7 +78,7 @@ use crate::obligations::{
 };
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
-    FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
+    FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError, NoExposureGuard,
     ProcessObligationLifecycleStore, RuntimeBackendHealth, TurnRunExecutor, TurnRunScheduler,
     TurnRunSchedulerConfig,
 };
@@ -363,6 +363,7 @@ where
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
     secret_store: Option<Arc<dyn SecretStore>>,
+    no_exposure_guard: Arc<NoExposureGuard>,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
     process_lifecycle_store: Arc<ProcessObligationLifecycleStore>,
@@ -419,6 +420,7 @@ where
             event_sink: None,
             audit_sink: None,
             secret_store: None,
+            no_exposure_guard: Arc::new(NoExposureGuard::new()),
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store,
@@ -571,6 +573,7 @@ where
             event_sink,
             audit_sink,
             secret_store,
+            no_exposure_guard,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store: _,
@@ -614,6 +617,7 @@ where
             event_sink,
             audit_sink,
             secret_store,
+            no_exposure_guard,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store,
@@ -967,6 +971,15 @@ where
         self.component_types.secret_store = Some(ProductionComponentType::of::<T>());
         self.secret_store = Some(secret_store);
         self
+    }
+
+    pub fn with_no_exposure_guard(mut self, guard: Arc<NoExposureGuard>) -> Self {
+        self.no_exposure_guard = guard;
+        self
+    }
+
+    pub fn no_exposure_guard(&self) -> &NoExposureGuard {
+        &self.no_exposure_guard
     }
 
     pub fn with_runtime_http_egress<T>(mut self, runtime_http_egress: Arc<T>) -> Self
@@ -1692,6 +1705,7 @@ where
         let mut handler = BuiltinObligationHandler::new()
             .with_network_policy_store(Arc::clone(&self.network_policy_store))
             .with_secret_injection_store(Arc::clone(&self.secret_injection_store))
+            .with_no_exposure_guard(Arc::clone(&self.no_exposure_guard))
             .with_resource_governor_dyn(governor);
 
         if let Some(audit_sink) = &self.audit_sink {

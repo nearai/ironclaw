@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::{ExposureBoundary, NoExposureGuard};
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_capabilities::{
@@ -22,7 +23,6 @@ use ironclaw_host_api::{
 use ironclaw_network::NetworkHttpEgress;
 use ironclaw_processes::{ProcessError, ProcessRecord, ProcessStart, ProcessStore};
 use ironclaw_resources::{ResourceError, ResourceGovernor};
-use ironclaw_safety::LeakDetector;
 use ironclaw_secrets::{
     SecretLease, SecretLeaseId, SecretMaterial, SecretMetadata, SecretStore, SecretStoreError,
 };
@@ -37,7 +37,7 @@ pub(crate) const DEFAULT_RUNTIME_SECRET_INJECTION_TTL: Duration = Duration::from
 /// Entries also expire after a short TTL so abandoned handoffs from setup
 /// failures, cancellation, or adapter bugs cannot remain usable indefinitely.
 #[derive(Clone)]
-pub(crate) struct RuntimeSecretInjectionStore {
+pub struct RuntimeSecretInjectionStore {
     state: Arc<RuntimeSecretInjectionState>,
 }
 
@@ -52,11 +52,11 @@ struct RuntimeSecretInjectionEntry {
 }
 
 impl RuntimeSecretInjectionStore {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
-    pub(crate) fn with_ttl(ttl: Duration) -> Self {
+    pub fn with_ttl(ttl: Duration) -> Self {
         Self {
             state: Arc::new(RuntimeSecretInjectionState {
                 secrets: Mutex::new(HashMap::new()),
@@ -65,7 +65,7 @@ impl RuntimeSecretInjectionStore {
         }
     }
 
-    pub(crate) fn insert(
+    pub fn insert(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -86,7 +86,7 @@ impl RuntimeSecretInjectionStore {
         Ok(())
     }
 
-    pub(crate) fn take(
+    pub fn take(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -108,7 +108,7 @@ impl RuntimeSecretInjectionStore {
     ///
     /// Background process lifecycle cleanup is guarded by a single-active-handoff
     /// invariant for the scoped capability; this method remains the abort/inline cleanup seam.
-    pub(crate) fn discard_for_capability(
+    pub fn discard_for_capability(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -131,8 +131,7 @@ impl RuntimeSecretInjectionStore {
         Ok(secrets.keys().any(|key| key.matches_scope(&scope_key)))
     }
 
-    #[cfg(test)]
-    fn prune_expired(&self) -> Result<usize, RuntimeSecretInjectionStoreError> {
+    pub fn prune_expired(&self) -> Result<usize, RuntimeSecretInjectionStoreError> {
         let mut secrets = self.lock()?;
         Ok(prune_expired_entries(&mut secrets, Instant::now()))
     }
@@ -176,7 +175,7 @@ fn prune_expired_entries(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RuntimeSecretInjectionStoreError {
+pub enum RuntimeSecretInjectionStoreError {
     Unavailable,
 }
 
@@ -264,16 +263,16 @@ impl RuntimeSecretInjectionScopeKey {
 /// every network operation in the invocation; obligation completion/abort or
 /// process lifecycle cleanup owns the final discard.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct NetworkObligationPolicyStore {
+pub struct NetworkObligationPolicyStore {
     policies: Arc<Mutex<HashMap<NetworkPolicyKey, NetworkPolicy>>>,
 }
 
 impl NetworkObligationPolicyStore {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
-    pub(crate) fn insert(
+    pub fn insert(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -285,7 +284,7 @@ impl NetworkObligationPolicyStore {
             .insert(NetworkPolicyKey::new(scope, capability_id), policy);
     }
 
-    pub(crate) fn get(
+    pub fn get(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -297,7 +296,7 @@ impl NetworkObligationPolicyStore {
             .cloned()
     }
 
-    pub(crate) fn take(
+    pub fn take(
         &self,
         scope: &ResourceScope,
         capability_id: &CapabilityId,
@@ -312,11 +311,7 @@ impl NetworkObligationPolicyStore {
     ///
     /// Background process lifecycle cleanup is guarded by a single-active-handoff
     /// invariant for the scoped capability; this method remains the abort/inline cleanup seam.
-    pub(crate) fn discard_for_capability(
-        &self,
-        scope: &ResourceScope,
-        capability_id: &CapabilityId,
-    ) {
+    pub fn discard_for_capability(&self, scope: &ResourceScope, capability_id: &CapabilityId) {
         let _ = self.take(scope, capability_id);
     }
 
@@ -964,6 +959,7 @@ pub struct BuiltinObligationHandler {
     network_policies: Option<Arc<NetworkObligationPolicyStore>>,
     secret_store: Option<Arc<dyn SecretStore>>,
     secret_injections: Option<Arc<RuntimeSecretInjectionStore>>,
+    no_exposure_guard: Arc<NoExposureGuard>,
     resource_governor: Option<Arc<dyn ResourceGovernor>>,
 }
 
@@ -1014,6 +1010,15 @@ impl BuiltinObligationHandler {
     ) -> Self {
         self.secret_injections = Some(store);
         self
+    }
+
+    pub fn with_no_exposure_guard(mut self, guard: Arc<NoExposureGuard>) -> Self {
+        self.no_exposure_guard = guard;
+        self
+    }
+
+    pub fn no_exposure_guard(&self) -> &NoExposureGuard {
+        &self.no_exposure_guard
     }
 
     pub fn with_resource_governor<T>(mut self, governor: Arc<T>) -> Self
@@ -1326,7 +1331,7 @@ impl CapabilityObligationHandler for BuiltinObligationHandler {
             .iter()
             .any(|obligation| matches!(obligation, Obligation::RedactOutput))
         {
-            dispatch.output = redact_output(dispatch.output)?;
+            dispatch.output = redact_output(dispatch.output, self.no_exposure_guard())?;
         }
 
         let output_bytes = dispatch_output_bytes(&dispatch.output)?;
@@ -1700,21 +1705,22 @@ fn dispatch_output_bytes(output: &serde_json::Value) -> Result<u64, CapabilityOb
 
 fn redact_output(
     output: serde_json::Value,
+    guard: &NoExposureGuard,
 ) -> Result<serde_json::Value, CapabilityObligationError> {
     match output {
         serde_json::Value::String(value) => {
-            redact_output_string(value).map(serde_json::Value::String)
+            redact_output_string(value, guard).map(serde_json::Value::String)
         }
         serde_json::Value::Array(values) => values
             .into_iter()
-            .map(redact_output)
+            .map(|value| redact_output(value, guard))
             .collect::<Result<Vec<_>, _>>()
             .map(serde_json::Value::Array),
         serde_json::Value::Object(entries) => {
             let mut redacted = serde_json::Map::with_capacity(entries.len());
             for (key, value) in entries {
-                let key = redact_output_string(key)?;
-                let value = redact_output(value)?;
+                let key = redact_output_string(key, guard)?;
+                let value = redact_output(value, guard)?;
                 if redacted.insert(key, value).is_some() {
                     return Err(output_obligation_failed());
                 }
@@ -1725,9 +1731,12 @@ fn redact_output(
     }
 }
 
-fn redact_output_string(value: String) -> Result<String, CapabilityObligationError> {
-    LeakDetector::new()
-        .scan_and_clean(&value)
+fn redact_output_string(
+    value: String,
+    guard: &NoExposureGuard,
+) -> Result<String, CapabilityObligationError> {
+    guard
+        .check_text(ExposureBoundary::DurableEvent, &value)
         .map_err(|_| output_obligation_failed())
 }
 
