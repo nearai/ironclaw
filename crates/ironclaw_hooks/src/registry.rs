@@ -141,9 +141,16 @@ pub enum HookPointSpec {
 }
 
 /// Bindings grouped by dispatcher point for cheap lookup during a tick.
+///
+/// `hook_index` is a denormalized side index that maps every `hook_id` to
+/// its `(point, vec-index)` slot in `by_point`. Maintained in lock-step
+/// with `by_point`, it converts what used to be O(n) full-table scans
+/// (priority application, poison, lookup) into O(1) operations. Finding
+/// #8 on PR #3634.
 #[derive(Debug, Default)]
 pub struct HookRegistry {
     by_point: HashMap<HookPointSpec, Vec<HookBinding>>,
+    hook_index: HashMap<HookId, (HookPointSpec, usize)>,
 }
 
 impl HookRegistry {
@@ -199,22 +206,19 @@ impl HookRegistry {
         // same hook id and observe its slot from outside the original point.
         // Either case violates the "one hook id, one slot" property the
         // poison machinery relies on.
-        let duplicate = self
-            .by_point
-            .values()
-            .flat_map(|bindings| bindings.iter())
-            .any(|existing| existing.hook_id == binding.hook_id);
-        if duplicate {
+        if self.hook_index.contains_key(&binding.hook_id) {
             return Err(HookError::RegistryConstruction(format!(
                 "duplicate hook id `{}` rejected: each hook id may register \
                  against the registry at most once",
                 binding.hook_id
             )));
         }
-        self.by_point
-            .entry(binding.point)
-            .or_default()
-            .push(binding);
+        let hook_id = binding.hook_id;
+        let point = binding.point;
+        let bindings = self.by_point.entry(point).or_default();
+        let slot = bindings.len();
+        bindings.push(binding);
+        self.hook_index.insert(hook_id, (point, slot));
         Ok(())
     }
 
@@ -224,13 +228,15 @@ impl HookRegistry {
     /// `HookPriority::DEFAULT` and the registrar then sets the
     /// manifest value).
     pub fn set_priority(&mut self, hook_id: HookId, priority: HookPriority) {
-        for bindings in self.by_point.values_mut() {
-            for binding in bindings.iter_mut() {
-                if binding.hook_id == hook_id {
-                    binding.priority = priority;
-                    return;
-                }
-            }
+        let Some(&(point, slot)) = self.hook_index.get(&hook_id) else {
+            return;
+        };
+        if let Some(binding) = self
+            .by_point
+            .get_mut(&point)
+            .and_then(|bindings| bindings.get_mut(slot))
+        {
+            binding.priority = priority;
         }
     }
 
@@ -271,20 +277,27 @@ impl HookRegistry {
 
     /// Mark a hook's slot poisoned for the rest of the run.
     pub fn poison(&mut self, hook_id: HookId) {
-        for bindings in self.by_point.values_mut() {
-            for binding in bindings.iter_mut() {
-                if binding.hook_id == hook_id {
-                    binding.poisoned = true;
-                }
-            }
+        let Some(&(point, slot)) = self.hook_index.get(&hook_id) else {
+            return;
+        };
+        if let Some(binding) = self
+            .by_point
+            .get_mut(&point)
+            .and_then(|bindings| bindings.get_mut(slot))
+        {
+            binding.poisoned = true;
         }
     }
 
     pub fn is_poisoned(&self, hook_id: HookId) -> bool {
+        let Some(&(point, slot)) = self.hook_index.get(&hook_id) else {
+            return false;
+        };
         self.by_point
-            .values()
-            .flat_map(|bindings| bindings.iter())
-            .any(|b| b.hook_id == hook_id && b.poisoned)
+            .get(&point)
+            .and_then(|bindings| bindings.get(slot))
+            .map(|binding| binding.poisoned)
+            .unwrap_or(false)
     }
 
     /// Iterator over all currently-poisoned hook ids. Used by the dispatcher
@@ -312,10 +325,7 @@ impl HookRegistry {
     /// dispatching so version or module-byte drift cannot silently skip a
     /// previously-observed hook slot.
     pub fn contains_hook(&self, hook_id: HookId) -> bool {
-        self.by_point
-            .values()
-            .flat_map(|bindings| bindings.iter())
-            .any(|b| b.hook_id == hook_id)
+        self.hook_index.contains_key(&hook_id)
     }
 
     /// Total number of bindings, poisoned or not.
