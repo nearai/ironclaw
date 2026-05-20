@@ -1,0 +1,17 @@
+[package]
+name = "ironclaw_auth"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+secrecy = { version = "0.10", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
