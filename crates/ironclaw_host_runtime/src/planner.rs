@@ -71,6 +71,10 @@ pub struct ExecutionPlan {
     pub process_backend: ProcessBackendKind,
     pub network_mode: NetworkMode,
     pub secret_mode: SecretMode,
+    pub requires_filesystem: bool,
+    pub requires_process: bool,
+    pub requires_network: bool,
+    pub requires_secret: bool,
 }
 
 /// Reasons the planner refuses to produce an `ExecutionPlan`.
@@ -114,6 +118,12 @@ pub fn plan_capability(
     policy: &EffectiveRuntimePolicy,
 ) -> Result<ExecutionPlan, PlannerError> {
     let effects = &descriptor.effects;
+    let needs_filesystem = effects.iter().any(|e| {
+        matches!(
+            e,
+            EffectKind::ReadFilesystem | EffectKind::WriteFilesystem | EffectKind::DeleteFilesystem
+        )
+    });
     let needs_process = descriptor.runtime == RuntimeKind::Script
         || effects
             .iter()
@@ -147,6 +157,10 @@ pub fn plan_capability(
         process_backend: policy.process_backend,
         network_mode: policy.network_mode,
         secret_mode: policy.secret_mode,
+        requires_filesystem: needs_filesystem,
+        requires_process: needs_process,
+        requires_network: needs_network,
+        requires_secret: needs_secret,
     })
 }
 

@@ -37,8 +37,8 @@ use ironclaw_host_api::{
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
     RuntimeHttpEgress, RuntimeKind,
     runtime_policy::{
-        DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode,
-        ProcessBackendKind, RuntimeProfile, SecretMode,
+        ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
+        NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
     },
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
@@ -83,9 +83,9 @@ use crate::obligations::{
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
-    InvocationServices, LocalHostProcessPort, ProcessObligationLifecycleStore,
-    RuntimeBackendHealth, RuntimeProcessPort, TurnRunExecutor, TurnRunScheduler,
-    TurnRunSchedulerConfig,
+    InvocationServicesResolutionRequest, InvocationServicesResolver, LocalHostProcessPort,
+    LocalInvocationServicesResolver, ProcessObligationLifecycleStore, RuntimeBackendHealth,
+    RuntimeProcessPort, TurnRunExecutor, TurnRunScheduler, TurnRunSchedulerConfig, plan_capability,
 };
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
@@ -1656,13 +1656,17 @@ where
             );
         }
         if let Some(runtime) = &self.first_party_runtime {
+            let invocation_services: Arc<dyn InvocationServicesResolver> =
+                Arc::new(LocalInvocationServicesResolver::new(
+                    Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
+                    runtime_http_egress(&self.runtime_http_egress),
+                    Arc::clone(&self.process_port),
+                ));
             dispatcher = dispatcher.with_runtime_adapter_arc(
                 RuntimeKind::FirstParty,
                 Arc::new(FirstPartyRuntimeAdapter::from_registry(
                     Arc::clone(runtime),
-                    Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
-                    Arc::clone(&self.runtime_http_egress),
-                    Arc::clone(&self.process_port),
+                    invocation_services,
                 )),
             );
         }
@@ -2044,26 +2048,34 @@ where
     }
 }
 
+fn local_first_party_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
 #[derive(Clone)]
 struct FirstPartyRuntimeAdapter {
     registry: Arc<FirstPartyCapabilityRegistry>,
-    filesystem: Arc<dyn RootFilesystem>,
-    runtime_http_egress: SharedRuntimeHttpEgress,
-    process_port: Arc<dyn RuntimeProcessPort>,
+    invocation_services: Arc<dyn InvocationServicesResolver>,
 }
 
 impl FirstPartyRuntimeAdapter {
     pub(crate) fn from_registry(
         registry: Arc<FirstPartyCapabilityRegistry>,
-        filesystem: Arc<dyn RootFilesystem>,
-        runtime_http_egress: SharedRuntimeHttpEgress,
-        process_port: Arc<dyn RuntimeProcessPort>,
+        invocation_services: Arc<dyn InvocationServicesResolver>,
     ) -> Self {
         Self {
             registry,
-            filesystem,
-            runtime_http_egress,
-            process_port,
+            invocation_services,
         }
     }
 }
@@ -2103,16 +2115,31 @@ where
                 })?,
         };
 
+        let plan =
+            plan_capability(request.descriptor, &local_first_party_policy()).map_err(|_| {
+                release_first_party_reservation(request.governor, reservation.id);
+                DispatchError::FirstParty {
+                    kind: RuntimeDispatchErrorKind::Backend,
+                }
+            })?;
+        let services = self
+            .invocation_services
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &request.scope,
+                mounts: request.mounts.as_ref(),
+            })
+            .map_err(|error| {
+                release_first_party_reservation(request.governor, reservation.id);
+                DispatchError::FirstParty { kind: error.kind() }
+            })?;
+
         let result = match AssertUnwindSafe(handler.dispatch(FirstPartyCapabilityRequest {
             capability_id: request.capability_id.clone(),
             scope: request.scope.clone(),
             estimate: request.estimate,
             mounts: request.mounts,
-            services: InvocationServices {
-                filesystem: Arc::clone(&self.filesystem),
-                runtime_http_egress: runtime_http_egress(&self.runtime_http_egress),
-                process: Arc::clone(&self.process_port),
-            },
+            services,
             input: request.input,
         }))
         .catch_unwind()
