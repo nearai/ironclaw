@@ -52,6 +52,7 @@ mod first_party_tools;
 pub mod memory_context;
 mod obligations;
 mod planner;
+mod process_port;
 mod production;
 mod services;
 mod surface;
@@ -82,6 +83,10 @@ pub use obligations::{
 };
 use obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
+pub use process_port::{
+    CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,
+    RuntimeProcessPort,
+};
 pub use production::DefaultHostRuntime;
 pub use services::{
     HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssue,

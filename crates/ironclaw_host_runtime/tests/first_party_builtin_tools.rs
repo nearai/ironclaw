@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
@@ -16,11 +17,13 @@ use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
-    ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime,
-    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, SHELL_CAPABILITY_ID,
-    SurfaceKind, TIME_CAPABILITY_ID, VisibleCapabilityAccess, VisibleCapabilityRequest,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    CommandExecutionOutput, CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID,
+    LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
+    SHELL_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID, VisibleCapabilityAccess,
+    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_package,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpResponse, NetworkHttpTransport,
@@ -164,6 +167,31 @@ async fn builtin_shell_invokes_copied_shell_core_through_host_runtime() {
             .contains("hello reborn")
     );
     assert_eq!(completed.usage.process_count, 1);
+}
+
+#[tokio::test]
+async fn builtin_shell_delegates_command_execution_to_process_port() {
+    let process_port = Arc::new(RecordingProcessPort::default());
+    let runtime = runtime_with_process_port(Arc::clone(&process_port));
+
+    let output = invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "echo via port", "timeout": 9}),
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["exit_code"], json!(0));
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["sandboxed"], json!(true));
+    assert_eq!(output["output"], json!("process port: echo via port"));
+    let requests = process_port.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].command, "echo via port");
+    assert_eq!(requests[0].timeout_secs, Some(9));
+    assert_eq!(requests[0].scope.user_id.as_str(), "user");
 }
 
 #[tokio::test]
@@ -1792,6 +1820,24 @@ where
     .host_runtime_for_local_testing()
 }
 
+fn runtime_with_process_port<T>(process_port: Arc<T>) -> impl HostRuntime
+where
+    T: RuntimeProcessPort + 'static,
+{
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_process_port(process_port)
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
 fn runtime_with_http_egress<T>(egress: Arc<T>) -> impl HostRuntime
 where
     T: RuntimeHttpEgress + 'static,
@@ -1887,6 +1933,27 @@ fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFiles
     )])
     .unwrap();
     (filesystem, mounts)
+}
+
+#[derive(Debug, Default)]
+struct RecordingProcessPort {
+    requests: std::sync::Mutex<Vec<CommandExecutionRequest>>,
+}
+
+#[async_trait]
+impl RuntimeProcessPort for RecordingProcessPort {
+    async fn run_command(
+        &self,
+        request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        self.requests.lock().unwrap().push(request.clone());
+        Ok(CommandExecutionOutput {
+            output: format!("process port: {}", request.command),
+            exit_code: 0,
+            sandboxed: true,
+            duration: Duration::from_millis(7),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default)]

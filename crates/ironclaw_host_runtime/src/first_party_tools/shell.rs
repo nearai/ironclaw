@@ -7,7 +7,10 @@ use ironclaw_host_api::{
 };
 use serde_json::{Value, json};
 
-use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
+use crate::{
+    CommandExecutionRequest, FirstPartyCapabilityError, FirstPartyCapabilityRequest,
+    RuntimeProcessError,
+};
 
 use super::{FIRST_PARTY_MAX_OUTPUT_BYTES, first_party_capability_manifest};
 
@@ -19,7 +22,7 @@ pub const SHELL_CAPABILITY_ID: &str = "builtin.shell";
 const DEFAULT_SHELL_WALL_CLOCK_MS: u64 = 120_000;
 const MAX_SHELL_WALL_CLOCK_MS: u64 = 120_000;
 const MAX_SHELL_TIMEOUT_SECS: u64 = MAX_SHELL_WALL_CLOCK_MS / 1000;
-const DEFAULT_SHELL_OUTPUT_BYTES: u64 = shell_core::MAX_OUTPUT_SIZE as u64;
+const DEFAULT_SHELL_OUTPUT_BYTES: u64 = crate::process_port::COMMAND_MAX_OUTPUT_SIZE as u64;
 
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     first_party_capability_manifest(
@@ -69,18 +72,24 @@ pub(super) async fn dispatch(
             RuntimeDispatchErrorKind::Resource,
         ));
     }
-    let output = shell_core::ShellExecutor::new()
-        .execute_direct(shell_core::ShellExecutionRequest {
-            extra_env: Default::default(),
-            ..parsed
+    shell_core::validate_command(&parsed.command, false).map_err(shell_error)?;
+    let output = request
+        .process
+        .run_command(CommandExecutionRequest {
+            scope: request.scope.clone(),
+            mounts: request.mounts.clone(),
+            command: parsed.command,
+            workdir: parsed.workdir,
+            timeout_secs: parsed.timeout_secs,
+            extra_env: parsed.extra_env,
         })
         .await
-        .map_err(shell_error)?;
+        .map_err(process_error)?;
 
     let output_value = json!({
         "output": output.output,
         "exit_code": output.exit_code,
-        "success": output.success,
+        "success": output.exit_code == 0,
         "sandboxed": output.sandboxed,
     });
     Ok((output_value, output.duration))
@@ -128,8 +137,14 @@ fn shell_error(error: shell_core::ShellExecutionError) -> FirstPartyCapabilityEr
             RuntimeDispatchErrorKind::InputEncode
         }
         shell_core::ShellExecutionError::NotAuthorized(_) => RuntimeDispatchErrorKind::Client,
-        shell_core::ShellExecutionError::Timeout(_) => RuntimeDispatchErrorKind::Resource,
-        shell_core::ShellExecutionError::ExecutionFailed(_) => RuntimeDispatchErrorKind::Executor,
+    };
+    FirstPartyCapabilityError::new(kind)
+}
+
+fn process_error(error: RuntimeProcessError) -> FirstPartyCapabilityError {
+    let kind = match error {
+        RuntimeProcessError::Timeout(_) => RuntimeDispatchErrorKind::Resource,
+        RuntimeProcessError::ExecutionFailed(_) => RuntimeDispatchErrorKind::Executor,
     };
     FirstPartyCapabilityError::new(kind)
 }

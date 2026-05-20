@@ -79,8 +79,8 @@ use crate::obligations::{
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
-    ProcessObligationLifecycleStore, RuntimeBackendHealth, TurnRunExecutor, TurnRunScheduler,
-    TurnRunSchedulerConfig,
+    LocalHostProcessPort, ProcessObligationLifecycleStore, RuntimeBackendHealth,
+    RuntimeProcessPort, TurnRunExecutor, TurnRunScheduler, TurnRunSchedulerConfig,
 };
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
@@ -367,6 +367,7 @@ where
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
     process_lifecycle_store: Arc<ProcessObligationLifecycleStore>,
     runtime_http_egress: SharedRuntimeHttpEgress,
+    process_port: Arc<dyn RuntimeProcessPort>,
     wasm_credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
@@ -423,6 +424,7 @@ where
             secret_injection_store,
             process_lifecycle_store,
             runtime_http_egress: Arc::new(Mutex::new(None)),
+            process_port: Arc::new(LocalHostProcessPort::new()),
             wasm_credential_provider: None,
             runtime_health: None,
             script_runtime: None,
@@ -488,6 +490,7 @@ where
             secret_injection_store,
             process_lifecycle_store,
             runtime_http_egress,
+            process_port,
             wasm_credential_provider,
             runtime_health,
             script_runtime,
@@ -521,6 +524,7 @@ where
             secret_injection_store,
             process_lifecycle_store,
             runtime_http_egress,
+            process_port,
             wasm_credential_provider,
             runtime_health,
             script_runtime,
@@ -575,6 +579,7 @@ where
             secret_injection_store,
             process_lifecycle_store: _,
             runtime_http_egress,
+            process_port,
             wasm_credential_provider,
             runtime_health,
             script_runtime,
@@ -618,6 +623,7 @@ where
             secret_injection_store,
             process_lifecycle_store,
             runtime_http_egress,
+            process_port,
             wasm_credential_provider,
             runtime_health,
             script_runtime,
@@ -977,6 +983,21 @@ where
         self.component_types.runtime_http_egress_verified = false;
         let runtime_http_egress: Arc<dyn RuntimeHttpEgress> = runtime_http_egress;
         set_runtime_http_egress(&self.runtime_http_egress, runtime_http_egress);
+        self
+    }
+
+    pub fn with_runtime_process_port<T>(self, process_port: Arc<T>) -> Self
+    where
+        T: RuntimeProcessPort + 'static,
+    {
+        self.with_runtime_process_port_dyn(process_port)
+    }
+
+    pub fn with_runtime_process_port_dyn(
+        mut self,
+        process_port: Arc<dyn RuntimeProcessPort>,
+    ) -> Self {
+        self.process_port = process_port;
         self
     }
 
@@ -1589,6 +1610,7 @@ where
                     Arc::clone(runtime),
                     Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
                     Arc::clone(&self.runtime_http_egress),
+                    Arc::clone(&self.process_port),
                 )),
             );
         }
@@ -1925,6 +1947,7 @@ struct FirstPartyRuntimeAdapter {
     registry: Arc<FirstPartyCapabilityRegistry>,
     filesystem: Arc<dyn RootFilesystem>,
     runtime_http_egress: SharedRuntimeHttpEgress,
+    process_port: Arc<dyn RuntimeProcessPort>,
 }
 
 impl FirstPartyRuntimeAdapter {
@@ -1932,11 +1955,13 @@ impl FirstPartyRuntimeAdapter {
         registry: Arc<FirstPartyCapabilityRegistry>,
         filesystem: Arc<dyn RootFilesystem>,
         runtime_http_egress: SharedRuntimeHttpEgress,
+        process_port: Arc<dyn RuntimeProcessPort>,
     ) -> Self {
         Self {
             registry,
             filesystem,
             runtime_http_egress,
+            process_port,
         }
     }
 }
@@ -1983,6 +2008,7 @@ where
             mounts: request.mounts,
             filesystem: Arc::clone(&self.filesystem),
             runtime_http_egress: runtime_http_egress(&self.runtime_http_egress),
+            process: Arc::clone(&self.process_port),
             input: request.input,
         }))
         .catch_unwind()
