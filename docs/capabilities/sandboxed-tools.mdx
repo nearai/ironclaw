@@ -4,7 +4,7 @@ sidebarTitle: Sandboxed Tools
 description: Sandboxed tool execution via WebAssembly (wasmtime)
 ---
 
-WASM tools run inside a WebAssembly sandbox powered by [wasmtime](https://wasmtime.dev/). They get a small, fixed set of host functions ([see below](#host-functions)) and nothing else: no syscalls, no environment access, no ambient network. Every capability the tool actually uses — which hosts it can reach, which secrets the host injects on its behalf, which workspace paths it can read — must be declared in a sidecar `capabilities.json` file.
+WASM tools run inside a WebAssembly sandbox powered by [wasmtime](https://wasmtime.dev/). They get a small, fixed set of host functions ([see below](#host-functions)) plus a restricted WASI context: no ambient environment access, no direct filesystem access, and no ambient network access. Every capability the tool actually uses — which hosts it can reach, which secrets the host injects on its behalf, which workspace paths it can read — must be declared in a sidecar `capabilities.json` file.
 
 This is IronClaw's recommended approach for custom integrations that need stronger isolation than a built-in Rust tool provides.
 
@@ -126,7 +126,7 @@ Every WASM tool ships a `<tool>.capabilities.json` alongside its `.wasm` binary.
 | `basic` | Sets `Authorization: Basic <base64(username:secret)>`; requires `username` |
 | `header` | Sets a custom header; requires `name`, optional `prefix` |
 | `query_param` | Appends `?name=<secret>`; requires `name` |
-| `url_path` | Substitutes a placeholder in the URL or body template; requires `placeholder` |
+| `url_path` | Substitutes a placeholder in the URL path; requires `placeholder` |
 
 For the full end-to-end injection flow (and why this can't be bypassed by a misbehaving tool), see [Secrets & Sandboxing](/security/secrets-and-sandboxing#how-a-tool-uses-a-secret).
 
@@ -153,7 +153,7 @@ WASM modules can call the following host functions provided by IronClaw:
 | `tool_invoke(alias, params)` | Declared in the WIT interface but not yet implemented for WASM tools; the host currently returns an error. |
 | `secret_exists(name)` | Check whether a secret is present and accessible to this tool. Returns a boolean only — never the value |
 
-These are the only host capabilities available. A WASM tool cannot call arbitrary OS functions, fork processes, or access the network directly — all network access goes through the proxy.
+These are the only host capabilities available. A WASM tool cannot call arbitrary OS functions, fork processes, or access the network directly — all network access goes through the host boundary via the `http_request` host function.
 
 ---
 
