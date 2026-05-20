@@ -981,6 +981,40 @@ async fn visible_surface_hides_mcp_http_when_policy_denies_network_even_if_effec
 }
 
 #[tokio::test]
+async fn visible_surface_hides_script_when_policy_denies_processes_even_if_effect_underdeclared() {
+    let runtime = runtime_with(
+        registry_from_manifests([(
+            SCRIPT_UNDERDECLARED_PROCESS_MANIFEST,
+            "/system/extensions/scripts",
+        )]),
+        Arc::new(PanicAuthorizer),
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "scripts",
+        "/system/extensions/scripts/manifest.toml",
+        vec![EffectKind::DispatchCapability],
+    )])))
+    .with_runtime_policy(network_denied_runtime_policy());
+
+    let context = context_with_grants([(
+        capability_id("scripts.run"),
+        vec![EffectKind::DispatchCapability],
+    )]);
+    let surface = runtime
+        .visible_capabilities(request_with_provider_trust(
+            context,
+            vec![("scripts", vec![EffectKind::DispatchCapability])],
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        surface.capabilities.is_empty(),
+        "ProcessBackendKind::None must hide script tools even if the manifest omits process effects"
+    );
+}
+
+#[tokio::test]
 async fn runtime_policy_denied_extension_invoke_does_not_dispatch() {
     let dispatcher = Arc::new(RecordingDispatcher::default());
     let dispatcher_for_runtime: Arc<dyn CapabilityDispatcher> = dispatcher.clone();
@@ -1770,6 +1804,27 @@ args = ["tests/"]
 id = "scripts.run"
 description = "Runs a script"
 effects = ["execute_code"]
+default_permission = "allow"
+parameters_schema = {}
+"#;
+
+const SCRIPT_UNDERDECLARED_PROCESS_MANIFEST: &str = r#"
+id = "scripts"
+name = "Scripts"
+version = "0.1.0"
+description = "Script runner"
+trust = "third_party"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "pytest"
+args = ["tests/"]
+
+[[capabilities]]
+id = "scripts.run"
+description = "Runs a script"
+effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = {}
 "#;

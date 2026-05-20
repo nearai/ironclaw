@@ -36,7 +36,10 @@ use ironclaw_host_api::{
     CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId, DispatchError,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
     RuntimeHttpEgress, RuntimeKind,
-    runtime_policy::{DeploymentMode, EffectiveRuntimePolicy, RuntimeProfile},
+    runtime_policy::{
+        DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode,
+        ProcessBackendKind, RuntimeProfile, SecretMode,
+    },
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::NetworkHttpEgress;
@@ -1142,6 +1145,16 @@ where
             ProductionWiringComponent::RuntimePolicy,
             self.runtime_policy.is_some(),
         );
+        if let Some(runtime_policy) = &self.runtime_policy
+            && let Some(reason) = local_only_runtime_policy_reason(runtime_policy)
+        {
+            self.push_issue(
+                &mut issues,
+                ProductionWiringComponent::RuntimePolicy,
+                ProductionWiringIssueKind::LocalOnlyImplementation,
+                Some(reason),
+            );
+        }
         self.push_missing(
             &mut issues,
             ProductionWiringComponent::RunState,
@@ -1787,6 +1800,31 @@ fn local_testing_runtime_policy() -> EffectiveRuntimePolicy {
     .unwrap_or_else(|error| {
         panic!("LocalSingleUser + LocalDev runtime policy must resolve for local testing: {error}")
     })
+}
+
+fn local_only_runtime_policy_reason(policy: &EffectiveRuntimePolicy) -> Option<&'static str> {
+    if matches!(policy.deployment, DeploymentMode::LocalSingleUser) {
+        return Some("local_single_user_deployment");
+    }
+    if matches!(
+        policy.filesystem_backend,
+        FilesystemBackendKind::HostWorkspace
+    ) {
+        return Some("host_workspace_filesystem");
+    }
+    if matches!(policy.process_backend, ProcessBackendKind::LocalHost) {
+        return Some("local_host_process");
+    }
+    if matches!(policy.network_mode, NetworkMode::Direct) {
+        return Some("direct_network");
+    }
+    if matches!(
+        policy.secret_mode,
+        SecretMode::ScrubbedEnv | SecretMode::InheritedEnv
+    ) {
+        return Some("local_secret_environment");
+    }
+    None
 }
 
 fn set_runtime_http_egress(

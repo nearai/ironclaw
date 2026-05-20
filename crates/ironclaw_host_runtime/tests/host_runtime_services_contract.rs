@@ -220,6 +220,56 @@ fn production_wiring_validation_rejects_missing_components_and_local_only_defaul
 }
 
 #[test]
+fn production_wiring_validation_rejects_local_only_runtime_policy() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_policy(local_dev_runtime_policy());
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("local-dev runtime policy must not pass production validation");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RuntimePolicy,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "local runtime policy should be reported as local-only: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_accepts_production_safe_runtime_policy_shape() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_policy(hosted_dev_runtime_policy());
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local/test defaults still prevent production validation");
+
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RuntimePolicy,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "hosted runtime policy should satisfy runtime-policy guardrail: {report:?}"
+    );
+}
+
+#[test]
 fn production_wiring_validation_accepts_persistent_resource_governor_component() {
     let dir = tempfile::tempdir().unwrap();
     let governor = Arc::new(PersistentResourceGovernor::new(
@@ -5964,6 +6014,34 @@ fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
         secret_mode: SecretMode::BrokeredHandles,
         approval_policy: ApprovalPolicy::AskAlways,
         audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn hosted_dev_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::HostedMultiTenant,
+        requested_profile: RuntimeProfile::HostedDev,
+        resolved_profile: RuntimeProfile::HostedDev,
+        filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+        process_backend: ProcessBackendKind::TenantSandbox,
+        network_mode: NetworkMode::Allowlist,
+        secret_mode: SecretMode::TenantBroker,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::Standard,
     }
 }
 
