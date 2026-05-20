@@ -13,6 +13,10 @@ use ironclaw_extensions::ExtensionRegistry;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_host_api::runtime_policy::{
+    ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
+    NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
+};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
@@ -83,6 +87,27 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
             .iter()
             .all(|capability| capability.estimated_resources.output_bytes.is_some())
     );
+}
+
+#[tokio::test]
+async fn builtin_first_party_surface_hides_runtime_policy_impossible_tools() {
+    let runtime = runtime_with_policy(network_denied_policy());
+    let request = VisibleCapabilityRequest::new(
+        execution_context(all_builtin_capability_ids()),
+        SurfaceKind::new("agent_loop").unwrap(),
+    )
+    .with_policy(CapabilitySurfacePolicy::allow_all())
+    .with_provider_trust(provider_trust());
+
+    let surface = runtime.visible_capabilities(request).await.unwrap();
+
+    let ids = surface
+        .capabilities
+        .iter()
+        .map(|capability| capability.descriptor.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(!ids.contains(&HTTP_CAPABILITY_ID));
+    assert!(ids.contains(&ECHO_CAPABILITY_ID));
 }
 
 #[tokio::test]
@@ -311,6 +336,39 @@ async fn builtin_http_invokes_through_host_runtime_egress() {
     assert_eq!(request.response_body_limit, Some(4096));
     assert_eq!(request.timeout_ms, Some(2500));
     assert!(request.credential_injections.is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_runtime_policy_denial_stops_before_egress() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        br#"{"ok":true}"#.to_vec(),
+    ));
+    let runtime = runtime_with_http_egress_and_policy(Arc::clone(&egress), network_denied_policy());
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+            capability_id(HTTP_CAPABILITY_ID),
+            ResourceEstimate::default(),
+            json!({"url": "https://api.example.test/v1/items"}),
+            trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected runtime-policy failure, got {outcome:?}");
+    };
+    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert_eq!(failure.capability_id, capability_id(HTTP_CAPABILITY_ID));
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("NetworkMode::Deny")
+    );
+    assert!(egress.requests().is_empty());
 }
 
 #[tokio::test]
@@ -1632,11 +1690,48 @@ where
     .host_runtime_for_local_testing()
 }
 
+fn runtime_with_policy(policy: EffectiveRuntimePolicy) -> impl HostRuntime {
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_trust_policy(Arc::new(trust_policy()))
+    .with_runtime_policy(policy)
+    .host_runtime_for_local_testing()
+}
+
 fn runtime_with_http_egress<T>(egress: Arc<T>) -> impl HostRuntime
 where
     T: RuntimeHttpEgress + 'static,
 {
     runtime_with_http_egress_and_governor(egress, Arc::new(InMemoryResourceGovernor::new()))
+}
+
+fn runtime_with_http_egress_and_policy<T>(
+    egress: Arc<T>,
+    policy: EffectiveRuntimePolicy,
+) -> impl HostRuntime
+where
+    T: RuntimeHttpEgress + 'static,
+{
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_http_egress(egress)
+    .with_trust_policy(Arc::new(trust_policy()))
+    .with_runtime_policy(policy)
+    .host_runtime_for_local_testing()
 }
 
 fn runtime_with_http_egress_and_governor<T>(
@@ -1939,6 +2034,20 @@ fn builtin_effects() -> Vec<EffectKind> {
         EffectKind::WriteFilesystem,
         EffectKind::Network,
     ]
+}
+
+fn network_denied_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Deny,
+        secret_mode: SecretMode::BrokeredHandles,
+        approval_policy: ApprovalPolicy::AskAlways,
+        audit_mode: AuditMode::LocalMinimal,
+    }
 }
 
 fn http_test_policy() -> NetworkPolicy {
