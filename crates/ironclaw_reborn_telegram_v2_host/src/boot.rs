@@ -70,9 +70,12 @@ pub async fn boot(
         RebornProductRuntimeConfig {
             default_tenant_id: default_tenant_id.clone(),
             default_agent_id: default_agent_id.clone(),
+            adapter_id: adapter_id.clone(),
+            installation_id: installation_id.clone(),
             telegram_bot_token: config.telegram_bot_token.expose_secret().to_string(),
             telegram_credential_handle: credential_handle.clone(),
             telegram_declared_hosts: telegram_declared_egress_hosts(),
+            pairings: config.pairings.clone(),
         },
     )
     .await?;

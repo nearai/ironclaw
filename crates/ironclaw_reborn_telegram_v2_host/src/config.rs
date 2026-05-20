@@ -44,6 +44,27 @@ pub struct HostConfig {
     pub tenant_id: String,
     /// Optional agent id override (defaults to `agent_default`).
     pub agent_id: String,
+    /// Trusted Telegram-user → canonical-Reborn-user pairings to install at
+    /// boot. The shared `ProductConversationBindingService` fails closed on
+    /// unpaired actors (the security invariant introduced by PR #3727); this
+    /// list bootstraps the pairings the host owner trusts. Each entry is
+    /// `<telegram_user_id>:<reborn_user_id>`. Read from
+    /// `REBORN_TELEGRAM_PAIRINGS` (comma-separated). Empty in production
+    /// deployments that pair out-of-band; required to send any message in
+    /// dev/test.
+    pub pairings: Vec<TelegramPairing>,
+}
+
+/// One trusted Telegram-user → Reborn-user pairing read from
+/// `REBORN_TELEGRAM_PAIRINGS`. Stored as raw strings here; `boot.rs`
+/// validates them as `UserId` / `ExternalActorRef` at startup and fails
+/// closed on any malformed pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramPairing {
+    /// Telegram user id as it appears in `from.id` on inbound updates.
+    pub external_user_id: String,
+    /// Canonical Reborn `UserId` this Telegram user maps to.
+    pub user_id: String,
 }
 
 /// Callback the config layer uses to read env-like values. The default
@@ -117,6 +138,8 @@ impl HostConfig {
             .ok_or_else(|| HostError::Config("TELEGRAM_WEBHOOK_SECRET must be set".into()))?
             .into();
 
+        let pairings = parse_pairings(env_lookup("REBORN_TELEGRAM_PAIRINGS").as_deref())?;
+
         Ok(Self {
             listen_addr,
             storage,
@@ -125,8 +148,54 @@ impl HostConfig {
             telegram_webhook_secret,
             tenant_id,
             agent_id,
+            pairings,
         })
     }
+}
+
+/// Parse `REBORN_TELEGRAM_PAIRINGS` — a comma-separated list of
+/// `<telegram_user_id>:<reborn_user_id>` entries.
+///
+/// Trims whitespace around the list, the comma-separated entries, and either
+/// side of the colon. Skips empty entries (so trailing commas are tolerated).
+/// Fails closed on any entry that has more or fewer than one colon, an empty
+/// external id, or an empty Reborn user id — those would silently corrupt the
+/// pairing table downstream.
+fn parse_pairings(raw: Option<&str>) -> Result<Vec<TelegramPairing>, HostError> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for (idx, entry) in raw.split(',').enumerate() {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let mut parts = entry.splitn(2, ':');
+        let external_user_id = parts
+            .next()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                HostError::Config(format!(
+                    "REBORN_TELEGRAM_PAIRINGS entry {idx} is empty before the colon: {entry:?}"
+                ))
+            })?;
+        let user_id = parts
+            .next()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                HostError::Config(format!(
+                    "REBORN_TELEGRAM_PAIRINGS entry {idx} is missing `<telegram_user_id>:<reborn_user_id>` form: {entry:?}"
+                ))
+            })?;
+        out.push(TelegramPairing {
+            external_user_id: external_user_id.to_string(),
+            user_id: user_id.to_string(),
+        });
+    }
+    Ok(out)
 }
 
 /// Opt-in env var that bypasses the default-namespace fail-closed check.
@@ -282,6 +351,71 @@ mod tests {
         assert_eq!(config.installation_id, "default");
         assert_eq!(config.tenant_id, "tenant_default");
         assert_eq!(config.agent_id, "agent_default");
+    }
+
+    #[test]
+    fn parse_pairings_returns_empty_when_env_unset() {
+        assert_eq!(parse_pairings(None).expect("ok"), Vec::new());
+    }
+
+    #[test]
+    fn parse_pairings_returns_empty_when_env_blank() {
+        assert_eq!(parse_pairings(Some("")).expect("ok"), Vec::new());
+        assert_eq!(parse_pairings(Some("   ")).expect("ok"), Vec::new());
+    }
+
+    #[test]
+    fn parse_pairings_handles_single_entry() {
+        let parsed = parse_pairings(Some("123456:user_alice")).expect("ok");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].external_user_id, "123456");
+        assert_eq!(parsed[0].user_id, "user_alice");
+    }
+
+    #[test]
+    fn parse_pairings_handles_multiple_entries_with_whitespace_and_trailing_comma() {
+        let parsed = parse_pairings(Some("  123:user_alice ,  456 : user_bob ,")).expect("ok");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].external_user_id, "123");
+        assert_eq!(parsed[0].user_id, "user_alice");
+        assert_eq!(parsed[1].external_user_id, "456");
+        assert_eq!(parsed[1].user_id, "user_bob");
+    }
+
+    #[test]
+    fn parse_pairings_rejects_entry_without_colon() {
+        let err = parse_pairings(Some("123,456:user_bob")).expect_err("must reject");
+        match err {
+            HostError::Config(msg) => {
+                assert!(msg.contains("REBORN_TELEGRAM_PAIRINGS"), "msg: {msg}");
+                assert!(msg.contains("123"), "msg should quote the bad entry: {msg}");
+            }
+            other => panic!("expected Config error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_pairings_rejects_empty_left_side() {
+        let err = parse_pairings(Some(":user_alice")).expect_err("must reject");
+        assert!(matches!(err, HostError::Config(_)));
+    }
+
+    #[test]
+    fn parse_pairings_rejects_empty_right_side() {
+        let err = parse_pairings(Some("123:")).expect_err("must reject");
+        assert!(matches!(err, HostError::Config(_)));
+    }
+
+    #[test]
+    fn from_env_with_accepts_pairings_var() {
+        let mut pairs = baseline_explicit_namespace();
+        pairs.push(("REBORN_TELEGRAM_PAIRINGS", "111:user_a,222:user_b"));
+        let env = fake_env(&pairs);
+        let lookup = lookup(&env);
+        let config = HostConfig::from_env_with(&lookup).expect("should succeed");
+        assert_eq!(config.pairings.len(), 2);
+        assert_eq!(config.pairings[0].external_user_id, "111");
+        assert_eq!(config.pairings[0].user_id, "user_a");
     }
 
     #[test]

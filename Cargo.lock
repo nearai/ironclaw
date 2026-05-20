@@ -4759,6 +4759,7 @@ dependencies = [
  "deadpool-postgres",
  "futures",
  "http-body-util",
+ "ironclaw_conversations",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_outbound",

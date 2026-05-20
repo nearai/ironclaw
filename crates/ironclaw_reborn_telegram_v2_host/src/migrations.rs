@@ -1,8 +1,13 @@
 //! Migration runner for the Reborn Telegram v2 host.
 //!
-//! Owns the two tables backing the ProductWorkflow:
+//! Owns the single SQL table backing the ProductWorkflow's durable side:
 //!   * `product_inbound_actions` — idempotency ledger
-//!   * `product_bindings`        — external → (tenant, user, thread) mapping
+//!
+//! Conversation binding (the external-actor → canonical-user mapping plus
+//! thread state) is no longer in a Telegram-specific table; it lives behind
+//! the shared `ProductConversationBindingService` (PR #3727) backed by
+//! `ironclaw_conversations`'s filesystem store. The unified-FS dispatch
+//! fabric (PR #3679) owns those records under the `/conversations` mount.
 //!
 //! These migrations are intentionally separate from any v1 migration set —
 //! this crate does not depend on the v1 `ironclaw` lib. Operators run this
@@ -32,33 +37,6 @@ CREATE TABLE IF NOT EXISTS product_inbound_actions (
 
 CREATE INDEX IF NOT EXISTS idx_product_inbound_actions_phase
     ON product_inbound_actions(phase, received_at);
-
-CREATE TABLE IF NOT EXISTS product_bindings (
-    adapter_id TEXT NOT NULL,
-    installation_id TEXT NOT NULL,
-    external_conversation_fingerprint TEXT NOT NULL,
-    external_actor_kind TEXT NOT NULL,
-    external_actor_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    thread_id TEXT NOT NULL,
-    agent_id TEXT,
-    project_id TEXT,
-    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    PRIMARY KEY (
-        adapter_id,
-        installation_id,
-        external_conversation_fingerprint,
-        external_actor_kind,
-        external_actor_id
-    )
-);
-
-CREATE INDEX IF NOT EXISTS idx_product_bindings_thread
-    ON product_bindings(thread_id);
-
-CREATE INDEX IF NOT EXISTS idx_product_bindings_user
-    ON product_bindings(user_id);
 "#;
 
 #[cfg(feature = "postgres")]
@@ -79,33 +57,6 @@ CREATE TABLE IF NOT EXISTS product_inbound_actions (
 
 CREATE INDEX IF NOT EXISTS idx_product_inbound_actions_phase
     ON product_inbound_actions(phase, received_at);
-
-CREATE TABLE IF NOT EXISTS product_bindings (
-    adapter_id TEXT NOT NULL,
-    installation_id TEXT NOT NULL,
-    external_conversation_fingerprint TEXT NOT NULL,
-    external_actor_kind TEXT NOT NULL,
-    external_actor_id TEXT NOT NULL,
-    tenant_id TEXT NOT NULL,
-    user_id TEXT NOT NULL,
-    thread_id TEXT NOT NULL,
-    agent_id TEXT,
-    project_id TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (
-        adapter_id,
-        installation_id,
-        external_conversation_fingerprint,
-        external_actor_kind,
-        external_actor_id
-    )
-);
-
-CREATE INDEX IF NOT EXISTS idx_product_bindings_thread
-    ON product_bindings(thread_id);
-
-CREATE INDEX IF NOT EXISTS idx_product_bindings_user
-    ON product_bindings(user_id);
 "#;
 
 #[cfg(feature = "libsql")]
