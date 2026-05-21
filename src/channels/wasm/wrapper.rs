@@ -4804,14 +4804,13 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
                 &ctx.channel_name,
                 ctx.workspace_store.as_ref(),
                 ctx.pairing_store.as_ref(),
-            ) {
-                if let Err(error) = queue_websocket_outbound_frame(&ctx.outbound_tx, payload) {
-                    tracing::warn!(
-                        channel = %ctx.channel_name,
-                        error = %error,
-                        "Failed to queue websocket post-poll update"
-                    );
-                }
+            ) && let Err(error) = queue_websocket_outbound_frame(&ctx.outbound_tx, payload)
+            {
+                tracing::warn!(
+                    channel = %ctx.channel_name,
+                    error = %error,
+                    "Failed to queue websocket post-poll update"
+                );
             }
         }
     });
