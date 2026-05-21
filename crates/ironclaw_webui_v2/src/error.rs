@@ -4,13 +4,14 @@
 //! shape browser handlers return to clients. The handler layer must never
 //! leak backend identifiers, scopes, or transport error details — the only
 //! information that crosses this boundary is what `RebornServicesError`
-//! already exposes (`code`, `status_code`, `retryable`, and the typed
+//! already exposes (`code`, `kind`, `status_code`, `retryable`, and the typed
 //! validation hint).
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use ironclaw_product_workflow::{
-    RebornServicesError, RebornServicesErrorCode, WebUiInboundValidationCode,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    WebUiInboundValidationCode,
 };
 use serde::Serialize;
 
@@ -38,6 +39,7 @@ impl WebUiV2HttpError {
         });
         let body = WebUiV2HttpErrorBody {
             error: self.0.code,
+            kind: self.0.kind,
             retryable: self.0.retryable,
             field: self.0.field.clone(),
             validation_code: self.0.validation_code,
@@ -67,6 +69,7 @@ impl IntoResponse for WebUiV2HttpError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WebUiV2HttpErrorBody {
     pub error: RebornServicesErrorCode,
+    pub kind: RebornServicesErrorKind,
     pub retryable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub field: Option<String>,

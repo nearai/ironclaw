@@ -36,6 +36,10 @@ use ironclaw_host_api::{
     CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId, DispatchError,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
     RuntimeHttpEgress, RuntimeKind,
+    runtime_policy::{
+        DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode,
+        ProcessBackendKind, RuntimeProfile, SecretMode,
+    },
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::NetworkHttpEgress;
@@ -140,6 +144,7 @@ impl ProductionWiringConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProductionWiringComponent {
     RuntimeBackend,
+    RuntimePolicy,
     TrustPolicy,
     Filesystem,
     ResourceGovernor,
@@ -152,6 +157,7 @@ pub enum ProductionWiringComponent {
     AuditSink,
     SecretStore,
     RuntimeHttpEgress,
+    RuntimeProcessPort,
     WasmCredentialProvider,
     ScriptRuntime,
     McpRuntime,
@@ -166,6 +172,7 @@ impl ProductionWiringComponent {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::RuntimeBackend => "runtime_backend",
+            Self::RuntimePolicy => "runtime_policy",
             Self::TrustPolicy => "trust_policy",
             Self::Filesystem => "filesystem",
             Self::ResourceGovernor => "resource_governor",
@@ -178,6 +185,7 @@ impl ProductionWiringComponent {
             Self::AuditSink => "audit_sink",
             Self::SecretStore => "secret_store",
             Self::RuntimeHttpEgress => "runtime_http_egress",
+            Self::RuntimeProcessPort => "runtime_process_port",
             Self::WasmCredentialProvider => "wasm_credential_provider",
             Self::ScriptRuntime => "script_runtime",
             Self::McpRuntime => "mcp_runtime",
@@ -259,6 +267,7 @@ struct ProductionComponentTypes {
     secret_store: Option<ProductionComponentType>,
     runtime_http_egress: Option<ProductionComponentType>,
     runtime_http_egress_verified: bool,
+    runtime_process_port: ProductionComponentType,
     wasm_credential_provider: Option<ProductionComponentType>,
     wasm_credential_provider_verified: bool,
     wasm_runtime_credential_provider_captured: bool,
@@ -298,7 +307,7 @@ impl ProductionComponentType {
 enum ProductionImplementationReadiness {
     ProductionCandidate,
     LocalOnly,
-    ErasedDurableSinkWrapper,
+    UnverifiedProductionImplementation,
 }
 
 fn component_name(component: Option<ProductionComponentType>) -> Option<&'static str> {
@@ -322,14 +331,15 @@ fn classify_component_type<T: 'static>() -> ProductionImplementationReadiness {
             || type_id == TypeId::of::<InMemorySecretStore>()
             || type_id == TypeId::of::<EmptyWasmRuntimeCredentials>()
             || type_id == TypeId::of::<InMemoryTurnStateStore>()
-            || type_id == TypeId::of::<NoopTurnRunWakeNotifier>() =>
+            || type_id == TypeId::of::<NoopTurnRunWakeNotifier>()
+            || type_id == TypeId::of::<LocalHostProcessPort>() =>
         {
             ProductionImplementationReadiness::LocalOnly
         }
         () if type_id == TypeId::of::<DurableEventSink>()
             || type_id == TypeId::of::<DurableAuditSink>() =>
         {
-            ProductionImplementationReadiness::ErasedDurableSinkWrapper
+            ProductionImplementationReadiness::UnverifiedProductionImplementation
         }
         () => ProductionImplementationReadiness::ProductionCandidate,
     }
@@ -371,6 +381,7 @@ where
     process_port: Arc<dyn RuntimeProcessPort>,
     wasm_credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
+    runtime_policy: Option<EffectiveRuntimePolicy>,
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
     first_party_runtime: Option<Arc<FirstPartyCapabilityRegistry>>,
@@ -428,6 +439,7 @@ where
             process_port: Arc::new(LocalHostProcessPort::new()),
             wasm_credential_provider: None,
             runtime_health: None,
+            runtime_policy: None,
             script_runtime: None,
             mcp_runtime: None,
             first_party_runtime: None,
@@ -451,6 +463,7 @@ where
                 secret_store: None,
                 runtime_http_egress: None,
                 runtime_http_egress_verified: false,
+                runtime_process_port: ProductionComponentType::of::<LocalHostProcessPort>(),
                 wasm_credential_provider: None,
                 wasm_credential_provider_verified: false,
                 wasm_runtime_credential_provider_captured: false,
@@ -494,6 +507,7 @@ where
             process_port,
             wasm_credential_provider,
             runtime_health,
+            runtime_policy,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -528,6 +542,7 @@ where
             process_port,
             wasm_credential_provider,
             runtime_health,
+            runtime_policy,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -583,6 +598,7 @@ where
             process_port,
             wasm_credential_provider,
             runtime_health,
+            runtime_policy,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -627,6 +643,7 @@ where
             process_port,
             wasm_credential_provider,
             runtime_health,
+            runtime_policy,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -987,17 +1004,23 @@ where
         self
     }
 
-    pub fn with_runtime_process_port<T>(self, process_port: Arc<T>) -> Self
+    pub fn with_runtime_process_port<T>(mut self, process_port: Arc<T>) -> Self
     where
         T: RuntimeProcessPort + 'static,
     {
-        self.with_runtime_process_port_dyn(process_port)
+        self.component_types.runtime_process_port = ProductionComponentType::of::<T>();
+        self.process_port = process_port;
+        self
     }
 
     pub fn with_runtime_process_port_dyn(
         mut self,
         process_port: Arc<dyn RuntimeProcessPort>,
     ) -> Self {
+        self.component_types.runtime_process_port = ProductionComponentType::named(
+            "dyn RuntimeProcessPort",
+            ProductionImplementationReadiness::UnverifiedProductionImplementation,
+        );
         self.process_port = process_port;
         self
     }
@@ -1028,6 +1051,11 @@ where
         T: RuntimeBackendHealth + 'static,
     {
         self.runtime_health = Some(runtime_health);
+        self
+    }
+
+    pub fn with_runtime_policy(mut self, policy: EffectiveRuntimePolicy) -> Self {
+        self.runtime_policy = Some(policy);
         self
     }
 
@@ -1145,6 +1173,21 @@ where
             ProductionWiringComponent::TrustPolicy,
             self.trust_policy_configured,
         );
+        self.push_missing(
+            &mut issues,
+            ProductionWiringComponent::RuntimePolicy,
+            self.runtime_policy.is_some(),
+        );
+        if let Some(runtime_policy) = &self.runtime_policy
+            && let Some(reason) = local_only_runtime_policy_reason(runtime_policy)
+        {
+            self.push_issue(
+                &mut issues,
+                ProductionWiringComponent::RuntimePolicy,
+                ProductionWiringIssueKind::LocalOnlyImplementation,
+                Some(reason),
+            );
+        }
         self.push_missing(
             &mut issues,
             ProductionWiringComponent::RunState,
@@ -1280,6 +1323,13 @@ where
                 self.first_party_runtime_covers_declared_capabilities(),
             );
         }
+        if self.first_party_runtime_uses_process_port() {
+            self.push_local_only(
+                &mut issues,
+                ProductionWiringComponent::RuntimeProcessPort,
+                Some(self.component_types.runtime_process_port),
+            );
+        }
 
         self.push_local_only(
             &mut issues,
@@ -1407,12 +1457,13 @@ where
                     ProductionWiringIssueKind::LocalOnlyImplementation,
                     Some(implementation.implementation),
                 ),
-                ProductionImplementationReadiness::ErasedDurableSinkWrapper => self.push_issue(
-                    issues,
-                    component,
-                    ProductionWiringIssueKind::UnverifiedProductionImplementation,
-                    Some(implementation.implementation),
-                ),
+                ProductionImplementationReadiness::UnverifiedProductionImplementation => self
+                    .push_issue(
+                        issues,
+                        component,
+                        ProductionWiringIssueKind::UnverifiedProductionImplementation,
+                        Some(implementation.implementation),
+                    ),
                 ProductionImplementationReadiness::ProductionCandidate => {}
             }
         }
@@ -1679,12 +1730,17 @@ where
                 self.registered_runtime_backends(),
             ))
         });
+        let runtime_policy = self
+            .runtime_policy
+            .clone()
+            .unwrap_or_else(local_testing_runtime_policy);
 
         let mut runtime = DefaultHostRuntime::new(
             Arc::clone(&self.registry),
             dispatcher,
             Arc::clone(&self.authorizer),
             self.surface_version.clone(),
+            runtime_policy,
         )
         .with_trust_policy_dyn(Arc::clone(&self.trust_policy))
         .with_process_manager(process_manager)
@@ -1706,7 +1762,6 @@ where
         if let Some(capability_leases) = &self.capability_leases {
             runtime = runtime.with_capability_leases(Arc::clone(capability_leases));
         }
-
         runtime.with_obligation_handler(Arc::new(self.builtin_obligation_handler()))
     }
 
@@ -1773,6 +1828,52 @@ where
         }
         declared.all(|descriptor| first_party_runtime.contains_handler(&descriptor.id))
     }
+
+    fn first_party_runtime_uses_process_port(&self) -> bool {
+        let Some(first_party_runtime) = &self.first_party_runtime else {
+            return false;
+        };
+        self.registry.capabilities().any(|descriptor| {
+            descriptor.runtime == RuntimeKind::FirstParty
+                && descriptor.id.as_str() == crate::SHELL_CAPABILITY_ID
+                && first_party_runtime.contains_handler(&descriptor.id)
+        })
+    }
+}
+
+fn local_testing_runtime_policy() -> EffectiveRuntimePolicy {
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
+        DeploymentMode::LocalSingleUser,
+        RuntimeProfile::LocalDev,
+    ))
+    .unwrap_or_else(|error| {
+        panic!("LocalSingleUser + LocalDev runtime policy must resolve for local testing: {error}")
+    })
+}
+
+fn local_only_runtime_policy_reason(policy: &EffectiveRuntimePolicy) -> Option<&'static str> {
+    if matches!(policy.deployment, DeploymentMode::LocalSingleUser) {
+        return Some("local_single_user_deployment");
+    }
+    if matches!(
+        policy.filesystem_backend,
+        FilesystemBackendKind::HostWorkspace
+    ) {
+        return Some("host_workspace_filesystem");
+    }
+    if matches!(policy.process_backend, ProcessBackendKind::LocalHost) {
+        return Some("local_host_process");
+    }
+    if matches!(policy.network_mode, NetworkMode::Direct) {
+        return Some("direct_network");
+    }
+    if matches!(
+        policy.secret_mode,
+        SecretMode::ScrubbedEnv | SecretMode::InheritedEnv
+    ) {
+        return Some("local_secret_environment");
+    }
+    None
 }
 
 fn set_runtime_http_egress(
@@ -2529,7 +2630,7 @@ mod tests {
     };
     use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
     use ironclaw_resources::InMemoryResourceGovernor;
-    use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+    use ironclaw_secrets::{InMemorySecretStore, SecretMaterial};
 
     use super::*;
 
@@ -2566,36 +2667,34 @@ mod tests {
     }
 
     #[test]
-    fn host_http_egress_helper_leases_secret_store_credentials_from_graph_store() {
-        let graph_secret_store = Arc::new(InMemorySecretStore::new());
+    fn host_http_egress_helper_injects_staged_credentials_from_handoff_store() {
         let scope = sample_scope();
         let capability_id = sample_capability_id();
         let handle = SecretHandle::new("api-token").unwrap();
-        block_on_secret_store(graph_secret_store.put(
-            scope.clone(),
-            handle.clone(),
-            SecretMaterial::from("graph-secret"),
-        ))
-        .expect("graph secret should be seeded");
 
         let network = RecordingNetwork::ok();
         let recorded_requests = Arc::clone(&network.requests);
         let services = test_services()
-            .with_secret_store(Arc::clone(&graph_secret_store))
+            .with_secret_store(Arc::new(InMemorySecretStore::new()))
             .try_with_host_http_egress(network)
             .expect("host HTTP egress should wire with graph secret store");
         services
             .network_policy_store
             .insert(&scope, &capability_id, staged_policy());
+        services
+            .secret_injection_store
+            .insert(
+                &scope,
+                &capability_id,
+                &handle,
+                SecretMaterial::from("staged-secret"),
+            )
+            .expect("staged credential should be seeded");
         let egress = configured_egress(&services);
 
         egress
-            .execute(request_with_secret_store_lease(
-                scope,
-                capability_id,
-                handle,
-            ))
-            .expect("SecretStoreLease should lease from graph-owned secret store");
+            .execute(request_with_staged_credential(scope, capability_id, handle))
+            .expect("StagedObligation should inject from handoff store");
 
         let requests = recorded_requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
@@ -2606,7 +2705,7 @@ mod tests {
                 .find(|(name, _)| name == "authorization"),
             Some(&(
                 "authorization".to_string(),
-                "Bearer graph-secret".to_string()
+                "Bearer staged-secret".to_string()
             ))
         );
     }
@@ -2663,7 +2762,7 @@ mod tests {
         }
     }
 
-    fn request_with_secret_store_lease(
+    fn request_with_staged_credential(
         scope: ResourceScope,
         capability_id: CapabilityId,
         handle: SecretHandle,
@@ -2671,7 +2770,9 @@ mod tests {
         RuntimeHttpEgressRequest {
             credential_injections: vec![RuntimeCredentialInjection {
                 handle,
-                source: RuntimeCredentialSource::SecretStoreLease,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
                 target: RuntimeCredentialTarget::Header {
                     name: "authorization".to_string(),
                     prefix: Some("Bearer ".to_string()),
@@ -2720,14 +2821,6 @@ mod tests {
             deny_private_ip_ranges: false,
             max_egress_bytes: Some(1),
         }
-    }
-
-    fn block_on_secret_store<T>(future: impl std::future::Future<Output = T>) -> T {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(future)
     }
 
     #[derive(Clone)]

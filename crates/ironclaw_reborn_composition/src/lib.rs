@@ -30,6 +30,8 @@ mod runtime;
 mod runtime_input;
 mod webui;
 
+use ironclaw_runtime_policy::{EffectiveRuntimePolicy as ResolvedRuntimePolicy, ResolveError};
+
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
 pub use input::RebornBuildInput;
@@ -65,6 +67,16 @@ pub fn reborn_model_slot_names() -> Vec<&'static str> {
         .iter()
         .map(|slot| slot.as_str())
         .collect()
+}
+
+/// Resolved policy for the standalone local development runtime profile.
+pub fn local_dev_runtime_policy() -> Result<ResolvedRuntimePolicy, ResolveError> {
+    use ironclaw_host_api::runtime_policy::{DeploymentMode, RuntimeProfile};
+
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
+        DeploymentMode::LocalSingleUser,
+        RuntimeProfile::LocalDev,
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +159,7 @@ use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::{
     MountAlias, MountGrant, MountPermissions, MountView, ResourceScope, SecretHandle, VirtualPath,
+    runtime_policy::EffectiveRuntimePolicy,
 };
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, HostRuntimeServices};
@@ -208,6 +221,7 @@ const PER_USER_ALIASES: &[&str] = &[
     "/turns",
     "/resources",
     "/engine",
+    "/skills",
 ];
 
 /// Per-invocation [`MountView`] used as the production resolver.
@@ -281,6 +295,7 @@ where
     pub event_store: RebornEventStoreConfig,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
+    pub runtime_policy: EffectiveRuntimePolicy,
     pub turn_run_wake_notifier: Arc<TWake>,
     pub surface_version: CapabilitySurfaceVersion,
 }
@@ -296,6 +311,7 @@ where
     pub event_store: RebornEventStoreConfig,
     pub secret_master_key: Option<SecretMaterial>,
     pub trust_policy: Arc<TPolicy>,
+    pub runtime_policy: EffectiveRuntimePolicy,
     pub turn_run_wake_notifier: Arc<TWake>,
     pub surface_version: CapabilitySurfaceVersion,
 }
@@ -367,6 +383,7 @@ where
         config.surface_version,
     )
     .with_trust_policy(config.trust_policy)
+    .with_runtime_policy(config.runtime_policy)
     .with_capability_leases(capability_leases)
     .with_secret_store(Arc::clone(&secret_store))
     .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
@@ -431,6 +448,7 @@ where
         config.surface_version,
     )
     .with_trust_policy(config.trust_policy)
+    .with_runtime_policy(config.runtime_policy)
     .with_capability_leases(capability_leases)
     .with_secret_store(Arc::clone(&secret_store))
     .with_turn_run_wake_notifier(config.turn_run_wake_notifier)
@@ -563,6 +581,7 @@ impl SecretStore for SharedSecretStore {
 #[cfg(all(test, any(feature = "libsql", feature = "postgres")))]
 mod mount_view_tests {
     use super::*;
+    use ironclaw_filesystem::{FilesystemError, FilesystemOperation, InMemoryBackend};
     use ironclaw_host_api::{
         AgentId, InvocationId, MissionId, ProjectId, ScopedPath, TenantId, ThreadId, UserId,
     };
@@ -644,6 +663,90 @@ mod mount_view_tests {
                 .unwrap();
             assert_eq!(resolved.as_str(), &format!("{system_subroot}/foo"));
         }
+    }
+
+    #[test]
+    fn invocation_mount_view_routes_user_skills_to_tenant_user_root() {
+        let scope = sample_scope();
+        let view = invocation_mount_view(&scope).unwrap();
+        let (resolved, grant) = view
+            .resolve_with_grant(&ScopedPath::new("/skills/code-review/SKILL.md").unwrap())
+            .unwrap();
+        assert_eq!(
+            resolved.as_str(),
+            &format!(
+                "/tenants/{}/users/{}/skills/code-review/SKILL.md",
+                scope.tenant_id.as_str(),
+                scope.user_id.as_str()
+            )
+        );
+        assert!(grant.permissions.read);
+        assert!(grant.permissions.write);
+        assert!(grant.permissions.list);
+        assert!(grant.permissions.delete);
+        assert!(!grant.permissions.execute);
+    }
+
+    #[test]
+    fn invocation_mount_view_keeps_user_skills_isolated_from_system_skills() {
+        let scope = sample_scope();
+        let view = invocation_mount_view(&scope).unwrap();
+        let user_skill = view
+            .resolve(&ScopedPath::new("/skills/code-review/SKILL.md").unwrap())
+            .unwrap();
+        let system_skill = view
+            .resolve(&ScopedPath::new("/system/skills/code-review/SKILL.md").unwrap())
+            .unwrap();
+        assert_ne!(user_skill.as_str(), system_skill.as_str());
+        assert!(
+            user_skill
+                .as_str()
+                .starts_with("/tenants/tenant-a/users/user-1/skills/")
+        );
+        assert_eq!(system_skill.as_str(), "/system/skills/code-review/SKILL.md");
+    }
+
+    #[test]
+    fn invocation_mount_view_isolates_user_skills_between_tenants() {
+        let view_a = invocation_mount_view(&sample_scope()).unwrap();
+        let view_b = invocation_mount_view(&other_tenant_scope()).unwrap();
+        let path = ScopedPath::new("/skills/code-review/SKILL.md").unwrap();
+        let a = view_a.resolve(&path).unwrap();
+        let b = view_b.resolve(&path).unwrap();
+        assert_ne!(a.as_str(), b.as_str());
+        assert!(a.as_str().contains("tenant-a"));
+        assert!(b.as_str().contains("tenant-b"));
+    }
+
+    #[tokio::test]
+    async fn scoped_filesystem_rejects_system_skill_writes_but_allows_user_skill_writes() {
+        let root = Arc::new(InMemoryBackend::default());
+        let scoped = wrap_scoped(root);
+        let scope = sample_scope();
+        let system_path = ScopedPath::new("/system/skills/code-review/SKILL.md").unwrap();
+        let user_path = ScopedPath::new("/skills/code-review/SKILL.md").unwrap();
+
+        let error = scoped
+            .write_bytes(&scope, &system_path, b"system skill".to_vec())
+            .await
+            .expect_err("system skills must remain read-only");
+        assert!(matches!(
+            error,
+            FilesystemError::PermissionDenied {
+                operation: FilesystemOperation::WriteFile,
+                ..
+            }
+        ));
+
+        scoped
+            .write_bytes(&scope, &user_path, b"user skill".to_vec())
+            .await
+            .expect("user skills should be writable through the scoped alias");
+        let content = scoped
+            .read_bytes(&scope, &user_path)
+            .await
+            .expect("user skill should be readable");
+        assert_eq!(content, b"user skill");
     }
 }
 

@@ -151,7 +151,7 @@ pub enum ProcessError {
     #[error("invalid storage path: {0}")]
     InvalidPath(String),
     #[error("filesystem error: {0}")]
-    Filesystem(String),
+    Filesystem(#[from] FilesystemError),
     #[error("serialization error: {0}")]
     Serialization(String),
     #[error("deserialization error: {0}")]
@@ -170,9 +170,14 @@ pub(crate) fn invalid_path(error: HostApiError) -> ProcessError {
     ProcessError::InvalidPath(error.to_string())
 }
 
-impl From<FilesystemError> for ProcessError {
-    fn from(error: FilesystemError) -> Self {
-        Self::Filesystem(error.to_string())
+impl ProcessError {
+    /// Returns true when the process failure wraps a typed filesystem NotFound.
+    pub fn is_filesystem_not_found(&self) -> bool {
+        match self {
+            Self::Filesystem(FilesystemError::NotFound { .. }) => true,
+            Self::ResourceCleanupFailed { original, .. } => original.is_filesystem_not_found(),
+            _ => false,
+        }
     }
 }
 

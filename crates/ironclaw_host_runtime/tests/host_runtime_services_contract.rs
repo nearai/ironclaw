@@ -42,11 +42,12 @@ use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest,
-    CapabilitySurfaceVersion, DefaultHostRuntime, HostHttpEgressService, HostRuntime,
-    HostRuntimeServices, ProcessObligationLifecycleStore, ProductionWiringComponent,
-    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
-    RuntimeStatusRequest, RuntimeWorkId,
+    CapabilitySurfaceVersion, CommandExecutionOutput, CommandExecutionRequest, DefaultHostRuntime,
+    HostHttpEgressService, HostRuntime, HostRuntimeServices, ProcessObligationLifecycleStore,
+    ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
+    RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort, RuntimeStatusRequest,
+    RuntimeWorkId, builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use ironclaw_network::{
@@ -118,6 +119,13 @@ fn production_wiring_validation_rejects_missing_components_and_local_only_defaul
             ProductionWiringIssueKind::Missing
         ),
         "missing explicit trust policy should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RuntimePolicy,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing resolved runtime policy should be reported: {report:?}"
     );
     assert!(
         report.contains(
@@ -209,6 +217,79 @@ fn production_wiring_validation_rejects_missing_components_and_local_only_defaul
             ProductionWiringIssueKind::LocalOnlyImplementation
         ),
         "in-memory process result store should be reported as local-only: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_rejects_local_only_runtime_policy() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_policy(local_dev_runtime_policy());
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("local-dev runtime policy must not pass production validation");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RuntimePolicy,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "local runtime policy should be reported as local-only: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_rejects_each_local_only_runtime_policy_field() {
+    let mut host_workspace = hosted_dev_runtime_policy();
+    host_workspace.filesystem_backend = FilesystemBackendKind::HostWorkspace;
+    assert_local_only_runtime_policy_rejected(host_workspace, "host_workspace_filesystem");
+
+    let mut local_process = hosted_dev_runtime_policy();
+    local_process.process_backend = ProcessBackendKind::LocalHost;
+    assert_local_only_runtime_policy_rejected(local_process, "local_host_process");
+
+    let mut direct_network = hosted_dev_runtime_policy();
+    direct_network.network_mode = NetworkMode::Direct;
+    assert_local_only_runtime_policy_rejected(direct_network, "direct_network");
+
+    let mut scrubbed_secrets = hosted_dev_runtime_policy();
+    scrubbed_secrets.secret_mode = SecretMode::ScrubbedEnv;
+    assert_local_only_runtime_policy_rejected(scrubbed_secrets, "local_secret_environment");
+
+    let mut inherited_secrets = hosted_dev_runtime_policy();
+    inherited_secrets.secret_mode = SecretMode::InheritedEnv;
+    assert_local_only_runtime_policy_rejected(inherited_secrets, "local_secret_environment");
+}
+
+#[test]
+fn production_wiring_validation_accepts_production_safe_runtime_policy_shape() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_policy(hosted_dev_runtime_policy());
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local/test defaults still prevent production validation");
+
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RuntimePolicy,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "hosted runtime policy should satisfy runtime-policy guardrail: {report:?}"
     );
 }
 
@@ -1024,6 +1105,54 @@ fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
             ProductionWiringIssueKind::UnverifiedProductionImplementation
         ),
         "runtime HTTP egress should require production verification: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_builtin_first_party_package()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
+        .expect_err("default local process port must not satisfy production shell wiring");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RuntimeProcessPort,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "builtin shell should make the local process port visible to production guardrails: {report:?}"
+    );
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_builtin_first_party_package()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_process_port(Arc::new(ProductionCandidateProcessPort));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
+        .expect_err("other local defaults should still keep this graph non-production");
+
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RuntimeProcessPort,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "custom process port should clear the process-port local-only issue: {report:?}"
     );
 }
 
@@ -2586,6 +2715,62 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
 }
 
 #[tokio::test]
+async fn host_runtime_services_resume_runtime_policy_denial_fails_matching_blocked_run() {
+    let fixture = approval_resume_fixture_with_manifest(
+        SCRIPT_NETWORK_MANIFEST,
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    );
+    let runtime = fixture.services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "policy reduced before resume"});
+
+    let gate = block_for_approval(&runtime, context.clone(), estimate.clone(), input.clone()).await;
+    let lease =
+        approve_dispatch_for_services(&fixture.services, &scope, gate.approval_request_id, None)
+            .await;
+    let denied_runtime = resume_runtime_with_policy(&fixture, network_denied_runtime_policy());
+
+    let outcome = denied_runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context.clone(),
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    let failed_run = fixture
+        .run_state
+        .get(&scope, context.invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed_run.status, RunStatus::Failed);
+    assert_eq!(failed_run.approval_request_id, None);
+    assert_eq!(
+        failed_run.error_kind.as_deref(),
+        Some("process_backend_none")
+    );
+    assert_eq!(
+        fixture
+            .capability_leases
+            .get(&scope, lease.grant.id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active,
+        "runtime-policy preflight failure must not claim or consume the approval lease"
+    );
+    assert!(fixture.events.events().is_empty());
+}
+
+#[tokio::test]
 async fn host_runtime_services_resume_without_backing_stores_fails_closed() {
     let runtime = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -3518,7 +3703,7 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
 }
 
 #[tokio::test]
-async fn host_runtime_services_wasm_http_secret_store_lease_uses_graph_secret_store() {
+async fn host_runtime_services_wasm_http_rejects_secret_store_lease_before_transport() {
     let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
     let component = tool_component(HTTP_TOOL_WAT);
     let filesystem = Arc::new(
@@ -3579,18 +3764,10 @@ async fn host_runtime_services_wasm_http_secret_store_lease_uses_graph_secret_st
         .unwrap();
 
     assert_completed_outcome(outcome, &capability_id);
-    let requests = network.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].policy, policy);
     assert_eq!(
-        requests[0]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-graph-store-secret".to_string(),
-        ))
+        network.requests(),
+        Vec::new(),
+        "direct secret-store lease credentials must be rejected before network transport"
     );
 }
 
@@ -4712,12 +4889,19 @@ struct ApprovalResumeFixture {
 }
 
 fn approval_resume_fixture() -> ApprovalResumeFixture {
+    approval_resume_fixture_with_manifest(SCRIPT_MANIFEST, vec![EffectKind::DispatchCapability])
+}
+
+fn approval_resume_fixture_with_manifest(
+    manifest: &str,
+    trust_effects: Vec<EffectKind>,
+) -> ApprovalResumeFixture {
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
-        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(registry_with_manifest(manifest)),
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
@@ -4726,7 +4910,7 @@ fn approval_resume_fixture() -> ApprovalResumeFixture {
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
         "script",
-        vec![EffectKind::DispatchCapability],
+        trust_effects,
     )))
     .with_run_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
@@ -4766,6 +4950,34 @@ fn resume_runtime_with_empty_registry(fixture: &ApprovalResumeFixture) -> Defaul
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
     )))
+    .host_runtime_for_local_testing()
+}
+
+fn resume_runtime_with_policy(
+    fixture: &ApprovalResumeFixture,
+    policy: EffectiveRuntimePolicy,
+) -> DefaultHostRuntime {
+    HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_NETWORK_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    )))
+    .with_run_state(Arc::clone(&fixture.run_state))
+    .with_approval_requests(Arc::clone(&fixture.approval_requests))
+    .with_capability_leases(Arc::clone(&fixture.capability_leases))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )))
+    .with_event_sink(Arc::new(fixture.events.clone()))
+    .with_runtime_policy(policy)
     .host_runtime_for_local_testing()
 }
 
@@ -4998,6 +5210,24 @@ struct ObligatingAuthorizer {
 impl ObligatingAuthorizer {
     fn new(obligations: Vec<Obligation>) -> Self {
         Self { obligations }
+    }
+}
+
+#[derive(Debug)]
+struct ProductionCandidateProcessPort;
+
+#[async_trait]
+impl RuntimeProcessPort for ProductionCandidateProcessPort {
+    async fn run_command(
+        &self,
+        _request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        Ok(CommandExecutionOutput {
+            output: String::new(),
+            exit_code: 0,
+            sandboxed: true,
+            duration: Duration::ZERO,
+        })
     }
 }
 
@@ -5701,6 +5931,14 @@ fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
     registry_with_manifests(&[manifest])
 }
 
+fn registry_with_builtin_first_party_package() -> ExtensionRegistry {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(builtin_first_party_package().unwrap())
+        .unwrap();
+    registry
+}
+
 fn registry_with_manifests(manifests: &[&str]) -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     for manifest in manifests {
@@ -5853,6 +6091,76 @@ fn trust_decision_with_dispatch_authority() -> TrustDecision {
         provenance: TrustProvenance::Default,
         evaluated_at: Utc::now(),
     }
+}
+
+fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Deny,
+        secret_mode: SecretMode::BrokeredHandles,
+        approval_policy: ApprovalPolicy::AskAlways,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn hosted_dev_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::HostedMultiTenant,
+        requested_profile: RuntimeProfile::HostedDev,
+        resolved_profile: RuntimeProfile::HostedDev,
+        filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+        process_backend: ProcessBackendKind::TenantSandbox,
+        network_mode: NetworkMode::Allowlist,
+        secret_mode: SecretMode::TenantBroker,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::Standard,
+    }
+}
+
+fn assert_local_only_runtime_policy_rejected(
+    runtime_policy: EffectiveRuntimePolicy,
+    expected_implementation: &'static str,
+) {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_policy(runtime_policy);
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("local-only runtime-policy field must not pass production validation");
+
+    assert!(
+        report.issues().iter().any(|issue| {
+            issue.component() == ProductionWiringComponent::RuntimePolicy
+                && issue.kind() == ProductionWiringIssueKind::LocalOnlyImplementation
+                && issue.implementation() == Some(expected_implementation)
+        }),
+        "runtime policy should report {expected_implementation}: {report:?}"
+    );
 }
 
 fn read_directory_text(root: &std::path::Path) -> String {
@@ -6218,6 +6526,27 @@ args = []
 id = "script.echo"
 description = "Echo through Script"
 effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const SCRIPT_NETWORK_MANIFEST: &str = r#"
+id = "script"
+name = "Script Echo"
+version = "0.1.0"
+description = "Script integration extension"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+args = []
+
+[[capabilities]]
+id = "script.echo"
+description = "Echo through Script"
+effects = ["dispatch_capability", "network"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;

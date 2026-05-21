@@ -14,6 +14,10 @@ use ironclaw_extensions::ExtensionRegistry;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_host_api::runtime_policy::{
+    ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
+    NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
+};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
@@ -92,6 +96,27 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
         .find(|capability| capability.descriptor.id.as_str() == SHELL_CAPABILITY_ID)
         .expect("shell capability must be visible");
     assert_eq!(shell.estimated_resources.process_count, Some(1));
+}
+
+#[tokio::test]
+async fn builtin_first_party_surface_hides_runtime_policy_impossible_tools() {
+    let runtime = runtime_with_policy(network_denied_policy());
+    let request = VisibleCapabilityRequest::new(
+        execution_context(all_builtin_capability_ids()),
+        SurfaceKind::new("agent_loop").unwrap(),
+    )
+    .with_policy(CapabilitySurfacePolicy::allow_all())
+    .with_provider_trust(provider_trust());
+
+    let surface = runtime.visible_capabilities(request).await.unwrap();
+
+    let ids = surface
+        .capabilities
+        .iter()
+        .map(|capability| capability.descriptor.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(!ids.contains(&HTTP_CAPABILITY_ID));
+    assert!(ids.contains(&ECHO_CAPABILITY_ID));
 }
 
 #[tokio::test]
@@ -177,7 +202,7 @@ async fn builtin_shell_delegates_command_execution_to_process_port() {
     let output = invoke_with_context(
         &runtime,
         SHELL_CAPABILITY_ID,
-        json!({"command": "echo via port", "timeout": 9}),
+        json!({"command": "echo via port", "timeout": 9, "workdir": "port-workdir"}),
         execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
     )
     .await
@@ -190,8 +215,28 @@ async fn builtin_shell_delegates_command_execution_to_process_port() {
     let requests = process_port.requests.lock().unwrap();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].command, "echo via port");
+    assert_eq!(requests[0].workdir.as_deref(), Some("port-workdir"));
     assert_eq!(requests[0].timeout_secs, Some(9));
+    assert!(
+        requests[0]
+            .mounts
+            .as_ref()
+            .is_some_and(|mounts| mounts.mounts.is_empty())
+    );
+    assert!(requests[0].extra_env.is_empty());
     assert_eq!(requests[0].scope.user_id.as_str(), "user");
+}
+
+#[tokio::test]
+async fn builtin_shell_returns_stderr_and_nonzero_exit_without_dispatch_failure() {
+    let output = invoke_shell(json!({"command": "printf shell-error >&2; exit 7"}))
+        .await
+        .unwrap();
+
+    assert_eq!(output["exit_code"], json!(7));
+    assert_eq!(output["success"], json!(false));
+    assert_eq!(output["sandboxed"], json!(false));
+    assert_eq!(output["output"], json!("shell-error"));
 }
 
 #[tokio::test]
@@ -488,6 +533,39 @@ async fn builtin_http_invokes_through_host_runtime_egress() {
     assert_eq!(request.response_body_limit, Some(4096));
     assert_eq!(request.timeout_ms, Some(2500));
     assert!(request.credential_injections.is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_runtime_policy_denial_stops_before_egress() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        br#"{"ok":true}"#.to_vec(),
+    ));
+    let runtime = runtime_with_http_egress_and_policy(Arc::clone(&egress), network_denied_policy());
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+            capability_id(HTTP_CAPABILITY_ID),
+            ResourceEstimate::default(),
+            json!({"url": "https://api.example.test/v1/items"}),
+            trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected runtime-policy failure, got {outcome:?}");
+    };
+    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert_eq!(failure.capability_id, capability_id(HTTP_CAPABILITY_ID));
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("NetworkMode::Deny")
+    );
+    assert!(egress.requests().is_empty());
 }
 
 #[tokio::test]
@@ -1255,8 +1333,21 @@ async fn builtin_coding_blocks_relative_workspace_protected_paths() {
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
 
+    let root_readme_write = invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "./README.md", "content": "changed\n"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(root_readme_write["success"], json!(true));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("README.md")).unwrap(),
+        "changed\n"
+    );
+
     for (tool_path, host_path) in [
-        ("./README.md", "README.md"),
         ("./daily/note.md", "daily/note.md"),
         ("./context/session.md", "context/session.md"),
     ] {
@@ -1838,11 +1929,48 @@ where
     .host_runtime_for_local_testing()
 }
 
+fn runtime_with_policy(policy: EffectiveRuntimePolicy) -> impl HostRuntime {
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_trust_policy(Arc::new(trust_policy()))
+    .with_runtime_policy(policy)
+    .host_runtime_for_local_testing()
+}
+
 fn runtime_with_http_egress<T>(egress: Arc<T>) -> impl HostRuntime
 where
     T: RuntimeHttpEgress + 'static,
 {
     runtime_with_http_egress_and_governor(egress, Arc::new(InMemoryResourceGovernor::new()))
+}
+
+fn runtime_with_http_egress_and_policy<T>(
+    egress: Arc<T>,
+    policy: EffectiveRuntimePolicy,
+) -> impl HostRuntime
+where
+    T: RuntimeHttpEgress + 'static,
+{
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_http_egress(egress)
+    .with_trust_policy(Arc::new(trust_policy()))
+    .with_runtime_policy(policy)
+    .host_runtime_for_local_testing()
 }
 
 fn runtime_with_http_egress_and_governor<T>(
@@ -2175,6 +2303,20 @@ fn builtin_effects() -> Vec<EffectKind> {
         EffectKind::SpawnProcess,
         EffectKind::ExecuteCode,
     ]
+}
+
+fn network_denied_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Deny,
+        secret_mode: SecretMode::BrokeredHandles,
+        approval_policy: ApprovalPolicy::AskAlways,
+        audit_mode: AuditMode::LocalMinimal,
+    }
 }
 
 fn http_test_policy() -> NetworkPolicy {
