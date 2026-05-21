@@ -713,4 +713,88 @@ api_version = "ironclaw.runtime/v1.not-a-number"
             RebornConfigFileError::InvalidApiVersion { .. }
         ));
     }
+
+    #[test]
+    fn parses_valid_budget_section() {
+        let toml = r#"
+[budget]
+user_daily_usd = 7.50
+project_daily_usd = 0.00
+mission_per_tick_usd = 0.25
+heartbeat_per_tick_usd = 0.05
+routine_lightweight_usd = 0.01
+routine_standard_usd = 0.20
+background_job_default_usd = 2.00
+default_tz = "America/Los_Angeles"
+warn_at = 0.60
+pause_at = 0.85
+overestimate_factor = 1.50
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("valid budget section must parse");
+        let budget = cfg.budget.as_ref().expect("budget section present");
+        assert_eq!(budget.user_daily_usd, Some(7.50));
+        assert_eq!(budget.project_daily_usd, Some(0.00));
+        assert_eq!(budget.default_tz.as_deref(), Some("America/Los_Angeles"));
+        assert_eq!(budget.warn_at, Some(0.60));
+        assert_eq!(budget.pause_at, Some(0.85));
+        assert_eq!(budget.overestimate_factor, Some(1.50));
+    }
+
+    #[test]
+    fn rejects_negative_budget_usd_field() {
+        let toml = r#"
+[budget]
+user_daily_usd = -1.0
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("negative USD must be rejected");
+        assert!(matches!(
+            err,
+            RebornConfigFileError::InvalidApiVersion { .. }
+        ));
+        assert!(err.to_string().contains("user_daily_usd"));
+    }
+
+    #[test]
+    fn rejects_budget_threshold_out_of_range() {
+        let toml = r#"
+[budget]
+warn_at = 1.5
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("out-of-range threshold must be rejected");
+        assert!(matches!(
+            err,
+            RebornConfigFileError::InvalidApiVersion { .. }
+        ));
+        assert!(err.to_string().contains("warn_at"));
+    }
+
+    #[test]
+    fn rejects_budget_pause_below_warn() {
+        let toml = r#"
+[budget]
+warn_at = 0.90
+pause_at = 0.50
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("pause_at < warn_at must be rejected");
+        assert!(matches!(
+            err,
+            RebornConfigFileError::InvalidApiVersion { .. }
+        ));
+        assert!(err.to_string().contains("pause_at"));
+    }
+
+    #[test]
+    fn rejects_unknown_budget_section_key() {
+        let toml = r#"
+[budget]
+not_a_field = 1.0
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("deny_unknown_fields must catch typos in [budget]");
+        assert!(matches!(err, RebornConfigFileError::Toml { .. }));
+    }
 }

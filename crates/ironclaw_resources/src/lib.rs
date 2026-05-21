@@ -40,7 +40,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use fs2::FileExt;
 
 use ironclaw_host_api::ReservationStatus;
@@ -1655,7 +1655,15 @@ fn account_snapshot_in_state(
         .as_ref()
         .map(|l| l.period.clone())
         .unwrap_or_default();
-    let (period_start, period_end) = period_bounds(&period, now);
+    // Rolling24h is anchored to when the limit was set (or last rolled
+    // over) — not to `now`. Derive the start from the stored anchor so
+    // the snapshot reports the window the ledger is actually accumulating
+    // against. For Calendar/PerInvocation, `period_bounds(now)` already
+    // returns the correct wall-clock-anchored window.
+    let (period_start, period_end) = match (state.period_anchors.get(account), &period) {
+        (Some(end), BudgetPeriod::Rolling24h) => (*end - Duration::hours(24), *end),
+        _ => period_bounds(&period, now),
+    };
     Some(AccountSnapshot {
         account: account.clone(),
         limits,
@@ -1839,16 +1847,16 @@ fn check_thresholds_first_intervention(
         return None;
     }
     // Decimal USD threshold check.
-    if let Some(intervention) = threshold_decimal(
+    if let Some(intervention) = threshold_decimal(ThresholdInputs {
         account,
-        ResourceDimension::Usd,
-        limits.max_usd,
-        usage.usd,
-        reserved.usd,
-        requested.usd,
-        limits.thresholds,
+        dimension: ResourceDimension::Usd,
+        limit: limits.max_usd,
+        usage: usage.usd,
+        reserved: reserved.usd,
+        requested: requested.usd,
+        thresholds: limits.thresholds,
         period_end,
-    ) {
+    }) {
         return Some(intervention);
     }
     // Integer dimensions.
@@ -1903,16 +1911,16 @@ fn check_thresholds_first_intervention(
             u64::from(requested.concurrency_slots),
         ),
     ] {
-        if let Some(intervention) = threshold_integer(
+        if let Some(intervention) = threshold_integer(ThresholdInputs {
             account,
             dimension,
             limit,
-            usage_v,
-            reserved_v,
-            requested_v,
-            limits.thresholds,
+            usage: usage_v,
+            reserved: reserved_v,
+            requested: requested_v,
+            thresholds: limits.thresholds,
             period_end,
-        ) {
+        }) {
             return Some(intervention);
         }
     }
@@ -1974,21 +1982,39 @@ fn check_integer(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn threshold_decimal(
-    account: &ResourceAccount,
+/// Inputs to threshold evaluation. Bundled so the dimension-typed helpers stay
+/// inside clippy's `too_many_arguments` default and so the cascade can pass
+/// per-dimension snapshots without re-spelling six positional parameters.
+struct ThresholdInputs<'a, T> {
+    account: &'a ResourceAccount,
     dimension: ResourceDimension,
-    limit: Option<Decimal>,
-    usage: Decimal,
-    reserved: Decimal,
-    requested: Decimal,
+    limit: Option<T>,
+    usage: T,
+    reserved: T,
+    requested: T,
     thresholds: BudgetThresholds,
     period_end: Option<DateTime<Utc>>,
-) -> Option<ThresholdIntervention> {
+}
+
+fn threshold_decimal(inputs: ThresholdInputs<'_, Decimal>) -> Option<ThresholdIntervention> {
+    let ThresholdInputs {
+        account,
+        dimension,
+        limit,
+        usage,
+        reserved,
+        requested,
+        thresholds,
+        period_end,
+    } = inputs;
     let limit = limit.filter(|v| *v > Decimal::ZERO)?;
     let total = usage.checked_add(reserved)?.checked_add(requested)?;
     let utilization = decimal_to_f64(total) / decimal_to_f64(limit);
-    if utilization >= thresholds.pause_at && utilization < 1.0 {
+    // A threshold at or above 1.0 is "disabled": utilization that hits 1.0
+    // is already a hard deny, so the only useful pause point is strictly
+    // below 1.0. Approval at exactly 100% utilization fires when pause_at
+    // is set below 1.0 (e.g. the recommended 0.90 default).
+    if thresholds.pause_at < 1.0 && utilization >= thresholds.pause_at {
         return Some(ThresholdIntervention::Approval(ResourceApprovalNeeded {
             account: account.clone(),
             dimension,
@@ -2000,7 +2026,7 @@ fn threshold_decimal(
             period_end,
         }));
     }
-    if utilization >= thresholds.warn_at && utilization < thresholds.pause_at {
+    if thresholds.warn_at < 1.0 && utilization >= thresholds.warn_at {
         return Some(ThresholdIntervention::Warning(BudgetWarning {
             account: account.clone(),
             dimension,
@@ -2012,21 +2038,21 @@ fn threshold_decimal(
     None
 }
 
-#[allow(clippy::too_many_arguments)]
-fn threshold_integer(
-    account: &ResourceAccount,
-    dimension: ResourceDimension,
-    limit: Option<u64>,
-    usage: u64,
-    reserved: u64,
-    requested: u64,
-    thresholds: BudgetThresholds,
-    period_end: Option<DateTime<Utc>>,
-) -> Option<ThresholdIntervention> {
+fn threshold_integer(inputs: ThresholdInputs<'_, u64>) -> Option<ThresholdIntervention> {
+    let ThresholdInputs {
+        account,
+        dimension,
+        limit,
+        usage,
+        reserved,
+        requested,
+        thresholds,
+        period_end,
+    } = inputs;
     let limit = limit.filter(|v| *v > 0)?;
     let total = usage.saturating_add(reserved).saturating_add(requested);
     let utilization = total as f64 / limit as f64;
-    if utilization >= thresholds.pause_at && utilization < 1.0 {
+    if thresholds.pause_at < 1.0 && utilization >= thresholds.pause_at {
         return Some(ThresholdIntervention::Approval(ResourceApprovalNeeded {
             account: account.clone(),
             dimension,
@@ -2038,7 +2064,7 @@ fn threshold_integer(
             period_end,
         }));
     }
-    if utilization >= thresholds.warn_at && utilization < thresholds.pause_at {
+    if thresholds.warn_at < 1.0 && utilization >= thresholds.warn_at {
         return Some(ThresholdIntervention::Warning(BudgetWarning {
             account: account.clone(),
             dimension,

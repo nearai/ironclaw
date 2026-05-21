@@ -306,4 +306,98 @@ mod tests {
         // Untouched defaults remain.
         assert_eq!(d.heartbeat_per_tick_usd, 0.05);
     }
+
+    // Process env is global state; serialize env-mutating tests behind a
+    // single mutex so they cannot race each other. The lock is unpoisoned
+    // before each test scope so a panic in one test does not cascade.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// RAII guard that sets an env var on construction and restores the
+    /// previous value (or removes the var) on drop, even on test panic.
+    struct EnvGuard {
+        key: &'static str,
+        prior: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prior = env::var(key).ok();
+            // SAFETY: env mutation in tests is serialized through `env_lock()`.
+            unsafe {
+                env::set_var(key, value);
+            }
+            Self { key, prior }
+        }
+
+        fn unset(key: &'static str) -> Self {
+            let prior = env::var(key).ok();
+            // SAFETY: env mutation in tests is serialized through `env_lock()`.
+            unsafe {
+                env::remove_var(key);
+            }
+            Self { key, prior }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: env mutation in tests is serialized through `env_lock()`.
+            unsafe {
+                match &self.prior {
+                    Some(v) => env::set_var(self.key, v),
+                    None => env::remove_var(self.key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn env_layer_overrides_section_and_rejects_invalid_f64() {
+        let _lock = env_lock();
+        // Establish a section override that env should win against.
+        let section = BudgetSection {
+            user_daily_usd: Some(10.0),
+            warn_at: Some(0.60),
+            pause_at: Some(0.80),
+            ..Default::default()
+        };
+
+        // Valid env override path.
+        {
+            let _g1 = EnvGuard::set(USER_DAILY_USD_ENV, "42.5");
+            let _g2 = EnvGuard::set(BUDGET_WARN_AT_ENV, "0.50");
+            let _g3 = EnvGuard::set(BUDGET_PAUSE_AT_ENV, "0.75");
+            let _g4 = EnvGuard::unset(BUDGET_OVERESTIMATE_FACTOR_ENV);
+            let d = BudgetDefaults::compiled_defaults()
+                .with_section(&section)
+                .with_env()
+                .expect("env layer must apply over section");
+            assert_eq!(d.user_daily_usd, 42.5);
+            assert_eq!(d.warn_at, 0.50);
+            assert_eq!(d.pause_at, 0.75);
+            // Untouched env preserves prior section value.
+            assert!((d.overestimate_factor - 1.20).abs() < f64::EPSILON);
+        }
+
+        // Malformed env value is surfaced as InvalidEnvF64, not silently dropped.
+        {
+            let _g = EnvGuard::set(USER_DAILY_USD_ENV, "not-a-number");
+            let err = BudgetDefaults::compiled_defaults()
+                .with_env()
+                .expect_err("non-numeric env override must error");
+            match err {
+                BudgetDefaultsError::InvalidEnvF64 { name, value } => {
+                    assert_eq!(name, USER_DAILY_USD_ENV);
+                    assert_eq!(value, "not-a-number");
+                }
+                other => panic!("expected InvalidEnvF64, got {other:?}"),
+            }
+        }
+    }
 }

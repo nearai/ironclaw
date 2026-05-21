@@ -85,23 +85,22 @@ fn normalize_for_hash(value: &Value) -> Value {
 }
 
 fn is_correlation_key(key: &str) -> bool {
-    let normalized: String = key
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-        .map(|c| c.to_ascii_lowercase())
-        .collect();
-    matches!(
-        normalized.as_str(),
-        "request_id"
-            | "requestid"
-            | "trace_id"
-            | "traceid"
-            | "correlation_id"
-            | "correlationid"
-            | "idempotency_key"
-            | "idempotencykey"
-            | "x_request_id"
-    )
+    // ASCII case-insensitive comparison against a static slice — zero
+    // heap allocation on every hash. Underscore-vs-no-underscore is the
+    // only spelling variance we accept; anything else (kebab-case,
+    // mixed alnum punctuation) is treated as a distinct param.
+    const KEYS: &[&str] = &[
+        "request_id",
+        "requestid",
+        "trace_id",
+        "traceid",
+        "correlation_id",
+        "correlationid",
+        "idempotency_key",
+        "idempotencykey",
+        "x_request_id",
+    ];
+    KEYS.iter().any(|k| key.eq_ignore_ascii_case(k))
 }
 
 fn normalize_string(s: &str) -> String {
@@ -110,38 +109,29 @@ fn normalize_string(s: &str) -> String {
 }
 
 fn replace_uuids(s: &str) -> String {
-    // Strict UUID v1-v5: 8-4-4-4-12 hex segments. Case-insensitive.
-    let mut out = String::with_capacity(s.len());
-    let chars: Vec<char> = s.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        if let Some(consumed) = match_uuid(&chars[i..]) {
-            out.push_str("<uuid>");
-            i += consumed;
-        } else {
-            out.push(chars[i]);
-            i += 1;
-        }
-    }
-    out
+    // Strict UUID v1-v5: 8-4-4-4-12 hex segments. ASCII-only by construction,
+    // so we scan over `&[u8]` and consume one UTF-8 codepoint at a time on
+    // the non-match path. Avoids the `Vec<char>` allocation the previous
+    // implementation paid on every hash.
+    replace_ascii_pattern(s, "<uuid>", match_uuid_bytes)
 }
 
-fn match_uuid(chars: &[char]) -> Option<usize> {
+fn match_uuid_bytes(bytes: &[u8]) -> Option<usize> {
     let segments = [8, 4, 4, 4, 12];
     let total_required: usize = segments.iter().sum::<usize>() + segments.len() - 1;
-    if chars.len() < total_required {
+    if bytes.len() < total_required {
         return None;
     }
     let mut idx = 0;
     for (i, len) in segments.iter().enumerate() {
         if i > 0 {
-            if chars[idx] != '-' {
+            if bytes[idx] != b'-' {
                 return None;
             }
             idx += 1;
         }
         for _ in 0..*len {
-            if !chars[idx].is_ascii_hexdigit() {
+            if !bytes[idx].is_ascii_hexdigit() {
                 return None;
             }
             idx += 1;
@@ -152,53 +142,41 @@ fn match_uuid(chars: &[char]) -> Option<usize> {
 
 fn replace_timestamps(s: &str) -> String {
     // Replace ISO-8601-ish timestamps: YYYY-MM-DD[Tt ]HH:MM:SS(.fff)?(Z|±HH:MM)?
-    let chars: Vec<char> = s.chars().collect();
-    let mut out = String::with_capacity(s.len());
-    let mut i = 0;
-    while i < chars.len() {
-        if let Some(consumed) = match_iso8601(&chars[i..]) {
-            out.push_str("<timestamp>");
-            i += consumed;
-        } else {
-            out.push(chars[i]);
-            i += 1;
-        }
-    }
-    out
+    replace_ascii_pattern(s, "<timestamp>", match_iso8601_bytes)
 }
 
-fn match_iso8601(chars: &[char]) -> Option<usize> {
-    // Minimum: YYYY-MM-DDTHH:MM:SS  = 19 chars
-    if chars.len() < 19 {
+fn match_iso8601_bytes(bytes: &[u8]) -> Option<usize> {
+    // Minimum: YYYY-MM-DDTHH:MM:SS  = 19 bytes (all ASCII).
+    if bytes.len() < 19 {
         return None;
     }
-    if !(chars[0].is_ascii_digit()
-        && chars[1].is_ascii_digit()
-        && chars[2].is_ascii_digit()
-        && chars[3].is_ascii_digit()
-        && chars[4] == '-'
-        && chars[5].is_ascii_digit()
-        && chars[6].is_ascii_digit()
-        && chars[7] == '-'
-        && chars[8].is_ascii_digit()
-        && chars[9].is_ascii_digit()
-        && (chars[10] == 'T' || chars[10] == 't' || chars[10] == ' ')
-        && chars[11].is_ascii_digit()
-        && chars[12].is_ascii_digit()
-        && chars[13] == ':'
-        && chars[14].is_ascii_digit()
-        && chars[15].is_ascii_digit()
-        && chars[16] == ':'
-        && chars[17].is_ascii_digit()
-        && chars[18].is_ascii_digit())
+    if !(bytes[0].is_ascii_digit()
+        && bytes[1].is_ascii_digit()
+        && bytes[2].is_ascii_digit()
+        && bytes[3].is_ascii_digit()
+        && bytes[4] == b'-'
+        && bytes[5].is_ascii_digit()
+        && bytes[6].is_ascii_digit()
+        && bytes[7] == b'-'
+        && bytes[8].is_ascii_digit()
+        && bytes[9].is_ascii_digit()
+        && (bytes[10] == b'T' || bytes[10] == b't' || bytes[10] == b' ')
+        && bytes[11].is_ascii_digit()
+        && bytes[12].is_ascii_digit()
+        && bytes[13] == b':'
+        && bytes[14].is_ascii_digit()
+        && bytes[15].is_ascii_digit()
+        && bytes[16] == b':'
+        && bytes[17].is_ascii_digit()
+        && bytes[18].is_ascii_digit())
     {
         return None;
     }
     let mut consumed = 19;
     // Optional fractional seconds .fff…
-    if consumed < chars.len() && chars[consumed] == '.' {
+    if consumed < bytes.len() && bytes[consumed] == b'.' {
         let mut j = consumed + 1;
-        while j < chars.len() && chars[j].is_ascii_digit() {
+        while j < bytes.len() && bytes[j].is_ascii_digit() {
             j += 1;
         }
         if j > consumed + 1 {
@@ -206,21 +184,48 @@ fn match_iso8601(chars: &[char]) -> Option<usize> {
         }
     }
     // Optional timezone Z or ±HH:MM
-    if consumed < chars.len() {
-        if chars[consumed] == 'Z' || chars[consumed] == 'z' {
+    if consumed < bytes.len() {
+        if bytes[consumed] == b'Z' || bytes[consumed] == b'z' {
             consumed += 1;
-        } else if (chars[consumed] == '+' || chars[consumed] == '-')
-            && consumed + 5 < chars.len()
-            && chars[consumed + 1].is_ascii_digit()
-            && chars[consumed + 2].is_ascii_digit()
-            && chars[consumed + 3] == ':'
-            && chars[consumed + 4].is_ascii_digit()
-            && chars[consumed + 5].is_ascii_digit()
+        } else if (bytes[consumed] == b'+' || bytes[consumed] == b'-')
+            && consumed + 5 < bytes.len()
+            && bytes[consumed + 1].is_ascii_digit()
+            && bytes[consumed + 2].is_ascii_digit()
+            && bytes[consumed + 3] == b':'
+            && bytes[consumed + 4].is_ascii_digit()
+            && bytes[consumed + 5].is_ascii_digit()
         {
             consumed += 6;
         }
     }
     Some(consumed)
+}
+
+/// Walk `s` byte-by-byte, replacing each ASCII-pattern match with `replacement`.
+/// On the non-match path advance one whole UTF-8 codepoint so we never split a
+/// multibyte character (Rust would panic on `&s[i..i+1]` mid-codepoint).
+fn replace_ascii_pattern(
+    s: &str,
+    replacement: &str,
+    matcher: fn(&[u8]) -> Option<usize>,
+) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if let Some(consumed) = matcher(&bytes[i..]) {
+            out.push_str(replacement);
+            i += consumed;
+        } else {
+            let mut next = i + 1;
+            while next < bytes.len() && !s.is_char_boundary(next) {
+                next += 1;
+            }
+            out.push_str(&s[i..next]);
+            i = next;
+        }
+    }
+    out
 }
 
 #[cfg(test)]

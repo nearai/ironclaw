@@ -127,15 +127,26 @@ pub struct GovernorBackedAccountant {
     governor: Arc<dyn ResourceGovernor>,
     cost_table: Arc<dyn ModelCostTable>,
     overestimate_factor: Decimal,
-    /// Tracks in-flight reservation ids per (run_id, model_id) so
-    /// `post_model_call` can reconcile/release the matching reservation
-    /// without the caller threading state through the loop port.
-    in_flight: Arc<DashMap<TurnRunId, ResourceReservationId>>,
+    /// Tracks in-flight reservations per run so `post_model_call` can
+    /// reconcile/release the matching reservation without the caller
+    /// threading state through the loop port. Stores the original estimate
+    /// alongside the id so reconcile can fall back to the estimated USD
+    /// as the recorded actual until provider-supplied token usage threads
+    /// through the loop layer.
+    in_flight: Arc<DashMap<TurnRunId, InFlightReservation>>,
     seeding_policy: Option<BudgetSeedingPolicy>,
-    /// Accounts already considered for seeding this process lifetime.
+    /// Accounts already successfully seeded this process lifetime.
     /// Bounded by the number of distinct (user, project) pairs the
     /// process sees; production tenants typically have O(1k) entries.
     seeded: Arc<DashSet<ResourceAccount>>,
+}
+
+/// Per-run reservation bookkeeping. Held until `post_model_call` reconciles
+/// or releases against the governor.
+#[derive(Debug, Clone)]
+struct InFlightReservation {
+    id: ResourceReservationId,
+    estimate: ResourceEstimate,
 }
 
 impl std::fmt::Debug for GovernorBackedAccountant {
@@ -190,21 +201,37 @@ impl GovernorBackedAccountant {
     }
 
     fn install_if_unseeded(&self, account: &ResourceAccount, limits: &ResourceLimits) {
-        if !self.seeded.insert(account.clone()) {
+        if self.seeded.contains(account) {
             return;
         }
-        // Best-effort: if a limit already exists for this account, leave
-        // it untouched. We check via `account_snapshot` (a single read)
-        // before set_limit to honor existing user/admin overrides.
+        // Honor existing user/admin overrides: a successful read showing
+        // an existing limit means seeding is a no-op. We mark seeded only
+        // after the governor has confirmed the state (read or write) — a
+        // failed snapshot/set_limit must not poison the cache, or future
+        // reservations will silently proceed without the intended default
+        // cap (rules/error-handling.md, "Silent-Failure Anti-Patterns").
         match self.governor.account_snapshot(account) {
             Ok(Some(snapshot)) if snapshot.limits.is_some() => {
-                // Already has a limit — do not overwrite user/admin
-                // configuration.
+                self.seeded.insert(account.clone());
             }
-            _ => {
-                if let Err(err) = self.governor.set_limit(account.clone(), limits.clone()) {
-                    tracing::warn!(?err, ?account, "seeding default budget for account failed");
+            Ok(_) => match self.governor.set_limit(account.clone(), limits.clone()) {
+                Ok(()) => {
+                    self.seeded.insert(account.clone());
                 }
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        ?account,
+                        "seeding default budget for account failed; will retry on next call"
+                    );
+                }
+            },
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    ?account,
+                    "reading account snapshot for seeding failed; will retry on next call"
+                );
             }
         }
     }
@@ -278,17 +305,47 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
         context: &LoopRunContext,
         request: &LoopModelRequest,
     ) -> Result<(), LoopModelGatewayError> {
+        // Reject a second concurrent reservation for the same run: the loop
+        // calls `stream_model` serially per run, so overlap means a prior
+        // post-call leaked. Hold one reservation only — release the new
+        // hold immediately rather than overwriting and leaking the old one.
+        if self.in_flight.contains_key(&context.run_id) {
+            return Err(LoopModelGatewayError::new(
+                AgentLoopHostErrorKind::BudgetAccountingFailed,
+                "budget accountant has an in-flight reservation for this run",
+            )
+            .map_err(internal_summary_error)?);
+        }
+
         let estimate = self.estimate_for(context, request);
         let scope = self.resource_scope(context);
         self.seed_if_missing(&scope);
         let reservation_id = ResourceReservationId::new();
         match self
             .governor
-            .reserve_with_id_and_outcome(scope, estimate, reservation_id)
+            .reserve_with_id_and_outcome(scope, estimate.clone(), reservation_id)
         {
             Ok(outcome) => {
-                self.in_flight
-                    .insert(context.run_id, outcome.reservation.id);
+                // Defense in depth: if another task raced us between the
+                // `contains_key` check above and now, refuse the second
+                // reservation by releasing this one and surfacing an error.
+                use dashmap::mapref::entry::Entry;
+                match self.in_flight.entry(context.run_id) {
+                    Entry::Vacant(slot) => {
+                        slot.insert(InFlightReservation {
+                            id: outcome.reservation.id,
+                            estimate,
+                        });
+                    }
+                    Entry::Occupied(_) => {
+                        let _ = self.governor.release(outcome.reservation.id);
+                        return Err(LoopModelGatewayError::new(
+                            AgentLoopHostErrorKind::BudgetAccountingFailed,
+                            "budget accountant has an in-flight reservation for this run",
+                        )
+                        .map_err(internal_summary_error)?);
+                    }
+                }
                 if !outcome.warnings.is_empty() {
                     tracing::debug!(
                         warnings = outcome.warnings.len(),
@@ -329,42 +386,62 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
         _request: &LoopModelRequest,
         outcome: ModelCallOutcome<'_>,
     ) -> Result<(), LoopModelGatewayError> {
-        let Some((_, reservation_id)) = self.in_flight.remove(&context.run_id) else {
-            // No reservation registered — pre_model_call must have failed
-            // before reservation succeeded. Nothing to reconcile/release.
-            return Ok(());
+        // Peek without removing — only clear the in-flight entry after the
+        // governor confirms the reconcile/release succeeded. Otherwise a
+        // transient storage error would orphan the reservation in the
+        // governor with no id left here to retry or audit.
+        let entry = match self.in_flight.get(&context.run_id) {
+            Some(e) => e.clone(),
+            None => {
+                // No reservation registered — pre_model_call must have
+                // failed before reservation succeeded.
+                return Ok(());
+            }
         };
+        let reservation_id = entry.id;
         let result = match outcome {
             ModelCallOutcome::Success(response) => {
-                let usage = usage_for_response(response);
+                let usage = usage_for_response(response, &entry.estimate);
                 self.governor.reconcile(reservation_id, usage).map(|_| ())
             }
             ModelCallOutcome::Failure(_) => self.governor.release(reservation_id).map(|_| ()),
         };
-        result.map_err(|err| {
-            tracing::warn!(
-                error = ?err,
-                run_id = ?context.run_id,
-                "budget accounting failed during post-model-call reconciliation"
-            );
-            LoopModelGatewayError::new(
-                AgentLoopHostErrorKind::BudgetAccountingFailed,
-                "budget accounting failed",
-            )
-            .unwrap_or_else(|reason| panic!("internal summary invariant violated: {reason}"))
-        })
+        match result {
+            Ok(()) => {
+                self.in_flight.remove(&context.run_id);
+                Ok(())
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = ?err,
+                    run_id = ?context.run_id,
+                    reservation_id = ?reservation_id,
+                    "budget accounting failed during post-model-call reconciliation; \
+                     reservation id retained for retry/cleanup"
+                );
+                Err(LoopModelGatewayError::new(
+                    AgentLoopHostErrorKind::BudgetAccountingFailed,
+                    "budget accounting failed",
+                )
+                .unwrap_or_else(|reason| panic!("internal summary invariant violated: {reason}")))
+            }
+        }
     }
 }
 
-fn usage_for_response(response: &LoopModelResponse) -> ResourceUsage {
-    // We do not yet thread real token counts from the provider response into
-    // the loop layer; the chunk count is a coarse-grained signal. Reconcile
-    // releases the overestimated reservation regardless — this just ensures
-    // the ledger records *something* for accounting.
+fn usage_for_response(response: &LoopModelResponse, estimate: &ResourceEstimate) -> ResourceUsage {
+    // Provider-supplied token counts and USD have not yet been threaded
+    // into `LoopModelResponse`. Until they are, reconcile the original
+    // reservation estimate as the recorded USD spend: this is conservative
+    // (the estimate already includes the overestimate factor) but ensures
+    // daily USD budgets actually deplete, which is the security invariant
+    // the cascade depends on. Once provider usage threads through the
+    // loop layer this falls back to those numbers; today the estimate is
+    // the only honest signal.
     let chunks = response.chunks.len() as u64;
     ResourceUsage {
-        usd: Decimal::ZERO,
-        input_tokens: 0,
+        usd: estimate.usd.unwrap_or(Decimal::ZERO),
+        input_tokens: estimate.input_tokens.unwrap_or(0),
         output_tokens: chunks,
         wall_clock_ms: 0,
         output_bytes: response
@@ -722,5 +799,180 @@ mod tests {
 
         let snapshot = governor.account_snapshot(&user_account).unwrap().unwrap();
         assert_eq!(snapshot.limits.unwrap().max_usd, Some(dec!(100.00)));
+    }
+
+    #[tokio::test]
+    async fn post_model_call_success_records_estimated_usd_until_provider_threading_lands() {
+        // Regression: prior to threading provider usage, reconcile recorded
+        // `usd: ZERO`, so daily USD budgets only constrained concurrency.
+        // The estimate fallback records the conservative reservation cost
+        // as actual spend, ensuring a daily USD cap actually depletes.
+        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
+        let context = run_context();
+        let user_account = ResourceAccount::user(
+            context.scope.tenant_id.clone(),
+            UserId::new("acct-user").unwrap(),
+        );
+        governor
+            .set_limit(
+                user_account.clone(),
+                ResourceLimits {
+                    max_usd: Some(dec!(100.00)),
+                    period: BudgetPeriod::Rolling24h,
+                    ..ResourceLimits::default()
+                },
+            )
+            .unwrap();
+        let cost = ModelCost {
+            input_per_token: dec!(0.0001),
+            output_per_token: dec!(0.001),
+            max_output_tokens: 1024,
+        };
+        let accountant = GovernorBackedAccountant::new(governor.clone(), Arc::new(CostStub(cost)));
+        let request = sample_request();
+        accountant.pre_model_call(&context, &request).await.unwrap();
+        let response = LoopModelResponse {
+            chunks: vec![],
+            output: ironclaw_turns::run_profile::ParentLoopOutput::AssistantReply(
+                ironclaw_turns::run_profile::AssistantReply {
+                    content: "ok".to_string(),
+                },
+            ),
+            effective_model_profile_id: ModelProfileId::new("acct_model").unwrap(),
+        };
+        accountant
+            .post_model_call(&context, &request, ModelCallOutcome::Success(&response))
+            .await
+            .unwrap();
+        let snapshot = governor.account_snapshot(&user_account).unwrap().unwrap();
+        assert!(
+            snapshot.ledger.spent.usd > Decimal::ZERO,
+            "USD spend must be recorded on success (got {})",
+            snapshot.ledger.spent.usd,
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_model_call_rejects_overlapping_reservation_for_same_run() {
+        // Regression: in_flight is keyed by TurnRunId. Two overlapping
+        // reservations under the same run id used to overwrite each other,
+        // leaking one hold. Defensively reject the second call.
+        let governor: Arc<dyn ResourceGovernor> = Arc::new(InMemoryResourceGovernor::new());
+        let accountant = GovernorBackedAccountant::new(governor.clone(), Arc::new(ZeroCostTable));
+        let context = run_context();
+        let request = sample_request();
+        accountant.pre_model_call(&context, &request).await.unwrap();
+        let err = accountant
+            .pre_model_call(&context, &request)
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, AgentLoopHostErrorKind::BudgetAccountingFailed);
+    }
+
+    #[tokio::test]
+    async fn seeding_retry_after_transient_failure_uses_failing_governor() {
+        // A governor that always fails set_limit must not poison `seeded`
+        // — a subsequent call should re-attempt seeding instead of
+        // silently proceeding without the intended default cap.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug, Default)]
+        struct FailingSetLimitGovernor {
+            calls: AtomicUsize,
+            inner: InMemoryResourceGovernor,
+            fail_first_n: usize,
+        }
+
+        impl ResourceGovernor for FailingSetLimitGovernor {
+            fn set_limit(
+                &self,
+                account: ResourceAccount,
+                limits: ResourceLimits,
+            ) -> Result<(), ResourceError> {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst);
+                if n < self.fail_first_n {
+                    return Err(ResourceError::InvalidEstimate {
+                        dimension: ResourceDimension::Usd,
+                        reason: "synthetic",
+                    });
+                }
+                self.inner.set_limit(account, limits)
+            }
+            fn reserve_with_outcome(
+                &self,
+                scope: ResourceScope,
+                estimate: ResourceEstimate,
+            ) -> Result<ReservationOutcome, ResourceError> {
+                self.inner.reserve_with_outcome(scope, estimate)
+            }
+            fn reserve_with_id_and_outcome(
+                &self,
+                scope: ResourceScope,
+                estimate: ResourceEstimate,
+                reservation_id: ResourceReservationId,
+            ) -> Result<ReservationOutcome, ResourceError> {
+                self.inner
+                    .reserve_with_id_and_outcome(scope, estimate, reservation_id)
+            }
+            fn reconcile(
+                &self,
+                reservation_id: ResourceReservationId,
+                actual: ResourceUsage,
+            ) -> Result<ResourceReceipt, ResourceError> {
+                self.inner.reconcile(reservation_id, actual)
+            }
+            fn release(
+                &self,
+                reservation_id: ResourceReservationId,
+            ) -> Result<ResourceReceipt, ResourceError> {
+                self.inner.release(reservation_id)
+            }
+            fn account_snapshot(
+                &self,
+                account: &ResourceAccount,
+            ) -> Result<Option<AccountSnapshot>, ResourceError> {
+                self.inner.account_snapshot(account)
+            }
+        }
+
+        use ironclaw_host_api::ResourceReceipt;
+        use ironclaw_resources::{
+            AccountSnapshot, ReservationOutcome, ResourceDimension, ResourceLimits,
+        };
+        let governor: Arc<dyn ResourceGovernor> = Arc::new(FailingSetLimitGovernor {
+            calls: AtomicUsize::new(0),
+            inner: InMemoryResourceGovernor::new(),
+            fail_first_n: 1,
+        });
+        let context = run_context();
+        let user_account = ResourceAccount::user(
+            context.scope.tenant_id.clone(),
+            UserId::new("acct-user").unwrap(),
+        );
+        let policy = BudgetSeedingPolicy::new(
+            dec!(5.00),
+            dec!(2.00),
+            BudgetPeriod::Rolling24h,
+            BudgetThresholds::DISABLED,
+        );
+        let accountant = GovernorBackedAccountant::new(governor.clone(), Arc::new(ZeroCostTable))
+            .with_seeding_policy(policy);
+        let request = sample_request();
+        // First call: set_limit fails. The reservation itself still
+        // succeeds (free against ZeroCostTable), so the account now has a
+        // ledger row — but no limits, which is exactly the seeded-but-
+        // unprotected hole the rule forbids.
+        accountant.pre_model_call(&context, &request).await.unwrap();
+        let first = governor.account_snapshot(&user_account).unwrap();
+        assert!(
+            first.as_ref().map(|s| s.limits.is_none()).unwrap_or(true),
+            "first pre_model_call should leave the account without a limit when set_limit fails",
+        );
+        // Drop the in-flight reservation so the next pre_model_call is allowed.
+        accountant.in_flight.clear();
+        // Second call: set_limit succeeds; cap is now in place.
+        accountant.pre_model_call(&context, &request).await.unwrap();
+        let snapshot = governor.account_snapshot(&user_account).unwrap().unwrap();
+        assert_eq!(snapshot.limits.unwrap().max_usd, Some(dec!(5.00)));
     }
 }

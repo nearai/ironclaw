@@ -874,16 +874,22 @@ where
             &request.surface_version,
         )?;
 
+        // Resolve messages *before* the budget reservation so a message-
+        // resolution failure here cannot orphan an active hold. The
+        // reservation must only be taken once we know the call is going
+        // to reach the provider.
+        let resolved_messages = self.resolve_model_messages(prompt_grant.messages).await?;
+
         // Pre-call budget check: reserve estimated cost against the
         // governor cascade. A denial here short-circuits before any
-        // provider/credential touch.
+        // provider/credential touch. Anything fallible after this point
+        // must funnel through `finalize_post_model_call` so the hold is
+        // reconciled or released.
         if let Some(accountant) = &self.budget_accountant
             && let Err(budget_error) = accountant.pre_model_call(&self.run_context, &request).await
         {
             return Err(budget_error.into_host_error());
         }
-
-        let resolved_messages = self.resolve_model_messages(prompt_grant.messages).await?;
         self.emit_model_started(requested_model_profile_id).await;
         let host_request = HostManagedModelRequest {
             model_profile_id: model_profile_id.clone(),
@@ -997,6 +1003,10 @@ where
         outcome: ModelCallOutcome<'_>,
         host_response_result: Result<LoopModelResponse, AgentLoopHostError>,
     ) -> Result<LoopModelResponse, AgentLoopHostError> {
+        // Accountant contract: durable accounting/release failures must fail
+        // closed. Swallowing on the provider-error path would hide stuck
+        // reservations and misreport the failure cause, so the accountant
+        // error takes precedence over the original model error.
         if let Err(acc_error) = accountant
             .post_model_call(&self.run_context, request, outcome)
             .await
@@ -1004,8 +1014,10 @@ where
             tracing::warn!(
                 kind = ?acc_error.kind,
                 diagnostic_ref = ?acc_error.diagnostic_ref,
-                "budget accountant post-call failed during error path"
+                "budget accountant post-call failed during error path; reporting as host error"
             );
+            self.emit_model_failed(acc_error.kind).await;
+            return Err(acc_error.into_host_error());
         }
         match host_response_result {
             Ok(response) => Ok(response),

@@ -1878,6 +1878,126 @@ fn account_snapshot_reports_current_period_and_spend() {
 }
 
 #[test]
+fn rolling_24h_snapshot_reports_anchored_window_not_now_window() {
+    // Regression: account_snapshot used to call `period_bounds(now)`, which
+    // anchors Rolling24h at the *current* wall clock. After advancing the
+    // FakeClock the reported window slides with it, breaking the UI
+    // contract that the window covers the ledger's actual accumulation.
+    let start = chrono::DateTime::parse_from_rfc3339("2026-05-21T12:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let clock = FakeClock::new(start);
+    let governor = InMemoryResourceGovernor::with_clock(Arc::new(clock.clone()));
+    let scope = sample_scope("tenant-roll", "user-roll", None);
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_usd: Some(dec!(5.00)),
+                period: BudgetPeriod::Rolling24h,
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+
+    let initial = governor.account_snapshot(&account).unwrap().unwrap();
+    let initial_end = initial.ledger.period_end;
+
+    // Advance 6 hours, still within the same Rolling24h window. The
+    // reported end should not move — it was anchored at set_limit time.
+    clock.advance(chrono::Duration::hours(6));
+    let later = governor.account_snapshot(&account).unwrap().unwrap();
+    assert_eq!(
+        later.ledger.period_end, initial_end,
+        "Rolling24h window must stay anchored to set_limit time, not slide with `now`",
+    );
+    assert_eq!(
+        later.ledger.period_end - later.ledger.period_start,
+        chrono::Duration::hours(24)
+    );
+}
+
+#[test]
+fn threshold_pause_fires_at_exactly_100_percent_when_pause_below_one() {
+    // Regression: previously the threshold check required `utilization < 1.0`,
+    // so the exact 100% case (e.g. requested = remaining) silently fell
+    // through without raising approval. With pause_at < 1.0 we should
+    // surface RequiresApproval rather than letting it slip past as Allow.
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant-100pct", "user-100pct", None);
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_usd: Some(dec!(10.00)),
+                thresholds: BudgetThresholds {
+                    warn_at: 0.75,
+                    pause_at: 0.90,
+                },
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+
+    // Exactly 100% utilization: usage 0, requested 10.00 against a $10 cap.
+    let err = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(10.00)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap_err();
+    match err {
+        ResourceError::RequiresApproval(needed) => {
+            assert_eq!(needed.dimension, ResourceDimension::Usd);
+            assert!(needed.utilization >= 1.0 - f64::EPSILON);
+        }
+        other => panic!("expected RequiresApproval at exactly 100% utilization, got {other:?}"),
+    }
+}
+
+#[test]
+fn pause_threshold_of_one_disables_approval_and_allows_under_hard_cap() {
+    // pause_at == 1.0 means "approval disabled" — under the hard limit
+    // we should reserve cleanly with no approval intervention. The old
+    // `utilization < 1.0` shortcut accidentally produced the right
+    // behavior here; the new `pause_at < 1.0` rule must preserve it.
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant-disabled", "user-disabled", None);
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account,
+            ResourceLimits {
+                max_usd: Some(dec!(10.00)),
+                thresholds: BudgetThresholds {
+                    warn_at: 1.0,
+                    pause_at: 1.0,
+                },
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+
+    // 95% of cap; pause_at = 1.0 disables approval, hard limit not yet hit.
+    let outcome = governor
+        .reserve_with_outcome(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(9.50)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    assert!(outcome.warnings.is_empty());
+}
+
+#[test]
 fn calendar_day_period_resets_at_local_midnight() {
     // 2026-05-21 23:00 UTC → 16:00 PDT. Spend $4 (~80% of $5 daily) and
     // verify that advancing to 09:00 UTC (~02:00 PDT next day) resets.
