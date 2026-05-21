@@ -108,5 +108,11 @@ ironclaw_product_workflow = { path = "../ironclaw_product_workflow", features = 
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 tempfile = "3"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
-tokio = { version = "1", features = ["macros", "rt", "time"] }
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
+# Real WebSocket client for the v2 stream-events-ws caller-level test.
+# Oneshot via `tower::ServiceExt::oneshot` cannot complete a true WS
+# upgrade (no underlying TCP stream → axum's WebSocketUpgrade extractor
+# returns 426), so the happy-path test needs a bound listener and a
+# proper WS client.
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["connect"] }
 tower = { version = "0.5", features = ["util"] }

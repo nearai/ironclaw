@@ -684,6 +684,131 @@ async fn timeline_route_rejects_nonempty_body_with_413() {
     );
 }
 
+/// Spawn the composed v2 `Router` on a kernel-picked loopback port
+/// and return the bound `SocketAddr` plus an abort handle. The serve
+/// task runs until aborted at test teardown. `axum::serve` is forbidden
+/// in `crates/.../src` by the `reborn_product_api_crates_do_not_bind_http_ingress`
+/// architecture rule, but the rule scans `src/` only — host-owned tests
+/// are the right place to drive a true WS upgrade.
+async fn spawn_serve(app: axum::Router) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let addr = listener.local_addr().expect("local_addr");
+    let handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (addr, handle)
+}
+
+fn ws_upgrade_request(
+    addr: std::net::SocketAddr,
+    bearer: &str,
+    origin: &str,
+) -> tokio_tungstenite::tungstenite::handshake::client::Request {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
+    let mut request = url.into_client_request().expect("ws client request");
+    request.headers_mut().insert(
+        http::header::AUTHORIZATION,
+        format!("Bearer {bearer}").parse().expect("auth header"),
+    );
+    request
+        .headers_mut()
+        .insert(http::header::ORIGIN, origin.parse().expect("origin header"));
+    request
+}
+
+#[tokio::test]
+async fn ws_upgrade_with_matching_origin_succeeds_with_101() {
+    // Happy path: bind a real listener, open a real WebSocket from a
+    // tungstenite client whose Origin matches the bound address. The
+    // WS-origin middleware passes, auth passes, axum returns 101
+    // Switching Protocols, and the connection upgrades cleanly.
+    // Without this coverage a regression in the WS layer ordering
+    // (origin check → auth → upgrade) would only be visible through
+    // the rejection-path tests, which short-circuit BEFORE the upgrade
+    // extractor runs.
+    let (app, _services) = build_app();
+    let (addr, handle) = spawn_serve(app).await;
+    let origin = format!("http://{addr}");
+    let request = ws_upgrade_request(addr, VALID_TOKEN, &origin);
+    let (ws_stream, response) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio_tungstenite::connect_async(request),
+    )
+    .await
+    .expect("ws connect within 5s")
+    .expect("ws upgrade must succeed for matching Origin");
+    assert_eq!(
+        response.status().as_u16(),
+        101,
+        "valid bearer + same-origin must yield 101 Switching Protocols",
+    );
+    drop(ws_stream);
+    handle.abort();
+}
+
+#[tokio::test]
+async fn ws_upgrade_uses_canonical_host_over_client_host_when_configured() {
+    // Operators running the v2 listener behind a reverse proxy may
+    // receive an attacker-controlled `Host` header. When
+    // `canonical_host` is set, the WS-origin middleware compares
+    // `Origin` against that operator-trusted value instead of trusting
+    // Host. This test binds a real listener, configures canonical_host
+    // to a value the listener is NOT actually reachable at, then:
+    //   1. A WS upgrade with `Origin: http://127.0.0.1:<port>` (matching
+    //      Host, NOT canonical_host) must be rejected.
+    //   2. A WS upgrade with `Origin: http://app.example.com` (matching
+    //      canonical_host) must succeed.
+    use ironclaw_reborn_composition::WebuiServeConfig;
+
+    let services = Arc::new(StubServices::default());
+    let bundle = RebornWebuiBundle {
+        api: services.clone(),
+        readiness: RebornReadiness::disabled(),
+    };
+    let config = WebuiServeConfig::new(
+        TenantId::new(TENANT).expect("tenant"),
+        Arc::new(OnlyValidToken),
+        vec![HeaderValue::from_static("http://localhost:1234")],
+    )
+    .with_canonical_host("app.example.com");
+    let app = ironclaw_reborn_composition::webui_v2_app(bundle, config).expect("app");
+    let (addr, handle) = spawn_serve(app).await;
+
+    // (1) Origin matches Host but NOT canonical_host — fail.
+    let host_matching_origin = format!("http://{addr}");
+    let attack_request = ws_upgrade_request(addr, VALID_TOKEN, &host_matching_origin);
+    let attack = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio_tungstenite::connect_async(attack_request),
+    )
+    .await
+    .expect("ws connect attempt within 5s");
+    assert!(
+        attack.is_err(),
+        "canonical_host must override Host: forged Origin must not pass same-origin",
+    );
+
+    // (2) Origin matches canonical_host — succeed.
+    let canonical_request = ws_upgrade_request(addr, VALID_TOKEN, "http://app.example.com");
+    let (ws_stream, response) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio_tungstenite::connect_async(canonical_request),
+    )
+    .await
+    .expect("ws connect within 5s")
+    .expect("ws upgrade must succeed for canonical_host Origin");
+    assert_eq!(
+        response.status().as_u16(),
+        101,
+        "Origin matching canonical_host must yield 101 even when Host disagrees",
+    );
+    drop(ws_stream);
+    handle.abort();
+}
+
 #[tokio::test]
 async fn ws_upgrade_without_origin_is_rejected_with_403() {
     // WebChat v2 declares stream_events_ws as SameOriginRequired.
