@@ -367,7 +367,7 @@ fn default_runtime_policy() -> EffectiveRuntimePolicy {
         resolved_profile: RuntimeProfile::SecureDefault,
         filesystem_backend: FilesystemBackendKind::ScopedVirtual,
         process_backend: ProcessBackendKind::None,
-        network_mode: NetworkMode::Brokered,
+        network_mode: NetworkMode::Deny,
         secret_mode: SecretMode::BrokeredHandles,
         approval_policy: ApprovalPolicy::AskAlways,
         audit_mode: AuditMode::LocalMinimal,

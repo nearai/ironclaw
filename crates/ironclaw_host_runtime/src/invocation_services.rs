@@ -71,6 +71,7 @@ pub trait InvocationServicesResolver: Send + Sync {
 
 /// Stable redacted service-resolution failure.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum InvocationServicesError {
     #[error("filesystem backend {backend:?} is not supported by this invocation services resolver")]
     UnsupportedFilesystemBackend { backend: FilesystemBackendKind },
@@ -133,10 +134,12 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
                 backend: plan.process_backend,
             });
         }
-        if plan.requires_network
-            && (matches!(plan.network_mode, NetworkMode::Deny)
-                || self.runtime_http_egress.is_none())
-        {
+        if plan.requires_network && !matches!(plan.network_mode, NetworkMode::DirectLogged) {
+            return Err(InvocationServicesError::UnsupportedNetworkMode {
+                mode: plan.network_mode,
+            });
+        }
+        if plan.requires_network && self.runtime_http_egress.is_none() {
             return Err(InvocationServicesError::UnsupportedNetworkMode {
                 mode: plan.network_mode,
             });
@@ -170,6 +173,20 @@ mod tests {
             _request: CommandExecutionRequest,
         ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
             unreachable!("resolver tests must not execute commands")
+        }
+    }
+
+    struct NoopRuntimeHttpEgress;
+
+    impl ironclaw_host_api::RuntimeHttpEgress for NoopRuntimeHttpEgress {
+        fn execute(
+            &self,
+            _request: ironclaw_host_api::RuntimeHttpEgressRequest,
+        ) -> Result<
+            ironclaw_host_api::RuntimeHttpEgressResponse,
+            ironclaw_host_api::RuntimeHttpEgressError,
+        > {
+            unreachable!("resolver tests must not execute HTTP requests")
         }
     }
 
@@ -319,6 +336,32 @@ mod tests {
             error,
             InvocationServicesError::UnsupportedNetworkMode {
                 mode: NetworkMode::DirectLogged
+            }
+        ));
+    }
+
+    #[test]
+    fn local_resolver_rejects_brokered_required_network_even_with_egress_service() {
+        let resolver = LocalInvocationServicesResolver::new(
+            Arc::new(LocalFilesystem::new()),
+            Some(Arc::new(NoopRuntimeHttpEgress)),
+            Arc::new(NoopProcessPort),
+        );
+        let plan = plan(ProcessBackendKind::None, false, true, NetworkMode::Brokered);
+
+        let error = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::NetworkDenied);
+        assert!(matches!(
+            error,
+            InvocationServicesError::UnsupportedNetworkMode {
+                mode: NetworkMode::Brokered
             }
         ));
     }

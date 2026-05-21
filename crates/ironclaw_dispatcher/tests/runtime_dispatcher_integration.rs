@@ -84,6 +84,7 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
         CapabilityId::new("echo.say").unwrap()
     );
     assert_eq!(requests[0].runtime, RuntimeKind::Wasm);
+    assert_eq!(requests[0].network_mode, NetworkMode::Deny);
     assert_eq!(requests[0].scope, scope);
     assert_eq!(requests[0].mounts, Some(mounts));
     assert_eq!(
@@ -195,6 +196,7 @@ struct RecordedAdapterRequest {
     provider: ExtensionId,
     capability_id: CapabilityId,
     runtime: RuntimeKind,
+    network_mode: NetworkMode,
     scope: ResourceScope,
     mounts: Option<MountView>,
     input: Value,
@@ -210,6 +212,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdap
             provider: request.package.id.clone(),
             capability_id: request.capability_id.clone(),
             runtime: request.descriptor.runtime,
+            network_mode: request.runtime_policy.network_mode,
             scope: request.scope.clone(),
             mounts: request.mounts.clone(),
             input: request.input.clone(),

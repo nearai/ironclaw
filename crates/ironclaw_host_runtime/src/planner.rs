@@ -258,6 +258,14 @@ mod tests {
             (vec![EffectKind::ExecuteCode], (false, true, false, false)),
             (vec![EffectKind::Network], (false, false, true, false)),
             (vec![EffectKind::UseSecret], (false, false, false, true)),
+            (
+                vec![EffectKind::ReadFilesystem, EffectKind::Network],
+                (true, false, true, false),
+            ),
+            (
+                vec![EffectKind::SpawnProcess, EffectKind::UseSecret],
+                (false, true, false, true),
+            ),
             (Vec::new(), (false, false, false, false)),
         ];
 
