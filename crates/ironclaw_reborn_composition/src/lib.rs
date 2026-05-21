@@ -727,7 +727,7 @@ mod mount_view_tests {
         let user_path = ScopedPath::new("/skills/code-review/SKILL.md").unwrap();
 
         let error = scoped
-            .write_file(&scope, &system_path, b"system skill")
+            .write_bytes(&scope, &system_path, b"system skill".to_vec())
             .await
             .expect_err("system skills must remain read-only");
         assert!(matches!(
