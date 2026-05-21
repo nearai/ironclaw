@@ -34,6 +34,7 @@ pub enum TurnBlockedGateKind {
     Approval,
     Auth,
     Resource,
+    AwaitDependentRun,
 }
 
 impl TurnBlockedGateKind {
@@ -42,6 +43,7 @@ impl TurnBlockedGateKind {
             TurnStatus::BlockedApproval => Some(Self::Approval),
             TurnStatus::BlockedAuth => Some(Self::Auth),
             TurnStatus::BlockedResource => Some(Self::Resource),
+            TurnStatus::BlockedDependentRun => Some(Self::AwaitDependentRun),
             _ => None,
         }
     }

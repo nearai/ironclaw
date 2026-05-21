@@ -173,6 +173,7 @@ fn workflow_error_kind(error: &ProductWorkflowError) -> &'static str {
         ProductWorkflowError::TurnSubmissionFailed { error } => match error.category() {
             TurnErrorCategory::ThreadBusy => "turn_thread_busy",
             TurnErrorCategory::AdmissionRejected => "turn_admission_rejected",
+            TurnErrorCategory::CapacityExceeded => "turn_capacity_exceeded",
             TurnErrorCategory::ScopeNotFound => "turn_scope_not_found",
             TurnErrorCategory::Unauthorized => "turn_unauthorized",
             TurnErrorCategory::InvalidRequest => "turn_invalid_request",
@@ -204,6 +205,7 @@ fn workflow_error_kind(error: &ProductWorkflowError) -> &'static str {
         ProductWorkflowError::TurnResumeDenied { error } => match error.category() {
             TurnErrorCategory::ThreadBusy => "turn_resume_thread_busy",
             TurnErrorCategory::AdmissionRejected => "turn_resume_admission_rejected",
+            TurnErrorCategory::CapacityExceeded => "turn_resume_capacity_exceeded",
             TurnErrorCategory::ScopeNotFound => "turn_resume_scope_not_found",
             TurnErrorCategory::Unauthorized => "turn_resume_unauthorized",
             TurnErrorCategory::InvalidRequest => "turn_resume_invalid_request",

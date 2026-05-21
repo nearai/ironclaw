@@ -319,6 +319,33 @@ impl CapabilityStage {
                     )
                     .await
             }
+            CapabilityOutcome::AwaitDependentRun { gate_ref, .. } => {
+                GateStage
+                    .process(
+                        ctx,
+                        GateInput {
+                            state,
+                            call,
+                            kind: GateKind::AwaitDependentRun,
+                            gate_ref,
+                        },
+                    )
+                    .await
+            }
+            CapabilityOutcome::SpawnedChildRun {
+                result_ref,
+                safe_summary,
+                ..
+            } => {
+                let result = ironclaw_turns::run_profile::CapabilityResultMessage {
+                    result_ref,
+                    safe_summary,
+                    terminate_hint: false,
+                };
+                append_capability_result_ref(ctx.host, &call, &result).await?;
+                push_completed_result(&mut state, result);
+                Ok(BatchStep::Continue(Box::new(state)))
+            }
             CapabilityOutcome::SpawnedProcess(handle) => {
                 self.fail_unsupported_process_wait(ctx, state, &call, &handle.process_ref)
                     .await

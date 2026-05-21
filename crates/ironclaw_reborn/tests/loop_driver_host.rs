@@ -85,9 +85,10 @@ use ironclaw_turns::{
     LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef,
     LoopMessageRef, LoopResultRef, PutCheckpointStateRequest, PutLoopCheckpointRequest,
     ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId, RunProfileResolutionRequest,
-    RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnActor, TurnAdmissionPolicy, TurnCoordinator, TurnError, TurnId, TurnLeaseToken, TurnRunId,
-    TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    RunProfileResolver, RunProfileVersion, SourceBindingRef, SpawnTreeReservation,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnCoordinator,
+    TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunRecord, TurnRunState, TurnRunnerId,
+    TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView,
@@ -950,6 +951,10 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
                     requested_run_profile: None,
                     idempotency_key: IdempotencyKey::new("idem-libsql-restart").unwrap(),
                     received_at: Utc::now(),
+                    requested_run_id: None,
+                    parent_run_id: None,
+                    subagent_depth: 0,
+                    spawn_tree_root_run_id: None,
                 },
                 &ironclaw_turns::AllowAllTurnAdmissionPolicy,
                 &resolver,
@@ -2151,6 +2156,10 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
             requested_run_profile: None,
             idempotency_key: IdempotencyKey::new("idem-runtime-planned").unwrap(),
             received_at: Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
         })
         .await
         .unwrap();
@@ -5791,9 +5800,10 @@ id = "script.echo"
 description = "Echo text through Reborn adapter e2e"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-visibility = "host_internal"
+visibility = "model"
 input_schema_ref = "schemas/script/echo.input.v1.json"
 output_schema_ref = "schemas/script/echo.output.v1.json"
+prompt_doc_ref = "prompt/script/echo.md"
 "#;
 
 /// Test-only evidence port that bypasses all durable evidence checks.
@@ -6216,6 +6226,41 @@ impl TurnStateStore for StaticTurnStateStore {
     async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         Ok(self.state.lock().unwrap().clone())
     }
+
+    async fn children_of(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        panic!("children_of should not be called by static test turn state store")
+    }
+
+    async fn get_run_record(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+    ) -> Result<Option<TurnRunRecord>, TurnError> {
+        panic!("get_run_record should not be called by static test turn state store")
+    }
+
+    async fn reserve_tree_descendants(
+        &self,
+        _scope: &TurnScope,
+        _tree_root_run_id: TurnRunId,
+        _amount: u32,
+        _cap: u32,
+    ) -> Result<SpawnTreeReservation, TurnError> {
+        panic!("reserve_tree_descendants should not be called by static test turn state store")
+    }
+
+    async fn release_tree_descendants(
+        &self,
+        _scope: &TurnScope,
+        _root_run_id: TurnRunId,
+        _delta: u32,
+    ) -> Result<(), TurnError> {
+        panic!("release_tree_descendants should not be called by static test turn state store")
+    }
 }
 
 async fn queue_fixture_turn(
@@ -6238,6 +6283,10 @@ async fn queue_fixture_turn(
                 requested_run_profile: None,
                 idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
                 received_at: Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
             },
             &ironclaw_turns::AllowAllTurnAdmissionPolicy,
             resolver,

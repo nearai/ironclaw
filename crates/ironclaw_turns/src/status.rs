@@ -15,6 +15,7 @@ pub enum TurnStatus {
     BlockedApproval,
     BlockedAuth,
     BlockedResource,
+    BlockedDependentRun,
     CancelRequested,
     Cancelled,
     Completed,
@@ -105,6 +106,7 @@ pub enum BlockedReason {
     Approval { gate_ref: GateRef },
     Auth { gate_ref: GateRef },
     Resource { gate_ref: GateRef },
+    DependentRun { gate_ref: GateRef },
 }
 
 impl BlockedReason {
@@ -113,14 +115,16 @@ impl BlockedReason {
             Self::Approval { .. } => TurnStatus::BlockedApproval,
             Self::Auth { .. } => TurnStatus::BlockedAuth,
             Self::Resource { .. } => TurnStatus::BlockedResource,
+            Self::DependentRun { .. } => TurnStatus::BlockedDependentRun,
         }
     }
 
     pub fn gate_ref(&self) -> &GateRef {
         match self {
-            Self::Approval { gate_ref } | Self::Auth { gate_ref } | Self::Resource { gate_ref } => {
-                gate_ref
-            }
+            Self::Approval { gate_ref }
+            | Self::Auth { gate_ref }
+            | Self::Resource { gate_ref }
+            | Self::DependentRun { gate_ref } => gate_ref,
         }
     }
 }
@@ -293,6 +297,7 @@ pub enum TurnErrorCategory {
     InvalidRequest,
     Unavailable,
     Conflict,
+    CapacityExceeded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -311,6 +316,8 @@ pub enum TurnError {
     Unavailable { reason: String },
     #[error("turn conflict: {reason}")]
     Conflict { reason: String },
+    #[error("turn capacity exceeded for {resource}: cap {cap}")]
+    CapacityExceeded { resource: &'static str, cap: u64 },
     #[error("invalid turn transition from {from:?} to {to:?}")]
     InvalidTransition { from: TurnStatus, to: TurnStatus },
     #[error("turn run lease mismatch")]
@@ -336,7 +343,12 @@ impl TurnError {
             Self::Conflict { .. } | Self::InvalidTransition { .. } | Self::LeaseMismatch => {
                 TurnErrorCategory::Conflict
             }
+            Self::CapacityExceeded { .. } => TurnErrorCategory::CapacityExceeded,
         }
+    }
+
+    pub fn capacity_exceeded(resource: &'static str, cap: u64) -> Self {
+        Self::CapacityExceeded { resource, cap }
     }
 
     pub fn is_expected_admission_outcome(&self) -> bool {
@@ -347,6 +359,7 @@ impl TurnError {
         match self.category() {
             TurnErrorCategory::ThreadBusy | TurnErrorCategory::Conflict => 409,
             TurnErrorCategory::AdmissionRejected => 429,
+            TurnErrorCategory::CapacityExceeded => 429,
             TurnErrorCategory::ScopeNotFound => 404,
             TurnErrorCategory::Unauthorized => 403,
             TurnErrorCategory::InvalidRequest => 400,

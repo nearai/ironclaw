@@ -1951,6 +1951,13 @@ fn turn_error_to_host_error(error: TurnError) -> AgentLoopHostError {
             "checkpoint state write conflicted with current turn state",
             &error,
         ),
+        TurnError::CapacityExceeded { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
+            "checkpoint_state",
+            "write",
+            AgentLoopHostErrorKind::Unavailable,
+            "checkpoint state store capacity was exceeded",
+            &error,
+        ),
         TurnError::InvalidTransition { .. } => ironclaw_loop_support::raw_agent_loop_host_error(
             "checkpoint_state",
             "write",

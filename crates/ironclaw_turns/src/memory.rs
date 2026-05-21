@@ -13,14 +13,14 @@ use crate::{
     GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord,
     LoopCheckpointStore, LoopExitMapping, PutLoopCheckpointRequest, ReplyTargetBindingRef,
     ResumeTurnRequest, ResumeTurnResponse, RunProfileResolutionError, RunProfileResolutionRequest,
-    RunProfileResolver, SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    ThreadBusy, TurnActiveLockKey, TurnActiveLockRecord, TurnActor, TurnAdmissionClass,
-    TurnAdmissionLimitProvider, TurnAdmissionPolicy, TurnAdmissionReservationRecord,
-    TurnCheckpointId, TurnCheckpointRecord, TurnError, TurnEventKind, TurnIdempotencyErrorReplay,
-    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
-    TurnIdempotencyReplay, TurnLifecycleEvent, TurnLockVersion, TurnPersistenceSnapshot,
-    TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState, TurnScope, TurnStateStore,
-    TurnStatus,
+    RunProfileResolver, SanitizedFailure, SourceBindingRef, SpawnTreeReservation,
+    SpawnTreeReservationKey, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActiveLockKey,
+    TurnActiveLockRecord, TurnActor, TurnAdmissionClass, TurnAdmissionLimitProvider,
+    TurnAdmissionPolicy, TurnAdmissionReservationRecord, TurnCheckpointId, TurnCheckpointRecord,
+    TurnError, TurnEventKind, TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind,
+    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLifecycleEvent,
+    TurnLockVersion, TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord,
+    TurnRunState, TurnScope, TurnStateStore, TurnStatus,
     admission::{TurnAdmissionBucket, admission_buckets},
     events::{EventCursor, TurnEventPage, TurnEventProjectionSource, project_turn_events},
     runner::{
@@ -90,6 +90,7 @@ struct Inner {
     events: Vec<TurnLifecycleEvent>,
     event_retention_floor: EventCursor,
     admission_reservations: HashMap<TurnRunId, TurnAdmissionReservationRecord>,
+    tree_reservations: HashMap<SpawnTreeReservationKey, u64>,
     limits: InMemoryTurnStateStoreLimits,
 }
 
@@ -127,6 +128,9 @@ struct RunRecord {
     last_heartbeat_at: Option<crate::TurnTimestamp>,
     claim_count: u64,
     received_at: crate::TurnTimestamp,
+    parent_run_id: Option<TurnRunId>,
+    subagent_depth: u32,
+    spawn_tree_root_run_id: Option<TurnRunId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -159,6 +163,18 @@ fn profile_resolution_error_to_turn_error(error: RunProfileResolutionError) -> T
         }
     };
     TurnError::AdmissionRejected(AdmissionRejection::new(reason))
+}
+
+fn same_scope_envelope(candidate: &TurnScope, scope: &TurnScope) -> bool {
+    candidate.tenant_id == scope.tenant_id
+        && candidate.agent_id == scope.agent_id
+        && candidate.project_id == scope.project_id
+}
+
+fn invalid_lineage(reason: impl Into<String>) -> TurnError {
+    TurnError::InvalidRequest {
+        reason: reason.into(),
+    }
 }
 
 struct SubmitInFlightGuard<'a> {
@@ -439,7 +455,93 @@ impl TurnStateStore for InMemoryTurnStateStore {
         }
 
         let turn_id = crate::TurnId::new();
-        let run_id = TurnRunId::new();
+        let run_id = request.requested_run_id.unwrap_or_default();
+        if inner.records.contains_key(&run_id) {
+            let response = Err(TurnError::Conflict {
+                reason: "requested_run_id already bound".to_string(),
+            });
+            inner.remember_submit_idempotency(
+                idempotency_key.clone(),
+                response.clone(),
+                request.received_at,
+            );
+            inner.submit_idempotency_in_flight.remove(&idempotency_key);
+            self.submit_idempotency_ready.notify_all();
+            return response;
+        }
+        let (parent_run_id, subagent_depth, spawn_tree_root_run_id) = match request.parent_run_id {
+            Some(parent_run_id) => {
+                let Some(parent) = inner.records.get(&parent_run_id) else {
+                    let response = Err(invalid_lineage("parent_run_id does not exist"));
+                    inner.remember_submit_idempotency(
+                        idempotency_key.clone(),
+                        response.clone(),
+                        request.received_at,
+                    );
+                    inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                    self.submit_idempotency_ready.notify_all();
+                    return response;
+                };
+                if !same_scope_envelope(&parent.scope, &request.scope) {
+                    let response = Err(invalid_lineage(
+                        "child scope must match parent tenant/agent/project",
+                    ));
+                    inner.remember_submit_idempotency(
+                        idempotency_key.clone(),
+                        response.clone(),
+                        request.received_at,
+                    );
+                    inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                    self.submit_idempotency_ready.notify_all();
+                    return response;
+                }
+                let expected_depth = parent.subagent_depth.saturating_add(1);
+                if request.subagent_depth != expected_depth {
+                    let response = Err(invalid_lineage(
+                        "subagent_depth must be parent depth plus one",
+                    ));
+                    inner.remember_submit_idempotency(
+                        idempotency_key.clone(),
+                        response.clone(),
+                        request.received_at,
+                    );
+                    inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                    self.submit_idempotency_ready.notify_all();
+                    return response;
+                }
+                let expected_root = parent.spawn_tree_root_run_id.unwrap_or(parent.run_id);
+                if request.spawn_tree_root_run_id != Some(expected_root) {
+                    let response = Err(invalid_lineage(
+                        "spawn_tree_root_run_id must inherit the parent root",
+                    ));
+                    inner.remember_submit_idempotency(
+                        idempotency_key.clone(),
+                        response.clone(),
+                        request.received_at,
+                    );
+                    inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                    self.submit_idempotency_ready.notify_all();
+                    return response;
+                }
+                (Some(parent_run_id), expected_depth, Some(expected_root))
+            }
+            None => {
+                if request.subagent_depth != 0 || request.spawn_tree_root_run_id.is_some() {
+                    let response = Err(invalid_lineage(
+                        "top-level runs cannot set subagent lineage fields",
+                    ));
+                    inner.remember_submit_idempotency(
+                        idempotency_key.clone(),
+                        response.clone(),
+                        request.received_at,
+                    );
+                    inner.submit_idempotency_in_flight.remove(&idempotency_key);
+                    self.submit_idempotency_ready.notify_all();
+                    return response;
+                }
+                (None, 0, None)
+            }
+        };
         let admission_class = profile.admission_class.clone();
         if let Err(rejection) = inner.reserve_admission(
             run_id,
@@ -489,6 +591,9 @@ impl TurnStateStore for InMemoryTurnStateStore {
             last_heartbeat_at: None,
             claim_count: 0,
             received_at: request.received_at,
+            parent_run_id,
+            subagent_depth,
+            spawn_tree_root_run_id,
         };
         inner.turns.insert(turn_id, turn_record);
         inner.active_locks.insert(
@@ -570,6 +675,119 @@ impl TurnStateStore for InMemoryTurnStateStore {
             .filter(|record| record.scope == request.scope)
             .map(RunRecord::state)
             .ok_or(TurnError::ScopeNotFound)
+    }
+
+    async fn children_of(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        let inner = self.lock_inner()?;
+        let Some(parent) = inner.records.get(&run_id) else {
+            return Ok(Vec::new());
+        };
+        if parent.scope != *scope {
+            return Ok(Vec::new());
+        }
+        let mut children = inner
+            .records
+            .values()
+            .filter(|record| {
+                same_scope_envelope(&record.scope, scope) && record.parent_run_id == Some(run_id)
+            })
+            .map(RunRecord::persistence_record)
+            .collect::<Vec<_>>();
+        children.sort_by_key(|record| record.received_at);
+        Ok(children)
+    }
+
+    async fn get_run_record(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Option<TurnRunRecord>, TurnError> {
+        let inner = self.lock_inner()?;
+        Ok(inner
+            .records
+            .get(&run_id)
+            .filter(|record| record.scope == *scope)
+            .map(RunRecord::persistence_record))
+    }
+
+    async fn reserve_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+        cap: u32,
+    ) -> Result<SpawnTreeReservation, TurnError> {
+        let mut inner = self.lock_inner()?;
+        let Some(root) = inner.records.get(&root_run_id) else {
+            return Err(TurnError::ScopeNotFound);
+        };
+        if !same_scope_envelope(&root.scope, scope) {
+            return Err(TurnError::Unauthorized);
+        }
+        let key = SpawnTreeReservationKey::new(scope, root_run_id);
+        let current = *inner.tree_reservations.get(&key).unwrap_or(&0);
+        let next = current.checked_add(u64::from(delta)).ok_or_else(|| {
+            TurnError::capacity_exceeded("spawn_tree_descendants", u64::from(cap))
+        })?;
+        if next > u64::from(cap) {
+            return Err(TurnError::capacity_exceeded(
+                "spawn_tree_descendants",
+                u64::from(cap),
+            ));
+        }
+        inner.tree_reservations.insert(key, next);
+        Ok(SpawnTreeReservation {
+            scope: scope.clone(),
+            root_run_id,
+            descendant_count: next,
+        })
+    }
+
+    async fn release_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+    ) -> Result<(), TurnError> {
+        let mut inner = self.lock_inner()?;
+        let Some(root) = inner.records.get(&root_run_id) else {
+            return Err(TurnError::ScopeNotFound);
+        };
+        if !same_scope_envelope(&root.scope, scope) {
+            return Err(TurnError::Unauthorized);
+        }
+        let key = SpawnTreeReservationKey::new(scope, root_run_id);
+        let mut released_reservation = false;
+        if let Some(count) = inner.tree_reservations.get_mut(&key) {
+            let previous = *count;
+            *count = count.saturating_sub(u64::from(delta));
+            if previous < u64::from(delta) {
+                tracing::debug!(
+                    root_run_id = %root_run_id,
+                    attempted = delta,
+                    available = previous,
+                    "tree descendant release underflowed; saturated at zero"
+                );
+            }
+            if *count == 0 {
+                inner.tree_reservations.remove(&key);
+                released_reservation = true;
+            }
+        }
+        if released_reservation
+            && inner
+                .records
+                .get(&root_run_id)
+                .is_some_and(|record| record.status.is_terminal())
+        {
+            inner.terminal_runs.push_back(root_run_id);
+            inner.prune_terminal_records();
+        }
+        Ok(())
     }
 }
 
@@ -815,6 +1033,9 @@ impl Inner {
                     last_heartbeat_at: run.last_heartbeat_at,
                     claim_count: run.claim_count,
                     received_at: run.received_at,
+                    parent_run_id: run.parent_run_id,
+                    subagent_depth: run.subagent_depth,
+                    spawn_tree_root_run_id: run.spawn_tree_root_run_id,
                 },
             );
         }
@@ -918,6 +1139,14 @@ impl Inner {
             }
         }
 
+        let mut tree_reservations = HashMap::new();
+        for reservation in snapshot.spawn_tree_reservations {
+            tree_reservations.insert(
+                SpawnTreeReservationKey::new(&reservation.scope, reservation.root_run_id),
+                reservation.descendant_count,
+            );
+        }
+
         Ok(Self {
             cursor,
             turns,
@@ -939,6 +1168,7 @@ impl Inner {
             events,
             event_retention_floor: snapshot.event_retention_floor,
             admission_reservations,
+            tree_reservations,
             limits,
         })
     }
@@ -1026,6 +1256,19 @@ impl Inner {
             .cloned()
             .collect::<Vec<_>>();
         admission_reservations.sort_by_key(|reservation| reservation.run_id.to_string());
+        let mut spawn_tree_reservations = self
+            .tree_reservations
+            .iter()
+            .filter_map(|(key, descendant_count)| {
+                let root = self.records.get(&key.root_run_id)?;
+                Some(SpawnTreeReservation {
+                    scope: root.scope.clone(),
+                    root_run_id: key.root_run_id,
+                    descendant_count: *descendant_count,
+                })
+            })
+            .collect::<Vec<_>>();
+        spawn_tree_reservations.sort_by_key(|reservation| reservation.root_run_id.to_string());
         TurnPersistenceSnapshot {
             turns,
             runs,
@@ -1036,6 +1279,7 @@ impl Inner {
             events: self.events.clone(),
             event_retention_floor: self.event_retention_floor,
             admission_reservations,
+            spawn_tree_reservations,
         }
     }
 
@@ -1229,7 +1473,10 @@ impl Inner {
             }
             if !matches!(
                 record.status,
-                TurnStatus::BlockedApproval | TurnStatus::BlockedAuth | TurnStatus::BlockedResource
+                TurnStatus::BlockedApproval
+                    | TurnStatus::BlockedAuth
+                    | TurnStatus::BlockedResource
+                    | TurnStatus::BlockedDependentRun
             ) {
                 return Err(TurnError::InvalidTransition {
                     from: record.status,
@@ -1297,6 +1544,7 @@ impl Inner {
                 | TurnStatus::BlockedApproval
                 | TurnStatus::BlockedAuth
                 | TurnStatus::BlockedResource
+                | TurnStatus::BlockedDependentRun
                 | TurnStatus::RecoveryRequired => (TurnStatus::Cancelled, TurnEventKind::Cancelled),
                 TurnStatus::Running | TurnStatus::CancelRequested => {
                     (TurnStatus::CancelRequested, TurnEventKind::CancelRequested)
@@ -1835,6 +2083,10 @@ impl Inner {
                 .records
                 .get(&run_id)
                 .is_some_and(|record| record.status.is_terminal())
+                && !self
+                    .tree_reservations
+                    .keys()
+                    .any(|reservation| reservation.root_run_id == run_id)
             {
                 self.records.remove(&run_id);
                 self.admission_reservations.remove(&run_id);
@@ -1865,6 +2117,9 @@ impl RunRecord {
             last_heartbeat_at: self.last_heartbeat_at,
             claim_count: self.claim_count,
             received_at: self.received_at,
+            parent_run_id: self.parent_run_id,
+            subagent_depth: self.subagent_depth,
+            spawn_tree_root_run_id: self.spawn_tree_root_run_id,
         }
     }
 

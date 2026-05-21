@@ -420,6 +420,7 @@ fn rejection_kind_for_turn_error(error: &TurnError) -> ProductRejectionKind {
         },
         TurnErrorCategory::ThreadBusy
         | TurnErrorCategory::InvalidRequest
+        | TurnErrorCategory::CapacityExceeded
         | TurnErrorCategory::Unavailable
         | TurnErrorCategory::Conflict => ProductRejectionKind::PolicyDenied,
     }

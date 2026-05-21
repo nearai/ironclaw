@@ -14,26 +14,28 @@ use ironclaw_turns::{
     AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, AllowAllTurnAdmissionPolicy,
     BlockedReason, CancelRunRequest, DefaultTurnCoordinator, GateRef, GetRunStateRequest,
     IdempotencyKey, InMemoryRunProfileResolver, InMemoryTurnEventSink, InMemoryTurnStateStore,
-    InMemoryTurnStateStoreLimits, LoopCheckpointStateRef, LoopExitMapping, LoopGateRef,
-    ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest, RunProfileId, RunProfileRequest,
-    RunProfileResolutionError, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
-    SanitizedCancelReason, SanitizedFailure, SourceBindingRef, StaticTurnAdmissionLimitProvider,
-    SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionAxisKind,
-    TurnAdmissionBucketKind, TurnAdmissionBucketScope, TurnAdmissionCapacityDenial,
-    TurnAdmissionClass, TurnAdmissionPolicy, TurnCheckpointId, TurnCoordinator, TurnError,
-    TurnErrorCategory, TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError,
-    TurnEventProjectionRequest, TurnEventProjectionService, TurnEventSink,
+    InMemoryTurnStateStoreLimits, LoopBlockedKind, LoopCheckpointStateRef, LoopExitMapping,
+    LoopGateRef, LoopResultRef, ReplyTargetBindingRef, ResolvedRunProfile, ResumeTurnRequest,
+    RunProfileId, RunProfileRequest, RunProfileResolutionError, RunProfileResolutionRequest,
+    RunProfileResolver, RunProfileVersion, SanitizedCancelReason, SanitizedFailure,
+    SourceBindingRef, StaticTurnAdmissionLimitProvider, SubmitTurnRequest, SubmitTurnResponse,
+    ThreadBusy, TurnActor, TurnAdmissionAxisKind, TurnAdmissionBucketKind,
+    TurnAdmissionBucketScope, TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionPolicy,
+    TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory, TurnEventKind,
+    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    TurnEventProjectionService, TurnEventProjectionSource, TurnEventSink,
     TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
     TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLockVersion, TurnRunId,
     TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
     TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     events::EventCursor,
-    run_profile::LoopModelRouteSnapshot,
+    run_profile::{CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse,
-        TurnRunTransitionPort, TurnRunnerOutcome,
+        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, EventPublishingTurnRunTransitionPort,
+        FailRunRequest, HeartbeatRequest, RecordModelRouteSnapshotRequest,
+        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
+        TurnRunnerOutcome,
     },
 };
 
@@ -90,6 +92,20 @@ fn approval_blocked_mapping(
     })
 }
 
+fn dependent_blocked_mapping(
+    checkpoint_id: TurnCheckpointId,
+    state_ref: LoopCheckpointStateRef,
+    gate_ref: &LoopGateRef,
+) -> LoopExitMapping {
+    LoopExitMapping::RunnerOutcome(TurnRunnerOutcome::Blocked {
+        checkpoint_id,
+        state_ref,
+        reason: BlockedReason::DependentRun {
+            gate_ref: GateRef::new(gate_ref.as_str()).unwrap(),
+        },
+    })
+}
+
 struct BlockingRunProfileResolver {
     started: mpsc::Sender<()>,
 }
@@ -121,6 +137,512 @@ fn turn_scope_agent_id_is_optional() {
     );
 
     assert_eq!(scope.agent_id, None);
+}
+
+#[test]
+fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
+    let child_run_id = TurnRunId::new();
+    let result_ref = LoopResultRef::new("result:child").unwrap();
+    let spawned = CapabilityOutcome::SpawnedChildRun {
+        child_run_id,
+        result_ref: result_ref.clone(),
+        safe_summary: "spawned in background".to_string(),
+    };
+    let spawned_json = serde_json::to_value(&spawned).unwrap();
+    assert_eq!(
+        spawned_json,
+        serde_json::json!({
+            "spawned_child_run": {
+                "child_run_id": child_run_id,
+                "result_ref": result_ref,
+                "safe_summary": "spawned in background"
+            }
+        })
+    );
+    assert!(!spawned.is_suspension());
+    assert_eq!(
+        serde_json::from_value::<CapabilityOutcome>(spawned_json).unwrap(),
+        spawned
+    );
+
+    let gate_ref = LoopGateRef::new("gate:dependent-run").unwrap();
+    let awaiting = CapabilityOutcome::AwaitDependentRun {
+        gate_ref: gate_ref.clone(),
+        safe_summary: "waiting on child".to_string(),
+    };
+    let awaiting_json = serde_json::to_value(&awaiting).unwrap();
+    assert_eq!(
+        awaiting_json,
+        serde_json::json!({
+            "await_dependent_run": {
+                "gate_ref": gate_ref,
+                "safe_summary": "waiting on child"
+            }
+        })
+    );
+    assert!(awaiting.is_suspension());
+    assert_eq!(
+        serde_json::from_value::<CapabilityOutcome>(awaiting_json).unwrap(),
+        awaiting
+    );
+}
+
+#[test]
+fn subagent_gate_and_blocked_wire_contracts_are_stable() {
+    let gate_kind = serde_json::to_value(LoopGateKind::AwaitDependentRun).unwrap();
+    assert_eq!(gate_kind, serde_json::json!("await_dependent_run"));
+    assert_eq!(
+        serde_json::from_value::<LoopGateKind>(gate_kind).unwrap(),
+        LoopGateKind::AwaitDependentRun
+    );
+
+    let blocked_kind = serde_json::to_value(LoopBlockedKind::AwaitDependentRun).unwrap();
+    assert_eq!(blocked_kind, serde_json::json!("await_dependent_run"));
+    assert_eq!(
+        serde_json::from_value::<LoopBlockedKind>(blocked_kind).unwrap(),
+        LoopBlockedKind::AwaitDependentRun
+    );
+
+    let status = serde_json::to_value(TurnStatus::BlockedDependentRun).unwrap();
+    assert_eq!(status, serde_json::json!("BlockedDependentRun"));
+    assert!(!TurnStatus::BlockedDependentRun.is_terminal());
+    assert!(TurnStatus::BlockedDependentRun.keeps_active_lock());
+    assert_eq!(
+        serde_json::from_value::<TurnStatus>(status).unwrap(),
+        TurnStatus::BlockedDependentRun
+    );
+
+    let gate_ref = GateRef::new("gate-dependent-run").unwrap();
+    let reason = BlockedReason::DependentRun {
+        gate_ref: gate_ref.clone(),
+    };
+    let reason_json = serde_json::to_value(&reason).unwrap();
+    assert_eq!(
+        reason_json,
+        serde_json::json!({"DependentRun": {"gate_ref": gate_ref}})
+    );
+    assert_eq!(reason.status(), TurnStatus::BlockedDependentRun);
+    assert_eq!(reason.gate_ref(), &gate_ref);
+    assert_eq!(
+        serde_json::from_value::<BlockedReason>(reason_json).unwrap(),
+        reason
+    );
+}
+
+#[test]
+fn submit_turn_request_lineage_defaults_for_legacy_json() {
+    let request: SubmitTurnRequest = serde_json::from_value(serde_json::json!({
+        "scope": scope("thread-legacy-request"),
+        "actor": actor(),
+        "accepted_message_ref": "message-legacy-request",
+        "source_binding_ref": "source-web",
+        "reply_target_binding_ref": "reply-web",
+        "requested_run_profile": "default",
+        "idempotency_key": "idem-legacy-request",
+        "received_at": received_at()
+    }))
+    .unwrap();
+
+    assert_eq!(request.requested_run_id, None);
+    assert_eq!(request.parent_run_id, None);
+    assert_eq!(request.subagent_depth, 0);
+    assert_eq!(request.spawn_tree_root_run_id, None);
+}
+
+#[tokio::test]
+async fn prepare_turn_mints_ids_without_side_effects_and_submit_binds_requested_id() {
+    let (coordinator, store) = coordinator();
+    let scope = scope("thread-prepared-run");
+    let first = coordinator.prepare_turn(scope.clone()).await.unwrap();
+    let second = coordinator.prepare_turn(scope.clone()).await.unwrap();
+    assert_ne!(first, second);
+    assert!(matches!(
+        coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: scope.clone(),
+                run_id: first
+            })
+            .await,
+        Err(TurnError::ScopeNotFound)
+    ));
+
+    let mut request = submit_request("thread-prepared-run", "idem-prepared-run");
+    request.requested_run_id = Some(first);
+    let response = coordinator.submit_turn(request.clone()).await.unwrap();
+    assert_eq!(accepted_run_id(&response), first);
+    assert!(
+        store
+            .get_run_record(&request.scope, first)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    let mut collision = submit_request("thread-prepared-collision", "idem-prepared-collision");
+    collision.requested_run_id = Some(first);
+    let err = coordinator.submit_turn(collision).await.unwrap_err();
+    assert!(matches!(err, TurnError::Conflict { .. }));
+}
+
+#[tokio::test]
+async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
+    let (coordinator, store) = coordinator();
+    let parent = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-parent", "idem-parent"))
+            .await
+            .unwrap(),
+    );
+    let child_scope = scope("thread-child");
+    let mut child_a = submit_request("thread-child", "idem-child-a");
+    child_a.parent_run_id = Some(parent);
+    child_a.subagent_depth = 1;
+    child_a.spawn_tree_root_run_id = Some(parent);
+    let child_a_id = accepted_run_id(&coordinator.submit_turn(child_a).await.unwrap());
+    let mut child_b = submit_request("thread-child-b", "idem-child-b");
+    child_b.parent_run_id = Some(parent);
+    child_b.subagent_depth = 1;
+    child_b.spawn_tree_root_run_id = Some(parent);
+    let child_b_id = accepted_run_id(&coordinator.submit_turn(child_b).await.unwrap());
+
+    let children = store
+        .children_of(&scope("thread-parent"), parent)
+        .await
+        .unwrap();
+    let child_ids = children
+        .iter()
+        .map(|child| child.run_id)
+        .collect::<Vec<_>>();
+    assert_eq!(children.len(), 2);
+    assert!(child_ids.contains(&child_a_id));
+    assert!(child_ids.contains(&child_b_id));
+    assert!(
+        children
+            .iter()
+            .all(|child| child.parent_run_id == Some(parent))
+    );
+    assert!(children.iter().all(|child| child.subagent_depth == 1));
+    let foreign_scope = TurnScope::new(
+        TenantId::new("tenant2").unwrap(),
+        Some(AgentId::new("agent1").unwrap()),
+        Some(ProjectId::new("project1").unwrap()),
+        ThreadId::new("thread-parent").unwrap(),
+    );
+    assert_eq!(
+        store.children_of(&foreign_scope, parent).await.unwrap(),
+        Vec::new()
+    );
+    assert_eq!(
+        store.children_of(&child_scope, parent).await.unwrap(),
+        Vec::new()
+    );
+    assert!(
+        store
+            .get_run_record(&child_scope, child_a_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        store
+            .get_run_record(&scope("thread-parent"), child_b_id)
+            .await
+            .unwrap(),
+        None
+    );
+
+    let reservation = store
+        .reserve_tree_descendants(&scope("thread-parent"), parent, 2, 3)
+        .await
+        .unwrap();
+    assert_eq!(reservation.descendant_count, 2);
+    assert!(matches!(
+        store
+            .reserve_tree_descendants(&scope("thread-parent"), parent, 2, 3)
+            .await,
+        Err(TurnError::CapacityExceeded { .. })
+    ));
+    store
+        .release_tree_descendants(&scope("thread-parent"), parent, 1)
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .reserve_tree_descendants(&scope("thread-child-b"), parent, 1, 3)
+            .await
+            .unwrap()
+            .descendant_count,
+        2
+    );
+    assert!(matches!(
+        store
+            .reserve_tree_descendants(&scope("thread-child"), parent, 2, 3)
+            .await,
+        Err(TurnError::CapacityExceeded { .. })
+    ));
+}
+
+#[tokio::test]
+async fn child_lineage_is_validated_against_parent_record() {
+    let (coordinator, _store) = coordinator();
+    let parent = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-lineage-parent",
+                "idem-lineage-parent",
+            ))
+            .await
+            .unwrap(),
+    );
+
+    let mut bad_depth = submit_request("thread-lineage-child", "idem-lineage-bad-depth");
+    bad_depth.parent_run_id = Some(parent);
+    bad_depth.subagent_depth = 2;
+    bad_depth.spawn_tree_root_run_id = Some(parent);
+    assert!(matches!(
+        coordinator.submit_turn(bad_depth).await,
+        Err(TurnError::InvalidRequest { .. })
+    ));
+
+    let mut bad_root = submit_request("thread-lineage-child", "idem-lineage-bad-root");
+    bad_root.parent_run_id = Some(parent);
+    bad_root.subagent_depth = 1;
+    bad_root.spawn_tree_root_run_id = Some(TurnRunId::new());
+    assert!(matches!(
+        coordinator.submit_turn(bad_root).await,
+        Err(TurnError::InvalidRequest { .. })
+    ));
+
+    let mut top_level_with_root =
+        submit_request("thread-lineage-top", "idem-lineage-top-with-root");
+    top_level_with_root.spawn_tree_root_run_id = Some(parent);
+    assert!(matches!(
+        coordinator.submit_turn(top_level_with_root).await,
+        Err(TurnError::InvalidRequest { .. })
+    ));
+}
+
+#[tokio::test]
+async fn blocked_dependent_run_can_resume_and_cancel_directly() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-dependent", "idem-dependent"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = LoopGateRef::new("gate:dependent-run").unwrap();
+    apply_test_loop_exit(
+        store.as_ref(),
+        run_id,
+        runner_id,
+        lease_token,
+        dependent_blocked_mapping(TurnCheckpointId::new(), block_state_ref(), &gate_ref),
+    )
+    .await
+    .unwrap();
+
+    let resumed = coordinator
+        .resume_turn(ResumeTurnRequest {
+            scope: scope("thread-dependent"),
+            actor: actor(),
+            run_id,
+            gate_resolution_ref: GateRef::new(gate_ref.as_str()).unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
+            idempotency_key: IdempotencyKey::new("idem-dependent-resume").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(resumed.status, TurnStatus::Queued);
+
+    let cancel_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-dependent-cancel",
+                "idem-dependent-cancel",
+            ))
+            .await
+            .unwrap(),
+    );
+    let cancel_runner_id = TurnRunnerId::new();
+    let cancel_lease = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: cancel_runner_id,
+            lease_token: cancel_lease,
+            scope_filter: Some(scope("thread-dependent-cancel")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let cancel_gate_ref = LoopGateRef::new("gate:dependent-run-cancel").unwrap();
+    apply_test_loop_exit(
+        store.as_ref(),
+        cancel_run_id,
+        cancel_runner_id,
+        cancel_lease,
+        dependent_blocked_mapping(TurnCheckpointId::new(), block_state_ref(), &cancel_gate_ref),
+    )
+    .await
+    .unwrap();
+
+    let cancelled = coordinator
+        .cancel_run(cancel_request(
+            "thread-dependent-cancel",
+            cancel_run_id,
+            "idem-dependent-cancel-public",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status, TurnStatus::Cancelled);
+    assert!(!cancelled.already_terminal);
+}
+
+#[tokio::test]
+async fn default_turn_coordinator_publishes_lifecycle_events_to_sink() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let coordinator = DefaultTurnCoordinator::new(store).with_event_sink(sink.clone());
+    let response = coordinator
+        .submit_turn(submit_request("thread-event-sink", "idem-event-sink"))
+        .await
+        .unwrap();
+
+    let run_id = accepted_run_id(&response);
+    let events = sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, TurnEventKind::Submitted);
+    assert_eq!(events[0].run_id, run_id);
+    assert_eq!(events[0].status, TurnStatus::Queued);
+}
+
+#[tokio::test]
+async fn default_turn_coordinator_does_not_publish_cancel_event_for_terminal_retry() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone()).with_event_sink(sink.clone());
+    let response = coordinator
+        .submit_turn(submit_request(
+            "thread-terminal-cancel-retry",
+            "idem-terminal-cancel-retry",
+        ))
+        .await
+        .unwrap();
+
+    let run_id = accepted_run_id(&response);
+    complete_queued_run(&store, run_id, "thread-terminal-cancel-retry").await;
+    let events_before_retry = sink.events();
+    let retry = coordinator
+        .cancel_run(cancel_request(
+            "thread-terminal-cancel-retry",
+            run_id,
+            "idem-terminal-cancel-retry",
+        ))
+        .await
+        .unwrap();
+
+    assert!(retry.already_terminal);
+    assert_eq!(retry.status, TurnStatus::Completed);
+    assert_eq!(sink.events(), events_before_retry);
+}
+
+#[tokio::test]
+async fn event_publishing_transition_port_publishes_blocked_and_terminal_events() {
+    let (coordinator, store) = coordinator();
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let transition_port = EventPublishingTurnRunTransitionPort::new(
+        Arc::clone(&store) as Arc<dyn TurnRunTransitionPort>,
+        Arc::clone(&store) as Arc<dyn TurnEventProjectionSource>,
+        Arc::clone(&sink) as Arc<dyn TurnEventSink>,
+    );
+
+    let blocked_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-transition-blocked",
+                "idem-transition-blocked",
+            ))
+            .await
+            .unwrap(),
+    );
+    let blocked_runner_id = TurnRunnerId::new();
+    let blocked_lease = TurnLeaseToken::new();
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: blocked_runner_id,
+            lease_token: blocked_lease,
+            scope_filter: Some(scope("thread-transition-blocked")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    apply_test_loop_exit(
+        &transition_port,
+        blocked_run_id,
+        blocked_runner_id,
+        blocked_lease,
+        dependent_blocked_mapping(
+            TurnCheckpointId::new(),
+            block_state_ref(),
+            &LoopGateRef::new("gate:transition-dependent").unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    let completed_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-transition-completed",
+                "idem-transition-completed",
+            ))
+            .await
+            .unwrap(),
+    );
+    let completed_runner_id = TurnRunnerId::new();
+    let completed_lease = TurnLeaseToken::new();
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: completed_runner_id,
+            lease_token: completed_lease,
+            scope_filter: Some(scope("thread-transition-completed")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    apply_test_loop_exit(
+        &transition_port,
+        completed_run_id,
+        completed_runner_id,
+        completed_lease,
+        completed_mapping(),
+    )
+    .await
+    .unwrap();
+
+    let events = sink.events();
+    assert!(events.iter().any(|event| {
+        event.run_id == blocked_run_id
+            && event.kind == TurnEventKind::Blocked
+            && event.status == TurnStatus::BlockedDependentRun
+    }));
+    assert!(events.iter().any(|event| {
+        event.run_id == completed_run_id
+            && event.kind == TurnEventKind::Completed
+            && event.status == TurnStatus::Completed
+    }));
 }
 
 #[tokio::test]
@@ -1706,6 +2228,70 @@ async fn terminal_record_pruning_bounds_released_admission_reservations() {
             .all(|reservation| reservation.run_id != first_run_id)
     );
     assert_eq!(snapshot.admission_reservations.len(), 1);
+}
+
+#[tokio::test]
+async fn terminal_root_with_tree_reservation_survives_terminal_pruning() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            max_terminal_records: 1,
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let parent_scope = scope("thread-tree-root-pruned");
+    let parent_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-tree-root-pruned",
+                "idem-tree-root-pruned",
+            ))
+            .await
+            .unwrap(),
+    );
+
+    store
+        .reserve_tree_descendants(&parent_scope, parent_run_id, 1, 3)
+        .await
+        .unwrap();
+    complete_queued_run(&store, parent_run_id, "thread-tree-root-pruned").await;
+
+    for index in 0..3 {
+        let thread = format!("thread-terminal-churn-{index}");
+        let run_id = accepted_run_id(
+            &coordinator
+                .submit_turn(submit_request(
+                    &thread,
+                    &format!("idem-terminal-churn-{index}"),
+                ))
+                .await
+                .unwrap(),
+        );
+        complete_queued_run(&store, run_id, &thread).await;
+    }
+
+    assert!(
+        store
+            .get_run_record(&parent_scope, parent_run_id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        store
+            .reserve_tree_descendants(&scope("thread-child-after-prune"), parent_run_id, 1, 3)
+            .await
+            .unwrap()
+            .descendant_count,
+        2
+    );
+    assert!(
+        store
+            .persistence_snapshot()
+            .spawn_tree_reservations
+            .iter()
+            .any(|reservation| reservation.root_run_id == parent_run_id)
+    );
 }
 
 #[tokio::test]
@@ -4106,6 +4692,28 @@ fn coordinator() -> (
     (DefaultTurnCoordinator::new(store.clone()), store)
 }
 
+async fn complete_queued_run(store: &InMemoryTurnStateStore, run_id: TurnRunId, thread: &str) {
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope(thread)),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    store
+        .complete_run(CompleteRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+        })
+        .await
+        .unwrap();
+}
+
 fn submit_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
     SubmitTurnRequest {
         scope: scope(thread),
@@ -4116,6 +4724,10 @@ fn submit_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest {
         requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
         idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
         received_at: received_at(),
+        requested_run_id: None,
+        parent_run_id: None,
+        subagent_depth: 0,
+        spawn_tree_root_run_id: None,
     }
 }
 

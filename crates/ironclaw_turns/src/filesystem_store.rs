@@ -45,9 +45,9 @@ use crate::{
     GetLoopCheckpointRequest, GetRunStateRequest, InMemoryTurnStateStore,
     InMemoryTurnStateStoreLimits, LoopCheckpointRecord, LoopCheckpointStore,
     PutLoopCheckpointRequest, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
-    SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionLimitProvider, TurnAdmissionPolicy,
-    TurnError, TurnEventPage, TurnEventProjectionSource, TurnPersistenceSnapshot, TurnRunState,
-    TurnScope, TurnStateStore,
+    SpawnTreeReservation, SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionLimitProvider,
+    TurnAdmissionPolicy, TurnError, TurnEventPage, TurnEventProjectionSource,
+    TurnPersistenceSnapshot, TurnRunId, TurnRunRecord, TurnRunState, TurnScope, TurnStateStore,
     events::project_turn_events,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -261,6 +261,59 @@ where
         self.build_in_memory_store(snapshot)?
             .get_run_state(request)
             .await
+    }
+
+    async fn children_of(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        let (snapshot, _) = self.read_snapshot().await?;
+        self.build_in_memory_store(snapshot)?
+            .children_of(scope, run_id)
+            .await
+    }
+
+    async fn get_run_record(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Option<TurnRunRecord>, TurnError> {
+        let (snapshot, _) = self.read_snapshot().await?;
+        self.build_in_memory_store(snapshot)?
+            .get_run_record(scope, run_id)
+            .await
+    }
+
+    async fn reserve_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+        cap: u32,
+    ) -> Result<SpawnTreeReservation, TurnError> {
+        self.apply(|store| async move {
+            let outcome = store
+                .reserve_tree_descendants(scope, root_run_id, delta, cap)
+                .await;
+            (outcome, store)
+        })
+        .await
+    }
+
+    async fn release_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+    ) -> Result<(), TurnError> {
+        self.apply(|store| async move {
+            let outcome = store
+                .release_tree_descendants(scope, root_run_id, delta)
+                .await;
+            (outcome, store)
+        })
+        .await
     }
 }
 

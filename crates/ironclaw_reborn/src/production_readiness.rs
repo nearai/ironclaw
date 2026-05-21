@@ -102,6 +102,7 @@ pub enum RebornLoopProductionComponent {
     InputControl,
     LoopExitApplier,
     TurnStateStore,
+    SubagentGoalStore,
     WakeNotifier,
     ProgressEvents,
 }
@@ -352,6 +353,7 @@ pub struct RebornLoopComponentGraphReadiness {
     pub input_control: RebornComponentReadiness,
     pub loop_exit_applier: RebornComponentReadiness,
     pub turn_state_store: RebornComponentReadiness,
+    pub subagent_goal_store: RebornComponentReadiness,
     pub wake_notifier: RebornComponentReadiness,
     pub progress_events: RebornComponentReadiness,
 }
@@ -369,6 +371,7 @@ impl RebornLoopComponentGraphReadiness {
             input_control: RebornComponentReadiness::production_verified(required),
             loop_exit_applier: RebornComponentReadiness::production_verified(required),
             turn_state_store: RebornComponentReadiness::production_verified(required),
+            subagent_goal_store: RebornComponentReadiness::production_verified(required),
             wake_notifier: RebornComponentReadiness::production_verified(required),
             progress_events: RebornComponentReadiness::production_verified(required),
         }
@@ -422,6 +425,10 @@ impl RebornLoopComponentGraphReadiness {
             (
                 RebornLoopProductionComponent::TurnStateStore,
                 self.turn_state_store,
+            ),
+            (
+                RebornLoopProductionComponent::SubagentGoalStore,
+                self.subagent_goal_store,
             ),
             (
                 RebornLoopProductionComponent::WakeNotifier,
@@ -716,6 +723,7 @@ fn component_subject(component: RebornLoopProductionComponent) -> &'static str {
         RebornLoopProductionComponent::InputControl => "input_control",
         RebornLoopProductionComponent::LoopExitApplier => "loop_exit_applier",
         RebornLoopProductionComponent::TurnStateStore => "turn_state_store",
+        RebornLoopProductionComponent::SubagentGoalStore => "subagent_goal_store",
         RebornLoopProductionComponent::WakeNotifier => "wake_notifier",
         RebornLoopProductionComponent::ProgressEvents => "progress_events",
     }

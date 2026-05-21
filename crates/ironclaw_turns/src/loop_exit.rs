@@ -382,12 +382,14 @@ pub struct LoopBlocked {
     pub exit_id: LoopExitId,
 }
 
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopBlockedKind {
     Approval,
     Auth,
     Resource,
+    AwaitDependentRun,
 }
 
 impl LoopBlockedKind {
@@ -397,6 +399,7 @@ impl LoopBlockedKind {
             Self::Approval => BlockedReason::Approval { gate_ref },
             Self::Auth => BlockedReason::Auth { gate_ref },
             Self::Resource => BlockedReason::Resource { gate_ref },
+            Self::AwaitDependentRun => BlockedReason::DependentRun { gate_ref },
         })
     }
 }

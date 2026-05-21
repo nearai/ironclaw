@@ -12,9 +12,9 @@ use ironclaw_turns::{
     LoopCheckpointRecord, LoopCheckpointStateRef, LoopCheckpointStore, LoopCompleted,
     LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef,
     PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-    RunProfileVersion, SanitizedFailure, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId,
-    TurnScope, TurnStateStore, TurnStatus,
+    RunProfileVersion, SanitizedFailure, SourceBindingRef, SpawnTreeReservation,
+    SubmitTurnRequest, SubmitTurnResponse, TurnCheckpointId, TurnError, TurnId, TurnLeaseToken,
+    TurnRunId, TurnRunRecord, TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{CheckpointSchemaId, LoopDriverId},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
@@ -100,6 +100,41 @@ impl TurnStateStore for StaticTurnStateStore {
         assert_eq!(request.scope, self.state.scope);
         assert_eq!(request.run_id, self.state.run_id);
         Ok(self.state.clone())
+    }
+
+    async fn children_of(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        panic!("children_of should not be called by evidence tests")
+    }
+
+    async fn get_run_record(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+    ) -> Result<Option<TurnRunRecord>, TurnError> {
+        panic!("get_run_record should not be called by evidence tests")
+    }
+
+    async fn reserve_tree_descendants(
+        &self,
+        _scope: &TurnScope,
+        _root_run_id: TurnRunId,
+        _delta: u32,
+        _cap: u32,
+    ) -> Result<SpawnTreeReservation, TurnError> {
+        panic!("reserve_tree_descendants should not be called by evidence tests")
+    }
+
+    async fn release_tree_descendants(
+        &self,
+        _scope: &TurnScope,
+        _root_run_id: TurnRunId,
+        _delta: u32,
+    ) -> Result<(), TurnError> {
+        panic!("release_tree_descendants should not be called by evidence tests")
     }
 }
 

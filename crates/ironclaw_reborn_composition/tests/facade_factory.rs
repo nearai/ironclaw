@@ -270,6 +270,10 @@ fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest
         requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
         idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
         received_at: Utc::now(),
+        requested_run_id: None,
+        parent_run_id: None,
+        subagent_depth: 0,
+        spawn_tree_root_run_id: None,
     }
 }
 

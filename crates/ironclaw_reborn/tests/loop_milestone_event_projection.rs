@@ -44,6 +44,7 @@ use ironclaw_turns::{
     RunProfileResolver, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
     TurnActor, TurnAdmissionPolicy, TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId,
     TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    SpawnTreeReservation, TurnRunRecord,
     run_profile::{
         AgentLoopHostErrorKind, BatchPolicyKind, CapabilityFailureKind, FinalizeAssistantMessage,
         HookDecisionSummary, LoopCheckpointKind, LoopDriverId, LoopGateKind, LoopHostMilestone,
@@ -715,6 +716,41 @@ impl TurnStateStore for StaticTurnStateStore {
 
     async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         Ok(self.state.lock().unwrap().clone())
+    }
+
+    async fn children_of(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        panic!("children_of should not be called by static test turn state store")
+    }
+
+    async fn get_run_record(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+    ) -> Result<Option<TurnRunRecord>, TurnError> {
+        panic!("get_run_record should not be called by static test turn state store")
+    }
+
+    async fn reserve_tree_descendants(
+        &self,
+        _scope: &TurnScope,
+        _tree_root_run_id: TurnRunId,
+        _amount: u32,
+        _cap: u32,
+    ) -> Result<SpawnTreeReservation, TurnError> {
+        panic!("reserve_tree_descendants should not be called by static test turn state store")
+    }
+
+    async fn release_tree_descendants(
+        &self,
+        _scope: &TurnScope,
+        _root_run_id: TurnRunId,
+        _delta: u32,
+    ) -> Result<(), TurnError> {
+        panic!("release_tree_descendants should not be called by static test turn state store")
     }
 }
 

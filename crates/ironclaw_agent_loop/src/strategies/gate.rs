@@ -63,6 +63,7 @@ pub(crate) enum GateKind {
     Approval,
     Auth,
     Resource,
+    AwaitDependentRun,
 }
 
 /// Strategy decision for a gate, plus the new `gate_state` slot value.
@@ -95,7 +96,8 @@ impl GateOutcome {
     /// executor honors it.
     pub(crate) fn validate_for_gate_kind(&self, kind: GateKind) -> Result<(), LoopFailureKind> {
         match (kind, self) {
-            (GateKind::Approval, GateOutcome::SkipAndContinue { .. }) => {
+            (GateKind::Approval, GateOutcome::SkipAndContinue { .. })
+            | (GateKind::AwaitDependentRun, GateOutcome::SkipAndContinue { .. }) => {
                 Err(LoopFailureKind::DriverBug)
             }
             _ => Ok(()),
@@ -203,6 +205,7 @@ mod tests {
             (GateKind::Approval, "approval"),
             (GateKind::Auth, "auth"),
             (GateKind::Resource, "resource"),
+            (GateKind::AwaitDependentRun, "await_dependent_run"),
         ] {
             let value = serde_json::to_value(variant).expect("serialize");
             assert_eq!(value, serde_json::json!(wire));
@@ -213,13 +216,20 @@ mod tests {
 
     #[test]
     fn gate_summary_round_trips() {
-        let summary = GateSummary {
-            kind: GateKind::Approval,
-            gate_ref: LoopGateRef::new("gate:approval-demo").expect("valid"),
-        };
-        let value = serde_json::to_value(&summary).expect("serialize");
-        let restored: GateSummary = serde_json::from_value(value).expect("deserialize");
-        assert_eq!(restored, summary);
+        for kind in [
+            GateKind::Approval,
+            GateKind::Auth,
+            GateKind::Resource,
+            GateKind::AwaitDependentRun,
+        ] {
+            let summary = GateSummary {
+                kind,
+                gate_ref: LoopGateRef::new("gate:approval-demo").expect("valid"),
+            };
+            let value = serde_json::to_value(&summary).expect("serialize");
+            let restored: GateSummary = serde_json::from_value(value).expect("deserialize");
+            assert_eq!(restored, summary);
+        }
     }
 
     #[test]
@@ -284,6 +294,17 @@ mod tests {
     }
 
     #[test]
+    fn await_dependent_run_gate_rejects_skip_and_continue_outcome() {
+        let outcome = GateOutcome::SkipAndContinue {
+            gate: sample_gate(),
+        };
+        assert_eq!(
+            outcome.validate_for_gate_kind(GateKind::AwaitDependentRun),
+            Err(LoopFailureKind::DriverBug)
+        );
+    }
+
+    #[test]
     fn auth_and_resource_gates_allow_skip_and_continue_outcome() {
         let outcome = GateOutcome::SkipAndContinue {
             gate: sample_gate(),
@@ -298,7 +319,12 @@ mod tests {
         let mut state = LoopExecutionState::initial_for_run(&test_run_context());
         state.gate_state = sample_gate();
 
-        for kind in [GateKind::Approval, GateKind::Auth, GateKind::Resource] {
+        for kind in [
+            GateKind::Approval,
+            GateKind::Auth,
+            GateKind::Resource,
+            GateKind::AwaitDependentRun,
+        ] {
             let summary = GateSummary {
                 kind,
                 gate_ref: LoopGateRef::new("gate:default-test").expect("valid"),

@@ -108,6 +108,7 @@ fn workflow_rejection_kind(category: TurnErrorCategory) -> ProductWorkflowReject
         TurnErrorCategory::Unauthorized => ProductWorkflowRejectionKind::Unauthorized,
         TurnErrorCategory::InvalidRequest => ProductWorkflowRejectionKind::InvalidRequest,
         TurnErrorCategory::Unavailable => ProductWorkflowRejectionKind::Unavailable,
+        TurnErrorCategory::CapacityExceeded => ProductWorkflowRejectionKind::AdmissionRejected,
         TurnErrorCategory::Conflict => ProductWorkflowRejectionKind::Conflict,
     }
 }

@@ -23,10 +23,10 @@ use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator,
     GetRunStateRequest, IdempotencyKey, InMemoryTurnStateStore, InMemoryTurnStateStoreLimits,
     NoopTurnRunWakeNotifier, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
-    RunProfileRequest, SanitizedCancelReason, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunState, TurnRunWake,
-    TurnRunWakeNotifier, TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStateStore,
-    TurnStatus,
+    RunProfileRequest, SanitizedCancelReason, SourceBindingRef, SpawnTreeReservation,
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId,
+    TurnRunRecord, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
+    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
@@ -300,6 +300,45 @@ impl TurnStateStore for DurableLikeTurnStore {
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         self.inner.get_run_state(request).await
     }
+
+    async fn children_of(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        self.inner.children_of(scope, run_id).await
+    }
+
+    async fn get_run_record(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Option<TurnRunRecord>, TurnError> {
+        self.inner.get_run_record(scope, run_id).await
+    }
+
+    async fn reserve_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+        cap: u32,
+    ) -> Result<SpawnTreeReservation, TurnError> {
+        self.inner
+            .reserve_tree_descendants(scope, root_run_id, delta, cap)
+            .await
+    }
+
+    async fn release_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+    ) -> Result<(), TurnError> {
+        self.inner
+            .release_tree_descendants(scope, root_run_id, delta)
+            .await
+    }
 }
 
 #[async_trait]
@@ -393,6 +432,41 @@ impl TurnStateStore for DurableTurnStoreStub {
 
     async fn get_run_state(&self, _request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
         panic!("store stub should not read turns")
+    }
+
+    async fn children_of(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+    ) -> Result<Vec<TurnRunRecord>, TurnError> {
+        panic!("store stub should not read child turns")
+    }
+
+    async fn get_run_record(
+        &self,
+        _scope: &TurnScope,
+        _run_id: TurnRunId,
+    ) -> Result<Option<TurnRunRecord>, TurnError> {
+        panic!("store stub should not read turn records")
+    }
+
+    async fn reserve_tree_descendants(
+        &self,
+        _scope: &TurnScope,
+        _root_run_id: TurnRunId,
+        _delta: u32,
+        _cap: u32,
+    ) -> Result<SpawnTreeReservation, TurnError> {
+        panic!("store stub should not reserve tree descendants")
+    }
+
+    async fn release_tree_descendants(
+        &self,
+        _scope: &TurnScope,
+        _root_run_id: TurnRunId,
+        _delta: u32,
+    ) -> Result<(), TurnError> {
+        panic!("store stub should not release tree descendants")
     }
 }
 
@@ -1332,6 +1406,10 @@ fn submit_turn_request(thread: &str, idempotency_key: &str) -> SubmitTurnRequest
         requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
         idempotency_key: IdempotencyKey::new(idempotency_key).unwrap(),
         received_at: Utc::now(),
+        requested_run_id: None,
+        parent_run_id: None,
+        subagent_depth: 0,
+        spawn_tree_root_run_id: None,
     }
 }
 

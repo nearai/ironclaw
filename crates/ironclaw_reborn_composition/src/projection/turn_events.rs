@@ -213,6 +213,7 @@ fn turn_status_wire(status: TurnStatus) -> &'static str {
         TurnStatus::BlockedApproval => "blocked_approval",
         TurnStatus::BlockedAuth => "blocked_auth",
         TurnStatus::BlockedResource => "blocked_resource",
+        TurnStatus::BlockedDependentRun => "blocked_dependent_run",
         TurnStatus::RecoveryRequired => "recovery_required",
         TurnStatus::CancelRequested => "cancel_requested",
         TurnStatus::Completed => "completed",

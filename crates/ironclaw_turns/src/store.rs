@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use ironclaw_host_api::{AgentId, ProjectId, TenantId};
+
 use crate::{
     AcceptedMessageRef, AdmissionRejection, CancelRunRequest, CancelRunResponse, GateRef,
     GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord, ReplyTargetBindingRef,
@@ -32,6 +34,33 @@ pub trait TurnStateStore: Send + Sync {
     ) -> Result<CancelRunResponse, TurnError>;
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError>;
+
+    async fn children_of(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Vec<TurnRunRecord>, TurnError>;
+
+    async fn get_run_record(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Option<TurnRunRecord>, TurnError>;
+
+    async fn reserve_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+        cap: u32,
+    ) -> Result<SpawnTreeReservation, TurnError>;
+
+    async fn release_tree_descendants(
+        &self,
+        scope: &TurnScope,
+        root_run_id: TurnRunId,
+        delta: u32,
+    ) -> Result<(), TurnError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -98,6 +127,40 @@ pub struct TurnRunRecord {
     pub last_heartbeat_at: Option<TurnTimestamp>,
     pub claim_count: u64,
     pub received_at: TurnTimestamp,
+    #[serde(default)]
+    pub parent_run_id: Option<TurnRunId>,
+    #[serde(default)]
+    pub subagent_depth: u32,
+    #[serde(default)]
+    pub spawn_tree_root_run_id: Option<TurnRunId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SpawnTreeReservationKey {
+    pub tenant_id: TenantId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<AgentId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
+    pub root_run_id: TurnRunId,
+}
+
+impl SpawnTreeReservationKey {
+    pub fn new(scope: &TurnScope, root_run_id: TurnRunId) -> Self {
+        Self {
+            tenant_id: scope.tenant_id.clone(),
+            agent_id: scope.agent_id.clone(),
+            project_id: scope.project_id.clone(),
+            root_run_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnTreeReservation {
+    pub scope: TurnScope,
+    pub root_run_id: TurnRunId,
+    pub descendant_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -163,6 +226,7 @@ pub enum TurnIdempotencyOutcomeKind {
     InvalidRequest,
     Unavailable,
     Conflict,
+    CapacityExceeded,
 }
 
 impl TurnIdempotencyOutcomeKind {
@@ -174,6 +238,7 @@ impl TurnIdempotencyOutcomeKind {
             TurnError::Unauthorized => Self::Unauthorized,
             TurnError::InvalidRequest { .. } => Self::InvalidRequest,
             TurnError::Unavailable { .. } => Self::Unavailable,
+            TurnError::CapacityExceeded { .. } => Self::CapacityExceeded,
             TurnError::Conflict { .. }
             | TurnError::InvalidTransition { .. }
             | TurnError::LeaseMismatch => Self::Conflict,
@@ -217,6 +282,10 @@ impl TurnIdempotencyErrorReplay {
             },
             TurnErrorCategory::Conflict => TurnError::Conflict {
                 reason: "replayed conflict".to_string(),
+            },
+            TurnErrorCategory::CapacityExceeded => TurnError::CapacityExceeded {
+                resource: "replayed",
+                cap: 0,
             },
             TurnErrorCategory::ThreadBusy => TurnError::Conflict {
                 reason: "replayed malformed thread-busy idempotency record".to_string(),
@@ -309,4 +378,6 @@ pub struct TurnPersistenceSnapshot {
     pub event_retention_floor: EventCursor,
     #[serde(default)]
     pub admission_reservations: Vec<TurnAdmissionReservationRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spawn_tree_reservations: Vec<SpawnTreeReservation>,
 }

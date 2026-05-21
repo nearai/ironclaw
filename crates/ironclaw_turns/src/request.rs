@@ -45,6 +45,14 @@ pub struct SubmitTurnRequest {
     pub requested_run_profile: Option<RunProfileRequest>,
     pub idempotency_key: IdempotencyKey,
     pub received_at: TurnTimestamp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_run_id: Option<TurnRunId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<TurnRunId>,
+    #[serde(default)]
+    pub subagent_depth: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_tree_root_run_id: Option<TurnRunId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
