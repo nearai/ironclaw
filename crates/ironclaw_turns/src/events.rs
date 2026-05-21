@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::{sync::Arc, sync::Mutex};
 use thiserror::Error;
 
-use crate::{TurnError, TurnRunId, TurnScope, TurnStatus};
+use ironclaw_host_api::{Timestamp, UserId};
+
+use crate::{GateRef, TurnError, TurnRunId, TurnScope, TurnStatus};
 
 const MAX_IN_MEMORY_EVENTS: usize = 10_000;
 pub const MAX_TURN_EVENT_PROJECTION_LIMIT: usize = 1_000;
@@ -26,14 +28,59 @@ pub enum TurnEventKind {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TurnBlockedGateKind {
+    Approval,
+    Auth,
+    Resource,
+}
+
+impl TurnBlockedGateKind {
+    pub fn from_status(status: TurnStatus) -> Option<Self> {
+        match status {
+            TurnStatus::BlockedApproval => Some(Self::Approval),
+            TurnStatus::BlockedAuth => Some(Self::Auth),
+            TurnStatus::BlockedResource => Some(Self::Resource),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnBlockedGateMetadata {
+    pub gate_ref: GateRef,
+    pub gate_kind: TurnBlockedGateKind,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnLifecycleEvent {
     pub cursor: EventCursor,
     pub scope: TurnScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurred_at: Option<Timestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<UserId>,
     pub run_id: TurnRunId,
     pub status: TurnStatus,
     pub kind: TurnEventKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_gate: Option<TurnBlockedGateMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sanitized_reason: Option<String>,
+}
+
+impl TurnLifecycleEvent {
+    /// Return the transport-facing lifecycle event view.
+    ///
+    /// Internal projection consumers may need gate metadata to materialize
+    /// read models, but public lifecycle snapshots must not expose resolution
+    /// refs that can later be used to act on a gate.
+    pub fn into_public_projection_entry(mut self) -> Self {
+        self.blocked_gate = None;
+        self
+    }
 }
 
 #[async_trait]
@@ -208,7 +255,11 @@ where
             });
         }
         Ok(TurnEventProjectionSnapshot {
-            entries: page.entries,
+            entries: page
+                .entries
+                .into_iter()
+                .map(TurnLifecycleEvent::into_public_projection_entry)
+                .collect(),
             next_cursor: TurnEventProjectionCursor::for_scope(request.scope, page.next_cursor),
             truncated: page.truncated,
         })

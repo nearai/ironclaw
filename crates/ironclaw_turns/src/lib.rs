@@ -41,7 +41,8 @@ pub use coordinator::{
     TurnAdmissionPolicy, TurnCoordinator, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
 };
 pub use events::{
-    EventCursor, InMemoryTurnEventSink, TurnEventKind, TurnEventPage, TurnEventProjectionCursor,
+    EventCursor, InMemoryTurnEventSink, MAX_TURN_EVENT_PROJECTION_LIMIT, TurnBlockedGateKind,
+    TurnBlockedGateMetadata, TurnEventKind, TurnEventPage, TurnEventProjectionCursor,
     TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService,
     TurnEventProjectionSnapshot, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
 };

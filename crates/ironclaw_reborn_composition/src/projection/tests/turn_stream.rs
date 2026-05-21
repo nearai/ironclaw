@@ -93,9 +93,15 @@ async fn webui_event_stream_resumes_mixed_batch_without_skipping_turn_event() {
             events: vec![TurnLifecycleEvent {
                 cursor: TurnEventCursor(1),
                 scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
                 run_id: turn_run,
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
+                blocked_gate: Some(TurnBlockedGateMetadata {
+                    gate_ref: GateRef::new("gate:auth-required").unwrap(),
+                    gate_kind: TurnBlockedGateKind::Auth,
+                }),
                 sanitized_reason: Some("GitHub authentication required".to_string()),
             }],
         }),
@@ -264,9 +270,12 @@ async fn webui_event_stream_emits_keepalive_when_only_turn_cursor_advances() {
             events: vec![TurnLifecycleEvent {
                 cursor: TurnEventCursor(1),
                 scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
                 run_id,
                 status: TurnStatus::Running,
                 kind: TurnEventKind::RunnerHeartbeat,
+                blocked_gate: None,
                 sanitized_reason: None,
             }],
         }),
@@ -317,18 +326,27 @@ async fn webui_event_stream_reads_past_filtered_turn_event_pages() {
         .map(|cursor| TurnLifecycleEvent {
             cursor: TurnEventCursor(cursor),
             scope: scope.clone(),
+            occurred_at: Some(chrono::Utc::now()),
+            owner_user_id: Some(user_id.clone()),
             run_id,
             status: TurnStatus::Running,
             kind: TurnEventKind::RunnerHeartbeat,
+            blocked_gate: None,
             sanitized_reason: None,
         })
         .collect::<Vec<_>>();
     events.push(TurnLifecycleEvent {
         cursor: TurnEventCursor(WEBUI_TURN_EVENT_PAGE_LIMIT as u64 + 1),
         scope: scope.clone(),
+        occurred_at: Some(chrono::Utc::now()),
+        owner_user_id: Some(user_id.clone()),
         run_id,
         status: TurnStatus::BlockedAuth,
         kind: TurnEventKind::Blocked,
+        blocked_gate: Some(TurnBlockedGateMetadata {
+            gate_ref: GateRef::new("gate:auth-required").unwrap(),
+            gate_kind: TurnBlockedGateKind::Auth,
+        }),
         sanitized_reason: Some("GitHub authentication required".to_string()),
     });
     let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
@@ -392,9 +410,15 @@ async fn webui_event_stream_does_not_prompt_for_stale_blocked_event() {
             events: vec![TurnLifecycleEvent {
                 cursor: TurnEventCursor(1),
                 scope: scope.clone(),
+                occurred_at: Some(chrono::Utc::now()),
+                owner_user_id: Some(user_id.clone()),
                 run_id,
                 status: TurnStatus::BlockedAuth,
                 kind: TurnEventKind::Blocked,
+                blocked_gate: Some(TurnBlockedGateMetadata {
+                    gate_ref: GateRef::new("gate:auth-required").unwrap(),
+                    gate_kind: TurnBlockedGateKind::Auth,
+                }),
                 sanitized_reason: Some("stale auth gate".to_string()),
             }],
         }),

@@ -115,6 +115,19 @@ Reducer rules:
 - may cache output, but cache is not source of truth
 - must tolerate unknown future event types by ignoring or preserving them according to version policy
 
+Projection crates may consume typed domain-event contracts from the owning
+domain crate when the read model is explicitly about that domain. For example,
+`ironclaw_event_projections` may consume `ironclaw_turns::TurnLifecycleEvent`
+to derive pending-gate rows from blocked/resumed/terminal turn facts. That does
+not make projections the source of truth for turn state, and it does not permit
+imports from product composition, root `src/`, or legacy engine pending-gate
+types.
+
+Read-model keys must preserve the full scope needed to enforce read isolation.
+Turn-derived pending-gate rows preserve tenant, agent, project, owner, thread,
+and run identity; a sink must not collapse rows to tenant/thread when the source
+`TurnScope` carries narrower agent/project boundaries.
+
 ---
 
 ## 6. Reconnect and resume

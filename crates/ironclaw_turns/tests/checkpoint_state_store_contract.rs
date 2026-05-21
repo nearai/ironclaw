@@ -481,9 +481,15 @@ fn turn_checkpoint_public_status_does_not_expose_checkpoint_payload() {
     let event = TurnLifecycleEvent {
         cursor: EventCursor(2),
         scope: scope.clone(),
+        occurred_at: Some(fixed_time()),
+        owner_user_id: Some(UserId::new("user-checkpoint-public").unwrap()),
         run_id,
         status: TurnStatus::BlockedApproval,
         kind: TurnEventKind::Blocked,
+        blocked_gate: Some(ironclaw_turns::TurnBlockedGateMetadata {
+            gate_ref: GateRef::new("gate-checkpoint-public").unwrap(),
+            gate_kind: ironclaw_turns::TurnBlockedGateKind::Approval,
+        }),
         sanitized_reason: Some("checkpointed".to_string()),
     };
     let snapshot = TurnPersistenceSnapshot {

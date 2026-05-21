@@ -8,6 +8,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+mod pending_gate_projection;
+
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_events::{
@@ -33,6 +35,12 @@ use thiserror::Error;
 mod runtime_projection;
 use runtime_projection::{
     RuntimeProjectionState, sort_capability_activities_for_projection, sort_runs_for_projection,
+};
+
+pub use pending_gate_projection::{
+    PENDING_GATE_PROJECTION_CONSUMER_ID, PendingGateProjection, PendingGateProjectionCursorStore,
+    PendingGateProjectionGateKind, PendingGateProjectionKey, PendingGateProjectionReplay,
+    PendingGateProjectionRow, PendingGateProjectionSink,
 };
 
 const STATE_REPLAY_PAGE_LIMIT: usize = 256;
