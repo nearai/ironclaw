@@ -3492,6 +3492,77 @@ async fn resume_turn_from_foreign_actor_is_denied_without_requeueing_run() {
 }
 
 #[tokio::test]
+async fn cancel_run_from_foreign_actor_is_denied_without_mutating_run() {
+    let (coordinator, store) = coordinator();
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-a", "idem-submit-a"))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let gate_ref = GateRef::new("approval-gate").unwrap();
+    store
+        .block_run(BlockRunRequest {
+            run_id,
+            runner_id,
+            lease_token,
+            checkpoint_id: TurnCheckpointId::new(),
+            state_ref: block_state_ref(),
+            reason: BlockedReason::Approval {
+                gate_ref: gate_ref.clone(),
+            },
+        })
+        .await
+        .unwrap();
+
+    let err = coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope("thread-a"),
+            actor: TurnActor::new(UserId::new("user2").unwrap()),
+            run_id,
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("idem-cancel-foreign-actor").unwrap(),
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(err, TurnError::Unauthorized);
+    assert_eq!(err.adapter_status_code(), 403);
+    let state = coordinator
+        .get_run_state(GetRunStateRequest {
+            scope: scope("thread-a"),
+            run_id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(state.status, TurnStatus::BlockedApproval);
+    assert_eq!(state.gate_ref, Some(gate_ref));
+
+    let cancelled = coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope("thread-a"),
+            actor: TurnActor::new(UserId::new("user1").unwrap()),
+            run_id,
+            reason: SanitizedCancelReason::UserRequested,
+            idempotency_key: IdempotencyKey::new("idem-cancel-owner").unwrap(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(cancelled.status, TurnStatus::Cancelled);
+}
+
+#[tokio::test]
 async fn resume_turn_with_wrong_gate_resolution_ref_is_invalid_request() {
     let (coordinator, store) = coordinator();
     let run_id = accepted_run_id(

@@ -49,6 +49,10 @@ fn descriptor_with_runtime(
     }
 }
 
+fn descriptor(id: &str, effects: Vec<EffectKind>) -> CapabilityDescriptor {
+    descriptor_with_runtime(id, RuntimeKind::Script, effects)
+}
+
 fn builtin_shell_descriptor() -> CapabilityDescriptor {
     builtin_first_party_package()
         .unwrap()
@@ -56,10 +60,6 @@ fn builtin_shell_descriptor() -> CapabilityDescriptor {
         .into_iter()
         .find(|descriptor| descriptor.id.as_str() == SHELL_CAPABILITY_ID)
         .expect("built-in shell descriptor must be registered")
-}
-
-fn descriptor(id: &str, effects: Vec<EffectKind>) -> CapabilityDescriptor {
-    descriptor_with_runtime(id, RuntimeKind::Script, effects)
 }
 
 // -- PR 6: Local profile vertical slice -------------------------------------

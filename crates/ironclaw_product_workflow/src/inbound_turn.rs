@@ -234,8 +234,6 @@ where
                 kind: "non_user_message".into(),
             });
         };
-        let source_binding_id = product_source_binding_id(envelope);
-        let submit_idempotency_key = submit_idempotency_key(envelope);
         let route_kind = route_kind_for_user_message(payload.trigger);
         let binding = self
             .binding_service
@@ -249,6 +247,8 @@ where
                 auth_claim: envelope.auth_claim().clone(),
             })
             .await?;
+        let source_binding_id = product_source_binding_id(envelope, &binding);
+        let submit_idempotency_key = submit_idempotency_key(envelope, &binding);
         let thread_scope = thread_scope_from_binding(&binding, route_kind)?;
         Ok(PreparedUserMessage {
             binding,
@@ -642,20 +642,39 @@ impl RefFactory for IdempotencyKey {
     }
 }
 
-fn product_source_binding_id(envelope: &ProductInboundEnvelope) -> String {
+fn product_source_binding_id(
+    envelope: &ProductInboundEnvelope,
+    binding: &ResolvedBinding,
+) -> String {
     format!(
-        "{}{}{}",
+        "{}{}{}{}{}",
         segment("adapter", envelope.adapter_id().as_str()),
         segment("installation", envelope.installation_id().as_str()),
+        segment(
+            "agent",
+            binding.agent_id.as_ref().map_or("", |id| id.as_str())
+        ),
+        segment(
+            "project",
+            binding.project_id.as_ref().map_or("", |id| id.as_str())
+        ),
         envelope.source_binding_key()
     )
 }
 
-fn submit_idempotency_key(envelope: &ProductInboundEnvelope) -> String {
+fn submit_idempotency_key(envelope: &ProductInboundEnvelope, binding: &ResolvedBinding) -> String {
     format!(
-        "{}{}{}",
+        "{}{}{}{}{}",
         segment("adapter", envelope.adapter_id().as_str()),
         segment("installation", envelope.installation_id().as_str()),
+        segment(
+            "agent",
+            binding.agent_id.as_ref().map_or("", |id| id.as_str())
+        ),
+        segment(
+            "project",
+            binding.project_id.as_ref().map_or("", |id| id.as_str())
+        ),
         segment("event", envelope.external_event_id().as_str())
     )
 }

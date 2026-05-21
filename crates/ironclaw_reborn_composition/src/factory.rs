@@ -160,6 +160,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     if let Some(runtime_policy) = input.runtime_policy {
         services = services.with_runtime_policy(runtime_policy);
     }
+    // TODO(process-port): local-dev intentionally uses the default
+    // LocalHostProcessPort until a non-local process backend is composed.
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
@@ -270,6 +272,9 @@ async fn build_production_shaped(
                 runtime_policy,
                 turn_run_wake_notifier,
             )?;
+            // TODO(process-port): if production enables FirstParty runtime,
+            // HostRuntimeServices must be given a production process port;
+            // otherwise the LocalHostProcessPort default is rejected.
             build_libsql_production(
                 profile,
                 wiring_config,
@@ -292,6 +297,9 @@ async fn build_production_shaped(
                 runtime_policy,
                 turn_run_wake_notifier,
             )?;
+            // TODO(process-port): if production enables FirstParty runtime,
+            // HostRuntimeServices must be given a production process port;
+            // otherwise the LocalHostProcessPort default is rejected.
             build_postgres_production(
                 profile,
                 wiring_config,

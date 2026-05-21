@@ -83,8 +83,8 @@ use crate::obligations::{
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
-    ProcessObligationLifecycleStore, RuntimeBackendHealth, TurnRunExecutor, TurnRunScheduler,
-    TurnRunSchedulerConfig,
+    LocalHostProcessPort, ProcessObligationLifecycleStore, RuntimeBackendHealth,
+    RuntimeProcessPort, TurnRunExecutor, TurnRunScheduler, TurnRunSchedulerConfig,
 };
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
@@ -156,6 +156,7 @@ pub enum ProductionWiringComponent {
     AuditSink,
     SecretStore,
     RuntimeHttpEgress,
+    RuntimeProcessPort,
     WasmCredentialProvider,
     ScriptRuntime,
     McpRuntime,
@@ -183,6 +184,7 @@ impl ProductionWiringComponent {
             Self::AuditSink => "audit_sink",
             Self::SecretStore => "secret_store",
             Self::RuntimeHttpEgress => "runtime_http_egress",
+            Self::RuntimeProcessPort => "runtime_process_port",
             Self::WasmCredentialProvider => "wasm_credential_provider",
             Self::ScriptRuntime => "script_runtime",
             Self::McpRuntime => "mcp_runtime",
@@ -264,6 +266,7 @@ struct ProductionComponentTypes {
     secret_store: Option<ProductionComponentType>,
     runtime_http_egress: Option<ProductionComponentType>,
     runtime_http_egress_verified: bool,
+    runtime_process_port: ProductionComponentType,
     wasm_credential_provider: Option<ProductionComponentType>,
     wasm_credential_provider_verified: bool,
     wasm_runtime_credential_provider_captured: bool,
@@ -303,7 +306,7 @@ impl ProductionComponentType {
 enum ProductionImplementationReadiness {
     ProductionCandidate,
     LocalOnly,
-    ErasedDurableSinkWrapper,
+    UnverifiedProductionImplementation,
 }
 
 fn component_name(component: Option<ProductionComponentType>) -> Option<&'static str> {
@@ -327,14 +330,15 @@ fn classify_component_type<T: 'static>() -> ProductionImplementationReadiness {
             || type_id == TypeId::of::<InMemorySecretStore>()
             || type_id == TypeId::of::<EmptyWasmRuntimeCredentials>()
             || type_id == TypeId::of::<InMemoryTurnStateStore>()
-            || type_id == TypeId::of::<NoopTurnRunWakeNotifier>() =>
+            || type_id == TypeId::of::<NoopTurnRunWakeNotifier>()
+            || type_id == TypeId::of::<LocalHostProcessPort>() =>
         {
             ProductionImplementationReadiness::LocalOnly
         }
         () if type_id == TypeId::of::<DurableEventSink>()
             || type_id == TypeId::of::<DurableAuditSink>() =>
         {
-            ProductionImplementationReadiness::ErasedDurableSinkWrapper
+            ProductionImplementationReadiness::UnverifiedProductionImplementation
         }
         () => ProductionImplementationReadiness::ProductionCandidate,
     }
@@ -373,6 +377,7 @@ where
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
     process_lifecycle_store: Arc<ProcessObligationLifecycleStore>,
     runtime_http_egress: SharedRuntimeHttpEgress,
+    process_port: Arc<dyn RuntimeProcessPort>,
     wasm_credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
@@ -430,6 +435,7 @@ where
             secret_injection_store,
             process_lifecycle_store,
             runtime_http_egress: Arc::new(Mutex::new(None)),
+            process_port: Arc::new(LocalHostProcessPort::new()),
             wasm_credential_provider: None,
             runtime_health: None,
             runtime_policy: None,
@@ -456,6 +462,7 @@ where
                 secret_store: None,
                 runtime_http_egress: None,
                 runtime_http_egress_verified: false,
+                runtime_process_port: ProductionComponentType::of::<LocalHostProcessPort>(),
                 wasm_credential_provider: None,
                 wasm_credential_provider_verified: false,
                 wasm_runtime_credential_provider_captured: false,
@@ -496,6 +503,7 @@ where
             secret_injection_store,
             process_lifecycle_store,
             runtime_http_egress,
+            process_port,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -530,6 +538,7 @@ where
             secret_injection_store,
             process_lifecycle_store,
             runtime_http_egress,
+            process_port,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -585,6 +594,7 @@ where
             secret_injection_store,
             process_lifecycle_store: _,
             runtime_http_egress,
+            process_port,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -629,6 +639,7 @@ where
             secret_injection_store,
             process_lifecycle_store,
             runtime_http_egress,
+            process_port,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -992,6 +1003,27 @@ where
         self
     }
 
+    pub fn with_runtime_process_port<T>(mut self, process_port: Arc<T>) -> Self
+    where
+        T: RuntimeProcessPort + 'static,
+    {
+        self.component_types.runtime_process_port = ProductionComponentType::of::<T>();
+        self.process_port = process_port;
+        self
+    }
+
+    pub fn with_runtime_process_port_dyn(
+        mut self,
+        process_port: Arc<dyn RuntimeProcessPort>,
+    ) -> Self {
+        self.component_types.runtime_process_port = ProductionComponentType::named(
+            "dyn RuntimeProcessPort",
+            ProductionImplementationReadiness::UnverifiedProductionImplementation,
+        );
+        self.process_port = process_port;
+        self
+    }
+
     /// Attaches the host HTTP egress shape required for production runtime
     /// adapters. The service must use staged network-policy handoffs and secret
     /// injection handoffs, not request-local/test policy fallback.
@@ -1290,6 +1322,13 @@ where
                 self.first_party_runtime_covers_declared_capabilities(),
             );
         }
+        if self.first_party_runtime_uses_process_port() {
+            self.push_local_only(
+                &mut issues,
+                ProductionWiringComponent::RuntimeProcessPort,
+                Some(self.component_types.runtime_process_port),
+            );
+        }
 
         self.push_local_only(
             &mut issues,
@@ -1417,12 +1456,13 @@ where
                     ProductionWiringIssueKind::LocalOnlyImplementation,
                     Some(implementation.implementation),
                 ),
-                ProductionImplementationReadiness::ErasedDurableSinkWrapper => self.push_issue(
-                    issues,
-                    component,
-                    ProductionWiringIssueKind::UnverifiedProductionImplementation,
-                    Some(implementation.implementation),
-                ),
+                ProductionImplementationReadiness::UnverifiedProductionImplementation => self
+                    .push_issue(
+                        issues,
+                        component,
+                        ProductionWiringIssueKind::UnverifiedProductionImplementation,
+                        Some(implementation.implementation),
+                    ),
                 ProductionImplementationReadiness::ProductionCandidate => {}
             }
         }
@@ -1621,6 +1661,7 @@ where
                     Arc::clone(runtime),
                     Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
                     Arc::clone(&self.runtime_http_egress),
+                    Arc::clone(&self.process_port),
                 )),
             );
         }
@@ -1785,6 +1826,17 @@ where
             return false;
         }
         declared.all(|descriptor| first_party_runtime.contains_handler(&descriptor.id))
+    }
+
+    fn first_party_runtime_uses_process_port(&self) -> bool {
+        let Some(first_party_runtime) = &self.first_party_runtime else {
+            return false;
+        };
+        self.registry.capabilities().any(|descriptor| {
+            descriptor.runtime == RuntimeKind::FirstParty
+                && descriptor.id.as_str() == crate::SHELL_CAPABILITY_ID
+                && first_party_runtime.contains_handler(&descriptor.id)
+        })
     }
 }
 
@@ -1996,6 +2048,7 @@ struct FirstPartyRuntimeAdapter {
     registry: Arc<FirstPartyCapabilityRegistry>,
     filesystem: Arc<dyn RootFilesystem>,
     runtime_http_egress: SharedRuntimeHttpEgress,
+    process_port: Arc<dyn RuntimeProcessPort>,
 }
 
 impl FirstPartyRuntimeAdapter {
@@ -2003,11 +2056,13 @@ impl FirstPartyRuntimeAdapter {
         registry: Arc<FirstPartyCapabilityRegistry>,
         filesystem: Arc<dyn RootFilesystem>,
         runtime_http_egress: SharedRuntimeHttpEgress,
+        process_port: Arc<dyn RuntimeProcessPort>,
     ) -> Self {
         Self {
             registry,
             filesystem,
             runtime_http_egress,
+            process_port,
         }
     }
 }
@@ -2054,6 +2109,7 @@ where
             mounts: request.mounts,
             filesystem: Arc::clone(&self.filesystem),
             runtime_http_egress: runtime_http_egress(&self.runtime_http_egress),
+            process: Arc::clone(&self.process_port),
             input: request.input,
         }))
         .catch_unwind()

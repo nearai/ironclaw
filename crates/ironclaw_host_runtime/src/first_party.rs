@@ -16,6 +16,8 @@ use ironclaw_host_api::{
 };
 use serde_json::Value;
 
+use crate::RuntimeProcessPort;
+
 /// Already-authorized first-party capability dispatch input.
 ///
 /// This is host-composed first-party surface, so the struct is `non_exhaustive`:
@@ -30,6 +32,7 @@ pub struct FirstPartyCapabilityRequest {
     pub mounts: Option<MountView>,
     pub filesystem: Arc<dyn RootFilesystem>,
     pub runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    pub process: Arc<dyn RuntimeProcessPort>,
     pub input: Value,
 }
 
@@ -49,6 +52,7 @@ impl fmt::Debug for FirstPartyCapabilityRequest {
                     .as_ref()
                     .map(|_| "<runtime http egress>"),
             )
+            .field("process", &"<runtime process port>")
             .field("input", &self.input)
             .finish()
     }

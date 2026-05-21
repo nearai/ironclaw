@@ -6,31 +6,33 @@ use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_adapters::{
-    ProductAdapterError, ProductOutboundEnvelope, ProjectionStream, ProjectionSubscriptionRequest,
-    ProtocolAuthFailure,
+    ProductAdapterError, ProductOutboundEnvelope, ProductWorkflowRejectionKind, ProjectionCursor,
+    ProjectionStream, ProjectionSubscriptionRequest, ProtocolAuthFailure, RedactedString,
 };
 use ironclaw_product_workflow::{
     RebornGetRunStateRequest, RebornResolveGateResponse, RebornServices, RebornServicesApi,
-    RebornServicesErrorCode, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiListThreadsRequest,
-    WebUiResolveGateRequest, WebUiSendMessageRequest,
+    RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
+    WebUiInboundValidationCode, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessages, ContextWindow,
     CreateSummaryArtifactRequest, EnsureThreadRequest, InMemorySessionThreadService,
-    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageStatus,
-    RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    LoadContextMessagesRequest, LoadContextWindowRequest, MessageContent, MessageKind,
+    MessageStatus, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
     SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
     UpdateAssistantDraftRequest,
 };
 use ironclaw_turns::{
-    AcceptedMessageRef, CancelRunRequest, CancelRunResponse, DefaultTurnCoordinator, EventCursor,
-    GateRef, GetRunStateRequest, InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnRequest,
-    ResumeTurnResponse, RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest,
-    SubmitTurnResponse, TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
+    AcceptedMessageRef, AdmissionRejection, AdmissionRejectionReason, CancelRunRequest,
+    CancelRunResponse, DefaultTurnCoordinator, EventCursor, GateRef, GetRunStateRequest,
+    InMemoryTurnStateStore, ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse,
+    RunProfileId, RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+    TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
 };
 use serde_json::json;
 
@@ -60,6 +62,43 @@ fn caller_for_user_with_project(
 
 fn run_id_string() -> String {
     "3d54a1f0-0a7f-4b9c-a350-4258f2fa3e18".to_string()
+}
+
+fn fake_thread_history(owner: &WebUiAuthenticatedCaller, thread_id: &str) -> ThreadHistory {
+    let thread_id = ThreadId::new(thread_id).expect("valid thread id");
+    let scope = ThreadScope {
+        tenant_id: owner.tenant_id.clone(),
+        agent_id: owner.agent_id.clone().expect("test caller has agent"),
+        project_id: owner.project_id.clone(),
+        owner_user_id: Some(owner.user_id.clone()),
+        mission_id: None,
+    };
+    ThreadHistory {
+        thread: SessionThreadRecord {
+            scope: scope.clone(),
+            thread_id: thread_id.clone(),
+            created_by_actor_id: owner.user_id.as_str().to_string(),
+            title: Some("M2 facade contract thread".to_string()),
+            metadata_json: None,
+        },
+        messages: vec![ThreadMessageRecord {
+            message_id: ThreadMessageId::new(),
+            thread_id,
+            sequence: 1,
+            kind: MessageKind::User,
+            status: MessageStatus::Submitted,
+            actor_id: Some(owner.user_id.as_str().to_string()),
+            source_binding_id: Some("webui-src:test".to_string()),
+            reply_target_binding_id: Some("webui-reply:test".to_string()),
+            turn_id: Some("turn-test".to_string()),
+            turn_run_id: Some(run_id_string()),
+            tool_result_ref: None,
+            tool_result_provider_call: None,
+            content: Some("timeline from fake M2 port".to_string()),
+            redaction_ref: None,
+        }],
+        summary_artifacts: vec![],
+    }
 }
 
 fn thread_scope_for(caller: &WebUiAuthenticatedCaller) -> ThreadScope {
@@ -259,6 +298,20 @@ impl ProjectionStream for AuthFailureProjectionStream {
     }
 }
 
+struct StaticErrorProjectionStream {
+    error: ProductAdapterError,
+}
+
+#[async_trait]
+impl ProjectionStream for StaticErrorProjectionStream {
+    async fn drain(
+        &self,
+        _request: ProjectionSubscriptionRequest,
+    ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
+        Err(self.error.clone())
+    }
+}
+
 /// Projection stream that records every `drain` invocation. Used by the
 /// `stream_events` ownership regression to assert that the projection
 /// drain is never reached when the ownership probe fails — if the probe
@@ -271,6 +324,10 @@ struct RecordingProjectionStream {
 impl RecordingProjectionStream {
     fn drain_count(&self) -> usize {
         self.drains.lock().expect("lock").len()
+    }
+
+    fn requests(&self) -> Vec<ProjectionSubscriptionRequest> {
+        self.drains.lock().expect("lock").clone()
     }
 }
 
@@ -430,6 +487,195 @@ impl SessionThreadService for ScopeMismatchThreadStub {
     }
 }
 
+enum ScriptedThreadBehavior {
+    BackendHistory,
+    History(Box<ThreadHistory>),
+    SubmittedReplay { turn_run_id: Option<String> },
+}
+
+struct ScriptedThreadService {
+    behavior: ScriptedThreadBehavior,
+    history_requests: Mutex<Vec<ThreadHistoryRequest>>,
+}
+
+impl ScriptedThreadService {
+    fn backend_history() -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::BackendHistory,
+            history_requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn history(history: ThreadHistory) -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::History(Box::new(history)),
+            history_requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn submitted_replay(turn_run_id: Option<String>) -> Self {
+        Self {
+            behavior: ScriptedThreadBehavior::SubmittedReplay { turn_run_id },
+            history_requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn history_requests(&self) -> Vec<ThreadHistoryRequest> {
+        self.history_requests.lock().expect("lock").clone()
+    }
+}
+
+#[async_trait]
+impl SessionThreadService for ScriptedThreadService {
+    async fn list_thread_history(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<ThreadHistory, SessionThreadError> {
+        self.history_requests
+            .lock()
+            .expect("lock")
+            .push(request.clone());
+        match &self.behavior {
+            ScriptedThreadBehavior::BackendHistory => Err(SessionThreadError::Backend(
+                "backend detail /host/path secret-token".to_string(),
+            )),
+            ScriptedThreadBehavior::History(history) => Ok(history.as_ref().clone()),
+            ScriptedThreadBehavior::SubmittedReplay { .. } => Ok(ThreadHistory {
+                thread: SessionThreadRecord {
+                    scope: request.scope,
+                    thread_id: request.thread_id,
+                    created_by_actor_id: "user-alpha".to_string(),
+                    title: None,
+                    metadata_json: None,
+                },
+                messages: Vec::new(),
+                summary_artifacts: Vec::new(),
+            }),
+        }
+    }
+
+    async fn ensure_thread(
+        &self,
+        _request: EnsureThreadRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        scripted_stub_unreachable("ensure_thread")
+    }
+
+    async fn accept_inbound_message(
+        &self,
+        _request: AcceptInboundMessageRequest,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        scripted_stub_unreachable("accept_inbound_message")
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        match &self.behavior {
+            ScriptedThreadBehavior::SubmittedReplay { turn_run_id } => {
+                Ok(Some(AcceptedInboundMessageReplay {
+                    scope: request.scope,
+                    thread_id: ThreadId::new("thread-alpha").expect("valid thread"),
+                    message_id: ThreadMessageId::new(),
+                    sequence: 1,
+                    status: MessageStatus::Submitted,
+                    actor_id: Some(request.actor_id),
+                    source_binding_id: Some(request.source_binding_id),
+                    reply_target_binding_id: Some("webui-reply:replayed".to_string()),
+                    turn_run_id: turn_run_id.clone(),
+                }))
+            }
+            ScriptedThreadBehavior::BackendHistory | ScriptedThreadBehavior::History(_) => {
+                scripted_stub_unreachable("replay_accepted_inbound_message")
+            }
+        }
+    }
+
+    async fn mark_message_submitted(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _turn_id: String,
+        _turn_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        scripted_stub_unreachable("mark_message_submitted")
+    }
+
+    async fn mark_message_deferred_busy(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        scripted_stub_unreachable("mark_message_deferred_busy")
+    }
+
+    async fn append_assistant_draft(
+        &self,
+        _request: AppendAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        scripted_stub_unreachable("append_assistant_draft")
+    }
+
+    async fn append_tool_result_reference(
+        &self,
+        _request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        scripted_stub_unreachable("append_tool_result_reference")
+    }
+
+    async fn update_assistant_draft(
+        &self,
+        _request: UpdateAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        scripted_stub_unreachable("update_assistant_draft")
+    }
+
+    async fn finalize_assistant_message(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _content: MessageContent,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        scripted_stub_unreachable("finalize_assistant_message")
+    }
+
+    async fn redact_message(
+        &self,
+        _request: RedactMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        scripted_stub_unreachable("redact_message")
+    }
+
+    async fn load_context_window(
+        &self,
+        _request: LoadContextWindowRequest,
+    ) -> Result<ContextWindow, SessionThreadError> {
+        scripted_stub_unreachable("load_context_window")
+    }
+
+    async fn load_context_messages(
+        &self,
+        _request: LoadContextMessagesRequest,
+    ) -> Result<ContextMessages, SessionThreadError> {
+        scripted_stub_unreachable("load_context_messages")
+    }
+
+    async fn create_summary_artifact(
+        &self,
+        _request: CreateSummaryArtifactRequest,
+    ) -> Result<SummaryArtifact, SessionThreadError> {
+        scripted_stub_unreachable("create_summary_artifact")
+    }
+}
+
+fn scripted_stub_unreachable(method: &str) -> ! {
+    panic!("ScriptedThreadService::{method} should not be reached")
+}
+
 async fn create_thread_for(
     services: &RebornServices,
     caller: WebUiAuthenticatedCaller,
@@ -501,6 +747,63 @@ async fn create_thread_metadata_is_serialized_json() {
     );
 }
 
+#[test]
+fn facade_error_taxonomy_serializes_all_stable_wire_names() {
+    let error = RebornServicesError {
+        code: RebornServicesErrorCode::Conflict,
+        kind: RebornServicesErrorKind::Busy,
+        status_code: 409,
+        retryable: false,
+        field: None,
+        validation_code: None,
+    };
+
+    let json = serde_json::to_value(&error).expect("error json");
+
+    assert_eq!(json["code"], "conflict");
+    assert_eq!(json["kind"], "busy");
+    assert_eq!(json["status_code"], 409);
+    assert_eq!(json["retryable"], false);
+
+    let cases = [
+        (RebornServicesErrorKind::Validation, "validation"),
+        (RebornServicesErrorKind::Duplicate, "duplicate"),
+        (RebornServicesErrorKind::Busy, "busy"),
+        (
+            RebornServicesErrorKind::ParticipantDenied,
+            "participant_denied",
+        ),
+        (RebornServicesErrorKind::BlockedApproval, "blocked_approval"),
+        (
+            RebornServicesErrorKind::BlockedAuthentication,
+            "blocked_authentication",
+        ),
+        (RebornServicesErrorKind::BlockedResource, "blocked_resource"),
+        (
+            RebornServicesErrorKind::ReplayUnavailable,
+            "replay_unavailable",
+        ),
+        (
+            RebornServicesErrorKind::TimelineUnavailable,
+            "timeline_unavailable",
+        ),
+        (
+            RebornServicesErrorKind::ServiceUnavailable,
+            "service_unavailable",
+        ),
+        (RebornServicesErrorKind::NotFound, "not_found"),
+        (RebornServicesErrorKind::Conflict, "conflict"),
+        (RebornServicesErrorKind::Internal, "internal"),
+    ];
+    for (kind, expected) in cases {
+        assert_eq!(
+            serde_json::to_value(kind).expect("kind json"),
+            serde_json::json!(expected),
+            "{kind:?} must keep its stable WebUI wire name"
+        );
+    }
+}
+
 #[tokio::test]
 async fn submit_turn_uses_facade_and_thread_history_without_route_store_access() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
@@ -567,6 +870,88 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
 }
 
 #[tokio::test]
+async fn m2_facade_timeline_contract_uses_fake_thread_port_with_authenticated_scope() {
+    let web_caller = caller();
+    let expected_tenant_id = web_caller.tenant_id.clone();
+    let expected_agent_id = web_caller.agent_id.clone().expect("test caller has agent");
+    let expected_project_id = web_caller.project_id.clone();
+    let expected_user_id = web_caller.user_id.clone();
+    let thread_service = Arc::new(ScriptedThreadService::history(fake_thread_history(
+        &web_caller,
+        "thread-alpha",
+    )));
+    let services = RebornServices::new(
+        thread_service.clone(),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let timeline = services
+        .get_timeline(
+            web_caller.clone(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("timeline is served by fake M2 thread port");
+
+    assert_eq!(timeline.thread.thread_id.as_str(), "thread-alpha");
+    assert_eq!(timeline.messages.len(), 1);
+    assert_eq!(
+        timeline.messages[0].content.as_deref(),
+        Some("timeline from fake M2 port")
+    );
+
+    let requests = thread_service.history_requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.thread_id.as_str(), "thread-alpha");
+    assert_eq!(request.scope.tenant_id, expected_tenant_id);
+    assert_eq!(request.scope.agent_id, expected_agent_id);
+    assert_eq!(request.scope.project_id, expected_project_id);
+    assert_eq!(request.scope.owner_user_id, Some(expected_user_id));
+}
+
+#[tokio::test]
+async fn m2_facade_stream_contract_uses_fake_projection_port_with_authenticated_scope() {
+    let web_caller = caller();
+    let event_stream = Arc::new(RecordingProjectionStream::default());
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_event_stream(event_stream.clone());
+    create_thread_for(&services, web_caller.clone(), "thread-alpha").await;
+    let after_cursor = ProjectionCursor::new("cursor-alpha").expect("cursor");
+
+    let response = services
+        .stream_events(
+            web_caller.clone(),
+            RebornStreamEventsRequest {
+                thread_id: "thread-alpha".to_string(),
+                after_cursor: Some(after_cursor.clone()),
+            },
+        )
+        .await
+        .expect("stream is served by fake M2 projection port");
+
+    assert!(response.events.is_empty());
+    let requests = event_stream.requests();
+    assert_eq!(requests.len(), 1);
+    let request = &requests[0];
+    assert_eq!(request.actor.user_id, web_caller.user_id);
+    assert_eq!(request.scope.tenant_id, web_caller.tenant_id);
+    assert_eq!(request.scope.agent_id, web_caller.agent_id);
+    assert_eq!(request.scope.project_id, web_caller.project_id);
+    assert_eq!(request.scope.thread_id.as_str(), "thread-alpha");
+    assert_eq!(
+        request.after_cursor.as_ref().map(ProjectionCursor::as_str),
+        Some(after_cursor.as_str())
+    );
+}
+
+#[tokio::test]
 async fn duplicate_submit_replays_prior_handoff_without_second_submission() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
@@ -596,6 +981,36 @@ async fn duplicate_submit_replays_prior_handoff_without_second_submission() {
         RebornSubmitTurnResponse::AlreadySubmitted { .. }
     ));
     assert_eq!(coordinator.submission_count(), 1);
+}
+
+#[tokio::test]
+async fn submitted_replay_with_missing_or_invalid_run_id_maps_to_replay_unavailable() {
+    for turn_run_id in [None, Some("not-a-uuid".to_string())] {
+        let coordinator = Arc::new(FakeTurnCoordinator::default());
+        let services = RebornServices::new(
+            Arc::new(ScriptedThreadService::submitted_replay(turn_run_id)),
+            coordinator.clone(),
+        );
+
+        let err = services
+            .submit_turn(
+                caller(),
+                serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                    "client_action_id": "send-replay-corrupt",
+                    "thread_id": "thread-alpha",
+                    "content": "hello from webui"
+                }))
+                .expect("request"),
+            )
+            .await
+            .expect_err("corrupt submitted replay cannot be reconstructed");
+
+        assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+        assert_eq!(err.kind, RebornServicesErrorKind::ReplayUnavailable);
+        assert_eq!(err.status_code, 409);
+        assert!(!err.retryable);
+        assert_eq!(coordinator.submission_count(), 0);
+    }
 }
 
 #[tokio::test]
@@ -785,7 +1200,7 @@ async fn same_thread_retry_reuses_legacy_accepted_message_without_creating_dupli
 }
 
 #[tokio::test]
-async fn duplicate_submit_rejects_cross_thread_reuse_of_same_client_action() {
+async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(threads, coordinator.clone());
@@ -819,6 +1234,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_of_same_client_action() {
         .expect_err("cross-thread duplicate is rejected");
 
     assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::Duplicate);
     assert_eq!(err.status_code, 409);
     assert_eq!(coordinator.submission_count(), 1);
 
@@ -1040,6 +1456,7 @@ async fn duplicate_submit_without_project_id_still_rejects_cross_thread_reuse() 
         .expect_err("cross-thread duplicate is rejected without a project binding");
 
     assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::Duplicate);
     assert_eq!(err.status_code, 409);
     assert_eq!(coordinator.submission_count(), 1);
 }
@@ -1112,6 +1529,7 @@ async fn validation_errors_are_stable_and_sanitized() {
         .expect_err("missing content rejected");
 
     assert_eq!(err.code, RebornServicesErrorCode::InvalidRequest);
+    assert_eq!(err.kind, RebornServicesErrorKind::Validation);
     assert_eq!(err.status_code, 400);
     assert_eq!(err.field.as_deref(), Some("content"));
     assert_eq!(
@@ -1121,6 +1539,37 @@ async fn validation_errors_are_stable_and_sanitized() {
     let rendered = serde_json::to_string(&err).expect("json");
     assert!(!rendered.contains("backend"));
     assert!(!rendered.contains("TurnCoordinator"));
+}
+
+#[tokio::test]
+async fn turn_admission_rejected_maps_to_busy_taxonomy() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::with_submit_error(
+            TurnError::AdmissionRejected(AdmissionRejection::new(
+                AdmissionRejectionReason::TenantLimit,
+            )),
+        )),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-rate-limited",
+                "thread_id": "thread-alpha",
+                "content": "hello from webui"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("admission rejection is a stable busy/rate-limited error");
+
+    assert_eq!(err.code, RebornServicesErrorCode::RateLimited);
+    assert_eq!(err.kind, RebornServicesErrorKind::Busy);
+    assert_eq!(err.status_code, 429);
+    assert!(err.retryable);
 }
 
 #[tokio::test]
@@ -1147,7 +1596,106 @@ async fn turn_unauthorized_maps_to_forbidden() {
         .expect_err("turn unauthorized is forbidden");
 
     assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
+    assert_eq!(err.kind, RebornServicesErrorKind::ParticipantDenied);
     assert_eq!(err.status_code, 403);
+}
+
+#[tokio::test]
+async fn turn_error_categories_map_to_facade_taxonomy() {
+    let cases = [
+        (
+            "conflict",
+            TurnError::Conflict {
+                reason: "active run changed".to_string(),
+            },
+            RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::Conflict,
+            409,
+            false,
+        ),
+        (
+            "scope-not-found",
+            TurnError::ScopeNotFound,
+            RebornServicesErrorCode::NotFound,
+            RebornServicesErrorKind::NotFound,
+            404,
+            false,
+        ),
+        (
+            "invalid-request",
+            TurnError::InvalidRequest {
+                reason: "invalid run profile".to_string(),
+            },
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+            400,
+            false,
+        ),
+        (
+            "unavailable",
+            TurnError::Unavailable {
+                reason: "turn store unavailable".to_string(),
+            },
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ServiceUnavailable,
+            503,
+            true,
+        ),
+    ];
+
+    for (name, turn_error, expected_code, expected_kind, expected_status, expected_retryable) in
+        cases
+    {
+        let services = RebornServices::new(
+            Arc::new(InMemorySessionThreadService::default()),
+            Arc::new(FakeTurnCoordinator::with_submit_error(turn_error)),
+        );
+        let thread_id = format!("thread-{name}");
+        create_thread_for(&services, caller(), &thread_id).await;
+
+        let err = services
+            .submit_turn(
+                caller(),
+                serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                    "client_action_id": format!("send-{name}"),
+                    "thread_id": thread_id,
+                    "content": "hello from webui"
+                }))
+                .expect("request"),
+            )
+            .await
+            .expect_err("turn error maps to stable facade taxonomy");
+
+        assert_eq!(err.code, expected_code, "{name}");
+        assert_eq!(err.kind, expected_kind, "{name}");
+        assert_eq!(err.status_code, expected_status, "{name}");
+        assert_eq!(err.retryable, expected_retryable, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn stream_events_without_projection_stream_maps_to_replay_unavailable_taxonomy() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .stream_events(
+            caller(),
+            RebornStreamEventsRequest {
+                thread_id: "thread-alpha".to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect_err("missing projection stream is replay unavailable");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ReplayUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert!(!err.retryable);
 }
 
 #[tokio::test]
@@ -1174,7 +1722,185 @@ async fn adapter_authentication_maps_to_unauthenticated() {
         .expect_err("adapter auth failure is unauthenticated");
 
     assert_eq!(err.code, RebornServicesErrorCode::Unauthenticated);
+    assert_eq!(err.kind, RebornServicesErrorKind::ParticipantDenied);
     assert_eq!(err.status_code, 401);
+}
+
+#[tokio::test]
+async fn projection_transient_maps_to_replay_unavailable_taxonomy() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_event_stream(Arc::new(StaticErrorProjectionStream {
+        error: ProductAdapterError::WorkflowTransient {
+            reason: RedactedString::new("provider stack trace with /host/path and secret-token"),
+        },
+    }));
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .stream_events(
+            caller(),
+            RebornStreamEventsRequest {
+                thread_id: "thread-alpha".to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect_err("projection transient is replay unavailable");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ReplayUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert!(err.retryable);
+    let rendered = format!("{err:?} {}", serde_json::to_string(&err).expect("json"));
+    assert!(!rendered.contains("secret-token"));
+    assert!(!rendered.contains("/host/path"));
+    assert!(!rendered.contains("provider stack trace"));
+}
+
+#[tokio::test]
+async fn projection_egress_denied_maps_to_blocked_resource_taxonomy() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    )
+    .with_event_stream(Arc::new(StaticErrorProjectionStream {
+        error: ProductAdapterError::EgressDenied {
+            reason: RedactedString::new("denied api key secret-token"),
+        },
+    }));
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .stream_events(
+            caller(),
+            RebornStreamEventsRequest {
+                thread_id: "thread-alpha".to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect_err("blocked resource is stable taxonomy");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedResource);
+    assert_eq!(err.status_code, 403);
+    let rendered = format!("{err:?} {}", serde_json::to_string(&err).expect("json"));
+    assert!(!rendered.contains("secret-token"));
+}
+
+#[tokio::test]
+async fn workflow_rejection_kinds_map_to_facade_taxonomy() {
+    let cases = [
+        (
+            ProductWorkflowRejectionKind::ThreadBusy,
+            409,
+            RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::Busy,
+        ),
+        (
+            ProductWorkflowRejectionKind::AdmissionRejected,
+            429,
+            RebornServicesErrorCode::RateLimited,
+            RebornServicesErrorKind::Busy,
+        ),
+        (
+            ProductWorkflowRejectionKind::ScopeNotFound,
+            404,
+            RebornServicesErrorCode::NotFound,
+            RebornServicesErrorKind::NotFound,
+        ),
+        (
+            ProductWorkflowRejectionKind::Unauthorized,
+            403,
+            RebornServicesErrorCode::Forbidden,
+            RebornServicesErrorKind::ParticipantDenied,
+        ),
+        (
+            ProductWorkflowRejectionKind::InvalidRequest,
+            400,
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+        ),
+        (
+            ProductWorkflowRejectionKind::Unavailable,
+            503,
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ReplayUnavailable,
+        ),
+        (
+            ProductWorkflowRejectionKind::Conflict,
+            409,
+            RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::Conflict,
+        ),
+    ];
+
+    for (workflow_kind, status_code, expected_code, expected_kind) in cases {
+        let services = RebornServices::new(
+            Arc::new(InMemorySessionThreadService::default()),
+            Arc::new(FakeTurnCoordinator::default()),
+        )
+        .with_event_stream(Arc::new(StaticErrorProjectionStream {
+            error: ProductAdapterError::WorkflowRejected {
+                kind: workflow_kind,
+                status_code,
+                retryable: false,
+                reason: RedactedString::new("internal workflow detail secret-token"),
+            },
+        }));
+        create_thread_for(&services, caller(), "thread-alpha").await;
+
+        let err = services
+            .stream_events(
+                caller(),
+                RebornStreamEventsRequest {
+                    thread_id: "thread-alpha".to_string(),
+                    after_cursor: None,
+                },
+            )
+            .await
+            .expect_err("workflow rejection maps to stable facade taxonomy");
+
+        assert_eq!(err.code, expected_code);
+        assert_eq!(err.kind, expected_kind);
+        assert_eq!(err.status_code, status_code);
+        assert!(
+            !serde_json::to_string(&err)
+                .expect("json")
+                .contains("secret-token")
+        );
+    }
+}
+
+#[tokio::test]
+async fn timeline_backend_failure_maps_to_timeline_unavailable_taxonomy() {
+    let services = RebornServices::new(
+        Arc::new(ScriptedThreadService::backend_history()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let err = services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("timeline backend failure is stable unavailable taxonomy");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::TimelineUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert!(err.retryable);
+    let rendered = format!("{err:?} {}", serde_json::to_string(&err).expect("json"));
+    assert!(!rendered.contains("secret-token"));
+    assert!(!rendered.contains("/host/path"));
+    assert!(!rendered.contains("backend detail"));
 }
 
 #[tokio::test]
@@ -1266,6 +1992,7 @@ async fn credential_gate_resolution_returns_sanitized_stable_error_until_gate_po
         .expect_err("credential resolution is not wired yet");
 
     assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedAuthentication);
     assert_eq!(err.status_code, 503);
     assert_eq!(coordinator.resumption_count(), 0);
     let rendered = format!("{err:?} {}", serde_json::to_string(&err).expect("json"));
@@ -1542,6 +2269,7 @@ async fn denied_gate_resolution_with_stale_gate_ref_returns_conflict() {
         .expect_err("stale gate_ref must produce Conflict, not silent cancel");
 
     assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval);
     assert_eq!(err.status_code, 409);
     assert_eq!(
         coordinator.cancellation_count(),
@@ -1579,6 +2307,7 @@ async fn approved_gate_resolution_with_persistent_flag_is_rejected() {
         .expect_err("persistent approval must be rejected");
 
     assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::BlockedApproval);
     assert_eq!(err.status_code, 503);
     assert_eq!(
         coordinator.resumption_count(),

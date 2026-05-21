@@ -4384,6 +4384,7 @@ dependencies = [
  "ironclaw_turns",
  "ironclaw_wasm",
  "jsonschema",
+ "libc",
  "libsql",
  "regex",
  "rust_decimal",
@@ -4445,6 +4446,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_memory",

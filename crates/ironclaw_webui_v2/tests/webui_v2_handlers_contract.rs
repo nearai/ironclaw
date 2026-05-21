@@ -25,9 +25,9 @@ use ironclaw_product_workflow::{
     ExtensionName, RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
     RebornResumeGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornSetupExtensionResponse, RebornSetupExtensionStatus, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    RebornServicesErrorKind, RebornSetupExtensionResponse, RebornSetupExtensionStatus,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiListThreadsRequest, WebUiResolveGateRequest,
     WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
@@ -218,6 +218,7 @@ impl RebornServicesApi for StubServices {
         // test that forgets to program this path can't quietly pass.
         Err(RebornServicesError {
             code: RebornServicesErrorCode::Internal,
+            kind: RebornServicesErrorKind::Internal,
             status_code: 500,
             retryable: false,
             field: None,
@@ -466,6 +467,7 @@ async fn create_thread_error_maps_to_http_status() {
     let services = Arc::new(StubServices::default());
     services.fail_create_thread(RebornServicesError {
         code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         field: None,
@@ -488,6 +490,7 @@ async fn create_thread_error_maps_to_http_status() {
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     let body = read_json(response).await;
     assert_eq!(body["error"], "forbidden");
+    assert_eq!(body["kind"], "participant_denied");
     assert_eq!(body["retryable"], false);
 }
 
@@ -823,6 +826,7 @@ async fn stream_events_caps_concurrent_streams_per_caller() {
     );
     let body = read_json(third).await;
     assert_eq!(body["error"], "rate_limited");
+    assert_eq!(body["kind"], "busy");
     assert_eq!(body["retryable"], true);
 
     // Release the first stream — slot returns to the pool.
@@ -1201,10 +1205,11 @@ async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
     let services = Arc::new(StubServices::default());
     services.enqueue_stream_events(Err(RebornServicesError {
         code: RebornServicesErrorCode::Forbidden,
+        kind: RebornServicesErrorKind::ParticipantDenied,
         status_code: 403,
         retryable: false,
         // The handler must NOT echo these into the SSE payload — the
-        // redacted shape carries only `error` + `retryable`.
+        // redacted shape carries only `error`, `kind`, and `retryable`.
         field: Some("thread_id".into()),
         validation_code: None,
     }));
@@ -1253,6 +1258,10 @@ async fn stream_events_facade_error_emits_redacted_error_event_and_closes() {
     assert_eq!(
         payload["error"], "forbidden",
         "error event must carry the redacted error code"
+    );
+    assert_eq!(
+        payload["kind"], "participant_denied",
+        "error event must carry the redacted error kind"
     );
     assert_eq!(
         payload["retryable"], false,
@@ -1332,6 +1341,7 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
     // close path before lifetime expiry.
     services.enqueue_stream_events(Err(RebornServicesError {
         code: RebornServicesErrorCode::Unavailable,
+        kind: RebornServicesErrorKind::ServiceUnavailable,
         status_code: 503,
         retryable: true,
         field: None,
