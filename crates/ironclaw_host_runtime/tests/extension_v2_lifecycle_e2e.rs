@@ -40,6 +40,7 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
     let mut lifecycle = ExtensionLifecycleService::new(ExtensionRegistry::new());
     lifecycle.install(package).await.unwrap();
     let extension_id = ExtensionId::new("script").unwrap();
+    let capability_id = CapabilityId::new("script.echo").unwrap();
     assert!(lifecycle.is_enabled(&extension_id));
     lifecycle.disable(&extension_id).await.unwrap();
     assert!(!lifecycle.is_enabled(&extension_id));
@@ -49,9 +50,7 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
     let hot_catalog = publish_hot_capability_catalog(&fs, lifecycle.registry())
         .await
         .unwrap();
-    let hot_record = hot_catalog
-        .get(&CapabilityId::new("script.echo").unwrap())
-        .unwrap();
+    let hot_record = hot_catalog.get(&capability_id).unwrap();
     assert_eq!(
         hot_record.descriptor.parameters_schema,
         json!({"type":"object","properties":{"message":{"type":"string"}},"required":["message"]})
@@ -86,9 +85,16 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
         RuntimeKind::Script,
         json!({"message":"script ok"}),
     ));
-    let dispatcher =
-        RuntimeDispatcher::from_arcs(Arc::new(discovered), Arc::new(fs), Arc::clone(&governor))
-            .with_runtime_adapter_arc(RuntimeKind::Script, Arc::clone(&adapter));
+    // Dispatcher is built from the lifecycle-installed registry, not the
+    // pre-install discovery snapshot, so this proves the registry the
+    // lifecycle service actually owns is dispatch-ready.
+    let fs_arc = Arc::new(fs);
+    let dispatcher = RuntimeDispatcher::from_arcs(
+        Arc::new(lifecycle.registry().clone()),
+        Arc::clone(&fs_arc),
+        Arc::clone(&governor),
+    )
+    .with_runtime_adapter_arc(RuntimeKind::Script, Arc::clone(&adapter));
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
     let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
     let reservation_id = reservation.id;
@@ -96,7 +102,7 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
 
     let result = dispatch_port
         .dispatch_json(ironclaw_host_api::CapabilityDispatchRequest {
-            capability_id: CapabilityId::new("script.echo").unwrap(),
+            capability_id: capability_id.clone(),
             scope: scope.clone(),
             estimate: estimate.clone(),
             mounts: None,
@@ -115,16 +121,22 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
     let requests = adapter.requests();
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].provider, extension_id);
-    assert_eq!(
-        requests[0].capability_id,
-        CapabilityId::new("script.echo").unwrap()
-    );
+    assert_eq!(requests[0].capability_id, capability_id);
     assert_eq!(requests[0].runtime, RuntimeKind::Script);
     assert_eq!(requests[0].scope, scope);
     assert_eq!(requests[0].estimate, estimate);
     assert_eq!(requests[0].mounts, None);
     assert_eq!(requests[0].resource_reservation_id, Some(reservation_id));
     assert_eq!(requests[0].input, json!({"message":"hello"}));
+
+    // Close the readiness chain: remove the package and confirm a fresh
+    // catalog publication no longer projects its capability.
+    lifecycle.remove(&extension_id).await.unwrap();
+    assert!(!lifecycle.is_enabled(&extension_id));
+    let after_remove = publish_hot_capability_catalog(fs_arc.as_ref(), lifecycle.registry())
+        .await
+        .unwrap();
+    assert!(after_remove.get(&capability_id).is_none());
 }
 
 #[tokio::test]
@@ -166,13 +178,14 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_wasm
         .unwrap()
         .clone();
 
+    let extension_id = ExtensionId::new("wasm-echo").unwrap();
+    let capability_id = CapabilityId::new("wasm-echo.echo").unwrap();
     let mut lifecycle = ExtensionLifecycleService::new(ExtensionRegistry::new());
     lifecycle.install(package).await.unwrap();
 
     let hot_catalog = publish_hot_capability_catalog(&fs, lifecycle.registry())
         .await
         .unwrap();
-    let capability_id = CapabilityId::new("wasm-echo.echo").unwrap();
     let hot_record = hot_catalog.get(&capability_id).unwrap();
     assert_eq!(hot_record.descriptor.runtime, RuntimeKind::Wasm);
     assert_eq!(
@@ -206,9 +219,13 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_wasm
         RuntimeKind::Wasm,
         json!({"message":"wasm ok"}),
     ));
-    let dispatcher =
-        RuntimeDispatcher::from_arcs(Arc::new(discovered), Arc::new(fs), Arc::clone(&governor))
-            .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(&adapter));
+    let fs_arc = Arc::new(fs);
+    let dispatcher = RuntimeDispatcher::from_arcs(
+        Arc::new(lifecycle.registry().clone()),
+        Arc::clone(&fs_arc),
+        Arc::clone(&governor),
+    )
+    .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(&adapter));
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
     let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
     let reservation_id = reservation.id;
@@ -231,9 +248,16 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_wasm
 
     let requests = adapter.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].provider, ExtensionId::new("wasm-echo").unwrap());
+    assert_eq!(requests[0].provider, extension_id);
     assert_eq!(requests[0].capability_id, capability_id);
     assert_eq!(requests[0].runtime, RuntimeKind::Wasm);
+
+    lifecycle.remove(&extension_id).await.unwrap();
+    assert!(!lifecycle.is_enabled(&extension_id));
+    let after_remove = publish_hot_capability_catalog(fs_arc.as_ref(), lifecycle.registry())
+        .await
+        .unwrap();
+    assert!(after_remove.get(&capability_id).is_none());
 }
 
 #[tokio::test]
@@ -250,13 +274,14 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_mcp_
         .unwrap()
         .clone();
 
+    let extension_id = ExtensionId::new("mcp-echo").unwrap();
+    let capability_id = CapabilityId::new("mcp-echo.echo").unwrap();
     let mut lifecycle = ExtensionLifecycleService::new(ExtensionRegistry::new());
     lifecycle.install(package).await.unwrap();
 
     let hot_catalog = publish_hot_capability_catalog(&fs, lifecycle.registry())
         .await
         .unwrap();
-    let capability_id = CapabilityId::new("mcp-echo.echo").unwrap();
     let hot_record = hot_catalog.get(&capability_id).unwrap();
     assert_eq!(hot_record.descriptor.runtime, RuntimeKind::Mcp);
     assert_eq!(
@@ -292,9 +317,13 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_mcp_
         RuntimeKind::Mcp,
         json!({"message":"mcp ok"}),
     ));
-    let dispatcher =
-        RuntimeDispatcher::from_arcs(Arc::new(discovered), Arc::new(fs), Arc::clone(&governor))
-            .with_runtime_adapter_arc(RuntimeKind::Mcp, Arc::clone(&adapter));
+    let fs_arc = Arc::new(fs);
+    let dispatcher = RuntimeDispatcher::from_arcs(
+        Arc::new(lifecycle.registry().clone()),
+        Arc::clone(&fs_arc),
+        Arc::clone(&governor),
+    )
+    .with_runtime_adapter_arc(RuntimeKind::Mcp, Arc::clone(&adapter));
     let dispatch_port: &dyn CapabilityDispatcher = &dispatcher;
     let reservation = governor.reserve(scope.clone(), estimate.clone()).unwrap();
     let reservation_id = reservation.id;
@@ -317,49 +346,16 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_mcp_
 
     let requests = adapter.requests();
     assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].provider, ExtensionId::new("mcp-echo").unwrap());
+    assert_eq!(requests[0].provider, extension_id);
     assert_eq!(requests[0].capability_id, capability_id);
     assert_eq!(requests[0].runtime, RuntimeKind::Mcp);
-}
-
-#[tokio::test]
-async fn extension_v2_lifecycle_remove_reflects_in_hot_capability_catalog() {
-    let (_storage, fs) = mounted_extension_fs("script", "script", SCRIPT_MANIFEST);
-    let discovered = discover_extensions_with_default_host_api_contracts(
-        &fs,
-        &VirtualPath::new("/system/extensions").unwrap(),
-    )
-    .await
-    .unwrap();
-    let extension_id = ExtensionId::new("script").unwrap();
-    let capability_id = CapabilityId::new("script.echo").unwrap();
-    let package = discovered.get_extension(&extension_id).unwrap().clone();
-
-    let mut lifecycle = ExtensionLifecycleService::new(ExtensionRegistry::new());
-    lifecycle.install(package).await.unwrap();
-
-    let before = publish_hot_capability_catalog(&fs, lifecycle.registry())
-        .await
-        .unwrap();
-    assert!(
-        before.get(&capability_id).is_some(),
-        "capability missing from hot catalog after install"
-    );
 
     lifecycle.remove(&extension_id).await.unwrap();
-    assert!(
-        !lifecycle.is_enabled(&extension_id),
-        "removed extension still reports enabled"
-    );
-
-    let after = publish_hot_capability_catalog(&fs, lifecycle.registry())
+    assert!(!lifecycle.is_enabled(&extension_id));
+    let after_remove = publish_hot_capability_catalog(fs_arc.as_ref(), lifecycle.registry())
         .await
         .unwrap();
-    assert!(
-        after.get(&capability_id).is_none(),
-        "capability still present in hot catalog after remove"
-    );
-    assert!(after.capabilities.is_empty());
+    assert!(after_remove.get(&capability_id).is_none());
 }
 
 #[derive(Clone)]

@@ -57,7 +57,7 @@ For every capability the package declares, the following must hold at the manife
 
 4. **Runtime lane is declared and permitted for the manifest source.** `[runtime] kind` resolves to one of `wasm`, `script`, `mcp`, `first_party`, `system`. `first_party` and `system` are only permitted when `ManifestSource::HostBundled`; any other source declaring them fails at parse with `RuntimeForbiddenForSource`.
 
-5. **Capability appears in the hot catalog after install.** Calling `publish_hot_capability_catalog(&fs, lifecycle.registry())` after `install` returns a `HotCapabilityRecord` keyed by the capability's `CapabilityId`, with `parameters_schema` replaced by the resolved input schema and `prompt_doc` populated for model-visible capabilities.
+5. **Model-visible capabilities appear in the hot catalog after install.** Calling `publish_hot_capability_catalog(&fs, lifecycle.registry())` after `install` returns a `HotCapabilityRecord` keyed by the capability's `CapabilityId` for every capability declared with `visibility = "model"`, with `parameters_schema` replaced by the resolved input schema and `prompt_doc` populated. `host_internal` and `api` capabilities are validated by manifest parsing but are deliberately not projected into the hot catalog — see `crates/ironclaw_host_runtime/src/capability_catalog.rs::publish_package_capabilities`.
 
 6. **Invocation routes through the host-runtime dispatch chain.** A `CapabilityDispatcher::dispatch_json` call with the capability's `CapabilityId` reaches a `RuntimeAdapter` registered for the capability's declared `RuntimeKind`, carrying the package's `ExtensionId` as the dispatched provider.
 
@@ -148,8 +148,8 @@ A package fails this gate the moment any one of the above is reachable from its 
 
 A package claiming readiness must have, at minimum:
 
-- a unit test that parses its manifest against `ExtensionManifestV2::parse_with_host_api_contracts`;
-- an integration test that exercises `discover → install → publish → dispatch → remove → publish` against a `LocalFilesystem`-mounted package fixture, with `dispatch_json` reaching a recorded `RuntimeAdapter` for its declared lane;
+- a unit test that parses its manifest through the production discovery entry point — `ExtensionManifestV2::parse_with_optional_host_api_contracts` (with the default `HostApiContractRegistry`) or via `ExtensionDiscovery::discover_with_manifest_contracts`. `parse_with_host_api_contracts` and the bare `parse` may be used for supplemental host-API or v1-envelope validation but are not the readiness evidence gate — a package can pass them with shape combinations that production discovery rejects;
+- an integration test, per declared runtime lane, that exercises the full chain `discover → install → publish → dispatch → remove → publish` against a `LocalFilesystem`-mounted package fixture, with the dispatcher built from `lifecycle.registry()` (not the pre-install discovery registry) and `dispatch_json` reaching a recorded `RuntimeAdapter` for that lane. The post-remove publication must show the package's capabilities absent from the hot catalog;
 - a negative test for at least one of §7's failure modes that is reachable from its manifest (most commonly missing schema or missing prompt doc).
 
 The canonical reference fixture for the dispatch chain lives at:
