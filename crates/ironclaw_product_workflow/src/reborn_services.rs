@@ -199,8 +199,9 @@ impl RebornServicesApi for RebornServices {
         .await?
         {
             if replay.thread_id != scope.thread_id {
-                return Err(RebornServicesError::from_status(
+                return Err(RebornServicesError::from_status_kind(
                     RebornServicesErrorCode::Conflict,
+                    RebornServicesErrorKind::Duplicate,
                     409,
                     false,
                 ));

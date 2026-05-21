@@ -747,7 +747,7 @@ async fn create_thread_metadata_is_serialized_json() {
 }
 
 #[test]
-fn facade_error_taxonomy_serializes_stable_wire_names() {
+fn facade_error_taxonomy_serializes_all_stable_wire_names() {
     let error = RebornServicesError {
         code: RebornServicesErrorCode::Conflict,
         kind: RebornServicesErrorKind::Busy,
@@ -763,6 +763,44 @@ fn facade_error_taxonomy_serializes_stable_wire_names() {
     assert_eq!(json["kind"], "busy");
     assert_eq!(json["status_code"], 409);
     assert_eq!(json["retryable"], false);
+
+    let cases = [
+        (RebornServicesErrorKind::Validation, "validation"),
+        (RebornServicesErrorKind::Duplicate, "duplicate"),
+        (RebornServicesErrorKind::Busy, "busy"),
+        (
+            RebornServicesErrorKind::ParticipantDenied,
+            "participant_denied",
+        ),
+        (RebornServicesErrorKind::BlockedApproval, "blocked_approval"),
+        (
+            RebornServicesErrorKind::BlockedAuthentication,
+            "blocked_authentication",
+        ),
+        (RebornServicesErrorKind::BlockedResource, "blocked_resource"),
+        (
+            RebornServicesErrorKind::ReplayUnavailable,
+            "replay_unavailable",
+        ),
+        (
+            RebornServicesErrorKind::TimelineUnavailable,
+            "timeline_unavailable",
+        ),
+        (
+            RebornServicesErrorKind::ServiceUnavailable,
+            "service_unavailable",
+        ),
+        (RebornServicesErrorKind::NotFound, "not_found"),
+        (RebornServicesErrorKind::Conflict, "conflict"),
+        (RebornServicesErrorKind::Internal, "internal"),
+    ];
+    for (kind, expected) in cases {
+        assert_eq!(
+            serde_json::to_value(kind).expect("kind json"),
+            serde_json::json!(expected),
+            "{kind:?} must keep its stable WebUI wire name"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1161,7 +1199,7 @@ async fn same_thread_retry_reuses_legacy_accepted_message_without_creating_dupli
 }
 
 #[tokio::test]
-async fn duplicate_submit_rejects_cross_thread_reuse_of_same_client_action() {
+async fn duplicate_submit_rejects_cross_thread_reuse_maps_to_duplicate_kind() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let services = RebornServices::new(threads, coordinator.clone());
@@ -1195,6 +1233,7 @@ async fn duplicate_submit_rejects_cross_thread_reuse_of_same_client_action() {
         .expect_err("cross-thread duplicate is rejected");
 
     assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::Duplicate);
     assert_eq!(err.status_code, 409);
     assert_eq!(coordinator.submission_count(), 1);
 
@@ -1416,6 +1455,7 @@ async fn duplicate_submit_without_project_id_still_rejects_cross_thread_reuse() 
         .expect_err("cross-thread duplicate is rejected without a project binding");
 
     assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+    assert_eq!(err.kind, RebornServicesErrorKind::Duplicate);
     assert_eq!(err.status_code, 409);
     assert_eq!(coordinator.submission_count(), 1);
 }
