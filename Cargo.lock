@@ -4742,16 +4742,21 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
+ "chrono",
  "http 1.4.0",
  "ironclaw_host_api",
  "ironclaw_reborn_composition",
+ "jsonwebtoken",
+ "parking_lot",
  "reqwest",
  "secrecy",
+ "serde",
  "serde_json",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

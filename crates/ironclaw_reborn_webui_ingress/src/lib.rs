@@ -21,6 +21,18 @@
 //! - No v1 dependency: this crate carries no `src/` import and never
 //!   reads v1 secrets / settings / DB.
 
+mod oidc;
+mod session;
+
+pub use oidc::{
+    AudienceClaim, ClaimToUserIdFn, IdTokenClaims, OidcAuthenticator, OidcAuthenticatorConfig,
+    OidcAuthenticatorError,
+};
+pub use session::{
+    InMemorySessionStore, SessionAuthenticator, SessionRecord, SessionStore, SessionStoreError,
+    SessionTokenSecret, unwrap_session_token, wrap_session_token,
+};
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
