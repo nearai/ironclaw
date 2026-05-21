@@ -1,6 +1,9 @@
 use ironclaw_extensions::{MANIFEST_SCHEMA_VERSION, ManifestSource};
 use ironclaw_host_api::HostPortCatalog;
-use ironclaw_product_adapter_registry::{ExtensionManifestRecord, ManifestHash, RegistryError};
+use ironclaw_product_adapter_registry::{
+    ExtensionManifestRecord, ManifestHash, RegistryError, parse_product_adapter_manifest_record,
+    product_adapter_sections,
+};
 use ironclaw_product_adapters::{AuthRequirement, ProductCapabilityFlag, ProductSurfaceKind};
 
 fn manifest(extra: &str) -> String {
@@ -45,7 +48,7 @@ credential_handle = "telegram_bot_token"
 }
 
 fn parse(raw: &str) -> Result<ExtensionManifestRecord, RegistryError> {
-    ExtensionManifestRecord::from_toml(
+    parse_product_adapter_manifest_record(
         raw,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
@@ -58,8 +61,9 @@ fn parses_product_adapter_host_api_section_from_extension_manifest_v2() {
     let record = parse(&manifest("")).unwrap();
 
     assert_eq!(record.extension_id().as_str(), "telegram-v2");
-    assert_eq!(record.product_adapters().len(), 1);
-    let adapter = &record.product_adapters()[0];
+    let adapters = product_adapter_sections(&record).unwrap();
+    assert_eq!(adapters.len(), 1);
+    let adapter = &adapters[0];
     assert_eq!(adapter.adapter_id().as_str(), "telegram-v2/inbound");
     assert_eq!(adapter.surface_kind(), ProductSurfaceKind::ExternalChannel);
     assert!(matches!(

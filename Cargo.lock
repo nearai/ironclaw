@@ -4274,6 +4274,7 @@ name = "ironclaw_extensions"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_trust",
@@ -4540,7 +4541,6 @@ dependencies = [
 name = "ironclaw_product_adapter_registry"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "chrono",
  "ironclaw_extensions",
  "ironclaw_host_api",
