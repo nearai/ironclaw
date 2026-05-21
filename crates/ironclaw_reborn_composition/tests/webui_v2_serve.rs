@@ -207,17 +207,26 @@ impl RebornServicesApi for StubServices {
 
 // ─── harness ──────────────────────────────────────────────────────────
 
+const AGENT: &str = "agent-default";
+const PROJECT: &str = "project-default";
+
 fn build_app() -> (axum::Router, Arc<StubServices>) {
     let services = Arc::new(StubServices::default());
     let bundle = RebornWebuiBundle {
         api: services.clone(),
         readiness: RebornReadiness::disabled(),
     };
+    // Match the host-installation pattern the CLI's `serve` command
+    // uses: stamp trusted default agent_id / project_id onto the auth
+    // layer. Without this, every authenticated v2 request would 400
+    // on the downstream facade.
     let config = WebuiServeConfig::new(
         TenantId::new(TENANT).expect("tenant"),
         Arc::new(OnlyValidToken),
         vec![HeaderValue::from_static("http://localhost:1234")],
-    );
+    )
+    .with_default_agent_id(AgentId::new(AGENT).expect("agent"))
+    .with_default_project_id(ProjectId::new(PROJECT).expect("project"));
     let app = webui_v2_app(bundle, config).expect("webui v2 app");
     (app, services)
 }
@@ -252,6 +261,21 @@ async fn bearer_happy_path_dispatches_to_facade_with_host_tenant() {
     assert_eq!(calls.len(), 1, "facade reached exactly once");
     assert_eq!(calls[0].tenant_id.as_str(), TENANT);
     assert_eq!(calls[0].user_id.as_str(), USER);
+    // Regression: caller MUST carry the trusted default agent_id and
+    // project_id stamped by `WebuiServeConfig::with_default_agent_id`
+    // / `with_default_project_id`. Without those, the downstream
+    // facade rejects every mutation/read with 400 InvalidRequest
+    // because it cannot build `ThreadScope`.
+    assert_eq!(
+        calls[0].agent_id.as_ref().map(|a| a.as_str()),
+        Some(AGENT),
+        "auth middleware must stamp trusted default agent_id onto the caller",
+    );
+    assert_eq!(
+        calls[0].project_id.as_ref().map(|p| p.as_str()),
+        Some(PROJECT),
+        "auth middleware must stamp trusted default project_id onto the caller",
+    );
 }
 
 #[tokio::test]

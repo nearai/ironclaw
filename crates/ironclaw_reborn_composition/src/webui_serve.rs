@@ -42,7 +42,7 @@ use axum::{
     middleware::{self, Next},
     response::{IntoResponse, Response},
 };
-use ironclaw_host_api::{TenantId, UserId};
+use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_webui_v2::{WebUiV2State, webui_v2_router};
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::{AllowHeaders, CorsLayer};
@@ -130,6 +130,20 @@ pub struct WebuiServeConfig {
     /// the same-origin check pass for a forged Origin. Defaults to
     /// `None` (fall back to Host-header comparison + allowlist).
     pub(crate) canonical_host: Option<String>,
+    /// Trusted default agent id stamped onto every
+    /// [`WebUiAuthenticatedCaller`]. The browser body cannot influence
+    /// this — it comes from host installation config / runtime
+    /// identity. Required because the downstream `RebornServicesApi`
+    /// facade builds `ThreadScope` from `caller.agent_id` for every
+    /// v2 mutation and read, and a `None` agent_id collapses to a
+    /// `400 InvalidRequest` before the handler reaches the workflow.
+    pub(crate) default_agent_id: Option<AgentId>,
+    /// Trusted default project id stamped onto every
+    /// [`WebUiAuthenticatedCaller`]. Optional at the type level
+    /// because the v2 facade allows projectless scopes for some
+    /// flows; supply it when the host installation has a single
+    /// canonical project.
+    pub(crate) default_project_id: Option<ProjectId>,
 }
 
 impl WebuiServeConfig {
@@ -147,6 +161,8 @@ impl WebuiServeConfig {
             allowed_origins,
             csp_header: None,
             canonical_host: None,
+            default_agent_id: None,
+            default_project_id: None,
         }
     }
 
@@ -155,6 +171,21 @@ impl WebuiServeConfig {
     /// trusting the request's `Host` header.
     pub fn with_canonical_host(mut self, host: impl Into<String>) -> Self {
         self.canonical_host = Some(host.into());
+        self
+    }
+
+    /// Set the trusted host-installation default `AgentId`. Stamped
+    /// onto every authenticated caller; required for the v2 facade to
+    /// build `ThreadScope` on mutations and reads.
+    pub fn with_default_agent_id(mut self, agent_id: AgentId) -> Self {
+        self.default_agent_id = Some(agent_id);
+        self
+    }
+
+    /// Set the trusted host-installation default `ProjectId`. Optional
+    /// — supply when the host installation has a canonical project.
+    pub fn with_default_project_id(mut self, project_id: ProjectId) -> Self {
+        self.default_project_id = Some(project_id);
         self
     }
 
@@ -271,6 +302,8 @@ pub fn webui_v2_app(
 
     let auth_state = AuthLayerState {
         tenant_id: config.tenant_id.clone(),
+        default_agent_id: config.default_agent_id.clone(),
+        default_project_id: config.default_project_id.clone(),
         authenticator: config.authenticator.clone(),
     };
 
@@ -362,6 +395,8 @@ pub fn webui_v2_app(
 #[derive(Clone)]
 struct AuthLayerState {
     tenant_id: TenantId,
+    default_agent_id: Option<AgentId>,
+    default_project_id: Option<ProjectId>,
     authenticator: Arc<dyn WebuiAuthenticator>,
 }
 
@@ -387,7 +422,19 @@ async fn authenticate_request(
         None => return unauthorized(),
     };
 
-    let caller = WebUiAuthenticatedCaller::new(state.tenant_id.clone(), user_id, None, None);
+    // Stamp the trusted agent/project from host installation config
+    // onto every authenticated caller. The downstream facade builds
+    // `ThreadScope` from `caller.agent_id` and 400s if it's missing,
+    // so a binary that fails to thread agent_id through here would
+    // authenticate users only to reject every v2 mutation/read. The
+    // browser body cannot influence either of these identifiers — by
+    // contract `WebuiServeConfig` is host-owned.
+    let caller = WebUiAuthenticatedCaller::new(
+        state.tenant_id.clone(),
+        user_id,
+        state.default_agent_id.clone(),
+        state.default_project_id.clone(),
+    );
     request.extensions_mut().insert(caller);
     next.run(request).await
 }

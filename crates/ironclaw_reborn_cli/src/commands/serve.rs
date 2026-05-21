@@ -25,14 +25,23 @@ const DEFAULT_ENV_USER_ID_VAR: &str = "IRONCLAW_REBORN_WEBUI_USER_ID";
 pub(crate) struct ServeCommand {
     /// Host interface for the Reborn WebChat v2 HTTP listener.
     /// Overrides `[webui].listen_host` from the boot config file.
-    #[arg(long, default_value = DEFAULT_SERVE_HOST)]
-    host: IpAddr,
+    /// Default (when neither is set) is `127.0.0.1`.
+    //
+    // Stored as `Option<IpAddr>` (no clap default) so the precedence
+    // chain `CLI > config > constant default` can be resolved
+    // explicitly. A clap default would conflate "operator passed
+    // 127.0.0.1 explicitly" with "operator omitted the flag", which
+    // would incorrectly let a config-supplied 0.0.0.0 win over an
+    // explicit --host 127.0.0.1.
+    #[arg(long)]
+    host: Option<IpAddr>,
 
     /// Port for the Reborn WebChat v2 HTTP listener. `0` lets the
     /// kernel pick a free port (useful for tests). Overrides
-    /// `[webui].listen_port` from the boot config file.
-    #[arg(long, default_value_t = DEFAULT_SERVE_PORT)]
-    port: u16,
+    /// `[webui].listen_port` from the boot config file. Default
+    /// (when neither is set) is 3000.
+    #[arg(long)]
+    port: Option<u16>,
 }
 
 impl ServeCommand {
@@ -89,25 +98,44 @@ impl ServeCommand {
             user_id,
         )?);
 
-        // Resolve listen address. CLI flags WIN over config file (consistent
-        // with `compiled defaults < config file < env vars < CLI flags`).
-        let host = if matches_cli_default_host(self.host) {
-            webui_section
-                .and_then(|section| section.listen_host.as_deref())
-                .map(IpAddr::from_str)
-                .transpose()
-                .map_err(|err| anyhow!("[webui].listen_host invalid: {err}"))?
-                .unwrap_or(self.host)
+        // Resolve trusted host-installation default agent/project from
+        // `[identity]`. The v2 facade builds `ThreadScope` from
+        // `caller.agent_id` on every mutation and read, so an absent
+        // default_agent here means every authenticated request would
+        // still 400. Mirror the same fallback rule the `run` command
+        // uses: identity.default_agent or composition's default.
+        let identity_section = config_file.as_ref().and_then(|file| file.identity.as_ref());
+        let default_agent_raw = identity_section
+            .and_then(|identity| identity.default_agent.as_deref())
+            .unwrap_or("reborn-cli");
+        let default_agent_id =
+            ironclaw_reborn_composition::host_api::AgentId::new(default_agent_raw).map_err(
+                |err| anyhow!("[identity].default_agent `{default_agent_raw}` is invalid: {err}"),
+            )?;
+        let default_project_id = identity_section
+            .and_then(|identity| identity.default_project.as_deref())
+            .map(ironclaw_reborn_composition::host_api::ProjectId::new)
+            .transpose()
+            .map_err(|err| anyhow!("[identity].default_project is invalid: {err}"))?;
+
+        // Resolve listen address with explicit precedence:
+        //   CLI flag (Some(...)) > config file > compile-time default.
+        // Both `host` and `port` are `Option<>` in the clap struct so
+        // we can distinguish "operator omitted the flag" from "operator
+        // passed the default value explicitly".
+        let host: IpAddr = if let Some(value) = self.host {
+            value
+        } else if let Some(raw) = webui_section.and_then(|s| s.listen_host.as_deref()) {
+            IpAddr::from_str(raw)
+                .map_err(|err| anyhow!("[webui].listen_host `{raw}` invalid: {err}"))?
         } else {
-            self.host
+            IpAddr::from_str(DEFAULT_SERVE_HOST)
+                .expect("DEFAULT_SERVE_HOST is a crate-local literal that parses as IpAddr") // safety: crate-local const known to be valid
         };
-        let port = if self.port == DEFAULT_SERVE_PORT {
-            webui_section
-                .and_then(|section| section.listen_port)
-                .unwrap_or(self.port)
-        } else {
-            self.port
-        };
+        let port: u16 = self
+            .port
+            .or_else(|| webui_section.and_then(|s| s.listen_port))
+            .unwrap_or(DEFAULT_SERVE_PORT);
         let listen_addr = SocketAddr::new(host, port);
 
         // CORS allow-origin list. Empty = fail-closed on every
@@ -131,6 +159,29 @@ impl ServeCommand {
                     usize::try_from(raw)
                         .map_err(|_| anyhow!("[webui].max_body_bytes_fallback exceeds usize"))
                 }
+            })
+            .transpose()?;
+
+        // Canonical host for WS same-origin check (defense against
+        // reverse-proxy passthrough-Host attacks). Validate as
+        // `host` or `host:port` — refuse multi-segment paths or
+        // scheme prefixes which would silently never match Origin.
+        let canonical_host = webui_section
+            .and_then(|section| section.canonical_host.as_deref())
+            .map(|raw| -> anyhow::Result<String> {
+                if raw.is_empty() {
+                    anyhow::bail!("[webui].canonical_host must not be empty");
+                }
+                if raw.contains("://") {
+                    anyhow::bail!(
+                        "[webui].canonical_host `{raw}` must be `host` or `host:port`, \
+                         not a scheme-qualified URL",
+                    );
+                }
+                if raw.contains('/') {
+                    anyhow::bail!("[webui].canonical_host `{raw}` must not contain `/`",);
+                }
+                Ok(raw.to_string())
             })
             .transpose()?;
 
@@ -176,7 +227,11 @@ impl ServeCommand {
                 &bundle.readiness,
             );
 
-            let mut serve_config = WebuiServeConfig::new(tenant_id, authenticator, allowed_origins);
+            let mut serve_config = WebuiServeConfig::new(tenant_id, authenticator, allowed_origins)
+                .with_default_agent_id(default_agent_id);
+            if let Some(project_id) = default_project_id {
+                serve_config = serve_config.with_default_project_id(project_id);
+            }
             if let Some(value) = csp_override {
                 serve_config = serve_config
                     .with_csp_header_str(value)
@@ -184,6 +239,9 @@ impl ServeCommand {
             }
             if let Some(value) = max_body_bytes_fallback {
                 serve_config = serve_config.with_max_body_bytes(value);
+            }
+            if let Some(host) = canonical_host {
+                serve_config = serve_config.with_canonical_host(host);
             }
             let router =
                 webui_v2_app(bundle, serve_config).context("failed to compose v2 Router")?;
@@ -217,10 +275,6 @@ impl ServeCommand {
 
         Ok(())
     }
-}
-
-fn matches_cli_default_host(value: IpAddr) -> bool {
-    value == IpAddr::from_str(DEFAULT_SERVE_HOST).expect("crate-local literal parses") // safety: DEFAULT_SERVE_HOST is a compile-time `&'static str` known to parse as IpAddr; failure here would be a build-time bug
 }
 
 fn print_serve_banner(

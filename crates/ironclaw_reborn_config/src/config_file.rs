@@ -185,6 +185,17 @@ pub struct WebuiSection {
     /// descriptor and are strictly tighter than this outer fallback.
     /// Default `14 * 1024 * 1024` (14 MiB). `0` is rejected.
     pub max_body_bytes_fallback: Option<u64>,
+    /// Canonical host this listener is reachable on (e.g.
+    /// `"app.example.com"` or `"127.0.0.1:3000"`). When set, the WS
+    /// same-origin middleware compares the request `Origin` against
+    /// this operator-trusted value instead of trusting the
+    /// client-supplied `Host` header. Critical when running behind a
+    /// reverse proxy that may forward an attacker-controlled Host —
+    /// without `canonical_host`, a forged Host + matching Origin
+    /// would pass `SameOriginRequired`. Format: `host` or
+    /// `host:port`; composition does not parse further. Default
+    /// `None` (fall back to Host-header compare + allowlist).
+    pub canonical_host: Option<String>,
 }
 
 /// One `[llm.<slot>]` entry. The slot name (typically `"default"` or
@@ -382,6 +393,9 @@ impl RebornConfigFile {
             }
             if let Some(csp) = &webui.csp_header_override {
                 check(Cow::Borrowed("webui.csp_header_override"), csp)?;
+            }
+            if let Some(host) = &webui.canonical_host {
+                check(Cow::Borrowed("webui.canonical_host"), host)?;
             }
         }
         Ok(())
