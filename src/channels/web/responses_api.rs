@@ -1242,24 +1242,33 @@ pub async fn create_response_handler(
             // Mirror the GET-path `conversation_belongs_to_user` check.
             // Without this, a foreign thread_uuid taints outbound
             // `notify_thread_id` and routes callbacks to the wrong user.
-            if let Some(store) = state.store.as_ref() {
-                let owns = store
-                    .conversation_belongs_to_user(thread, &user.user_id)
-                    .await
-                    .map_err(|e| {
-                        api_error(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Failed to verify ownership: {e}"),
-                            "server_error",
-                        )
-                    })?;
-                if !owns {
-                    return Err(api_error(
-                        StatusCode::NOT_FOUND,
-                        format!("Response '{prev_id}' not found"),
-                        "invalid_request_error",
-                    ));
-                }
+            // Fail closed when the store is unavailable so a misconfigured
+            // deployment cannot silently bypass cross-tenant authz — matches
+            // the GET path's `SERVICE_UNAVAILABLE` behaviour rather than
+            // dropping the check on the floor.
+            let store = state.store.as_ref().ok_or_else(|| {
+                api_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Database not configured",
+                    "server_error",
+                )
+            })?;
+            let owns = store
+                .conversation_belongs_to_user(thread, &user.user_id)
+                .await
+                .map_err(|e| {
+                    api_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("Failed to verify ownership: {e}"),
+                        "server_error",
+                    )
+                })?;
+            if !owns {
+                return Err(api_error(
+                    StatusCode::NOT_FOUND,
+                    format!("Response '{prev_id}' not found"),
+                    "invalid_request_error",
+                ));
             }
             thread
         }

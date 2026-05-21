@@ -339,28 +339,77 @@ async fn external_tools_rejected_when_engine_v2_disabled() {
 
 /// `function_call_output` items are a resume signal: they must be
 /// matched against a pending external-tool gate for the resolved
-/// thread. Without one (e.g. because the caller fabricates a
-/// `previous_response_id` or the gate already expired), the handler
-/// must reject with 400 instead of silently sending the resume into a
-/// fresh thread.
+/// thread. Without one (the caller resumes against a thread that has
+/// no live external-tool gate, or the gate already expired), the
+/// handler must reject with 400 instead of silently sending the
+/// resume into a fresh thread.
+///
+/// Z1 reconciliation note (#3669 zmanian re-review):
+/// `create_response_handler` now fail-closes the
+/// `conversation_belongs_to_user` check whenever `previous_response_id`
+/// is present. The pending-gate branch is reached only *after* that
+/// check passes, so this test seeds a real same-user conversation and
+/// builds the `previous_response_id` against its thread uuid. Before
+/// the Z1 fix, a wholly-fabricated id used to flow through to the
+/// pending-gate check; now that path is correctly blocked at the
+/// authz layer (see `tests/responses_api_cross_tenant.rs`).
+#[cfg(feature = "libsql")]
 #[tokio::test]
 async fn resume_without_pending_gate_returns_400() {
-    let (addr, _state, _guard) = start_test_server().await;
-    let url = format!("http://{}/api/v1/responses", addr);
+    use ironclaw::db::Database;
 
-    // Synthesize a wire-valid previous_response_id (resp_<32hex><32hex>)
-    // that names a thread the gateway has never seen. The handler
-    // accepts the format, looks for a pending gate, finds none, and
-    // must respond 400 — not silently drop the function_call_output
-    // and start a fresh turn against the thread.
-    let fake_prev = format!("resp_{}{}", "0".repeat(32), "1".repeat(32));
+    // Spin up a store-backed gateway so the authz check passes. We
+    // can't use the shared `start_test_server()` helper because it
+    // builds a store-less `GatewayState`.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("resume_pending_gate.db");
+    let backend = ironclaw::db::libsql::LibSqlBackend::new_local(&path)
+        .await
+        .expect("libsql backend");
+    backend.run_migrations().await.expect("migrations");
+    let db: Arc<dyn Database> = Arc::new(backend);
+
+    // Seed a conversation owned by `test-user` so the authz check
+    // passes — we want to exercise the *pending-gate* branch, not the
+    // (now separately tested) cross-tenant 404 branch.
+    let thread_uuid = db
+        .create_conversation_with_metadata(
+            "gateway",
+            "test-user",
+            &serde_json::json!({ "title": "resume w/o pending gate" }),
+        )
+        .await
+        .expect("seed conversation");
+
+    let state = TestGatewayBuilder::new()
+        .user_id("test-user")
+        .store(Arc::clone(&db))
+        .build();
+    let auth = MultiAuthState::single(AUTH_TOKEN.to_string(), "test-user".to_string());
+    let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
+    let bound = start_server(addr, state.clone(), auth.into())
+        .await
+        .expect("start_server");
+    let shutdown = state.shutdown_tx.write().await.take();
+    let _guard = ServerGuard { shutdown };
+
+    let url = format!("http://{}/api/v1/responses", bound);
+    // Build a wire-valid previous_response_id pointing at Alice's
+    // seeded thread. The handler decodes it, authz passes (same
+    // user), and the pending-gate check fires next — there is no
+    // live external-tool gate for this thread, so 400.
+    let prev_id = format!(
+        "resp_{}{}",
+        uuid::Uuid::new_v4().simple(),
+        thread_uuid.simple()
+    );
 
     let resp = client()
         .post(&url)
         .bearer_auth(AUTH_TOKEN)
         .json(&serde_json::json!({
             "model": "default",
-            "previous_response_id": fake_prev,
+            "previous_response_id": prev_id,
             "input": [
                 {
                     "type": "function_call_output",
