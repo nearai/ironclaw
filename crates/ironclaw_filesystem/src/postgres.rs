@@ -469,6 +469,48 @@ impl RootFilesystem for PostgresRootFilesystem {
         Ok(row.get("contents"))
     }
 
+    async fn read_file_bounded(
+        &self,
+        path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        let client = self.client().await?;
+        let max_bytes = max_bytes as i64;
+        let row = client
+            .query_opt(
+                r#"
+                SELECT
+                    CASE
+                        WHEN octet_length(contents)::BIGINT <= $2 THEN contents
+                        ELSE NULL
+                    END AS contents,
+                    octet_length(contents)::BIGINT AS len,
+                    is_dir
+                FROM root_filesystem_entries
+                WHERE path = $1
+                "#,
+                &[&path.as_str(), &max_bytes],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        let Some(row) = row else {
+            return Err(not_found(path.clone(), FilesystemOperation::ReadFile));
+        };
+        let is_dir: bool = row.get("is_dir");
+        if is_dir {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "is a directory".to_string(),
+            });
+        }
+        let len: i64 = row.get("len");
+        if len > max_bytes {
+            return Ok(None);
+        }
+        Ok(Some(row.get("contents")))
+    }
+
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         let client = self.client().await?;
         if matches!(

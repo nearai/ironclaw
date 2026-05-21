@@ -174,9 +174,8 @@ where
         &self,
         request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
-        let request = request.into_request();
-        let scope = request.scope.clone();
-        let capability_id = request.capability_id.clone();
+        let scope = request.scope().clone();
+        let capability_id = request.capability_id().clone();
         self.emit_event(RuntimeEvent::dispatch_requested(
             scope.clone(),
             capability_id.clone(),
@@ -186,14 +185,14 @@ where
         let descriptor = match self
             .registry
             .as_ref()
-            .get_capability(&request.capability_id)
+            .get_capability(request.capability_id())
         {
             Some(descriptor) => descriptor,
             None => {
                 let error = DispatchError::UnknownCapability {
                     capability: capability_id.clone(),
                 };
-                self.release_request_reservation(&request);
+                self.release_request_reservation(request.resource_reservation());
                 self.emit_dispatch_failure(scope, capability_id, None, None, &error)
                     .await?;
                 return Err(error);
@@ -206,7 +205,7 @@ where
                     capability: capability_id.clone(),
                     provider: descriptor.provider.clone(),
                 };
-                self.release_request_reservation(&request);
+                self.release_request_reservation(request.resource_reservation());
                 self.emit_dispatch_failure(
                     scope,
                     capability_id,
@@ -225,7 +224,7 @@ where
                 descriptor_runtime: descriptor.runtime,
                 package_runtime,
             };
-            self.release_request_reservation(&request);
+            self.release_request_reservation(request.resource_reservation());
             self.emit_dispatch_failure(
                 scope,
                 capability_id,
@@ -240,7 +239,7 @@ where
         let runtime = descriptor.runtime;
         let Some(adapter) = self.runtime_adapters.get(&runtime) else {
             let error = DispatchError::MissingRuntimeBackend { runtime };
-            self.release_request_reservation(&request);
+            self.release_request_reservation(request.resource_reservation());
             self.emit_dispatch_failure(
                 scope,
                 capability_id,
@@ -267,12 +266,12 @@ where
                 descriptor,
                 filesystem: self.filesystem.as_ref(),
                 governor: self.governor.as_ref(),
-                capability_id: &request.capability_id,
-                scope: request.scope,
-                estimate: request.estimate,
-                mounts: request.mounts,
-                resource_reservation: request.resource_reservation,
-                input: request.input,
+                capability_id: request.capability_id(),
+                scope: request.scope().clone(),
+                estimate: request.estimate().clone(),
+                mounts: request.mounts().cloned(),
+                resource_reservation: request.resource_reservation().cloned(),
+                input: request.input().clone(),
             })
             .await
         {
@@ -309,8 +308,8 @@ where
         })
     }
 
-    fn release_request_reservation(&self, request: &CapabilityDispatchRequest) {
-        if let Some(reservation) = &request.resource_reservation
+    fn release_request_reservation(&self, reservation: Option<&ResourceReservation>) {
+        if let Some(reservation) = reservation
             && let Err(error) = self.governor.as_ref().release(reservation.id)
         {
             tracing::warn!(

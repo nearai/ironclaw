@@ -167,12 +167,19 @@ fn authorized_dispatch_request_exposes_only_authority_source() {
     let authorized =
         AuthorizedDispatchRequest::new(request.clone(), DispatchAuthorityProof::capability_host());
 
-    assert_eq!(authorized.request(), &request);
+    assert_eq!(authorized.capability_id(), &request.capability_id);
+    assert_eq!(authorized.scope(), &request.scope);
+    assert_eq!(authorized.estimate(), &request.estimate);
+    assert_eq!(authorized.mounts(), request.mounts.as_ref());
+    assert_eq!(
+        authorized.resource_reservation(),
+        request.resource_reservation.as_ref()
+    );
+    assert_eq!(authorized.input(), &request.input);
     assert_eq!(
         authorized.authority_source(),
         DispatchAuthoritySource::CapabilityHost
     );
-    assert_eq!(authorized.into_request(), request);
 
     let process_authorized = AuthorizedDispatchRequest::new(
         CapabilityDispatchRequest {
@@ -188,6 +195,14 @@ fn authorized_dispatch_request_exposes_only_authority_source() {
     assert_eq!(
         process_authorized.authority_source(),
         DispatchAuthoritySource::HostProcessExecutor
+    );
+}
+
+#[test]
+fn dispatch_authority_proof_debug_stays_opaque() {
+    assert_eq!(
+        format!("{:?}", DispatchAuthorityProof::capability_host()),
+        "DispatchAuthorityProof"
     );
 }
 
@@ -956,6 +971,9 @@ fn audit_envelope_serializes_redacted_summary_shape() {
 
 #[test]
 fn host_port_ids_are_host_namespaced_and_serializable() {
+    let http_egress = HostPortId::new(HOST_RUNTIME_HTTP_EGRESS_PORT_ID).unwrap();
+    assert_eq!(http_egress.as_str(), "host.runtime.http_egress");
+
     let id = HostPortId::new("host.storage.sql_transaction.first_party").unwrap();
     assert_eq!(id.as_str(), "host.storage.sql_transaction.first_party");
     assert_eq!(serde_json::to_value(&id).unwrap(), json!(id.as_str()));

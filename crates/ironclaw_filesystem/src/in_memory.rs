@@ -923,6 +923,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bounded_read_default_impl_routes_through_stat_and_get() {
+        let fs = InMemoryBackend::new();
+        let path = vpath("/tmp/bounded.bin");
+        fs.put(
+            &path,
+            Entry::bytes(b"bounded payload".to_vec()),
+            CasExpectation::Absent,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            fs.read_file_bounded(&path, 15).await.unwrap(),
+            Some(b"bounded payload".to_vec())
+        );
+        assert_eq!(fs.read_file_bounded(&path, 14).await.unwrap(), None);
+    }
+
+    #[tokio::test]
     async fn get_and_query_populate_versioned_entry_path() {
         // PR #3659 review fix: `VersionedEntry` now carries the
         // [`VirtualPath`] of the record so query consumers can drive

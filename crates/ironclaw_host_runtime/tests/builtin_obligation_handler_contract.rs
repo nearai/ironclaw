@@ -1,3 +1,7 @@
+mod support;
+
+use support::legacy_capability_fixture_to_v2;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -8,7 +12,7 @@ use ironclaw_capabilities::{
     CapabilityObligationRequest,
 };
 use ironclaw_events::InMemoryAuditSink;
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CapabilitySurfaceVersion,
@@ -19,6 +23,14 @@ use ironclaw_resources::{InMemoryResourceGovernor, ResourceAccount};
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde_json::json;
+
+fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
+        ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
+        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev,
+    ))
+    .unwrap()
+}
 
 fn obligation_services(
     secret_store: Arc<InMemorySecretStore>,
@@ -951,6 +963,7 @@ async fn default_host_runtime_fails_closed_when_resource_ceiling_lacks_required_
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_builtin_obligation_handler();
 
@@ -995,6 +1008,7 @@ async fn default_host_runtime_dispatches_when_resource_ceiling_is_satisfied() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_builtin_obligation_handler();
 
@@ -1028,6 +1042,7 @@ async fn default_host_runtime_installs_configured_obligation_handler() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_obligation_handler(handler);
 
@@ -1094,22 +1109,20 @@ impl CapabilityDispatcher for RecordingDispatcher {
         &self,
         request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
-        let request = request.into_request();
         Ok(CapabilityDispatchResult {
-            capability_id: request.capability_id,
+            capability_id: request.capability_id().clone(),
             provider: ExtensionId::new("echo").unwrap(),
             runtime: RuntimeKind::Wasm,
             output: json!({"ok": true}),
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: request
-                    .resource_reservation
-                    .as_ref()
+                    .resource_reservation()
                     .map(|reservation| reservation.id)
                     .unwrap_or_default(),
-                scope: request.scope,
+                scope: request.scope().clone(),
                 status: ReservationStatus::Reconciled,
-                estimate: request.estimate,
+                estimate: request.estimate().clone(),
                 actual: Some(ResourceUsage::default()),
             },
         })
@@ -1170,12 +1183,22 @@ fn allowed_network_policy() -> NetworkPolicy {
 }
 
 fn registry_with_echo_capability() -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse(ECHO_MANIFEST).unwrap();
+    let manifest = parse_manifest(ECHO_MANIFEST);
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     let package = ExtensionPackage::from_manifest(manifest, root).unwrap();
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     registry
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
 }
 
 fn execution_context(grants: CapabilitySet) -> ExecutionContext {

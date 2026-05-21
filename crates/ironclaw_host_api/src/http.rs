@@ -57,8 +57,9 @@ pub struct RuntimeCredentialInjection {
 pub enum RuntimeCredentialSource {
     /// Lease and consume material directly from the scoped secret store.
     ///
-    /// This remains the compatibility path for host-derived credentials that
-    /// are not backed by an already-satisfied authorization obligation.
+    /// This is the legacy/test compatibility path for host-derived credentials
+    /// that are not backed by an already-satisfied authorization obligation.
+    /// Production runtime tool egress must use [`Self::StagedObligation`].
     #[default]
     SecretStoreLease,
     /// Consume material staged by an `InjectSecretOnce` obligation handler.

@@ -72,6 +72,13 @@ pub enum RunProfileRequestAuthority {
     System,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PersonalContextAuthority {
+    Direct,
+    #[default]
+    Shared,
+}
+
 impl RunProfileRequestAuthority {
     pub(super) fn allows(self, dimension: PrivilegedRunProfileDimension) -> bool {
         match dimension {

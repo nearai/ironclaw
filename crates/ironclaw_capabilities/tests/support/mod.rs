@@ -38,22 +38,29 @@ impl CapabilityDispatcher for RecordingDispatcher {
         &self,
         request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
-        let request = request.into_request();
+        let recorded = CapabilityDispatchRequest {
+            capability_id: request.capability_id().clone(),
+            scope: request.scope().clone(),
+            estimate: request.estimate().clone(),
+            mounts: request.mounts().cloned(),
+            resource_reservation: request.resource_reservation().cloned(),
+            input: request.input().clone(),
+        };
         *self
             .request
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(request.clone());
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(recorded);
         Ok(CapabilityDispatchResult {
-            capability_id: request.capability_id,
+            capability_id: request.capability_id().clone(),
             provider: extension_id(),
             runtime: RuntimeKind::Wasm,
             output: json!({"ok": true}),
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: ResourceReservationId::new(),
-                scope: request.scope,
+                scope: request.scope().clone(),
                 status: ReservationStatus::Reconciled,
-                estimate: request.estimate,
+                estimate: request.estimate().clone(),
                 actual: Some(ResourceUsage::default()),
             },
         })
@@ -144,7 +151,12 @@ impl TrustAwareCapabilityDispatchAuthorizer for ObligatingAuthorizer {
 }
 
 pub fn registry_with_echo_capability() -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse(ECHO_MANIFEST).unwrap();
+    let manifest = ExtensionManifest::parse(
+        ECHO_MANIFEST,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/echo").unwrap(),

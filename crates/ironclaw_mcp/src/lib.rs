@@ -18,8 +18,8 @@ use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, NetworkMethod, NetworkPolicy, ResourceEstimate, ResourceReservation,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialInjection,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeKind,
+    RuntimeCredentialSource, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    RuntimeHttpEgressResponse, RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -393,6 +393,8 @@ where
 
         let response_body_limit =
             effective_mcp_response_body_limit(plan.response_body_limit, request.max_output_bytes);
+        let credential_injections =
+            mcp_credentials_for_exchange(method, plan.credential_injections);
         let response = self
             .http
             .request(McpHostHttpRequest {
@@ -403,7 +405,7 @@ where
                 headers,
                 body,
                 network_policy: plan.network_policy,
-                credential_injections: plan.credential_injections,
+                credential_injections,
                 response_body_limit,
                 timeout_ms: plan.timeout_ms,
             })
@@ -565,6 +567,25 @@ fn mcp_client_http_error(error: McpHostHttpError) -> String {
     match error {
         McpHostHttpError::Egress { reason } => reason,
     }
+}
+
+fn mcp_credentials_for_exchange(
+    method: &str,
+    credential_injections: Vec<RuntimeCredentialInjection>,
+) -> Vec<RuntimeCredentialInjection> {
+    if method == "tools/call" {
+        return credential_injections;
+    }
+
+    credential_injections
+        .into_iter()
+        .filter(|injection| {
+            !matches!(
+                injection.source,
+                RuntimeCredentialSource::StagedObligation { .. }
+            )
+        })
+        .collect()
 }
 
 fn effective_mcp_response_body_limit(host_limit: Option<u64>, client_limit: u64) -> Option<u64> {

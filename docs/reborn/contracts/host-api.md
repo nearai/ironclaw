@@ -590,6 +590,7 @@ Rules:
 - profile schema refs are relative repository paths, never absolute paths, URLs, or traversal paths;
 - profile schema-ref equality is identity/reference matching only; it does not prove JSON-schema conformance, which is deferred to manifest/claim validation slices;
 - host-port IDs are lowercase `host.*` dotted names;
+- the initial host-runtime supported catalog entry is `host.runtime.http_egress` for mediated runtime HTTP egress validation;
 - host-port catalogs reject duplicate entries and are not runtime implementation registries;
 - host-port views reject duplicate grants and do not grant authority by themselves;
 - `HostPortGrant` remains a thin `HostPortId` grant token; future attenuation or parameter narrowing uses a separate wire type.
@@ -676,7 +677,7 @@ pub enum RuntimeDispatchErrorKind;
 
 Rules:
 
-- `CapabilityDispatcher::dispatch_json` accepts only `AuthorizedDispatchRequest`. `CapabilityDispatchRequest` is raw payload data; grant checks, approvals, obligation preparation, and resource reservation happen before it is sealed with `DispatchAuthorityProof`. Production code must not expose reusable proof handles from sealed requests; only the authority source may be inspected for diagnostics. Optional `mounts` and `resource_reservation` fields are prepared obligation effects, not new authority grants.
+- `CapabilityDispatcher::dispatch_json` accepts only `AuthorizedDispatchRequest`. `CapabilityDispatchRequest` is raw payload data; grant checks, approvals, obligation preparation, and resource reservation happen before it is sealed with `DispatchAuthorityProof`. Production code must not expose reusable proof handles or whole raw request values from sealed requests; dispatch consumers may inspect only field-level request facts and the authority source. Optional `mounts` and `resource_reservation` fields are prepared obligation effects, not new authority grants.
 - `CapabilityDispatchResult` exposes normalized host facts: capability ID, provider, runtime, output, usage, and resource receipt.
 - `DispatchError` uses stable control-plane variants for registry/routing failures and `RuntimeDispatchErrorKind` for WASM/Script/MCP failures.
 - Runtime/backend detail strings, stderr, host paths, and secret-bearing messages must not cross this port.

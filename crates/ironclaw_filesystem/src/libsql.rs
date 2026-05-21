@@ -650,6 +650,58 @@ impl RootFilesystem for LibSqlRootFilesystem {
             .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))
     }
 
+    async fn read_file_bounded(
+        &self,
+        path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        let conn = self.connect().await?;
+        let max_bytes = max_bytes as i64;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT
+                    CASE
+                        WHEN length(contents) <= ?2 THEN contents
+                        ELSE NULL
+                    END,
+                    length(contents),
+                    is_dir
+                FROM root_filesystem_entries
+                WHERE path = ?1
+                "#,
+                libsql::params![path.as_str(), max_bytes],
+            )
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?
+        else {
+            return Err(not_found(path.clone(), FilesystemOperation::ReadFile));
+        };
+        let is_dir: i64 = row
+            .get(2)
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        if is_dir != 0 {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "is a directory".to_string(),
+            });
+        }
+        let len: i64 = row
+            .get(1)
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        if len > max_bytes {
+            return Ok(None);
+        }
+        row.get(0)
+            .map(Some)
+            .map_err(|error| libsql_db_error(path.clone(), FilesystemOperation::ReadFile, error))
+    }
+
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         if matches!(
             self.exact_entry(path).await?,

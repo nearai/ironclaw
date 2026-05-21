@@ -153,8 +153,8 @@ trap 'rm -f "${TEST_BOUNDARIES_FILE:-}" "${GATEWAY_APP_JS_TMP:-}"' EXIT
 for f in $CHANGED_FILES; do
     [ -f "$f" ] || continue
     test_line=$(awk '
-        /^#\[cfg\(test\)\]/ { cfg_at = NR; next }
-        cfg_at && /^mod tests([[:space:]]*\{)?[[:space:]]*$/ { print NR; exit }
+        /^#\[cfg\(.*test.*\)\]/ { cfg_at = NR; next }
+        cfg_at && /^mod [[:alnum:]_]+([[:space:]]*\{)?[[:space:]]*$/ { print NR; exit }
         cfg_at && NF > 0 && !/^[[:space:]]*$/ { cfg_at = 0 }
     ' "$f")
     if [ -n "$test_line" ]; then
@@ -269,6 +269,7 @@ fi
 #    Suppressible with "// safety:" in the hunk.
 DIFF_W_OUTPUT=$(git diff --cached -W -- '*.rs' 2>/dev/null || git diff "$(resolve_base_ref)" -W -- '*.rs' 2>/dev/null || true)
 if [ -n "$DIFF_W_OUTPUT" ]; then
+    DIFF_W_OUTPUT=$(printf '%s\n' "$DIFF_W_OUTPUT" | strip_test_mod_lines)
     HUNK_COUNT=$(echo "$DIFF_W_OUTPUT" | awk '
         /^@@/ {
             if (count >= 2 && !has_tx && !has_safety) found++

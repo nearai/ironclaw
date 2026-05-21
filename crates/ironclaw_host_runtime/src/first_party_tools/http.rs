@@ -1,16 +1,15 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
 use ironclaw_host_api::{
-    CapabilityId, EffectKind, NetworkMethod, NetworkPolicy, PermissionMode, ResourceCeiling,
-    ResourceEstimate, ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind,
-    RuntimeHttpEgressError, RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest, RuntimeKind,
-    SandboxQuota,
+    EffectKind, NetworkMethod, NetworkPolicy, PermissionMode, ResourceCeiling, ResourceEstimate,
+    ResourceProfile, ResourceUsage, RuntimeDispatchErrorKind, RuntimeHttpEgressError,
+    RuntimeHttpEgressReasonCode, RuntimeHttpEgressRequest, RuntimeKind, SandboxQuota,
 };
 use serde_json::{Map, Value, json};
 
 use crate::{FirstPartyCapabilityError, FirstPartyCapabilityRequest};
 
-use super::{FIRST_PARTY_MAX_OUTPUT_BYTES, input_error};
+use super::{FIRST_PARTY_MAX_OUTPUT_BYTES, first_party_capability_manifest, input_error};
 
 pub const HTTP_CAPABILITY_ID: &str = "builtin.http";
 
@@ -30,62 +29,12 @@ pub(super) struct HttpDispatchOutput {
 }
 
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
-    Ok(CapabilityManifest {
-        id: CapabilityId::new(HTTP_CAPABILITY_ID)?,
-        description: "Perform an outbound HTTP request through host egress. Redirect responses are returned; the host transport does not follow them."
-            .to_string(),
-        effects: vec![EffectKind::DispatchCapability, EffectKind::Network],
-        default_permission: PermissionMode::Ask,
-        parameters_schema: json!({
-            "type": "object",
-            "properties": {
-                "method": {
-                    "type": "string",
-                    "enum": ["get", "post", "put", "patch", "delete", "head"]
-                },
-                "url": { "type": "string" },
-                "headers": {
-                    "description": "Request headers as either an array of {name,value} pairs or an object. Array form preserves duplicate header names; object form does not.",
-                    "oneOf": [
-                        {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "name": { "type": "string" },
-                                    "value": { "type": "string" }
-                                },
-                                "required": ["name", "value"]
-                            }
-                        },
-                        {
-                            "type": "object",
-                            "additionalProperties": { "type": "string" }
-                        }
-                    ]
-                },
-                "body": {
-                    "description": "UTF-8 string or JSON value to send as the request body. Non-string JSON bodies default Content-Type to application/json unless a content-type header is supplied."
-                },
-                "body_base64": {
-                    "type": "string",
-                    "description": "Base64-encoded bytes to send as the request body"
-                },
-                "response_body_limit": {
-                    "type": "integer",
-                    "description": "Maximum raw response body bytes to return. Omit to use the built-in fail-closed default cap; values must be at least 1. Binary responses are base64-encoded, raise effective output cost by about 33%, and must still fit the first-party output ceiling.",
-                    "minimum": 1,
-                    "maximum": MAX_RESPONSE_BODY_LIMIT
-                },
-                "timeout_ms": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": MAX_HTTP_TIMEOUT_MS
-                }
-            },
-            "required": ["url"]
-        }),
-        resource_profile: Some(ResourceProfile {
+    first_party_capability_manifest(
+        HTTP_CAPABILITY_ID,
+        "Perform an outbound HTTP request through host egress. Redirect responses are returned; the host transport does not follow them.",
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+        PermissionMode::Ask,
+        Some(ResourceProfile {
             default_estimate: ResourceEstimate {
                 wall_clock_ms: Some(DEFAULT_HTTP_TIMEOUT_MS.into()),
                 output_bytes: Some(DEFAULT_RESPONSE_BODY_LIMIT),
@@ -104,7 +53,7 @@ pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
                 }),
             }),
         }),
-    })
+    )
 }
 
 pub(super) async fn dispatch(

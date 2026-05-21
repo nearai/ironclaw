@@ -946,7 +946,7 @@ async fn busy_thread_persists_second_message_as_deferred() {
 }
 
 #[tokio::test]
-async fn retry_replays_accepted_message_before_live_binding_resolution() {
+async fn retry_validates_live_binding_before_accepted_message_replay() {
     let binding_service = FakeConversationBindingService::new();
     let binding_handle = binding_service.clone();
     let thread_service = InMemorySessionThreadService::default();
@@ -977,16 +977,16 @@ async fn retry_replays_accepted_message_before_live_binding_resolution() {
     let outcome = service
         .accept_user_message(&envelope)
         .await
-        .expect("retry reuses accepted message");
+        .expect("retry validates the current binding before replay");
     let InboundTurnOutcome::Submitted { binding, .. } = outcome else {
         panic!("expected submitted retry")
     };
-    assert_eq!(binding.user_id.as_str(), "user:user1");
-    assert_ne!(binding.thread_id.as_str(), "thread:churned");
+    assert_eq!(binding.user_id.as_str(), "user:churned");
+    assert_eq!(binding.thread_id.as_str(), "thread:churned");
     assert_eq!(
         binding_handle.resolve_count(),
-        1,
-        "retry must replay accepted message before live binding resolution"
+        2,
+        "retry must validate current binding before accepted-message replay"
     );
 
     let history = thread_service

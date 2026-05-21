@@ -481,6 +481,12 @@ where
                     .ok_or(SessionThreadError::UnknownMessage {
                         message_id: record.message_id,
                     })?;
+                if existing.actor_id.as_deref() != Some(request.actor_id.as_str()) {
+                    return Err(SessionThreadError::IdempotentReplayActorMismatch {
+                        stored_actor_id: existing.actor_id.clone().unwrap_or_default(),
+                        requested_actor_id: request.actor_id,
+                    });
+                }
                 return Ok(AcceptedInboundMessage {
                     thread_id: existing.thread_id,
                     message_id: record.message_id,
@@ -939,6 +945,20 @@ where
             summary_artifacts: history_summary_artifacts(&messages, summaries),
             messages: history_messages(&messages),
         })
+    }
+
+    async fn read_thread(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        let thread = self
+            .read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?
+            .0;
+        Ok(thread.record)
     }
 
     async fn create_summary_artifact(

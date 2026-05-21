@@ -1434,6 +1434,7 @@ async fn loop_prompt_bundle_public_serialization_hides_raw_content() {
 
     let status = TurnRunState {
         scope: host.context.scope.clone(),
+        actor: Some(TurnActor::new(UserId::new("user-loop-host").unwrap())),
         turn_id: host.context.turn_id,
         run_id: host.context.run_id,
         status: TurnStatus::Running,
@@ -1470,6 +1471,26 @@ fn prompt_mode_wire_shape_uses_issue_contract_spelling() {
         serde_json::from_str::<PromptMode>("\"codeact\"").unwrap(),
         PromptMode::CodeAct
     );
+}
+
+#[tokio::test]
+async fn loop_run_context_actor_is_serde_backward_compatible() {
+    let context = claimed_run_context().await;
+    assert!(context.actor().is_none());
+
+    let legacy_wire = serde_json::to_value(&context).unwrap();
+    assert!(
+        !legacy_wire.as_object().unwrap().contains_key("actor"),
+        "actor: None must stay omitted for legacy wire compatibility"
+    );
+    let decoded: LoopRunContext = serde_json::from_value(legacy_wire).unwrap();
+    assert!(decoded.actor().is_none());
+
+    let actor = TurnActor::new(UserId::new("user-loop-context-serde").unwrap());
+    let actor_context = context.with_actor(actor.clone());
+    let decoded_with_actor: LoopRunContext =
+        serde_json::from_value(serde_json::to_value(&actor_context).unwrap()).unwrap();
+    assert_eq!(decoded_with_actor.actor(), Some(&actor));
 }
 
 #[tokio::test]

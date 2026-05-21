@@ -35,14 +35,23 @@ pub struct CapabilityDispatchRequest {
 /// must keep minting at the capability-host boundary and architecture tests
 /// guard that invariant. The source is intentionally diagnostic only; it does
 /// not leave the sealed request as a reusable authority handle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct DispatchAuthorityProof {
     source: DispatchAuthoritySource,
     _private: (),
 }
 
+impl std::fmt::Debug for DispatchAuthorityProof {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DispatchAuthorityProof").finish()
+    }
+}
+
 impl DispatchAuthorityProof {
     /// Mint proof after capability-host authorization and obligation checks.
+    ///
+    /// Use only at the capability-host boundary after authorization,
+    /// obligation preparation, and resource reservation have completed.
     #[doc(hidden)]
     pub const fn capability_host() -> Self {
         Self {
@@ -52,6 +61,9 @@ impl DispatchAuthorityProof {
     }
 
     /// Mint proof for host-owned process execution of previously authorized work.
+    ///
+    /// Use only inside the host process-executor boundary for work that has
+    /// already passed dispatch authorization.
     #[doc(hidden)]
     pub const fn host_process_executor() -> Self {
         Self {
@@ -96,16 +108,32 @@ impl AuthorizedDispatchRequest {
         Self { request, authority }
     }
 
-    pub fn request(&self) -> &CapabilityDispatchRequest {
-        &self.request
+    pub fn capability_id(&self) -> &CapabilityId {
+        &self.request.capability_id
+    }
+
+    pub fn scope(&self) -> &ResourceScope {
+        &self.request.scope
+    }
+
+    pub fn estimate(&self) -> &ResourceEstimate {
+        &self.request.estimate
+    }
+
+    pub fn mounts(&self) -> Option<&MountView> {
+        self.request.mounts.as_ref()
+    }
+
+    pub fn resource_reservation(&self) -> Option<&ResourceReservation> {
+        self.request.resource_reservation.as_ref()
+    }
+
+    pub fn input(&self) -> &Value {
+        &self.request.input
     }
 
     pub const fn authority_source(&self) -> DispatchAuthoritySource {
         self.authority.source()
-    }
-
-    pub fn into_request(self) -> CapabilityDispatchRequest {
-        self.request
     }
 }
 

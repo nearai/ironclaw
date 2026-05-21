@@ -188,9 +188,13 @@ async fn concrete_mcp_http_client_routes_json_rpc_through_shared_egress() {
             .all(|request| request.network_policy == plan.network_policy)
     );
     assert!(
-        requests
+        requests[..2]
             .iter()
-            .all(|request| request.credential_injections == plan.credential_injections)
+            .all(|request| request.credential_injections.is_empty())
+    );
+    assert_eq!(
+        requests[2].credential_injections,
+        plan.credential_injections
     );
     assert!(
         requests
@@ -1038,7 +1042,9 @@ fn host_http_plan() -> McpHostHttpEgressPlan {
         network_policy: mcp_http_policy(),
         credential_injections: vec![RuntimeCredentialInjection {
             handle: SecretHandle::new("github-token").unwrap(),
-            source: RuntimeCredentialSource::SecretStoreLease,
+            source: RuntimeCredentialSource::StagedObligation {
+                capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            },
             target: RuntimeCredentialTarget::Header {
                 name: "Authorization".to_string(),
                 prefix: Some("Bearer ".to_string()),
@@ -1367,9 +1373,23 @@ impl ResourceGovernor for ReleaseFailingGovernor {
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse(manifest).unwrap();
+    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+        manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .unwrap();
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
+}
+
+fn capability_provider_contracts() -> HostApiContractRegistry {
+    let mut contracts = HostApiContractRegistry::new();
+    contracts
+        .register(Arc::new(CapabilityProviderHostApiContract::new().unwrap()))
+        .unwrap();
+    contracts
 }
 
 fn sample_scope() -> ResourceScope {
@@ -1403,7 +1423,7 @@ fn mcp_http_policy() -> NetworkPolicy {
     }
 }
 
-const MCP_MANIFEST: &str = r#"
+const MCP_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "github-mcp"
 name = "GitHub MCP"
 version = "0.1.0"
@@ -1415,15 +1435,23 @@ kind = "mcp"
 transport = "http"
 url = "https://mcp.example.test/mcp"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "github-mcp.search"
 description = "Search GitHub"
 effects = ["network", "dispatch_capability"]
 default_permission = "ask"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/github-mcp/search.input.v1.json"
+output_schema_ref = "schemas/github-mcp/search.output.v1.json"
 "#;
 
-const STDIO_MCP_MANIFEST: &str = r#"
+const STDIO_MCP_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "github-mcp"
 name = "GitHub MCP"
 version = "0.1.0"
@@ -1441,10 +1469,12 @@ id = "github-mcp.search"
 description = "Search GitHub"
 effects = ["network", "dispatch_capability"]
 default_permission = "ask"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/github-mcp/search.input.v1.json"
+output_schema_ref = "schemas/github-mcp/search.output.v1.json"
 "#;
 
-const SCRIPT_MANIFEST: &str = r#"
+const SCRIPT_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "script"
 name = "Script Echo"
 version = "0.1.0"
@@ -1462,5 +1492,7 @@ id = "script.echo"
 description = "Echo text"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/script/echo.input.v1.json"
+output_schema_ref = "schemas/script/echo.output.v1.json"
 "#;

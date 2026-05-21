@@ -6,8 +6,8 @@
 
 use chrono::{DateTime, Utc};
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ExternalEventId, ProductAdapterId, ProductInboundAck,
-    ProductInboundPayload,
+    AdapterInstallationId, ExternalActorRef, ExternalEventId, ProductAdapterId, ProductInboundAck,
+    ProductInboundPayload, ProductRejectionKind,
 };
 use ironclaw_turns::{LoopGateRef, TurnRunId};
 use serde::{Deserialize, Serialize};
@@ -137,6 +137,7 @@ typed_token!(
 pub struct ActionFingerprintKey {
     pub adapter_id: ProductAdapterId,
     pub installation_id: AdapterInstallationId,
+    pub external_actor_ref: ExternalActorRef,
     pub source_binding_key: SourceBindingKey,
     pub external_event_id: ExternalEventId,
 }
@@ -145,12 +146,14 @@ impl ActionFingerprintKey {
     pub fn new(
         adapter_id: ProductAdapterId,
         installation_id: AdapterInstallationId,
+        external_actor_ref: ExternalActorRef,
         source_binding_key: SourceBindingKey,
         external_event_id: ExternalEventId,
     ) -> Self {
         Self {
             adapter_id,
             installation_id,
+            external_actor_ref,
             source_binding_key,
             external_event_id,
         }
@@ -183,6 +186,7 @@ pub enum ActionDispatchKind {
     AuthResolution { auth_request_ref: AuthRequestRef },
     ProjectionSubscription,
     LinkedThreadAction { action_id: LinkedThreadActionId },
+    Rejected { kind: ProductRejectionKind },
     NoOp,
 }
 
@@ -283,6 +287,7 @@ mod tests {
         ActionFingerprintKey::new(
             ProductAdapterId::new("test_adapter").expect("valid adapter"),
             AdapterInstallationId::new("install_alpha").expect("valid installation"),
+            ExternalActorRef::new("test", "user1", Option::<String>::None).expect("valid actor"),
             SourceBindingKey::new("space:0:;conversation:5:conv1;topic:0:;")
                 .expect("valid source binding"),
             ExternalEventId::new("evt:action").expect("valid event"),

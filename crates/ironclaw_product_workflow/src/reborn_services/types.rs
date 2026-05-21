@@ -42,9 +42,24 @@ pub enum RebornSubmitTurnResponse {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RebornTimelineRequest {
     pub thread_id: String,
+    /// Maximum number of messages returned in one response. The facade
+    /// clamps to the [`TIMELINE_DEFAULT_PAGE_SIZE`,
+    /// `TIMELINE_MAX_PAGE_SIZE`] range so callers cannot bypass the
+    /// per-response size bound by asking for an unbounded page. Falls
+    /// back to the default when absent.
+    ///
+    /// [`TIMELINE_DEFAULT_PAGE_SIZE`]: super::TIMELINE_DEFAULT_PAGE_SIZE
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Opaque pagination cursor returned in the previous response's
+    /// `next_cursor`. Browsers do not need to interpret the value; the
+    /// facade encodes the earliest message sequence the page should
+    /// include here and round-trips it on each follow-up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +67,11 @@ pub struct RebornTimelineResponse {
     pub thread: SessionThreadRecord,
     pub messages: Vec<ThreadMessageRecord>,
     pub summary_artifacts: Vec<SummaryArtifact>,
+    /// Opaque cursor to pass back as `cursor` on the follow-up request
+    /// to load the older page. `None` means the caller has reached the
+    /// start of the thread and there is nothing more to load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

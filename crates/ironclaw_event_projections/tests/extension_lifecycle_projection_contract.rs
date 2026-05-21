@@ -10,11 +10,12 @@ use ironclaw_events::{AuditSink, DurableAuditSink, EventError};
 use ironclaw_extensions::{
     ExtensionError, ExtensionLifecycleEvent, ExtensionLifecycleEventSink,
     ExtensionLifecycleService, ExtensionManifest, ExtensionPackage, ExtensionRegistry,
+    ManifestSource,
 };
 use ironclaw_host_api::{
     ActionSummary, AgentId, AuditEnvelope, AuditEventId, AuditStage, CorrelationId,
-    DecisionSummary, EffectKind, ExtensionId, ExtensionLifecycleOperation, InvocationId, ProjectId,
-    ResourceScope, TenantId, UserId, VirtualPath,
+    DecisionSummary, EffectKind, ExtensionId, ExtensionLifecycleOperation, HostPortCatalog,
+    InvocationId, ProjectId, ResourceScope, TenantId, UserId, VirtualPath,
 };
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornProfile, build_reborn_event_stores,
@@ -38,7 +39,12 @@ async fn extension_lifecycle_projects_metadata_only_from_durable_audit_log() {
         DurableAuditSink::new(Arc::clone(&audit_log)),
     )));
     let package = ExtensionPackage::from_manifest(
-        ExtensionManifest::parse(EXTENSION_MANIFEST_WITH_RAW_SENTINELS).unwrap(),
+        ExtensionManifest::parse(
+            EXTENSION_MANIFEST_WITH_RAW_SENTINELS,
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::empty(),
+        )
+        .unwrap(),
         VirtualPath::new("/system/extensions/echo").unwrap(),
     )
     .unwrap();
@@ -47,6 +53,8 @@ async fn extension_lifecycle_projects_metadata_only_from_durable_audit_log() {
             &EXTENSION_MANIFEST_WITH_RAW_SENTINELS
                 .replace("version = \"0.1.0\"", "version = \"0.2.0\"")
                 .replace("echo.say", "echo.reply"),
+            ManifestSource::InstalledLocal,
+            &HostPortCatalog::empty(),
         )
         .unwrap(),
         VirtualPath::new("/system/extensions/echo").unwrap(),

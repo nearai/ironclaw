@@ -88,6 +88,34 @@ pub trait SessionThreadService: Send + Sync {
         request: ThreadHistoryRequest,
     ) -> Result<ThreadHistory, SessionThreadError>;
 
+    /// Cheap, owner-scoped existence probe that returns *only* the
+    /// thread record — no message transcript, no summary artifacts.
+    ///
+    /// Long-lived callers (e.g. the WebUI SSE handler) need to
+    /// re-validate that the authenticated caller still owns the thread
+    /// on every poll, but they have no use for the message body. Using
+    /// `list_thread_history` for that probe forces a full transcript +
+    /// summary load per poll, which on a large thread is hundreds of
+    /// rows per second per active stream.
+    ///
+    /// The default implementation delegates to `list_thread_history` so
+    /// existing stubs and test impls do not need to change; production
+    /// backends override it with a metadata-only path.
+    ///
+    /// Implementations MUST preserve the same ownership-probe semantics
+    /// as `list_thread_history`: returning `UnknownThread` for both
+    /// "thread does not exist" and "thread exists but is owned by a
+    /// different scope" so callers cannot use the response as an
+    /// existence oracle.
+    async fn read_thread(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        self.list_thread_history(request)
+            .await
+            .map(|history| history.thread)
+    }
+
     async fn create_summary_artifact(
         &self,
         request: CreateSummaryArtifactRequest,

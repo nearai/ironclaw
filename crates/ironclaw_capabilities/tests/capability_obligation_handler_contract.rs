@@ -561,18 +561,17 @@ impl CapabilityDispatcher for OutputDispatcher {
         &self,
         request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
-        let request = request.into_request();
         Ok(CapabilityDispatchResult {
-            capability_id: request.capability_id,
+            capability_id: request.capability_id().clone(),
             provider: extension_id(),
             runtime: RuntimeKind::Wasm,
             output: self.output.clone(),
             usage: ResourceUsage::default(),
             receipt: ResourceReceipt {
                 id: ResourceReservationId::new(),
-                scope: request.scope,
+                scope: request.scope().clone(),
                 status: ReservationStatus::Reconciled,
-                estimate: request.estimate,
+                estimate: request.estimate().clone(),
                 actual: Some(ResourceUsage::default()),
             },
         })

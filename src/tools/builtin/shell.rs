@@ -1184,11 +1184,13 @@ fn truncate_output(s: &str) -> String {
         let half = MAX_OUTPUT_SIZE / 2;
         let head_end = crate::util::floor_char_boundary(s, half);
         let tail_start = crate::util::floor_char_boundary(s, s.len() - half);
+        let head = s.get(..head_end).unwrap_or_default();
+        let tail = s.get(tail_start..).unwrap_or_default();
         format!(
             "{}\n\n... [truncated {} bytes] ...\n\n{}",
-            &s[..head_end],
+            head,
             s.len() - MAX_OUTPUT_SIZE,
-            &s[tail_start..]
+            tail
         )
     }
 }

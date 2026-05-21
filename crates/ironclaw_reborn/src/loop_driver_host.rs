@@ -383,6 +383,7 @@ where
         if let Some(source) = self.identity_context_source.as_ref() {
             context_adapter = context_adapter.with_identity_context_source(source.clone());
         }
+        context_adapter = context_adapter.with_milestone_sink(Arc::clone(&self.milestone_sink));
         let context: Arc<dyn LoopContextPort> = Arc::new(context_adapter);
         let instruction_materialization_store: Arc<dyn InstructionMaterializationStore> =
             Arc::new(InMemoryInstructionMaterializationStore::default());
@@ -1266,6 +1267,9 @@ where
             claimed.state.run_id,
             claimed.resolved_run_profile.clone(),
         );
+        if let Some(actor) = claimed.state.actor.clone() {
+            loop_run_context = loop_run_context.with_actor(actor);
+        }
         if let Some(snapshot) = claimed.state.resolved_model_route.clone() {
             loop_run_context = loop_run_context.with_resolved_model_route(snapshot);
         }

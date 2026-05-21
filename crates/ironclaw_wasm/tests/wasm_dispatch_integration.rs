@@ -12,7 +12,10 @@ use ironclaw_dispatcher::{
     RuntimeAdapter, RuntimeAdapterRequest, RuntimeAdapterResult, RuntimeDispatcher,
 };
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRuntime};
+use ironclaw_extensions::{
+    CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage, ExtensionRuntime,
+    HostApiContractRegistry, ManifestSource,
+};
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_resources::*;
@@ -780,9 +783,23 @@ fn registry_with_package(manifest: &str) -> ironclaw_extensions::ExtensionRegist
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse(manifest).unwrap();
+    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+        manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .unwrap();
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
+}
+
+fn capability_provider_contracts() -> HostApiContractRegistry {
+    let mut contracts = HostApiContractRegistry::new();
+    contracts
+        .register(Arc::new(CapabilityProviderHostApiContract::new().unwrap()))
+        .unwrap();
+    contracts
 }
 
 fn mounted_empty_extension_root() -> LocalFilesystem {
@@ -1109,7 +1126,7 @@ const TRAP_TOOL_WAT: &str = r#"
 )
 "#;
 
-const WASM_MANIFEST: &str = r#"
+const WASM_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "wasm-smoke"
 name = "WASM Smoke"
 version = "0.1.0"
@@ -1120,15 +1137,23 @@ trust = "untrusted"
 kind = "wasm"
 module = "wasm/counter.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "wasm-smoke.count"
 description = "Count through WASM"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/wasm-smoke/count.input.v1.json"
+output_schema_ref = "schemas/wasm-smoke/count.output.v1.json"
 "#;
 
-const WASM_TRAP_MANIFEST: &str = r#"
+const WASM_TRAP_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "wasm-smoke"
 name = "WASM Trap"
 version = "0.1.0"
@@ -1144,10 +1169,12 @@ id = "wasm-smoke.trap"
 description = "Trap through WASM"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/wasm-smoke/trap.input.v1.json"
+output_schema_ref = "schemas/wasm-smoke/trap.output.v1.json"
 "#;
 
-const WASM_HTTP_TRAP_MANIFEST: &str = r#"
+const WASM_HTTP_TRAP_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "wasm-smoke"
 name = "WASM HTTP Trap"
 version = "0.1.0"
@@ -1163,5 +1190,7 @@ id = "wasm-smoke.httptrap"
 description = "Trap after host HTTP through WASM"
 effects = ["dispatch_capability", "network"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/wasm-smoke/httptrap.input.v1.json"
+output_schema_ref = "schemas/wasm-smoke/httptrap.output.v1.json"
 "#;

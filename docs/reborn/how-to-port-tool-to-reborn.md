@@ -74,7 +74,7 @@ visibility = "model"
 description = "Search the web using Brave Search."
 effects = ["dispatch_capability", "network", "use_secret"]
 default_permission = "ask"
-required_host_ports = ["host.network.http", "host.secrets.inject"]
+required_host_ports = ["host.runtime.http_egress"]
 input_schema_ref = "schemas/search.input.v1.json"
 output_schema_ref = "schemas/search.output.v1.json"
 prompt_doc_ref = "prompt/search.md"
@@ -90,6 +90,7 @@ Important v2 rules:
 - `ironclaw.*` extension IDs are reserved for host-bundled extensions.
 - Every capability uses extension-local `input_schema_ref` and `output_schema_ref`; no inline schemas, absolute paths, URLs, or `..` traversal.
 - `prompt_doc_ref` is required only for `visibility = "model"` capabilities.
+- The default host-runtime catalog currently validates `host.runtime.http_egress`; other host-port names are future/deferred vocabulary until added to the catalog.
 - Full manifests and JSON schemas are cold registry artifacts; hot loop context gets compact resolved tool surface only.
 
 ## Path A: port a host-owned built-in tool to FirstParty

@@ -1,10 +1,14 @@
+mod support;
+
+use support::legacy_capability_fixture_to_v2;
+
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_events::InMemoryAuditSink;
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
@@ -17,6 +21,14 @@ use ironclaw_resources::{InMemoryResourceGovernor, ResourceGovernor};
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde_json::json;
+
+fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
+        ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
+        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev,
+    ))
+    .unwrap()
+}
 
 #[tokio::test]
 async fn default_runtime_installs_configured_builtin_obligation_services() {
@@ -60,6 +72,7 @@ async fn default_runtime_installs_configured_builtin_obligation_services() {
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_builtin_obligation_services(&services);
 
@@ -212,13 +225,12 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
         &self,
         request: AuthorizedDispatchRequest,
     ) -> Result<CapabilityDispatchResult, DispatchError> {
-        let request = request.into_request();
         let egress_response = self
             .egress
             .execute(RuntimeHttpEgressRequest {
                 runtime: RuntimeKind::Wasm,
-                scope: request.scope.clone(),
-                capability_id: request.capability_id.clone(),
+                scope: request.scope().clone(),
+                capability_id: request.capability_id().clone(),
                 method: NetworkMethod::Post,
                 url: "https://api.example.com/v1/run".to_string(),
                 headers: Vec::new(),
@@ -227,7 +239,7 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
                 credential_injections: vec![RuntimeCredentialInjection {
                     handle: self.secret_handle.clone(),
                     source: RuntimeCredentialSource::StagedObligation {
-                        capability_id: request.capability_id.clone(),
+                        capability_id: request.capability_id().clone(),
                     },
                     target: RuntimeCredentialTarget::Header {
                         name: "authorization".to_string(),
@@ -244,8 +256,7 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
         assert_eq!(egress_response.status, 200);
 
         let reservation = request
-            .resource_reservation
-            .as_ref()
+            .resource_reservation()
             .expect("configured resource governor should reserve before dispatch");
         let receipt = self.resource_governor.release(reservation.id).unwrap();
         *self
@@ -254,7 +265,7 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
 
         Ok(CapabilityDispatchResult {
-            capability_id: request.capability_id,
+            capability_id: request.capability_id().clone(),
             provider: extension_id(),
             runtime: RuntimeKind::Wasm,
             output: json!({"ok": true}),
@@ -265,7 +276,7 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
 }
 
 fn registry_with_echo_capability() -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse(ECHO_MANIFEST).unwrap();
+    let manifest = parse_manifest(ECHO_MANIFEST);
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/echo").unwrap(),
@@ -274,6 +285,16 @@ fn registry_with_echo_capability() -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     registry
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
 }
 
 fn execution_context_with_dispatch_grant() -> ExecutionContext {

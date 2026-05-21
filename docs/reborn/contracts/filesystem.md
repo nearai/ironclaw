@@ -405,10 +405,17 @@ Backend errors may keep raw errors for logs, but public/display errors should us
 
 ## 14. Initial Rust API sketch
 
+`read_file_bounded` returns `Ok(None)` when the file exceeds the caller's limit; streaming backends should enforce that without allocating the full file first.
+
 ```rust
 #[async_trait]
 pub trait RootFilesystem {
     async fn read_file(&self, path: &VirtualPath) -> Result<Vec<u8>, FilesystemError>;
+    async fn read_file_bounded(
+        &self,
+        path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError>;
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError>;
     async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError>;
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;

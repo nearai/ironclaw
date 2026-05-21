@@ -8,17 +8,17 @@ use crate::{RunProfileId, RunProfileRequest, RunProfileVersion};
 use super::{
     driver::AgentLoopDriverDescriptor,
     policy::{
-        CancellationPolicy, CheckpointPolicy, PrivilegedRunProfileDimension,
-        RedactedRunProfileProvenance, RedactedRunProfileSource, ResourceBudgetPolicy,
-        RunProfileRequestAuthority, RunProfileResolutionError, RuntimeProfileConstraints,
-        SteeringPolicy,
+        CancellationPolicy, CheckpointPolicy, PersonalContextAuthority,
+        PrivilegedRunProfileDimension, RedactedRunProfileProvenance, RedactedRunProfileSource,
+        ResourceBudgetPolicy, RunProfileRequestAuthority, RunProfileResolutionError,
+        RuntimeProfileConstraints, SteeringPolicy,
     },
     refs::{
         CapabilitySurfaceProfileId, CheckpointSchemaId, ConcurrencyClass, ContextProfileId,
         LoopDriverId, ModelProfileId, ResourceBudgetTier, RunClassId, RunProfileFingerprint,
         RunProfileSourceLayer, RunProfileSourceRef, RunnerPoolId, SchedulingClass,
     },
-    snapshot::ResolvedRunProfile,
+    snapshot::{PersonalContextPolicy, ResolvedRunProfile},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +26,8 @@ pub struct RunProfileResolutionRequest {
     pub requested_run_profile: Option<RunProfileRequest>,
     #[serde(skip, default)]
     pub authority: RunProfileRequestAuthority,
+    #[serde(skip, default)]
+    pub personal_context_authority: PersonalContextAuthority,
 }
 
 impl RunProfileResolutionRequest {
@@ -33,6 +35,7 @@ impl RunProfileResolutionRequest {
         Self {
             requested_run_profile: None,
             authority: RunProfileRequestAuthority::User,
+            personal_context_authority: PersonalContextAuthority::Direct,
         }
     }
 
@@ -43,6 +46,11 @@ impl RunProfileResolutionRequest {
 
     pub fn with_authority(mut self, authority: RunProfileRequestAuthority) -> Self {
         self.authority = authority;
+        self
+    }
+
+    pub fn with_personal_context_authority(mut self, authority: PersonalContextAuthority) -> Self {
+        self.personal_context_authority = authority;
         self
     }
 }
@@ -189,6 +197,7 @@ pub struct RunProfileDefinition {
     cancellation_policy: CancellationPolicy,
     checkpoint_policy: CheckpointPolicy,
     resource_budget_policy: ResourceBudgetPolicy,
+    personal_context_policy: PersonalContextPolicy,
     runtime_constraints: RuntimeProfileConstraints,
     runner_pool_id: Option<RunnerPoolId>,
     scheduling_class: SchedulingClass,
@@ -214,10 +223,29 @@ impl RunProfileDefinition {
         definition
     }
 
+    pub fn with_personal_context_policy(mut self, policy: PersonalContextPolicy) -> Self {
+        self.personal_context_policy = policy;
+        self
+    }
+
     fn resolve(&self, request: &RunProfileResolutionRequest) -> ResolvedRunProfile {
         let mut provenance = provenance_for(self, request);
         let resource_budget_policy = self.resolve_resource_budget_policy(request, &mut provenance);
-        let fingerprint = fingerprint_for(self, &resource_budget_policy, &provenance);
+        let effective_personal_context_policy = match (
+            self.personal_context_policy,
+            request.personal_context_authority,
+        ) {
+            (PersonalContextPolicy::Allowed, PersonalContextAuthority::Shared) => {
+                PersonalContextPolicy::Excluded
+            }
+            (policy, _) => policy,
+        };
+        let fingerprint = fingerprint_for(
+            self,
+            &resource_budget_policy,
+            effective_personal_context_policy,
+            &provenance,
+        );
         ResolvedRunProfile {
             run_class_id: self.run_class_id.clone(),
             profile_id: self.profile_id.clone(),
@@ -232,6 +260,7 @@ impl RunProfileDefinition {
             cancellation_policy: self.cancellation_policy.clone(),
             checkpoint_policy: self.checkpoint_policy.clone(),
             resource_budget_policy,
+            personal_context_policy: effective_personal_context_policy,
             runtime_constraints: self.runtime_constraints.clone(),
             runner_pool_id: self.runner_pool_id.clone(),
             scheduling_class: self.scheduling_class.clone(),
@@ -313,6 +342,7 @@ fn interactive_profile() -> RunProfileDefinition {
             max_model_calls: 32,
             max_capability_invocations: 64,
         },
+        personal_context_policy: PersonalContextPolicy::Excluded,
         runtime_constraints: RuntimeProfileConstraints {
             allow_raw_runtime_backend_selection: false,
             allow_broad_capability_surface: false,
@@ -366,6 +396,7 @@ fn long_running_mission_profile() -> RunProfileDefinition {
             max_model_calls: 256,
             max_capability_invocations: 1024,
         },
+        personal_context_policy: PersonalContextPolicy::Excluded,
         runtime_constraints: RuntimeProfileConstraints {
             allow_raw_runtime_backend_selection: false,
             allow_broad_capability_surface: false,
@@ -417,6 +448,7 @@ fn update_bool(value: bool, update: &mut impl FnMut(&str)) {
 fn fingerprint_for(
     definition: &RunProfileDefinition,
     resource_budget_policy: &ResourceBudgetPolicy,
+    personal_context_policy: PersonalContextPolicy,
     provenance: &RedactedRunProfileProvenance,
 ) -> RunProfileFingerprint {
     let mut hash = 0xcbf29ce484222325_u64;
@@ -452,6 +484,7 @@ fn fingerprint_for(
     update(definition.model_profile_id.as_str());
     update(definition.capability_surface_profile_id.as_str());
     update(definition.context_profile_id.as_str());
+    update(personal_context_policy.as_str());
     update_bool(definition.steering_policy.allow_steering, &mut update);
     update_bool(definition.steering_policy.allow_interrupt, &mut update);
     update_bool(
@@ -560,9 +593,65 @@ mod tests {
             fingerprint_for(
                 &relaxed,
                 &relaxed.resource_budget_policy,
+                relaxed.personal_context_policy,
                 &relaxed_provenance
             ),
-            fingerprint_for(&strict, &strict.resource_budget_policy, &strict_provenance),
+            fingerprint_for(
+                &strict,
+                &strict.resource_budget_policy,
+                strict.personal_context_policy,
+                &strict_provenance
+            ),
         );
+    }
+
+    #[test]
+    fn shared_authority_downgrades_allowed_to_excluded() {
+        let allowed_profile =
+            interactive_profile().with_personal_context_policy(PersonalContextPolicy::Allowed);
+        let request = RunProfileResolutionRequest::interactive_default()
+            .with_personal_context_authority(PersonalContextAuthority::Shared);
+        let snapshot = allowed_profile.resolve(&request);
+        assert_eq!(
+            snapshot.personal_context_policy,
+            PersonalContextPolicy::Excluded
+        );
+    }
+
+    #[test]
+    fn direct_authority_preserves_allowed() {
+        let allowed_profile =
+            interactive_profile().with_personal_context_policy(PersonalContextPolicy::Allowed);
+        let request = RunProfileResolutionRequest::interactive_default()
+            .with_personal_context_authority(PersonalContextAuthority::Direct);
+        let snapshot = allowed_profile.resolve(&request);
+        assert_eq!(
+            snapshot.personal_context_policy,
+            PersonalContextPolicy::Allowed
+        );
+    }
+
+    #[test]
+    fn fingerprint_changes_when_authority_downgrades_personal_context_policy() {
+        let allowed_profile =
+            interactive_profile().with_personal_context_policy(PersonalContextPolicy::Allowed);
+        let direct = allowed_profile.resolve(
+            &RunProfileResolutionRequest::interactive_default()
+                .with_personal_context_authority(PersonalContextAuthority::Direct),
+        );
+        let shared = allowed_profile.resolve(
+            &RunProfileResolutionRequest::interactive_default()
+                .with_personal_context_authority(PersonalContextAuthority::Shared),
+        );
+
+        assert_eq!(
+            direct.personal_context_policy,
+            PersonalContextPolicy::Allowed
+        );
+        assert_eq!(
+            shared.personal_context_policy,
+            PersonalContextPolicy::Excluded
+        );
+        assert_ne!(direct.resolution_fingerprint, shared.resolution_fingerprint);
     }
 }

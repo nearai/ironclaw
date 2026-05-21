@@ -921,12 +921,33 @@ mod tests {
     }
 
     /// `check_secrets` runs a read-only probe (env → keychain) and then, if
-    /// a key is found, probes the backing store. The exact outcome depends
-    /// on the test-host environment — if `SECRETS_MASTER_KEY` is set in CI,
-    /// we'll Pass / Fail; on a dev machine with no keychain we'll Skip.
+    /// a key is found, probes the backing store. The test pins the env source
+    /// so it does not touch a developer machine's real keychain.
     /// Either way the function must not panic.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span the entire test — other tests read the same env vars
     async fn check_secrets_does_not_panic() {
+        struct EnvGuard(&'static str, Option<String>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                // SAFETY: Under ENV_MUTEX.
+                unsafe {
+                    match &self.1 {
+                        Some(val) => std::env::set_var(self.0, val),
+                        None => std::env::remove_var(self.0),
+                    }
+                }
+            }
+        }
+
+        let _mutex = crate::config::helpers::lock_env();
+        let prev = std::env::var("SECRETS_MASTER_KEY").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("SECRETS_MASTER_KEY", "a".repeat(64));
+        }
+        let _env_guard = EnvGuard("SECRETS_MASTER_KEY", prev);
+
         let settings = Settings::default();
         let result = check_secrets(&settings).await;
         match result {
@@ -1102,7 +1123,29 @@ mod tests {
     /// from the settings snapshot). Just make sure settings drift no longer
     /// panics the check.
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // env guard must span the entire test — other tests read the same env vars
     async fn check_secrets_env_source_does_not_panic() {
+        struct EnvGuard(&'static str, Option<String>);
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                // SAFETY: Under ENV_MUTEX.
+                unsafe {
+                    match &self.1 {
+                        Some(val) => std::env::set_var(self.0, val),
+                        None => std::env::remove_var(self.0),
+                    }
+                }
+            }
+        }
+
+        let _mutex = crate::config::helpers::lock_env();
+        let prev = std::env::var("SECRETS_MASTER_KEY").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("SECRETS_MASTER_KEY", "a".repeat(64));
+        }
+        let _env_guard = EnvGuard("SECRETS_MASTER_KEY", prev);
+
         let settings = Settings {
             secrets_master_key_source: crate::settings::KeySource::Env,
             ..Default::default()

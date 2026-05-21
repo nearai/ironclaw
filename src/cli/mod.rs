@@ -529,11 +529,16 @@ mod tests {
 
     #[test]
     fn test_version() {
-        let cmd = Cli::command();
-        assert_eq!(
-            cmd.get_version().unwrap_or("unknown"),
-            env!("CARGO_PKG_VERSION")
-        );
+        let version = std::thread::Builder::new()
+            .stack_size(CLI_HELP_RENDER_STACK_SIZE)
+            .spawn(|| {
+                let cmd = Cli::command();
+                cmd.get_version().unwrap_or("unknown").to_string()
+            })
+            .expect("CLI command render thread should spawn")
+            .join()
+            .expect("CLI command render thread should not panic");
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

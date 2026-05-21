@@ -3,8 +3,9 @@ use thiserror::Error;
 
 use crate::{
     AcceptedMessageRef, GateRef, ReplyTargetBindingRef, ResolvedRunProfile, RunProfileId,
-    RunProfileVersion, SourceBindingRef, TurnAdmissionClass, TurnCheckpointId, TurnId, TurnRunId,
-    TurnScope, events::EventCursor, request::TurnTimestamp, run_profile::LoopModelRouteSnapshot,
+    RunProfileVersion, SourceBindingRef, TurnActor, TurnAdmissionClass, TurnCheckpointId, TurnId,
+    TurnRunId, TurnScope, events::EventCursor, request::TurnTimestamp,
+    run_profile::LoopModelRouteSnapshot,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +264,8 @@ impl AdmissionRejection {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnRunState {
     pub scope: TurnScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<TurnActor>,
     pub turn_id: TurnId,
     pub run_id: TurnRunId,
     pub status: TurnStatus,
