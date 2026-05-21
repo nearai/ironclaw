@@ -99,23 +99,6 @@ use crate::channels::web::features::settings::{
 };
 use crate::channels::web::features::status::gateway_status_handler;
 
-/// Terminal-3 FE origins baked into the CORS allowlist by default.
-///
-/// These are the canonical staging + prod hosts for the Trinity FE
-/// (`apps/trinity` in `Terminal-3/t3-apps`) — operationally fixed
-/// targets that every public deployment of t3-claw needs to accept.
-/// Including them in the binary removes the per-cluster env-var
-/// configuration step that otherwise turns into an opaque "Browser
-/// blocked the upload — most likely CORS" message in the FE.
-///
-/// Custom deployments (other domains, partner integrations, embedded
-/// apps) extend the set at runtime via the `T3CLAW_ALLOWED_ORIGINS`
-/// env var; entries here always pass the allowlist check.
-const DEFAULT_T3_FE_ORIGINS: &[&str] = &[
-    "https://staging.network.terminal3.io",
-    "https://network.terminal3.io",
-];
-
 /// Start the gateway HTTP server.
 ///
 /// Returns the actual bound `SocketAddr` (useful when binding to port 0).
@@ -496,14 +479,21 @@ pub async fn start_server(
     // startup bug, not a request-time error — so we fail the bootstrap
     // with `ChannelError::StartupFailed` rather than panic.
     //
-    // Bundled defaults: the Terminal-3 Trinity FE origins (staging + prod)
-    // are baked in so a fresh deploy serves the standard FE without any
-    // per-cluster env config. Custom deployments (other domains, additional
-    // localhost ports, embedded apps) extend the set via
-    // `T3CLAW_ALLOWED_ORIGINS` — a comma-separated list of fully-qualified
-    // origins like `http://localhost:3200`. Each entry is parsed
-    // independently; an invalid value is logged and skipped rather than
-    // aborting startup.
+    // Non-local origins must opt in via `T3CLAW_ALLOWED_ORIGINS` — a
+    // comma-separated list of fully-qualified origins like
+    // `http://localhost:3200`. This stays opt-in deliberately: the
+    // gateway sets `allow_credentials(true)` and admits the
+    // `Authorization` header (see the CorsLayer build below), so adding
+    // an origin grants browser-side JS at that origin the ability to
+    // issue authenticated requests against this gateway and read
+    // responses. Baking remote production / staging hosts into the
+    // binary would ship that trust into every deployment — including
+    // non-T3 forks — and would widen the attack surface for any
+    // future XSS on those hosts. Document recommended values in
+    // deployment templates (`deploy-gcp/env.example`) instead.
+    //
+    // Each entry is parsed independently; an invalid value is logged
+    // and skipped rather than aborting startup.
     let ip_origin = format!("http://{addr}").parse().map_err(|e| {
         crate::error::ChannelError::StartupFailed {
             name: "gateway".to_string(),
@@ -517,16 +507,6 @@ pub async fn start_server(
             reason: format!("Invalid CORS origin for localhost:{}: {e}", addr.port()),
         })?;
     let mut allowed_origins: Vec<header::HeaderValue> = vec![ip_origin, localhost_origin];
-    for default in DEFAULT_T3_FE_ORIGINS {
-        match default.parse::<header::HeaderValue>() {
-            Ok(origin) => allowed_origins.push(origin),
-            Err(err) => tracing::warn!(
-                %err,
-                origin = default,
-                "default T3 FE origin failed to parse — skipping",
-            ),
-        }
-    }
     if let Ok(extra) = std::env::var("T3CLAW_ALLOWED_ORIGINS") {
         for raw in extra.split(',') {
             let trimmed = raw.trim();
@@ -536,8 +516,8 @@ pub async fn start_server(
             match trimmed.parse::<header::HeaderValue>() {
                 Ok(origin) => {
                     // Skip duplicates so the rejection log stays readable
-                    // when an operator sets the env var to a superset of
-                    // the defaults.
+                    // when an operator's env var overlaps the auto-added
+                    // bind / localhost origins.
                     if !allowed_origins.contains(&origin) {
                         allowed_origins.push(origin);
                     }
