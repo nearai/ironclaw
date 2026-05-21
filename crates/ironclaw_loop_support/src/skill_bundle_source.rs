@@ -42,8 +42,8 @@ pub trait SkillBundleSource: Send + Sync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SkillSourceKind {
     System,
-    User,
     TenantShared,
+    User,
 }
 
 impl SkillSourceKind {
@@ -87,8 +87,8 @@ impl SkillBundleId {
         source_kind: SkillSourceKind,
         name: impl AsRef<str>,
     ) -> Result<Self, SkillBundleSourceError> {
-        let name = name.as_ref().trim();
-        if !validate_skill_name(name) {
+        let name = name.as_ref();
+        if name.trim() != name || !validate_skill_name(name) {
             return Err(SkillBundleSourceError::InvalidBundleId);
         }
         Ok(Self {
@@ -126,8 +126,9 @@ pub struct SkillFilePath(String);
 impl SkillFilePath {
     /// Builds a validated bundle-relative file path.
     pub fn new(path: impl AsRef<str>) -> Result<Self, SkillBundleSourceError> {
-        let path = path.as_ref().trim();
-        if path.is_empty()
+        let path = path.as_ref();
+        if path.trim() != path
+            || path.is_empty()
             || path.starts_with('/')
             || path.starts_with('~')
             || path.contains('\\')
@@ -252,9 +253,9 @@ impl SkillBundleDescriptor {
     }
 
     /// Returns the deterministic ordering key used by [`Ord`].
-    pub fn ordering_key(&self) -> (&'static str, &str, &str) {
+    pub fn ordering_key(&self) -> (SkillSourceKind, &str, &str) {
         (
-            self.id.source_kind().as_str(),
+            self.id.source_kind(),
             self.id.name(),
             self.skill_md_path.as_str(),
         )
@@ -327,7 +328,15 @@ mod tests {
             "user:code-review"
         );
 
-        for invalid in ["", "has space", "../escape", "/absolute", "ümlaut"] {
+        for invalid in [
+            "",
+            " code-review",
+            "code-review ",
+            "has space",
+            "../escape",
+            "/absolute",
+            "ümlaut",
+        ] {
             assert!(SkillBundleId::new(SkillSourceKind::User, invalid).is_err());
         }
     }
@@ -345,6 +354,8 @@ mod tests {
     fn skill_file_path_rejects_mount_escape_and_raw_host_shapes() {
         for invalid in [
             "",
+            " references/policy.md",
+            "references/policy.md ",
             "/skills/code-review/SKILL.md",
             "../SKILL.md",
             "references/../SKILL.md",
