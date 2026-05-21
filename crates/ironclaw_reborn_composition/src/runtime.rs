@@ -1338,10 +1338,10 @@ mod tests {
             ),
         ]));
         let skill_context_source: Arc<dyn HostSkillContextSource> = skill_source;
-        let input = RebornRuntimeInput::from_services(RebornBuildInput::local_dev(
-            "runtime-skill-owner",
-            root.path().join("local-dev"),
-        ))
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-skill-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
         .with_identity(RebornRuntimeIdentity {
             tenant_id: "runtime-skill-tenant".to_string(),
             agent_id: "runtime-skill-agent".to_string(),
