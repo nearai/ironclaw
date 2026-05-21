@@ -39,7 +39,7 @@ pub trait SkillBundleSource: Send + Sync {
 }
 
 /// Host-approved scope from which a skill bundle was discovered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SkillSourceKind {
     System,
     User,
@@ -60,6 +60,18 @@ impl SkillSourceKind {
 impl std::fmt::Display for SkillSourceKind {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+impl Ord for SkillSourceKind {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl PartialOrd for SkillSourceKind {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
@@ -204,8 +216,12 @@ impl SkillBundleDescriptor {
     }
 
     /// Overrides provenance metadata supplied by the host source.
+    ///
+    /// The descriptor id remains the source-kind authority; this method preserves
+    /// other provenance fields while aligning provenance source kind with the id.
     #[must_use]
-    pub fn with_provenance(mut self, provenance: SkillBundleProvenance) -> Self {
+    pub fn with_provenance(mut self, mut provenance: SkillBundleProvenance) -> Self {
+        provenance.source_kind = self.id.source_kind();
         self.provenance = provenance;
         self
     }
@@ -332,6 +348,7 @@ mod tests {
             "/skills/code-review/SKILL.md",
             "../SKILL.md",
             "references/../SKILL.md",
+            "references/./SKILL.md",
             "references//SKILL.md",
             "C:/Users/alice/SKILL.md",
             "https://example.test/SKILL.md",
@@ -347,23 +364,28 @@ mod tests {
     }
 
     #[test]
-    fn skill_bundle_descriptor_builders_and_accessors_preserve_metadata() {
-        let provenance = SkillBundleProvenance::new(SkillSourceKind::TenantShared)
-            .with_content_hash("sha256:abc123");
+    fn skill_bundle_descriptor_can_override_provenance_with_content_hash() {
         let descriptor = SkillBundleDescriptor::new(
             id(SkillSourceKind::User, "code-review"),
             Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
         )
         .with_skill_md_path(SkillFilePath::new("nested/SKILL.md").unwrap())
-        .with_provenance(provenance.clone());
+        .with_provenance(
+            SkillBundleProvenance::new(SkillSourceKind::TenantShared)
+                .with_content_hash("sha256:abc123"),
+        );
 
         assert_eq!(descriptor.id().source_kind(), SkillSourceKind::User);
         assert_eq!(descriptor.id().name(), "code-review");
         assert_eq!(descriptor.skill_md_path().as_str(), "nested/SKILL.md");
         assert_eq!(descriptor.trust(), Some(&SkillTrust::Trusted));
         assert_eq!(descriptor.visibility(), Some(&SkillVisibility::Visible));
-        assert_eq!(descriptor.provenance(), &provenance);
+        assert_eq!(descriptor.provenance().source_kind, SkillSourceKind::User);
+        assert_eq!(
+            descriptor.provenance().content_hash.as_deref(),
+            Some("sha256:abc123")
+        );
     }
 
     #[test]
@@ -399,6 +421,26 @@ mod tests {
         assert_eq!(
             SkillBundleSourceError::Internal.to_string(),
             "skill bundle source internal error"
+        );
+    }
+
+    #[test]
+    fn skill_source_kind_sort_matches_stable_string_ordering() {
+        let mut source_kinds = vec![
+            SkillSourceKind::User,
+            SkillSourceKind::TenantShared,
+            SkillSourceKind::System,
+        ];
+
+        source_kinds.sort();
+
+        assert_eq!(
+            source_kinds,
+            vec![
+                SkillSourceKind::System,
+                SkillSourceKind::TenantShared,
+                SkillSourceKind::User,
+            ]
         );
     }
 
