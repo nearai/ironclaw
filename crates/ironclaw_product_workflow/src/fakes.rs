@@ -284,6 +284,9 @@ impl IdempotencyLedger for FakeIdempotencyLedger {
 ///
 /// Queued `program_outcome(s)` results are consumed first; `allow`, `rewrite_*`,
 /// `reject`, and `force_failure` configure the fallback used after the queue.
+/// `delay_responses_by` composes with both queued and fallback outcomes: every
+/// subsequent policy response waits for the configured delay until a new fake is
+/// created.
 #[derive(Clone)]
 pub struct FakeBeforeInboundPolicy {
     state: Arc<Mutex<FakeBeforeInboundPolicyState>>,
@@ -305,6 +308,9 @@ impl FakeBeforeInboundPolicy {
     }
 
     /// Use allow as the fallback after queued outcomes are exhausted.
+    ///
+    /// This does not clear `delay_responses_by`; delayed fakes continue to
+    /// delay allow outcomes.
     pub fn allow(&self) {
         let mut state = self
             .state
@@ -314,6 +320,9 @@ impl FakeBeforeInboundPolicy {
     }
 
     /// Use this rewrite as the fallback after queued outcomes are exhausted.
+    ///
+    /// This does not clear `delay_responses_by`; delayed fakes continue to
+    /// delay rewrite outcomes.
     pub fn rewrite_user_message(&self, payload: UserMessagePayload) {
         let mut state = self
             .state
@@ -323,6 +332,9 @@ impl FakeBeforeInboundPolicy {
     }
 
     /// Use this rejection as the fallback after queued outcomes are exhausted.
+    ///
+    /// This does not clear `delay_responses_by`; delayed fakes continue to
+    /// delay rejection outcomes.
     pub fn reject(&self, rejection: ProductRejection) {
         let mut state = self
             .state
@@ -332,6 +344,9 @@ impl FakeBeforeInboundPolicy {
     }
 
     /// Use this failure as the fallback after queued outcomes are exhausted.
+    ///
+    /// This does not clear `delay_responses_by`; delayed fakes continue to
+    /// delay failure outcomes.
     pub fn force_failure(&self, error: ProductWorkflowError) {
         let mut state = self
             .state
@@ -367,7 +382,8 @@ impl FakeBeforeInboundPolicy {
     /// Delay every policy response after recording the request.
     ///
     /// Use a delay longer than the workflow timeout to exercise the timeout
-    /// and retry-release path.
+    /// and retry-release path. The delay composes with queued outcomes and the
+    /// fallback outcome; create a new fake when an immediate response is needed.
     pub fn delay_responses_by(&self, delay: Duration) {
         let mut state = self
             .state
@@ -386,6 +402,10 @@ impl FakeBeforeInboundPolicy {
     }
 
     /// Recorded policy requests.
+    ///
+    /// These are intentionally raw test-support requests, including external
+    /// actor/conversation refs, so contract tests can assert exact routing
+    /// context. Do not log this collection from production-like tests.
     pub fn requests(&self) -> Vec<BeforeInboundPolicyRequest> {
         let state = self
             .state

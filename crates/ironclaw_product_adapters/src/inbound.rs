@@ -649,6 +649,13 @@ mod tests {
 
     #[test]
     fn user_message_text_length_bounded_through_serde() {
+        let empty = serde_json::json!({
+            "text": "",
+            "attachments": [],
+            "trigger": "direct_chat"
+        });
+        assert!(serde_json::from_value::<UserMessagePayload>(empty).is_ok());
+
         let at_limit = serde_json::json!({
             "text": "a".repeat(USER_MESSAGE_TEXT_MAX_BYTES),
             "attachments": [],
@@ -674,6 +681,13 @@ mod tests {
             )
             .is_err()
         );
+        let empty_command = serde_json::json!({
+            "command": "",
+            "arguments": "",
+            "trigger": "bot_command"
+        });
+        assert!(serde_json::from_value::<InboundCommandPayload>(empty_command).is_err());
+
         let at_limit = serde_json::json!({
             "command": "h".repeat(COMMAND_MAX_BYTES),
             "arguments": "",

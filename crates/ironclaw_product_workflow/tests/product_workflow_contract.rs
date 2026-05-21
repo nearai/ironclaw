@@ -761,7 +761,7 @@ async fn before_inbound_policy_retryable_failure_releases_fingerprint() {
 #[tokio::test]
 async fn before_inbound_policy_timeout_releases_fingerprint_for_retry() {
     let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
-    policy.delay_responses_by(StdDuration::from_millis(50));
+    policy.delay_responses_by(StdDuration::from_millis(200));
     let envelope = sample_envelope("policy-timeout-release");
 
     let first = workflow
@@ -833,6 +833,15 @@ async fn before_inbound_policy_permanent_failure_settles_terminal_rejection() {
     assert_eq!(
         rejection.disposition(),
         ProductRejectionDisposition::Permanent
+    );
+    let rejection_debug = format!("{rejection:?}");
+    assert!(
+        !rejection_debug.contains("policy configuration is invalid"),
+        "durable rejection ack must not expose raw policy internals: {rejection_debug}"
+    );
+    assert!(
+        rejection_debug.contains("<redacted>"),
+        "durable rejection reason should remain redacted: {rejection_debug}"
     );
 }
 
@@ -1464,7 +1473,17 @@ async fn concrete_product_workflow_reuses_prepared_binding_for_content_only_poli
         .await
         .expect("policy-rewritten message accepted");
 
-    assert_eq!(coordinator.submissions().len(), 1);
+    let submissions = coordinator.submissions();
+    assert_eq!(submissions.len(), 1);
+    assert_eq!(
+        submissions[0].scope.tenant_id.as_str(),
+        "tenant:install_alpha"
+    );
+    assert_eq!(submissions[0].actor.user_id.as_str(), "user:user1");
+    assert_eq!(
+        submissions[0].scope.agent_id.as_ref().map(AgentId::as_str),
+        Some("agent:fake")
+    );
     assert_eq!(binding.resolve_count(), 1);
     assert_eq!(
         binding.route_kinds(),
