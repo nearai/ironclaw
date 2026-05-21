@@ -739,7 +739,7 @@ mod mount_view_tests {
         ));
 
         scoped
-            .write_file(&scope, &user_path, b"user skill")
+            .write_bytes(&scope, &user_path, b"user skill".to_vec())
             .await
             .expect("user skills should be writable through the scoped alias");
         let content = scoped
