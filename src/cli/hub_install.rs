@@ -42,6 +42,9 @@ pub fn validate_release_tag(tag: &str) -> anyhow::Result<()> {
             tag
         );
     }
+    if tag.contains("..") {
+        anyhow::bail!("release tag '{}' must not contain '..'", tag);
+    }
     Ok(())
 }
 
@@ -99,6 +102,8 @@ mod tests {
     fn validate_release_tag_rejects_unsafe_input() {
         for tag in [
             "",
+            "..",
+            "v1..0",
             "../etc",
             "release/../other",
             "release@evil.com",

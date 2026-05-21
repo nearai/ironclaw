@@ -202,6 +202,30 @@ async fn install(
         .await
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
+    install_with_manifest(
+        manifest,
+        name,
+        force_skill,
+        force_tool,
+        release_tag,
+        target,
+        force,
+        acknowledge_unverified,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn install_with_manifest(
+    manifest: HubManifest,
+    name: &str,
+    force_skill: bool,
+    force_tool: bool,
+    release_tag: Option<String>,
+    target: Option<PathBuf>,
+    force: bool,
+    acknowledge_unverified: bool,
+) -> anyhow::Result<()> {
     let kind = classify(&manifest, name, force_tool, force_skill)?;
 
     let provenance = match kind {
@@ -577,5 +601,65 @@ mod tests {
         assert!(hits.contains(&"evm-rpc".to_string()));
         assert!(hits.contains(&"near-rpc".to_string()));
         assert!(!hits.contains(&"clickup".to_string()));
+    }
+
+    fn manifest_with_one_new_tool(name: &str) -> HubManifest {
+        let mut m = manifest_with(vec![name], vec![]);
+        if let Some(tool) = m.tools.first_mut() {
+            tool.provenance = Provenance::New;
+        }
+        m
+    }
+
+    #[tokio::test]
+    async fn install_with_manifest_rejects_provenance_new_without_acknowledgement() {
+        let manifest = manifest_with_one_new_tool("indie-tool");
+        let err = install_with_manifest(
+            manifest,
+            "indie-tool",
+            false,
+            false,
+            None,
+            None,
+            false,
+            false,
+        )
+        .await
+        .expect_err("community-unverified entry without --acknowledge-unverified must bail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("UNVERIFIED") && msg.contains("--acknowledge-unverified"),
+            "CLI gate error must name the flag the operator needs to set, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn install_with_manifest_passes_gate_with_acknowledgement() {
+        let manifest = manifest_with_one_new_tool("indie-tool");
+        let result = install_with_manifest(
+            manifest,
+            "indie-tool",
+            false,
+            false,
+            None,
+            None,
+            false,
+            true,
+        )
+        .await;
+        match result {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    !msg.contains("UNVERIFIED"),
+                    "ack=true must clear the gate; any UNVERIFIED bail here means the gate \
+                     fired despite acknowledgement, got: {msg}"
+                );
+            }
+            Ok(_) => panic!(
+                "test-fixture artifact URLs cannot resolve in a unit-test environment; \
+                 an Ok result means the install pipeline silently bypassed network entirely"
+            ),
+        }
     }
 }

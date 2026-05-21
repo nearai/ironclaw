@@ -695,7 +695,7 @@ pub(crate) fn verify_sha256(bytes: &[u8], expected: &str, url: &str) -> Result<(
     hasher.update(bytes);
     let actual = format!("{:x}", hasher.finalize());
 
-    if actual != expected {
+    if !actual.eq_ignore_ascii_case(expected) {
         return Err(RegistryError::ChecksumMismatch {
             url: url.to_string(),
             expected_sha256: expected.to_string(),
@@ -905,6 +905,16 @@ mod tests {
     fn test_verify_sha256_invalid() {
         let err = verify_sha256(b"data", "0000", "test://url").expect_err("checksum mismatch");
         assert!(matches!(err, RegistryError::ChecksumMismatch { .. }));
+    }
+
+    #[test]
+    fn test_verify_sha256_accepts_uppercase_expected() {
+        use sha2::{Digest, Sha256};
+        let data = b"hello world";
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let hash = format!("{:X}", hasher.finalize());
+        assert!(verify_sha256(data, &hash, "test://url").is_ok());
     }
 
     #[tokio::test]

@@ -204,6 +204,22 @@ fn install_outcome_to_json(kind: HubEntryKind, outcome: &HubInstallOutcome) -> s
     serde_json::Value::Object(obj)
 }
 
+fn annotate_reload_verification(json: &mut serde_json::Value, name: &str, loaded: &[String]) {
+    let verified = loaded.iter().any(|n| n.eq_ignore_ascii_case(name));
+    let Some(obj) = json.as_object_mut() else {
+        return;
+    };
+    obj.insert("reload_verified".into(), serde_json::Value::Bool(verified));
+    if !verified {
+        obj.insert(
+            "reload_warning".into(),
+            serde_json::Value::String(format!(
+                "skill '{name}' written to disk but not present in the registry after reload"
+            )),
+        );
+    }
+}
+
 fn tool_entry_json(entry: &HubToolEntry) -> serde_json::Value {
     serde_json::json!({
         "kind": "tool",
@@ -300,27 +316,26 @@ impl IronhubInstallTool {
                     .install_skill_from_manifest(&manifest, &parsed.name, parsed.force)
                     .await
                     .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+                let mut json = install_outcome_to_json(kind, &outcome);
                 if let Some(reg) = &self.deps.skill_registry {
                     let reg = Arc::clone(reg);
                     let handle = tokio::runtime::Handle::current();
-                    tokio::task::spawn_blocking(move || {
+                    let loaded = tokio::task::spawn_blocking(move || {
                         let mut guard = reg.write().unwrap_or_else(|poison| {
                             tracing::error!(
                                 "skill registry RwLock was poisoned (a previous writer panicked); recovering"
                             );
                             poison.into_inner()
                         });
-                        handle.block_on(guard.reload());
+                        handle.block_on(guard.reload())
                     })
                     .await
                     .map_err(|e| {
                         ToolError::ExecutionFailed(format!("skill registry reload join: {e}"))
                     })?;
+                    annotate_reload_verification(&mut json, &outcome.name, &loaded);
                 }
-                Ok(ToolOutput::success(
-                    install_outcome_to_json(kind, &outcome),
-                    start.elapsed(),
-                ))
+                Ok(ToolOutput::success(json, start.elapsed()))
             }
         }
     }
@@ -1052,6 +1067,41 @@ mod tests {
     }
 
     #[test]
+    fn annotate_reload_verification_flags_present_skill() {
+        let mut json =
+            install_outcome_to_json(HubEntryKind::Skill, &outcome("chief-of-staff", false));
+        annotate_reload_verification(
+            &mut json,
+            "chief-of-staff",
+            &["chief-of-staff".to_string(), "other-skill".to_string()],
+        );
+        assert_eq!(json["reload_verified"], true);
+        assert!(json.get("reload_warning").is_none());
+    }
+
+    #[test]
+    fn annotate_reload_verification_matches_case_insensitively() {
+        let mut json =
+            install_outcome_to_json(HubEntryKind::Skill, &outcome("Chief-Of-Staff", false));
+        annotate_reload_verification(&mut json, "Chief-Of-Staff", &["chief-of-staff".to_string()]);
+        assert_eq!(json["reload_verified"], true);
+    }
+
+    #[test]
+    fn annotate_reload_verification_warns_when_absent() {
+        let mut json =
+            install_outcome_to_json(HubEntryKind::Skill, &outcome("chief-of-staff", false));
+        annotate_reload_verification(&mut json, "chief-of-staff", &["other-skill".to_string()]);
+        assert_eq!(json["reload_verified"], false);
+        assert!(
+            json["reload_warning"]
+                .as_str()
+                .unwrap()
+                .contains("not present in the registry after reload")
+        );
+    }
+
+    #[test]
     fn tool_entry_json_surfaces_provenance_and_trust_label() {
         let entry = HubToolEntry {
             name: "indie-tool".into(),
@@ -1276,6 +1326,74 @@ mod tests {
         assert!(!re.is_match("../etc"));
         assert!(!re.is_match("Name"));
         assert!(!re.is_match(""));
+    }
+
+    fn ironhub_deps_for_schema_check() -> IronhubDeps {
+        let secrets = crate::channels::web::test_helpers::test_secrets_store();
+        let (ext_mgr, tools_dir, _channels_dir) =
+            crate::channels::web::test_helpers::test_ext_mgr(secrets);
+        std::mem::forget(tools_dir);
+        IronhubDeps {
+            extension_manager: ext_mgr,
+            skill_registry: None,
+        }
+    }
+
+    #[test]
+    fn every_name_carrying_schema_accepts_underscore_and_matches_validate_hub_name() {
+        let schemas: [(&str, serde_json::Value); 3] = [
+            (
+                "ironhub_install",
+                IronhubInstallTool::new(ironhub_deps_for_schema_check()).parameters_schema(),
+            ),
+            ("ironhub_info", IronhubInfoTool::new().parameters_schema()),
+            (
+                "ironhub_remove",
+                IronhubRemoveTool::new(ironhub_deps_for_schema_check()).parameters_schema(),
+            ),
+        ];
+        for (tool_name, schema) in schemas {
+            let pattern = schema["properties"]["name"]["pattern"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{tool_name}: missing properties.name.pattern"));
+            let re = regex::Regex::new(pattern)
+                .unwrap_or_else(|e| panic!("{tool_name}: pattern is not a valid regex: {e}"));
+
+            assert!(
+                re.is_match("microsoft_365"),
+                "{tool_name}: schema must accept underscore names like microsoft_365 \
+                 (validate_hub_name accepts them; schema must not be tighter)"
+            );
+            assert!(
+                re.is_match("chief-of-staff"),
+                "{tool_name}: schema must accept hyphen names"
+            );
+            assert!(
+                re.is_match("clickup"),
+                "{tool_name}: schema must accept plain lowercase names"
+            );
+            assert!(
+                !re.is_match("Microsoft365"),
+                "{tool_name}: schema must reject uppercase"
+            );
+            assert!(
+                !re.is_match("../etc/passwd"),
+                "{tool_name}: schema must reject path traversal"
+            );
+            assert!(
+                !re.is_match("name with space"),
+                "{tool_name}: schema must reject spaces"
+            );
+            assert!(
+                !re.is_match(""),
+                "{tool_name}: schema must reject empty name"
+            );
+
+            assert!(
+                crate::cli::hub_install::looks_like_hub_name("microsoft_365"),
+                "shared validator must agree the schema's accepted name is also valid"
+            );
+        }
     }
 
     #[test]

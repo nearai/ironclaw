@@ -156,26 +156,6 @@ impl HubInstaller {
         })
     }
 
-    pub async fn install_tool_by_name(
-        &self,
-        name: &str,
-        force: bool,
-    ) -> Result<HubInstallOutcome, RegistryError> {
-        let manifest = self.fetch_manifest().await?;
-        self.install_tool_from_manifest(&manifest, name, force)
-            .await
-    }
-
-    pub async fn install_skill_by_name(
-        &self,
-        name: &str,
-        force: bool,
-    ) -> Result<HubInstallOutcome, RegistryError> {
-        let manifest = self.fetch_manifest().await?;
-        self.install_skill_from_manifest(&manifest, name, force)
-            .await
-    }
-
     pub async fn install_tool_from_manifest(
         &self,
         manifest: &HubManifest,
