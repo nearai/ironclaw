@@ -26,7 +26,7 @@ use axum::{
     routing::{get, post, put},
 };
 use tokio::sync::oneshot;
-use tower_http::cors::{AllowHeaders, CorsLayer};
+use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::channels::web::auth::{CombinedAuthState, auth_middleware};
@@ -479,10 +479,19 @@ pub async fn start_server(
     // startup bug, not a request-time error — so we fail the bootstrap
     // with `ChannelError::StartupFailed` rather than panic.
     //
-    // Operators running a separate FE on a different localhost port
-    // (e.g. the trinity payroll-v2 FE on :3200, per the runbook's #24)
-    // must opt in via `T3CLAW_ALLOWED_ORIGINS` — a comma-separated
-    // list of fully-qualified origins like `http://localhost:3200`.
+    // Non-local origins must opt in via `T3CLAW_ALLOWED_ORIGINS` — a
+    // comma-separated list of fully-qualified origins like
+    // `http://localhost:3200`. This stays opt-in deliberately: the
+    // gateway sets `allow_credentials(true)` and admits the
+    // `Authorization` header (see the CorsLayer build below), so adding
+    // an origin grants browser-side JS at that origin the ability to
+    // issue authenticated requests against this gateway and read
+    // responses. Baking remote production / staging hosts into the
+    // binary would ship that trust into every deployment — including
+    // non-T3 forks — and would widen the attack surface for any
+    // future XSS on those hosts. Document recommended values in
+    // deployment templates (`deploy-gcp/env.example`) instead.
+    //
     // Each entry is parsed independently; an invalid value is logged
     // and skipped rather than aborting startup.
     let ip_origin = format!("http://{addr}").parse().map_err(|e| {
@@ -505,7 +514,14 @@ pub async fn start_server(
                 continue;
             }
             match trimmed.parse::<header::HeaderValue>() {
-                Ok(origin) => allowed_origins.push(origin),
+                Ok(origin) => {
+                    // Skip duplicates so the rejection log stays readable
+                    // when an operator's env var overlaps the auto-added
+                    // bind / localhost origins.
+                    if !allowed_origins.contains(&origin) {
+                        allowed_origins.push(origin);
+                    }
+                }
                 Err(err) => tracing::warn!(
                     %err,
                     origin = trimmed,
@@ -514,8 +530,39 @@ pub async fn start_server(
             }
         }
     }
+    let origin_strings: Vec<&str> = allowed_origins
+        .iter()
+        .filter_map(|h| h.to_str().ok())
+        .collect();
+    tracing::info!(
+        count = allowed_origins.len(),
+        origins = ?origin_strings,
+        "CORS allow_origin list resolved at startup",
+    );
+
+    // Wrap the allowlist in a predicate so we can log per-rejection.
+    // Without this, a missing entry surfaces only as a silent missing
+    // `Access-Control-Allow-Origin` header — the operator has to diff
+    // browser devtools to spot the problem. Logging at WARN at the
+    // gateway means a single `grep CORS preflight rejected` finds the
+    // exact origin the FE was using.
+    let allowed_for_predicate = allowed_origins.clone();
+    let allow_origin = AllowOrigin::predicate(
+        move |origin: &header::HeaderValue, _parts: &axum::http::request::Parts| {
+            let allowed = allowed_for_predicate.contains(origin);
+            if !allowed {
+                tracing::warn!(
+                    origin = ?origin,
+                    allowed_count = allowed_for_predicate.len(),
+                    "CORS preflight rejected: origin not in allowlist \
+                     (add to T3CLAW_ALLOWED_ORIGINS env var to grant)",
+                );
+            }
+            allowed
+        },
+    );
     let cors = CorsLayer::new()
-        .allow_origin(allowed_origins)
+        .allow_origin(allow_origin)
         .allow_methods([
             axum::http::Method::GET,
             axum::http::Method::POST,
