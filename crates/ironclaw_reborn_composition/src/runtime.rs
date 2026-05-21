@@ -31,10 +31,12 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+use ironclaw_host_api::{AgentId, ScopedPath, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
+    FilesystemSkillBundleRoot, FilesystemSkillBundleSource, HostIdentityContextBuildError,
+    HostIdentityContextCandidate, HostIdentityContextSource, HostSkillContextSource,
+    SkillBundleContextSource,
 };
 use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
 use ironclaw_reborn::runtime::{
@@ -471,7 +473,7 @@ pub async fn build_reborn_runtime(
         runner,
         poll,
         identity,
-        skill_context_source,
+        skill_context_source: configured_skill_context_source,
         #[cfg(test)]
         model_gateway_override,
     } = input;
@@ -510,6 +512,10 @@ pub async fn build_reborn_runtime(
     let checkpoint_state_store = Arc::clone(&local_runtime.checkpoint_state_store);
     let loop_checkpoint_store = Arc::clone(&local_runtime.loop_checkpoint_store);
     let thread_service = Arc::clone(&local_runtime.thread_service);
+    let skill_context_source = match configured_skill_context_source {
+        Some(source) => Some(source),
+        None => Some(local_dev_filesystem_skill_context_source(local_runtime)?),
+    };
 
     let validated_identity = validate_runtime_identity(identity)?;
 
@@ -646,6 +652,26 @@ pub async fn build_reborn_runtime(
         default_run_profile_id,
         wake_sender,
         send_locks: Mutex::new(HashMap::new()),
+    })
+}
+
+fn local_dev_filesystem_skill_context_source(
+    local_runtime: &crate::factory::RebornLocalRuntimeServices,
+) -> Result<Arc<dyn HostSkillContextSource>, RebornRuntimeError> {
+    let bundle_source = Arc::new(FilesystemSkillBundleSource::new(
+        Arc::clone(&local_runtime.skill_filesystem),
+        vec![
+            FilesystemSkillBundleRoot::system(scoped_skill_root("/system/skills")?),
+            FilesystemSkillBundleRoot::tenant_shared(scoped_skill_root("/tenant-shared/skills")?),
+            FilesystemSkillBundleRoot::user(scoped_skill_root("/skills")?),
+        ],
+    ));
+    Ok(Arc::new(SkillBundleContextSource::new(bundle_source)))
+}
+
+fn scoped_skill_root(path: &str) -> Result<ScopedPath, RebornRuntimeError> {
+    ScopedPath::new(path).map_err(|reason| RebornRuntimeError::InvalidArgument {
+        reason: format!("skill root path: {reason}"),
     })
 }
 
@@ -1337,10 +1363,10 @@ mod tests {
             ),
         ]));
         let skill_context_source: Arc<dyn HostSkillContextSource> = skill_source;
-        let input = RebornRuntimeInput::from_services(RebornBuildInput::local_dev(
-            "runtime-skill-owner",
-            root.path().join("local-dev"),
-        ))
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-skill-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
         .with_identity(RebornRuntimeIdentity {
             tenant_id: "runtime-skill-tenant".to_string(),
             agent_id: "runtime-skill-agent".to_string(),
@@ -1386,6 +1412,148 @@ mod tests {
         assert_eq!(request_count, 1);
         assert!(skill_message_content.contains("review helper description"));
         assert!(skill_message_content.contains("Use review helper prompt content."));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_wires_filesystem_skills_by_default_to_model_calls() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/skills/system-helper"))
+            .expect("system skill dir");
+        std::fs::write(
+            storage_root.join("system/skills/system-helper/SKILL.md"),
+            skill_md(
+                "system-helper",
+                "system helper description",
+                "SYSTEM_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write system skill");
+        std::fs::create_dir_all(storage_root.join("skills/local-helper")).expect("user skill dir");
+        std::fs::write(
+            storage_root.join("skills/local-helper/SKILL.md"),
+            skill_md(
+                "local-helper",
+                "local helper description",
+                "USER_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write user skill");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "filesystem skill context ok".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-filesystem-skill-owner", storage_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-filesystem-skill-tenant".to_string(),
+            agent_id: "runtime-filesystem-skill-agent".to_string(),
+            source_binding_id: "runtime-filesystem-skill-source".to_string(),
+            reply_target_binding_id: "runtime-filesystem-skill-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.send_user_message(&conversation, "review this"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(reply.text.as_deref(), Some("filesystem skill context ok"));
+        let skill_messages = {
+            let requests = requests
+                .lock()
+                .expect("recording gateway requests lock poisoned");
+            requests[0]
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.role == HostManagedModelMessageRole::System
+                        && message
+                            .content_ref
+                            .as_str()
+                            .starts_with("msg:snippet.skill.")
+                })
+                .map(|message| message.content.clone())
+                .collect::<Vec<_>>()
+        };
+        let combined_skill_context = skill_messages.join("\n");
+        assert_eq!(skill_messages.len(), 2);
+        assert!(combined_skill_context.contains("system helper description"));
+        assert!(combined_skill_context.contains("SYSTEM_HELPER_PROMPT_SENTINEL"));
+        assert!(combined_skill_context.contains("local helper description"));
+        assert!(!combined_skill_context.contains("USER_HELPER_PROMPT_SENTINEL"));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_fails_closed_for_invalid_filesystem_skill_before_model_call() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("skills/bad-helper")).expect("bad skill dir");
+        std::fs::write(
+            storage_root.join("skills/bad-helper/SKILL.md"),
+            skill_md(
+                "different-name",
+                "bad helper description",
+                "BAD_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write bad skill");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "should not reach model".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-bad-skill-owner", storage_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-bad-skill-tenant".to_string(),
+            agent_id: "runtime-bad-skill-agent".to_string(),
+            source_binding_id: "runtime-bad-skill-source".to_string(),
+            reply_target_binding_id: "runtime-bad-skill-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.send_user_message(&conversation, "review this"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+
+        assert_ne!(reply.status, TurnStatus::Completed);
+        assert!(
+            requests
+                .lock()
+                .expect("recording gateway requests lock poisoned")
+                .is_empty(),
+            "invalid filesystem skill should fail before model dispatch"
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

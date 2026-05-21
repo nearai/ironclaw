@@ -2,10 +2,12 @@ use std::sync::Arc;
 
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
-use ironclaw_host_api::{EffectKind, PackageId};
+use ironclaw_host_api::{
+    EffectKind, MountAlias, MountGrant, MountPermissions, MountView, PackageId, VirtualPath,
+};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
     builtin_first_party_handlers, builtin_first_party_package,
@@ -40,6 +42,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
     pub(crate) thread_service: Arc<InMemorySessionThreadService>,
+    pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -134,6 +137,12 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         ironclaw_host_api::HostPath::from_path_buf(workspace_root),
     )?;
 
+    let filesystem = Arc::new(filesystem);
+    let skill_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&filesystem),
+        local_dev_skill_mount_view()?,
+    ));
+
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let turn_state = Arc::new(InMemoryTurnStateStore::default());
@@ -142,11 +151,12 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
         loop_checkpoint_store: Arc::new(InMemoryLoopCheckpointStore::default()),
         thread_service: Arc::new(InMemorySessionThreadService::default()),
+        skill_filesystem,
     });
 
     let mut services = HostRuntimeServices::new(
         Arc::new(local_dev_extension_registry()?),
-        Arc::new(filesystem),
+        filesystem,
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
@@ -171,6 +181,28 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         turn_coordinator: Some(turn_coordinator),
         readiness: readiness_for(input.profile, true, true),
         local_runtime: Some(local_runtime),
+    })
+}
+
+fn local_dev_skill_mount_view() -> Result<MountView, RebornBuildError> {
+    let grant = |alias: &str, target: &str| -> Result<MountGrant, RebornBuildError> {
+        Ok(MountGrant::new(
+            MountAlias::new(alias).map_err(|error| RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            })?,
+            VirtualPath::new(target).map_err(|error| RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            })?,
+            MountPermissions::read_only(),
+        ))
+    };
+    MountView::new(vec![
+        grant("/skills", "/projects/skills")?,
+        grant("/tenant-shared", "/projects/tenant-shared")?,
+        grant("/system/skills", "/projects/system/skills")?,
+    ])
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
     })
 }
 
