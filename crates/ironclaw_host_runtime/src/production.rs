@@ -25,6 +25,7 @@ use ironclaw_extensions::{ExtensionPackage, ExtensionRegistry};
 use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatcher, CapabilityId, DispatchFailureKind, InvocationId,
     PackageSource, ResourceScope, RuntimeDispatchErrorKind, RuntimeKind,
+    runtime_policy::EffectiveRuntimePolicy,
 };
 use ironclaw_processes::{
     ProcessCancellationRegistry, ProcessError, ProcessHost, ProcessManager, ProcessResultStore,
@@ -42,7 +43,8 @@ use crate::{
     RuntimeBlockedReason, RuntimeCapabilityCompleted, RuntimeCapabilityFailure,
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
     RuntimeFailureKind, RuntimeStatusRequest, RuntimeWorkId, RuntimeWorkSummary,
-    VisibleCapabilityRequest, VisibleCapabilitySurface, surface::CapabilityCatalog,
+    VisibleCapabilityRequest, VisibleCapabilitySurface, plan_capability,
+    surface::CapabilityCatalog,
 };
 
 /// Default production wiring for [`HostRuntime`].
@@ -62,6 +64,7 @@ pub struct DefaultHostRuntime {
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     obligation_handler: Option<Arc<dyn CapabilityObligationHandler>>,
     surface_version: CapabilitySurfaceVersion,
+    runtime_policy: EffectiveRuntimePolicy,
 }
 
 impl DefaultHostRuntime {
@@ -86,6 +89,7 @@ impl DefaultHostRuntime {
         dispatcher: Arc<dyn CapabilityDispatcher>,
         authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
         surface_version: CapabilitySurfaceVersion,
+        runtime_policy: EffectiveRuntimePolicy,
     ) -> Self {
         Self {
             registry,
@@ -103,6 +107,7 @@ impl DefaultHostRuntime {
             runtime_health: None,
             obligation_handler: None,
             surface_version,
+            runtime_policy,
         }
     }
 
@@ -119,6 +124,13 @@ impl DefaultHostRuntime {
     /// Attaches an already-erased host-owned trust policy.
     pub fn with_trust_policy_dyn(mut self, trust_policy: Arc<dyn TrustPolicy>) -> Self {
         self.trust_policy = trust_policy;
+        self
+    }
+
+    /// Attaches the resolved runtime policy that structurally gates each
+    /// capability invocation and visible-capability projection.
+    pub fn with_runtime_policy(mut self, policy: EffectiveRuntimePolicy) -> Self {
+        self.runtime_policy = policy;
         self
     }
 
@@ -261,6 +273,15 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
+        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
+            tracing::debug!(
+                capability_id = %capability_id,
+                runtime_policy_error_kind = error.kind(),
+                "capability runtime policy rejected invocation before dispatch"
+            );
+            return Ok(runtime_policy_failure(capability_id, error));
+        }
+
         let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
             Ok(host_decision) => host_decision,
             Err(error) => {
@@ -324,6 +345,22 @@ impl HostRuntime for DefaultHostRuntime {
             );
         }
 
+        if let Err(error) = self.enforce_runtime_policy(&capability_id) {
+            tracing::debug!(
+                capability_id = %capability_id,
+                runtime_policy_error_kind = error.kind(),
+                "capability runtime policy rejected resume before dispatch"
+            );
+            self.fail_matching_blocked_resume_on_preflight_error(
+                &context,
+                &capability_id,
+                approval_request_id,
+                error.kind(),
+            )
+            .await;
+            return Ok(runtime_policy_failure(capability_id, error));
+        }
+
         let trust_decision = match self.evaluate_invocation_trust(&capability_id) {
             Ok(host_decision) => host_decision,
             Err(error) => {
@@ -384,6 +421,7 @@ impl HostRuntime for DefaultHostRuntime {
             self.registry.as_ref(),
             self.authorizer.as_ref(),
             &self.surface_version,
+            &self.runtime_policy,
         )
         .visible_capabilities(request)
         .await
@@ -616,6 +654,27 @@ impl DefaultHostRuntime {
         Ok(decision)
     }
 
+    fn enforce_runtime_policy(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Result<(), RuntimePolicyEvaluationError> {
+        let descriptor = self
+            .registry
+            .get_capability(capability_id)
+            .ok_or(RuntimePolicyEvaluationError::UnknownCapability)?;
+        let plan = plan_capability(descriptor, &self.runtime_policy)
+            .map_err(RuntimePolicyEvaluationError::Denied)?;
+        tracing::debug!(
+            capability_id = %capability_id,
+            filesystem_backend = ?plan.filesystem_backend,
+            process_backend = ?plan.process_backend,
+            network_mode = ?plan.network_mode,
+            secret_mode = ?plan.secret_mode,
+            "capability runtime policy planned invocation"
+        );
+        Ok(())
+    }
+
     async fn fail_matching_blocked_resume_on_preflight_error(
         &self,
         context: &ironclaw_host_api::ExecutionContext,
@@ -737,6 +796,36 @@ enum TrustEvaluationError {
     Policy,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RuntimePolicyEvaluationError {
+    UnknownCapability,
+    Denied(crate::PlannerError),
+}
+
+impl RuntimePolicyEvaluationError {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::UnknownCapability => "unknown_capability",
+            Self::Denied(crate::PlannerError::ProcessEffectsRequiredButProcessBackendIsNone {
+                ..
+            }) => "process_backend_none",
+            Self::Denied(crate::PlannerError::NetworkRequiredButNetworkModeIsDeny { .. }) => {
+                "network_denied"
+            }
+            Self::Denied(crate::PlannerError::SecretAccessRequiredButSecretModeIsDeny {
+                ..
+            }) => "secret_denied",
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            Self::UnknownCapability => "unknown capability".to_string(),
+            Self::Denied(error) => format!("runtime policy denied capability: {error}"),
+        }
+    }
+}
+
 impl TrustEvaluationError {
     const fn kind(self) -> &'static str {
         match self {
@@ -815,6 +904,24 @@ fn trust_evaluation_failure(
         kind: trust_evaluation_failure_kind(error),
         message: Some(error.message().to_string()),
     })
+}
+
+fn runtime_policy_failure(
+    capability_id: CapabilityId,
+    error: RuntimePolicyEvaluationError,
+) -> RuntimeCapabilityOutcome {
+    RuntimeCapabilityOutcome::Failed(RuntimeCapabilityFailure {
+        capability_id,
+        kind: runtime_policy_failure_kind(&error),
+        message: Some(error.message()),
+    })
+}
+
+fn runtime_policy_failure_kind(error: &RuntimePolicyEvaluationError) -> RuntimeFailureKind {
+    match error {
+        RuntimePolicyEvaluationError::UnknownCapability => RuntimeFailureKind::MissingRuntime,
+        RuntimePolicyEvaluationError::Denied(_) => RuntimeFailureKind::Authorization,
+    }
 }
 
 fn trust_evaluation_failure_kind(error: TrustEvaluationError) -> RuntimeFailureKind {

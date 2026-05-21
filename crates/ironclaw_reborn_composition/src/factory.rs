@@ -3,6 +3,8 @@ use std::sync::Arc;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::LocalFilesystem;
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_api::{EffectKind, PackageId};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
@@ -142,7 +144,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         thread_service: Arc::new(InMemorySessionThreadService::default()),
     });
 
-    let services = HostRuntimeServices::new(
+    let mut services = HostRuntimeServices::new(
         Arc::new(local_dev_extension_registry()?),
         Arc::new(filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
@@ -155,6 +157,9 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     .with_run_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_turn_state(Arc::clone(&turn_state));
+    if let Some(runtime_policy) = input.runtime_policy {
+        services = services.with_runtime_policy(runtime_policy);
+    }
 
     let host_runtime: Arc<dyn ironclaw_host_runtime::HostRuntime> =
         Arc::new(services.host_runtime_for_local_testing());
@@ -202,6 +207,9 @@ fn local_dev_first_party_trust_policy() -> Result<HostTrustPolicy, RebornBuildEr
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem,
+                EffectKind::Network,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
             ],
             None,
         ),
@@ -219,6 +227,7 @@ async fn build_production_shaped(
         owner_id: _,
         storage,
         production_trust_policy,
+        runtime_policy,
         turn_run_wake_notifier,
         required_runtime_backends,
         require_runtime_http_egress,
@@ -233,6 +242,7 @@ async fn build_production_shaped(
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let _ = (
         production_trust_policy,
+        runtime_policy,
         turn_run_wake_notifier,
         required_runtime_backends,
         require_runtime_http_egress,
@@ -255,8 +265,11 @@ async fn build_production_shaped(
             auth_token,
             secret_master_key,
         } => {
-            let production_wiring =
-                production_wiring(production_trust_policy, turn_run_wake_notifier)?;
+            let production_wiring = production_wiring(
+                production_trust_policy,
+                runtime_policy,
+                turn_run_wake_notifier,
+            )?;
             build_libsql_production(
                 profile,
                 wiring_config,
@@ -274,8 +287,11 @@ async fn build_production_shaped(
             url,
             secret_master_key,
         } => {
-            let production_wiring =
-                production_wiring(production_trust_policy, turn_run_wake_notifier)?;
+            let production_wiring = production_wiring(
+                production_trust_policy,
+                runtime_policy,
+                turn_run_wake_notifier,
+            )?;
             build_postgres_production(
                 profile,
                 wiring_config,
@@ -292,22 +308,26 @@ async fn build_production_shaped(
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 struct RebornProductionWiring {
     trust_policy: Arc<HostTrustPolicy>,
+    runtime_policy: EffectiveRuntimePolicy,
     turn_run_wake_notifier: Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>,
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 fn production_wiring(
     trust_policy: Option<Arc<HostTrustPolicy>>,
+    runtime_policy: Option<EffectiveRuntimePolicy>,
     turn_run_wake_notifier: Option<Arc<ironclaw_host_runtime::SchedulerTurnRunWakeNotifier>>,
 ) -> Result<RebornProductionWiring, RebornBuildError> {
     let trust_policy = trust_policy.ok_or(RebornBuildError::MissingProductionTrustPolicy)?;
     if !trust_policy.has_sources() {
         return Err(RebornBuildError::EmptyProductionTrustPolicy);
     }
+    let runtime_policy = runtime_policy.ok_or(RebornBuildError::MissingRuntimePolicy)?;
     let turn_run_wake_notifier =
         turn_run_wake_notifier.ok_or(RebornBuildError::MissingTurnRunWakeNotifier)?;
     Ok(RebornProductionWiring {
         trust_policy,
+        runtime_policy,
         turn_run_wake_notifier,
     })
 }
@@ -367,6 +387,7 @@ async fn build_libsql_production(
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
     .with_trust_policy(production_wiring.trust_policy)
+    .with_runtime_policy(production_wiring.runtime_policy)
     .with_capability_leases(leases)
     .with_secret_store(secret_store)
     .with_filesystem_resource_governor(Arc::clone(&scoped_filesystem))
@@ -430,6 +451,7 @@ async fn build_postgres_production(
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
     .with_trust_policy(production_wiring.trust_policy)
+    .with_runtime_policy(production_wiring.runtime_policy)
     .with_capability_leases(leases)
     .with_secret_store(secret_store)
     .with_filesystem_resource_governor(Arc::clone(&scoped_filesystem))

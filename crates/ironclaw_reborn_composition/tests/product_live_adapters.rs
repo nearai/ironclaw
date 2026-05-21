@@ -6,12 +6,12 @@ use chrono::Utc;
 use ironclaw_host_api::{
     AgentId, CapabilityGrant, CapabilityGrantId, CapabilityId, CapabilitySet, EffectKind,
     ExecutionContext, ExtensionId, GrantConstraints, MountAlias, MountGrant, MountPermissions,
-    MountView, NetworkPolicy, Principal, RuntimeKind, TenantId, ThreadId, TrustClass, UserId,
-    VirtualPath,
+    MountView, NetworkPolicy, NetworkTargetPattern, Principal, RuntimeKind, TenantId, ThreadId,
+    TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SurfaceKind,
-    VisibleCapabilityRequest as HostVisibleCapabilityRequest,
+    CapabilitySurfacePolicy, ECHO_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    SurfaceKind, VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
@@ -396,6 +396,124 @@ async fn local_dev_adapter_invokes_builtin_echo_through_host_runtime_port() {
         io.result_for_ref(&run_context, &completed.result_ref)
             .unwrap(),
         serde_json::json!("hello product live")
+    );
+}
+
+#[tokio::test]
+async fn local_dev_adapter_invokes_builtin_shell_through_product_live_surface() {
+    let root = tempfile::tempdir().unwrap();
+    let services = build_reborn_services(RebornBuildInput::local_dev(
+        "builtin-shell-owner",
+        root.path().join("local-dev"),
+    ))
+    .await
+    .unwrap();
+    let run_context = loop_run_context("builtin-shell").await;
+    let io = Arc::new(ProductLiveCapabilityIo::default());
+    let input_ref = io
+        .stage_input(
+            &run_context,
+            serde_json::json!({ "command": "echo hello product shell" }),
+        )
+        .unwrap();
+    let capability_id = capability_id(SHELL_CAPABILITY_ID);
+    let shell_effects = vec![
+        EffectKind::DispatchCapability,
+        EffectKind::ReadFilesystem,
+        EffectKind::WriteFilesystem,
+        EffectKind::Network,
+        EffectKind::SpawnProcess,
+        EffectKind::ExecuteCode,
+    ];
+    let user_id = UserId::new("user-builtin-shell").unwrap();
+    let shell_grant = CapabilityGrant {
+        id: CapabilityGrantId::new(),
+        capability: capability_id.clone(),
+        grantee: Principal::User(user_id.clone()),
+        issued_by: Principal::HostRuntime,
+        constraints: GrantConstraints {
+            allowed_effects: shell_effects.clone(),
+            mounts: MountView::default(),
+            network: NetworkPolicy {
+                allowed_targets: vec![NetworkTargetPattern {
+                    scheme: None,
+                    host_pattern: "*".to_string(),
+                    port: None,
+                }],
+                deny_private_ip_ranges: false,
+                max_egress_bytes: None,
+            },
+            secrets: Vec::new(),
+            resource_ceiling: None,
+            expires_at: None,
+            max_invocations: None,
+        },
+    };
+    let adapters = ProductLivePlannedRuntimeAdapters::from_services(
+        &services,
+        ProductLivePlannedRuntimeAdapterConfig {
+            capability_authority_resolver: authority_resolver(
+                ProductLiveVisibleCapabilityRequestConfig::new(
+                    user_id,
+                    RuntimeKind::FirstParty,
+                    TrustClass::FirstParty,
+                    SurfaceKind::new("agent_loop").unwrap(),
+                    CapabilitySurfacePolicy::allow_all(),
+                )
+                .with_grants(CapabilitySet {
+                    grants: vec![shell_grant],
+                })
+                .with_provider_trust_for_effects(
+                    ExtensionId::new("builtin").unwrap(),
+                    EffectiveTrustClass::user_trusted(),
+                    shell_effects,
+                ),
+            ),
+            capability_input_resolver: io.clone(),
+            capability_result_writer: io.clone(),
+            capability_allow_set: capability_allowlist([capability_id.clone()]),
+            ..adapter_config()
+        },
+    )
+    .unwrap();
+    let capability_port = adapters
+        .capability_factory
+        .create_capability_port(&run_context)
+        .await
+        .unwrap();
+
+    let surface = capability_port
+        .visible_capabilities(VisibleCapabilityRequest)
+        .await
+        .unwrap();
+    assert!(
+        surface
+            .descriptors
+            .iter()
+            .any(|descriptor| descriptor.capability_id == capability_id),
+        "builtin shell must be visible through the product-live adapter surface"
+    );
+
+    let outcome = capability_port
+        .invoke_capability(CapabilityInvocation {
+            surface_version: surface.version,
+            capability_id: capability_id.clone(),
+            input_ref,
+        })
+        .await
+        .unwrap();
+    let CapabilityOutcome::Completed(completed) = outcome else {
+        panic!("expected completed builtin shell outcome, got {outcome:?}");
+    };
+    let result = io
+        .result_for_ref(&run_context, &completed.result_ref)
+        .unwrap();
+    assert_eq!(result["exit_code"], serde_json::json!(0));
+    assert!(
+        result["output"]
+            .as_str()
+            .expect("shell output must be text")
+            .contains("hello product shell")
     );
 }
 

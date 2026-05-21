@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::Context;
 use ironclaw_reborn_composition::{
     PollSettings, RebornRuntimeIdentity, RebornRuntimeInput, TurnRunnerSettings,
-    build_reborn_runtime,
+    build_reborn_runtime, local_dev_runtime_policy,
 };
 use ironclaw_reborn_config::{REBORN_PROFILE_ENV, RebornBootConfig, RebornProfile};
 use tokio_util::sync::CancellationToken;
@@ -217,7 +217,10 @@ fn build_runtime_input(config: &RebornBootConfig) -> anyhow::Result<RebornRuntim
     let workspace_root = std::env::current_dir()
         .context("failed to resolve current directory for local-dev workspace")?;
     let services_input = RebornBuildInput::local_dev(owner_id, local_dev_root)
-        .with_local_dev_workspace_root(workspace_root);
+        .with_local_dev_workspace_root(workspace_root)
+        .with_runtime_policy(
+            local_dev_runtime_policy().context("failed to resolve local-dev runtime policy")?,
+        );
 
     #[allow(unused_mut)]
     let mut runtime_input = RebornRuntimeInput::from_services(services_input)

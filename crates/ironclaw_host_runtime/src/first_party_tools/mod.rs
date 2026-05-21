@@ -9,6 +9,7 @@ mod coding;
 mod echo;
 mod http;
 mod json;
+mod shell;
 mod time;
 
 use std::{sync::Arc, time::Instant};
@@ -36,6 +37,7 @@ pub use coding::{
 pub use echo::ECHO_CAPABILITY_ID;
 pub use http::HTTP_CAPABILITY_ID;
 pub use json::JSON_CAPABILITY_ID;
+pub use shell::SHELL_CAPABILITY_ID;
 pub use time::TIME_CAPABILITY_ID;
 
 pub const BUILTIN_FIRST_PARTY_PROVIDER: &str = "builtin";
@@ -73,6 +75,7 @@ pub fn builtin_first_party_package() -> Result<ExtensionPackage, ExtensionError>
                     time::manifest()?,
                     json::manifest()?,
                     http::manifest()?,
+                    shell::manifest()?,
                 ];
                 capabilities.extend(coding::manifests()?);
                 capabilities
@@ -90,6 +93,7 @@ pub fn builtin_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, Ho
         .with_handler(CapabilityId::new(TIME_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(JSON_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(HTTP_CAPABILITY_ID)?, handler.clone())
+        .with_handler(CapabilityId::new(SHELL_CAPABILITY_ID)?, handler.clone())
         .with_handler(CapabilityId::new(READ_FILE_CAPABILITY_ID)?, handler.clone())
         .with_handler(
             CapabilityId::new(WRITE_FILE_CAPABILITY_ID)?,
@@ -153,6 +157,28 @@ impl FirstPartyCapabilityHandler for BuiltinFirstPartyTools {
                 let result = http::dispatch(&request).await?;
                 network_egress_bytes = result.network_egress_bytes;
                 result.output
+            }
+            SHELL_CAPABILITY_ID => {
+                let (output, duration) = shell::dispatch(&request).await?;
+                let wall_clock_ms = duration.as_millis().try_into().unwrap_or(u64::MAX);
+                let output_bytes = bounded_output_bytes(&output).map_err(|error| {
+                    error.with_usage(ResourceUsage {
+                        wall_clock_ms,
+                        network_egress_bytes,
+                        process_count: 1,
+                        ..ResourceUsage::default()
+                    })
+                })?;
+                return Ok(FirstPartyCapabilityResult::new(
+                    output,
+                    ResourceUsage {
+                        wall_clock_ms,
+                        output_bytes,
+                        network_egress_bytes,
+                        process_count: 1,
+                        ..ResourceUsage::default()
+                    },
+                ));
             }
             READ_FILE_CAPABILITY_ID
             | WRITE_FILE_CAPABILITY_ID

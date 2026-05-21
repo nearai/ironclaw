@@ -489,6 +489,12 @@ pub async fn build_reborn_runtime(
             ),
         });
     }
+    if services_input.runtime_policy().is_none() {
+        return Err(RebornRuntimeError::InvalidArgument {
+            reason: "RebornRuntimeInput.services must include a resolved runtime policy"
+                .to_string(),
+        });
+    }
 
     let owner_id = services_input.owner_id().to_string();
     let mut services = build_reborn_services(services_input).await?;
@@ -792,11 +798,20 @@ fn build_stub_gateway() -> Arc<dyn ironclaw_loop_support::HostManagedModelGatewa
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex as StdMutex};
+    use std::sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use std::time::Duration;
 
     use async_trait::async_trait;
-    use ironclaw_host_api::CapabilityId;
+    use ironclaw_host_api::{
+        CapabilityId,
+        runtime_policy::{
+            ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,
+            FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
+        },
+    };
     use ironclaw_loop_support::{
         HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
@@ -814,15 +829,36 @@ mod tests {
         },
     };
 
+    use crate::RebornReadinessState;
     use crate::input::RebornBuildInput;
     use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
+    use crate::webui::build_webui_services;
 
     use super::build_reborn_runtime;
+
+    fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+        EffectiveRuntimePolicy {
+            deployment: DeploymentMode::LocalSingleUser,
+            requested_profile: RuntimeProfile::LocalDev,
+            resolved_profile: RuntimeProfile::LocalDev,
+            filesystem_backend: FilesystemBackendKind::HostWorkspace,
+            process_backend: ProcessBackendKind::LocalHost,
+            network_mode: NetworkMode::DirectLogged,
+            secret_mode: SecretMode::ScrubbedEnv,
+            approval_policy: ApprovalPolicy::AskDestructive,
+            audit_mode: AuditMode::LocalMinimal,
+        }
+    }
 
     #[derive(Debug)]
     struct RecordingGateway {
         reply: String,
         requests: Arc<StdMutex<Vec<HostManagedModelRequest>>>,
+    }
+
+    #[derive(Debug, Default)]
+    struct FailingSkillContextSource {
+        calls: AtomicUsize,
     }
 
     #[derive(Debug, Default)]
@@ -871,6 +907,17 @@ mod tests {
             Ok(HostManagedModelResponse::assistant_reply(
                 self.reply.clone(),
             ))
+        }
+    }
+
+    #[async_trait]
+    impl HostSkillContextSource for FailingSkillContextSource {
+        async fn load_skill_context_candidates(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(HostSkillContextBuildError::SourceUnavailable)
         }
     }
 
@@ -1060,10 +1107,10 @@ mod tests {
             reply: "recorded runtime reply".to_string(),
             requests: Arc::clone(&requests),
         });
-        let input = RebornRuntimeInput::from_services(RebornBuildInput::local_dev(
-            "runtime-success-owner",
-            root.path().join("local-dev"),
-        ))
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-success-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
         .with_identity(RebornRuntimeIdentity {
             tenant_id: "runtime-success-tenant".to_string(),
             agent_id: "runtime-success-agent".to_string(),
@@ -1120,14 +1167,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_user_message_uses_caller_supplied_skill_context_source() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "should not reach model".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let skill_context_source = Arc::new(FailingSkillContextSource::default());
+        let skill_context_source_for_input: Arc<dyn HostSkillContextSource> =
+            skill_context_source.clone();
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-skill-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-skill-tenant".to_string(),
+            agent_id: "runtime-skill-agent".to_string(),
+            source_binding_id: "runtime-skill-source".to_string(),
+            reply_target_binding_id: "runtime-skill-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_skill_context_source(skill_context_source_for_input)
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.send_user_message(&conversation, "ping"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+
+        assert_ne!(reply.status, TurnStatus::Completed);
+        assert_eq!(
+            skill_context_source.calls.load(Ordering::SeqCst),
+            1,
+            "composition should pass caller-supplied skill context into the planned runtime"
+        );
+        assert!(
+            requests
+                .lock()
+                .expect("recording gateway requests lock poisoned")
+                .is_empty(),
+            "skill context failure should stop before model dispatch"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
     async fn local_dev_runtime_exposes_host_runtime_capabilities_to_model_calls() {
         let root = tempfile::tempdir().expect("tempdir");
         let gateway = Arc::new(ToolCallingGateway::default());
         let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
-        let input = RebornRuntimeInput::from_services(RebornBuildInput::local_dev(
-            "runtime-tools-owner",
-            root.path().join("local-dev"),
-        ))
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-tools-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
         .with_identity(RebornRuntimeIdentity {
             tenant_id: "runtime-tools-tenant".to_string(),
             agent_id: "runtime-tools-agent".to_string(),
@@ -1301,7 +1403,8 @@ mod tests {
         let gateway_for_runtime: Arc<dyn HostManagedModelGateway> = gateway.clone();
         let input = RebornRuntimeInput::from_services(
             RebornBuildInput::local_dev("runtime-workspace-owner", root.path().join("local-dev"))
-                .with_local_dev_workspace_root(workspace_root.path().to_path_buf()),
+                .with_local_dev_workspace_root(workspace_root.path().to_path_buf())
+                .with_runtime_policy(local_dev_runtime_policy()),
         )
         .with_identity(RebornRuntimeIdentity {
             tenant_id: "runtime-workspace-tenant".to_string(),
@@ -1338,6 +1441,39 @@ mod tests {
             request_count, 2,
             "workspace listing should require initial request plus tool-result follow-up"
         );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-webui-owner", root.path().join("local-dev"))
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-tenant".to_string(),
+            agent_id: "runtime-webui-agent".to_string(),
+            source_binding_id: "runtime-webui-source".to_string(),
+            reply_target_binding_id: "runtime-webui-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        });
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let runtime_turn_coordinator = runtime.webui_turn_coordinator();
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+
+        let _api = bundle.api.clone();
+        assert!(Arc::ptr_eq(
+            &runtime_turn_coordinator,
+            &runtime.webui_turn_coordinator()
+        ));
+        assert_eq!(bundle.readiness, runtime.services().readiness);
+        assert_eq!(bundle.readiness.state, RebornReadinessState::DevOnly);
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

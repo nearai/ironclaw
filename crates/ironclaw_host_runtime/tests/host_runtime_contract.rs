@@ -38,6 +38,14 @@ use ironclaw_trust::{
 };
 use serde_json::json;
 
+fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
+        ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
+        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev,
+    ))
+    .unwrap()
+}
+
 #[test]
 fn bounded_contract_strings_share_validation_semantics() {
     assert!(IdempotencyKey::new("").is_err());
@@ -70,6 +78,7 @@ async fn default_runtime_returns_completed_outcome_for_authorized_dispatch() {
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()))
     .with_run_state(run_state.clone())
@@ -112,6 +121,7 @@ async fn default_runtime_surfaces_approval_required_with_persisted_request_id() 
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone())
     .with_approval_requests(approval_requests.clone())
@@ -156,6 +166,7 @@ async fn default_runtime_uses_combined_store_for_atomic_approval_block() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state_approval_store(combined_store.clone())
     .with_capability_leases(leases);
@@ -224,6 +235,7 @@ async fn default_runtime_propagates_unavailable_when_run_state_lookup_fails_duri
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state)
     .with_approval_requests(approval_requests)
@@ -263,6 +275,7 @@ async fn default_runtime_returns_failed_for_unknown_capability() {
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone());
 
@@ -315,6 +328,7 @@ async fn default_runtime_surfaces_authorization_failure_when_authorizer_denies()
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     );
 
     let context = execution_context_with_dispatch_grant();
@@ -356,6 +370,7 @@ async fn default_runtime_idempotency_key_is_advisory_and_does_not_dedupe() {
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()));
 
@@ -402,6 +417,7 @@ async fn default_runtime_status_returns_default_when_no_run_state_attached() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     );
 
     let context = execution_context_with_dispatch_grant();
@@ -431,6 +447,7 @@ async fn default_runtime_status_propagates_unavailable_on_run_state_error() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state);
 
@@ -468,6 +485,7 @@ async fn default_runtime_status_redacts_process_filesystem_errors() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_process_store(process_store);
 
@@ -507,6 +525,7 @@ async fn default_runtime_status_filters_to_running_records_only() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone());
 
@@ -566,6 +585,7 @@ async fn default_runtime_visible_capabilities_returns_empty_descriptors_for_empt
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     );
 
     let context = execution_context_with_dispatch_grant();
@@ -592,6 +612,7 @@ async fn default_runtime_returns_versioned_visible_surface_with_registry_descrip
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy()));
 
@@ -619,6 +640,7 @@ async fn default_runtime_status_reports_running_invocations_only() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone());
 
@@ -660,6 +682,7 @@ async fn default_runtime_cancel_reports_running_invocations_as_unsupported() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone());
 
@@ -702,6 +725,7 @@ async fn default_runtime_cancel_kills_running_processes_and_cancels_tokens() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_process_store(process_store.clone())
     .with_process_cancellation_registry(cancellation_registry.clone());
@@ -746,6 +770,7 @@ async fn default_runtime_status_includes_running_processes_from_process_store() 
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_process_store(process_store.clone());
 
@@ -786,6 +811,7 @@ async fn default_runtime_cancel_writes_killed_process_result_record() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_process_store(process_store.clone())
     .with_process_result_store(result_store.clone())
@@ -832,6 +858,7 @@ async fn default_runtime_status_does_not_duplicate_process_backed_invocations() 
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_run_state(run_state.clone())
     .with_process_store(process_store.clone());
@@ -876,6 +903,7 @@ async fn default_runtime_health_reports_ready_when_registry_requires_no_backends
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     );
 
     let health = runtime.health().await.unwrap();
@@ -894,6 +922,7 @@ async fn default_runtime_health_without_probe_reports_required_runtimes_missing(
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     );
 
     let health = runtime.health().await.unwrap();
@@ -912,6 +941,7 @@ async fn default_runtime_health_uses_configured_backend_probe() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_runtime_health(Arc::new(HealthyRuntimeProbe));
 

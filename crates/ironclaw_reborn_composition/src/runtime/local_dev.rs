@@ -12,7 +12,7 @@ use ironclaw_host_api::{
     NetworkPolicy, Principal, RuntimeKind, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
-    CapabilitySurfacePolicy, HostRuntime, SurfaceKind,
+    CapabilitySurfacePolicy, HostRuntime, SHELL_CAPABILITY_ID, SurfaceKind,
     VisibleCapabilityRequest as HostVisibleCapabilityRequest,
 };
 use ironclaw_loop_support::{
@@ -479,7 +479,7 @@ fn local_dev_visible_capability_request(
         TrustDecision {
             effective_trust: EffectiveTrustClass::user_trusted(),
             authority_ceiling: AuthorityCeiling {
-                allowed_effects: local_dev_allowed_effects(),
+                allowed_effects: local_dev_provider_allowed_effects(),
                 max_resource_ceiling: None,
             },
             provenance: TrustProvenance::AdminConfig,
@@ -507,7 +507,7 @@ fn local_dev_builtin_grants(
             grantee: Principal::Extension(grantee.clone()),
             issued_by: Principal::HostRuntime,
             constraints: GrantConstraints {
-                allowed_effects: local_dev_allowed_effects(),
+                allowed_effects: local_dev_capability_allowed_effects(capability_id),
                 mounts: mounts.clone(),
                 network: NetworkPolicy::default(),
                 secrets: Vec::new(),
@@ -520,11 +520,12 @@ fn local_dev_builtin_grants(
     Ok(CapabilitySet { grants })
 }
 
-fn local_dev_builtin_capability_ids() -> [&'static str; 9] {
+fn local_dev_builtin_capability_ids() -> [&'static str; 10] {
     [
         "builtin.echo",
         "builtin.time",
         "builtin.json",
+        SHELL_CAPABILITY_ID,
         "builtin.read_file",
         "builtin.write_file",
         "builtin.list_dir",
@@ -534,12 +535,33 @@ fn local_dev_builtin_capability_ids() -> [&'static str; 9] {
     ]
 }
 
+fn local_dev_capability_allowed_effects(capability_id: &str) -> Vec<EffectKind> {
+    if capability_id == SHELL_CAPABILITY_ID {
+        return local_dev_shell_allowed_effects();
+    }
+    local_dev_allowed_effects()
+}
+
 fn local_dev_allowed_effects() -> Vec<EffectKind> {
     vec![
         EffectKind::DispatchCapability,
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
     ]
+}
+
+fn local_dev_shell_allowed_effects() -> Vec<EffectKind> {
+    let mut effects = local_dev_allowed_effects();
+    effects.extend([
+        EffectKind::SpawnProcess,
+        EffectKind::ExecuteCode,
+        EffectKind::Network,
+    ]);
+    effects
+}
+
+fn local_dev_provider_allowed_effects() -> Vec<EffectKind> {
+    local_dev_shell_allowed_effects()
 }
 
 fn local_dev_workspace_mounts() -> Result<MountView, AgentLoopHostError> {
@@ -701,12 +723,35 @@ mod tests {
 
         assert!(capability_ids.contains(&"builtin.write_file"));
         assert!(capability_ids.contains(&"builtin.apply_patch"));
+        assert!(capability_ids.contains(&SHELL_CAPABILITY_ID));
         assert_eq!(
             local_dev_allowed_effects(),
             vec![
                 EffectKind::DispatchCapability,
                 EffectKind::ReadFilesystem,
                 EffectKind::WriteFilesystem
+            ]
+        );
+        assert_eq!(
+            local_dev_capability_allowed_effects(SHELL_CAPABILITY_ID),
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+                EffectKind::Network
+            ]
+        );
+        assert_eq!(
+            local_dev_provider_allowed_effects(),
+            vec![
+                EffectKind::DispatchCapability,
+                EffectKind::ReadFilesystem,
+                EffectKind::WriteFilesystem,
+                EffectKind::SpawnProcess,
+                EffectKind::ExecuteCode,
+                EffectKind::Network
             ]
         );
     }
