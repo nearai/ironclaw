@@ -1074,12 +1074,99 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
     );
 }
 
+#[test]
+fn reborn_product_auth_contract_stays_reborn_native() {
+    let forbidden = [
+        ForbiddenRebornAuthUse {
+            pattern: "ironclaw::",
+            reason: "Reborn product auth must not depend on the v1 root crate",
+        },
+        ForbiddenRebornAuthUse {
+            pattern: "src/extensions",
+            reason: "v1 extension paths are inventory only, not Reborn auth implementation",
+        },
+        ForbiddenRebornAuthUse {
+            pattern: "src/channels/web",
+            reason: "v1 web routes are inventory only, not Reborn auth implementation",
+        },
+        ForbiddenRebornAuthUse {
+            pattern: "ExtensionManager",
+            reason: "Reborn product auth must not call through the v1 extension manager",
+        },
+        ForbiddenRebornAuthUse {
+            pattern: "PendingOAuth",
+            reason: "Reborn product auth must not reuse v1 pending OAuth maps",
+        },
+        ForbiddenRebornAuthUse {
+            pattern: "PendingGate",
+            reason: "Reborn product auth must not reuse v1 pending gate maps",
+        },
+        ForbiddenRebornAuthUse {
+            pattern: "SecretsStore",
+            reason: "Reborn product auth must use opaque handles, not raw v1 secrets storage",
+        },
+        ForbiddenRebornAuthUse {
+            pattern: "get_decrypted",
+            reason: "Reborn product auth must not retrieve raw secret material directly",
+        },
+        ForbiddenRebornAuthUse {
+            pattern: "reqwest",
+            reason: "Reborn product auth must not own outbound HTTP transport",
+        },
+        ForbiddenRebornAuthUse {
+            pattern: "authorization_code: String",
+            reason: "raw OAuth codes must be one-shot non-serializable provider inputs",
+        },
+        ForbiddenRebornAuthUse {
+            pattern: "pkce_verifier: String",
+            reason: "raw PKCE verifiers must be one-shot non-serializable provider inputs",
+        },
+        ForbiddenRebornAuthUse {
+            pattern: "access_token: String",
+            reason: "raw provider tokens must not enter product auth contract records",
+        },
+        ForbiddenRebornAuthUse {
+            pattern: "refresh_token: String",
+            reason: "raw provider tokens must not enter product auth contract records",
+        },
+    ];
+
+    let root = workspace_root();
+    let manifest = std::fs::read_to_string(root.join("crates/ironclaw_auth/Cargo.toml"))
+        .expect("ironclaw_auth manifest must be readable");
+    assert!(
+        !manifest.contains("reqwest"),
+        "ironclaw_auth must not depend on reqwest directly; provider transport belongs behind Reborn-native composition"
+    );
+
+    let auth_src = root.join("crates/ironclaw_auth/src");
+    assert!(
+        auth_src.exists(),
+        "Reborn product auth contract crate must have a src directory at {}",
+        auth_src.display()
+    );
+
+    let mut violations = Vec::new();
+    collect_forbidden_reborn_auth_uses(&auth_src, &root, &forbidden, &mut violations);
+
+    assert!(
+        violations.is_empty(),
+        "Reborn product auth can be behavior-compatible with v1, but implementation code paths must not mingle with v1 routes, v1 extension/secrets managers, raw provider transport, or raw secret records:\n{}",
+        violations.join("\n")
+    );
+}
+
 struct ForbiddenRuntimeNetworkUse {
     pattern: &'static str,
     reason: &'static str,
 }
 
 struct ForbiddenRebornIngressUse {
+    pattern: &'static str,
+    reason: &'static str,
+}
+
+struct ForbiddenRebornAuthUse {
     pattern: &'static str,
     reason: &'static str,
 }
@@ -1133,6 +1220,57 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_engine",
                 "ironclaw_gateway",
+            ],
+        },
+        BoundaryRule {
+            // Product auth is a Reborn contract/facade vocabulary. It may
+            // describe behavior-compatible v1 inventory, but implementation
+            // code must not reach into v1 routes, extension managers, secret
+            // stores, runtimes, or channel-specific stacks.
+            crate_name: "ironclaw_auth",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_approvals",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapters",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_product_workflow",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_storage",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
             ],
         },
         BoundaryRule {
@@ -1954,6 +2092,43 @@ fn collect_forbidden_reborn_ingress_uses(
         let path = entry.path();
         if path.is_dir() {
             collect_forbidden_reborn_ingress_uses(&path, root, forbidden, violations);
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        for (line_number, line) in contents.lines().enumerate() {
+            for rule in forbidden {
+                if line.contains(rule.pattern) {
+                    let relative = path.strip_prefix(root).unwrap_or(&path);
+                    violations.push(format!(
+                        "{}:{} contains `{}` ({})",
+                        relative.display(),
+                        line_number + 1,
+                        rule.pattern,
+                        rule.reason
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn collect_forbidden_reborn_auth_uses(
+    dir: &std::path::Path,
+    root: &std::path::Path,
+    forbidden: &[ForbiddenRebornAuthUse],
+    violations: &mut Vec<String>,
+) {
+    let entries = std::fs::read_dir(dir)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
+    for entry in entries {
+        let entry = entry.unwrap_or_else(|error| panic!("failed to read dir entry: {error}"));
+        let path = entry.path();
+        if path.is_dir() {
+            collect_forbidden_reborn_auth_uses(&path, root, forbidden, violations);
             continue;
         }
         if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {

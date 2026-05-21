@@ -75,6 +75,7 @@ If a task needs to change one of those answers, it is not implementation work; i
 - [`events.md`](events.md)
 - [`events-projections.md`](events-projections.md)
 - [`resources.md`](resources.md)
+- [`auth-product.md`](auth-product.md)
 - [`extensions.md`](extensions.md)
 
 ### New contracts in this packet
