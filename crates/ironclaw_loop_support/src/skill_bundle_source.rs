@@ -287,6 +287,8 @@ pub enum SkillBundleSourceError {
     InvalidBundleId,
     #[error("skill bundle file path is invalid")]
     InvalidFilePath,
+    #[error("skill bundle content is invalid")]
+    InvalidSkillBundle,
     #[error("skill bundle not found")]
     BundleNotFound,
     #[error("skill bundle file not found")]
