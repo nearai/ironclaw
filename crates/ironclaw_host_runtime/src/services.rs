@@ -480,6 +480,10 @@ where
         }
     }
 
+    /// Replaces the effective runtime policy used by dispatcher composition.
+    ///
+    /// This is an already-resolved policy, not a requested profile; callers
+    /// that need profile resolution should resolve it before wiring services.
     pub fn with_effective_runtime_policy(mut self, runtime_policy: EffectiveRuntimePolicy) -> Self {
         self.runtime_policy = Some(runtime_policy);
         self
@@ -1658,6 +1662,7 @@ where
                 Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
                 runtime_http_egress(&self.runtime_http_egress),
                 Arc::clone(&self.process_port),
+                self.secret_store.clone(),
             ));
 
         if let Some(runtime) = &self.script_runtime {
@@ -2859,6 +2864,7 @@ mod tests {
                 Arc::new(LocalFilesystem::new()),
                 None,
                 Arc::new(LocalHostProcessPort::new()),
+                None,
             )),
         );
         let filesystem = LocalFilesystem::new();
@@ -2921,6 +2927,7 @@ mod tests {
                 Arc::new(LocalFilesystem::new()),
                 None,
                 Arc::new(LocalHostProcessPort::new()),
+                None,
             )),
         );
         let filesystem = LocalFilesystem::new();
@@ -2956,6 +2963,56 @@ mod tests {
             result,
             Err(DispatchError::Wasm {
                 kind: RuntimeDispatchErrorKind::NetworkDenied
+            })
+        ));
+        assert_eq!(inner.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn service_guard_rejects_required_secret_without_secret_store_before_dispatch() {
+        let inner = Arc::new(RecordingRuntimeAdapter::default());
+        let adapter = ServiceResolvedRuntimeAdapter::new(
+            Arc::clone(&inner),
+            Arc::new(LocalInvocationServicesResolver::new(
+                Arc::new(LocalFilesystem::new()),
+                None,
+                Arc::new(LocalHostProcessPort::new()),
+                None,
+            )),
+        );
+        let filesystem = LocalFilesystem::new();
+        let governor = InMemoryResourceGovernor::new();
+        let scope = sample_scope();
+        let estimate = ResourceEstimate::default();
+        let package = test_package(WASM_MANIFEST, "test-wasm");
+        let descriptor = test_descriptor(RuntimeKind::Wasm, vec![EffectKind::UseSecret]);
+        let policy = policy_with(
+            FilesystemBackendKind::HostWorkspace,
+            ProcessBackendKind::LocalHost,
+            NetworkMode::Deny,
+            SecretMode::ScrubbedEnv,
+        );
+
+        let result = adapter
+            .dispatch_json(RuntimeAdapterRequest {
+                package: &package,
+                descriptor: &descriptor,
+                filesystem: &filesystem,
+                governor: &governor,
+                runtime_policy: &policy,
+                capability_id: &descriptor.id,
+                scope,
+                estimate,
+                mounts: None,
+                resource_reservation: None,
+                input: json!({}),
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::SecretDenied
             })
         ));
         assert_eq!(inner.call_count(), 0);

@@ -615,7 +615,7 @@ async fn builtin_http_defaults_json_body_content_type() {
 }
 
 #[tokio::test]
-async fn builtin_http_fails_closed_without_runtime_egress() {
+async fn builtin_http_fails_closed_when_policy_allows_network_but_runtime_egress_is_missing() {
     let runtime = runtime_with_policy(local_dev_policy());
     let error = invoke_with_context(
         &runtime,

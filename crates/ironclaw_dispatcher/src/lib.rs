@@ -146,6 +146,10 @@ where
         }
     }
 
+    /// Replaces the effective runtime policy passed to runtime adapters.
+    ///
+    /// The dispatcher does not resolve profiles; callers must supply the
+    /// concrete policy that should govern each dispatch request.
     pub fn with_runtime_policy(mut self, runtime_policy: EffectiveRuntimePolicy) -> Self {
         self.runtime_policy = runtime_policy;
         self

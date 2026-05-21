@@ -15,6 +15,7 @@ use ironclaw_host_api::{
     MountView, ResourceScope, RuntimeDispatchErrorKind, RuntimeHttpEgress,
     runtime_policy::{FilesystemBackendKind, NetworkMode, ProcessBackendKind},
 };
+use ironclaw_secrets::SecretStore;
 use thiserror::Error;
 
 use crate::{ExecutionPlan, RuntimeProcessPort};
@@ -29,21 +30,23 @@ pub struct InvocationServices {
     pub filesystem: Arc<dyn RootFilesystem>,
     pub runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub process: Arc<dyn RuntimeProcessPort>,
+    pub secret_store: Option<Arc<dyn SecretStore>>,
 }
 
 impl fmt::Debug for InvocationServices {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("InvocationServices")
-            .field("filesystem", &"<root filesystem>")
+            .field("filesystem", &"[REDACTED]")
             .field(
                 "runtime_http_egress",
-                &self
-                    .runtime_http_egress
-                    .as_ref()
-                    .map(|_| "<runtime http egress>"),
+                &self.runtime_http_egress.as_ref().map(|_| "[REDACTED]"),
             )
-            .field("process", &"<runtime process port>")
+            .field("process", &"[REDACTED]")
+            .field(
+                "secret_store",
+                &self.secret_store.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -79,6 +82,8 @@ pub enum InvocationServicesError {
     UnsupportedProcessBackend { backend: ProcessBackendKind },
     #[error("network mode {mode:?} is not supported by this invocation services resolver")]
     UnsupportedNetworkMode { mode: NetworkMode },
+    #[error("capability requires secret access but no secret store is configured")]
+    SecretAccessRequired,
 }
 
 impl InvocationServicesError {
@@ -87,6 +92,7 @@ impl InvocationServicesError {
             Self::UnsupportedFilesystemBackend { .. } => RuntimeDispatchErrorKind::FilesystemDenied,
             Self::UnsupportedProcessBackend { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
             Self::UnsupportedNetworkMode { .. } => RuntimeDispatchErrorKind::NetworkDenied,
+            Self::SecretAccessRequired => RuntimeDispatchErrorKind::SecretDenied,
         }
     }
 }
@@ -97,6 +103,7 @@ pub struct LocalInvocationServicesResolver {
     filesystem: Arc<dyn RootFilesystem>,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     process: Arc<dyn RuntimeProcessPort>,
+    secret_store: Option<Arc<dyn SecretStore>>,
 }
 
 impl LocalInvocationServicesResolver {
@@ -104,11 +111,13 @@ impl LocalInvocationServicesResolver {
         filesystem: Arc<dyn RootFilesystem>,
         runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
         process: Arc<dyn RuntimeProcessPort>,
+        secret_store: Option<Arc<dyn SecretStore>>,
     ) -> Self {
         Self {
             filesystem,
             runtime_http_egress,
             process,
+            secret_store,
         }
     }
 }
@@ -144,10 +153,14 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
                 mode: plan.network_mode,
             });
         }
+        if plan.requires_secret && self.secret_store.is_none() {
+            return Err(InvocationServicesError::SecretAccessRequired);
+        }
         Ok(InvocationServices {
             filesystem: Arc::clone(&self.filesystem),
             runtime_http_egress: self.runtime_http_egress.clone(),
             process: Arc::clone(&self.process),
+            secret_store: self.secret_store.clone(),
         })
     }
 }
@@ -158,6 +171,7 @@ mod tests {
     use async_trait::async_trait;
     use ironclaw_filesystem::LocalFilesystem;
     use ironclaw_host_api::{CapabilityId, ResourceScope, runtime_policy::SecretMode};
+    use ironclaw_secrets::InMemorySecretStore;
 
     use crate::{
         CommandExecutionOutput, CommandExecutionRequest, RuntimeProcessError, RuntimeProcessPort,
@@ -198,6 +212,7 @@ mod tests {
             true,
             false,
             NetworkMode::DirectLogged,
+            false,
         );
 
         let services = resolver
@@ -219,6 +234,7 @@ mod tests {
             true,
             false,
             NetworkMode::Allowlist,
+            false,
         );
 
         let error = resolver
@@ -241,7 +257,13 @@ mod tests {
     #[test]
     fn local_resolver_does_not_require_process_for_pure_plan() {
         let resolver = resolver_without_http();
-        let plan = plan(ProcessBackendKind::None, false, false, NetworkMode::Deny);
+        let plan = plan(
+            ProcessBackendKind::None,
+            false,
+            false,
+            NetworkMode::Deny,
+            false,
+        );
 
         resolver
             .resolve(InvocationServicesResolutionRequest {
@@ -255,7 +277,13 @@ mod tests {
     #[test]
     fn local_resolver_rejects_unsupported_filesystem_backend() {
         let resolver = resolver_without_http();
-        let mut plan = plan(ProcessBackendKind::None, false, false, NetworkMode::Deny);
+        let mut plan = plan(
+            ProcessBackendKind::None,
+            false,
+            false,
+            NetworkMode::Deny,
+            false,
+        );
         plan.requires_filesystem = true;
         plan.filesystem_backend = FilesystemBackendKind::TenantWorkspace;
 
@@ -279,7 +307,13 @@ mod tests {
     #[test]
     fn local_resolver_ignores_unsupported_filesystem_backend_when_not_required() {
         let resolver = resolver_without_http();
-        let mut plan = plan(ProcessBackendKind::None, false, false, NetworkMode::Deny);
+        let mut plan = plan(
+            ProcessBackendKind::None,
+            false,
+            false,
+            NetworkMode::Deny,
+            false,
+        );
         plan.filesystem_backend = FilesystemBackendKind::TenantWorkspace;
 
         resolver
@@ -294,7 +328,13 @@ mod tests {
     #[test]
     fn local_resolver_rejects_denied_required_network() {
         let resolver = resolver_without_http();
-        let plan = plan(ProcessBackendKind::None, false, true, NetworkMode::Deny);
+        let plan = plan(
+            ProcessBackendKind::None,
+            false,
+            true,
+            NetworkMode::Deny,
+            false,
+        );
 
         let error = resolver
             .resolve(InvocationServicesResolutionRequest {
@@ -321,6 +361,7 @@ mod tests {
             false,
             true,
             NetworkMode::DirectLogged,
+            false,
         );
 
         let error = resolver
@@ -346,8 +387,15 @@ mod tests {
             Arc::new(LocalFilesystem::new()),
             Some(Arc::new(NoopRuntimeHttpEgress)),
             Arc::new(NoopProcessPort),
+            None,
         );
-        let plan = plan(ProcessBackendKind::None, false, true, NetworkMode::Brokered);
+        let plan = plan(
+            ProcessBackendKind::None,
+            false,
+            true,
+            NetworkMode::Brokered,
+            false,
+        );
 
         let error = resolver
             .resolve(InvocationServicesResolutionRequest {
@@ -364,6 +412,59 @@ mod tests {
                 mode: NetworkMode::Brokered
             }
         ));
+    }
+
+    #[test]
+    fn local_resolver_rejects_required_secret_when_secret_store_is_absent() {
+        let resolver = resolver_without_http();
+        let plan = plan(
+            ProcessBackendKind::None,
+            false,
+            false,
+            NetworkMode::Deny,
+            true,
+        );
+
+        let error = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::SecretDenied);
+        assert!(matches!(
+            error,
+            InvocationServicesError::SecretAccessRequired
+        ));
+    }
+
+    #[test]
+    fn local_resolver_accepts_required_secret_when_secret_store_is_available() {
+        let resolver = LocalInvocationServicesResolver::new(
+            Arc::new(LocalFilesystem::new()),
+            None,
+            Arc::new(NoopProcessPort),
+            Some(Arc::new(InMemorySecretStore::new())),
+        );
+        let plan = plan(
+            ProcessBackendKind::None,
+            false,
+            false,
+            NetworkMode::Deny,
+            true,
+        );
+
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap();
+
+        assert!(services.secret_store.is_some());
     }
 
     #[test]
@@ -389,6 +490,7 @@ mod tests {
             Arc::new(LocalFilesystem::new()),
             None,
             Arc::new(NoopProcessPort),
+            None,
         )
     }
 
@@ -397,6 +499,7 @@ mod tests {
         requires_process: bool,
         requires_network: bool,
         network_mode: NetworkMode,
+        requires_secret: bool,
     ) -> ExecutionPlan {
         ExecutionPlan {
             capability: CapabilityId::new("test.capability".to_string()).unwrap(),
@@ -407,7 +510,7 @@ mod tests {
             requires_filesystem: false,
             requires_process,
             requires_network,
-            requires_secret: false,
+            requires_secret,
         }
     }
 }
