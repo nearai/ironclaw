@@ -36,12 +36,17 @@ use crate::policy::{
     NoopBeforeInboundPolicy,
 };
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_millis(10);
 
 /// Run a before-inbound policy with the workflow-owned wall-clock budget.
+///
+/// The timeout keeps slow policy backends from holding an idempotency
+/// fingerprint in-flight indefinitely. A timed-out policy maps to a transient,
+/// non-permanent [`ProductWorkflowError::BeforeInboundPolicyFailed`] so the
+/// workflow releases the fingerprint and lets the same inbound action retry.
 pub(crate) async fn check_before_inbound_policy(
     before_inbound_policy: &dyn BeforeInboundPolicy,
     request: BeforeInboundPolicyRequest,
@@ -770,6 +775,16 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn noop_before_inbound_policy_allows_user_messages() {
+        let outcome = NoopBeforeInboundPolicy
+            .check_user_message(policy_request())
+            .await
+            .expect("noop policy should not fail");
+
+        assert_eq!(outcome, BeforeInboundPolicyOutcome::Allow);
     }
 
     #[test]

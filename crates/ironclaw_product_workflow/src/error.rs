@@ -136,21 +136,20 @@ impl From<ProductWorkflowError> for ProductAdapterError {
             ProductWorkflowError::Transient { reason } => ProductAdapterError::WorkflowTransient {
                 reason: RedactedString::new(reason),
             },
-            ProductWorkflowError::BeforeInboundPolicyFailed { permanent, .. } => {
-                // Policy backends may include classifier/provider details in errors;
-                // keep adapter-visible messages stable and generic.
+            ProductWorkflowError::BeforeInboundPolicyFailed { reason, permanent } => {
+                // Adapter error surfaces wrap the reason in RedactedString, so
+                // diagnostics remain available internally without leaking to
+                // public protocol output.
                 if permanent {
                     ProductAdapterError::WorkflowRejected {
                         kind: ProductWorkflowRejectionKind::AdmissionRejected,
                         status_code: 403,
                         retryable: false,
-                        reason: RedactedString::new("before-inbound policy failed"),
+                        reason: RedactedString::new(reason),
                     }
                 } else {
                     ProductAdapterError::WorkflowTransient {
-                        reason: RedactedString::new(
-                            "before-inbound policy temporarily unavailable",
-                        ),
+                        reason: RedactedString::new(reason),
                     }
                 }
             }

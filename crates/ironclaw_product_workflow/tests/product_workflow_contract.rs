@@ -1,6 +1,7 @@
 //! Contract tests for the product workflow facade.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -755,6 +756,42 @@ async fn before_inbound_policy_retryable_failure_releases_fingerprint() {
     assert!(second.is_retryable());
     assert_eq!(policy.request_count(), 2);
     assert_eq!(inbound.accepted_count(), 0);
+}
+
+#[tokio::test]
+async fn before_inbound_policy_timeout_releases_fingerprint_for_retry() {
+    let (workflow, inbound, ledger, policy) = build_workflow_with_policy();
+    policy.delay_responses_by(StdDuration::from_millis(50));
+    let envelope = sample_envelope("policy-timeout-release");
+
+    let first = workflow
+        .accept_inbound(envelope.clone())
+        .await
+        .expect_err("timed-out policy should be retryable");
+    assert!(first.is_retryable());
+    assert_eq!(policy.request_count(), 1);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 1);
+    assert!(
+        ledger
+            .last_released_action()
+            .expect("released action")
+            .dispatch_kind
+            .is_none()
+    );
+
+    let second = workflow
+        .accept_inbound(envelope)
+        .await
+        .expect_err("released fingerprint should retry timed-out policy");
+    assert!(second.is_retryable());
+    assert_eq!(policy.request_count(), 2);
+    assert_eq!(inbound.accepted_count(), 0);
+    assert_eq!(ledger.settled_count(), 0);
+    assert_eq!(ledger.in_flight_count(), 0);
+    assert_eq!(ledger.released_count(), 2);
 }
 
 #[tokio::test]

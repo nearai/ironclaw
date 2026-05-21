@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -293,6 +294,7 @@ struct FakeBeforeInboundPolicyState {
     requests: Vec<BeforeInboundPolicyRequest>,
     programmed_outcomes: VecDeque<Result<BeforeInboundPolicyOutcome, ProductWorkflowError>>,
     fallback_outcome: Option<Result<BeforeInboundPolicyOutcome, ProductWorkflowError>>,
+    response_delay: Option<Duration>,
 }
 
 impl FakeBeforeInboundPolicy {
@@ -338,7 +340,7 @@ impl FakeBeforeInboundPolicy {
         state.fallback_outcome = Some(Err(error));
     }
 
-    /// Append one policy result consumed by the next request.
+    /// Append one policy result consumed by the next request before fallback.
     pub fn program_outcome(
         &self,
         outcome: Result<BeforeInboundPolicyOutcome, ProductWorkflowError>,
@@ -350,7 +352,7 @@ impl FakeBeforeInboundPolicy {
         state.programmed_outcomes.push_back(outcome);
     }
 
-    /// Synchronously program policy results consumed before the fallback outcome.
+    /// Append policy results consumed in order before the fallback outcome.
     pub fn program_outcomes(
         &self,
         outcomes: impl IntoIterator<Item = Result<BeforeInboundPolicyOutcome, ProductWorkflowError>>,
@@ -360,6 +362,18 @@ impl FakeBeforeInboundPolicy {
             .lock()
             .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
         state.programmed_outcomes.extend(outcomes);
+    }
+
+    /// Delay every policy response after recording the request.
+    ///
+    /// Use a delay longer than the workflow timeout to exercise the timeout
+    /// and retry-release path.
+    pub fn delay_responses_by(&self, delay: Duration) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
+        state.response_delay = Some(delay);
     }
 
     /// How many user messages reached policy checks.
@@ -393,16 +407,26 @@ impl BeforeInboundPolicy for FakeBeforeInboundPolicy {
         &self,
         request: BeforeInboundPolicyRequest,
     ) -> Result<BeforeInboundPolicyOutcome, ProductWorkflowError> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
-        state.requests.push(request);
-        state
-            .programmed_outcomes
-            .pop_front()
-            .or_else(|| state.fallback_outcome.clone())
-            .unwrap_or(Ok(BeforeInboundPolicyOutcome::Allow))
+        let (delay, outcome) = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
+            state.requests.push(request);
+            let delay = state.response_delay;
+            let outcome = state
+                .programmed_outcomes
+                .pop_front()
+                .or_else(|| state.fallback_outcome.clone())
+                .unwrap_or(Ok(BeforeInboundPolicyOutcome::Allow));
+            (delay, outcome)
+        };
+
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+
+        outcome
     }
 }
 
