@@ -1172,7 +1172,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_reborn_composition",
                 "ironclaw_reborn_config",
                 "ironclaw_reborn_event_store",
-                "ironclaw_reborn_extensions",
+                "ironclaw_first_party_extensions",
                 "ironclaw_resources",
                 "ironclaw_run_state",
                 "ironclaw_runtime_policy",
@@ -1229,10 +1229,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
-            // First-party Reborn extensions are userland packages. They may
+            // First-party extensions are userland packages. They may
             // consume scoped storage and loop-facing DTO adapters, but must not
             // receive ambient runtime authority or lower substrate handles.
-            crate_name: "ironclaw_reborn_extensions",
+            crate_name: "ironclaw_first_party_extensions",
             forbidden: vec![
                 "ironclaw",
                 "ironclaw_approvals",

@@ -57,7 +57,7 @@ ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
 ironclaw_reborn = { path = "../ironclaw_reborn" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
-ironclaw_reborn_extensions = { path = "../ironclaw_reborn_extensions" }
+ironclaw_first_party_extensions = { path = "../ironclaw_first_party_extensions" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
 ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
