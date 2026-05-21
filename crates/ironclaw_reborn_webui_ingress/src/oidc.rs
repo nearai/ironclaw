@@ -158,7 +158,19 @@ struct Jwk {
 struct JwksCache {
     fetched_at: Option<Instant>,
     keys: Vec<Jwk>,
+    /// Timestamp of the last JWKS fetch failure. While within the
+    /// failure-backoff window, `jwks()` returns the (possibly stale)
+    /// cached keys instead of queueing another fetch that will likely
+    /// also fail. Prevents request convoys behind a slow / unavailable
+    /// JWKS endpoint.
+    last_failure_at: Option<Instant>,
 }
+
+/// How long to back off after a JWKS fetch failure before allowing
+/// another network attempt. During this window, expired cache reads
+/// return the stale keys (stale-while-revalidate); fresh cache hits
+/// are unaffected.
+const JWKS_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
 
 /// OIDC ID-token authenticator. Cheap to clone — the JWKS cache is
 /// `Arc`-shared.
@@ -236,11 +248,36 @@ impl OidcAuthenticator {
         None
     }
 
+    /// Stale-while-revalidate fallback: if the cache has keys at all,
+    /// return them when we're within the failure-backoff window. The
+    /// caller's request may still 401 on a rotated `kid`, but the
+    /// gateway is not blocked behind another guaranteed-timeout fetch.
+    fn try_stale_keys_during_backoff(&self) -> Option<Vec<Jwk>> {
+        let guard = self.cache.read();
+        let in_backoff = guard
+            .last_failure_at
+            .is_some_and(|at| at.elapsed() < JWKS_FAILURE_BACKOFF);
+        if in_backoff && !guard.keys.is_empty() {
+            return Some(guard.keys.clone());
+        }
+        None
+    }
+
     async fn jwks(&self) -> Result<Vec<Jwk>, OidcAuthenticatorError> {
         // Cheap fast-path: if the cache is fresh, return it under the
         // read lock.
         if let Some(keys) = self.try_cached_keys() {
             return Ok(keys);
+        }
+
+        // Backoff path: a recent failure means the upstream JWKS
+        // endpoint is currently flaky. Return stale keys without
+        // queueing behind another fetch attempt. This is the convoy
+        // break — without it, the first slow-failed fetch would
+        // serialize every concurrent auth request behind one network
+        // timeout at a time.
+        if let Some(stale) = self.try_stale_keys_during_backoff() {
+            return Ok(stale);
         }
 
         // Single-flight: only one concurrent caller actually hits the
@@ -251,30 +288,78 @@ impl OidcAuthenticator {
         if let Some(keys) = self.try_cached_keys() {
             return Ok(keys);
         }
+        // Another caller may have just registered a failure that
+        // started the backoff window while we waited on the lock.
+        // Honor it without trying again.
+        if let Some(stale) = self.try_stale_keys_during_backoff() {
+            return Ok(stale);
+        }
         self.refresh_jwks_locked().await
     }
 
     /// Force a JWKS refresh bypassing the cache TTL check. Used when
-    /// a token's `kid` is not in the currently-cached keys, which is
-    /// the normal signal that the issuer has rotated keys mid-TTL.
-    /// Without this path, newly-signed tokens 401 for the full cache
-    /// window until the TTL expires, even though an immediate refresh
-    /// would contain the new key. The single-flight lock prevents a
-    /// burst of unknown-`kid` tokens from each spawning their own
-    /// fetch.
+    /// a token's `kid` is not in the currently-cached keys — the
+    /// normal signal that the issuer has rotated keys mid-TTL. Without
+    /// this path, newly-signed tokens 401 for the full cache window.
+    ///
+    /// Single-flight: if another caller refreshed while this caller
+    /// was waiting on `refresh_lock`, return that caller's result
+    /// without re-fetching. We detect "someone else refreshed" by
+    /// comparing the `fetched_at` timestamp before and after taking
+    /// the lock — a change means a concurrent refresh succeeded.
+    /// Unlike `jwks()`, we cannot short-circuit on a fresh
+    /// `try_cached_keys` here because the whole point of the call is
+    /// that the fresh cache lacked the token's kid.
     async fn force_refresh_jwks(&self) -> Result<Vec<Jwk>, OidcAuthenticatorError> {
+        let before_fetched_at = self.cache.read().fetched_at;
         let _guard = self.refresh_lock.lock().await;
-        // Another caller may have just refreshed while we waited for
-        // the lock; honor that result instead of re-fetching.
-        if let Some(keys) = self.try_cached_keys() {
-            return Ok(keys);
+        let after_fetched_at = self.cache.read().fetched_at;
+        if before_fetched_at != after_fetched_at {
+            return Ok(self.cache.read().keys.clone());
         }
         self.refresh_jwks_locked().await
     }
 
     /// Caller MUST hold `refresh_lock`. Performs the network fetch and
-    /// replaces the cache atomically.
+    /// replaces the cache atomically. On failure, stamps
+    /// `last_failure_at` so subsequent callers within the backoff
+    /// window can short-circuit through `try_stale_keys_during_backoff`
+    /// instead of queueing behind another timeout. Also returns the
+    /// (possibly stale) cached keys on failure if any exist —
+    /// stale-while-revalidate keeps auth working through a transient
+    /// JWKS outage; the caller's lookup may still 401 on a rotated
+    /// kid, but the gateway doesn't fail every authenticated request.
     async fn refresh_jwks_locked(&self) -> Result<Vec<Jwk>, OidcAuthenticatorError> {
+        let outcome = self.fetch_jwks().await;
+        match outcome {
+            Ok(keys) => {
+                let mut guard = self.cache.write();
+                guard.fetched_at = Some(Instant::now());
+                guard.last_failure_at = None;
+                guard.keys = keys.clone();
+                Ok(keys)
+            }
+            Err(err) => {
+                let stale = {
+                    let mut guard = self.cache.write();
+                    guard.last_failure_at = Some(Instant::now());
+                    guard.keys.clone()
+                };
+                if !stale.is_empty() {
+                    tracing::info!(
+                        target = "ironclaw::reborn::webui_ingress::oidc",
+                        error = %err,
+                        "JWKS refresh failed; serving stale cached keys (backoff started)",
+                    );
+                    Ok(stale)
+                } else {
+                    Err(err)
+                }
+            }
+        }
+    }
+
+    async fn fetch_jwks(&self) -> Result<Vec<Jwk>, OidcAuthenticatorError> {
         let response = self
             .http
             .get(&self.jwks_url)
@@ -291,9 +376,6 @@ impl OidcAuthenticator {
             .json()
             .await
             .map_err(|err| OidcAuthenticatorError::JwksParse(err.to_string()))?;
-        let mut guard = self.cache.write();
-        guard.fetched_at = Some(Instant::now());
-        guard.keys = jwks.keys.clone();
         Ok(jwks.keys)
     }
 

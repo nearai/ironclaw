@@ -448,13 +448,21 @@ async fn ws_drain_loop(
     // Mirror the SSE generator: own the slot guard, bound stream
     // lifetime, drain stream_events on the same poll cadence, emit
     // each envelope as a JSON text frame.
+    //
+    // Send-side timeout: every `socket.send().await` is bounded by
+    // the remaining lifetime budget. Without this, a TCP-backpressuring
+    // client could pin the task (and its `SseSlot`) past
+    // `SSE_MAX_LIFETIME`, consuming one of the caller's shared
+    // concurrency slots until the kernel eventually drops the
+    // half-broken connection.
     let _slot_guard = slot;
     let started_at = tokio::time::Instant::now();
     let mut after_cursor: Option<ProjectionCursor> = None;
     loop {
         let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
         if remaining.is_zero() {
-            let _ = socket.close().await;
+            let _ =
+                ws_send_with_timeout(&mut socket, None, std::time::Duration::from_millis(0)).await;
             return;
         }
         let request = RebornStreamEventsRequest {
@@ -474,12 +482,23 @@ async fn ws_drain_loop(
                 for envelope in response.events {
                     match serde_json::to_string(&envelope) {
                         Ok(text) => {
-                            if socket
-                                .send(axum::extract::ws::Message::Text(text.into()))
-                                .await
-                                .is_err()
+                            let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                            if send_budget.is_zero() {
+                                let _ = socket.close().await;
+                                return;
+                            }
+                            if ws_send_with_timeout(
+                                &mut socket,
+                                Some(axum::extract::ws::Message::Text(text.into())),
+                                send_budget,
+                            )
+                            .await
+                            .is_err()
                             {
-                                // Peer hung up.
+                                // Peer hung up, TCP backpressure
+                                // exceeded budget, or socket otherwise
+                                // unwritable. Drop the task and
+                                // release the slot.
                                 return;
                             }
                         }
@@ -511,13 +530,49 @@ async fn ws_drain_loop(
                     retryable: error.retryable,
                 };
                 if let Ok(text) = serde_json::to_string(&payload) {
-                    let _ = socket
-                        .send(axum::extract::ws::Message::Text(text.into()))
-                        .await;
+                    let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                    let _ = ws_send_with_timeout(
+                        &mut socket,
+                        Some(axum::extract::ws::Message::Text(text.into())),
+                        send_budget,
+                    )
+                    .await;
                 }
                 let _ = socket.close().await;
                 return;
             }
+        }
+    }
+}
+
+/// Send a WS frame (or close, when `frame` is `None`) bounded by
+/// `budget`. Returns `Err(())` on timeout, peer hangup, or close
+/// error so callers can release the per-caller `SseSlot` instead of
+/// hanging indefinitely on a stalled socket.
+async fn ws_send_with_timeout(
+    socket: &mut axum::extract::ws::WebSocket,
+    frame: Option<axum::extract::ws::Message>,
+    budget: std::time::Duration,
+) -> Result<(), ()> {
+    if budget.is_zero() {
+        let _ = socket.close().await;
+        return Err(());
+    }
+    let send_future = async {
+        match frame {
+            Some(message) => socket.send(message).await.map_err(|_| ()),
+            None => socket.close().await.map_err(|_| ()),
+        }
+    };
+    match tokio::time::timeout(budget, send_future).await {
+        Ok(result) => result,
+        Err(_elapsed) => {
+            tracing::debug!(
+                target = "ironclaw_webui_v2::ws",
+                budget_ms = budget.as_millis() as u64,
+                "WS send exceeded lifetime budget; releasing slot",
+            );
+            Err(())
         }
     }
 }

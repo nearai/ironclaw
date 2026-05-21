@@ -1125,3 +1125,116 @@ async fn missing_caller_extension_returns_500() {
     // extractor failed.
     let _ = response.into_body().collect().await.expect("drain body");
 }
+
+// Regression for the "WS transport's projection payload + redacted
+// error frame untested" review (Medium). The composition crate's WS
+// caller-level test verifies the upgrade returns 101, but only a real
+// WS connection that pumps frames can catch breakage in the
+// per-envelope JSON serialization, cursor advancement on the
+// `after_cursor` field, or the redacted error frame the handler emits
+// on facade failure.
+#[tokio::test]
+async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let services = Arc::new(StubServices::default());
+
+    let envelope_a = make_projection_envelope("cursor:a", "hello");
+    let envelope_b = make_projection_envelope("cursor:b", "world");
+    services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
+        events: vec![envelope_a.clone(), envelope_b.clone()],
+    }));
+    // After draining the two real events, the next drain produces a
+    // facade error so the handler exercises the redacted-error-frame +
+    // close path before lifetime expiry.
+    services.enqueue_stream_events(Err(RebornServicesError {
+        code: RebornServicesErrorCode::Unavailable,
+        status_code: 503,
+        retryable: true,
+        field: None,
+        validation_code: None,
+    }));
+
+    let router = router_with(services.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
+    let (mut ws, response) = tokio::time::timeout(
+        Duration::from_secs(5),
+        tokio_tungstenite::connect_async(url),
+    )
+    .await
+    .expect("ws connect within 5s")
+    .expect("ws upgrade");
+    assert_eq!(response.status().as_u16(), 101);
+
+    // Read frames until we see both projection envelopes and the
+    // redacted error frame, or the stream closes.
+    let mut text_frames: Vec<String> = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline && text_frames.len() < 3 {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(WsMessage::Text(text)))) => text_frames.push(text.to_string()),
+            Ok(Some(Ok(WsMessage::Close(_)))) | Ok(None) => break,
+            Ok(Some(Ok(_))) => continue, // ignore ping/pong/binary
+            Ok(Some(Err(_))) => break,
+            Err(_) => break,
+        }
+    }
+    let _ = ws.close(None).await;
+    serve_handle.abort();
+
+    assert!(
+        text_frames.len() >= 3,
+        "expected projection envelopes + error frame; got {} text frame(s): {:?}",
+        text_frames.len(),
+        text_frames,
+    );
+
+    // First two frames carry the projection envelopes, in order.
+    let envelope_a_json: Value = serde_json::from_str(&text_frames[0]).expect("envelope a parses");
+    let expected_a: Value = serde_json::to_value(&envelope_a).expect("envelope a value");
+    assert_eq!(
+        envelope_a_json, expected_a,
+        "first WS frame must carry the first ProductOutboundEnvelope verbatim",
+    );
+    let envelope_b_json: Value = serde_json::from_str(&text_frames[1]).expect("envelope b parses");
+    let expected_b: Value = serde_json::to_value(&envelope_b).expect("envelope b value");
+    assert_eq!(envelope_b_json, expected_b);
+
+    // Third frame is the redacted error payload — `error` code +
+    // `retryable` flag only. No `detail`, `field`, `validation_code`,
+    // or any internal diagnostic must leak through.
+    let error_json: Value =
+        serde_json::from_str(&text_frames[2]).expect("error frame parses as json");
+    assert_eq!(error_json["error"], serde_json::json!("unavailable"));
+    assert_eq!(error_json["retryable"], serde_json::json!(true));
+    assert!(
+        error_json.get("detail").is_none(),
+        "redacted error frame must not carry server diagnostics",
+    );
+    assert!(error_json.get("field").is_none());
+    assert!(error_json.get("validation_code").is_none());
+
+    // The handler must have advanced `after_cursor` between the two
+    // drains so the browser would resume from cursor:b on reconnect.
+    let calls = services.stream_events_calls.lock().expect("lock").clone();
+    assert!(
+        calls.len() >= 2,
+        "second poll must occur for the redacted-error path to fire",
+    );
+    assert_eq!(
+        calls[1].after_cursor.as_ref(),
+        Some(envelope_b.projection_cursor()),
+        "second WS poll must advance after_cursor to the last emitted projection cursor",
+    );
+}
