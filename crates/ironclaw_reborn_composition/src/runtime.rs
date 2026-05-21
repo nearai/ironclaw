@@ -34,13 +34,15 @@ use uuid::Uuid;
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_first_party_extensions::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, LoadedFirstPartyExtensions,
-    SelectableSkillContextSource, SkillActivationSelectorConfig,
+    SelectableSkillContextSource, SkillActivationRequest, SkillActivationSelection,
+    SkillActivationSelectorConfig, SkillBundleAsset, SkillBundleAssetReadError,
+    SkillExecutionAdapter,
 };
 use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     FilesystemSkillBundleSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostSkillContextSource,
+    HostIdentityContextSource, HostSkillContextSource, SkillBundleId,
 };
 use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
 use ironclaw_reborn::runtime::{
@@ -55,9 +57,9 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
     ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId,
-    TurnScope, TurnStatus,
-    run_profile::{InMemoryLoopHostMilestoneSink, LoopRunContext, PromptMode},
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnId,
+    TurnRunId, TurnScope, TurnStatus,
+    run_profile::{InMemoryLoopHostMilestoneSink, LoopRunContext, PromptMode, ResolvedRunProfile},
 };
 
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
@@ -119,6 +121,10 @@ pub enum RebornRuntimeError {
     LlmProvider(String),
     #[error("turn-runner worker is no longer running")]
     WorkerStopped,
+    #[error("skill execution unavailable for assembled runtime")]
+    SkillExecutionUnavailable,
+    #[error("skill execution failed: {0}")]
+    SkillExecution(String),
 }
 
 impl From<TurnError> for RebornRuntimeError {
@@ -152,13 +158,39 @@ pub struct RebornRuntime {
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
     default_run_profile_id: String,
+    default_resolved_run_profile: ResolvedRunProfile,
     wake_sender: TurnRunnerWakeSender,
     send_locks: Mutex<HashMap<ConversationId, Arc<Mutex<()>>>>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
+    skill_execution_adapter: Option<Arc<LocalDevSkillExecutionAdapter>>,
 }
 
 type LocalDevSelectableSkillContextSource =
     SelectableSkillContextSource<FilesystemSkillBundleSource<LocalFilesystem>>;
+type LocalDevSkillExecutionAdapter =
+    SkillExecutionAdapter<FilesystemSkillBundleSource<LocalFilesystem>>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebornSkillExecutionPlan {
+    selection: SkillActivationSelection,
+    active_bundles: Vec<SkillBundleId>,
+}
+
+impl RebornSkillExecutionPlan {
+    pub fn selection(&self) -> &SkillActivationSelection {
+        &self.selection
+    }
+
+    pub fn activations(&self) -> &[SkillActivationRequest] {
+        &self.selection.activations
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RebornSkillExecutionResult {
+    pub plan: RebornSkillExecutionPlan,
+    pub reply: AssistantReply,
+}
 
 impl RebornRuntime {
     /// Snapshot of the substrate facades produced by `build_reborn_services`.
@@ -312,6 +344,43 @@ impl RebornRuntime {
         })
     }
 
+    /// Prepare first-party skill activation for a message, submit it through
+    /// the normal Reborn loop, and return both the structured activation plan
+    /// and final assistant reply.
+    pub async fn execute_skill_message(
+        &self,
+        conversation: &ConversationId,
+        text: &str,
+    ) -> Result<RebornSkillExecutionResult, RebornRuntimeError> {
+        let plan = self.prepare_skill_execution(conversation, text).await?;
+        let reply = self.send_user_message(conversation, text).await?;
+        Ok(RebornSkillExecutionResult { plan, reply })
+    }
+
+    /// Read a bundle-relative asset from a skill activated by
+    /// [`Self::execute_skill_message`].
+    pub async fn read_skill_execution_asset(
+        &self,
+        conversation: &ConversationId,
+        plan: &RebornSkillExecutionPlan,
+        activation: &SkillActivationRequest,
+        path: impl AsRef<str>,
+    ) -> Result<SkillBundleAsset, RebornRuntimeError> {
+        let adapter = self
+            .skill_execution_adapter
+            .as_ref()
+            .ok_or(RebornRuntimeError::SkillExecutionUnavailable)?;
+        let run_context = self.skill_execution_run_context(conversation);
+        let reader = ironclaw_first_party_extensions::SkillBundleAssetReader::new(
+            adapter.selector().bundle_source(),
+            plan.active_bundles.iter().cloned(),
+        );
+        reader
+            .read_file_for_activation(&run_context, activation, path)
+            .await
+            .map_err(skill_asset_error)
+    }
+
     /// Stop the turn-runner worker. Awaits the worker task to finish before
     /// returning.
     pub async fn shutdown(self) -> Result<(), RebornRuntimeError> {
@@ -333,6 +402,37 @@ impl RebornRuntime {
             self.thread_scope.project_id.clone(),
             thread_id.clone(),
         )
+    }
+
+    async fn prepare_skill_execution(
+        &self,
+        conversation: &ConversationId,
+        text: &str,
+    ) -> Result<RebornSkillExecutionPlan, RebornRuntimeError> {
+        let adapter = self
+            .skill_execution_adapter
+            .as_ref()
+            .ok_or(RebornRuntimeError::SkillExecutionUnavailable)?;
+        let run_context = self.skill_execution_run_context(conversation);
+        let plan = adapter
+            .prepare(&run_context, text)
+            .await
+            .map_err(|error| RebornRuntimeError::SkillExecution(error.to_string()))?;
+        let active_bundles = plan.activated_bundles().to_vec();
+        Ok(RebornSkillExecutionPlan {
+            selection: plan.selection,
+            active_bundles,
+        })
+    }
+
+    fn skill_execution_run_context(&self, conversation: &ConversationId) -> LoopRunContext {
+        LoopRunContext::new(
+            self.turn_scope_for(&conversation.0),
+            TurnId::new(),
+            TurnRunId::new(),
+            self.default_resolved_run_profile.clone(),
+        )
+        .with_actor(TurnActor::new(self.actor_user_id.clone()))
     }
 
     async fn send_lock_for(&self, conversation: &ConversationId) -> Arc<Mutex<()>> {
@@ -523,16 +623,18 @@ pub async fn build_reborn_runtime(
     let checkpoint_state_store = Arc::clone(&local_runtime.checkpoint_state_store);
     let loop_checkpoint_store = Arc::clone(&local_runtime.loop_checkpoint_store);
     let thread_service = Arc::clone(&local_runtime.thread_service);
-    let (skill_context_source, skill_activation_source) = match configured_skill_context_source {
-        Some(source) => (Some(source), None),
-        None => {
-            let local_dev_skills = local_dev_filesystem_skill_context_source(local_runtime)?;
-            (
-                Some(local_dev_skills.source),
-                Some(local_dev_skills.activation_source),
-            )
-        }
-    };
+    let (skill_context_source, skill_activation_source, skill_execution_adapter) =
+        match configured_skill_context_source {
+            Some(source) => (Some(source), None, None),
+            None => {
+                let local_dev_skills = local_dev_filesystem_skill_context_source(local_runtime)?;
+                (
+                    Some(local_dev_skills.source),
+                    Some(local_dev_skills.activation_source),
+                    Some(local_dev_skills.execution_adapter),
+                )
+            }
+        };
 
     let validated_identity = validate_runtime_identity(identity)?;
 
@@ -633,16 +735,14 @@ pub async fn build_reborn_runtime(
         model_budget_accountant: None,
         safety_context: None,
     })?;
-    let default_run_profile_id = composition
+    let default_resolved_run_profile = composition
         .run_profile_resolver
         .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
         .await
         .map_err(|error| RebornRuntimeError::InvalidArgument {
             reason: format!("could not resolve default run profile: {error}"),
-        })?
-        .profile_id
-        .as_str()
-        .to_string();
+        })?;
+    let default_run_profile_id = default_resolved_run_profile.profile_id.as_str().to_string();
     let planned_turn_coordinator: Arc<dyn TurnCoordinator> = composition.coordinator.clone();
     services.turn_coordinator = Some(Arc::clone(&planned_turn_coordinator));
 
@@ -667,15 +767,18 @@ pub async fn build_reborn_runtime(
         source_binding_ref: validated_identity.source_binding_ref,
         reply_target_binding_ref: validated_identity.reply_target_binding_ref,
         default_run_profile_id,
+        default_resolved_run_profile,
         wake_sender,
         send_locks: Mutex::new(HashMap::new()),
         skill_activation_source,
+        skill_execution_adapter,
     })
 }
 
 struct LocalDevSkillContextSource {
     source: Arc<dyn HostSkillContextSource>,
     activation_source: Arc<LocalDevSelectableSkillContextSource>,
+    execution_adapter: Arc<LocalDevSkillExecutionAdapter>,
 }
 
 fn local_dev_filesystem_skill_context_source(
@@ -696,10 +799,12 @@ fn local_dev_filesystem_skill_context_source(
             reason: "first-party skills extension did not expose a skill context source"
                 .to_string(),
         })?;
+    let execution_adapter = Arc::new(SkillExecutionAdapter::new(Arc::clone(&activation_source)));
     let source: Arc<dyn HostSkillContextSource> = activation_source.clone();
     Ok(LocalDevSkillContextSource {
         source,
         activation_source,
+        execution_adapter,
     })
 }
 
@@ -738,6 +843,10 @@ fn validate_runtime_identity(
         source_binding_ref,
         reply_target_binding_ref,
     })
+}
+
+fn skill_asset_error(error: SkillBundleAssetReadError) -> RebornRuntimeError {
+    RebornRuntimeError::SkillExecution(error.to_string())
 }
 
 struct AllowAllCapabilitySurfaceResolver;
@@ -859,6 +968,7 @@ mod tests {
     use std::time::Duration;
 
     use async_trait::async_trait;
+    use ironclaw_first_party_extensions::SkillActivationRequest;
     use ironclaw_host_api::{
         CapabilityId,
         runtime_policy::{
@@ -870,6 +980,7 @@ mod tests {
         HostManagedModelError, HostManagedModelErrorKind, HostManagedModelGateway,
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
         HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
+        SkillSourceKind,
     };
     use ironclaw_skills::SkillTrust;
     use ironclaw_threads::{
@@ -888,7 +999,7 @@ mod tests {
     use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
     use crate::webui::build_webui_services;
 
-    use super::build_reborn_runtime;
+    use super::{RebornRuntimeError, build_reborn_runtime};
 
     fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
         EffectiveRuntimePolicy {
@@ -1527,6 +1638,116 @@ mod tests {
         assert!(combined_skill_context.contains("SYSTEM_HELPER_PROMPT_SENTINEL"));
         assert!(!combined_skill_context.contains("local helper description"));
         assert!(!combined_skill_context.contains("USER_HELPER_PROMPT_SENTINEL"));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn execute_skill_message_returns_plan_and_reads_active_bundle_assets() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/skills/system-helper/references"))
+            .expect("system skill references dir");
+        std::fs::write(
+            storage_root.join("system/skills/system-helper/SKILL.md"),
+            skill_md(
+                "system-helper",
+                "system helper description",
+                "SYSTEM_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write system skill");
+        std::fs::write(
+            storage_root.join("system/skills/system-helper/references/policy.md"),
+            "SYSTEM_HELPER_POLICY_SENTINEL",
+        )
+        .expect("write system skill policy");
+        std::fs::create_dir_all(storage_root.join("skills/local-helper/references"))
+            .expect("user skill references dir");
+        std::fs::write(
+            storage_root.join("skills/local-helper/SKILL.md"),
+            skill_md(
+                "local-helper",
+                "local helper description",
+                "USER_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write user skill");
+        std::fs::write(
+            storage_root.join("skills/local-helper/references/policy.md"),
+            "USER_HELPER_POLICY_SENTINEL",
+        )
+        .expect("write user skill policy");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "skill execution ok".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-skill-execution-owner", storage_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-skill-execution-tenant".to_string(),
+            agent_id: "runtime-skill-execution-agent".to_string(),
+            source_binding_id: "runtime-skill-execution-source".to_string(),
+            reply_target_binding_id: "runtime-skill-execution-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.execute_skill_message(&conversation, "please use system-helper"),
+        )
+        .await
+        .expect("runtime skill execution should finish")
+        .expect("runtime skill execution should succeed");
+
+        assert_eq!(result.reply.status, TurnStatus::Completed);
+        assert_eq!(result.reply.text.as_deref(), Some("skill execution ok"));
+        assert_eq!(result.plan.activations().len(), 1);
+        let activation = &result.plan.activations()[0];
+        assert_eq!(activation.name, "system-helper");
+        assert_eq!(activation.source, Some(SkillSourceKind::System));
+
+        let asset = runtime
+            .read_skill_execution_asset(
+                &conversation,
+                &result.plan,
+                activation,
+                "references/policy.md",
+            )
+            .await
+            .expect("active skill asset");
+        assert_eq!(
+            asset.into_utf8().expect("asset utf8"),
+            "SYSTEM_HELPER_POLICY_SENTINEL"
+        );
+
+        let inactive = SkillActivationRequest {
+            name: "local-helper".to_string(),
+            source: Some(SkillSourceKind::User),
+            mode: ironclaw_first_party_extensions::SkillActivationMode::ExplicitMention,
+        };
+        let error = runtime
+            .read_skill_execution_asset(
+                &conversation,
+                &result.plan,
+                &inactive,
+                "references/policy.md",
+            )
+            .await
+            .expect_err("inactive skill asset should be denied");
+        assert!(
+            matches!(error, RebornRuntimeError::SkillExecution(ref reason) if reason.contains("not active")),
+            "unexpected inactive asset error: {error}"
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

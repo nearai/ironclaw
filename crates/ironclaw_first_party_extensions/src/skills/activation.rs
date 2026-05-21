@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use ironclaw_loop_support::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
-    SkillBundleDescriptor, SkillBundleSource, SkillBundleSourceError, SkillSourceKind,
-    sort_skill_bundle_descriptors,
+    SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError,
+    SkillSourceKind, sort_skill_bundle_descriptors,
 };
 use ironclaw_skills::{
     LoadedSkill, SkillSource, extract_skill_mentions, parse_skill_md, prefilter_skills,
@@ -72,6 +72,26 @@ pub struct SkillActivationSelection {
     pub activations: Vec<SkillActivationRequest>,
     pub rewritten_message: String,
     pub feedback: Vec<String>,
+}
+
+/// Fully resolved activation output for one user message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillActivationPlan {
+    pub selection: SkillActivationSelection,
+    activated_bundles: Vec<SkillBundleId>,
+}
+
+impl SkillActivationPlan {
+    pub fn new(selection: SkillActivationSelection, activated_bundles: Vec<SkillBundleId>) -> Self {
+        Self {
+            selection,
+            activated_bundles,
+        }
+    }
+
+    pub fn activated_bundles(&self) -> &[SkillBundleId] {
+        &self.activated_bundles
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -152,6 +172,41 @@ where
             .remove(scope);
     }
 
+    pub fn bundle_source(&self) -> Arc<S> {
+        Arc::clone(&self.bundle_source)
+    }
+
+    pub async fn select_activation_plan(
+        &self,
+        run_context: &LoopRunContext,
+        message: &str,
+    ) -> Result<SkillActivationPlan, SkillActivationSelectionError> {
+        if message.trim().is_empty() {
+            return Ok(SkillActivationPlan::new(
+                SkillActivationSelection {
+                    activations: Vec::new(),
+                    rewritten_message: message.to_string(),
+                    feedback: Vec::new(),
+                },
+                Vec::new(),
+            ));
+        }
+
+        let mut descriptors = self
+            .bundle_source
+            .list_skill_bundles(run_context)
+            .await
+            .map_err(skill_bundle_source_error_to_selection_error)?;
+        sort_skill_bundle_descriptors(&mut descriptors);
+        validate_descriptor_policy_metadata(&descriptors)?;
+
+        let candidates =
+            load_activation_candidates(self.bundle_source.as_ref(), run_context, &descriptors)
+                .await?;
+        let selection = select_skill_activations(message, &candidates, &self.config)?;
+        Ok(activation_plan_for_candidates(selection, &candidates))
+    }
+
     fn message_for_scope(&self, scope: &TurnScope) -> Option<String> {
         self.messages_by_scope
             .lock()
@@ -181,27 +236,14 @@ where
             load_activation_candidates(self.bundle_source.as_ref(), run_context, &descriptors)
                 .await?;
         let selection = select_skill_activations(message, &candidates, &self.config)?;
-        if selection.activations.is_empty() {
+        let plan = activation_plan_for_candidates(selection, &candidates);
+        if plan.selection.activations.is_empty() {
             return Ok(Vec::new());
         }
 
-        let selected_ids: HashSet<(SkillSourceKind, String)> = selection
-            .activations
-            .iter()
-            .filter_map(|activation| {
-                activation
-                    .source
-                    .map(|source| (source, activation.name.clone()))
-            })
-            .collect();
-
         let mut selected = Vec::new();
         for candidate in candidates {
-            let key = (
-                candidate.descriptor.id().source_kind(),
-                candidate.loaded.manifest.name.clone(),
-            );
-            if selected_ids.contains(&key) {
+            if plan.activated_bundles.contains(candidate.descriptor.id()) {
                 selected.push(candidate.into_context_candidate());
             }
         }
@@ -242,6 +284,37 @@ impl ActivationCandidate {
         )
         .with_ordering_key(descriptor_context_ordering_key(&self.descriptor))
     }
+}
+
+fn activation_plan_for_candidates(
+    selection: SkillActivationSelection,
+    candidates: &[ActivationCandidate],
+) -> SkillActivationPlan {
+    let selected_ids: HashSet<(SkillSourceKind, String)> = selection
+        .activations
+        .iter()
+        .filter_map(|activation| {
+            activation
+                .source
+                .map(|source| (source, activation.name.clone()))
+        })
+        .collect();
+    let activated_bundles = candidates
+        .iter()
+        .filter_map(|candidate| {
+            let key = (
+                candidate.descriptor.id().source_kind(),
+                candidate.loaded.manifest.name.clone(),
+            );
+            if selected_ids.contains(&key) {
+                Some(candidate.descriptor.id().clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    SkillActivationPlan::new(selection, activated_bundles)
 }
 
 async fn load_activation_candidates<S>(

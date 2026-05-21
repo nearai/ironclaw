@@ -1,5 +1,9 @@
 use std::sync::Arc;
 
+mod activation;
+mod assets;
+mod execution;
+
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::ScopedPath;
 use ironclaw_loop_support::{
@@ -8,7 +12,13 @@ use ironclaw_loop_support::{
 };
 use thiserror::Error;
 
-use crate::{SelectableSkillContextSource, SkillActivationSelectorConfig};
+pub use activation::{
+    DEFAULT_MAX_ACTIVE_SKILLS, DEFAULT_MAX_SKILL_CONTEXT_TOKENS, SelectableSkillContextSource,
+    SkillActivationMode, SkillActivationPlan, SkillActivationRequest, SkillActivationSelection,
+    SkillActivationSelectionError, SkillActivationSelectorConfig,
+};
+pub use assets::{SkillBundleAsset, SkillBundleAssetReadError, SkillBundleAssetReader};
+pub use execution::{SkillExecutionAdapter, SkillExecutionAdapterError, SkillExecutionPlan};
 
 const SYSTEM_SKILLS_ROOT: &str = "/system/skills";
 const USER_SKILLS_ROOT: &str = "/skills";
@@ -155,6 +165,15 @@ where
         Arc::new(SelectableSkillContextSource::new(
             Arc::clone(&self.bundle_source),
             config,
+        ))
+    }
+
+    pub fn skill_execution_adapter(
+        &self,
+        config: SkillActivationSelectorConfig,
+    ) -> Arc<SkillExecutionAdapter<FilesystemSkillBundleSource<F>>> {
+        Arc::new(SkillExecutionAdapter::new(
+            self.selectable_skill_context_source(config),
         ))
     }
 }
