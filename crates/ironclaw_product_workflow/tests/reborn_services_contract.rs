@@ -341,6 +341,136 @@ impl SessionThreadService for FailingThreadHistoryStub {
     }
 }
 
+struct SubmittedReplayThreadStub {
+    turn_run_id: Option<String>,
+}
+
+impl SubmittedReplayThreadStub {
+    fn new(turn_run_id: Option<String>) -> Self {
+        Self { turn_run_id }
+    }
+}
+
+#[async_trait]
+impl SessionThreadService for SubmittedReplayThreadStub {
+    async fn list_thread_history(
+        &self,
+        _request: ThreadHistoryRequest,
+    ) -> Result<ThreadHistory, SessionThreadError> {
+        replay_stub_unreachable("list_thread_history")
+    }
+
+    async fn ensure_thread(
+        &self,
+        _request: EnsureThreadRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        replay_stub_unreachable("ensure_thread")
+    }
+
+    async fn accept_inbound_message(
+        &self,
+        _request: AcceptInboundMessageRequest,
+    ) -> Result<AcceptedInboundMessage, SessionThreadError> {
+        replay_stub_unreachable("accept_inbound_message")
+    }
+
+    async fn replay_accepted_inbound_message(
+        &self,
+        _request: ReplayAcceptedInboundMessageRequest,
+    ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
+        let owner = caller();
+        let thread_id = ThreadId::new("thread-alpha").expect("valid thread");
+        let scope = ThreadScope {
+            tenant_id: owner.tenant_id,
+            agent_id: owner.agent_id.expect("caller agent"),
+            project_id: owner.project_id,
+            owner_user_id: Some(owner.user_id),
+            mission_id: None,
+        };
+
+        Ok(Some(AcceptedInboundMessageReplay {
+            scope,
+            thread_id,
+            message_id: ThreadMessageId::new(),
+            sequence: 1,
+            status: MessageStatus::Submitted,
+            actor_id: Some("user-alpha".to_string()),
+            source_binding_id: Some("webui-src:replayed".to_string()),
+            reply_target_binding_id: Some("webui-reply:replayed".to_string()),
+            turn_run_id: self.turn_run_id.clone(),
+        }))
+    }
+
+    async fn mark_message_submitted(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _turn_id: String,
+        _turn_run_id: String,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        replay_stub_unreachable("mark_message_submitted")
+    }
+
+    async fn mark_message_deferred_busy(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        replay_stub_unreachable("mark_message_deferred_busy")
+    }
+
+    async fn append_assistant_draft(
+        &self,
+        _request: AppendAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        replay_stub_unreachable("append_assistant_draft")
+    }
+
+    async fn update_assistant_draft(
+        &self,
+        _request: UpdateAssistantDraftRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        replay_stub_unreachable("update_assistant_draft")
+    }
+
+    async fn finalize_assistant_message(
+        &self,
+        _scope: &ThreadScope,
+        _thread_id: &ThreadId,
+        _message_id: ThreadMessageId,
+        _content: MessageContent,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        replay_stub_unreachable("finalize_assistant_message")
+    }
+
+    async fn redact_message(
+        &self,
+        _request: RedactMessageRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        replay_stub_unreachable("redact_message")
+    }
+
+    async fn load_context_window(
+        &self,
+        _request: LoadContextWindowRequest,
+    ) -> Result<ContextWindow, SessionThreadError> {
+        replay_stub_unreachable("load_context_window")
+    }
+
+    async fn create_summary_artifact(
+        &self,
+        _request: CreateSummaryArtifactRequest,
+    ) -> Result<SummaryArtifact, SessionThreadError> {
+        replay_stub_unreachable("create_summary_artifact")
+    }
+}
+
+fn replay_stub_unreachable(method: &str) -> ! {
+    panic!("SubmittedReplayThreadStub::{method} should not be reached")
+}
+
 #[tokio::test]
 async fn duplicate_create_thread_replays_generated_thread_for_same_client_action() {
     let services = RebornServices::new(
@@ -495,6 +625,36 @@ async fn duplicate_submit_replays_prior_handoff_without_second_submission() {
 }
 
 #[tokio::test]
+async fn submitted_replay_with_missing_or_invalid_run_id_maps_to_replay_unavailable() {
+    for turn_run_id in [None, Some("not-a-uuid".to_string())] {
+        let coordinator = Arc::new(FakeTurnCoordinator::default());
+        let services = RebornServices::new(
+            Arc::new(SubmittedReplayThreadStub::new(turn_run_id)),
+            coordinator.clone(),
+        );
+
+        let err = services
+            .submit_turn(
+                caller(),
+                serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                    "client_action_id": "send-replay-corrupt",
+                    "thread_id": "thread-alpha",
+                    "content": "hello from webui"
+                }))
+                .expect("request"),
+            )
+            .await
+            .expect_err("corrupt submitted replay cannot be reconstructed");
+
+        assert_eq!(err.code, RebornServicesErrorCode::Conflict);
+        assert_eq!(err.kind, RebornServicesErrorKind::ReplayUnavailable);
+        assert_eq!(err.status_code, 409);
+        assert!(!err.retryable);
+        assert_eq!(coordinator.submission_count(), 0);
+    }
+}
+
+#[tokio::test]
 async fn validation_errors_are_stable_and_sanitized() {
     let services = RebornServices::new(
         Arc::new(InMemorySessionThreadService::default()),
@@ -581,6 +741,101 @@ async fn turn_unauthorized_maps_to_forbidden() {
     assert_eq!(err.code, RebornServicesErrorCode::Forbidden);
     assert_eq!(err.kind, RebornServicesErrorKind::ParticipantDenied);
     assert_eq!(err.status_code, 403);
+}
+
+#[tokio::test]
+async fn turn_error_categories_map_to_facade_taxonomy() {
+    let cases = [
+        (
+            "conflict",
+            TurnError::Conflict {
+                reason: "active run changed".to_string(),
+            },
+            RebornServicesErrorCode::Conflict,
+            RebornServicesErrorKind::Conflict,
+            409,
+            false,
+        ),
+        (
+            "scope-not-found",
+            TurnError::ScopeNotFound,
+            RebornServicesErrorCode::NotFound,
+            RebornServicesErrorKind::NotFound,
+            404,
+            false,
+        ),
+        (
+            "invalid-request",
+            TurnError::InvalidRequest {
+                reason: "invalid run profile".to_string(),
+            },
+            RebornServicesErrorCode::InvalidRequest,
+            RebornServicesErrorKind::Validation,
+            400,
+            false,
+        ),
+        (
+            "unavailable",
+            TurnError::Unavailable {
+                reason: "turn store unavailable".to_string(),
+            },
+            RebornServicesErrorCode::Unavailable,
+            RebornServicesErrorKind::ServiceUnavailable,
+            503,
+            true,
+        ),
+    ];
+
+    for (name, turn_error, expected_code, expected_kind, expected_status, expected_retryable) in
+        cases
+    {
+        let services = RebornServices::new(
+            Arc::new(InMemorySessionThreadService::default()),
+            Arc::new(FakeTurnCoordinator::with_submit_error(turn_error)),
+        );
+
+        let err = services
+            .submit_turn(
+                caller(),
+                serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                    "client_action_id": format!("send-{name}"),
+                    "thread_id": format!("thread-{name}"),
+                    "content": "hello from webui"
+                }))
+                .expect("request"),
+            )
+            .await
+            .expect_err("turn error maps to stable facade taxonomy");
+
+        assert_eq!(err.code, expected_code, "{name}");
+        assert_eq!(err.kind, expected_kind, "{name}");
+        assert_eq!(err.status_code, expected_status, "{name}");
+        assert_eq!(err.retryable, expected_retryable, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn stream_events_without_projection_stream_maps_to_replay_unavailable_taxonomy() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let err = services
+        .stream_events(
+            caller(),
+            RebornStreamEventsRequest {
+                thread_id: "thread-alpha".to_string(),
+                after_cursor: None,
+            },
+        )
+        .await
+        .expect_err("missing projection stream is replay unavailable");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(err.kind, RebornServicesErrorKind::ReplayUnavailable);
+    assert_eq!(err.status_code, 503);
+    assert!(!err.retryable);
 }
 
 #[tokio::test]
