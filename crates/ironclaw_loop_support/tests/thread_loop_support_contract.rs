@@ -277,6 +277,37 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_skill_bundle
 }
 
 #[tokio::test]
+async fn thread_context_port_skill_bundle_source_fails_closed_when_visibility_missing() {
+    let fixture = ThreadFixture::new().await;
+    let bundle_source = Arc::new(StaticSkillBundleSource::new(vec![skill_bundle_descriptor(
+        SkillSourceKind::User,
+        "alpha",
+        Some(SkillTrust::Trusted),
+        None,
+    )]));
+    let source = Arc::new(SkillBundleContextSource::new(Arc::clone(&bundle_source)));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_skill_context_source(source);
+
+    let error = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert!(bundle_source.reads().is_empty());
+}
+
+#[tokio::test]
 async fn context_port_populates_identity_when_source_set() {
     let fixture = ThreadFixture::new().await;
     let source = Arc::new(StaticIdentityContextSource::new(vec![trusted_identity(
