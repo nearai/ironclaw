@@ -240,6 +240,28 @@ async fn builtin_shell_returns_stderr_and_nonzero_exit_without_dispatch_failure(
 }
 
 #[tokio::test]
+async fn builtin_shell_rejects_hosted_process_plan_before_handler_runs() {
+    let process_port = Arc::new(RecordingProcessPort::default());
+    let runtime =
+        runtime_with_process_port_and_policy(Arc::clone(&process_port), hosted_dev_policy());
+
+    let error = invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "echo must not run"}),
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Authorization);
+    assert!(
+        process_port.requests.lock().unwrap().is_empty(),
+        "hosted shell must fail at invocation-service resolution before the handler can run"
+    );
+}
+
+#[tokio::test]
 async fn builtin_shell_reuses_v1_shell_validation() {
     for input in [
         json!({"command": "cat ~/server.key"}),
@@ -594,7 +616,7 @@ async fn builtin_http_defaults_json_body_content_type() {
 
 #[tokio::test]
 async fn builtin_http_fails_closed_without_runtime_egress() {
-    let runtime = runtime();
+    let runtime = runtime_with_policy(local_dev_policy());
     let error = invoke_with_context(
         &runtime,
         HTTP_CAPABILITY_ID,
@@ -1907,11 +1929,22 @@ where
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
 
 fn runtime_with_process_port<T>(process_port: Arc<T>) -> impl HostRuntime
+where
+    T: RuntimeProcessPort + 'static,
+{
+    runtime_with_process_port_and_policy(process_port, local_dev_policy())
+}
+
+fn runtime_with_process_port_and_policy<T>(
+    process_port: Arc<T>,
+    policy: EffectiveRuntimePolicy,
+) -> impl HostRuntime
 where
     T: RuntimeProcessPort + 'static,
 {
@@ -1925,6 +1958,8 @@ where
     )
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
     .with_runtime_process_port(process_port)
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
+    .with_effective_runtime_policy(policy)
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -1942,6 +1977,34 @@ fn runtime_with_policy(policy: EffectiveRuntimePolicy) -> impl HostRuntime {
     .with_trust_policy(Arc::new(trust_policy()))
     .with_runtime_policy(policy)
     .host_runtime_for_local_testing()
+}
+
+fn local_dev_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn hosted_dev_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::HostedMultiTenant,
+        requested_profile: RuntimeProfile::HostedDev,
+        resolved_profile: RuntimeProfile::HostedDev,
+        filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+        process_backend: ProcessBackendKind::TenantSandbox,
+        network_mode: NetworkMode::Allowlist,
+        secret_mode: SecretMode::TenantBroker,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::Standard,
+    }
 }
 
 fn runtime_with_http_egress<T>(egress: Arc<T>) -> impl HostRuntime

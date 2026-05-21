@@ -37,8 +37,8 @@ use ironclaw_host_api::{
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
     RuntimeHttpEgress, RuntimeKind,
     runtime_policy::{
-        ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
-        NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
+        DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode,
+        ProcessBackendKind, RuntimeProfile, SecretMode,
     },
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
@@ -477,6 +477,11 @@ where
                 turn_run_wake_notifier: None,
             },
         }
+    }
+
+    pub fn with_effective_runtime_policy(mut self, runtime_policy: EffectiveRuntimePolicy) -> Self {
+        self.runtime_policy = Some(runtime_policy);
+        self
     }
 
     #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -1641,6 +1646,11 @@ where
             Arc::clone(&self.registry),
             Arc::clone(&self.filesystem),
             Arc::clone(&self.governor),
+        )
+        .with_runtime_policy(
+            self.runtime_policy
+                .clone()
+                .unwrap_or_else(local_testing_runtime_policy),
         );
 
         if let Some(runtime) = &self.script_runtime {
@@ -2048,20 +2058,6 @@ where
     }
 }
 
-fn local_first_party_policy() -> EffectiveRuntimePolicy {
-    EffectiveRuntimePolicy {
-        deployment: DeploymentMode::LocalSingleUser,
-        requested_profile: RuntimeProfile::LocalDev,
-        resolved_profile: RuntimeProfile::LocalDev,
-        filesystem_backend: FilesystemBackendKind::HostWorkspace,
-        process_backend: ProcessBackendKind::LocalHost,
-        network_mode: NetworkMode::DirectLogged,
-        secret_mode: SecretMode::ScrubbedEnv,
-        approval_policy: ApprovalPolicy::AskDestructive,
-        audit_mode: AuditMode::LocalMinimal,
-    }
-}
-
 #[derive(Clone)]
 struct FirstPartyRuntimeAdapter {
     registry: Arc<FirstPartyCapabilityRegistry>,
@@ -2115,13 +2111,12 @@ where
                 })?,
         };
 
-        let plan =
-            plan_capability(request.descriptor, &local_first_party_policy()).map_err(|_| {
-                release_first_party_reservation(request.governor, reservation.id);
-                DispatchError::FirstParty {
-                    kind: RuntimeDispatchErrorKind::Backend,
-                }
-            })?;
+        let plan = plan_capability(request.descriptor, request.runtime_policy).map_err(|_| {
+            release_first_party_reservation(request.governor, reservation.id);
+            DispatchError::FirstParty {
+                kind: RuntimeDispatchErrorKind::Backend,
+            }
+        })?;
         let services = self
             .invocation_services
             .resolve(InvocationServicesResolutionRequest {

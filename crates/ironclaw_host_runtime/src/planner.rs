@@ -233,6 +233,53 @@ mod tests {
     }
 
     #[test]
+    fn marks_required_services_from_declared_effects() {
+        let policy = policy_with(
+            FilesystemBackendKind::HostWorkspace,
+            ProcessBackendKind::LocalHost,
+            NetworkMode::DirectLogged,
+            SecretMode::ScrubbedEnv,
+        );
+
+        let cases = [
+            (
+                vec![EffectKind::ReadFilesystem],
+                (true, false, false, false),
+            ),
+            (
+                vec![EffectKind::WriteFilesystem],
+                (true, false, false, false),
+            ),
+            (
+                vec![EffectKind::DeleteFilesystem],
+                (true, false, false, false),
+            ),
+            (vec![EffectKind::SpawnProcess], (false, true, false, false)),
+            (vec![EffectKind::ExecuteCode], (false, true, false, false)),
+            (vec![EffectKind::Network], (false, false, true, false)),
+            (vec![EffectKind::UseSecret], (false, false, false, true)),
+            (Vec::new(), (false, false, false, false)),
+        ];
+
+        for (effects, expected) in cases {
+            let plan = plan_capability(
+                &descriptor_with_runtime(RuntimeKind::Wasm, effects),
+                &policy,
+            )
+            .unwrap();
+            assert_eq!(
+                (
+                    plan.requires_filesystem,
+                    plan.requires_process,
+                    plan.requires_network,
+                    plan.requires_secret,
+                ),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn plans_hosted_dev_shell_run_against_tenant_sandbox_never_local_host() {
         // Issue example: `HostedDev + shell.run -> tenant-sandbox
         // process, never provider-host shell`. The resolver guarantees

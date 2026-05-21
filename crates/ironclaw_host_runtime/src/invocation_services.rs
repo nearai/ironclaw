@@ -133,7 +133,10 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
                 backend: plan.process_backend,
             });
         }
-        if plan.requires_network && matches!(plan.network_mode, NetworkMode::Deny) {
+        if plan.requires_network
+            && (matches!(plan.network_mode, NetworkMode::Deny)
+                || self.runtime_http_egress.is_none())
+        {
             return Err(InvocationServicesError::UnsupportedNetworkMode {
                 mode: plan.network_mode,
             });
@@ -257,6 +260,21 @@ mod tests {
     }
 
     #[test]
+    fn local_resolver_ignores_unsupported_filesystem_backend_when_not_required() {
+        let resolver = resolver_without_http();
+        let mut plan = plan(ProcessBackendKind::None, false, false, NetworkMode::Deny);
+        plan.filesystem_backend = FilesystemBackendKind::TenantWorkspace;
+
+        resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .expect("unused filesystem backend must not block pure invocations");
+    }
+
+    #[test]
     fn local_resolver_rejects_denied_required_network() {
         let resolver = resolver_without_http();
         let plan = plan(ProcessBackendKind::None, false, true, NetworkMode::Deny);
@@ -274,6 +292,33 @@ mod tests {
             error,
             InvocationServicesError::UnsupportedNetworkMode {
                 mode: NetworkMode::Deny
+            }
+        ));
+    }
+
+    #[test]
+    fn local_resolver_rejects_required_network_when_egress_service_is_absent() {
+        let resolver = resolver_without_http();
+        let plan = plan(
+            ProcessBackendKind::None,
+            false,
+            true,
+            NetworkMode::DirectLogged,
+        );
+
+        let error = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::NetworkDenied);
+        assert!(matches!(
+            error,
+            InvocationServicesError::UnsupportedNetworkMode {
+                mode: NetworkMode::DirectLogged
             }
         ));
     }
