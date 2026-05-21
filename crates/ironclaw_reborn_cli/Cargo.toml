@@ -28,8 +28,9 @@ root-llm-provider = ["ironclaw_reborn_composition/root-llm-provider"]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4.5.0"
-ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
+ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0", features = ["webui-v2-beta"] }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
+ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", version = "0.1.0" }
 secrecy = "0.10"
 serde_json = "1"
 tempfile = "3"

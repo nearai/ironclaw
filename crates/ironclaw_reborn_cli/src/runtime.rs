@@ -185,7 +185,7 @@ fn install_ctrl_c_cancellation() -> CancellationToken {
     cancellation
 }
 
-fn build_runtime_input(config: &RebornBootConfig) -> anyhow::Result<RebornRuntimeInput> {
+pub(crate) fn build_runtime_input(config: &RebornBootConfig) -> anyhow::Result<RebornRuntimeInput> {
     use ironclaw_reborn_composition::RebornBuildInput;
 
     // Read the operator's boot TOML if present. Missing file is OK

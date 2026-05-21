@@ -1,0 +1,28 @@
+[package]
+name = "ironclaw_reborn_webui_ingress"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Host-owned listener binding + serve loop for the Reborn WebChat v2 HTTP gateway"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+axum = "0.8"
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["webui-v2-beta"] }
+secrecy = "0.10"
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync"] }
+tracing = "0.1"
+
+[dev-dependencies]
+http = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time"] }

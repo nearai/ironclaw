@@ -69,7 +69,19 @@ pub use webui::{RebornWebuiBundle, build_webui_services};
 #[cfg(feature = "webui-v2-beta")]
 pub use webui_rate_limit::RateLimitConfigError;
 #[cfg(feature = "webui-v2-beta")]
-pub use webui_serve::{WebuiAuthenticator, WebuiServeConfig, WebuiServeError, webui_v2_app};
+pub use webui_serve::{
+    WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError, WebuiServeError, webui_v2_app,
+};
+
+/// Re-exported identity vocabulary host binaries need to construct
+/// [`WebuiServeConfig`] (and any other public type on this crate whose
+/// signature mentions a host-api identity). Kept narrow on purpose —
+/// the composition CLAUDE.md says "Expose facade-shaped handles only";
+/// these two newtypes are the WebUI gateway's host-identity facade.
+#[cfg(feature = "webui-v2-beta")]
+pub mod host_api {
+    pub use ironclaw_host_api::{TenantId, UserId};
+}
 
 /// Reborn model purpose slot names exposed for diagnostic callers.
 ///

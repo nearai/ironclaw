@@ -130,6 +130,53 @@ impl WebuiServeConfig {
             csp_header: None,
         }
     }
+
+    /// Parse a list of allow-origin strings (typically read from
+    /// operator config TOML) into the typed `HeaderValue` vector.
+    /// Lets host binaries construct [`WebuiServeConfig`] without
+    /// pulling axum / http as a direct workspace dependency.
+    pub fn parse_allowed_origins(
+        origins: &[String],
+    ) -> Result<Vec<HeaderValue>, WebuiServeConfigError> {
+        origins
+            .iter()
+            .map(|raw| {
+                HeaderValue::from_str(raw).map_err(|err| {
+                    WebuiServeConfigError::InvalidAllowedOrigin {
+                        origin: raw.clone(),
+                        reason: err.to_string(),
+                    }
+                })
+            })
+            .collect()
+    }
+
+    /// Override [`Self::max_body_bytes`] in a builder-style.
+    pub fn with_max_body_bytes(mut self, bytes: usize) -> Self {
+        self.max_body_bytes = bytes;
+        self
+    }
+
+    /// Override [`Self::csp_header`] in a builder-style. The supplied
+    /// string is parsed into a `HeaderValue`; invalid values surface
+    /// as [`WebuiServeConfigError::InvalidCspHeader`].
+    pub fn with_csp_header_str(mut self, csp: &str) -> Result<Self, WebuiServeConfigError> {
+        let value =
+            HeaderValue::from_str(csp).map_err(|err| WebuiServeConfigError::InvalidCspHeader {
+                reason: err.to_string(),
+            })?;
+        self.csp_header = Some(value);
+        Ok(self)
+    }
+}
+
+/// Errors surfaced by [`WebuiServeConfig`]'s string-based helpers.
+#[derive(Debug, thiserror::Error)]
+pub enum WebuiServeConfigError {
+    #[error("CORS allow-origin entry `{origin}` is not a valid HTTP header value: {reason}")]
+    InvalidAllowedOrigin { origin: String, reason: String },
+    #[error("CSP header is not a valid HTTP header value: {reason}")]
+    InvalidCspHeader { reason: String },
 }
 
 /// Errors raised while composing the WebChat v2 gateway `Router`.

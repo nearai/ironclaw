@@ -4639,6 +4639,7 @@ dependencies = [
  "clap_complete",
  "ironclaw_reborn_composition",
  "ironclaw_reborn_config",
+ "ironclaw_reborn_webui_ingress",
  "secrecy",
  "serde_json",
  "tempfile",
@@ -4733,6 +4734,24 @@ dependencies = [
  "tracing",
  "urlencoding",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "ironclaw_reborn_webui_ingress"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "http 1.4.0",
+ "ironclaw_host_api",
+ "ironclaw_reborn_composition",
+ "reqwest",
+ "secrecy",
+ "serde_json",
+ "subtle",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
