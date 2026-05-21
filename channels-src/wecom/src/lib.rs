@@ -52,6 +52,8 @@ const STREAM_CHUNK_LIMIT_BYTES: usize = 20_000;
 const STATUS_MESSAGE_MAX_CHARS: usize = 1200;
 const WEBSOCKET_MEDIA_CHUNK_SIZE: usize = 512 * 1024;
 const MAX_WEBSOCKET_MEDIA_CHUNKS: usize = 100;
+const MAX_WEBSOCKET_MEDIA_ATTACHMENTS_PER_RESPONSE: usize = 4;
+const MAX_WEBSOCKET_MEDIA_TOTAL_BYTES_PER_RESPONSE: usize = 20 * 1024 * 1024;
 const MAX_WEBSOCKET_MEDIA_BATCH_ERRORS: usize = 10;
 const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 const MAX_WEBSOCKET_IMAGE_BYTES: usize = 10 * 1024 * 1024;
@@ -597,27 +599,24 @@ fn process_pending_inbound_bundle(
 }
 
 fn emit_pending_inbound_bundle(bundle: PendingInboundBundle) {
-    let was_buffered = bundle.flush_at_ms > 0;
     let mut attachments: Vec<InboundAttachment> =
         bundle.attachments.into_iter().map(Into::into).collect();
     let attachment_ids: Vec<String> = attachments.iter().map(|att| att.id.clone()).collect();
-    if was_buffered {
-        let mut hydrated = Vec::with_capacity(attachments.len());
-        for mut attachment in attachments {
-            if let Err(error) = rehydrate_pending_inbound_attachment_data(&mut attachment) {
-                channel_host::log(
-                    channel_host::LogLevel::Warn,
-                    &format!(
-                        "Dropping buffered WeCom attachment '{}' because rehydrate failed: {}",
-                        attachment.id, error
-                    ),
-                );
-                continue;
-            }
-            hydrated.push(attachment);
+    let mut hydrated = Vec::with_capacity(attachments.len());
+    for mut attachment in attachments {
+        if let Err(error) = rehydrate_pending_inbound_attachment_data(&mut attachment) {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!(
+                    "Dropping WeCom attachment '{}' because inline data is unavailable: {}",
+                    attachment.id, error
+                ),
+            );
+            continue;
         }
-        attachments = hydrated;
+        hydrated.push(attachment);
     }
+    attachments = hydrated;
 
     if bundle.content.trim().is_empty() && attachments.is_empty() {
         channel_host::log(
@@ -733,6 +732,20 @@ fn load_dm_policy() -> DmPolicy {
         .unwrap_or_default()
 }
 
+struct SenderAccessSnapshot {
+    dm_policy: DmPolicy,
+    allow_from: Vec<String>,
+}
+
+impl SenderAccessSnapshot {
+    fn load() -> Self {
+        Self {
+            dm_policy: load_dm_policy(),
+            allow_from: load_allow_from(),
+        }
+    }
+}
+
 fn send_pairing_reply(route: &PairingReplyRoute, code: &str) -> Result<(), String> {
     let content = pairing_reply_text(route, code);
     send_websocket_stream_reply(&route.req_id, &route.reply_cmd, &content)
@@ -780,6 +793,7 @@ fn pairing_reply_text(route: &PairingReplyRoute, code: &str) -> String {
 fn is_sender_allowed(
     sender_id: &str,
     chat_type: Option<&str>,
+    access: &SenderAccessSnapshot,
     pairing_reply: Option<PairingReplyRoute>,
 ) -> Result<bool, String> {
     let owner_id = channel_host::workspace_read(OWNER_ID_PATH).filter(|s| !s.is_empty());
@@ -787,20 +801,19 @@ fn is_sender_allowed(
         return Ok(true);
     }
 
-    let dm_policy = load_dm_policy();
-    if dm_policy_allows_sender_without_allowlist(dm_policy, chat_type) {
+    if dm_policy_allows_sender_without_allowlist(access.dm_policy, chat_type) {
         return Ok(true);
     }
 
-    let allowed = load_allow_from();
-    if allowed
+    if access
+        .allow_from
         .iter()
         .any(|entry| entry == "*" || entry == sender_id)
     {
         return Ok(true);
     }
 
-    if dm_policy == DmPolicy::Pairing {
+    if access.dm_policy == DmPolicy::Pairing {
         let meta = serde_json::json!({ "user_id": sender_id }).to_string();
         let result = channel_host::pairing_upsert_request(CHANNEL_NAME, sender_id, &meta)?;
         if let Some(reply_route) = pairing_reply {
@@ -1620,9 +1633,34 @@ fn start_websocket_media_batch(
     let mut sends = Vec::new();
     let mut outbound_payloads = Vec::new();
     let mut errors = Vec::new();
+    let mut selected_media_count = 0usize;
+    let mut selected_media_bytes = 0usize;
     for (index, attachment) in attachments.iter().enumerate() {
+        if selected_media_count >= MAX_WEBSOCKET_MEDIA_ATTACHMENTS_PER_RESPONSE {
+            push_websocket_media_error(
+                &mut errors,
+                format!(
+                    "WeCom websocket media response exceeds {MAX_WEBSOCKET_MEDIA_ATTACHMENTS_PER_RESPONSE} attachment(s); remaining attachments were skipped"
+                ),
+            );
+            continue;
+        }
+        if selected_media_bytes.saturating_add(attachment.data.len())
+            > MAX_WEBSOCKET_MEDIA_TOTAL_BYTES_PER_RESPONSE
+        {
+            push_websocket_media_error(
+                &mut errors,
+                format!(
+                    "WeCom websocket media response exceeds {MAX_WEBSOCKET_MEDIA_TOTAL_BYTES_PER_RESPONSE} total bytes; attachment '{}' was skipped",
+                    attachment.filename
+                ),
+            );
+            continue;
+        }
         match build_pending_websocket_media_send(&batch_id, &chat_id, attachment, index) {
             Ok((send, payload)) => {
+                selected_media_count += 1;
+                selected_media_bytes += attachment.data.len();
                 outbound_payloads.push(PendingWebsocketMediaOutbound {
                     send_id: send.id.clone(),
                     payload,
@@ -2192,7 +2230,10 @@ fn websocket_mixed_content_parts(
     (text_parts.join("\n"), attachments)
 }
 
-fn handle_websocket_message_frame(frame: WecomWsFrame<WecomWsMessageBody>) {
+fn handle_websocket_message_frame(
+    frame: WecomWsFrame<WecomWsMessageBody>,
+    access: &SenderAccessSnapshot,
+) {
     let body = frame.body;
     if !should_process_message_id(&body.msgid) {
         return;
@@ -2202,6 +2243,7 @@ fn handle_websocket_message_frame(frame: WecomWsFrame<WecomWsMessageBody>) {
     match is_sender_allowed(
         &sender_id,
         body.chattype.as_deref(),
+        access,
         Some(PairingReplyRoute {
             req_id: frame.headers.req_id.clone(),
             reply_cmd: WECOM_WS_REPLY_CMD.to_string(),
@@ -2297,7 +2339,10 @@ fn handle_websocket_message_frame(frame: WecomWsFrame<WecomWsMessageBody>) {
     );
 }
 
-fn handle_websocket_event_frame(frame: WecomWsFrame<WecomWsEventBody>) {
+fn handle_websocket_event_frame(
+    frame: WecomWsFrame<WecomWsEventBody>,
+    access: &SenderAccessSnapshot,
+) {
     let body = frame.body;
     if !should_process_message_id(&body.msgid) {
         return;
@@ -2324,6 +2369,7 @@ fn handle_websocket_event_frame(frame: WecomWsFrame<WecomWsEventBody>) {
     match is_sender_allowed(
         &sender_id,
         body.chattype.as_deref(),
+        access,
         Some(PairingReplyRoute {
             req_id: frame.headers.req_id.clone(),
             reply_cmd: reply_cmd.to_string(),
@@ -2393,6 +2439,8 @@ fn process_websocket_event_queue() {
         );
     }
 
+    let access = SenderAccessSnapshot::load();
+
     for frame in frames {
         let cmd = serde_json::from_str::<serde_json::Value>(&frame)
             .ok()
@@ -2406,7 +2454,7 @@ fn process_websocket_event_queue() {
         match cmd.as_deref() {
             Some("aibot_msg_callback") => {
                 match serde_json::from_str::<WecomWsFrame<WecomWsMessageBody>>(&frame) {
-                    Ok(parsed) => handle_websocket_message_frame(parsed),
+                    Ok(parsed) => handle_websocket_message_frame(parsed, &access),
                     Err(error) => channel_host::log(
                         channel_host::LogLevel::Warn,
                         &format!("Failed to parse WeCom websocket message frame: {error}"),
@@ -2415,7 +2463,7 @@ fn process_websocket_event_queue() {
             }
             Some("aibot_event_callback") => {
                 match serde_json::from_str::<WecomWsFrame<WecomWsEventBody>>(&frame) {
-                    Ok(parsed) => handle_websocket_event_frame(parsed),
+                    Ok(parsed) => handle_websocket_event_frame(parsed, &access),
                     Err(error) => channel_host::log(
                         channel_host::LogLevel::Warn,
                         &format!("Failed to parse WeCom websocket event frame: {error}"),
@@ -3044,6 +3092,46 @@ mod tests {
         assert_eq!(
             websocket_media_target(&metadata).as_deref(),
             Some("wr-chat")
+        );
+    }
+
+    #[test]
+    fn websocket_media_batch_enforces_per_response_limits_before_persisting() {
+        test_reset_websocket_state();
+        let metadata = WecomMessageMetadata {
+            to_user: "ZhangSan".to_string(),
+            target: Some("chat-1".to_string()),
+            chat_id: Some("chat-1".to_string()),
+            chat_type: Some("private".to_string()),
+            source_msg_id: Some("msg-1".to_string()),
+            ws_req_id: Some("req-1".to_string()),
+            ws_chat_id: Some("chat-1".to_string()),
+            ws_chat_type: Some("private".to_string()),
+            ws_reply_cmd: Some(WECOM_WS_REPLY_CMD.to_string()),
+        };
+        let attachments: Vec<Attachment> = (0..(MAX_WEBSOCKET_MEDIA_ATTACHMENTS_PER_RESPONSE + 2))
+            .map(|idx| make_outbound_attachment(&format!("image-{idx}.png"), "image/png", 1))
+            .collect();
+
+        let result = start_websocket_media_batch(
+            &metadata,
+            "req-1",
+            WECOM_WS_REPLY_CMD,
+            "caption",
+            &attachments,
+        );
+
+        assert_eq!(result.started, MAX_WEBSOCKET_MEDIA_ATTACHMENTS_PER_RESPONSE);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("attachment(s)"))
+        );
+        let persisted = load_pending_websocket_media_state();
+        assert_eq!(
+            persisted.sends.len(),
+            MAX_WEBSOCKET_MEDIA_ATTACHMENTS_PER_RESPONSE
         );
     }
 

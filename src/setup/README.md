@@ -357,6 +357,11 @@ key first, then falls back to the standard env var.
 - Reads `capabilities.json` for `setup.required_secrets`
 - For each secret: check existing, prompt or auto-generate, validate regex
 - Save each secret via `SecretsContext`
+- For WeCom, additionally prompts for non-secret runtime preferences such as
+  DM admission policy, optional sender allowlist, and inbound media merge
+  window. These values are persisted as
+  `settings.channels.wasm_channel_runtime_overrides.wecom:<key>` entries and
+  merged back into the channel runtime config during activation/reconfiguration.
 - Persist selected channel names in `settings.channels.wasm_channels` as a
   first-run startup fallback. Once the running app writes
   `activated_channels`, that runtime state becomes the authoritative restore

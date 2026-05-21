@@ -2893,6 +2893,22 @@ impl WasmChannel {
             .unwrap_or_default()
     }
 
+    async fn clear_generated_image_attachments(&self, metadata: &serde_json::Value) {
+        let paths = self.take_generated_image_attachments(metadata).await;
+        remove_staged_generated_image_attachments(&paths);
+    }
+
+    async fn clear_all_generated_image_attachments(&self) {
+        let paths: Vec<String> = self
+            .pending_generated_image_attachments
+            .lock()
+            .await
+            .drain()
+            .flat_map(|(_, paths)| paths)
+            .collect();
+        remove_staged_generated_image_attachments(&paths);
+    }
+
     /// Handle a status update, managing the typing repeat timer.
     ///
     /// On Thinking: fires on_status once, then spawns a background task
@@ -3073,6 +3089,7 @@ impl WasmChannel {
             StatusUpdate::Status(msg) if is_terminal_text_status(msg) => {
                 // Waiting on user or terminal states: stop typing and fire once.
                 self.cancel_typing_task().await;
+                self.clear_generated_image_attachments(metadata).await;
 
                 if let Err(e) = self.call_on_status(&status, metadata).await {
                     tracing::debug!(
@@ -3913,6 +3930,7 @@ impl Channel for WasmChannel {
     async fn shutdown(&self) -> Result<(), ChannelError> {
         // Cancel typing indicator
         self.cancel_typing_task().await;
+        self.clear_all_generated_image_attachments().await;
 
         // Send shutdown signal
         if let Some(tx) = self.shutdown_tx.write().await.take() {
@@ -4150,9 +4168,7 @@ async fn resolve_websocket_secret(
         return Some(secret.expose().to_string());
     }
 
-    std::env::var(secret_name.to_uppercase())
-        .ok()
-        .filter(|value| !value.is_empty())
+    None
 }
 
 #[cfg(test)]
@@ -4796,6 +4812,7 @@ fn spawn_websocket_poll(poll_guard: tokio::sync::OwnedMutexGuard<()>, ctx: Webso
                             "Failed to restore websocket queue after poll failure"
                         );
                     }
+                    break;
                 }
             }
 
@@ -5968,6 +5985,7 @@ fn prepare_response_attachments(
 
 #[cfg(test)]
 mod tests {
+    use futures::StreamExt;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
@@ -5983,17 +6001,20 @@ mod tests {
     };
     use crate::channels::wasm::wrapper::{
         DiscordGatewayWebsocketConfig, EmitDispatchContext, HttpResponse,
-        TELEGRAM_TEST_API_BASE_ENV, TEST_HTTP_REWRITE_MAP_ENV, WasmChannel, WebsocketAuthPreflight,
-        WebsocketCloseDisposition, WebsocketFrameAction, WebsocketProtocolConfig,
+        TELEGRAM_TEST_API_BASE_ENV, TEST_HTTP_REWRITE_MAP_ENV, WEBSOCKET_EVENT_QUEUE_MAX_ITEMS,
+        WasmChannel, WebsocketAuthPreflight, WebsocketCloseDisposition, WebsocketFrameAction,
+        WebsocketPollContext, WebsocketProtocolConfig, WebsocketProtocolKind,
         WebsocketRuntimeConfig, WebsocketStartDecision, WecomAibotSessionState,
         build_discord_gateway_presence_update, build_websocket_identify_message,
         build_websocket_resume_message, build_wecom_aibot_ping_message,
         build_wecom_aibot_subscribe_message, classify_websocket_close_code,
-        discord_gateway_presence_status, drain_guest_logs, parse_websocket_invalid_session,
-        parse_websocket_ready_session, parse_wecom_aibot_frame, prepare_response_attachments,
-        resolve_websocket_identify_message, rewrite_http_url_for_testing,
-        should_warn_on_heartbeat_interval, uses_owner_broadcast_target, websocket_auth_preflight,
-        websocket_heartbeat_sleep_duration, websocket_reconnect_backoff, websocket_start_decision,
+        discord_gateway_presence_status, drain_guest_logs, generated_image_delivery_key,
+        parse_websocket_invalid_session, parse_websocket_ready_session, parse_wecom_aibot_frame,
+        prepare_response_attachments, resolve_websocket_identify_message,
+        rewrite_http_url_for_testing, should_warn_on_heartbeat_interval, spawn_websocket_poll,
+        uses_owner_broadcast_target, websocket_auth_preflight, websocket_heartbeat_sleep_duration,
+        websocket_processing_queue_path, websocket_queue_path, websocket_reconnect_backoff,
+        websocket_start_decision,
     };
     use crate::channels::{OutgoingAttachment, OutgoingResponse};
     use crate::pairing::PairingStore;
@@ -6070,7 +6091,22 @@ mod tests {
 
     fn load_or_build_wecom_component_wasm() -> Vec<u8> {
         let fixture_path = std::path::Path::new("channels-src/wecom/wecom.wasm");
-        if let Ok(bytes) = std::fs::read(fixture_path)
+        let source_paths = [
+            std::path::Path::new("channels-src/wecom/Cargo.toml"),
+            std::path::Path::new("channels-src/wecom/src/lib.rs"),
+        ];
+        let newest_source_mtime = source_paths
+            .iter()
+            .filter_map(|path| std::fs::metadata(path).ok()?.modified().ok())
+            .max();
+        let fixture_is_fresh = std::fs::metadata(fixture_path)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .is_some_and(|fixture_mtime| {
+                newest_source_mtime.is_none_or(|source_mtime| fixture_mtime >= source_mtime)
+            });
+        if fixture_is_fresh
+            && let Ok(bytes) = std::fs::read(fixture_path)
             && !bytes.is_empty()
         {
             return bytes;
@@ -6127,6 +6163,41 @@ mod tests {
             Arc::new(PairingStore::new_noop()),
             None,
         )
+    }
+
+    async fn spawn_wecom_websocket_poll_for_test(
+        channel: &WasmChannel,
+        outbound_tx: tokio::sync::mpsc::Sender<String>,
+        callback_timeout: Duration,
+    ) {
+        let poll_guard = channel.websocket_poll_lock.clone().lock_owned().await;
+        spawn_websocket_poll(
+            poll_guard,
+            WebsocketPollContext {
+                channel_name: "wecom".to_string(),
+                runtime: Arc::clone(&channel.runtime),
+                prepared: Arc::clone(&channel.prepared),
+                capabilities: channel.capabilities.clone(),
+                poll_capabilities: channel.capabilities.clone(),
+                credentials: Arc::clone(&channel.credentials),
+                pairing_store: Arc::clone(&channel.pairing_store),
+                workspace_store: Arc::clone(&channel.workspace_store),
+                callback_lock: Arc::clone(&channel.callback_lock),
+                message_tx: Arc::clone(&channel.message_tx),
+                rate_limiter: Arc::clone(&channel.rate_limiter),
+                last_broadcast_metadata: Arc::clone(&channel.last_broadcast_metadata),
+                settings_store: channel.settings_store.clone(),
+                owner_scope_id: channel.owner_scope_id.clone(),
+                owner_actor_id: Arc::clone(&channel.owner_actor_id),
+                channel_bound_user_id: Arc::clone(&channel.channel_bound_user_id),
+                secrets_store: channel.secrets_store.clone(),
+                protocol_kind: WebsocketProtocolKind::WecomAibot,
+                outbound_tx,
+                queue_path: websocket_queue_path("wecom"),
+                processing_queue_path: websocket_processing_queue_path("wecom"),
+                callback_timeout,
+            },
+        );
     }
 
     #[cfg(feature = "libsql")]
@@ -6754,9 +6825,10 @@ mod tests {
 
     fn wecom_websocket_capabilities() -> ChannelCapabilities {
         let tool_capabilities = ToolCapabilities {
-            http: Some(HttpCapability::new(vec![EndpointPattern::host(
-                "openws.work.weixin.qq.com",
-            )])),
+            http: Some(HttpCapability::new(vec![
+                EndpointPattern::host("openws.work.weixin.qq.com"),
+                EndpointPattern::host("*.myqcloud.com").with_methods(vec!["GET".to_string()]),
+            ])),
             websocket: Some(serde_json::json!({
                 "url": "wss://openws.work.weixin.qq.com",
                 "connect_on_start": true,
@@ -8028,6 +8100,140 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_call_on_poll_emits_wecom_websocket_callback_message() {
+        let channel = create_wecom_component_test_channel().await;
+        channel
+            .call_on_start()
+            .await
+            .expect("wecom on_start should succeed");
+        let mut stream = channel
+            .ensure_message_channel()
+            .await
+            .expect("message stream should be created");
+
+        channel.workspace_store.commit_writes(&[
+            PendingWorkspaceWrite {
+                path: "channels/wecom/dm_policy".to_string(),
+                content: "allowlist".to_string(),
+            },
+            PendingWorkspaceWrite {
+                path: "channels/wecom/allow_from".to_string(),
+                content: serde_json::json!(["ZhangSan"]).to_string(),
+            },
+        ]);
+
+        let frame = serde_json::json!({
+            "cmd": "aibot_msg_callback",
+            "headers": { "req_id": "req-callback-1" },
+            "body": {
+                "msgid": "msg-callback-1",
+                "chatid": "group-chat-1",
+                "chattype": "group",
+                "from": { "userid": "ZhangSan" },
+                "msgtype": "mixed",
+                "mixed": {
+                    "msg_item": [
+                        {
+                            "type": "text",
+                            "text": { "content": "hello from group" }
+                        },
+                        {
+                            "type": "image",
+                            "image": { "url": "https://not-allowlisted.example.com/image.jpg" }
+                        }
+                    ]
+                }
+            }
+        })
+        .to_string();
+        channel
+            .workspace_store
+            .append_json_text_queue(
+                &websocket_queue_path("wecom"),
+                &frame,
+                WEBSOCKET_EVENT_QUEUE_MAX_ITEMS,
+            )
+            .expect("queue websocket callback frame");
+
+        let (outbound_tx, _outbound_rx) =
+            tokio::sync::mpsc::channel(super::WEBSOCKET_OUTBOUND_QUEUE_CAPACITY);
+        spawn_wecom_websocket_poll_for_test(&channel, outbound_tx, Duration::from_secs(10)).await;
+
+        let msg = tokio::time::timeout(Duration::from_secs(20), stream.next())
+            .await
+            .expect("poll should emit message before timeout")
+            .expect("message stream should remain open");
+        assert_eq!(msg.channel, "wecom");
+        assert_eq!(msg.sender_id, "ZhangSan");
+        assert_eq!(msg.content, "hello from group");
+        assert_eq!(
+            msg.thread_id.as_ref().map(|thread_id| thread_id.as_str()),
+            Some("wecom:group:group-chat-1")
+        );
+        assert_eq!(
+            msg.metadata["source_msg_id"],
+            serde_json::json!("msg-callback-1")
+        );
+        assert_eq!(
+            msg.metadata["ws_req_id"],
+            serde_json::json!("req-callback-1")
+        );
+        assert_eq!(msg.metadata["chat_type"], serde_json::json!("group"));
+        assert!(
+            msg.attachments.is_empty(),
+            "unhydrated WeCom media must not be emitted as metadata-only attachments"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_websocket_poll_restores_processing_queue_when_on_poll_fails() {
+        use crate::tools::wasm::WorkspaceReader;
+
+        let channel = create_wecom_component_test_channel().await;
+        let frame = serde_json::json!({
+            "cmd": "aibot_msg_callback",
+            "headers": { "req_id": "req-timeout-1" },
+            "body": {
+                "msgid": "msg-timeout-1",
+                "chattype": "single",
+                "from": { "userid": "ZhangSan" },
+                "msgtype": "text",
+                "text": { "content": "retry me" }
+            }
+        })
+        .to_string();
+        let queue_path = websocket_queue_path("wecom");
+        let processing_queue_path = websocket_processing_queue_path("wecom");
+        channel
+            .workspace_store
+            .append_json_text_queue(&queue_path, &frame, WEBSOCKET_EVENT_QUEUE_MAX_ITEMS)
+            .expect("queue websocket callback frame");
+
+        let (outbound_tx, _outbound_rx) =
+            tokio::sync::mpsc::channel(super::WEBSOCKET_OUTBOUND_QUEUE_CAPACITY);
+        spawn_wecom_websocket_poll_for_test(&channel, outbound_tx, Duration::ZERO).await;
+
+        let restored = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if channel
+                    .workspace_store
+                    .read(&processing_queue_path)
+                    .is_none()
+                    && let Some(raw) = channel.workspace_store.read(&queue_path)
+                {
+                    break raw;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("websocket queue should be restored after poll timeout");
+        let restored_frames: Vec<String> =
+            serde_json::from_str(&restored).expect("restored queue json");
+        assert_eq!(restored_frames, vec![frame]);
+    }
+
+    #[tokio::test]
     async fn test_image_generated_status_defers_until_wecom_final_response() {
         use crate::channels::IncomingMessage;
 
@@ -8081,6 +8287,61 @@ mod tests {
             serde_json::json!("900150983cd24fb0d6963f7d28e17f72")
         );
         assert!(rx.try_recv().is_err(), "only one image upload should start");
+    }
+
+    #[tokio::test]
+    async fn test_done_status_clears_status_staged_wecom_image_without_response() {
+        let channel = create_wecom_component_test_channel().await;
+        let metadata = serde_json::json!({
+            "to_user": "ZhangSan",
+            "source_msg_id": "msg-cleanup",
+            "ws_req_id": "req-cleanup",
+            "ws_chat_id": null,
+            "ws_chat_type": "single",
+            "ws_reply_cmd": "aibot_respond_msg",
+        });
+
+        channel
+            .send_status(
+                crate::channels::StatusUpdate::ImageGenerated {
+                    event_id: "image-cleanup".to_string(),
+                    data_url: "data:image/png;base64,YWJj".to_string(),
+                    path: None,
+                },
+                &metadata,
+            )
+            .await
+            .expect("generated image status should stage");
+
+        let staged_paths = channel
+            .pending_generated_image_attachments
+            .lock()
+            .await
+            .get(&generated_image_delivery_key(&metadata))
+            .cloned()
+            .expect("image should be staged");
+        assert_eq!(staged_paths.len(), 1);
+
+        channel
+            .send_status(
+                crate::channels::StatusUpdate::Status("Done".to_string()),
+                &metadata,
+            )
+            .await
+            .expect("done status should clear staged image");
+
+        assert!(
+            channel
+                .pending_generated_image_attachments
+                .lock()
+                .await
+                .get(&generated_image_delivery_key(&metadata))
+                .is_none()
+        );
+        assert!(
+            !std::path::Path::new(&staged_paths[0]).exists(),
+            "staged generated image file should be removed on terminal no-response path"
+        );
     }
 
     #[tokio::test]

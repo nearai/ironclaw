@@ -1118,7 +1118,7 @@ impl ExtensionManager {
         &self,
         name: &str,
         activation_user_id: &str,
-    ) -> HashMap<String, serde_json::Value> {
+    ) -> Result<HashMap<String, serde_json::Value>, ExtensionError> {
         let mut overrides = HashMap::new();
 
         if let Some(store) = self.settings_store() {
@@ -1145,11 +1145,9 @@ impl ExtensionManager {
                     }
                 }
                 Err(e) => {
-                    tracing::debug!(
-                        channel = %name,
-                        error = %e,
-                        "Failed to load persisted wasm runtime config overrides"
-                    );
+                    return Err(ExtensionError::Config(format!(
+                        "Failed to load persisted runtime config overrides for channel '{name}': {e}"
+                    )));
                 }
             }
         }
@@ -1189,7 +1187,7 @@ impl ExtensionManager {
             }
         }
 
-        overrides
+        Ok(overrides)
     }
 
     async fn load_wechat_bound_user_id(&self) -> Option<String> {
@@ -1276,7 +1274,7 @@ impl ExtensionManager {
         let external_id = crate::pairing::ExternalId::from(external_id.to_string());
         let config_overrides = self
             .load_channel_runtime_config_overrides(channel_name, &self.user_id)
-            .await;
+            .await?;
         let deps = crate::pairing::approval::ApprovalDeps {
             tunnel_url: self.tunnel_url.as_deref(),
             store: self.store.as_ref(),
@@ -6382,7 +6380,7 @@ impl ExtensionManager {
             );
             config_updates.extend(
                 self.load_channel_runtime_config_overrides(&channel_name, activation_user_id)
-                    .await,
+                    .await?,
             );
             inject_wasm_channel_secret_config_mappings(
                 &channel_name,
@@ -6621,7 +6619,7 @@ impl ExtensionManager {
         );
         config_updates.extend(
             self.load_channel_runtime_config_overrides(name, user_id)
-                .await,
+                .await?,
         );
         inject_wasm_channel_secret_config_mappings(
             name,

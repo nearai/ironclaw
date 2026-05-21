@@ -653,8 +653,7 @@ impl ChannelWorkspaceStore {
 
         restored.append(&mut live);
         if restored.len() > max_items {
-            let overflow = restored.len() - max_items;
-            restored.drain(0..overflow);
+            restored.truncate(max_items);
         }
 
         if restored.is_empty() {
@@ -1028,6 +1027,44 @@ mod tests {
                 "frame-1".to_string(),
                 "frame-2".to_string(),
                 "frame-3".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn test_channel_workspace_store_restore_json_text_queue_drops_live_tail_on_overflow() {
+        use crate::channels::wasm::host::ChannelWorkspaceStore;
+        use crate::tools::wasm::WorkspaceReader;
+
+        let store = ChannelWorkspaceStore::new();
+        let live_path = "channels/discord/state/gateway_event_queue";
+        let drain_path = "channels/discord/state/gateway_event_queue_processing";
+
+        store
+            .append_json_text_queue(live_path, "failed-1", 10)
+            .unwrap();
+        store
+            .append_json_text_queue(live_path, "failed-2", 10)
+            .unwrap();
+        assert!(store.move_json_text_queue(live_path, drain_path).unwrap());
+
+        for live in ["live-1", "live-2", "live-3"] {
+            store.append_json_text_queue(live_path, live, 10).unwrap();
+        }
+
+        assert!(
+            store
+                .restore_json_text_queue(live_path, drain_path, 3)
+                .unwrap()
+        );
+
+        let restored: Vec<String> = serde_json::from_str(&store.read(live_path).unwrap()).unwrap();
+        assert_eq!(
+            restored,
+            vec![
+                "failed-1".to_string(),
+                "failed-2".to_string(),
+                "live-1".to_string()
             ]
         );
     }
