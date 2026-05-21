@@ -10,6 +10,8 @@ use std::{collections::HashMap, path::PathBuf, process::Stdio, time::Duration};
 
 use async_trait::async_trait;
 use ironclaw_host_api::{MountView, ResourceScope};
+#[cfg(unix)]
+use libc::{SIGKILL, kill};
 use thiserror::Error;
 use tokio::{io::AsyncReadExt, process::Command};
 
@@ -21,7 +23,6 @@ const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 /// Environment variables safe to forward to local child processes.
 const SAFE_ENV_VARS: &[&str] = &[
     "PATH",
-    "HOME",
     "USER",
     "LOGNAME",
     "SHELL",
@@ -115,7 +116,13 @@ impl RuntimeProcessPort for LocalHostProcessPort {
             .workdir
             .as_deref()
             .map(PathBuf::from)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            .map(Ok)
+            .unwrap_or_else(std::env::current_dir)
+            .map_err(|e| {
+                RuntimeProcessError::ExecutionFailed(format!(
+                    "cannot determine working directory: {e}"
+                ))
+            })?;
         let timeout = request
             .timeout_secs
             .map(Duration::from_secs)
@@ -158,6 +165,8 @@ async fn execute_local_command(
         }
     }
     command.envs(extra_env);
+    // Keep shell "~" expansion available without exposing the host user's home.
+    command.env("HOME", workdir);
     command
         .current_dir(workdir)
         .stdin(Stdio::null())
@@ -219,20 +228,11 @@ async fn terminate_child_tree(child: &mut tokio::process::Child) {
         // SAFETY: Child was spawned into its own process group with pgid == pid.
         // Negative pid targets only that process group; result is best-effort.
         unsafe {
-            let _ = kill_process_group(-(pid as i32), SIGKILL);
+            let _ = kill(-(pid as i32), SIGKILL);
         }
     }
     let _ = child.kill().await;
     let _ = child.wait().await;
-}
-
-#[cfg(unix)]
-const SIGKILL: i32 = 9;
-
-#[cfg(unix)]
-unsafe extern "C" {
-    #[link_name = "kill"]
-    fn kill_process_group(pid: i32, sig: i32) -> i32;
 }
 
 async fn read_stream_limited<R>(mut stream: R) -> String
@@ -277,4 +277,43 @@ fn floor_char_boundary(s: &str, pos: usize) -> usize {
         i -= 1;
     }
     i
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_output_preserves_exact_limit() {
+        let output = "x".repeat(COMMAND_MAX_OUTPUT_SIZE);
+
+        assert_eq!(truncate_output(&output), output);
+    }
+
+    #[test]
+    fn truncate_output_respects_utf8_boundaries() {
+        let output = format!(
+            "{}{}{}",
+            "a".repeat(COMMAND_MAX_OUTPUT_SIZE / 2 - 1),
+            "é",
+            "b".repeat(COMMAND_MAX_OUTPUT_SIZE)
+        );
+
+        let truncated = truncate_output(&output);
+
+        assert!(truncated.is_char_boundary(COMMAND_MAX_OUTPUT_SIZE / 2 - 1));
+        assert!(truncated.contains("... [truncated "));
+        assert!(truncated.starts_with(&"a".repeat(COMMAND_MAX_OUTPUT_SIZE / 2 - 1)));
+        assert!(truncated.ends_with(&"b".repeat(COMMAND_MAX_OUTPUT_SIZE / 2)));
+    }
+
+    #[tokio::test]
+    async fn read_stream_limited_truncates_after_limit() {
+        let input = "x".repeat(COMMAND_MAX_OUTPUT_SIZE + 1);
+
+        let output = read_stream_limited(input.as_bytes()).await;
+
+        assert!(output.len() > COMMAND_MAX_OUTPUT_SIZE);
+        assert!(output.contains("... [truncated 1 bytes] ..."));
+    }
 }

@@ -14,6 +14,8 @@
 - `surface.rs` owns host-runtime capability-surface shaping and versions.
 - `production.rs` and `services.rs` compose runtime services and readiness
   evidence used by Reborn loop wiring.
+- Production wiring must reject local-only runtime policy shapes, not just require
+  that some `EffectiveRuntimePolicy` value is present.
 - First-party runtime tools belong under `first_party_tools/`; do not append new
   built-ins to broad runtime files.
 
@@ -21,7 +23,8 @@
 
 - Add a new runtime service module when the service has its own authority,
   readiness, or resource accounting boundary.
-- Add a first-party tool file per capability.
+- Add a first-party tool file per capability, except for tightly-coupled
+  v1-compatible coding-tool families that share one legacy surface contract.
 - Keep readiness checks near the runtime service they validate; driver/product
   readiness belongs in `ironclaw_reborn`.
 

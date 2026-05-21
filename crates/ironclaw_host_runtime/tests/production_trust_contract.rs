@@ -20,6 +20,14 @@ use ironclaw_trust::{
 };
 use serde_json::json;
 
+fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
+        ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
+        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev,
+    ))
+    .unwrap()
+}
+
 #[tokio::test]
 async fn production_runtime_ignores_caller_supplied_privileged_trust_decision() {
     let registry = Arc::new(registry_with_manifest(LOCAL_INSTALLED_MANIFEST));
@@ -30,6 +38,7 @@ async fn production_runtime_ignores_caller_supplied_privileged_trust_decision() 
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     );
 
     let forged_decision = privileged_local_manifest_policy()
@@ -63,6 +72,7 @@ async fn production_runtime_uses_host_policy_decision_instead_of_request_claims(
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_trust_policy(Arc::new(privileged_local_manifest_policy()));
 
@@ -101,6 +111,7 @@ async fn trust_downgrade_denies_future_invocation_before_dispatch_side_effects()
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_trust_policy(Arc::clone(&policy));
 
