@@ -3,10 +3,9 @@
 mod reborn_support;
 mod support;
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, sync::Arc};
+
+use tokio::sync::RwLock;
 
 use async_trait::async_trait;
 use ironclaw_loop_support::{
@@ -89,16 +88,20 @@ async fn reborn_identity_tenant_scope_isolation_parity() {
         .await
         .expect("submit tenant beta turn");
 
-    identity_source.set_identity(
-        alpha_turn.scope.tenant_id.as_str(),
-        alpha_turn.actor.user_id.as_str(),
-        TENANT_ALPHA_IDENTITY,
-    );
-    identity_source.set_identity(
-        beta_turn.scope.tenant_id.as_str(),
-        beta_turn.actor.user_id.as_str(),
-        TENANT_BETA_IDENTITY,
-    );
+    identity_source
+        .set_identity(
+            alpha_turn.scope.tenant_id.as_str(),
+            alpha_turn.actor.user_id.as_str(),
+            TENANT_ALPHA_IDENTITY,
+        )
+        .await;
+    identity_source
+        .set_identity(
+            beta_turn.scope.tenant_id.as_str(),
+            beta_turn.actor.user_id.as_str(),
+            TENANT_BETA_IDENTITY,
+        )
+        .await;
 
     alpha.start();
     beta.start();
@@ -140,7 +143,7 @@ async fn reborn_identity_tenant_scope_isolation_parity() {
         "tenant beta",
     );
 
-    let seen = identity_source.seen_keys();
+    let seen = identity_source.seen_keys().await;
     assert!(seen.contains(&TenantIdentityKey::from_turn(&alpha_turn)));
     assert!(seen.contains(&TenantIdentityKey::from_turn(&beta_turn)));
 
@@ -162,9 +165,10 @@ fn system_prompt_text(request: &ironclaw_loop_support::HostManagedModelRequest) 
 
 fn assert_prompt_contains_only(prompts: &[String], expected: &str, forbidden: &str, label: &str) {
     assert!(
-        prompts
-            .iter()
-            .any(|prompt| prompt.contains(expected) && !prompt.contains(forbidden)),
+        !prompts.is_empty()
+            && prompts
+                .iter()
+                .all(|prompt| prompt.contains(expected) && !prompt.contains(forbidden)),
         "{label} prompt should contain only matching tenant identity; prompts={prompts:#?}"
     );
 }
@@ -186,19 +190,19 @@ impl TenantIdentityKey {
 
 #[derive(Default)]
 struct TenantIdentitySource {
-    identities: Mutex<HashMap<TenantIdentityKey, HostIdentityContextCandidate>>,
-    seen: Mutex<Vec<TenantIdentityKey>>,
+    identities: RwLock<HashMap<TenantIdentityKey, HostIdentityContextCandidate>>,
+    seen: RwLock<Vec<TenantIdentityKey>>,
 }
 
 impl TenantIdentitySource {
-    fn set_identity(&self, tenant_id: &str, user_id: &str, content: &str) {
+    async fn set_identity(&self, tenant_id: &str, user_id: &str, content: &str) {
         let name = IdentityFileName::new("IDENTITY.md").expect("identity file name");
         let candidate = HostIdentityContextCandidate::new_installed_summary_only(
             name,
             content.to_string(),
             IdentityApplicability::Always,
         );
-        self.identities.lock().expect("identity lock").insert(
+        self.identities.write().await.insert(
             TenantIdentityKey {
                 tenant_id: tenant_id.to_string(),
                 user_id: user_id.to_string(),
@@ -207,8 +211,8 @@ impl TenantIdentitySource {
         );
     }
 
-    fn seen_keys(&self) -> Vec<TenantIdentityKey> {
-        self.seen.lock().expect("identity lock").clone()
+    async fn seen_keys(&self) -> Vec<TenantIdentityKey> {
+        self.seen.read().await.clone()
     }
 }
 
@@ -227,14 +231,14 @@ impl HostIdentityContextSource for TenantIdentitySource {
             user_id: actor.user_id.as_str().to_string(),
         };
         {
-            let mut seen = self.seen.lock().expect("identity lock");
+            let mut seen = self.seen.write().await;
             if !seen.contains(&key) {
                 seen.push(key.clone());
             }
         }
         self.identities
-            .lock()
-            .expect("identity lock")
+            .read()
+            .await
             .get(&key)
             .cloned()
             .map(|candidate| vec![candidate])

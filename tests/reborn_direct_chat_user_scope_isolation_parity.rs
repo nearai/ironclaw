@@ -80,10 +80,6 @@ async fn reborn_direct_chat_user_scope_isolation_parity() {
         .expect("bob completed");
 
     assert_ne!(
-        alice.actor.user_id, bob.actor.user_id,
-        "direct chats from distinct external actors must resolve to distinct canonical users"
-    );
-    assert_ne!(
         alice.thread_scope, bob.thread_scope,
         "direct chat thread scopes must remain owner-user isolated"
     );

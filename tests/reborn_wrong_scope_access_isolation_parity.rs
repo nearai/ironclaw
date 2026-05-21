@@ -47,18 +47,13 @@ async fn reborn_wrong_scope_access_isolation_parity() {
     );
 
     let wrong_thread_scope = wrong_tenant_thread_scope(&submitted.thread_scope);
-    match harness
-        .history_for_thread_in_scope(wrong_thread_scope, submitted.thread_id.clone())
-        .await
-    {
-        Ok(messages) => assert!(
-            messages
-                .iter()
-                .all(|message| message.content.as_deref() != Some("needs approval")),
-            "wrong tenant thread lookup must not expose submitted message"
-        ),
-        Err(_) => {}
-    }
+    assert!(
+        harness
+            .history_for_thread_in_scope(wrong_thread_scope, submitted.thread_id.clone())
+            .await
+            .is_err(),
+        "wrong tenant scope must not access thread history"
+    );
 
     assert!(
         harness
