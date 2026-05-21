@@ -36,8 +36,12 @@ use crate::policy::{
     NoopBeforeInboundPolicy,
 };
 
+#[cfg(not(test))]
 const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_millis(10);
 
+/// Run a before-inbound policy with the workflow-owned wall-clock budget.
 pub(crate) async fn check_before_inbound_policy(
     before_inbound_policy: &dyn BeforeInboundPolicy,
     request: BeforeInboundPolicyRequest,
@@ -726,11 +730,47 @@ fn bounded_ref<T: RefFactory>(prefix: &str, raw: &str) -> Result<T, ProductWorkf
 
 #[cfg(test)]
 mod tests {
+    use std::future::pending;
+
+    use async_trait::async_trait;
     use chrono::TimeZone;
     use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
+    use ironclaw_product_adapters::{
+        AdapterInstallationId, ExternalActorRef, ExternalConversationRef, ProductAdapterId,
+        ProductTriggerReason, UserMessagePayload,
+    };
     use ironclaw_threads::ThreadScope;
 
+    use crate::action::SourceBindingKey;
+
     use super::*;
+
+    struct PendingBeforeInboundPolicy;
+
+    #[async_trait]
+    impl BeforeInboundPolicy for PendingBeforeInboundPolicy {
+        async fn check_user_message(
+            &self,
+            _request: BeforeInboundPolicyRequest,
+        ) -> Result<BeforeInboundPolicyOutcome, ProductWorkflowError> {
+            pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn check_before_inbound_policy_times_out_as_retryable_failure() {
+        let err = check_before_inbound_policy(&PendingBeforeInboundPolicy, policy_request())
+            .await
+            .expect_err("pending policy should time out");
+
+        assert!(matches!(
+            err,
+            ProductWorkflowError::BeforeInboundPolicyFailed {
+                permanent: false,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn submitted_replay_becomes_already_submitted_handoff() {
@@ -789,6 +829,27 @@ mod tests {
         assert_eq!(submission.message_id, message_id);
         assert_eq!(submission.source_binding_id, "src:alpha");
         assert_eq!(submission.reply_target_binding_id, "reply:alpha");
+    }
+
+    fn policy_request() -> BeforeInboundPolicyRequest {
+        BeforeInboundPolicyRequest {
+            adapter_id: ProductAdapterId::new("test_adapter").expect("adapter"),
+            installation_id: AdapterInstallationId::new("install_alpha").expect("installation"),
+            external_actor_ref: ExternalActorRef::new("test", "user1", Option::<String>::None)
+                .expect("actor"),
+            external_conversation_ref: ExternalConversationRef::new(None, "conv1", None, None)
+                .expect("conversation"),
+            source_binding_key: SourceBindingKey::new("space:0:;conversation:5:conv1;topic:0:;")
+                .expect("source binding key"),
+            rate_limit_key: SourceBindingKey::new("space:0:;conversation:5:conv1;topic:0:;")
+                .expect("rate limit key"),
+            user_message: UserMessagePayload::new(
+                "hello",
+                vec![],
+                ProductTriggerReason::DirectChat,
+            )
+            .expect("message"),
+        }
     }
 
     fn replay(

@@ -152,7 +152,8 @@ pub struct FakeIdempotencyLedger {
 struct FakeIdempotencyState {
     in_flight: HashMap<ActionFingerprintKey, ProductInboundAction>,
     settled: HashMap<ActionFingerprintKey, ProductInboundAction>,
-    released: Vec<ProductInboundAction>,
+    released_count: usize,
+    last_released: Option<ProductInboundAction>,
     fail_with: Option<ProductWorkflowError>,
     settle_fail_with: Option<ProductWorkflowError>,
 }
@@ -205,10 +206,16 @@ impl FakeIdempotencyLedger {
         state.settled.values().cloned().collect()
     }
 
-    /// Get all released non-terminal actions.
-    pub fn released_actions(&self) -> Vec<ProductInboundAction> {
+    /// How many non-terminal actions were released.
+    pub fn released_count(&self) -> usize {
         let state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
-        state.released.clone()
+        state.released_count
+    }
+
+    /// Most recent released non-terminal action, retained for targeted assertions.
+    pub fn last_released_action(&self) -> Option<ProductInboundAction> {
+        let state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
+        state.last_released.clone()
     }
 }
 
@@ -262,7 +269,8 @@ impl IdempotencyLedger for FakeIdempotencyLedger {
             return Err(error);
         }
         state.in_flight.remove(&action.fingerprint);
-        state.released.push(action);
+        state.released_count += 1;
+        state.last_released = Some(action);
         Ok(())
     }
 }
@@ -272,6 +280,9 @@ impl IdempotencyLedger for FakeIdempotencyLedger {
 // ---------------------------------------------------------------------------
 
 /// In-memory fake for before-inbound policy checks.
+///
+/// Queued `program_outcome(s)` results are consumed first; `allow`, `rewrite_*`,
+/// `reject`, and `force_failure` configure the fallback used after the queue.
 #[derive(Clone)]
 pub struct FakeBeforeInboundPolicy {
     state: Arc<Mutex<FakeBeforeInboundPolicyState>>,
@@ -291,7 +302,7 @@ impl FakeBeforeInboundPolicy {
         }
     }
 
-    /// Allow all messages without modification.
+    /// Use allow as the fallback after queued outcomes are exhausted.
     pub fn allow(&self) {
         let mut state = self
             .state
@@ -300,7 +311,7 @@ impl FakeBeforeInboundPolicy {
         state.fallback_outcome = Some(Ok(BeforeInboundPolicyOutcome::Allow));
     }
 
-    /// Rewrite all user-message payloads.
+    /// Use this rewrite as the fallback after queued outcomes are exhausted.
     pub fn rewrite_user_message(&self, payload: UserMessagePayload) {
         let mut state = self
             .state
@@ -309,7 +320,7 @@ impl FakeBeforeInboundPolicy {
         state.fallback_outcome = Some(Ok(BeforeInboundPolicyOutcome::RewriteUserMessage(payload)));
     }
 
-    /// Reject all user messages.
+    /// Use this rejection as the fallback after queued outcomes are exhausted.
     pub fn reject(&self, rejection: ProductRejection) {
         let mut state = self
             .state
@@ -318,7 +329,7 @@ impl FakeBeforeInboundPolicy {
         state.fallback_outcome = Some(Ok(BeforeInboundPolicyOutcome::Reject(rejection)));
     }
 
-    /// Fail all policy checks.
+    /// Use this failure as the fallback after queued outcomes are exhausted.
     pub fn force_failure(&self, error: ProductWorkflowError) {
         let mut state = self
             .state
@@ -339,7 +350,7 @@ impl FakeBeforeInboundPolicy {
         state.programmed_outcomes.push_back(outcome);
     }
 
-    /// Append policy results consumed in request order before the fallback outcome.
+    /// Synchronously program policy results consumed before the fallback outcome.
     pub fn program_outcomes(
         &self,
         outcomes: impl IntoIterator<Item = Result<BeforeInboundPolicyOutcome, ProductWorkflowError>>,

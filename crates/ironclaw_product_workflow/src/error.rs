@@ -137,6 +137,8 @@ impl From<ProductWorkflowError> for ProductAdapterError {
                 reason: RedactedString::new(reason),
             },
             ProductWorkflowError::BeforeInboundPolicyFailed { permanent, .. } => {
+                // Policy backends may include classifier/provider details in errors;
+                // keep adapter-visible messages stable and generic.
                 if permanent {
                     ProductAdapterError::WorkflowRejected {
                         kind: ProductWorkflowRejectionKind::AdmissionRejected,

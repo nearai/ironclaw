@@ -582,9 +582,14 @@ async fn before_inbound_policy_retryable_rejection_releases_fingerprint() {
     assert_eq!(inbound.accepted_count(), 0);
     assert_eq!(ledger.settled_count(), 0);
     assert_eq!(ledger.in_flight_count(), 0);
-    let released = ledger.released_actions();
-    assert_eq!(released.len(), 1);
-    assert!(released[0].dispatch_kind.is_none());
+    assert_eq!(ledger.released_count(), 1);
+    assert!(
+        ledger
+            .last_released_action()
+            .expect("released action")
+            .dispatch_kind
+            .is_none()
+    );
 
     // Re-submitting the same envelope must re-invoke the policy (no duplicate
     // replay caching), because retryable rejections release the fingerprint.
@@ -1387,6 +1392,46 @@ async fn concrete_product_workflow_bot_mention_uses_shared_route() {
     assert_eq!(
         binding.route_kinds(),
         vec![ironclaw_product_workflow::ProductConversationRouteKind::Shared]
+    );
+}
+
+#[tokio::test]
+async fn concrete_product_workflow_reuses_prepared_binding_for_content_only_policy_rewrite() {
+    let binding = Arc::new(FakeConversationBindingService::new());
+    let coordinator = Arc::new(RecordingTurnCoordinator::default());
+    let inbound = Arc::new(DefaultInboundTurnService::new(
+        binding.clone(),
+        InMemorySessionThreadService::default(),
+        coordinator.clone(),
+    ));
+    let policy = Arc::new(FakeBeforeInboundPolicy::new());
+    policy.rewrite_user_message(
+        UserMessagePayload::new("rewritten direct", vec![], ProductTriggerReason::DirectChat)
+            .expect("message"),
+    );
+    let workflow = DefaultProductWorkflow::new(
+        inbound,
+        Arc::new(InMemoryIdempotencyLedger::new()),
+        binding.clone(),
+    )
+    .with_before_inbound_policy(policy);
+
+    workflow
+        .accept_inbound(sample_envelope_with_payload(
+            "policy-rewrite-direct-route",
+            ProductInboundPayload::UserMessage(
+                UserMessagePayload::new("hello direct", vec![], ProductTriggerReason::DirectChat)
+                    .expect("message"),
+            ),
+        ))
+        .await
+        .expect("policy-rewritten message accepted");
+
+    assert_eq!(coordinator.submissions().len(), 1);
+    assert_eq!(binding.resolve_count(), 1);
+    assert_eq!(
+        binding.route_kinds(),
+        vec![ironclaw_product_workflow::ProductConversationRouteKind::Direct]
     );
 }
 

@@ -408,6 +408,7 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
         ProductWorkflowError::BeforeInboundPolicyFailed {
             permanent: true, ..
         } => Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+            // Durable acks cross adapter boundaries; do not persist raw policy internals.
             ProductRejectionKind::PolicyDenied,
             "before-inbound policy failed",
         ))),
