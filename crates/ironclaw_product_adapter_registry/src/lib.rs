@@ -16,7 +16,9 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use ironclaw_extensions::{
-    ExtensionManifestV2, HostApiContractRegistry, HostApiId, HostApiManifestContract,
+    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
+    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestV2,
+    HostApiContractRegistry, HostApiId, HostApiManifestContext, HostApiManifestContract,
     HostApiMultiplicity, HostApiRefV2, ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{ExtensionId, HostPortCatalog};
@@ -27,13 +29,7 @@ use ironclaw_product_adapters::{
 use serde::Deserialize;
 use thiserror::Error;
 
-pub use ironclaw_extensions::{
-    ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
-    ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
-    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
-    ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
-    ManifestHash,
-};
+pub use ironclaw_extensions::ManifestHash;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -62,7 +58,6 @@ pub fn parse_product_adapter_manifest_record(
         ExtensionInstallationError::Manifest(error) => RegistryError::Manifest(error),
         other => RegistryError::Installation(other),
     })?;
-    product_adapter_sections(&record)?;
     Ok(record)
 }
 
@@ -209,7 +204,8 @@ impl ProductAdapterRuntimeEntry {
 /// `ironclaw.product_adapter/v1` host-api section, then pairs each with its
 /// projected ProductAdapter section. Enabled extensions without ProductAdapter
 /// sections are intentionally ignored by this projection, not reported as
-/// unknown manifests. Results are sorted by installation id.
+/// unknown manifests. Results follow the installation store's enabled ordering:
+/// updated_at descending with installation_id as a deterministic tie-breaker.
 pub async fn list_enabled_product_adapter_entries(
     store: &dyn ExtensionInstallationStore,
 ) -> Result<Vec<ProductAdapterRuntimeEntry>, RegistryError> {
@@ -219,13 +215,20 @@ pub async fn list_enabled_product_adapter_entries(
         .map(|m| (m.extension_id().clone(), m))
         .collect();
     let mut entries = Vec::new();
+    let mut adapter_cache: HashMap<ExtensionId, Vec<ProductAdapterHostApiSection>> = HashMap::new();
     for installation in store.list_enabled_installations().await? {
         let manifest = manifest_map
             .get(installation.extension_id())
             .ok_or_else(|| RegistryError::UnknownManifest {
                 extension_id: installation.extension_id().clone(),
             })?;
-        let adapters = project_product_adapter_sections(manifest.raw_toml(), manifest.manifest())?;
+        let adapters = if let Some(adapters) = adapter_cache.get(installation.extension_id()) {
+            adapters.clone()
+        } else {
+            let adapters = product_adapter_sections(manifest)?;
+            adapter_cache.insert(installation.extension_id().clone(), adapters.clone());
+            adapters
+        };
         validate_installation_against_one_manifest(manifest, &installation, &adapters)?;
         if adapters.is_empty() {
             continue;
@@ -288,6 +291,21 @@ impl HostApiManifestContract for ProductAdapterHostApiContract {
         let placeholder = ExtensionId::new("x").map_err(|e| e.to_string())?;
         ProductAdapterHostApiSection::from_value(
             &placeholder,
+            host_api.section.clone(),
+            section.clone(),
+        )
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    }
+
+    fn validate_section_with_context(
+        &self,
+        context: &HostApiManifestContext<'_>,
+        host_api: &HostApiRefV2,
+        section: &toml::Value,
+    ) -> Result<(), String> {
+        ProductAdapterHostApiSection::from_value(
+            context.extension_id,
             host_api.section.clone(),
             section.clone(),
         )
@@ -376,10 +394,9 @@ fn validate_installation_against_one_manifest(
         _ => {}
     }
 
-    // Credential bindings must only reference handles declared in the manifest.
-    // For non-product-adapter manifests there are no declared credentials, so
-    // any binding would be invalid; but installations on non-PA manifests are
-    // allowed (they just must not carry bindings).
+    // ProductAdapter credential scope is intentionally enforced at projection
+    // time. The generic extension store only knows extension ids and manifest
+    // hashes; domain-specific handle validation belongs in this crate.
     let declared: BTreeSet<_> = product_adapters
         .iter()
         .flat_map(|pa| {
@@ -587,6 +604,8 @@ fn project_product_adapter_sections(
     // TOML section table but does not expose that table as a public projection
     // API. Re-parse here so this crate can build typed ProductAdapter entries
     // without reaching through the manifest parser's private representation.
+    // If profiling shows this is material, add a targeted section projection
+    // API in `ironclaw_extensions` instead of caching private parser state here.
     let value: toml::Value =
         toml::from_str(raw_toml).map_err(|error| RegistryError::ManifestSectionParse {
             section: root_section.clone(),

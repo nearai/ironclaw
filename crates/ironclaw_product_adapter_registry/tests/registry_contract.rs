@@ -1,15 +1,17 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use ironclaw_extensions::{MANIFEST_SCHEMA_VERSION, ManifestSource};
+use ironclaw_extensions::{
+    ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
+    ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
+    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
+    ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
+    MANIFEST_SCHEMA_VERSION, ManifestSource,
+};
 use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle};
 use ironclaw_product_adapter_registry::{
-    ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
-    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
-    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
-    InMemoryExtensionInstallationStore, ManifestHash, RegistryError,
-    list_enabled_product_adapter_entries, parse_product_adapter_manifest_record,
-    product_adapter_sections,
+    ManifestHash, RegistryError, list_enabled_product_adapter_entries,
+    parse_product_adapter_manifest_record, product_adapter_sections,
 };
 
 fn extension_id() -> ExtensionId {
@@ -478,10 +480,6 @@ async fn arc_store_delegation_works() {
 
 #[tokio::test]
 async fn update_health_uses_redacted_string() {
-    use ironclaw_product_adapter_registry::{
-        ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus,
-    };
-
     let store = InMemoryExtensionInstallationStore::default();
     store
         .upsert_manifest(manifest("telegram_bot_token", "sha256:abc123"))

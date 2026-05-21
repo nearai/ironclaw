@@ -269,7 +269,7 @@ impl<'de> Deserialize<'de> for ExtensionHealthMessage {
     where
         D: Deserializer<'de>,
     {
-        String::deserialize(deserializer).map(Self)
+        String::deserialize(deserializer).map(|_| Self(REDACTED_PLACEHOLDER.to_string()))
     }
 }
 
@@ -348,7 +348,7 @@ impl ExtensionInstallation {
             activation_state,
             manifest_ref,
             credential_bindings,
-            health: ExtensionHealthSnapshot::healthy(),
+            health: ExtensionHealthSnapshot::new(ExtensionHealthStatus::Healthy, None, updated_at),
             updated_at,
         })
     }
@@ -579,6 +579,9 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
         manifest: ExtensionManifestRecord,
     ) -> Result<(), ExtensionInstallationError> {
         let mut inner = self.inner.write().await;
+        // The in-memory store intentionally scans existing installations to
+        // preserve the manifest hash invariant. Durable stores should use a
+        // targeted read path or secondary index before handling large catalogs.
         for installation in inner.installations.values() {
             if installation.extension_id() == manifest.extension_id() {
                 validate_installation_against_one_manifest(&manifest, installation)?;
@@ -602,12 +605,19 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
     async fn list_enabled_installations(
         &self,
     ) -> Result<Vec<ExtensionInstallation>, ExtensionInstallationError> {
-        Ok(self
-            .list_installations()
-            .await?
-            .into_iter()
+        let inner = self.inner.read().await;
+        let mut installations: Vec<_> = inner
+            .installations
+            .values()
             .filter(|i| i.activation_state() == ExtensionActivationState::Enabled)
-            .collect())
+            .cloned()
+            .collect();
+        installations.sort_by(|a, b| {
+            b.updated_at()
+                .cmp(&a.updated_at())
+                .then_with(|| a.installation_id().cmp(b.installation_id()))
+        });
+        Ok(installations)
     }
 
     async fn get_installation(
@@ -627,7 +637,6 @@ impl ExtensionInstallationStore for InMemoryExtensionInstallationStore {
         &self,
         installation: ExtensionInstallation,
     ) -> Result<(), ExtensionInstallationError> {
-        validate_bindings_unique(installation.credential_bindings())?;
         let mut inner = self.inner.write().await;
         validate_installation_against_manifest(&inner.manifests, &installation)?;
         inner

@@ -1,8 +1,7 @@
-use ironclaw_extensions::{MANIFEST_SCHEMA_VERSION, ManifestSource};
+use ironclaw_extensions::{ExtensionManifestRecord, MANIFEST_SCHEMA_VERSION, ManifestSource};
 use ironclaw_host_api::HostPortCatalog;
 use ironclaw_product_adapter_registry::{
-    ExtensionManifestRecord, ManifestHash, RegistryError, parse_product_adapter_manifest_record,
-    product_adapter_sections,
+    ManifestHash, RegistryError, parse_product_adapter_manifest_record, product_adapter_sections,
 };
 use ironclaw_product_adapters::{AuthRequirement, ProductCapabilityFlag, ProductSurfaceKind};
 
@@ -186,13 +185,7 @@ flags = ["inbound_messages"]
 
     let err = parse(&raw).unwrap_err();
     assert!(
-        matches!(
-            err,
-            RegistryError::InvalidValue {
-                field: "adapter_id",
-                ..
-            }
-        ),
+        err.to_string().contains("invalid adapter_id"),
         "expected adapter_id validation error, got {err:?}"
     );
 }
