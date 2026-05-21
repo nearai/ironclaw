@@ -149,3 +149,50 @@ fn rejects_auth_header_injection_shape() {
         } | RegistryError::Manifest(_)
     ));
 }
+
+#[test]
+fn rejects_real_derived_adapter_id_that_exceeds_limit() {
+    let extension_id = "a".repeat(128);
+    let subsection = "b".repeat(128);
+    let section = format!("product_adapter.{subsection}");
+    let raw = format!(
+        r#"
+schema_version = "{schema}"
+id = "{extension_id}"
+name = "Long ProductAdapter"
+version = "0.1.0"
+description = "test"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "adapters/long.wasm"
+
+[[host_api]]
+id = "ironclaw.product_adapter/v1"
+section = "{section}"
+
+[{section}]
+surface_kind = "external_channel"
+
+[{section}.auth]
+kind = "bearer_token"
+
+[{section}.capabilities]
+flags = ["inbound_messages"]
+"#,
+        schema = MANIFEST_SCHEMA_VERSION,
+    );
+
+    let err = parse(&raw).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            RegistryError::InvalidValue {
+                field: "adapter_id",
+                ..
+            }
+        ),
+        "expected adapter_id validation error, got {err:?}"
+    );
+}

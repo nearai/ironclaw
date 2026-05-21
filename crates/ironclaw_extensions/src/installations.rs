@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 use tokio::sync::RwLock;
 
@@ -228,8 +228,9 @@ pub struct ExtensionHealthSnapshot {
     checked_at: DateTime<Utc>,
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
+const REDACTED_PLACEHOLDER: &str = "<redacted>";
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct ExtensionHealthMessage(String);
 
 impl ExtensionHealthMessage {
@@ -237,14 +238,29 @@ impl ExtensionHealthMessage {
         Self(value.into())
     }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
+    pub fn placeholder() -> &'static str {
+        REDACTED_PLACEHOLDER
     }
 }
 
 impl fmt::Debug for ExtensionHealthMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("<redacted>")
+        f.write_str(REDACTED_PLACEHOLDER)
+    }
+}
+
+impl fmt::Display for ExtensionHealthMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(REDACTED_PLACEHOLDER)
+    }
+}
+
+impl Serialize for ExtensionHealthMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(REDACTED_PLACEHOLDER)
     }
 }
 

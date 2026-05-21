@@ -51,7 +51,7 @@ pub fn parse_product_adapter_manifest_record(
     let contract = Arc::new(ProductAdapterHostApiContract::new()?);
     let mut contracts = HostApiContractRegistry::new();
     contracts.register(contract)?;
-    ExtensionManifestRecord::from_toml_with_contracts(
+    let record = ExtensionManifestRecord::from_toml_with_contracts(
         raw_toml,
         source,
         host_port_catalog,
@@ -61,7 +61,9 @@ pub fn parse_product_adapter_manifest_record(
     .map_err(|error| match error {
         ExtensionInstallationError::Manifest(error) => RegistryError::Manifest(error),
         other => RegistryError::Installation(other),
-    })
+    })?;
+    product_adapter_sections(&record)?;
+    Ok(record)
 }
 
 pub fn product_adapter_sections(
