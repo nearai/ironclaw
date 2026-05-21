@@ -22,7 +22,7 @@ use ironclaw_product_adapters::{
     ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
+    ExtensionName, RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
     RebornResumeGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
     RebornSetupExtensionResponse, RebornSetupExtensionStatus, RebornStreamEventsRequest,
@@ -274,10 +274,11 @@ impl RebornServicesApi for StubServices {
     async fn setup_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        request: WebUiSetupExtensionRequest,
+        extension_name: ExtensionName,
+        _request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         Ok(RebornSetupExtensionResponse {
-            extension_name: request.extension_name,
+            extension_name,
             status: RebornSetupExtensionStatus::NotImplemented,
             payload: None,
         })
@@ -587,6 +588,71 @@ async fn stream_events_last_event_id_header_takes_precedence_over_query() {
     );
 }
 
+// Regression for the typed-internals review (Medium): the
+// `extension_name` route segment must be validated against
+// `ExtensionName` at the handler/facade boundary so the typed value
+// is what crosses into the facade contract — not a raw `String`. A
+// well-formed name reaches the facade and the typed identifier
+// round-trips into the response.
+#[tokio::test]
+async fn setup_extension_dispatches_typed_extension_name_to_facade() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/telegram/setup")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"action":"begin"}"#))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_json(response).await;
+    assert_eq!(
+        body["extension_name"], "telegram",
+        "facade must echo the typed extension name from the path",
+    );
+    assert_eq!(body["status"], "not_implemented");
+}
+
+// Companion to the typed-internals fix: a malformed identifier in
+// the route path must be rejected at the handler/facade boundary
+// before the facade is called, with the same `invalid_request` wire
+// shape any other inbound validation failure produces. Without
+// boundary validation, a path like `../etc` would silently flow
+// into the facade as a raw `String` and the typed-internals rule in
+// `.claude/rules/types.md` would be broken in practice.
+#[tokio::test]
+async fn setup_extension_rejects_malformed_extension_name_with_400() {
+    let services = Arc::new(StubServices::default());
+    let router = router_with(services.clone());
+
+    // `..` triggers `IdentityError::PathTraversal` in `ExtensionName::new`.
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/webchat/v2/extensions/..%2Fbad/setup")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("request"),
+        )
+        .await
+        .expect("oneshot");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = read_json(response).await;
+    assert_eq!(body["error"], "invalid_request");
+    assert_eq!(body["field"], "extension_name");
+    assert_eq!(body["validation_code"], "invalid_id");
+    assert_eq!(body["retryable"], false);
+}
+
 fn url_encode(value: &str) -> String {
     // Minimal application/x-www-form-urlencoded helper: percent-encode every
     // byte that is not an unreserved character per RFC 3986. Avoids pulling
@@ -601,6 +667,121 @@ fn url_encode(value: &str) -> String {
         }
     }
     out
+}
+
+// Regression for the WS-shares-SSE-pool review (Medium): the WS
+// transport must draw from the same `SseCapacity` pool as the SSE
+// transport for the same `(tenant, user)`. If they kept independent
+// counters, a caller could open `cap` SSE streams *and* `cap` WS
+// streams concurrently — doubling the backend `stream_events` drain
+// the cap is supposed to bound.
+//
+// The PR description claims this shared-pool semantic; this test
+// locks it in by making the pool size 1, consuming the only slot
+// with an held-open SSE response, then asserting a same-caller WS
+// upgrade attempt returns 429 until the SSE body is dropped.
+#[tokio::test]
+async fn stream_events_ws_shares_capacity_with_sse_streams() {
+    let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
+    // Pool size 1: any one open stream (SSE or WS) must exhaust the
+    // budget for the caller.
+    let router = webui_v2_router(WebUiV2State::with_sse_concurrency_limit(services, 1))
+        .layer(axum::Extension(caller()));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    // Step 1: consume the only slot with a held-open SSE connection
+    // via a low-level reqwest-style raw HTTP GET. We use plain TCP
+    // so we can hold the response open without consuming the body
+    // — the `SseSlot` guard lives inside the response body and is
+    // released only when the stream drops.
+    let mut sse_stream = tokio::net::TcpStream::connect(addr).await.expect("tcp");
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    sse_stream
+        .write_all(
+            b"GET /api/webchat/v2/threads/thread-x/events HTTP/1.1\r\n\
+              Host: localhost\r\n\
+              Accept: text/event-stream\r\n\
+              Connection: keep-alive\r\n\
+              \r\n",
+        )
+        .await
+        .expect("write sse request");
+    // Read just enough to confirm we got a 200 OK + the start of
+    // headers; this guarantees the handler ran `try_acquire`.
+    let mut header_buf = [0u8; 512];
+    let n = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        sse_stream.read(&mut header_buf),
+    )
+    .await
+    .expect("sse header read within 5s")
+    .expect("sse header read");
+    let header_prefix = std::str::from_utf8(&header_buf[..n]).expect("utf8 headers");
+    assert!(
+        header_prefix.starts_with("HTTP/1.1 200"),
+        "SSE handshake must return 200; got: {header_prefix:?}",
+    );
+
+    // Step 2: same-caller WS upgrade must hit the shared cap. Use a
+    // real WS handshake against the same listener; the upgrade
+    // response carries the 429 from `try_acquire` before any frames
+    // flow.
+    let ws_url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
+    let ws_attempt = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio_tungstenite::connect_async(ws_url.clone()),
+    )
+    .await
+    .expect("ws connect attempt within 5s");
+    match ws_attempt {
+        Ok((_ws, response)) => panic!(
+            "WS upgrade must be rejected while SSE holds the only slot; \
+             instead the server returned status {} and completed the upgrade",
+            response.status().as_u16(),
+        ),
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(
+                response.status().as_u16(),
+                429,
+                "WS upgrade must hit the same per-caller cap as SSE",
+            );
+        }
+        Err(other) => panic!("WS upgrade failed with unexpected error: {other:?}"),
+    }
+
+    // Step 3: drop the SSE stream → kernel closes the connection
+    // → axum drops the response body → `SseSlot` decrements. After
+    // a yield the slot is reusable and the WS upgrade succeeds.
+    drop(sse_stream);
+    tokio::task::yield_now().await;
+    // Give the server task a moment to observe the EOF and drop
+    // the body; we cannot await a specific signal, but a short
+    // polling loop converges quickly without timing flakiness.
+    let recovered = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match tokio_tungstenite::connect_async(ws_url.clone()).await {
+                Ok((ws, response)) => return Ok::<_, ()>((ws, response)),
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(25)).await,
+            }
+        }
+    })
+    .await
+    .expect("WS must complete upgrade within 5s after the SSE slot is released");
+    let (mut ws, response) = recovered.expect("recovered ws");
+    assert_eq!(
+        response.status().as_u16(),
+        101,
+        "WS must complete the upgrade once the SSE slot has been released",
+    );
+    let _ = ws.close(None).await;
+    serve_handle.abort();
 }
 
 // Regression for the per-caller SSE concurrency review (Medium): once the
@@ -739,6 +920,7 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
         async fn setup_extension(
             &self,
             _caller: WebUiAuthenticatedCaller,
+            _extension_name: ExtensionName,
             _request: WebUiSetupExtensionRequest,
         ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
             unreachable!("not exercised by this test")

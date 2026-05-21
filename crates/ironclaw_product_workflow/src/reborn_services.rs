@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_common::ExtensionName;
 use ironclaw_host_api::{AgentId, ThreadId};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProjectionStream, ProjectionSubscriptionRequest,
@@ -107,9 +108,17 @@ pub trait RebornServicesApi: Send + Sync {
     /// The route exists so the WebUI v2 entrypoint inventory is
     /// complete and so future onboarding port work has a fixed surface
     /// to fill in.
+    ///
+    /// `extension_name` is the validated, typed identifier from the
+    /// route path. Per `.claude/rules/types.md`, extension identifiers
+    /// must not flow internally as raw `String` — the handler/facade
+    /// boundary validates the path segment with
+    /// [`ironclaw_common::ExtensionName`] and threads the typed value
+    /// through this argument.
     async fn setup_extension(
         &self,
         caller: WebUiAuthenticatedCaller,
+        extension_name: ExtensionName,
         request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError>;
 }
@@ -589,14 +598,15 @@ impl RebornServicesApi for RebornServices {
     async fn setup_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        request: WebUiSetupExtensionRequest,
+        extension_name: ExtensionName,
+        _request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         // Skeleton: v2 native onboarding lifecycle is intentionally
         // not wired to v1's onboarding controller. Returns a clear
         // status so v2 callers know the route exists but the
         // underlying flow is not yet ported.
         Ok(RebornSetupExtensionResponse {
-            extension_name: request.extension_name,
+            extension_name,
             status: RebornSetupExtensionStatus::NotImplemented,
             payload: None,
         })

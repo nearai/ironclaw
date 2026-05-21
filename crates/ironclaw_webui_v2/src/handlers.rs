@@ -22,13 +22,13 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
-    ProjectionCursor, RebornCancelRunResponse, RebornCreateThreadResponse,
+    ExtensionName, ProjectionCursor, RebornCancelRunResponse, RebornCreateThreadResponse,
     RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
     RebornServicesErrorCode, RebornSetupExtensionResponse, RebornStreamEventsRequest,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
-    WebUiSetupExtensionRequest,
+    WebUiInboundValidationCode, WebUiInboundValidationError, WebUiListThreadsRequest,
+    WebUiResolveGateRequest, WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -392,16 +392,29 @@ pub struct ListThreadsQuery {
 /// `RebornSetupExtensionStatus::NotImplemented`. The route exists so
 /// the v2 entrypoint inventory is complete and so future onboarding
 /// port work has a stable surface to fill in.
+///
+/// The path segment is validated against
+/// [`ExtensionName`] at the handler/facade boundary; a
+/// malformed identifier returns `400 invalid_argument` before the
+/// facade is called. The typed value is threaded through the facade
+/// argument so internal request/response state never carries a raw
+/// `String` extension name (see `.claude/rules/types.md`).
 pub async fn setup_extension(
     State(state): State<WebUiV2State>,
     Extension(caller): Extension<WebUiAuthenticatedCaller>,
     Path(SetupExtensionPath { extension_name }): Path<SetupExtensionPath>,
-    Json(mut body): Json<WebUiSetupExtensionRequest>,
+    Json(body): Json<WebUiSetupExtensionRequest>,
 ) -> Result<Json<RebornSetupExtensionResponse>, WebUiV2HttpError> {
-    // Path wins over body so a `?extension_name=x` body field cannot
-    // override the route binding.
-    body.extension_name = extension_name;
-    let response = state.services().setup_extension(caller, body).await?;
+    let extension_name = ExtensionName::new(&extension_name).map_err(|_| {
+        RebornServicesError::from(WebUiInboundValidationError::new(
+            "extension_name",
+            WebUiInboundValidationCode::InvalidId,
+        ))
+    })?;
+    let response = state
+        .services()
+        .setup_extension(caller, extension_name, body)
+        .await?;
     Ok(Json(response))
 }
 

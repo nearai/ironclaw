@@ -20,7 +20,7 @@ use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
+    ExtensionName, RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
     RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornSetupExtensionResponse,
     RebornSetupExtensionStatus, RebornStreamEventsRequest, RebornStreamEventsResponse,
@@ -195,10 +195,11 @@ impl RebornServicesApi for StubServices {
     async fn setup_extension(
         &self,
         _caller: WebUiAuthenticatedCaller,
-        request: WebUiSetupExtensionRequest,
+        extension_name: ExtensionName,
+        _request: WebUiSetupExtensionRequest,
     ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
         Ok(RebornSetupExtensionResponse {
-            extension_name: request.extension_name,
+            extension_name,
             status: RebornSetupExtensionStatus::NotImplemented,
             payload: None,
         })

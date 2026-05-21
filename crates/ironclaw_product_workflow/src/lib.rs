@@ -71,6 +71,10 @@ pub use policy::{
 // a direct dependency on `ironclaw_product_adapters` — the single-facade
 // boundary is enforced by `ironclaw_architecture`.
 pub use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
+// Re-exported so the WebUI v2 handler crate can validate the
+// `extension_name` path segment at the handler/facade boundary
+// without pulling `ironclaw_common` into its forbidden-imports set.
+pub use ironclaw_common::ExtensionName;
 pub use reborn_services::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,

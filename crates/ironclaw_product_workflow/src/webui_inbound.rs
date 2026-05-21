@@ -110,15 +110,15 @@ pub struct WebUiListThreadsRequest {
 /// onboarding controller remains v1 today — concrete impl returns
 /// `RebornSetupExtensionStatus::NotImplemented` until a v2-aware
 /// extension lifecycle lands.
+///
+/// `extension_name` is not part of the body — it is bound from the
+/// route path as an [`ironclaw_common::ExtensionName`] and threaded
+/// through the facade as a typed parameter. The handler/facade
+/// boundary validates the path segment so a malformed identifier
+/// never crosses into facade-internal request/response state as a
+/// raw `String`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WebUiSetupExtensionRequest {
-    /// `extension_name` is also bound from the route path. The handler
-    /// overwrites whatever the body carried with the path-bound value
-    /// so a stray body field cannot redirect the request to another
-    /// extension; the field is `#[serde(default)]` so callers may
-    /// omit it from the body entirely.
-    #[serde(default)]
-    pub extension_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
