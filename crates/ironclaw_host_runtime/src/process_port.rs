@@ -316,4 +316,40 @@ mod tests {
         assert!(output.len() > COMMAND_MAX_OUTPUT_SIZE);
         assert!(output.contains("... [truncated 1 bytes] ..."));
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn execute_local_command_overrides_home_to_workdir() {
+        let workdir = tempfile::tempdir().expect("tempdir");
+
+        let (output, exit_code) = execute_local_command(
+            "printf '%s' \"$HOME\"",
+            &workdir.path().to_path_buf(),
+            Duration::from_secs(5),
+            &HashMap::new(),
+        )
+        .await
+        .expect("command succeeds");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output, workdir.path().display().to_string());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn execute_local_command_runs_through_windows_cmd() {
+        let workdir = tempfile::tempdir().expect("tempdir");
+
+        let (output, exit_code) = execute_local_command(
+            "echo %HOME%",
+            &workdir.path().to_path_buf(),
+            Duration::from_secs(5),
+            &HashMap::new(),
+        )
+        .await
+        .expect("command succeeds");
+
+        assert_eq!(exit_code, 0);
+        assert_eq!(output.trim(), workdir.path().display().to_string());
+    }
 }

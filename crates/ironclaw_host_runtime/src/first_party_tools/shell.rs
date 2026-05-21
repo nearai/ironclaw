@@ -22,7 +22,7 @@ pub const SHELL_CAPABILITY_ID: &str = "builtin.shell";
 const DEFAULT_SHELL_WALL_CLOCK_MS: u64 = 120_000;
 const MAX_SHELL_WALL_CLOCK_MS: u64 = 120_000;
 const MAX_SHELL_TIMEOUT_SECS: u64 = MAX_SHELL_WALL_CLOCK_MS / 1000;
-const DEFAULT_SHELL_OUTPUT_BYTES: u64 = crate::process_port::COMMAND_MAX_OUTPUT_SIZE as u64;
+const DEFAULT_SHELL_OUTPUT_BYTES: u64 = 64 * 1024;
 
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     first_party_capability_manifest(
