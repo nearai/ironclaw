@@ -3,16 +3,19 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use ironclaw_host_api::VirtualPath;
 
+use crate::backend::EventRecord;
 use crate::db::{
     child_path_like_pattern, db_error, direct_children, directory_append_error,
-    directory_write_error, escape_like_literal, escape_like_with_trailing_wildcard, is_not_found,
-    not_found, record_version_from_i64, sql_index_name, system_time_from_unix_seconds,
-    valid_engine_path, virtual_path_prefixes,
+    directory_write_error, escape_like_literal, escape_like_with_trailing_wildcard,
+    infrastructure_error, infrastructure_pg_error, is_not_found, not_found, page_offset_to_i64,
+    record_version_from_i64, record_version_to_i64, sql_index_name, system_time_from_unix_seconds,
+    virtual_path_prefixes,
 };
+use crate::vector::{cosine_similarity, decode_embedding_blob};
 use crate::{
-    BackendCapabilities, CasExpectation, ContentType, DirEntry, Entry, FileStat, FileType,
-    FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexSpec, IndexValue, Page,
-    RecordKind, RecordVersion, RootFilesystem, VersionedEntry,
+    BackendCapabilities, Capability, CasExpectation, ContentType, DirEntry, Entry, FileStat,
+    FileType, FilesystemError, FilesystemOperation, Filter, IndexKey, IndexKind, IndexSpec,
+    IndexValue, Page, RecordKind, RecordVersion, RootFilesystem, SeqNo, VersionedEntry,
 };
 
 #[cfg(feature = "postgres")]
@@ -32,24 +35,14 @@ impl PostgresRootFilesystem {
         client
             .batch_execute(POSTGRES_ROOT_FILESYSTEM_SCHEMA)
             .await
-            .map_err(|error| {
-                db_error(
-                    valid_engine_path(),
-                    FilesystemOperation::CreateDirAll,
-                    error,
-                )
-            })
+            .map_err(|error| infrastructure_pg_error(FilesystemOperation::CreateDirAll, error))
     }
 
     async fn client(&self) -> Result<deadpool_postgres::Object, FilesystemError> {
         self.pool
             .get()
             .await
-            .map_err(|error| FilesystemError::Backend {
-                path: valid_engine_path(),
-                operation: FilesystemOperation::Stat,
-                reason: error.to_string(),
-            })
+            .map_err(|error| infrastructure_error(FilesystemOperation::Stat, error.to_string()))
     }
 }
 
@@ -58,9 +51,16 @@ impl PostgresRootFilesystem {
 impl RootFilesystem for PostgresRootFilesystem {
     fn capabilities(&self) -> BackendCapabilities {
         // sql_typical: read/write/append/list/stat/delete/records/query/
-        // IndexExact/IndexPrefix/CAS. Events + FTS/Vector indexes stay off
-        // until their respective backend ports land.
+        // IndexExact/IndexPrefix/CAS. Events join the set with the V30
+        // append/tail backing table. Postgres has native `tsvector` /
+        // `plainto_tsquery` so we advertise IndexFts. Vector indexing is
+        // currently a brute-force cosine ranker against `indexed->>'key'`
+        // values stored as IndexValue::Bytes; we advertise IndexVector but
+        // do not require pgvector.
         BackendCapabilities::sql_typical()
+            .with(Capability::Events)
+            .with(Capability::IndexFts)
+            .with(Capability::IndexVector)
     }
 
     async fn put(
@@ -121,7 +121,7 @@ impl RootFilesystem for PostgresRootFilesystem {
                 Ok(RecordVersion::from_backend(1))
             }
             CasExpectation::Version(expected) => {
-                let expected_raw = expected.get() as i64;
+                let expected_raw = record_version_to_i64(path, expected)?;
                 let rows = client
                     .execute(
                         r#"
@@ -236,12 +236,8 @@ impl RootFilesystem for PostgresRootFilesystem {
         let kind_str = match &spec.kind {
             IndexKind::Exact => "exact".to_string(),
             IndexKind::Prefix => "prefix".to_string(),
-            IndexKind::Fts | IndexKind::Vector { .. } => {
-                return Err(FilesystemError::Unsupported {
-                    path: path.clone(),
-                    operation: FilesystemOperation::EnsureIndex,
-                });
-            }
+            IndexKind::Fts => "fts".to_string(),
+            IndexKind::Vector { dim } => format!("vector:{dim}"),
         };
         if spec.keys.is_empty() {
             return Err(FilesystemError::IndexConflict {
@@ -299,19 +295,78 @@ impl RootFilesystem for PostgresRootFilesystem {
         }
 
         let index_name = sql_index_name(path.as_str(), spec.name.as_str());
-        let expressions: Vec<String> = spec
-            .keys
-            .iter()
-            .map(|k| format!("((indexed->>'{}'))", k.as_str()))
-            .collect();
-        let ddl = format!(
-            "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries ({})",
-            expressions.join(", ")
-        );
-        client
-            .batch_execute(&ddl)
-            .await
-            .map_err(|error| db_error(path.clone(), FilesystemOperation::EnsureIndex, error))?;
+        match &spec.kind {
+            IndexKind::Exact | IndexKind::Prefix => {
+                let expressions: Vec<String> = spec
+                    .keys
+                    .iter()
+                    .map(|k| format!("((indexed->>'{}'))", k.as_str()))
+                    .collect();
+                let ddl = format!(
+                    "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries ({})",
+                    expressions.join(", ")
+                );
+                client.batch_execute(&ddl).await.map_err(|error| {
+                    db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+            }
+            IndexKind::Fts => {
+                if spec.keys.len() != 1 {
+                    return Err(FilesystemError::IndexConflict {
+                        path: path.clone(),
+                        name: spec.name.clone(),
+                        reason: crate::IndexConflictReason::SpecMismatch,
+                    });
+                }
+                let fts_key = spec.keys[0].as_str();
+                // GIN expression index on a `to_tsvector(...)` over the
+                // indexed JSON projection. Postgres `to_tsvector` returns
+                // `tsvector`, which GIN indexes natively. The matching
+                // predicate at query time uses `@@ plainto_tsquery`.
+                //
+                // Audit finding F4: libsql FTS5 virtual tables are
+                // declared per-mount-prefix (one vtable per
+                // `ensure_index(prefix, ...)`), so a query at one prefix
+                // can't accidentally match indexed rows under a sibling
+                // prefix. The Postgres GIN index, by contrast, used to
+                // be global over `root_filesystem_entries` regardless of
+                // which prefix declared it — fine for correctness (the
+                // query path still scopes by `path LIKE prefix/%`) but
+                // it breaks parity in two ways: a search at `/memory/a`
+                // would have its planner consider postings from
+                // `/memory/b` before filtering, and `DROP INDEX` for a
+                // prefix-scoped tear-down would impact other prefixes.
+                // Make the index a partial index gated by the prefix to
+                // restore parity.
+                let prefix_pattern =
+                    escape_like_with_trailing_wildcard(&format!("{}/%", path.as_str()));
+                let prefix_literal = prefix_pattern.replace('\'', "''");
+                let ddl = format!(
+                    "CREATE INDEX IF NOT EXISTS {index_name} ON root_filesystem_entries \
+                     USING GIN (to_tsvector('english', COALESCE(indexed->>'{fts_key}', ''))) \
+                     WHERE path = '{path_literal}' OR path LIKE '{prefix_literal}' ESCAPE '!'",
+                    path_literal = path.as_str().replace('\'', "''"),
+                );
+                client.batch_execute(&ddl).await.map_err(|error| {
+                    db_error(path.clone(), FilesystemOperation::EnsureIndex, error)
+                })?;
+            }
+            IndexKind::Vector { dim } => {
+                if *dim == 0 {
+                    return Err(FilesystemError::IndexConflict {
+                        path: path.clone(),
+                        name: spec.name.clone(),
+                        reason: crate::IndexConflictReason::SpecMismatch,
+                    });
+                }
+                // Vector storage = IndexValue::Bytes in the indexed JSON
+                // projection. No per-row table or DDL is required; queries
+                // brute-force cosine over the candidate set. pgvector
+                // support could be layered in later via a dialect probe
+                // (`SELECT * FROM pg_extension WHERE extname='vector'`)
+                // without changing this trait surface.
+            }
+        }
         Ok(())
     }
 
@@ -321,6 +376,17 @@ impl RootFilesystem for PostgresRootFilesystem {
         filter: &Filter,
         page: Page,
     ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        // Vector-nearest is evaluated by ranking the candidate set in Rust.
+        if let Filter::VectorNearest {
+            key,
+            embedding,
+            limit,
+        } = filter
+        {
+            return self
+                .vector_nearest_query(path, key, embedding, *limit)
+                .await;
+        }
         let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync + Send>> = Vec::new();
         let path_str = path.as_str().to_string();
         let prefix_pattern = escape_like_with_trailing_wildcard(&format!("{}/%", path.as_str()));
@@ -344,8 +410,13 @@ impl RootFilesystem for PostgresRootFilesystem {
             params.len() + 1,
             params.len() + 2
         ));
+        // `page.limit` is `u32` and clamped to `Page::MAX_LIMIT`, so the
+        // `i64::from` is safe by construction. `page.offset` is `u64` and
+        // user-supplied — guard with `try_from` so values ≥ 2^63 surface
+        // a typed `Backend` error instead of wrapping to a negative
+        // OFFSET. (Audit finding F6.)
         params.push(Box::new(i64::from(page.limit.min(Page::MAX_LIMIT))));
-        params.push(Box::new(page.offset as i64));
+        params.push(Box::new(page_offset_to_i64(path, page.offset)?));
 
         let client = self.client().await?;
         let params_ref: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
@@ -396,6 +467,48 @@ impl RootFilesystem for PostgresRootFilesystem {
             });
         }
         Ok(row.get("contents"))
+    }
+
+    async fn read_file_bounded(
+        &self,
+        path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        let client = self.client().await?;
+        let max_bytes = max_bytes as i64;
+        let row = client
+            .query_opt(
+                r#"
+                SELECT
+                    CASE
+                        WHEN octet_length(contents)::BIGINT <= $2 THEN contents
+                        ELSE NULL
+                    END AS contents,
+                    octet_length(contents)::BIGINT AS len,
+                    is_dir
+                FROM root_filesystem_entries
+                WHERE path = $1
+                "#,
+                &[&path.as_str(), &max_bytes],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        let Some(row) = row else {
+            return Err(not_found(path.clone(), FilesystemOperation::ReadFile));
+        };
+        let is_dir: bool = row.get("is_dir");
+        if is_dir {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "is a directory".to_string(),
+            });
+        }
+        let len: i64 = row.get("len");
+        if len > max_bytes {
+            return Ok(None);
+        }
+        Ok(Some(row.get("contents")))
     }
 
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
@@ -538,6 +651,60 @@ impl RootFilesystem for PostgresRootFilesystem {
         Ok(())
     }
 
+    async fn append(&self, path: &VirtualPath, payload: Vec<u8>) -> Result<SeqNo, FilesystemError> {
+        let client = self.client().await?;
+        let row = client
+            .query_one(
+                r#"
+                INSERT INTO root_filesystem_events (path, payload)
+                VALUES ($1, $2)
+                RETURNING id
+                "#,
+                &[&path.as_str(), &payload],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Append, error))?;
+        let id: i64 = row.get("id");
+        seq_no_from_i64(path, id, FilesystemOperation::Append)
+    }
+
+    async fn tail(
+        &self,
+        path: &VirtualPath,
+        from: SeqNo,
+    ) -> Result<Vec<EventRecord>, FilesystemError> {
+        let client = self.client().await?;
+        let from_raw = i64::try_from(from.get()).map_err(|_| {
+            backend_error(
+                path.clone(),
+                FilesystemOperation::Tail,
+                "tail cursor exceeds i64",
+            )
+        })?;
+        let rows = client
+            .query(
+                r#"
+                SELECT id, payload
+                FROM root_filesystem_events
+                WHERE path = $1 AND id > $2
+                ORDER BY id ASC
+                "#,
+                &[&path.as_str(), &from_raw],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Tail, error))?;
+        rows.into_iter()
+            .map(|row| {
+                let id: i64 = row.get("id");
+                let payload: Vec<u8> = row.get("payload");
+                Ok(EventRecord {
+                    seq: seq_no_from_i64(path, id, FilesystemOperation::Tail)?,
+                    payload,
+                })
+            })
+            .collect()
+    }
+
     async fn create_dir_all(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
         let mut client = self.client().await?;
         let transaction = client
@@ -661,6 +828,100 @@ impl PostgresRootFilesystem {
         Ok(row.is_some())
     }
 
+    /// Brute-force cosine ranker over candidate rows in this prefix whose
+    /// indexed projection has an `IndexValue::Bytes` value at `key`. Used
+    /// when the caller's filter is a top-level `VectorNearest`.
+    ///
+    /// Two-phase to bound memory on large prefixes (review feedback on
+    /// the unified-FS rework): first SELECT `(path, indexed, version)`
+    /// for every candidate, rank by cosine in Rust, then `get()` the
+    /// top-k entries to materialize bodies. Rows outside the cutoff
+    /// never have their `contents` bytea loaded.
+    async fn vector_nearest_query(
+        &self,
+        path: &VirtualPath,
+        key: &IndexKey,
+        embedding: &[f32],
+        limit: u32,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let client = self.client().await?;
+        let prefix_pattern = escape_like_with_trailing_wildcard(&format!("{}/%", path.as_str()));
+        let rows = client
+            .query(
+                "SELECT path, indexed, version \
+                 FROM root_filesystem_entries \
+                 WHERE is_dir = FALSE AND (path = $1 OR path LIKE $2 ESCAPE '!')",
+                &[&path.as_str(), &prefix_pattern],
+            )
+            .await
+            .map_err(|error| db_error(path.clone(), FilesystemOperation::Query, error))?;
+        let mut ranked: Vec<(VirtualPath, RecordVersion, f32)> = Vec::new();
+        for row in rows {
+            let row_path: String = row.get("path");
+            let row_path = VirtualPath::new(row_path)?;
+            let indexed_value: serde_json::Value = row.get("indexed");
+            let version_raw: i64 = row.get("version");
+            let indexed: BTreeMap<IndexKey, IndexValue> = if indexed_value.is_null() {
+                BTreeMap::new()
+            } else {
+                serde_json::from_value(indexed_value).map_err(|_| {
+                    FilesystemError::DeserializeIndexed {
+                        path: row_path.clone(),
+                        operation: FilesystemOperation::Query,
+                    }
+                })?
+            };
+            let Some(IndexValue::Bytes(bytes)) = indexed.get(key) else {
+                continue;
+            };
+            let Some(vec) = decode_embedding_blob(bytes) else {
+                continue;
+            };
+            let Some(score) = cosine_similarity(embedding, &vec) else {
+                continue;
+            };
+            let version = record_version_from_i64(&row_path, version_raw)?;
+            ranked.push((row_path, version, score));
+        }
+        // Sort by descending cosine score, then ascending path for a stable
+        // tie-breaker so equal-score rows truncate deterministically across
+        // runs and across backends. The in-memory reference uses the same
+        // tie-breaker; this keeps cross-backend behavior aligned.
+        ranked.sort_by(|a, b| {
+            b.2.partial_cmp(&a.2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.as_str().cmp(b.0.as_str()))
+        });
+        ranked.truncate(limit as usize);
+        // Release the client so each `get()` below claims its own
+        // pooled connection rather than serializing through one.
+        drop(client);
+        self.materialize_ranked(ranked).await
+    }
+
+    /// Phase-2 of [`vector_nearest_query`]: load full [`VersionedEntry`]
+    /// bodies for the ranked-and-truncated candidate set. Mirrors the
+    /// libSQL backend's `materialize_ranked`, including the silently-skip
+    /// behaviour when a candidate path disappears between phase-1
+    /// ranking and the phase-2 `get`. Pulled out so the concurrent-delete
+    /// branch has a deterministic test seam.
+    pub(crate) async fn materialize_ranked(
+        &self,
+        ranked: Vec<(VirtualPath, RecordVersion, f32)>,
+    ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+        let mut out = Vec::with_capacity(ranked.len());
+        for (row_path, _version, _score) in ranked {
+            let Some(versioned) = self.get(&row_path).await? else {
+                // Concurrent delete between the ranking SELECT and
+                // the body fetch — skip rather than error so the
+                // search doesn't blow up on a race.
+                continue;
+            };
+            out.push(versioned);
+        }
+        Ok(out)
+    }
+
     async fn current_version_with_client(
         &self,
         client: &tokio_postgres::Client,
@@ -723,6 +984,16 @@ fn translate_filter(
             Ok(())
         }
         Filter::Range { key, lo, hi } => {
+            // Mixed-variant bounds have no meaningful BETWEEN. Reject rather
+            // than fall through to a lexicographic-on-text comparison that
+            // silently produces wrong results. Matches the in-memory
+            // backend's `discriminant(lo) == discriminant(hi)` requirement.
+            if std::mem::discriminant(lo) != std::mem::discriminant(hi) {
+                return Err(FilesystemError::Unsupported {
+                    path: path.clone(),
+                    operation: FilesystemOperation::Query,
+                });
+            }
             // PR #3661 reviewer fix: when both bounds are `I64`, cast both
             // the extracted JSON text and bound params to `BIGINT` so the
             // BETWEEN comparison is numeric. Otherwise `'2' BETWEEN '10'
@@ -760,6 +1031,26 @@ fn translate_filter(
             }
             Ok(())
         }
+        Filter::Fts { key, query } => {
+            // `plainto_tsquery` is the user-input-safe parser; we never
+            // splice the user query into SQL. Match against an expression
+            // identical to the `to_tsvector(...)` used by the GIN index in
+            // ensure_index so the planner can use it.
+            params.push(Box::new(query.clone()));
+            out.push_str(&format!(
+                "(to_tsvector('english', COALESCE(indexed->>'{}', '')) @@ plainto_tsquery('english', ${}))",
+                key.as_str(),
+                params.len()
+            ));
+            Ok(())
+        }
+        Filter::VectorNearest { .. } => Err(FilesystemError::Unsupported {
+            // Same reason as libsql: VectorNearest is a ranking operation
+            // and is evaluated at the top-level `query` method, not as a
+            // WHERE-clause predicate. Nested usage is unsupported.
+            path: path.clone(),
+            operation: FilesystemOperation::Query,
+        }),
         Filter::And(children) => translate_compound(path, children, " AND ", "TRUE", out, params),
         Filter::Or(children) => translate_compound(path, children, " OR ", "FALSE", out, params),
     }
@@ -861,6 +1152,34 @@ fn build_entry(
 }
 
 #[cfg(feature = "postgres")]
+fn seq_no_from_i64(
+    path: &VirtualPath,
+    raw: i64,
+    operation: FilesystemOperation,
+) -> Result<SeqNo, FilesystemError> {
+    u64::try_from(raw)
+        .map(SeqNo::from_backend)
+        .map_err(|_| FilesystemError::Backend {
+            path: path.clone(),
+            operation,
+            reason: format!("event seq {raw} is not representable"),
+        })
+}
+
+#[cfg(feature = "postgres")]
+fn backend_error(
+    path: VirtualPath,
+    operation: FilesystemOperation,
+    reason: impl Into<String>,
+) -> FilesystemError {
+    FilesystemError::Backend {
+        path,
+        operation,
+        reason: reason.into(),
+    }
+}
+
+#[cfg(feature = "postgres")]
 const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = concat!(
     include_str!("../../../migrations/V26__root_filesystem_entries.sql"),
     "\n",
@@ -869,4 +1188,6 @@ const POSTGRES_ROOT_FILESYSTEM_SCHEMA: &str = concat!(
     include_str!("../../../migrations/V28__root_filesystem_records.sql"),
     "\n",
     include_str!("../../../migrations/V29__root_filesystem_index_specs.sql"),
+    "\n",
+    include_str!("../../../migrations/V30__root_filesystem_events.sql"),
 );

@@ -1,37 +1,23 @@
 use chrono::{DateTime, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use ironclaw_extensions::{CapabilityManifest, ExtensionError};
-use ironclaw_host_api::{CapabilityId, EffectKind, PermissionMode};
+use ironclaw_host_api::{EffectKind, PermissionMode};
 use serde_json::{Value, json};
 
 use crate::FirstPartyCapabilityError;
 
-use super::{input_error, resource_profile};
+use super::{first_party_capability_manifest, input_error, resource_profile};
 
 pub const TIME_CAPABILITY_ID: &str = "builtin.time";
 
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
-    Ok(CapabilityManifest {
-        id: CapabilityId::new(TIME_CAPABILITY_ID)?,
-        description: "Get, parse, format, convert, or diff timestamps".to_string(),
-        effects: vec![EffectKind::DispatchCapability],
-        default_permission: PermissionMode::Allow,
-        parameters_schema: json!({
-            "type": "object",
-            "properties": {
-                "operation": { "type": "string", "enum": ["now", "parse", "convert", "format", "diff"] },
-                "input": { "type": "string" },
-                "timestamp": { "type": "string" },
-                "timezone": { "type": "string" },
-                "from_timezone": { "type": "string" },
-                "to_timezone": { "type": "string" },
-                "format": { "type": "string" },
-                "format_string": { "type": "string" },
-                "timestamp2": { "type": "string" }
-            }
-        }),
-        resource_profile: resource_profile(),
-    })
+    first_party_capability_manifest(
+        TIME_CAPABILITY_ID,
+        "Get, parse, format, convert, or diff timestamps",
+        vec![EffectKind::DispatchCapability],
+        PermissionMode::Allow,
+        resource_profile(),
+    )
 }
 
 pub(super) fn dispatch(input: &Value) -> Result<Value, FirstPartyCapabilityError> {

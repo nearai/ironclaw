@@ -6,14 +6,14 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::GrantAuthorizer;
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
     AgentId, ApprovalRequestId, CapabilityDescriptor, CapabilityGrant, CapabilityGrantId,
     CapabilityId, CapabilitySet, EffectKind, ExecutionContext, ExtensionId, GrantConstraints,
-    MountView, NetworkPolicy, PackageId, PermissionMode, Principal, ProcessId, ProjectId,
-    ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId, ThreadId, TrustClass,
-    UserId, VirtualPath,
+    HostPortCatalog, MountView, NetworkPolicy, PackageId, PermissionMode, Principal, ProcessId,
+    ProjectId, ResourceEstimate, ResourceUsage, RuntimeKind, SecretHandle, TenantId, ThreadId,
+    TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     CancelRuntimeWorkOutcome, CancelRuntimeWorkRequest, CapabilitySurfacePolicy, HostRuntime,
@@ -100,8 +100,8 @@ use ironclaw_turns::{
         LoopInputCursorToken, LoopInputPort, LoopModelBudgetAccountant, LoopModelGatewayError,
         LoopModelPort, LoopModelRequest, LoopModelRouteSnapshot, LoopProgressEvent,
         LoopPromptBundleRequest, LoopPromptPort, LoopRunContext, LoopSafeSummary, ModelCallOutcome,
-        NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PromptMode, SkillVisibility,
-        StageCheckpointPayloadRequest, VisibleCapabilityRequest,
+        NoOpBudgetAccountant, NoOpPolicyGuard, ParentLoopOutput, PersonalContextPolicy, PromptMode,
+        SkillVisibility, StageCheckpointPayloadRequest, VisibleCapabilityRequest,
     },
     runner::{ClaimRunRequest, ClaimedTurnRun, TurnRunTransitionPort},
 };
@@ -168,6 +168,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -179,6 +180,7 @@ async fn text_only_host_factory_builds_complete_agent_loop_driver_host() {
             messages: prompt_bundle.messages,
             surface_version: Some(surface.version.clone()),
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -274,6 +276,7 @@ async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -283,6 +286,7 @@ async fn text_only_host_factory_sanitizes_gateway_error_summaries() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -329,6 +333,7 @@ async fn text_only_host_factory_invokes_model_budget_accountant() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -337,6 +342,7 @@ async fn text_only_host_factory_invokes_model_budget_accountant() {
         messages: prompt_bundle.messages,
         surface_version: None,
         model_preference: None,
+        capability_view: None,
     })
     .await
     .unwrap();
@@ -451,6 +457,7 @@ async fn progress_port_prompt_bundle_built_does_not_double_emit() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -718,6 +725,7 @@ async fn text_only_host_factory_includes_safety_context_in_prompt_bundle() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -726,6 +734,7 @@ async fn text_only_host_factory_includes_safety_context_in_prompt_bundle() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -887,10 +896,8 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
                 .await
                 .unwrap(),
         );
-        let thread_service = ironclaw_threads::LibSqlSessionThreadService::new(thread_db);
-        thread_service.run_migrations().await.unwrap();
-        let turn_store = ironclaw_turns::LibSqlTurnStateStore::new(turn_db);
-        turn_store.run_migrations().await.unwrap();
+        let thread_service = build_libsql_thread_service(thread_db).await;
+        let turn_store = libsql_filesystem_turn_store(turn_db).await;
         thread_service
             .ensure_thread(EnsureThreadRequest {
                 scope: thread_scope.clone(),
@@ -963,10 +970,8 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
             .await
             .unwrap(),
     );
-    let thread_service = Arc::new(ironclaw_threads::LibSqlSessionThreadService::new(thread_db));
-    thread_service.run_migrations().await.unwrap();
-    let turn_store = Arc::new(ironclaw_turns::LibSqlTurnStateStore::new(turn_db));
-    turn_store.run_migrations().await.unwrap();
+    let thread_service = Arc::new(build_libsql_thread_service(thread_db).await);
+    let turn_store = Arc::new(libsql_filesystem_turn_store(turn_db).await);
     let loop_checkpoint_store: Arc<dyn LoopCheckpointStore> = turn_store.clone();
     let transition_port: Arc<dyn ironclaw_turns::runner::TurnRunTransitionPort> =
         turn_store.clone();
@@ -1059,6 +1064,61 @@ async fn turn_runner_worker_completes_after_libsql_turn_and_thread_services_reop
             && message.content.as_deref() == Some("model says hi")
             && message.turn_run_id.as_deref() == Some(expected_run_id.as_str())
     }));
+}
+
+/// Build the libSQL-backed [`FilesystemSessionThreadService`] used by the
+/// restart test. The same `libsql::Database` handle drives the underlying
+/// [`LibSqlRootFilesystem`]; reopening the database file from a sibling
+/// process (or reconstructing it across a process-restart, as this test
+/// simulates) exposes the same records through a fresh
+/// `FilesystemSessionThreadService` instance. The `/threads` mount alias
+/// resolves to a fixed top-level `VirtualPath` for the test; production
+/// composition routes the alias through the per-invocation
+/// [`MountView`](ironclaw_host_api::MountView) so tenant isolation is
+/// structural rather than something this test has to thread through paths.
+#[cfg(feature = "libsql-restart-tests")]
+async fn build_libsql_thread_service(
+    db: Arc<libsql::Database>,
+) -> ironclaw_threads::FilesystemSessionThreadService<ironclaw_filesystem::LibSqlRootFilesystem> {
+    use ironclaw_filesystem::{LibSqlRootFilesystem, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions};
+
+    let fs = LibSqlRootFilesystem::new(db);
+    fs.run_migrations().await.unwrap();
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/threads").unwrap(),
+        VirtualPath::new("/threads").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(Arc::new(fs), mounts));
+    ironclaw_threads::FilesystemSessionThreadService::new(scoped)
+}
+
+/// Construct a [`FilesystemTurnStateStore`] backed by [`LibSqlRootFilesystem`]
+/// over the supplied libSQL database. The on-disk shape is the same single
+/// `/turns/state.json` snapshot the production composition uses; the libSQL
+/// backend just provides durability for the underlying filesystem record.
+/// Mounts `/turns` at the canonical
+/// `/engine/tenants/<tenant>/users/<user>/turns` target so the per-invocation
+/// `MountView` shape lines up with the production wiring.
+#[cfg(feature = "libsql-restart-tests")]
+async fn libsql_filesystem_turn_store(
+    db: Arc<libsql::Database>,
+) -> ironclaw_turns::FilesystemTurnStateStore<ironclaw_filesystem::LibSqlRootFilesystem> {
+    use ironclaw_filesystem::{LibSqlRootFilesystem, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await.unwrap();
+    let view = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").unwrap(),
+        VirtualPath::new("/engine/tenants/tenant-libsql-restart/users/user-libsql-restart/turns")
+            .unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(filesystem, view));
+    ironclaw_turns::FilesystemTurnStateStore::new(scoped)
 }
 
 #[tokio::test]
@@ -1580,6 +1640,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -1588,6 +1649,7 @@ async fn text_only_host_e2e_keeps_persisted_model_route_through_full_flow() {
             messages: prompt_bundle.messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -2321,12 +2383,14 @@ async fn text_only_host_factory_threads_model_route_snapshot_to_gateway() {
                     checkpoint_state_ref: None,
                     max_messages: Some(8),
                     inline_messages: Vec::new(),
+                    capability_view: None,
                 })
                 .await
                 .unwrap()
                 .messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -2582,6 +2646,7 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -2590,6 +2655,7 @@ async fn text_only_host_e2e_flow_persists_checkpoint_mapping_in_turn_state_store
             messages: prompt_bundle.messages,
             surface_version: Some(surface_version.clone()),
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -2671,6 +2737,7 @@ async fn text_only_host_prompt_accepts_empty_surface_version() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -2691,6 +2758,7 @@ async fn text_only_host_prompt_rejects_stale_surface_version() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -2711,6 +2779,7 @@ async fn text_only_host_prompt_rejects_codeact_mode_and_zero_budget() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -2724,6 +2793,7 @@ async fn text_only_host_prompt_rejects_codeact_mode_and_zero_budget() {
             checkpoint_state_ref: None,
             max_messages: Some(0),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -2742,6 +2812,7 @@ async fn text_only_host_prompt_rejects_inline_messages() {
             surface_version: None,
             checkpoint_state_ref: None,
             max_messages: Some(8),
+            capability_view: None,
             inline_messages: vec![LoopInlineMessage {
                 role: LoopInlineMessageRole::User,
                 safe_body: LoopSafeSummary::new("safe inline nudge").unwrap(),
@@ -2781,6 +2852,7 @@ async fn text_only_host_prompt_rejects_foreign_context_and_checkpoint_refs() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -2794,6 +2866,7 @@ async fn text_only_host_prompt_rejects_foreign_context_and_checkpoint_refs() {
             checkpoint_state_ref: Some(LoopCheckpointStateRef::new("checkpoint:foreign").unwrap()),
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -2813,6 +2886,7 @@ async fn text_only_host_prompt_rejects_foreign_context_and_checkpoint_refs() {
             ),
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -2889,6 +2963,7 @@ async fn text_only_host_factory_threads_identity_source_to_prompt_and_model() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -2906,12 +2981,58 @@ async fn text_only_host_factory_threads_identity_source_to_prompt_and_model() {
             messages: prompt_bundle.messages,
             surface_version: Some(surface.version),
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
 
     let requests = fixture.gateway.requests();
     assert_eq!(requests[0].messages[0].content, "factory identity content");
+}
+
+#[tokio::test]
+async fn text_only_host_factory_excludes_personal_identity_when_profile_excludes_it() {
+    let fixture = HostFixture::new("thread-host-personal-excluded", "hello reborn").await;
+    assert_eq!(
+        fixture.context.resolved_run_profile.personal_context_policy,
+        PersonalContextPolicy::Excluded
+    );
+    let source = Arc::new(StaticIdentityContextSource::new(vec![trusted_identity(
+        "USER.md",
+        "private user profile",
+        IdentityApplicability::OnPersonalContextAllowed,
+    )]));
+    let host = fixture
+        .factory()
+        .with_identity_context_source(source)
+        .build_text_only_host(RebornLoopDriverHostRequest {
+            claimed_run: fixture.claimed.clone(),
+            loop_run_context: fixture.context.clone(),
+        })
+        .await
+        .unwrap();
+    let host_dyn: &(dyn AgentLoopDriverHost + Send + Sync) = &host;
+
+    let prompt_bundle = host_dyn
+        .build_prompt_bundle(LoopPromptBundleRequest {
+            mode: PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: Some(8),
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(prompt_bundle.identity_message_count, 0);
+    assert!(
+        prompt_bundle
+            .messages
+            .iter()
+            .all(|message| !message.content_ref.as_str().starts_with("msg:identity."))
+    );
 }
 
 #[tokio::test]
@@ -3446,6 +3567,7 @@ async fn text_only_host_skill_context_does_not_expand_capability_surface() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -3512,6 +3634,7 @@ async fn text_only_host_prompt_bundle_includes_surface_metadata_and_still_stream
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -3524,6 +3647,7 @@ async fn text_only_host_prompt_bundle_includes_surface_metadata_and_still_stream
         messages: prompt_bundle.messages,
         surface_version: Some(surface.version),
         model_preference: None,
+        capability_view: None,
     })
     .await
     .unwrap();
@@ -4387,6 +4511,7 @@ async fn text_only_host_prompt_accepts_refetched_surface_version() {
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -5557,7 +5682,12 @@ fn host_runtime_visible_request_with_dispatch_grant(
 
 fn e2e_registry_with_manifest(manifest: &str) -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
-    let manifest = ExtensionManifest::parse(manifest).unwrap();
+    let manifest = ExtensionManifest::parse(
+        manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/script").unwrap(),
@@ -5802,6 +5932,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
                 checkpoint_state_ref: None,
                 max_messages: Some(8),
                 inline_messages: Vec::new(),
+                capability_view: None,
             })
             .await
             .map_err(driver_host_error)?;
@@ -5810,6 +5941,7 @@ impl AgentLoopDriver for ScriptCapabilityFinalReplyDriver {
                 messages: prompt_bundle.messages,
                 surface_version: Some(surface.version),
                 model_preference: None,
+                capability_view: None,
             })
             .await
             .map_err(driver_host_error)?;
@@ -5922,6 +6054,7 @@ impl AgentLoopDriver for TextOnlyFinalReplyDriver {
                 checkpoint_state_ref: None,
                 max_messages: Some(8),
                 inline_messages: Vec::new(),
+                capability_view: None,
             })
             .await
             .map_err(driver_host_error)?;
@@ -5930,6 +6063,7 @@ impl AgentLoopDriver for TextOnlyFinalReplyDriver {
                 messages: prompt_bundle.messages,
                 surface_version: Some(surface.version),
                 model_preference: None,
+                capability_view: None,
             })
             .await
             .map_err(driver_host_error)?;
@@ -6163,6 +6297,7 @@ impl HostFixture {
         let run_id = TurnRunId::new();
         let state = ironclaw_turns::TurnRunState {
             scope: turn_scope.clone(),
+            actor: Some(TurnActor::new(user_id.clone())),
             turn_id,
             run_id,
             status: TurnStatus::Running,
@@ -6438,6 +6573,7 @@ impl RecordingGateway {
                     surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),
                     capability_id: CapabilityId::new("demo.echo").unwrap(),
                     input_ref: CapabilityInputRef::new("input:opaque-tool-call").unwrap(),
+                    provider_replay: None,
                 },
             ]),
         });

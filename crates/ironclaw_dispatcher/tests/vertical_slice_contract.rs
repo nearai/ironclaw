@@ -1,3 +1,7 @@
+mod support;
+
+use support::legacy_capability_fixture_to_v2;
+
 use async_trait::async_trait;
 use ironclaw_dispatcher::*;
 use ironclaw_extensions::*;
@@ -9,10 +13,7 @@ use serde_json::json;
 #[tokio::test]
 async fn vertical_slice_discovers_and_dispatches_registered_runtime_adapters() {
     let fs = filesystem_with_echo_extensions();
-    let registry =
-        ExtensionDiscovery::discover(&fs, &VirtualPath::new("/system/extensions").unwrap())
-            .await
-            .unwrap();
+    let registry = discover_legacy_fixture_registry(&fs).await;
     assert_eq!(registry.extensions().count(), 3);
 
     let governor = InMemoryResourceGovernor::new();
@@ -178,15 +179,27 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
     let storage = tempfile::tempdir().unwrap().keep();
     let wasm_root = storage.join("echo-wasm");
     std::fs::create_dir_all(&wasm_root).unwrap();
-    std::fs::write(wasm_root.join("manifest.toml"), WASM_MANIFEST).unwrap();
+    std::fs::write(
+        wasm_root.join("manifest.toml"),
+        legacy_capability_fixture_to_v2(WASM_MANIFEST),
+    )
+    .unwrap();
 
     let script_root = storage.join("echo-script");
     std::fs::create_dir_all(&script_root).unwrap();
-    std::fs::write(script_root.join("manifest.toml"), SCRIPT_MANIFEST).unwrap();
+    std::fs::write(
+        script_root.join("manifest.toml"),
+        legacy_capability_fixture_to_v2(SCRIPT_MANIFEST),
+    )
+    .unwrap();
 
     let mcp_root = storage.join("echo-mcp");
     std::fs::create_dir_all(&mcp_root).unwrap();
-    std::fs::write(mcp_root.join("manifest.toml"), MCP_MANIFEST).unwrap();
+    std::fs::write(
+        mcp_root.join("manifest.toml"),
+        legacy_capability_fixture_to_v2(MCP_MANIFEST),
+    )
+    .unwrap();
 
     let mut fs = LocalFilesystem::new();
     fs.mount_local(
@@ -195,6 +208,18 @@ fn filesystem_with_echo_extensions() -> LocalFilesystem {
     )
     .unwrap();
     fs
+}
+
+async fn discover_legacy_fixture_registry(fs: &LocalFilesystem) -> ExtensionRegistry {
+    ExtensionDiscovery::discover_with_manifest_contracts(
+        fs,
+        &VirtualPath::new("/system/extensions").unwrap(),
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+        &HostApiContractRegistry::new(),
+    )
+    .await
+    .unwrap()
 }
 
 fn sample_scope() -> ResourceScope {

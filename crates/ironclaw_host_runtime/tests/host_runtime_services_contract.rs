@@ -1,3 +1,7 @@
+mod support;
+
+use support::legacy_capability_fixture_to_v2;
+
 use std::{
     sync::{
         Arc, Mutex,
@@ -29,9 +33,11 @@ use ironclaw_events::{
     EventReplay, EventStreamKey, InMemoryAuditSink, InMemoryDurableAuditLog,
     InMemoryDurableEventLog, InMemoryEventSink, ReadScope, RuntimeEventKind,
 };
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
+#[cfg(feature = "libsql")]
+use ironclaw_filesystem::ScopedFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
@@ -55,14 +61,10 @@ use ironclaw_processes::{
 use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStoreError, RebornProfile, build_reborn_event_stores,
 };
-#[cfg(feature = "libsql")]
-use ironclaw_resources::ResourceTally;
 use ironclaw_resources::{
     InMemoryResourceGovernor, JsonFileResourceGovernorStore, PersistentResourceGovernor,
-    ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits,
+    ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits, ResourceTally,
 };
-#[cfg(feature = "libsql")]
-use ironclaw_run_state::LibSqlRunStateApprovalStore;
 use ironclaw_run_state::{
     ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
     RunRecord, RunStart, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
@@ -77,7 +79,7 @@ use ironclaw_trust::{
     HostTrustPolicy, TrustDecision, TrustProvenance,
 };
 #[cfg(feature = "libsql")]
-use ironclaw_turns::LibSqlTurnStateStore;
+use ironclaw_turns::FilesystemTurnStateStore;
 #[cfg(feature = "libsql")]
 use ironclaw_turns::{
     AcceptedMessageRef, IdempotencyKey, InMemoryRunProfileResolver, ReplyTargetBindingRef,
@@ -116,6 +118,13 @@ fn production_wiring_validation_rejects_missing_components_and_local_only_defaul
             ProductionWiringIssueKind::Missing
         ),
         "missing explicit trust policy should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RuntimePolicy,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing resolved runtime policy should be reported: {report:?}"
     );
     assert!(
         report.contains(
@@ -211,6 +220,79 @@ fn production_wiring_validation_rejects_missing_components_and_local_only_defaul
 }
 
 #[test]
+fn production_wiring_validation_rejects_local_only_runtime_policy() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_policy(local_dev_runtime_policy());
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("local-dev runtime policy must not pass production validation");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RuntimePolicy,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "local runtime policy should be reported as local-only: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_rejects_each_local_only_runtime_policy_field() {
+    let mut host_workspace = hosted_dev_runtime_policy();
+    host_workspace.filesystem_backend = FilesystemBackendKind::HostWorkspace;
+    assert_local_only_runtime_policy_rejected(host_workspace, "host_workspace_filesystem");
+
+    let mut local_process = hosted_dev_runtime_policy();
+    local_process.process_backend = ProcessBackendKind::LocalHost;
+    assert_local_only_runtime_policy_rejected(local_process, "local_host_process");
+
+    let mut direct_network = hosted_dev_runtime_policy();
+    direct_network.network_mode = NetworkMode::Direct;
+    assert_local_only_runtime_policy_rejected(direct_network, "direct_network");
+
+    let mut scrubbed_secrets = hosted_dev_runtime_policy();
+    scrubbed_secrets.secret_mode = SecretMode::ScrubbedEnv;
+    assert_local_only_runtime_policy_rejected(scrubbed_secrets, "local_secret_environment");
+
+    let mut inherited_secrets = hosted_dev_runtime_policy();
+    inherited_secrets.secret_mode = SecretMode::InheritedEnv;
+    assert_local_only_runtime_policy_rejected(inherited_secrets, "local_secret_environment");
+}
+
+#[test]
+fn production_wiring_validation_accepts_production_safe_runtime_policy_shape() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_policy(hosted_dev_runtime_policy());
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("other local/test defaults still prevent production validation");
+
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RuntimePolicy,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "hosted runtime policy should satisfy runtime-policy guardrail: {report:?}"
+    );
+}
+
+#[test]
 fn production_wiring_validation_accepts_persistent_resource_governor_component() {
     let dir = tempfile::tempdir().unwrap();
     let governor = Arc::new(PersistentResourceGovernor::new(
@@ -238,16 +320,26 @@ fn production_wiring_validation_accepts_persistent_resource_governor_component()
     );
 }
 
-#[cfg(feature = "libsql")]
+/// Filesystem-backed equivalent of the deleted libSQL/Postgres tests.
+/// Backend choice is a `RootFilesystem` property; the `with_filesystem_resource_governor`
+/// builder drives the same surface that the deleted SQL-specific builders
+/// covered.
 #[tokio::test]
-async fn with_libsql_resource_governor_runs_migrations_before_first_reserve() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = Arc::new(
-        libsql::Builder::new_local(dir.path().join("resources.db"))
-            .build()
-            .await
-            .unwrap(),
-    );
+async fn with_filesystem_resource_governor_persists_reservations_across_handles() {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/resources").unwrap(),
+        VirtualPath::new("/tenants/tenant1/users/user1/resources").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        mounts,
+    ));
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -257,9 +349,7 @@ async fn with_libsql_resource_governor_runs_migrations_before_first_reserve() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_libsql_resource_governor(Arc::clone(&db))
-    .await
-    .unwrap();
+    .with_filesystem_resource_governor(Arc::clone(&scoped));
 
     let governor = services.resource_governor();
     let scope = sample_scope(InvocationId::new());
@@ -285,16 +375,22 @@ async fn with_libsql_resource_governor_runs_migrations_before_first_reserve() {
     governor.release(reservation.id).unwrap();
 }
 
-#[cfg(feature = "libsql")]
 #[tokio::test]
-async fn with_libsql_resource_governor_closes_process_reservations_on_cancel() {
-    let dir = tempfile::tempdir().unwrap();
-    let db = Arc::new(
-        libsql::Builder::new_local(dir.path().join("resources.db"))
-            .build()
-            .await
-            .unwrap(),
-    );
+async fn with_filesystem_resource_governor_closes_process_reservations_on_cancel() {
+    use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
+    use ironclaw_host_api::{MountAlias, MountGrant, MountPermissions, MountView, VirtualPath};
+
+    let backend = Arc::new(InMemoryBackend::new());
+    let mounts = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/resources").unwrap(),
+        VirtualPath::new("/tenants/tenant1/users/user1/resources").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    let scoped = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&backend),
+        mounts,
+    ));
     let process_services = ProcessServices::new(
         Arc::new(InMemoryProcessStore::new()),
         Arc::new(InMemoryProcessResultStore::new()),
@@ -309,9 +405,7 @@ async fn with_libsql_resource_governor_closes_process_reservations_on_cancel() {
         process_services,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_libsql_resource_governor(Arc::clone(&db))
-    .await
-    .unwrap();
+    .with_filesystem_resource_governor(Arc::clone(&scoped));
     let governor = services.resource_governor();
     let scope = sample_scope(InvocationId::new());
     let account = ResourceAccount::tenant(scope.tenant_id.clone());
@@ -360,99 +454,6 @@ async fn with_libsql_resource_governor_closes_process_reservations_on_cancel() {
             ..
         }
     ));
-}
-
-#[cfg(feature = "postgres")]
-const POSTGRES_SKIP_ENV: &str = "IRONCLAW_SKIP_POSTGRES_TESTS";
-
-#[cfg(feature = "postgres")]
-fn postgres_skip_requested() -> bool {
-    std::env::var(POSTGRES_SKIP_ENV).is_ok_and(|value| value == "1" || value == "true")
-}
-
-#[cfg(feature = "postgres")]
-async fn postgres_pool_or_skip() -> Option<deadpool_postgres::Pool> {
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://localhost/ironclaw_test".to_string());
-    let config: tokio_postgres::Config = database_url
-        .parse()
-        .expect("DATABASE_URL must be a valid Postgres URL");
-    let mgr = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
-    let pool = deadpool_postgres::Pool::builder(mgr)
-        .max_size(2)
-        .build()
-        .expect("build deadpool");
-    match pool.get().await {
-        Ok(_) => Some(pool),
-        Err(error) => {
-            if postgres_skip_requested() {
-                eprintln!(
-                    "skipping host-runtime Postgres resource governor test ({POSTGRES_SKIP_ENV}=1): {error}"
-                );
-                None
-            } else {
-                panic!(
-                    "host-runtime Postgres resource governor test could not reach Postgres ({error}); \
-                     set DATABASE_URL to a reachable Postgres test database, or set \
-                     {POSTGRES_SKIP_ENV}=1 to explicitly skip."
-                );
-            }
-        }
-    }
-}
-
-#[cfg(feature = "postgres")]
-async fn drop_postgres_resource_governor_table(pool: &deadpool_postgres::Pool) {
-    let client = pool.get().await.expect("cleanup client");
-    client
-        .batch_execute("DROP TABLE IF EXISTS ironclaw_resource_governor_snapshots")
-        .await
-        .expect("drop resource governor snapshots table");
-}
-
-#[cfg(feature = "postgres")]
-#[tokio::test]
-async fn with_postgres_resource_governor_runs_migrations_before_first_reserve() {
-    let Some(pool) = postgres_pool_or_skip().await else {
-        return;
-    };
-    drop_postgres_resource_governor_table(&pool).await;
-
-    let services = HostRuntimeServices::new(
-        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
-        Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
-        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    )
-    .with_postgres_resource_governor(pool.clone())
-    .await
-    .unwrap();
-
-    let governor = services.resource_governor();
-    let scope = sample_scope(InvocationId::new());
-    let account = ResourceAccount::tenant(scope.tenant_id.clone());
-    governor
-        .set_limit(
-            account.clone(),
-            ResourceLimits {
-                max_concurrency_slots: Some(1),
-                ..ResourceLimits::default()
-            },
-        )
-        .unwrap();
-    let reservation = governor
-        .reserve(
-            scope,
-            ResourceEstimate {
-                concurrency_slots: Some(1),
-                ..ResourceEstimate::default()
-            },
-        )
-        .unwrap();
-    governor.release(reservation.id).unwrap();
-    drop_postgres_resource_governor_table(&pool).await;
 }
 
 #[test]
@@ -527,119 +528,23 @@ fn production_wiring_validation_rejects_unsupported_runtime_requirements() {
     );
 }
 
-#[cfg(feature = "libsql")]
-#[tokio::test]
-async fn libsql_run_state_store_selection_satisfies_production_run_state_guardrails() {
-    let db_dir = tempfile::tempdir().unwrap();
-    let db_path = db_dir.path().join("run-state-selection.db");
-    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let services = HostRuntimeServices::new(
-        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
-        Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(GrantAuthorizer::new()),
-        ProcessServices::in_memory(),
-        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    )
-    .with_libsql_run_state_approval_store(Arc::clone(&db))
-    .await
-    .unwrap();
-
-    let report = services
-        .validate_production_wiring(&ProductionWiringConfig::new([]))
-        .expect_err("other local services remain intentionally unready");
-    assert!(
-        !report.contains(
-            ProductionWiringComponent::RunState,
-            ProductionWiringIssueKind::Missing
-        ),
-        "LibSqlRunStateApprovalStore must satisfy run-state presence: {report:?}"
-    );
-    assert!(
-        !report.contains(
-            ProductionWiringComponent::ApprovalRequests,
-            ProductionWiringIssueKind::Missing
-        ),
-        "LibSqlRunStateApprovalStore must satisfy approval-store presence: {report:?}"
-    );
-    assert!(
-        !report.contains(
-            ProductionWiringComponent::RunState,
-            ProductionWiringIssueKind::LocalOnlyImplementation
-        ),
-        "LibSqlRunStateApprovalStore must not be classified local-only: {report:?}"
-    );
-    assert!(
-        !report.contains(
-            ProductionWiringComponent::ApprovalRequests,
-            ProductionWiringIssueKind::LocalOnlyImplementation
-        ),
-        "LibSqlRunStateApprovalStore must not be classified local-only: {report:?}"
-    );
-}
-
-#[cfg(feature = "libsql")]
-#[tokio::test]
-async fn libsql_run_state_store_selection_persists_runtime_approval_block() {
-    let db_dir = tempfile::tempdir().unwrap();
-    let db_path = db_dir.path().join("run-state-runtime-approval.db");
-    let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let services = HostRuntimeServices::new(
-        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
-        Arc::new(LocalFilesystem::new()),
-        Arc::new(InMemoryResourceGovernor::new()),
-        Arc::new(ApprovalThenGrantAuthorizer),
-        ProcessServices::in_memory(),
-        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
-    )
-    .with_libsql_run_state_approval_store(Arc::clone(&db))
-    .await
-    .unwrap()
-    .with_trust_policy(Arc::new(local_manifest_trust_policy(
-        "script",
-        vec![EffectKind::DispatchCapability],
-    )))
-    .with_script_runtime(Arc::new(ScriptRuntime::new(
-        ScriptRuntimeConfig::for_testing(),
-        EchoScriptBackend,
-    )));
-
-    let runtime = services.host_runtime_for_local_testing();
-    let context = execution_context_without_grants();
-    let outcome = runtime
-        .invoke_capability(RuntimeCapabilityRequest::new(
-            context.clone(),
-            script_capability_id(),
-            ResourceEstimate::default(),
-            json!({"message": "durable approval"}),
-            trust_decision_with_dispatch_authority(),
-        ))
-        .await
-        .unwrap();
-
-    let RuntimeCapabilityOutcome::ApprovalRequired(gate) = outcome else {
-        panic!("expected approval gate, got {outcome:?}");
-    };
-    let store = LibSqlRunStateApprovalStore::new(db);
-    let run_record = RunStateStore::get(&store, &context.resource_scope, context.invocation_id)
-        .await
-        .unwrap()
-        .expect("run record persisted");
-    assert_eq!(run_record.status, RunStatus::BlockedApproval);
-    assert_eq!(
-        run_record.approval_request_id,
-        Some(gate.approval_request_id)
-    );
-    let approval_record =
-        ApprovalRequestStore::get(&store, &context.resource_scope, gate.approval_request_id)
-            .await
-            .unwrap()
-            .expect("approval record persisted");
-    assert_eq!(
-        approval_record.status,
-        ironclaw_run_state::ApprovalStatus::Pending
-    );
-}
+// The legacy `LibSqlRunStateApprovalStore` / `PostgresRunStateApprovalStore`
+// per-backend run-state + approval stores were deleted along with their
+// `with_libsql_run_state_approval_store` /
+// `with_postgres_run_state_approval_store` builder methods (see
+// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`).
+// Durability across reopen is now a property of the underlying
+// `RootFilesystem` (`LibSqlRootFilesystem`, `PostgresRootFilesystem`, …)
+// composed through `with_filesystem_run_state`; the run-state store layer
+// no longer owns its own per-SQL persistence. The deleted tests were:
+//
+//   - `libsql_run_state_store_selection_satisfies_production_run_state_guardrails`
+//   - `libsql_run_state_store_selection_persists_runtime_approval_block`
+//
+// The equivalent guardrail surface for the filesystem-backed wiring is
+// exercised by `tests/reborn_durable_restart_integration.rs` (services
+// graph restart over `LocalFilesystem`) and the `ironclaw_run_state`
+// contract suite.
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
@@ -676,14 +581,34 @@ async fn production_root_filesystem_selection_accepts_libsql_root_filesystem() {
     );
 }
 
+/// Construct an [`Arc<ScopedFilesystem<LibSqlRootFilesystem>>`] that exposes
+/// the `/turns` mount alias over a libSQL-backed [`RootFilesystem`]. Mirrors
+/// the production composition shape: the `/turns` alias rewrites to a
+/// tenant/user-scoped target inside `/engine`, and the filesystem backend
+/// supplies durable storage. Used by tests that previously constructed
+/// `LibSqlTurnStateStore` directly.
+#[cfg(feature = "libsql")]
+async fn libsql_scoped_turns_fs(
+    db: Arc<libsql::Database>,
+) -> Arc<ScopedFilesystem<LibSqlRootFilesystem>> {
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(db));
+    filesystem.run_migrations().await.unwrap();
+    let view = MountView::new(vec![MountGrant::new(
+        MountAlias::new("/turns").unwrap(),
+        VirtualPath::new("/engine/tenants/tenant1/users/user1/turns").unwrap(),
+        MountPermissions::read_write_list_delete(),
+    )])
+    .unwrap();
+    Arc::new(ScopedFilesystem::with_fixed_view(filesystem, view))
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
-async fn production_turn_state_selection_accepts_libsql_turn_state_store() {
+async fn production_turn_state_selection_accepts_filesystem_turn_state_store() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("turn-state.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
-    let turn_state = Arc::new(LibSqlTurnStateStore::new(Arc::clone(&db)));
-    turn_state.run_migrations().await.unwrap();
+    let scoped = libsql_scoped_turns_fs(Arc::clone(&db)).await;
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -693,9 +618,7 @@ async fn production_turn_state_selection_accepts_libsql_turn_state_store() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_libsql_turn_state_store(Arc::clone(&db))
-    .await
-    .unwrap();
+    .with_filesystem_turn_state_store(scoped);
 
     let report = services
         .validate_production_wiring(&ProductionWiringConfig::new([]))
@@ -705,14 +628,14 @@ async fn production_turn_state_selection_accepts_libsql_turn_state_store() {
             ProductionWiringComponent::TurnState,
             ProductionWiringIssueKind::Missing
         ),
-        "LibSqlTurnStateStore must satisfy production turn-state presence: {report:?}"
+        "FilesystemTurnStateStore must satisfy production turn-state presence: {report:?}"
     );
     assert!(
         !report.contains(
             ProductionWiringComponent::TurnState,
             ProductionWiringIssueKind::LocalOnlyImplementation
         ),
-        "LibSqlTurnStateStore must not be classified local-only: {report:?}"
+        "FilesystemTurnStateStore over LibSqlRootFilesystem must not be classified local-only: {report:?}"
     );
 }
 
@@ -745,6 +668,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     let db_path = db_dir.path().join("turn-coordinator.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
     let notifier = Arc::new(RecordingTurnRunWakeNotifier::default());
+    let scoped = libsql_scoped_turns_fs(Arc::clone(&db)).await;
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -754,9 +678,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_libsql_turn_state_store(Arc::clone(&db))
-    .await
-    .unwrap()
+    .with_filesystem_turn_state_store(Arc::clone(&scoped))
     .with_run_profile_resolver(Arc::new(InMemoryRunProfileResolver::default()))
     .with_turn_run_wake_notifier(Arc::clone(&notifier));
 
@@ -767,7 +689,7 @@ async fn production_turn_coordinator_uses_configured_store_and_notifier() {
     let response = coordinator.submit_turn(request.clone()).await.unwrap();
     let SubmitTurnResponse::Accepted { run_id, .. } = response;
 
-    let reopened = LibSqlTurnStateStore::new(Arc::clone(&db));
+    let reopened = FilesystemTurnStateStore::new(scoped);
     let state = reopened
         .get_run_state(ironclaw_turns::GetRunStateRequest {
             scope: request.scope,
@@ -786,6 +708,7 @@ async fn production_turn_coordinator_requires_explicit_run_profile_resolver() {
     let db_dir = tempfile::tempdir().unwrap();
     let db_path = db_dir.path().join("turn-coordinator-missing-resolver.db");
     let db = Arc::new(libsql::Builder::new_local(db_path).build().await.unwrap());
+    let scoped = libsql_scoped_turns_fs(Arc::clone(&db)).await;
 
     let services = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -795,9 +718,7 @@ async fn production_turn_coordinator_requires_explicit_run_profile_resolver() {
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
-    .with_libsql_turn_state_store(Arc::clone(&db))
-    .await
-    .unwrap()
+    .with_filesystem_turn_state_store(scoped)
     .with_turn_run_wake_notifier(Arc::new(RecordingTurnRunWakeNotifier::default()));
 
     let report = match services.turn_coordinator_for_production() {
@@ -2745,6 +2666,62 @@ async fn host_runtime_services_resume_trust_preflight_failure_fails_only_matchin
 }
 
 #[tokio::test]
+async fn host_runtime_services_resume_runtime_policy_denial_fails_matching_blocked_run() {
+    let fixture = approval_resume_fixture_with_manifest(
+        SCRIPT_NETWORK_MANIFEST,
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    );
+    let runtime = fixture.services.host_runtime_for_local_testing();
+    let context = execution_context_without_grants();
+    let scope = context.resource_scope.clone();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "policy reduced before resume"});
+
+    let gate = block_for_approval(&runtime, context.clone(), estimate.clone(), input.clone()).await;
+    let lease =
+        approve_dispatch_for_services(&fixture.services, &scope, gate.approval_request_id, None)
+            .await;
+    let denied_runtime = resume_runtime_with_policy(&fixture, network_denied_runtime_policy());
+
+    let outcome = denied_runtime
+        .resume_capability(RuntimeCapabilityResumeRequest::new(
+            context.clone(),
+            gate.approval_request_id,
+            script_capability_id(),
+            estimate,
+            input,
+            trust_decision_with_dispatch_authority(),
+        ))
+        .await
+        .unwrap();
+
+    assert_failed_outcome(outcome, RuntimeFailureKind::Authorization);
+    let failed_run = fixture
+        .run_state
+        .get(&scope, context.invocation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed_run.status, RunStatus::Failed);
+    assert_eq!(failed_run.approval_request_id, None);
+    assert_eq!(
+        failed_run.error_kind.as_deref(),
+        Some("process_backend_none")
+    );
+    assert_eq!(
+        fixture
+            .capability_leases
+            .get(&scope, lease.grant.id)
+            .await
+            .unwrap()
+            .status,
+        CapabilityLeaseStatus::Active,
+        "runtime-policy preflight failure must not claim or consume the approval lease"
+    );
+    assert!(fixture.events.events().is_empty());
+}
+
+#[tokio::test]
 async fn host_runtime_services_resume_without_backing_stores_fails_closed() {
     let runtime = HostRuntimeServices::new(
         Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
@@ -3461,7 +3438,7 @@ async fn host_runtime_services_fails_closed_when_durable_obligation_audit_append
 
 #[tokio::test]
 async fn host_runtime_services_routes_wasm_http_through_per_invocation_policy_handoff() {
-    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
     let component = tool_component(HTTP_TOOL_WAT);
     let filesystem = Arc::new(
         filesystem_with_wasm_component(
@@ -3523,7 +3500,7 @@ async fn host_runtime_services_routes_wasm_http_through_per_invocation_policy_ha
 
 #[tokio::test]
 async fn host_runtime_services_routes_cached_wasm_http_through_per_invocation_policy_handoff() {
-    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
     let component = tool_component(HTTP_TOOL_WAT);
     let filesystem = Arc::new(
         filesystem_with_wasm_component(
@@ -3587,7 +3564,7 @@ async fn host_runtime_services_routes_cached_wasm_http_through_per_invocation_po
 
 #[tokio::test]
 async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secret_handoffs() {
-    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
     let component = tool_component(HTTP_TOOL_WAT);
     let filesystem = Arc::new(
         filesystem_with_wasm_component(
@@ -3677,8 +3654,8 @@ async fn host_runtime_services_wasm_http_uses_production_staged_network_and_secr
 }
 
 #[tokio::test]
-async fn host_runtime_services_wasm_http_secret_store_lease_uses_graph_secret_store() {
-    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+async fn host_runtime_services_wasm_http_rejects_secret_store_lease_before_transport() {
+    let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
     let component = tool_component(HTTP_TOOL_WAT);
     let filesystem = Arc::new(
         filesystem_with_wasm_component(
@@ -3738,24 +3715,16 @@ async fn host_runtime_services_wasm_http_secret_store_lease_uses_graph_secret_st
         .unwrap();
 
     assert_completed_outcome(outcome, &capability_id);
-    let requests = network.requests();
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0].policy, policy);
     assert_eq!(
-        requests[0]
-            .headers
-            .iter()
-            .find(|(name, _)| name == "authorization"),
-        Some(&(
-            "authorization".to_string(),
-            "Bearer sk-graph-store-secret".to_string(),
-        ))
+        network.requests(),
+        Vec::new(),
+        "direct secret-store lease credentials must be rejected before network transport"
     );
 }
 
 #[tokio::test]
 async fn host_runtime_services_wasm_http_missing_staged_secret_stays_before_transport() {
-    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
     let component = tool_component(HTTP_TOOL_WAT);
     let filesystem = Arc::new(
         filesystem_with_wasm_component(
@@ -3824,7 +3793,7 @@ async fn host_runtime_services_wasm_http_missing_staged_secret_stays_before_tran
 
 #[tokio::test]
 async fn host_runtime_services_denies_wasm_http_when_shared_egress_has_no_policy_handoff() {
-    let parsed_manifest = ExtensionManifest::parse(WASM_HTTP_SUCCESS_MANIFEST).unwrap();
+    let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
     let component = tool_component(HTTP_TOOL_WAT);
     let filesystem = Arc::new(
         filesystem_with_wasm_component(
@@ -4871,12 +4840,19 @@ struct ApprovalResumeFixture {
 }
 
 fn approval_resume_fixture() -> ApprovalResumeFixture {
+    approval_resume_fixture_with_manifest(SCRIPT_MANIFEST, vec![EffectKind::DispatchCapability])
+}
+
+fn approval_resume_fixture_with_manifest(
+    manifest: &str,
+    trust_effects: Vec<EffectKind>,
+) -> ApprovalResumeFixture {
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let capability_leases = Arc::new(InMemoryCapabilityLeaseStore::new());
     let events = InMemoryEventSink::new();
     let services = HostRuntimeServices::new(
-        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(registry_with_manifest(manifest)),
         Arc::new(LocalFilesystem::new()),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(ApprovalThenGrantAuthorizer),
@@ -4885,7 +4861,7 @@ fn approval_resume_fixture() -> ApprovalResumeFixture {
     )
     .with_trust_policy(Arc::new(local_manifest_trust_policy(
         "script",
-        vec![EffectKind::DispatchCapability],
+        trust_effects,
     )))
     .with_run_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
@@ -4925,6 +4901,34 @@ fn resume_runtime_with_empty_registry(fixture: &ApprovalResumeFixture) -> Defaul
         ScriptRuntimeConfig::for_testing(),
         EchoScriptBackend,
     )))
+    .host_runtime_for_local_testing()
+}
+
+fn resume_runtime_with_policy(
+    fixture: &ApprovalResumeFixture,
+    policy: EffectiveRuntimePolicy,
+) -> DefaultHostRuntime {
+    HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_NETWORK_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(ApprovalThenGrantAuthorizer),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_trust_policy(Arc::new(local_manifest_trust_policy(
+        "script",
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    )))
+    .with_run_state(Arc::clone(&fixture.run_state))
+    .with_approval_requests(Arc::clone(&fixture.approval_requests))
+    .with_capability_leases(Arc::clone(&fixture.capability_leases))
+    .with_script_runtime(Arc::new(ScriptRuntime::new(
+        ScriptRuntimeConfig::for_testing(),
+        EchoScriptBackend,
+    )))
+    .with_event_sink(Arc::new(fixture.events.clone()))
+    .with_runtime_policy(policy)
     .host_runtime_for_local_testing()
 }
 
@@ -5863,13 +5867,23 @@ fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
 fn registry_with_manifests(manifests: &[&str]) -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     for manifest in manifests {
-        let manifest = ExtensionManifest::parse(manifest).unwrap();
+        let manifest = parse_manifest(manifest);
         let root =
             VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
         let package = ExtensionPackage::from_manifest(manifest, root).unwrap();
         registry.insert(package).unwrap();
     }
     registry
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
 }
 
 fn execution_context_without_grants() -> ExecutionContext {
@@ -6004,6 +6018,76 @@ fn trust_decision_with_dispatch_authority() -> TrustDecision {
     }
 }
 
+fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Deny,
+        secret_mode: SecretMode::BrokeredHandles,
+        approval_policy: ApprovalPolicy::AskAlways,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn hosted_dev_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::HostedMultiTenant,
+        requested_profile: RuntimeProfile::HostedDev,
+        resolved_profile: RuntimeProfile::HostedDev,
+        filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+        process_backend: ProcessBackendKind::TenantSandbox,
+        network_mode: NetworkMode::Allowlist,
+        secret_mode: SecretMode::TenantBroker,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::Standard,
+    }
+}
+
+fn assert_local_only_runtime_policy_rejected(
+    runtime_policy: EffectiveRuntimePolicy,
+    expected_implementation: &'static str,
+) {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_policy(runtime_policy);
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]))
+        .expect_err("local-only runtime-policy field must not pass production validation");
+
+    assert!(
+        report.issues().iter().any(|issue| {
+            issue.component() == ProductionWiringComponent::RuntimePolicy
+                && issue.kind() == ProductionWiringIssueKind::LocalOnlyImplementation
+                && issue.implementation() == Some(expected_implementation)
+        }),
+        "runtime policy should report {expected_implementation}: {report:?}"
+    );
+}
+
 fn read_directory_text(root: &std::path::Path) -> String {
     let mut output = String::new();
     let mut stack = vec![root.to_path_buf()];
@@ -6127,7 +6211,7 @@ async fn wasm_runtime_for_component(
     module_path: &str,
     wat: &str,
 ) -> WasmRuntimeFixture {
-    let parsed_manifest = ExtensionManifest::parse(manifest).unwrap();
+    let parsed_manifest = parse_manifest(manifest);
     let component = tool_component(wat);
     let filesystem = Arc::new(
         filesystem_with_wasm_component(parsed_manifest.id.as_str(), module_path, &component).await,
@@ -6168,7 +6252,7 @@ async fn wasm_runtime_for_component_with_slow_zero_body_http(
     module_path: &str,
     wat: &str,
 ) -> WasmWallClockRuntimeFixture {
-    let parsed_manifest = ExtensionManifest::parse(manifest).unwrap();
+    let parsed_manifest = parse_manifest(manifest);
     let component = tool_component(wat);
     let filesystem = Arc::new(
         filesystem_with_wasm_component(parsed_manifest.id.as_str(), module_path, &component).await,
@@ -6367,6 +6451,27 @@ args = []
 id = "script.echo"
 description = "Echo through Script"
 effects = ["dispatch_capability"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
+const SCRIPT_NETWORK_MANIFEST: &str = r#"
+id = "script"
+name = "Script Echo"
+version = "0.1.0"
+description = "Script integration extension"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "echo"
+args = []
+
+[[capabilities]]
+id = "script.echo"
+description = "Echo through Script"
+effects = ["dispatch_capability", "network"]
 default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;

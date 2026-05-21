@@ -29,8 +29,7 @@ use ironclaw_extensions::{
 use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle};
 use ironclaw_product_adapters::{
     AuthRequirement, DeclaredEgressTarget, EgressCredentialHandle, ProductAdapterCapabilities,
-    ProductAdapterError, ProductAdapterId, ProductCapabilityFlag, ProductSurfaceKind,
-    RedactedString,
+    ProductAdapterId, ProductCapabilityFlag, ProductSurfaceKind, RedactedString,
 };
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -446,6 +445,8 @@ pub trait ExtensionInstallationStore: Send + Sync {
         state: ExtensionActivationState,
     ) -> Result<(), RegistryError>;
 
+    /// Replace the stored health snapshot without enforcing status/message
+    /// consistency; callers may report status codes before a diagnostic exists.
     async fn update_health(
         &self,
         installation_id: &ExtensionInstallationId,
@@ -786,7 +787,9 @@ impl ProductAdapterRuntimeEntry {
 ///
 /// Filters to enabled installations whose manifest carries an
 /// `ironclaw.product_adapter/v1` host-api section, then pairs each with its
-/// projected ProductAdapter section. Results are sorted by installation id.
+/// projected ProductAdapter section. Enabled extensions without ProductAdapter
+/// sections are intentionally ignored by this projection, not reported as
+/// unknown manifests. Results are sorted by installation id.
 pub async fn list_enabled_product_adapter_entries(
     store: &dyn ExtensionInstallationStore,
 ) -> Result<Vec<ProductAdapterRuntimeEntry>, RegistryError> {
@@ -805,7 +808,7 @@ pub async fn list_enabled_product_adapter_entries(
         validate_installation_against_one_manifest(manifest, &installation)?;
         let adapters = manifest.product_adapters();
         if adapters.is_empty() {
-            continue; // extension is enabled but not a product adapter — skip
+            continue;
         }
         for adapter in adapters {
             entries.push(ProductAdapterRuntimeEntry::new(
@@ -856,7 +859,12 @@ impl HostApiManifestContract for ProductAdapterHostApiContract {
         host_api: &HostApiRefV2,
         section: &toml::Value,
     ) -> Result<(), String> {
-        // Use a throwaway extension id for shape-only validation.
+        // The contract hook runs while the generic manifest parser is still
+        // validating the host-api section envelope, before it exposes the real
+        // extension id to contract implementations. `from_value` needs an id
+        // only to derive the adapter_id that this shape-only path discards;
+        // cross-field checks involving the real extension id belong in
+        // `project_product_adapter_sections` below.
         let placeholder = ExtensionId::new("x").map_err(|e| e.to_string())?;
         ProductAdapterHostApiSection::from_value(
             &placeholder,
@@ -876,8 +884,6 @@ impl HostApiManifestContract for ProductAdapterHostApiContract {
 pub enum RegistryError {
     #[error(transparent)]
     Manifest(#[from] ManifestV2Error),
-    #[error(transparent)]
-    ProductAdapter(#[from] ProductAdapterError),
     #[error("invalid {field}: {reason}")]
     InvalidValue { field: &'static str, reason: String },
     #[error("product adapter manifest section {section} parse failed: {reason}")]
@@ -1127,7 +1133,17 @@ fn looks_like_inline_secret(value: &str) -> bool {
         return false;
     }
     const PREFIXES: &[&str] = &[
-        "sk-", "xoxb-", "xoxa-", "xoxp-", "xoxs-", "xoxe-", "ghp_", "gho_", "ghu_", "ghs_", "ghr_",
+        "sk-",   // OpenAI / Anthropic style API keys.
+        "xoxb-", // Slack bot token.
+        "xoxa-", // Slack app token.
+        "xoxp-", // Slack user token.
+        "xoxs-", // Slack service token.
+        "xoxe-", // Slack configuration token.
+        "ghp_",  // GitHub personal access token.
+        "gho_",  // GitHub OAuth token.
+        "ghu_",  // GitHub user-to-server token.
+        "ghs_",  // GitHub server-to-server token.
+        "ghr_",  // GitHub refresh token.
     ];
     PREFIXES.iter().any(|p| lower.starts_with(p))
         || looks_like_aws_access_key(value)
@@ -1178,6 +1194,10 @@ fn project_product_adapter_sections(
     // ASCII identifier defined as a module constant.
     let root_section = ManifestSectionPath::new(PRODUCT_ADAPTER_SECTION_PREFIX)
         .map_err(RegistryError::Manifest)?;
+    // `ironclaw_extensions` validates host-api sections from its internal
+    // TOML section table but does not expose that table as a public projection
+    // API. Re-parse here so this crate can build typed ProductAdapter entries
+    // without reaching through the manifest parser's private representation.
     let value: toml::Value =
         toml::from_str(raw_toml).map_err(|error| RegistryError::ManifestSectionParse {
             section: root_section.clone(),

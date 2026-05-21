@@ -59,6 +59,7 @@ impl ContextStrategy for DefaultContextStrategy {
             checkpoint_state_ref: None,
             max_messages: Some(self.max_messages.max(1)),
             inline_messages: Vec::new(),
+            capability_view: None,
         }
     }
 }
@@ -139,6 +140,7 @@ mod tests {
                 max_model_calls: 32,
                 max_capability_invocations: 64,
             },
+            personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {
                 allow_raw_runtime_backend_selection: false,
                 allow_broad_capability_surface: false,

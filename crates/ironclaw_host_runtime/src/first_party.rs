@@ -12,11 +12,15 @@ use async_trait::async_trait;
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityId, MountView, ResourceEstimate, ResourceScope, ResourceUsage,
-    RuntimeDispatchErrorKind,
+    RuntimeDispatchErrorKind, RuntimeHttpEgress,
 };
 use serde_json::Value;
 
 /// Already-authorized first-party capability dispatch input.
+///
+/// This is host-composed first-party surface, so the struct is `non_exhaustive`:
+/// external crates may inspect fields in custom handlers but must not construct
+/// it with a struct literal.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct FirstPartyCapabilityRequest {
@@ -25,6 +29,7 @@ pub struct FirstPartyCapabilityRequest {
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
     pub filesystem: Arc<dyn RootFilesystem>,
+    pub runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub input: Value,
 }
 
@@ -37,6 +42,13 @@ impl fmt::Debug for FirstPartyCapabilityRequest {
             .field("estimate", &self.estimate)
             .field("mounts", &self.mounts)
             .field("filesystem", &"<root filesystem>")
+            .field(
+                "runtime_http_egress",
+                &self
+                    .runtime_http_egress
+                    .as_ref()
+                    .map(|_| "<runtime http egress>"),
+            )
             .field("input", &self.input)
             .finish()
     }

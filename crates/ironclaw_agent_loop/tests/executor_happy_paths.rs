@@ -61,6 +61,19 @@ async fn calls_then_reply_completes() {
         (CheckpointKind::BeforeModel, 1),
         (CheckpointKind::Final, 1),
     ]);
+    let calls = host.call_log();
+    let append_position = calls
+        .iter()
+        .position(|call| matches!(call, MockHostCall::AppendCapabilityResultRef { .. }))
+        .expect("completed capability result should append transcript evidence");
+    let next_model_position = calls
+        .iter()
+        .enumerate()
+        .filter(|(_, call)| matches!(call, MockHostCall::StreamModel))
+        .nth(1)
+        .map(|(index, _)| index)
+        .expect("model should run again after result evidence");
+    assert!(append_position < next_model_position);
 }
 
 #[tokio::test]

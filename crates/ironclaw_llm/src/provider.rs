@@ -367,6 +367,28 @@ impl ToolCompletionRequest {
         }
     }
 
+    /// Create a tool-aware request from the common completion envelope.
+    pub fn from_completion_request(request: CompletionRequest, tools: Vec<ToolDefinition>) -> Self {
+        let CompletionRequest {
+            messages,
+            model,
+            max_tokens,
+            temperature,
+            stop_sequences,
+            metadata,
+        } = request;
+        Self {
+            messages,
+            tools,
+            model,
+            max_tokens,
+            temperature,
+            stop_sequences,
+            tool_choice: None,
+            metadata,
+        }
+    }
+
     /// Set model override.
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());

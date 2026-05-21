@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -186,7 +187,16 @@ pub trait SecretsStore: Send + Sync {
     ) -> Result<SecretConsumeResult, SecretError> {
         match self.get_decrypted(user_id, name).await {
             Ok(secret) => {
-                if secret.expose() != expected_value {
+                // Constant-time comparison: AES-GCM authenticated decrypt rules out
+                // any direct ciphertext oracle, but `decrypted.expose() != expected`
+                // would short-circuit on the first differing byte and leak the
+                // plaintext through response-latency timing. `ct_eq` walks the full
+                // buffer regardless of where the bytes diverge. See F1 (HIGH —
+                // timing oracle) in the 2026-05 audit.
+                let matches: bool =
+                    ConstantTimeEq::ct_eq(secret.expose().as_bytes(), expected_value.as_bytes())
+                        .into();
+                if !matches {
                     return Ok(SecretConsumeResult::Mismatched);
                 }
                 self.delete(user_id, name).await?;
@@ -307,7 +317,12 @@ impl SecretsStore for InMemorySecretsStore {
         let decrypted = self
             .crypto
             .decrypt(&secret.encrypted_value, &secret.key_salt, &aad)?;
-        if decrypted.expose() != expected_value {
+        // Constant-time comparison — see F1 in the 2026-05 audit and the matching
+        // doc comment on the trait default body. `!=` short-circuits and leaks the
+        // first differing byte through measurable response-latency variance.
+        let matches: bool =
+            ConstantTimeEq::ct_eq(decrypted.expose().as_bytes(), expected_value.as_bytes()).into();
+        if !matches {
             return Ok(SecretConsumeResult::Mismatched);
         }
         secrets.remove(&key);

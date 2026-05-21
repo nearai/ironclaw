@@ -1,10 +1,14 @@
+mod support;
+
+use support::legacy_capability_fixture_to_v2;
+
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::TrustAwareCapabilityDispatchAuthorizer;
 use ironclaw_events::InMemoryAuditSink;
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationServices, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
@@ -17,6 +21,14 @@ use ironclaw_resources::{InMemoryResourceGovernor, ResourceGovernor};
 use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde_json::json;
+
+fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
+        ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
+        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev,
+    ))
+    .unwrap()
+}
 
 #[tokio::test]
 async fn default_runtime_installs_configured_builtin_obligation_services() {
@@ -60,6 +72,7 @@ async fn default_runtime_installs_configured_builtin_obligation_services() {
         dispatcher.clone(),
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_builtin_obligation_services(&services);
 
@@ -264,7 +277,7 @@ impl CapabilityDispatcher for ObligationAwareDispatcher {
 }
 
 fn registry_with_echo_capability() -> ExtensionRegistry {
-    let manifest = ExtensionManifest::parse(ECHO_MANIFEST).unwrap();
+    let manifest = parse_manifest(ECHO_MANIFEST);
     let package = ExtensionPackage::from_manifest(
         manifest,
         VirtualPath::new("/system/extensions/echo").unwrap(),
@@ -273,6 +286,16 @@ fn registry_with_echo_capability() -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     registry.insert(package).unwrap();
     registry
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
 }
 
 fn execution_context_with_dispatch_grant() -> ExecutionContext {

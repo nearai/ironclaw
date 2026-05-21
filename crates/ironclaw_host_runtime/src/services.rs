@@ -31,11 +31,15 @@ use ironclaw_extensions::{ExtensionRegistry, ExtensionRuntime};
 use ironclaw_filesystem::LibSqlRootFilesystem;
 #[cfg(feature = "postgres")]
 use ironclaw_filesystem::PostgresRootFilesystem;
-use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_filesystem::{LocalFilesystem, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{
     CapabilityDispatchRequest, CapabilityDispatcher, CapabilityId, DispatchError,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeDispatchErrorKind,
     RuntimeHttpEgress, RuntimeKind,
+    runtime_policy::{
+        DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode,
+        ProcessBackendKind, RuntimeProfile, SecretMode,
+    },
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutor, McpInvocation};
 use ironclaw_network::NetworkHttpEgress;
@@ -48,33 +52,21 @@ use ironclaw_reborn_event_store::{
     RebornEventStoreConfig, RebornEventStoreError, RebornEventStores, RebornProfile,
     build_reborn_event_stores,
 };
-#[cfg(feature = "libsql")]
-use ironclaw_resources::LibSqlResourceGovernorStore;
-#[cfg(feature = "postgres")]
-use ironclaw_resources::PostgresResourceGovernorStore;
-use ironclaw_resources::{InMemoryResourceGovernor, ResourceGovernor};
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_resources::{PersistentResourceGovernor, ResourceError};
-#[cfg(feature = "libsql")]
-use ironclaw_run_state::LibSqlRunStateApprovalStore;
-#[cfg(feature = "postgres")]
-use ironclaw_run_state::PostgresRunStateApprovalStore;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use ironclaw_run_state::RunStateError;
+use ironclaw_resources::{
+    FilesystemResourceGovernorStore, InMemoryResourceGovernor, PersistentResourceGovernor,
+    ResourceGovernor,
+};
 use ironclaw_run_state::{
-    ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
-    RunStateApprovalStore, RunStateStore,
+    ApprovalRequestStore, FilesystemApprovalRequestStore, FilesystemRunStateStore,
+    InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateApprovalStore, RunStateStore,
 };
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
 use ironclaw_secrets::{InMemorySecretStore, SecretStore};
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
-#[cfg(feature = "libsql")]
-use ironclaw_turns::LibSqlTurnStateStore;
-#[cfg(feature = "postgres")]
-use ironclaw_turns::PostgresTurnStateStore;
 use ironclaw_turns::{
-    DefaultTurnCoordinator, InMemoryTurnStateStore, NoopTurnRunWakeNotifier, RunProfileResolver,
-    TurnRunWakeNotifier, TurnStateStore, runner::TurnRunTransitionPort,
+    DefaultTurnCoordinator, FilesystemTurnStateStore, InMemoryTurnStateStore,
+    NoopTurnRunWakeNotifier, RunProfileResolver, TurnRunWakeNotifier, TurnStateStore,
+    runner::TurnRunTransitionPort,
 };
 use ironclaw_wasm::{
     DenyWasmHostHttp, EmptyWasmRuntimeCredentials, PreparedWitTool, WasmError,
@@ -151,6 +143,7 @@ impl ProductionWiringConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProductionWiringComponent {
     RuntimeBackend,
+    RuntimePolicy,
     TrustPolicy,
     Filesystem,
     ResourceGovernor,
@@ -177,6 +170,7 @@ impl ProductionWiringComponent {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::RuntimeBackend => "runtime_backend",
+            Self::RuntimePolicy => "runtime_policy",
             Self::TrustPolicy => "trust_policy",
             Self::Filesystem => "filesystem",
             Self::ResourceGovernor => "resource_governor",
@@ -381,6 +375,7 @@ where
     runtime_http_egress: SharedRuntimeHttpEgress,
     wasm_credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
+    runtime_policy: Option<EffectiveRuntimePolicy>,
     script_runtime: Option<Arc<dyn ScriptExecutor>>,
     mcp_runtime: Option<Arc<dyn McpExecutor>>,
     first_party_runtime: Option<Arc<FirstPartyCapabilityRegistry>>,
@@ -437,6 +432,7 @@ where
             runtime_http_egress: Arc::new(Mutex::new(None)),
             wasm_credential_provider: None,
             runtime_health: None,
+            runtime_policy: None,
             script_runtime: None,
             mcp_runtime: None,
             first_party_runtime: None,
@@ -502,6 +498,7 @@ where
             runtime_http_egress,
             wasm_credential_provider,
             runtime_health,
+            runtime_policy,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -535,6 +532,7 @@ where
             runtime_http_egress,
             wasm_credential_provider,
             runtime_health,
+            runtime_policy,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -563,7 +561,6 @@ where
         self.with_root_filesystem(filesystem)
     }
 
-    #[cfg(any(feature = "libsql", feature = "postgres"))]
     fn with_resource_governor<T>(self, governor: Arc<T>) -> HostRuntimeServices<F, T, S, R>
     where
         T: ResourceGovernor + 'static,
@@ -590,6 +587,7 @@ where
             runtime_http_egress,
             wasm_credential_provider,
             runtime_health,
+            runtime_policy,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -633,6 +631,7 @@ where
             runtime_http_egress,
             wasm_credential_provider,
             runtime_health,
+            runtime_policy,
             script_runtime,
             mcp_runtime,
             first_party_runtime,
@@ -645,30 +644,26 @@ where
         }
     }
 
-    #[cfg(feature = "libsql")]
-    pub async fn with_libsql_resource_governor(
+    /// Replace the in-memory governor with a filesystem-backed
+    /// [`PersistentResourceGovernor`] over the supplied
+    /// [`ScopedFilesystem`]. Backend choice (libSQL, Postgres, in-memory,
+    /// local disk) is a property of the underlying
+    /// [`RootFilesystem`](ironclaw_filesystem::RootFilesystem); see
+    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`.
+    pub fn with_filesystem_resource_governor<FsBackend>(
         self,
-        db: Arc<libsql::Database>,
-    ) -> Result<
-        HostRuntimeServices<F, PersistentResourceGovernor<LibSqlResourceGovernorStore>, S, R>,
-        ResourceError,
-    > {
-        let store = LibSqlResourceGovernorStore::new(db);
-        store.run_migrations().await?;
-        Ok(self.with_resource_governor(Arc::new(PersistentResourceGovernor::new(store))))
-    }
-
-    #[cfg(feature = "postgres")]
-    pub async fn with_postgres_resource_governor(
-        self,
-        pool: deadpool_postgres::Pool,
-    ) -> Result<
-        HostRuntimeServices<F, PersistentResourceGovernor<PostgresResourceGovernorStore>, S, R>,
-        ResourceError,
-    > {
-        let store = PostgresResourceGovernorStore::new(pool);
-        store.run_migrations().await?;
-        Ok(self.with_resource_governor(Arc::new(PersistentResourceGovernor::new(store))))
+        scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
+    ) -> HostRuntimeServices<
+        F,
+        PersistentResourceGovernor<FilesystemResourceGovernorStore<FsBackend>>,
+        S,
+        R,
+    >
+    where
+        FsBackend: RootFilesystem + 'static,
+    {
+        let store = FilesystemResourceGovernorStore::new(scoped_filesystem);
+        self.with_resource_governor(Arc::new(PersistentResourceGovernor::new(store)))
     }
 
     pub fn resource_governor(&self) -> Arc<G> {
@@ -760,28 +755,41 @@ where
         self
     }
 
-    /// Builds and attaches the libSQL transactional combined run-state and
-    /// approval-request store for production/shared callers.
-    #[cfg(feature = "libsql")]
-    pub async fn with_libsql_run_state_approval_store(
+    /// Builds and attaches filesystem-backed run-state and approval-request
+    /// stores over the supplied [`ScopedFilesystem`].
+    ///
+    /// Production composition wires both `/run-state` and `/approvals` mount
+    /// aliases on the same [`ScopedFilesystem`], so a single handle is enough
+    /// to construct both stores: each takes its alias-relative subtree
+    /// through the shared `MountView`. The backend choice
+    /// (`LibSqlRootFilesystem`, `PostgresRootFilesystem`,
+    /// `InMemoryBackend`, …) happens at the `RootFilesystem` layer, not here.
+    ///
+    /// Replaces the legacy `with_libsql_run_state_approval_store` /
+    /// `with_postgres_run_state_approval_store` builders (deleted along with
+    /// the corresponding per-backend `Filesystem*Store` siblings — see
+    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`).
+    ///
+    /// Unlike the deleted SQL combined store this wiring does NOT carry an
+    /// atomic `save_pending_and_block_approval` transition: filesystem
+    /// stores ship as two independent records under distinct mount aliases.
+    /// Callers fall back to the two-step
+    /// `ApprovalRequestStore::save_pending` then
+    /// `RunStateStore::block_approval` path in
+    /// `ironclaw_capabilities::host`. Production composition should layer a
+    /// transactional wrapper (or accept the two-step semantics) when
+    /// cross-record atomicity matters.
+    pub fn with_filesystem_run_state<FsBackend>(
         self,
-        db: Arc<libsql::Database>,
-    ) -> Result<Self, RunStateError> {
-        let store = Arc::new(LibSqlRunStateApprovalStore::new(db));
-        store.run_migrations().await?;
-        Ok(self.with_run_state_approval_store(store))
-    }
-
-    /// Builds and attaches the PostgreSQL transactional combined run-state and
-    /// approval-request store for production/shared callers.
-    #[cfg(feature = "postgres")]
-    pub async fn with_postgres_run_state_approval_store(
-        self,
-        pool: deadpool_postgres::Pool,
-    ) -> Result<Self, RunStateError> {
-        let store = Arc::new(PostgresRunStateApprovalStore::new(pool));
-        store.run_migrations().await?;
-        Ok(self.with_run_state_approval_store(store))
+        scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
+    ) -> Self
+    where
+        FsBackend: RootFilesystem + 'static,
+    {
+        let run_state = Arc::new(FilesystemRunStateStore::new(Arc::clone(&scoped_filesystem)));
+        let approval_requests = Arc::new(FilesystemApprovalRequestStore::new(scoped_filesystem));
+        self.with_run_state(run_state)
+            .with_approval_requests(approval_requests)
     }
 
     pub fn with_capability_leases<T>(mut self, capability_leases: Arc<T>) -> Self
@@ -838,24 +846,33 @@ where
         self
     }
 
-    #[cfg(feature = "libsql")]
-    pub async fn with_libsql_turn_state_store(
+    /// Builds and attaches a filesystem-backed turn-state store over the
+    /// supplied [`ScopedFilesystem`].
+    ///
+    /// Production composition wires the `/turns` mount alias on the same
+    /// [`ScopedFilesystem`] that carries the other consumer-store aliases,
+    /// so a single handle is enough to construct this store: it takes its
+    /// alias-relative subtree through the shared `MountView`. The backend
+    /// choice (`LibSqlRootFilesystem`, `PostgresRootFilesystem`,
+    /// `InMemoryBackend`, …) happens at the [`RootFilesystem`] layer, not
+    /// here.
+    ///
+    /// Replaces the legacy `with_libsql_turn_state_store` /
+    /// `with_postgres_turn_state_store` builders (deleted along with the
+    /// corresponding per-backend `Filesystem*Store` siblings — see
+    /// `docs/plans/2026-05-16-scoped-filesystem-tenant-isolation.md`). The
+    /// filesystem store implements both [`TurnStateStore`] and
+    /// [`TurnRunTransitionPort`], so this wiring covers production
+    /// readiness for both axes.
+    pub fn with_filesystem_turn_state_store<FsBackend>(
         self,
-        db: Arc<libsql::Database>,
-    ) -> Result<Self, ironclaw_turns::TurnError> {
-        let store = Arc::new(LibSqlTurnStateStore::new(db));
-        store.run_migrations().await?;
-        Ok(self.with_turn_state_and_transition_port(store))
-    }
-
-    #[cfg(feature = "postgres")]
-    pub async fn with_postgres_turn_state_store(
-        self,
-        pool: deadpool_postgres::Pool,
-    ) -> Result<Self, ironclaw_turns::TurnError> {
-        let store = Arc::new(PostgresTurnStateStore::new(pool));
-        store.run_migrations().await?;
-        Ok(self.with_turn_state_and_transition_port(store))
+        scoped_filesystem: Arc<ScopedFilesystem<FsBackend>>,
+    ) -> Self
+    where
+        FsBackend: RootFilesystem + 'static,
+    {
+        let store = Arc::new(FilesystemTurnStateStore::new(scoped_filesystem));
+        self.with_turn_state_and_transition_port(store)
     }
 
     pub fn with_turn_run_wake_notifier<T>(mut self, notifier: Arc<T>) -> Self
@@ -1004,6 +1021,11 @@ where
         self
     }
 
+    pub fn with_runtime_policy(mut self, policy: EffectiveRuntimePolicy) -> Self {
+        self.runtime_policy = Some(policy);
+        self
+    }
+
     pub fn with_wasm_runtime_credential_provider<T>(mut self, provider: Arc<T>) -> Self
     where
         T: WasmRuntimeCredentialProvider + 'static,
@@ -1118,6 +1140,21 @@ where
             ProductionWiringComponent::TrustPolicy,
             self.trust_policy_configured,
         );
+        self.push_missing(
+            &mut issues,
+            ProductionWiringComponent::RuntimePolicy,
+            self.runtime_policy.is_some(),
+        );
+        if let Some(runtime_policy) = &self.runtime_policy
+            && let Some(reason) = local_only_runtime_policy_reason(runtime_policy)
+        {
+            self.push_issue(
+                &mut issues,
+                ProductionWiringComponent::RuntimePolicy,
+                ProductionWiringIssueKind::LocalOnlyImplementation,
+                Some(reason),
+            );
+        }
         self.push_missing(
             &mut issues,
             ProductionWiringComponent::RunState,
@@ -1583,6 +1620,7 @@ where
                 Arc::new(FirstPartyRuntimeAdapter::from_registry(
                     Arc::clone(runtime),
                     Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
+                    Arc::clone(&self.runtime_http_egress),
                 )),
             );
         }
@@ -1650,12 +1688,17 @@ where
                 self.registered_runtime_backends(),
             ))
         });
+        let runtime_policy = self
+            .runtime_policy
+            .clone()
+            .unwrap_or_else(local_testing_runtime_policy);
 
         let mut runtime = DefaultHostRuntime::new(
             Arc::clone(&self.registry),
             dispatcher,
             Arc::clone(&self.authorizer),
             self.surface_version.clone(),
+            runtime_policy,
         )
         .with_trust_policy_dyn(Arc::clone(&self.trust_policy))
         .with_process_manager(process_manager)
@@ -1677,7 +1720,6 @@ where
         if let Some(capability_leases) = &self.capability_leases {
             runtime = runtime.with_capability_leases(Arc::clone(capability_leases));
         }
-
         runtime.with_obligation_handler(Arc::new(self.builtin_obligation_handler()))
     }
 
@@ -1744,6 +1786,41 @@ where
         }
         declared.all(|descriptor| first_party_runtime.contains_handler(&descriptor.id))
     }
+}
+
+fn local_testing_runtime_policy() -> EffectiveRuntimePolicy {
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
+        DeploymentMode::LocalSingleUser,
+        RuntimeProfile::LocalDev,
+    ))
+    .unwrap_or_else(|error| {
+        panic!("LocalSingleUser + LocalDev runtime policy must resolve for local testing: {error}")
+    })
+}
+
+fn local_only_runtime_policy_reason(policy: &EffectiveRuntimePolicy) -> Option<&'static str> {
+    if matches!(policy.deployment, DeploymentMode::LocalSingleUser) {
+        return Some("local_single_user_deployment");
+    }
+    if matches!(
+        policy.filesystem_backend,
+        FilesystemBackendKind::HostWorkspace
+    ) {
+        return Some("host_workspace_filesystem");
+    }
+    if matches!(policy.process_backend, ProcessBackendKind::LocalHost) {
+        return Some("local_host_process");
+    }
+    if matches!(policy.network_mode, NetworkMode::Direct) {
+        return Some("direct_network");
+    }
+    if matches!(
+        policy.secret_mode,
+        SecretMode::ScrubbedEnv | SecretMode::InheritedEnv
+    ) {
+        return Some("local_secret_environment");
+    }
+    None
 }
 
 fn set_runtime_http_egress(
@@ -1918,16 +1995,19 @@ where
 struct FirstPartyRuntimeAdapter {
     registry: Arc<FirstPartyCapabilityRegistry>,
     filesystem: Arc<dyn RootFilesystem>,
+    runtime_http_egress: SharedRuntimeHttpEgress,
 }
 
 impl FirstPartyRuntimeAdapter {
     pub(crate) fn from_registry(
         registry: Arc<FirstPartyCapabilityRegistry>,
         filesystem: Arc<dyn RootFilesystem>,
+        runtime_http_egress: SharedRuntimeHttpEgress,
     ) -> Self {
         Self {
             registry,
             filesystem,
+            runtime_http_egress,
         }
     }
 }
@@ -1973,6 +2053,7 @@ where
             estimate: request.estimate,
             mounts: request.mounts,
             filesystem: Arc::clone(&self.filesystem),
+            runtime_http_egress: runtime_http_egress(&self.runtime_http_egress),
             input: request.input,
         }))
         .catch_unwind()
@@ -2490,7 +2571,7 @@ mod tests {
     };
     use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
     use ironclaw_resources::InMemoryResourceGovernor;
-    use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+    use ironclaw_secrets::{InMemorySecretStore, SecretMaterial};
 
     use super::*;
 
@@ -2527,36 +2608,34 @@ mod tests {
     }
 
     #[test]
-    fn host_http_egress_helper_leases_secret_store_credentials_from_graph_store() {
-        let graph_secret_store = Arc::new(InMemorySecretStore::new());
+    fn host_http_egress_helper_injects_staged_credentials_from_handoff_store() {
         let scope = sample_scope();
         let capability_id = sample_capability_id();
         let handle = SecretHandle::new("api-token").unwrap();
-        block_on_secret_store(graph_secret_store.put(
-            scope.clone(),
-            handle.clone(),
-            SecretMaterial::from("graph-secret"),
-        ))
-        .expect("graph secret should be seeded");
 
         let network = RecordingNetwork::ok();
         let recorded_requests = Arc::clone(&network.requests);
         let services = test_services()
-            .with_secret_store(Arc::clone(&graph_secret_store))
+            .with_secret_store(Arc::new(InMemorySecretStore::new()))
             .try_with_host_http_egress(network)
             .expect("host HTTP egress should wire with graph secret store");
         services
             .network_policy_store
             .insert(&scope, &capability_id, staged_policy());
+        services
+            .secret_injection_store
+            .insert(
+                &scope,
+                &capability_id,
+                &handle,
+                SecretMaterial::from("staged-secret"),
+            )
+            .expect("staged credential should be seeded");
         let egress = configured_egress(&services);
 
         egress
-            .execute(request_with_secret_store_lease(
-                scope,
-                capability_id,
-                handle,
-            ))
-            .expect("SecretStoreLease should lease from graph-owned secret store");
+            .execute(request_with_staged_credential(scope, capability_id, handle))
+            .expect("StagedObligation should inject from handoff store");
 
         let requests = recorded_requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
@@ -2567,7 +2646,7 @@ mod tests {
                 .find(|(name, _)| name == "authorization"),
             Some(&(
                 "authorization".to_string(),
-                "Bearer graph-secret".to_string()
+                "Bearer staged-secret".to_string()
             ))
         );
     }
@@ -2624,7 +2703,7 @@ mod tests {
         }
     }
 
-    fn request_with_secret_store_lease(
+    fn request_with_staged_credential(
         scope: ResourceScope,
         capability_id: CapabilityId,
         handle: SecretHandle,
@@ -2632,7 +2711,9 @@ mod tests {
         RuntimeHttpEgressRequest {
             credential_injections: vec![RuntimeCredentialInjection {
                 handle,
-                source: RuntimeCredentialSource::SecretStoreLease,
+                source: RuntimeCredentialSource::StagedObligation {
+                    capability_id: capability_id.clone(),
+                },
                 target: RuntimeCredentialTarget::Header {
                     name: "authorization".to_string(),
                     prefix: Some("Bearer ".to_string()),
@@ -2681,14 +2762,6 @@ mod tests {
             deny_private_ip_ranges: false,
             max_egress_bytes: Some(1),
         }
-    }
-
-    fn block_on_secret_store<T>(future: impl std::future::Future<Output = T>) -> T {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
-            .block_on(future)
     }
 
     #[derive(Clone)]

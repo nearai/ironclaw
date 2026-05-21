@@ -88,11 +88,16 @@ pub(super) fn operation_allowed(
         FilesystemOperation::Delete => permissions.delete,
         FilesystemOperation::CreateDirAll => permissions.write,
         FilesystemOperation::MountLocal => false,
-        // Coding tools never use the unified record/index/txn surface — they
-        // are bytes-only. If a future code path routes here, treat record-
-        // plane reads as `read` and writes as `write` to stay fail-closed.
+        // Coding tools never use the unified record/index/txn/event surface
+        // — they are bytes-only. If a future code path routes here, treat
+        // record-plane reads as `read` and writes as `write` to stay
+        // fail-closed. `Append` (event-plane append) is distinct from
+        // `AppendFile` (byte-plane append onto a regular file) but both
+        // map to `permissions.write`.
         FilesystemOperation::Query => permissions.read && permissions.list,
-        FilesystemOperation::EnsureIndex | FilesystemOperation::BeginTxn => permissions.write,
+        FilesystemOperation::EnsureIndex
+        | FilesystemOperation::BeginTxn
+        | FilesystemOperation::Append => permissions.write,
         FilesystemOperation::Tail => permissions.read,
     }
 }
@@ -182,6 +187,8 @@ pub(super) fn is_workspace_path(path: &str) -> bool {
     let scoped = scoped_path_input(path);
     let normalized = scoped.trim_start_matches('/');
     let relative = normalized.strip_prefix("workspace/").unwrap_or(normalized);
+    // This intentionally protects only root workspace memory files. Project
+    // docs such as README.md remain writable through the scoped filesystem.
     (!relative.contains('/') && WORKSPACE_FILES.contains(&relative))
         || relative.starts_with("daily/")
         || relative.starts_with("context/")

@@ -1,7 +1,30 @@
 use async_trait::async_trait;
 use ironclaw_host_api::CapabilityId;
+use serde::{Deserialize, Serialize};
 
 use crate::state::LoopExecutionState;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CapabilityFilter {
+    /// Allow everything the host would otherwise expose.
+    #[default]
+    All,
+    /// Only the capabilities whose IDs appear in the set.
+    AllowOnly(Vec<CapabilityId>),
+    /// Everything except the capabilities whose IDs appear in the set.
+    Deny(Vec<CapabilityId>),
+}
+
+impl CapabilityFilter {
+    pub(crate) fn permits(&self, capability_id: &CapabilityId) -> bool {
+        match self {
+            Self::All => true,
+            Self::AllowOnly(allowed) => allowed.contains(capability_id),
+            Self::Deny(denied) => !denied.contains(capability_id),
+        }
+    }
+}
 
 /// Decides which capabilities are visible to the model this iteration.
 ///
@@ -32,22 +55,6 @@ impl CapabilityStrategy for DefaultCapabilityStrategy {
     async fn filter(&self, _state: &LoopExecutionState) -> CapabilityFilter {
         CapabilityFilter::All
     }
-}
-
-/// Strategy-side narrowing of the visible capability surface.
-///
-/// Variants are mutually exclusive. The host always applies its own
-/// scope/grant/auth filters on top; this filter only narrows.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum CapabilityFilter {
-    /// Allow everything the host would otherwise expose.
-    #[default]
-    All,
-    /// Only the capabilities whose IDs appear in the set.
-    AllowOnly(Vec<CapabilityId>),
-    /// Everything except the capabilities whose IDs appear in the set.
-    Deny(Vec<CapabilityId>),
 }
 
 #[cfg(test)]
@@ -125,6 +132,7 @@ mod tests {
                 max_model_calls: 32,
                 max_capability_invocations: 64,
             },
+            personal_context_policy: ironclaw_turns::run_profile::PersonalContextPolicy::Excluded,
             runtime_constraints: RuntimeProfileConstraints {
                 allow_raw_runtime_backend_selection: false,
                 allow_broad_capability_surface: false,

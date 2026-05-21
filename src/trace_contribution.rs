@@ -1608,7 +1608,7 @@ pub fn synthetic_privacy_filter_canary_values() -> Vec<String> {
     vec![
         "trace-canary.person@example.invalid".to_string(),
         "tc_canary_secret_0123456789abcdef".to_string(),
-        "/tmp/trace_canary_private/path.txt".to_string(),
+        "/tmp/trace_canary_private/path.txt".to_string(), // safety: canary text intentionally includes a synthetic private path.
     ]
 }
 
@@ -6342,7 +6342,7 @@ fn trace_credit_notice_fingerprint(records: &[LocalTraceSubmissionRecord]) -> Op
         hasher.update(part.as_bytes());
         hasher.update(b"\n");
     }
-    Some(format!("sha256:{}", hex::encode(&hasher.finalize()[..16])))
+    Some(format!("sha256:{}", hex::encode(&hasher.finalize()[..16]))) // safety: slicing the fixed-size SHA-256 byte array.
 }
 
 fn upsert_trace_credit_notice_outbox_item_unlocked(
@@ -6602,7 +6602,7 @@ fn safe_trace_credit_notice_channel(channel: &str) -> String {
 
 fn trace_credit_notice_delivery_error_hash(error: &str) -> String {
     let digest = Sha256::digest(error.as_bytes());
-    format!("sha256:{}", hex::encode(&digest[..8]))
+    format!("sha256:{}", hex::encode(&digest[..8])) // safety: slicing the fixed-size SHA-256 byte array.
 }
 
 fn trace_credit_notice_delivery_error_kind(error: &str) -> TraceQueueTelemetryFailureKind {
@@ -7161,7 +7161,7 @@ fn trace_queue_error_hash(error: &anyhow::Error) -> String {
     let mut hasher = Sha256::new();
     hasher.update(error.to_string().as_bytes());
     let digest = hasher.finalize();
-    format!("sha256:{}", hex::encode(&digest[..8]))
+    format!("sha256:{}", hex::encode(&digest[..8])) // safety: slicing the fixed-size SHA-256 byte array.
 }
 
 fn sanitized_trace_submission_failure_reason(error: &anyhow::Error) -> (String, String) {
@@ -7537,7 +7537,7 @@ fn sync_directory_best_effort(path: &Path, label: &str) {
 
 fn scope_hash(scope: &str) -> String {
     let digest = Sha256::digest(scope.as_bytes());
-    hex::encode(&digest[..16])
+    hex::encode(&digest[..16]) // safety: slicing the fixed-size SHA-256 byte array.
 }
 
 #[cfg(test)]

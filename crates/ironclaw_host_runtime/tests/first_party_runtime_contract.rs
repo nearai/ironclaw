@@ -9,7 +9,8 @@ use futures_util::FutureExt;
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::{
-    CapabilityManifest, ExtensionManifest, ExtensionPackage, ExtensionRegistry, ExtensionRuntime,
+    CapabilityManifest, CapabilityVisibility, ExtensionManifest, ExtensionPackage,
+    ExtensionRegistry, ExtensionRuntime, MANIFEST_SCHEMA_VERSION, ManifestSource,
 };
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::*;
@@ -400,21 +401,37 @@ impl FirstPartyCapabilityHandler for RecordingFirstPartyHandler {
 fn first_party_registry() -> ExtensionRegistry {
     let package = ExtensionPackage::from_manifest(
         ExtensionManifest {
+            schema_version: MANIFEST_SCHEMA_VERSION.to_string(),
             id: provider_id(),
             name: "Host".to_string(),
             version: "0.1.0".to_string(),
             description: "Host-owned first-party capabilities".to_string(),
+            source: ManifestSource::HostBundled,
             requested_trust: RequestedTrustClass::FirstPartyRequested,
-            trust: TrustClass::Sandbox,
+            descriptor_trust_default: TrustClass::Sandbox,
             runtime: ExtensionRuntime::FirstParty {
                 service: "host".to_string(),
             },
+            host_apis: Vec::new(),
             capabilities: vec![CapabilityManifest {
                 id: capability_id(),
+                implements: Vec::new(),
                 description: "Reports host status".to_string(),
                 effects: vec![EffectKind::DispatchCapability],
                 default_permission: PermissionMode::Allow,
-                parameters_schema: json!({"type":"object"}),
+                visibility: CapabilityVisibility::Model,
+                input_schema_ref: CapabilityProfileSchemaRef::new(
+                    "schemas/host/status.input.v1.json",
+                )
+                .unwrap(),
+                output_schema_ref: CapabilityProfileSchemaRef::new(
+                    "schemas/host/status.output.v1.json",
+                )
+                .unwrap(),
+                prompt_doc_ref: Some(
+                    CapabilityProfileSchemaRef::new("prompts/host/status.md").unwrap(),
+                ),
+                required_host_ports: Vec::new(),
                 resource_profile: None,
             }],
         },

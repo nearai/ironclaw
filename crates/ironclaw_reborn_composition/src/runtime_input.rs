@@ -12,16 +12,19 @@
 //!   waiting on submitted turns to finish.
 //! - **Runtime identity** — tenant/agent and source/reply binding identifiers
 //!   supplied by the caller so this composition root stays channel-agnostic.
+//! - **Skill context source** — optional caller-supplied source for
+//!   model-visible skill instructions, preserving the no-skill behavior when
+//!   absent.
 //!
 //! The CLI builds this struct from env vars / config; it does not call into
 //! `ironclaw_reborn` or `ironclaw_llm` directly.
 
-#[cfg(test)]
 use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(test)]
 use ironclaw_loop_support::HostManagedModelGateway;
+use ironclaw_loop_support::HostSkillContextSource;
 
 use crate::input::RebornBuildInput;
 
@@ -63,6 +66,12 @@ impl Default for RebornRuntimeIdentity {
 /// composition-owned types so callers (the CLI) never name `ironclaw_llm`
 /// directly.
 #[cfg(feature = "root-llm-provider")]
+pub const DEFAULT_LLM_REQUEST_TIMEOUT_SECS: u64 = 120;
+
+pub const DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+pub const DEFAULT_TURN_RUNNER_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+#[cfg(feature = "root-llm-provider")]
 #[derive(Debug, Clone)]
 pub struct RebornLlmConfig {
     /// Provider id (e.g. `"openai"`, `"anthropic"`, `"ollama"`).
@@ -102,8 +111,59 @@ impl RebornLlmConfig {
             base_url: base_url.into(),
             api_key: Some(api_key),
             protocol: "open_ai_completions".to_string(),
-            request_timeout_secs: 120,
+            request_timeout_secs: DEFAULT_LLM_REQUEST_TIMEOUT_SECS,
             extra_headers: Vec::new(),
+        }
+    }
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[derive(Debug, Clone)]
+pub struct ResolvedRebornLlm {
+    provider_id: String,
+    model: String,
+    pub(crate) source: ResolvedRebornLlmSource,
+}
+
+#[cfg(feature = "root-llm-provider")]
+#[derive(Debug, Clone)]
+pub(crate) enum ResolvedRebornLlmSource {
+    Catalog(RebornLlmConfig),
+    RegistryProvider {
+        config: ironclaw_llm::RegistryProviderConfig,
+        request_timeout_secs: u64,
+    },
+}
+
+#[cfg(feature = "root-llm-provider")]
+impl ResolvedRebornLlm {
+    pub fn provider_id(&self) -> &str {
+        &self.provider_id
+    }
+
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    pub fn from_catalog(config: RebornLlmConfig) -> Self {
+        Self {
+            provider_id: config.provider_id.clone(),
+            model: config.model.clone(),
+            source: ResolvedRebornLlmSource::Catalog(config),
+        }
+    }
+
+    pub(crate) fn from_registry_provider(
+        config: ironclaw_llm::RegistryProviderConfig,
+        request_timeout_secs: u64,
+    ) -> Self {
+        Self {
+            provider_id: config.provider_id.clone(),
+            model: config.model.clone(),
+            source: ResolvedRebornLlmSource::RegistryProvider {
+                config,
+                request_timeout_secs,
+            },
         }
     }
 }
@@ -118,8 +178,8 @@ pub struct TurnRunnerSettings {
 impl Default for TurnRunnerSettings {
     fn default() -> Self {
         Self {
-            heartbeat_interval: Duration::from_secs(10),
-            poll_interval: Duration::from_secs(2),
+            heartbeat_interval: DEFAULT_TURN_RUNNER_HEARTBEAT_INTERVAL,
+            poll_interval: DEFAULT_TURN_RUNNER_POLL_INTERVAL,
         }
     }
 }
@@ -146,10 +206,11 @@ impl Default for PollSettings {
 pub struct RebornRuntimeInput {
     pub services: Option<RebornBuildInput>,
     #[cfg(feature = "root-llm-provider")]
-    pub llm: Option<RebornLlmConfig>,
+    pub llm: Option<ResolvedRebornLlm>,
     pub runner: TurnRunnerSettings,
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
+    pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     #[cfg(test)]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
 }
@@ -167,6 +228,7 @@ impl RebornRuntimeInput {
             runner: TurnRunnerSettings::default(),
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
+            skill_context_source: None,
             #[cfg(test)]
             model_gateway_override: None,
         }
@@ -174,6 +236,12 @@ impl RebornRuntimeInput {
 
     #[cfg(feature = "root-llm-provider")]
     pub fn with_llm(mut self, llm: RebornLlmConfig) -> Self {
+        self.llm = Some(ResolvedRebornLlm::from_catalog(llm));
+        self
+    }
+
+    #[cfg(feature = "root-llm-provider")]
+    pub fn with_resolved_llm(mut self, llm: ResolvedRebornLlm) -> Self {
         self.llm = Some(llm);
         self
     }
@@ -190,6 +258,11 @@ impl RebornRuntimeInput {
 
     pub fn with_identity(mut self, identity: RebornRuntimeIdentity) -> Self {
         self.identity = identity;
+        self
+    }
+
+    pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
+        self.skill_context_source = Some(source);
         self
     }
 

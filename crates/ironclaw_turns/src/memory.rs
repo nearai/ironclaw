@@ -1843,9 +1843,9 @@ impl RunRecord {
     }
 
     fn state(&self) -> TurnRunState {
-        let _ = &self.actor;
         TurnRunState {
             scope: self.scope.clone(),
+            actor: Some(self.actor.clone()),
             turn_id: self.turn_id,
             run_id: self.run_id,
             status: self.status,

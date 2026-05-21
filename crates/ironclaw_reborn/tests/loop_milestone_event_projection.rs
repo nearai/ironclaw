@@ -38,9 +38,9 @@ use ironclaw_turns::{
     InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
     LoopCompletionKind, LoopExitId, LoopFailureKind, ReplyTargetBindingRef, ResumeTurnRequest,
     RunProfileId, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionPolicy, TurnCheckpointId,
-    TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
-    TurnStateStore, TurnStatus,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
+    TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId,
+    TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostErrorKind, BatchPolicyKind, FinalizeAssistantMessage, LoopCheckpointKind,
         LoopDriverId, LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter,
@@ -327,6 +327,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -335,6 +336,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
             messages: success_prompt.messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -400,6 +402,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
             checkpoint_state_ref: None,
             max_messages: Some(8),
             inline_messages: Vec::new(),
+            capability_view: None,
         })
         .await
         .unwrap();
@@ -408,6 +411,7 @@ async fn drive_model_reply_milestones_and_assert_projection(
             messages: failure_prompt.messages,
             surface_version: None,
             model_preference: None,
+            capability_view: None,
         })
         .await
         .unwrap_err();
@@ -766,6 +770,7 @@ impl HostFixture {
         let run_id = TurnRunId::new();
         let state = TurnRunState {
             scope: turn_scope.clone(),
+            actor: Some(TurnActor::new(user_id())),
             turn_id,
             run_id,
             status: TurnStatus::Running,

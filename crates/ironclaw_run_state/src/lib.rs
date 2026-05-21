@@ -3,28 +3,27 @@
 //! `ironclaw_run_state` stores the current lifecycle state for host-managed
 //! invocations. It is separate from runtime events: events are append-only
 //! history, while run state answers "what is this invocation waiting on now?".
-//! Feature-gated PostgreSQL and libSQL stores provide transactional durable
-//! backends for production composition; in-memory and filesystem stores remain
-//! useful for tests, local demos, and single-process profiles.
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-mod db;
-
-#[cfg(feature = "libsql")]
-pub use db::{LibSqlApprovalRequestStore, LibSqlRunStateApprovalStore, LibSqlRunStateStore};
-#[cfg(feature = "postgres")]
-pub use db::{PostgresApprovalRequestStore, PostgresRunStateApprovalStore, PostgresRunStateStore};
+//!
+//! Durable persistence is provided by [`FilesystemRunStateStore`] and
+//! [`FilesystemApprovalRequestStore`] over a
+//! [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). The
+//! `RootFilesystem` choice (libSQL-backed, PostgreSQL-backed, in-memory, or
+//! local-disk) is made at the filesystem layer — the consumer-store level no
+//! longer carries per-backend impls.
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard, OnceLock},
+    sync::{Arc, Mutex, MutexGuard, OnceLock, Weak},
 };
 
 use async_trait::async_trait;
-use ironclaw_filesystem::{FilesystemError, RootFilesystem};
+use ironclaw_filesystem::{
+    CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, RecordVersion,
+    RootFilesystem, ScopedFilesystem,
+};
 use ironclaw_host_api::{
     AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, HostApiError, InvocationId,
-    MissionId, ProjectId, ResourceScope, TenantId, ThreadId, UserId, VirtualPath,
+    MissionId, ProjectId, ResourceScope, ScopedPath, TenantId, ThreadId, UserId,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -535,32 +534,108 @@ impl ApprovalRequestStore for InMemoryApprovalRequestStore {
     }
 }
 
-/// Filesystem-backed run-state store under resource-owner-scoped `/engine` paths.
-pub struct FilesystemRunStateStore<'a, F>
+/// Bound on the CAS retry loop. Picked deliberately small: in normal
+/// operation the in-process serialization mutex collapses contention to
+/// one writer at a time, and cross-process contention on filesystem mounts
+/// is what audit finding F2 is meant to surface — exhausting retries is
+/// expected to be a backend error, not a routine condition.
+const FILESYSTEM_CAS_RETRIES: usize = 8;
+
+/// Filesystem-backed run-state store under the `/run-state` mount alias.
+///
+/// Construct with a [`ScopedFilesystem`] over any [`RootFilesystem`]. The
+/// [`ScopedFilesystem`] resolves the `/run-state` alias to a
+/// tenant/user-scoped [`VirtualPath`](ironclaw_host_api::VirtualPath) per
+/// its [`MountView`](ironclaw_host_api::MountView) and enforces per-op ACL
+/// before any backend dispatch — so tenant isolation is structural rather
+/// than something this crate has to re-derive from `ResourceScope.tenant_id`
+/// / `user_id`. Within-tenant axes (agent/project/mission/thread) remain in
+/// the alias-relative path because they are not covered by the per-tenant
+/// `MountAlias`.
+pub struct FilesystemRunStateStore<F>
 where
     F: RootFilesystem,
 {
-    filesystem: &'a F,
+    filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<'a, F> FilesystemRunStateStore<'a, F>
+impl<F> FilesystemRunStateStore<F>
 where
     F: RootFilesystem,
 {
-    pub fn new(filesystem: &'a F) -> Self {
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self { filesystem }
     }
 
-    async fn write_record(&self, record: &RunRecord) -> Result<(), RunStateError> {
-        let path = run_record_path(&record.scope, record.invocation_id)?;
-        let bytes = serialize_pretty(record)?;
-        self.filesystem.write_file(&path, &bytes).await?;
-        Ok(())
+    fn record_entry(record: &RunRecord) -> Result<Entry, RunStateError> {
+        let body = serialize_pretty(record)?;
+        Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+    }
+
+    async fn read_versioned(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+    ) -> Result<Option<(RunRecord, RecordVersion)>, RunStateError> {
+        let path = run_record_path(scope, invocation_id)?;
+        let Some(versioned) = self.filesystem.get(scope, &path).await? else {
+            return Ok(None);
+        };
+        let record = deserialize::<RunRecord>(&versioned.entry.body)?;
+        if same_scope_owner(&record.scope, scope) {
+            Ok(Some((record, versioned.version)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Read-modify-write a run record with optimistic CAS and bounded retry.
+    ///
+    /// `mutate` projects the staged record onto its new shape. The loop
+    /// re-reads on `VersionMismatch` (cross-process contention) and on
+    /// `Unsupported` falls back to `CasExpectation::Any` so the byte-only
+    /// `LocalFilesystem` path stays serializable through the in-process
+    /// lock map. (Audit finding F2.)
+    async fn apply_update<M>(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        mut mutate: M,
+    ) -> Result<RunRecord, RunStateError>
+    where
+        M: FnMut(&mut RunRecord),
+    {
+        let path = run_record_path(scope, invocation_id)?;
+        for _ in 0..FILESYSTEM_CAS_RETRIES {
+            let (mut record, version) = self
+                .read_versioned(scope, invocation_id)
+                .await?
+                .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+            mutate(&mut record);
+            let entry = Self::record_entry(&record)?;
+            match put_with_cas(
+                self.filesystem.as_ref(),
+                scope,
+                &path,
+                entry,
+                CasExpectation::Version(version),
+            )
+            .await
+            {
+                Ok(()) => return Ok(record),
+                Err(PutError::VersionMismatch) => continue,
+                Err(PutError::Other(error)) => return Err(error),
+            }
+        }
+        Err(RunStateError::Backend(format!(
+            "filesystem CAS retries exhausted for path {}",
+            path.as_str()
+        )))
     }
 }
 
 #[async_trait]
-impl<F> RunStateStore for FilesystemRunStateStore<'_, F>
+impl<F> RunStateStore for FilesystemRunStateStore<F>
 where
     F: RootFilesystem,
 {
@@ -568,11 +643,6 @@ where
         let path = run_record_path(&start.scope, start.invocation_id)?;
         let record_lock = filesystem_record_lock(&path);
         let _guard = record_lock.lock().await;
-        if self.get(&start.scope, start.invocation_id).await?.is_some() {
-            return Err(RunStateError::InvocationAlreadyExists {
-                invocation_id: start.invocation_id,
-            });
-        }
         let record = RunRecord {
             invocation_id: start.invocation_id,
             capability_id: start.capability_id,
@@ -581,8 +651,22 @@ where
             approval_request_id: None,
             error_kind: None,
         };
-        self.write_record(&record).await?;
-        Ok(record)
+        let entry = Self::record_entry(&record)?;
+        match put_with_cas(
+            self.filesystem.as_ref(),
+            &record.scope,
+            &path,
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        {
+            Ok(()) => Ok(record),
+            Err(PutError::VersionMismatch) => Err(RunStateError::InvocationAlreadyExists {
+                invocation_id: record.invocation_id,
+            }),
+            Err(PutError::Other(error)) => Err(error),
+        }
     }
 
     async fn block_approval(
@@ -594,15 +678,12 @@ where
         let path = run_record_path(scope, invocation_id)?;
         let record_lock = filesystem_record_lock(&path);
         let _guard = record_lock.lock().await;
-        let mut record = self
-            .get(scope, invocation_id)
-            .await?
-            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
-        record.status = RunStatus::BlockedApproval;
-        record.approval_request_id = Some(approval.id);
-        record.error_kind = None;
-        self.write_record(&record).await?;
-        Ok(record)
+        self.apply_update(scope, invocation_id, |record| {
+            record.status = RunStatus::BlockedApproval;
+            record.approval_request_id = Some(approval.id);
+            record.error_kind = None;
+        })
+        .await
     }
 
     async fn block_auth(
@@ -614,15 +695,12 @@ where
         let path = run_record_path(scope, invocation_id)?;
         let record_lock = filesystem_record_lock(&path);
         let _guard = record_lock.lock().await;
-        let mut record = self
-            .get(scope, invocation_id)
-            .await?
-            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
-        record.status = RunStatus::BlockedAuth;
-        record.approval_request_id = None;
-        record.error_kind = Some(error_kind);
-        self.write_record(&record).await?;
-        Ok(record)
+        self.apply_update(scope, invocation_id, |record| {
+            record.status = RunStatus::BlockedAuth;
+            record.approval_request_id = None;
+            record.error_kind = Some(error_kind.clone());
+        })
+        .await
     }
 
     async fn complete(
@@ -633,15 +711,12 @@ where
         let path = run_record_path(scope, invocation_id)?;
         let record_lock = filesystem_record_lock(&path);
         let _guard = record_lock.lock().await;
-        let mut record = self
-            .get(scope, invocation_id)
-            .await?
-            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
-        record.status = RunStatus::Completed;
-        record.approval_request_id = None;
-        record.error_kind = None;
-        self.write_record(&record).await?;
-        Ok(record)
+        self.apply_update(scope, invocation_id, |record| {
+            record.status = RunStatus::Completed;
+            record.approval_request_id = None;
+            record.error_kind = None;
+        })
+        .await
     }
 
     async fn fail(
@@ -653,15 +728,12 @@ where
         let path = run_record_path(scope, invocation_id)?;
         let record_lock = filesystem_record_lock(&path);
         let _guard = record_lock.lock().await;
-        let mut record = self
-            .get(scope, invocation_id)
-            .await?
-            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
-        record.status = RunStatus::Failed;
-        record.approval_request_id = None;
-        record.error_kind = Some(error_kind);
-        self.write_record(&record).await?;
-        Ok(record)
+        self.apply_update(scope, invocation_id, |record| {
+            record.status = RunStatus::Failed;
+            record.approval_request_id = None;
+            record.error_kind = Some(error_kind.clone());
+        })
+        .await
     }
 
     async fn get(
@@ -669,18 +741,10 @@ where
         scope: &ResourceScope,
         invocation_id: InvocationId,
     ) -> Result<Option<RunRecord>, RunStateError> {
-        let path = run_record_path(scope, invocation_id)?;
-        let bytes = match self.filesystem.read_file(&path).await {
-            Ok(bytes) => bytes,
-            Err(error) if is_not_found(&error) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        let record = deserialize::<RunRecord>(&bytes)?;
-        if same_scope_owner(&record.scope, scope) {
-            Ok(Some(record))
-        } else {
-            Ok(None)
-        }
+        Ok(self
+            .read_versioned(scope, invocation_id)
+            .await?
+            .map(|(record, _)| record))
     }
 
     async fn records_for_scope(
@@ -688,7 +752,7 @@ where
         scope: &ResourceScope,
     ) -> Result<Vec<RunRecord>, RunStateError> {
         let root = run_records_root(scope)?;
-        let entries = match self.filesystem.list_dir(&root).await {
+        let entries = match self.filesystem.list_dir(scope, &root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -696,12 +760,14 @@ where
         let mut records = Vec::new();
         for entry in entries {
             if entry.name.ends_with(".json") {
-                let bytes = match self.filesystem.read_file(&entry.path).await {
-                    Ok(bytes) => bytes,
-                    Err(error) if is_not_found(&error) => continue,
-                    Err(error) => return Err(error.into()),
+                // `list_dir` returns post-resolution `VirtualPath`s; reconstruct
+                // the alias-relative `ScopedPath` so the follow-up `get` still
+                // runs through the per-op ACL.
+                let child = join_scoped(&root, &entry.name)?;
+                let Some(versioned) = self.filesystem.get(scope, &child).await? else {
+                    continue;
                 };
-                let record = deserialize::<RunRecord>(&bytes)?;
+                let record = deserialize::<RunRecord>(&versioned.entry.body)?;
                 if same_scope_owner(&record.scope, scope) {
                     records.push(record);
                 }
@@ -712,22 +778,52 @@ where
     }
 }
 
-/// Filesystem-backed approval request store under resource-owner-scoped `/engine` paths.
-pub struct FilesystemApprovalRequestStore<'a, F>
+/// Filesystem-backed approval request store under the `/approvals` mount alias.
+///
+/// See [`FilesystemRunStateStore`] for the structural-tenant-isolation
+/// rationale; this store applies the same shape to approval-request records
+/// under a sibling mount alias so a single composition can wire run state
+/// and approvals to distinct alias targets while sharing one backend.
+pub struct FilesystemApprovalRequestStore<F>
 where
     F: RootFilesystem,
 {
-    filesystem: &'a F,
+    filesystem: Arc<ScopedFilesystem<F>>,
 }
 
-impl<'a, F> FilesystemApprovalRequestStore<'a, F>
+impl<F> FilesystemApprovalRequestStore<F>
 where
     F: RootFilesystem,
 {
-    pub fn new(filesystem: &'a F) -> Self {
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
         Self { filesystem }
     }
 
+    fn record_entry(record: &ApprovalRecord) -> Result<Entry, RunStateError> {
+        let body = serialize_pretty(record)?;
+        Ok(Entry::bytes(body).with_content_type(ContentType::json()))
+    }
+
+    async fn read_versioned(
+        &self,
+        scope: &ResourceScope,
+        request_id: ApprovalRequestId,
+    ) -> Result<Option<(ApprovalRecord, RecordVersion)>, RunStateError> {
+        let path = approval_record_path(scope, request_id)?;
+        let Some(versioned) = self.filesystem.get(scope, &path).await? else {
+            return Ok(None);
+        };
+        let record = deserialize::<ApprovalRecord>(&versioned.entry.body)?;
+        if same_scope_owner(&record.scope, scope) {
+            Ok(Some((record, versioned.version)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Read-modify-write an approval record with optimistic CAS and bounded
+    /// retry. Mirrors `FilesystemRunStateStore::apply_update` — see audit
+    /// finding F2.
     async fn update_status(
         &self,
         scope: &ResourceScope,
@@ -735,33 +831,42 @@ where
         status: ApprovalStatus,
     ) -> Result<ApprovalRecord, RunStateError> {
         let path = approval_record_path(scope, request_id)?;
-        let record_lock = filesystem_record_lock(&path);
-        let _guard = record_lock.lock().await;
-        let mut record = self
-            .get(scope, request_id)
-            .await?
-            .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
-        if record.status != ApprovalStatus::Pending {
-            return Err(RunStateError::ApprovalNotPending {
-                request_id,
-                status: record.status,
-            });
+        for _ in 0..FILESYSTEM_CAS_RETRIES {
+            let (mut record, version) = self
+                .read_versioned(scope, request_id)
+                .await?
+                .ok_or(RunStateError::UnknownApprovalRequest { request_id })?;
+            if record.status != ApprovalStatus::Pending {
+                return Err(RunStateError::ApprovalNotPending {
+                    request_id,
+                    status: record.status,
+                });
+            }
+            record.status = status;
+            let entry = Self::record_entry(&record)?;
+            match put_with_cas(
+                self.filesystem.as_ref(),
+                scope,
+                &path,
+                entry,
+                CasExpectation::Version(version),
+            )
+            .await
+            {
+                Ok(()) => return Ok(record),
+                Err(PutError::VersionMismatch) => continue,
+                Err(PutError::Other(error)) => return Err(error),
+            }
         }
-        record.status = status;
-        self.write_record(&record).await?;
-        Ok(record)
-    }
-
-    async fn write_record(&self, record: &ApprovalRecord) -> Result<(), RunStateError> {
-        let path = approval_record_path(&record.scope, record.request.id)?;
-        let bytes = serialize_pretty(record)?;
-        self.filesystem.write_file(&path, &bytes).await?;
-        Ok(())
+        Err(RunStateError::Backend(format!(
+            "filesystem CAS retries exhausted for path {}",
+            path.as_str()
+        )))
     }
 }
 
 #[async_trait]
-impl<F> ApprovalRequestStore for FilesystemApprovalRequestStore<'_, F>
+impl<F> ApprovalRequestStore for FilesystemApprovalRequestStore<F>
 where
     F: RootFilesystem,
 {
@@ -773,18 +878,27 @@ where
         let path = approval_record_path(&scope, request.id)?;
         let record_lock = filesystem_record_lock(&path);
         let _guard = record_lock.lock().await;
-        if self.get(&scope, request.id).await?.is_some() {
-            return Err(RunStateError::ApprovalRequestAlreadyExists {
-                request_id: request.id,
-            });
-        }
         let record = ApprovalRecord {
             scope,
             request,
             status: ApprovalStatus::Pending,
         };
-        self.write_record(&record).await?;
-        Ok(record)
+        let entry = Self::record_entry(&record)?;
+        match put_with_cas(
+            self.filesystem.as_ref(),
+            &record.scope,
+            &path,
+            entry,
+            CasExpectation::Absent,
+        )
+        .await
+        {
+            Ok(()) => Ok(record),
+            Err(PutError::VersionMismatch) => Err(RunStateError::ApprovalRequestAlreadyExists {
+                request_id: record.request.id,
+            }),
+            Err(PutError::Other(error)) => Err(error),
+        }
     }
 
     async fn get(
@@ -792,18 +906,10 @@ where
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
     ) -> Result<Option<ApprovalRecord>, RunStateError> {
-        let path = approval_record_path(scope, request_id)?;
-        let bytes = match self.filesystem.read_file(&path).await {
-            Ok(bytes) => bytes,
-            Err(error) if is_not_found(&error) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        let record = deserialize::<ApprovalRecord>(&bytes)?;
-        if same_scope_owner(&record.scope, scope) {
-            Ok(Some(record))
-        } else {
-            Ok(None)
-        }
+        Ok(self
+            .read_versioned(scope, request_id)
+            .await?
+            .map(|(record, _)| record))
     }
 
     async fn approve(
@@ -811,6 +917,9 @@ where
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
     ) -> Result<ApprovalRecord, RunStateError> {
+        let path = approval_record_path(scope, request_id)?;
+        let record_lock = filesystem_record_lock(&path);
+        let _guard = record_lock.lock().await;
         self.update_status(scope, request_id, ApprovalStatus::Approved)
             .await
     }
@@ -820,6 +929,9 @@ where
         scope: &ResourceScope,
         request_id: ApprovalRequestId,
     ) -> Result<ApprovalRecord, RunStateError> {
+        let path = approval_record_path(scope, request_id)?;
+        let record_lock = filesystem_record_lock(&path);
+        let _guard = record_lock.lock().await;
         self.update_status(scope, request_id, ApprovalStatus::Denied)
             .await
     }
@@ -842,8 +954,7 @@ where
                 status: record.status,
             });
         }
-        let path = approval_record_path(scope, request_id)?;
-        self.filesystem.delete(&path).await?;
+        self.filesystem.delete(scope, &path).await?;
         Ok(record)
     }
 
@@ -852,7 +963,7 @@ where
         scope: &ResourceScope,
     ) -> Result<Vec<ApprovalRecord>, RunStateError> {
         let root = approval_records_root(scope)?;
-        let entries = match self.filesystem.list_dir(&root).await {
+        let entries = match self.filesystem.list_dir(scope, &root).await {
             Ok(entries) => entries,
             Err(error) if is_not_found(&error) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -860,12 +971,15 @@ where
         let mut records = Vec::new();
         for entry in entries {
             if entry.name.ends_with(".json") {
-                let bytes = match self.filesystem.read_file(&entry.path).await {
-                    Ok(bytes) => bytes,
-                    Err(error) if is_not_found(&error) => continue,
-                    Err(error) => return Err(error.into()),
+                // See `FilesystemRunStateStore::records_for_scope` — `list_dir`
+                // returns post-resolution `VirtualPath`s; rebuild the
+                // alias-relative `ScopedPath` so the follow-up `get` runs
+                // through the per-op ACL.
+                let child = join_scoped(&root, &entry.name)?;
+                let Some(versioned) = self.filesystem.get(scope, &child).await? else {
+                    continue;
                 };
-                let record = deserialize::<ApprovalRecord>(&bytes)?;
+                let record = deserialize::<ApprovalRecord>(&versioned.entry.body)?;
                 if same_scope_owner(&record.scope, scope) {
                     records.push(record);
                 }
@@ -876,72 +990,139 @@ where
     }
 }
 
+// Path layout under the `/run-state` and `/approvals` mount aliases:
+//
+//     /run-state[/agents/<agent>][/projects/<project>][/missions/<mission>][/threads/<thread>]/runs/<invocation_id>.json
+//     /approvals[/agents/<agent>][/projects/<project>][/missions/<mission>][/threads/<thread>]/<request_id>.json
+//
+// Tenant + user identity moves into the caller's `MountView` per the
+// per-tenant `MountAlias` rewriting, so neither prefix is encoded in the
+// path itself. Within-tenant sub-scope axes (agent/project/mission/thread)
+// stay in the alias-relative path because they are within-tenant scoping
+// not covered by the per-tenant `MountAlias`.
+
+const RUN_STATE_PREFIX: &str = "/run-state";
+const APPROVALS_PREFIX: &str = "/approvals";
+
 fn run_record_path(
     scope: &ResourceScope,
     invocation_id: InvocationId,
-) -> Result<VirtualPath, RunStateError> {
-    VirtualPath::new(format!(
+) -> Result<ScopedPath, RunStateError> {
+    scoped_path(&format!(
         "{}/{invocation_id}.json",
-        run_records_root(scope)?.as_str()
+        run_records_root_string(scope)
     ))
-    .map_err(invalid_path)
 }
 
-fn run_records_root(scope: &ResourceScope) -> Result<VirtualPath, RunStateError> {
-    VirtualPath::new(format!("{}/runs", tenant_user_root(scope))).map_err(invalid_path)
+fn run_records_root(scope: &ResourceScope) -> Result<ScopedPath, RunStateError> {
+    scoped_path(&run_records_root_string(scope))
+}
+
+fn run_records_root_string(scope: &ResourceScope) -> String {
+    format!("{}/runs", scope_owner_alias_string(RUN_STATE_PREFIX, scope))
 }
 
 fn approval_record_path(
     scope: &ResourceScope,
     request_id: ApprovalRequestId,
-) -> Result<VirtualPath, RunStateError> {
-    VirtualPath::new(format!(
+) -> Result<ScopedPath, RunStateError> {
+    scoped_path(&format!(
         "{}/{request_id}.json",
-        approval_records_root(scope)?.as_str()
+        approval_records_root_string(scope)
     ))
-    .map_err(invalid_path)
 }
 
-fn approval_records_root(scope: &ResourceScope) -> Result<VirtualPath, RunStateError> {
-    VirtualPath::new(format!("{}/approvals", tenant_user_root(scope))).map_err(invalid_path)
+fn approval_records_root(scope: &ResourceScope) -> Result<ScopedPath, RunStateError> {
+    scoped_path(&approval_records_root_string(scope))
+}
+
+fn approval_records_root_string(scope: &ResourceScope) -> String {
+    scope_owner_alias_string(APPROVALS_PREFIX, scope)
+}
+
+/// Build the alias-relative owner prefix for a scope under the given mount
+/// alias. Tenant and user are intentionally absent — they live in the
+/// `MountView` the caller supplied. Sub-scope axes (agent/project/mission/
+/// thread) stay in the path so within-tenant cross-scope isolation still
+/// works for stores sharing one alias target.
+fn scope_owner_alias_string(prefix: &'static str, scope: &ResourceScope) -> String {
+    let mut base = String::from(prefix);
+    if let Some(agent_id) = &scope.agent_id {
+        base.push_str("/agents/");
+        base.push_str(agent_id.as_str());
+    }
+    if let Some(project_id) = &scope.project_id {
+        base.push_str("/projects/");
+        base.push_str(project_id.as_str());
+    }
+    if let Some(mission_id) = &scope.mission_id {
+        base.push_str("/missions/");
+        base.push_str(mission_id.as_str());
+    }
+    if let Some(thread_id) = &scope.thread_id {
+        base.push_str("/threads/");
+        base.push_str(thread_id.as_str());
+    }
+    base
+}
+
+fn scoped_path(raw: &str) -> Result<ScopedPath, RunStateError> {
+    ScopedPath::new(raw).map_err(invalid_path)
+}
+
+/// Join a leaf segment onto a [`ScopedPath`] prefix. Mirrors the engine /
+/// processes / secrets / outbound stores' `join_scoped` helper: `list_dir`
+/// returns post-resolution [`VirtualPath`](ironclaw_host_api::VirtualPath)s,
+/// but the follow-up `get` must run through the `ScopedFilesystem` so the
+/// per-op ACL is enforced — so callers strip the leaf name and rejoin it
+/// onto the original `ScopedPath` prefix.
+fn join_scoped(prefix: &ScopedPath, leaf: &str) -> Result<ScopedPath, RunStateError> {
+    scoped_path(&format!(
+        "{}/{}",
+        prefix.as_str().trim_end_matches('/'),
+        leaf
+    ))
 }
 
 type FilesystemRecordLock = Arc<tokio::sync::Mutex<()>>;
 
-static FILESYSTEM_RECORD_LOCKS: OnceLock<Mutex<HashMap<String, FilesystemRecordLock>>> =
+// Per-path async serialization for filesystem-backed run/approval stores.
+//
+// Values are stored as `Weak<Mutex<()>>` so the map does not pin lock entries
+// alive once all in-flight operations on a path have released their `Arc`
+// clones. Each call:
+//
+//   1. Opportunistically prunes entries whose `Weak` no longer upgrades —
+//      keeps the map size bounded under high tenant churn (audit finding F1).
+//   2. Returns the live `Arc` if one is still in flight on this path.
+//   3. Otherwise installs a fresh `Arc` and hands back a clone.
+//
+// Race note: we hold the outer `std::sync::Mutex` for the whole upgrade-or-
+// insert window, so two callers asking for the same path receive the same
+// `Arc`; the previously-stale entry path is the only one that creates a new
+// lock, and only when no other `Arc` exists.
+static FILESYSTEM_RECORD_LOCKS: OnceLock<Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>> =
     OnceLock::new();
 
-fn filesystem_record_lock(path: &VirtualPath) -> FilesystemRecordLock {
+fn filesystem_record_lock(path: &ScopedPath) -> FilesystemRecordLock {
     let locks = FILESYSTEM_RECORD_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = locks
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    Arc::clone(
-        guard
-            .entry(path.as_str().to_string())
-            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-    )
-}
 
-fn tenant_user_root(scope: &ResourceScope) -> String {
-    let mut base = format!(
-        "/engine/tenants/{}/users/{}",
-        scope.tenant_id.as_str(),
-        scope.user_id.as_str()
-    );
-    if let Some(agent_id) = &scope.agent_id {
-        base = format!("{base}/agents/{}", agent_id.as_str());
+    // Drop entries whose owning Arc has been released. Cheap O(n) scan;
+    // run-state and approval traffic only ever holds a handful of live
+    // paths at once, and pruning here avoids a separate sweeper task.
+    guard.retain(|_, weak| weak.strong_count() > 0);
+
+    let key = path.as_str();
+    if let Some(existing) = guard.get(key).and_then(Weak::upgrade) {
+        return existing;
     }
-    if let Some(project_id) = &scope.project_id {
-        base = format!("{base}/projects/{}", project_id.as_str());
-    }
-    if let Some(mission_id) = &scope.mission_id {
-        base = format!("{base}/missions/{}", mission_id.as_str());
-    }
-    if let Some(thread_id) = &scope.thread_id {
-        base = format!("{base}/threads/{}", thread_id.as_str());
-    }
-    base
+
+    let fresh: FilesystemRecordLock = Arc::new(tokio::sync::Mutex::new(()));
+    guard.insert(key.to_string(), Arc::downgrade(&fresh));
+    fresh
 }
 
 fn invalid_path(error: HostApiError) -> RunStateError {
@@ -974,4 +1155,120 @@ where
 
 fn is_not_found(error: &FilesystemError) -> bool {
     matches!(error, FilesystemError::NotFound { .. })
+}
+
+/// Local error classification for the CAS-aware put helper.
+enum PutError {
+    /// Backend reported `VersionMismatch` (cross-process raced us). The
+    /// caller retries by re-reading the current record.
+    VersionMismatch,
+    /// Any other backend or serialization failure; surface to caller.
+    Other(RunStateError),
+}
+
+/// Issue a `put` honoring the requested CAS expectation.
+///
+/// Falls back to `CasExpectation::Any` when the backend reports `Unsupported`
+/// for the request — `LocalFilesystem` is byte-only and only accepts `Any`.
+/// On a byte-only backend the in-process record-lock map provides
+/// intra-process serialization; cross-process safety on those backends is
+/// documented as a process-local limitation
+/// (`crates/ironclaw_run_state/CLAUDE.md`).
+///
+/// On the byte-only fallback path, `CasExpectation::Absent` is emulated via
+/// a `get` precheck so callers still see `PutError::VersionMismatch` when
+/// the record already exists. The check-then-write race is closed by the
+/// in-process lock map; cross-process callers fall back to the documented
+/// process-local limitation.
+async fn put_with_cas<F>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    path: &ScopedPath,
+    entry: Entry,
+    cas: CasExpectation,
+) -> Result<(), PutError>
+where
+    F: RootFilesystem,
+{
+    let fallback_entry = entry.clone();
+    match filesystem.put(scope, path, entry, cas).await {
+        Ok(_) => Ok(()),
+        Err(FilesystemError::VersionMismatch { .. }) => Err(PutError::VersionMismatch),
+        Err(FilesystemError::Unsupported {
+            operation: FilesystemOperation::WriteFile,
+            ..
+        }) => {
+            if matches!(cas, CasExpectation::Absent) {
+                let existing = filesystem
+                    .get(scope, path)
+                    .await
+                    .map_err(|error| PutError::Other(error.into()))?;
+                if existing.is_some() {
+                    return Err(PutError::VersionMismatch);
+                }
+            }
+            filesystem
+                .put(scope, path, fallback_entry, CasExpectation::Any)
+                .await
+                .map(|_| ())
+                .map_err(|error| PutError::Other(error.into()))
+        }
+        Err(error) => Err(PutError::Other(error.into())),
+    }
+}
+
+#[cfg(test)]
+mod lock_map_tests {
+    use super::*;
+
+    /// Returns whether the lock map currently holds an entry for `key`
+    /// whose `Weak` still upgrades to a live `Arc`.
+    fn entry_is_live(key: &str) -> bool {
+        FILESYSTEM_RECORD_LOCKS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(key)
+            .and_then(Weak::upgrade)
+            .is_some()
+    }
+
+    #[test]
+    fn filesystem_record_lock_returns_same_arc_while_holders_alive() {
+        let path = ScopedPath::new("/run-state/projects/p/runs/share.json".to_string()).unwrap();
+        let a = filesystem_record_lock(&path);
+        let b = filesystem_record_lock(&path);
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "concurrent callers must share the lock"
+        );
+    }
+
+    #[test]
+    fn filesystem_record_lock_prunes_dead_entries_on_reuse() {
+        // Hold a lock for a path, then drop it; the next call against a
+        // *different* path triggers the pruning sweep, after which the
+        // first path's entry must no longer be reachable. Demonstrates
+        // the map does not grow unboundedly with tenant/path churn
+        // (audit finding F1).
+        let path = ScopedPath::new("/run-state/projects/p/runs/prune.json".to_string()).unwrap();
+        let other = ScopedPath::new("/run-state/projects/p/runs/other.json".to_string()).unwrap();
+
+        let arc = filesystem_record_lock(&path);
+        assert!(
+            entry_is_live(path.as_str()),
+            "acquisition should produce a live entry"
+        );
+        drop(arc);
+
+        // After the Arc drops, the Weak in the map is dead. Acquire any
+        // other path to trigger the prune sweep — the dead entry for
+        // the first path must be gone afterwards.
+        let _other_arc = filesystem_record_lock(&other);
+        assert!(
+            !entry_is_live(path.as_str()),
+            "dead Weak entry should have been pruned for {}",
+            path.as_str()
+        );
+    }
 }

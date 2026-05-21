@@ -919,6 +919,9 @@ fn audit_envelope_serializes_redacted_summary_shape() {
 
 #[test]
 fn host_port_ids_are_host_namespaced_and_serializable() {
+    let http_egress = HostPortId::new(HOST_RUNTIME_HTTP_EGRESS_PORT_ID).unwrap();
+    assert_eq!(http_egress.as_str(), "host.runtime.http_egress");
+
     let id = HostPortId::new("host.storage.sql_transaction.first_party").unwrap();
     assert_eq!(id.as_str(), "host.storage.sql_transaction.first_party");
     assert_eq!(serde_json::to_value(&id).unwrap(), json!(id.as_str()));

@@ -166,7 +166,12 @@ fn validate_access_claim(
 /// attempts so the saga can retry without losing the audit trail.
 fn is_transient_validator_error(error: &OutboundError) -> bool {
     match error {
-        OutboundError::Backend | OutboundError::Serialization => true,
+        // `CasConflict` is the typed compare-and-swap failure from the
+        // filesystem-backed store. It is internal to the store layer and the
+        // store's bounded retry loop converts it to `Backend` before returning
+        // to the service, so it should never reach this classification site —
+        // but classify it as transient (retryable) for defence in depth.
+        OutboundError::Backend | OutboundError::Serialization | OutboundError::CasConflict => true,
         OutboundError::InvalidRequest { .. }
         | OutboundError::SubscriptionScopeMismatch
         | OutboundError::AccessDenied

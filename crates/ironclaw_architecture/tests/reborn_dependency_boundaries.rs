@@ -131,7 +131,9 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         "crates/ironclaw_reborn_cli/src/commands/mod.rs",
         "crates/ironclaw_reborn_cli/src/commands/completion.rs",
         "crates/ironclaw_reborn_cli/src/commands/doctor.rs",
+        "crates/ironclaw_reborn_cli/src/commands/repl.rs",
         "crates/ironclaw_reborn_cli/src/commands/run.rs",
+        "crates/ironclaw_reborn_cli/src/commands/serve.rs",
         "crates/ironclaw_reborn_cli/src/context.rs",
     ];
     for path in command_module_paths {
@@ -166,6 +168,27 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         [],
         "ironclaw_reborn_config must remain a standalone boot contract crate with no IronClaw workspace dependencies of any dependency kind",
     );
+
+    let cli_runtime_source =
+        std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/src/runtime.rs"))
+            .expect("Reborn CLI runtime.rs must be readable");
+    assert!(
+        cli_runtime_source.contains("build_reborn_runtime"),
+        "Reborn CLI should enter the assembled runtime through ironclaw_reborn_composition::build_reborn_runtime"
+    );
+    for forbidden in [
+        "use ironclaw_host_runtime::",
+        "use ironclaw_reborn::",
+        "use ironclaw_threads::",
+        "use ironclaw_turns::",
+        "HostRuntimeServices",
+        "build_default_planned_runtime",
+    ] {
+        assert!(
+            !cli_runtime_source.contains(forbidden),
+            "Reborn CLI runtime.rs must not wire lower-level Reborn runtime pieces directly via `{forbidden}`; keep REPL as a UX shell over ironclaw_reborn_composition."
+        );
+    }
 }
 
 #[test]
@@ -461,17 +484,29 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
     // otherwise have to live in the CLI or root app, which the dep rules
     // forbid).
     let composition_runtime = root.join("crates/ironclaw_reborn_composition/src/runtime.rs");
+    let composition_local_dev_runtime =
+        root.join("crates/ironclaw_reborn_composition/src/runtime/local_dev.rs");
     assert!(
         composition_runtime.exists(),
         "expected Reborn runtime assembly at {}",
         composition_runtime.display()
     );
+    assert!(
+        composition_local_dev_runtime.exists(),
+        "expected local-dev runtime assembly at {}",
+        composition_local_dev_runtime.display()
+    );
     let composition_runtime_source = std::fs::read_to_string(&composition_runtime)
         .expect("composition runtime.rs must be readable");
+    let composition_runtime_sources = format!(
+        "{}\n{}",
+        composition_runtime_source,
+        std::fs::read_to_string(&composition_local_dev_runtime)
+            .expect("composition runtime/local_dev.rs must be readable")
+    );
     for required in [
         "pub async fn build_reborn_runtime",
         "pub struct RebornRuntime",
-        "use ironclaw_reborn::loop_driver_host::",
         "use ironclaw_reborn::runtime::",
         "build_default_planned_runtime",
         "DefaultPlannedRuntimeParts",
@@ -483,6 +518,130 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
              ingress points can avoid importing `ironclaw_reborn` directly."
         );
     }
+    assert!(
+        composition_runtime_sources.contains("use ironclaw_reborn::loop_driver_host::"),
+        "composition runtime module set missing `use ironclaw_reborn::loop_driver_host::` -- \
+         the host adapter assembly may live in a runtime submodule, but it must stay inside \
+         `ironclaw_reborn_composition` rather than the CLI or other ingress points."
+    );
+}
+
+/// Lock the boot-config TOML + provider-catalog layering for the
+/// standalone `ironclaw-reborn` binary.
+///
+/// Three properties:
+///
+/// 1. `ironclaw_reborn_config` continues to expose the boot-time parser
+///    (`RebornConfigFile`) and the file-path accessors
+///    (`RebornHome::config_file_path` / `providers_file_path`). These are
+///    the surface the CLI relies on to find both files without
+///    hardcoding the paths itself, and they're what shell tooling /
+///    operator runbooks pattern-match on.
+///
+/// 2. The provider catalog file lives at `<home>/providers.json` —
+///    same filename as v1's `~/.ironclaw/providers.json` so operator
+///    muscle memory transfers and the same JSON editor tooling
+///    applies. The boot TOML lives at `<home>/config.toml`. Changing
+///    either filename breaks all existing operator-side documentation.
+///
+/// 3. `RebornConfigFile` rejects inline secret material at parse time.
+///    The unit test in `secrets_guard` covers the patterns; this
+///    boundary test asserts that the rejection path is *wired through*
+///    `RebornConfigFile::validate` (file-level grep). A regression
+///    that bypasses the guard for the boot file fails here loudly
+///    rather than silently round-tripping a secret through git.
+#[test]
+fn reborn_boot_config_file_layout_is_pinned() {
+    let root = workspace_root();
+
+    let config_lib = std::fs::read_to_string(root.join("crates/ironclaw_reborn_config/src/lib.rs"))
+        .expect("reborn config lib.rs must be readable");
+    for required_export in [
+        "pub use config_file::",
+        "RebornConfigFile",
+        "REBORN_CONFIG_API_VERSION",
+        "InlineSecretError",
+    ] {
+        assert!(
+            config_lib.contains(required_export),
+            "ironclaw_reborn_config/src/lib.rs must export `{required_export}`; \
+             see reborn_boot_config_file_layout_is_pinned for context"
+        );
+    }
+
+    let home_src = std::fs::read_to_string(root.join("crates/ironclaw_reborn_config/src/home.rs"))
+        .expect("reborn config home.rs must be readable");
+    for required_method in ["pub fn config_file_path", "pub fn providers_file_path"] {
+        assert!(
+            home_src.contains(required_method),
+            "RebornHome must expose `{required_method}` so the CLI / composition can locate \
+             the boot files without hardcoding paths; see \
+             reborn_boot_config_file_layout_is_pinned"
+        );
+    }
+    // File names — these match v1's `~/.ironclaw/providers.json` so the
+    // same operator tooling / documentation applies.
+    assert!(
+        home_src.contains("\"config.toml\""),
+        "boot config file name must be `config.toml`"
+    );
+    assert!(
+        home_src.contains("\"providers.json\""),
+        "provider catalog file name must be `providers.json` to match v1's filename for \
+         operator-tooling compatibility"
+    );
+
+    // The boot TOML parser must wire the inline-secret guard. A
+    // regression that bypasses it (e.g. a future contributor adds a
+    // new section and forgets to call `reject_inline_secret`) would
+    // silently allow pasted credentials through.
+    let config_file_src =
+        std::fs::read_to_string(root.join("crates/ironclaw_reborn_config/src/config_file.rs"))
+            .expect("reborn config_file.rs must be readable");
+    assert!(
+        config_file_src.contains("reject_inline_secret"),
+        "RebornConfigFile::validate must call `reject_inline_secret` on operator-pasteable \
+         fields. See `docs/reborn/contracts/secrets.md` and epic #3036's `Pitfalls & \
+         Landmines` section: \"Do not bake secret material into blueprints/config.\""
+    );
+
+    // Provider-catalog load-from-path must be reachable from
+    // composition without forcing `ironclaw_reborn_config` to depend
+    // on `ironclaw_llm` (which would violate _config's standalone
+    // boundary). The composition crate is the legitimate consumer.
+    let llm_catalog = root.join("crates/ironclaw_reborn_composition/src/llm_catalog.rs");
+    assert!(
+        llm_catalog.exists(),
+        "composition must expose a catalog resolver at {} so the CLI can stitch \
+         RebornConfigFile + providers.json into a RebornLlmConfig without itself \
+         depending on ironclaw_llm",
+        llm_catalog.display()
+    );
+    let llm_catalog_src = std::fs::read_to_string(&llm_catalog).expect("llm_catalog readable");
+    for required in [
+        "pub fn resolve_llm_selection_against_catalog",
+        "pub fn resolve_against_registry",
+        "ProviderRegistry::load_from_path",
+    ] {
+        assert!(
+            llm_catalog_src.contains(required),
+            "composition llm_catalog must expose `{required}` so the resolver path is \
+             stable; see reborn_boot_config_file_layout_is_pinned"
+        );
+    }
+
+    // `ironclaw_llm` must expose the path-overridable loader so the
+    // catalog file location is selectable per-deployment (the
+    // standalone Reborn binary points at $IRONCLAW_REBORN_HOME/providers.json,
+    // not v1's ~/.ironclaw/providers.json).
+    let llm_registry = std::fs::read_to_string(root.join("crates/ironclaw_llm/src/registry.rs"))
+        .expect("ironclaw_llm registry.rs must be readable");
+    assert!(
+        llm_registry.contains("pub fn load_from_path"),
+        "ironclaw_llm::ProviderRegistry must expose `load_from_path` so callers can \
+         override the user-overlay catalog path; v1 hardcoded ~/.ironclaw/providers.json \
+         and the Reborn standalone needs its own home."
+    );
 }
 
 #[test]
@@ -891,6 +1050,12 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         "crates/ironclaw_turns/src",
         "crates/ironclaw_threads/src",
         "crates/ironclaw_loop_support/src",
+        // WebChat v2 route surface: a Product/API crate that exposes
+        // axum handler functions and `IngressRouteDescriptor`s but must
+        // never bind sockets or call `axum::serve` itself — that is
+        // host composition's job. Without this entry the contract fails
+        // open for the new route crate.
+        "crates/ironclaw_webui_v2/src",
     ];
 
     let mut violations = Vec::new();
@@ -971,6 +1136,59 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             ],
         },
         BoundaryRule {
+            // WebChat v2 route surface must only reach into Reborn through
+            // the host-facing facade and the ingress vocabulary; anything
+            // that lets a handler touch the dispatcher, runtime lane, run
+            // state, or a storage backend directly would defeat the
+            // single-facade discipline that this crate exists to enforce.
+            crate_name: "ironclaw_webui_v2",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                // Single-facade boundary: route handlers consume only the
+                // `ironclaw_product_workflow` facade plus the ingress + error
+                // vocabulary. Projection types are re-exported through the
+                // facade crate so handlers never reach into the adapter
+                // surface directly.
+                "ironclaw_product_adapters",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_storage",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+            ],
+        },
+        BoundaryRule {
             // Registry projects ProductAdapter host-api sections from the single
             // Extension Manifest v2 and owns activation state. Runtime/dispatcher/engine
             // crates would invert ownership, secrets crates could expose raw
@@ -1007,51 +1225,6 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_tui",
                 "ironclaw_wasm",
                 "ironclaw_wasm_product_adapters",
-            ],
-        },
-        BoundaryRule {
-            crate_name: "ironclaw_storage",
-            forbidden: vec![
-                "ironclaw",
-                "ironclaw_approvals",
-                "ironclaw_architecture",
-                "ironclaw_authorization",
-                "ironclaw_capabilities",
-                "ironclaw_common",
-                "ironclaw_conversations",
-                "ironclaw_dispatcher",
-                "ironclaw_engine",
-                "ironclaw_event_projections",
-                "ironclaw_events",
-                "ironclaw_extensions",
-                "ironclaw_filesystem",
-                "ironclaw_gateway",
-                "ironclaw_host_api",
-                "ironclaw_host_runtime",
-                "ironclaw_llm",
-                "ironclaw_loop_support",
-                "ironclaw_mcp",
-                "ironclaw_memory",
-                "ironclaw_network",
-                "ironclaw_outbound",
-                "ironclaw_processes",
-                "ironclaw_product_adapters",
-                "ironclaw_reborn",
-                "ironclaw_reborn_cli",
-                "ironclaw_reborn_config",
-                "ironclaw_reborn_event_store",
-                "ironclaw_resources",
-                "ironclaw_run_state",
-                "ironclaw_runtime_policy",
-                "ironclaw_safety",
-                "ironclaw_scripts",
-                "ironclaw_secrets",
-                "ironclaw_skills",
-                "ironclaw_threads",
-                "ironclaw_trust",
-                "ironclaw_tui",
-                "ironclaw_turns",
-                "ironclaw_wasm",
             ],
         },
         BoundaryRule {
@@ -1164,7 +1337,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
-                "ironclaw_filesystem",
+                // ironclaw_filesystem is permitted: FilesystemResourceGovernorStore
+                // routes the resource-governor snapshot through ScopedFilesystem
+                // under the universal-fs-dispatch rework (plan
+                // 2026-05-14-universal-fs-dispatch).
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
                 "ironclaw_network",
@@ -1266,7 +1442,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_conversations",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                "ironclaw_filesystem",
+                // ironclaw_filesystem is permitted: FilesystemOutboundStateStore
+                // routes outbound persistence through ScopedFilesystem under
+                // the universal-fs-dispatch rework (plan
+                // 2026-05-14-universal-fs-dispatch).
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
@@ -1320,13 +1499,15 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         },
         BoundaryRule {
             crate_name: "ironclaw_reborn_event_store",
+            // ironclaw_filesystem is permitted: FilesystemEventLog routes the
+            // durable log through the universal RootFilesystem dispatch
+            // fabric. See `2026-05-14-universal-fs-dispatch.md`.
             forbidden: vec![
                 "ironclaw_authorization",
                 "ironclaw_approvals",
                 "ironclaw_capabilities",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                "ironclaw_filesystem",
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
                 "ironclaw_network",
@@ -1347,6 +1528,11 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_dispatcher",
                 "ironclaw_events",
                 "ironclaw_extensions",
+                // ironclaw_filesystem is permitted: FilesystemSecretStore /
+                // FilesystemCredentialBroker route secret + credential
+                // persistence through ScopedFilesystem under the
+                // universal-fs-dispatch rework (plan
+                // 2026-05-14-universal-fs-dispatch).
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
                 "ironclaw_processes",
@@ -1424,7 +1610,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_engine",
                 "ironclaw_events",
                 "ironclaw_extensions",
-                "ironclaw_filesystem",
+                // ironclaw_filesystem is permitted: FilesystemSessionThreadService
+                // routes thread/transcript persistence through ScopedFilesystem
+                // under the universal-fs-dispatch rework (plan
+                // 2026-05-14-universal-fs-dispatch).
                 "ironclaw_gateway",
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
@@ -1482,7 +1671,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_dispatcher",
                 "ironclaw_extensions",
-                "ironclaw_filesystem",
+                // ironclaw_filesystem is permitted: FilesystemTurnStateStore
+                // routes turn-coordination persistence through ScopedFilesystem
+                // under the universal-fs-dispatch rework (plan
+                // 2026-05-14-universal-fs-dispatch).
                 "ironclaw_host_runtime",
                 "ironclaw_mcp",
                 "ironclaw_memory",

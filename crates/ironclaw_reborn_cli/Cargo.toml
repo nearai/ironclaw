@@ -32,6 +32,7 @@ ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
 secrecy = "0.10"
 serde_json = "1"
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "io-std", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tracing = "0.1"
@@ -40,6 +41,3 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 [[bin]]
 name = "ironclaw-reborn"
 path = "src/main.rs"
-
-[dev-dependencies]
-tempfile = "3"

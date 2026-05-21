@@ -14,16 +14,23 @@
 //!   user-message path that coordinates binding + turn submission.
 //! - [`ConversationBindingService`] — resolves external adapter refs to
 //!   canonical Reborn identifiers.
+//! - [`ProductConversationBindingService`] — bridges product adapter bindings to
+//!   `ironclaw_conversations` using trusted installation configuration for
+//!   tenant/default scope selection.
 //! - [`IdempotencyLedger`] — durable action deduplication port.
+//! - [`InMemoryIdempotencyLedger`] — local-dev/test ledger with in-flight lease
+//!   recovery semantics.
 //! - [`ProductInboundAction`] — durable ledger record for inbound actions.
 
 #![forbid(unsafe_code)]
 
 mod action;
 mod binding;
+mod conversation_binding;
 mod error;
 #[cfg(any(test, feature = "test-support"))]
 mod fakes;
+mod in_memory_ledger;
 mod inbound_turn;
 mod ledger;
 mod reborn_services;
@@ -34,18 +41,32 @@ pub use action::{
     ActionDispatchKind, ActionFingerprintKey, ActionPhase, AuthRequestRef, LinkedThreadActionId,
     ProductActionId, ProductCommandName, ProductInboundAction, SourceBindingKey,
 };
-pub use binding::{ConversationBindingService, ResolveBindingRequest, ResolvedBinding};
+pub use binding::{
+    ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
+    ResolvedBinding,
+};
+pub use conversation_binding::{
+    ProductConversationBindingService, ProductInstallationKey, ProductInstallationScope,
+    StaticProductInstallationResolver,
+};
 pub use error::ProductWorkflowError;
 #[cfg(any(test, feature = "test-support"))]
 pub use fakes::{FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService};
+pub use in_memory_ledger::InMemoryIdempotencyLedger;
 pub use inbound_turn::{DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService};
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
+// Projection types that route handlers need to thread through SSE
+// (parse the resume cursor, emit each envelope as JSON). Re-exported so
+// `ironclaw_webui_v2` consumes them via the facade crate and does not need
+// a direct dependency on `ironclaw_product_adapters` — the single-facade
+// boundary is enforced by `ironclaw_architecture`.
+pub use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
 pub use reborn_services::{
-    RebornCancelRunResponse, RebornCreateThreadResponse, RebornResolveGateResponse,
-    RebornResumeGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
-    RebornServicesErrorCode, RebornServicesErrorKind, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse,
+    RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
+    RebornGetRunStateResponse, RebornResolveGateResponse, RebornResumeGateResponse, RebornServices,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse,
 };
 pub use webui_inbound::{
     WebUiAuthenticatedCaller, WebUiCancelReason, WebUiCancelRunRequest, WebUiCreateThreadRequest,

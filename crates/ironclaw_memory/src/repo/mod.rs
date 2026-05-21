@@ -7,33 +7,17 @@ use ironclaw_filesystem::{DirEntry, FileType, FilesystemError, FilesystemOperati
 use ironclaw_host_api::VirtualPath;
 
 use crate::metadata::MemoryWriteOptions;
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-use crate::path::validated_memory_relative_path;
 use crate::path::{
     MemoryDocumentPath, MemoryDocumentScope, memory_backend_unsupported, memory_error,
     memory_not_found, valid_memory_path,
 };
 use crate::search::{MemorySearchRequest, MemorySearchResult};
 
+mod filesystem;
 mod in_memory;
-#[cfg(feature = "libsql")]
-mod libsql;
-#[cfg(feature = "libsql")]
-mod native_libsql;
-#[cfg(feature = "postgres")]
-mod native_postgres;
-#[cfg(feature = "postgres")]
-mod postgres;
 
+pub use filesystem::FilesystemMemoryDocumentRepository;
 pub use in_memory::InMemoryMemoryDocumentRepository;
-#[cfg(feature = "libsql")]
-pub use libsql::LibSqlMemoryDocumentRepository;
-#[cfg(feature = "libsql")]
-pub use native_libsql::RebornLibSqlMemoryDocumentRepository;
-#[cfg(feature = "postgres")]
-pub use native_postgres::RebornPostgresMemoryDocumentRepository;
-#[cfg(feature = "postgres")]
-pub use postgres::PostgresMemoryDocumentRepository;
 
 /// Result of an optimistic atomic append attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -158,75 +142,6 @@ pub(crate) fn scoped_memory_changed_by_key(scope: &MemoryDocumentScope) -> Strin
         );
     }
     scoped_memory_owner_key(scope)
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) fn scoped_memory_agent_id(scope: &MemoryDocumentScope) -> Option<&str> {
-    scope.agent_id()
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) fn db_path_for_memory_document(path: &MemoryDocumentPath) -> String {
-    path.relative_path().to_string()
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) fn memory_document_from_db_path(
-    scope: &MemoryDocumentScope,
-    db_path: &str,
-) -> Option<MemoryDocumentPath> {
-    validated_memory_relative_path(db_path.to_string())
-        .ok()
-        .map(|relative_path| MemoryDocumentPath {
-            scope: scope.clone(),
-            relative_path,
-        })
-}
-
-/// DB-only sentinel for an absent agent or project id under the Reborn-native
-/// schema. The `MemoryDocumentScope` constructor rejects empty supplied IDs and
-/// `_none`, so the empty string is unambiguous as a "no agent/project" marker.
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) const REBORN_SCOPE_NONE_SENTINEL: &str = "";
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) fn reborn_agent_id_db_value(scope: &MemoryDocumentScope) -> &str {
-    scope.agent_id().unwrap_or(REBORN_SCOPE_NONE_SENTINEL)
-}
-
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) fn reborn_project_id_db_value(scope: &MemoryDocumentScope) -> &str {
-    scope.project_id().unwrap_or(REBORN_SCOPE_NONE_SENTINEL)
-}
-
-/// Reconstruct a `MemoryDocumentPath` from explicit Reborn-native scope columns
-/// and a relative path. Empty `agent_id_db` / `project_id_db` map back to
-/// `None` (the absent-id sentinel for the native schema).
-#[cfg(any(feature = "libsql", feature = "postgres"))]
-pub(crate) fn reborn_memory_document_from_row(
-    tenant_id: &str,
-    user_id: &str,
-    agent_id_db: &str,
-    project_id_db: &str,
-    db_path: &str,
-) -> Option<MemoryDocumentPath> {
-    let agent_id = if agent_id_db == REBORN_SCOPE_NONE_SENTINEL {
-        None
-    } else {
-        Some(agent_id_db)
-    };
-    let project_id = if project_id_db == REBORN_SCOPE_NONE_SENTINEL {
-        None
-    } else {
-        Some(project_id_db)
-    };
-    let scope =
-        MemoryDocumentScope::new_with_agent(tenant_id, user_id, agent_id, project_id).ok()?;
-    let relative_path = validated_memory_relative_path(db_path.to_string()).ok()?;
-    Some(MemoryDocumentPath {
-        scope,
-        relative_path,
-    })
 }
 
 pub(crate) fn ensure_document_path_does_not_conflict(
