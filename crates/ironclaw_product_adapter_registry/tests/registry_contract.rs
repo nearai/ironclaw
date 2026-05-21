@@ -4,12 +4,13 @@ use chrono::Utc;
 use ironclaw_extensions::{MANIFEST_SCHEMA_VERSION, ManifestSource};
 use ironclaw_host_api::{ExtensionId, HostPortCatalog, SecretHandle};
 use ironclaw_product_adapter_registry::{
-    ExtensionActivationState, ExtensionCredentialBinding, ExtensionInstallation,
-    ExtensionInstallationId, ExtensionInstallationStore, ExtensionManifestRecord,
-    ExtensionManifestRef, InMemoryExtensionInstallationStore, ManifestHash, RegistryError,
-    list_enabled_product_adapter_entries,
+    ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
+    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
+    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestRef,
+    InMemoryExtensionInstallationStore, ManifestHash, RegistryError,
+    list_enabled_product_adapter_entries, parse_product_adapter_manifest_record,
+    product_adapter_sections,
 };
-use ironclaw_product_adapters::EgressCredentialHandle;
 
 fn extension_id() -> ExtensionId {
     ExtensionId::new("telegram-v2").unwrap()
@@ -19,8 +20,8 @@ fn installation_id() -> ExtensionInstallationId {
     ExtensionInstallationId::new("acme-telegram-prod").unwrap()
 }
 
-fn credential(value: &str) -> EgressCredentialHandle {
-    EgressCredentialHandle::new(value).unwrap()
+fn credential(value: &str) -> ExtensionCredentialHandle {
+    ExtensionCredentialHandle::new(value).unwrap()
 }
 
 fn manifest_hash(value: &str) -> ManifestHash {
@@ -59,7 +60,7 @@ handle = "{required_credential}"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
     );
-    ExtensionManifestRecord::from_toml(
+    parse_product_adapter_manifest_record(
         raw,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
@@ -185,7 +186,7 @@ async fn credential_binding_must_reference_declared_manifest_handle() {
     let invalid = ExtensionInstallation::new(
         installation_id(),
         extension_id(),
-        ExtensionActivationState::Installed,
+        ExtensionActivationState::Enabled,
         ExtensionManifestRef::new(extension_id(), Some(manifest_hash("sha256:abc123"))),
         vec![ExtensionCredentialBinding::new(
             credential("slack_bot_token"),
@@ -195,7 +196,10 @@ async fn credential_binding_must_reference_declared_manifest_handle() {
     )
     .unwrap();
 
-    let err = store.upsert_installation(invalid).await.unwrap_err();
+    store.upsert_installation(invalid).await.unwrap();
+    let err = list_enabled_product_adapter_entries(&store)
+        .await
+        .unwrap_err();
     assert!(matches!(
         err,
         RegistryError::UndeclaredCredentialHandle { .. }
@@ -214,7 +218,10 @@ async fn manifest_hash_mismatch_is_rejected() {
         .upsert_installation(installation(ExtensionActivationState::Installed))
         .await
         .unwrap_err();
-    assert!(matches!(err, RegistryError::ManifestHashMismatch { .. }));
+    assert!(matches!(
+        err,
+        ExtensionInstallationError::ManifestHashMismatch { .. }
+    ));
 }
 
 #[tokio::test]
@@ -229,8 +236,11 @@ async fn upsert_manifest_rejects_when_existing_installation_binding_revoked() {
         .await
         .unwrap();
 
-    let err = store
+    store
         .upsert_manifest(manifest("other_token", "sha256:abc123"))
+        .await
+        .unwrap();
+    let err = list_enabled_product_adapter_entries(&store)
         .await
         .unwrap_err();
     assert!(matches!(
@@ -280,7 +290,10 @@ fn duplicate_credential_bindings_rejected_at_construction() {
     )
     .unwrap_err();
     assert!(
-        matches!(err, RegistryError::DuplicateCredentialBinding { .. }),
+        matches!(
+            err,
+            ExtensionInstallationError::DuplicateCredentialBinding { .. }
+        ),
         "expected DuplicateCredentialBinding, got {err:?}"
     );
 }
@@ -397,7 +410,7 @@ handle = "outbound_token"
         schema = MANIFEST_SCHEMA_VERSION,
     );
     let multi_id = ExtensionId::new("multi-adapter").unwrap();
-    let multi_manifest = ExtensionManifestRecord::from_toml(
+    let multi_manifest = parse_product_adapter_manifest_record(
         raw,
         ManifestSource::InstalledLocal,
         &HostPortCatalog::empty(),
@@ -405,7 +418,7 @@ handle = "outbound_token"
     )
     .unwrap();
     assert_eq!(
-        multi_manifest.product_adapters().len(),
+        product_adapter_sections(&multi_manifest).unwrap().len(),
         2,
         "manifest should project two product adapter sections"
     );
@@ -465,8 +478,9 @@ async fn arc_store_delegation_works() {
 
 #[tokio::test]
 async fn update_health_uses_redacted_string() {
-    use ironclaw_product_adapter_registry::{ExtensionHealthSnapshot, ExtensionHealthStatus};
-    use ironclaw_product_adapters::RedactedString;
+    use ironclaw_product_adapter_registry::{
+        ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus,
+    };
 
     let store = InMemoryExtensionInstallationStore::default();
     store
@@ -480,7 +494,7 @@ async fn update_health_uses_redacted_string() {
 
     let health = ExtensionHealthSnapshot::new(
         ExtensionHealthStatus::Degraded,
-        Some(RedactedString::new("timeout after 5s")),
+        Some(ExtensionHealthMessage::new("timeout after 5s")),
         Utc::now(),
     );
     store
@@ -494,10 +508,10 @@ async fn update_health_uses_redacted_string() {
         .unwrap()
         .unwrap();
     assert_eq!(inst.health().status(), ExtensionHealthStatus::Degraded);
-    // RedactedString Debug impl should redact the value.
+    // ExtensionHealthMessage Debug impl should redact the value.
     let debug = format!("{:?}", inst.health().message().unwrap());
     assert!(
         !debug.contains("timeout after 5s"),
-        "RedactedString should redact the message in Debug output"
+        "ExtensionHealthMessage should redact the message in Debug output"
     );
 }

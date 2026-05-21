@@ -43,7 +43,9 @@ use ironclaw_reborn::runtime::{
     build_default_planned_runtime,
 };
 use ironclaw_reborn::turn_runner::{TurnRunnerWakeSender, TurnRunnerWorkerConfig};
-use ironclaw_reborn_extensions::{FirstPartySkillsExtension, FirstPartySkillsExtensionHandles};
+use ironclaw_reborn_extensions::{
+    FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, LoadedRebornFirstPartyExtensions,
+};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, EnsureThreadRequest, InMemorySessionThreadService, MessageContent,
     MessageKind, MessageStatus, SessionThreadService, ThreadHistoryRequest, ThreadScope,
@@ -658,7 +660,7 @@ pub async fn build_reborn_runtime(
 fn local_dev_filesystem_skill_context_source(
     local_runtime: &crate::factory::RebornLocalRuntimeServices,
 ) -> Result<Arc<dyn HostSkillContextSource>, RebornRuntimeError> {
-    let extension = FirstPartySkillsExtension::new(
+    let skills_extension = FirstPartySkillsExtension::new(
         Arc::clone(&local_runtime.skill_filesystem),
         FirstPartySkillsExtensionHandles::reborn_default().map_err(|reason| {
             RebornRuntimeError::InvalidArgument {
@@ -666,7 +668,13 @@ fn local_dev_filesystem_skill_context_source(
             }
         })?,
     );
-    Ok(extension.host_skill_context_source())
+    let loaded_extensions = LoadedRebornFirstPartyExtensions::new().with_skills(skills_extension);
+    loaded_extensions
+        .skill_context_source()
+        .ok_or(RebornRuntimeError::InvalidArgument {
+            reason: "first-party skills extension did not expose a skill context source"
+                .to_string(),
+        })
 }
 
 struct ValidatedRuntimeIdentity {
