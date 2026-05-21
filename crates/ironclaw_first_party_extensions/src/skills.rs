@@ -8,6 +8,8 @@ use ironclaw_loop_support::{
 };
 use thiserror::Error;
 
+use crate::{SelectableSkillContextSource, SkillActivationSelectorConfig};
+
 const SYSTEM_SKILLS_ROOT: &str = "/system/skills";
 const USER_SKILLS_ROOT: &str = "/skills";
 const TENANT_SHARED_SKILLS_ROOT: &str = "/tenant-shared/skills";
@@ -144,6 +146,16 @@ where
 
     pub fn host_skill_context_source(&self) -> Arc<dyn HostSkillContextSource> {
         self.context_source.clone()
+    }
+
+    pub fn selectable_skill_context_source(
+        &self,
+        config: SkillActivationSelectorConfig,
+    ) -> Arc<SelectableSkillContextSource<FilesystemSkillBundleSource<F>>> {
+        Arc::new(SelectableSkillContextSource::new(
+            Arc::clone(&self.bundle_source),
+            config,
+        ))
     }
 }
 

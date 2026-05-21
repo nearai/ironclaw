@@ -31,14 +31,16 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_first_party_extensions::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, LoadedFirstPartyExtensions,
+    SelectableSkillContextSource, SkillActivationSelectorConfig,
 };
 use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
-    HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
-    HostSkillContextSource,
+    FilesystemSkillBundleSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
+    HostIdentityContextSource, HostSkillContextSource,
 };
 use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
 use ironclaw_reborn::runtime::{
@@ -152,7 +154,11 @@ pub struct RebornRuntime {
     default_run_profile_id: String,
     wake_sender: TurnRunnerWakeSender,
     send_locks: Mutex<HashMap<ConversationId, Arc<Mutex<()>>>>,
+    skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
 }
+
+type LocalDevSelectableSkillContextSource =
+    SelectableSkillContextSource<FilesystemSkillBundleSource<LocalFilesystem>>;
 
 impl RebornRuntime {
     /// Snapshot of the substrate facades produced by `build_reborn_services`.
@@ -231,6 +237,9 @@ impl RebornRuntime {
             return Err(RebornRuntimeError::WorkerStopped);
         }
         let scope = self.turn_scope_for(&conversation.0);
+        if let Some(skill_activation_source) = &self.skill_activation_source {
+            skill_activation_source.record_user_message(scope.clone(), text);
+        }
         let accepted = self
             .thread_service
             .accept_inbound_message(AcceptInboundMessageRequest {
@@ -514,9 +523,15 @@ pub async fn build_reborn_runtime(
     let checkpoint_state_store = Arc::clone(&local_runtime.checkpoint_state_store);
     let loop_checkpoint_store = Arc::clone(&local_runtime.loop_checkpoint_store);
     let thread_service = Arc::clone(&local_runtime.thread_service);
-    let skill_context_source = match configured_skill_context_source {
-        Some(source) => Some(source),
-        None => Some(local_dev_filesystem_skill_context_source(local_runtime)?),
+    let (skill_context_source, skill_activation_source) = match configured_skill_context_source {
+        Some(source) => (Some(source), None),
+        None => {
+            let local_dev_skills = local_dev_filesystem_skill_context_source(local_runtime)?;
+            (
+                Some(local_dev_skills.source),
+                Some(local_dev_skills.activation_source),
+            )
+        }
     };
 
     let validated_identity = validate_runtime_identity(identity)?;
@@ -654,12 +669,18 @@ pub async fn build_reborn_runtime(
         default_run_profile_id,
         wake_sender,
         send_locks: Mutex::new(HashMap::new()),
+        skill_activation_source,
     })
+}
+
+struct LocalDevSkillContextSource {
+    source: Arc<dyn HostSkillContextSource>,
+    activation_source: Arc<LocalDevSelectableSkillContextSource>,
 }
 
 fn local_dev_filesystem_skill_context_source(
     local_runtime: &crate::factory::RebornLocalRuntimeServices,
-) -> Result<Arc<dyn HostSkillContextSource>, RebornRuntimeError> {
+) -> Result<LocalDevSkillContextSource, RebornRuntimeError> {
     let skills_extension = FirstPartySkillsExtension::new(
         Arc::clone(&local_runtime.skill_filesystem),
         FirstPartySkillsExtensionHandles::reborn_default().map_err(|reason| {
@@ -669,12 +690,17 @@ fn local_dev_filesystem_skill_context_source(
         })?,
     );
     let loaded_extensions = LoadedFirstPartyExtensions::new().with_skills(skills_extension);
-    loaded_extensions
-        .skill_context_source()
-        .ok_or(RebornRuntimeError::InvalidArgument {
+    let activation_source = loaded_extensions
+        .selectable_skill_context_source(SkillActivationSelectorConfig::default())
+        .ok_or_else(|| RebornRuntimeError::InvalidArgument {
             reason: "first-party skills extension did not expose a skill context source"
                 .to_string(),
-        })
+        })?;
+    let source: Arc<dyn HostSkillContextSource> = activation_source.clone();
+    Ok(LocalDevSkillContextSource {
+        source,
+        activation_source,
+    })
 }
 
 struct ValidatedRuntimeIdentity {
@@ -1124,7 +1150,9 @@ mod tests {
     }
 
     fn skill_md(name: &str, description: &str, prompt: &str) -> String {
-        format!("---\nname: {name}\ndescription: {description}\n---\n\n{prompt}")
+        format!(
+            "---\nname: {name}\ndescription: {description}\nactivation:\n  keywords: [\"{name}\"]\n---\n\n{prompt}"
+        )
     }
 
     #[tokio::test]
@@ -1419,7 +1447,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_runtime_wires_filesystem_skills_by_default_to_model_calls() {
+    async fn local_dev_runtime_selects_filesystem_skills_by_message_before_model_calls() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("system/skills/system-helper"))
@@ -1468,7 +1496,7 @@ mod tests {
         let conversation = runtime.new_conversation().await.expect("conversation");
         let reply = tokio::time::timeout(
             Duration::from_secs(3),
-            runtime.send_user_message(&conversation, "review this"),
+            runtime.send_user_message(&conversation, "please use system-helper"),
         )
         .await
         .expect("runtime send should finish")
@@ -1494,10 +1522,10 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let combined_skill_context = skill_messages.join("\n");
-        assert_eq!(skill_messages.len(), 2);
+        assert_eq!(skill_messages.len(), 1);
         assert!(combined_skill_context.contains("system helper description"));
         assert!(combined_skill_context.contains("SYSTEM_HELPER_PROMPT_SENTINEL"));
-        assert!(combined_skill_context.contains("local helper description"));
+        assert!(!combined_skill_context.contains("local helper description"));
         assert!(!combined_skill_context.contains("USER_HELPER_PROMPT_SENTINEL"));
 
         runtime.shutdown().await.expect("runtime shutdown");

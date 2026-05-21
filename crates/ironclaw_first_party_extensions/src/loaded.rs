@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use ironclaw_filesystem::RootFilesystem;
-use ironclaw_loop_support::HostSkillContextSource;
+use ironclaw_loop_support::{FilesystemSkillBundleSource, HostSkillContextSource};
 
-use crate::skills::FirstPartySkillsExtension;
+use crate::{
+    SelectableSkillContextSource, SkillActivationSelectorConfig, skills::FirstPartySkillsExtension,
+};
 
 /// Loaded first-party extension ports exposed to Reborn composition.
 ///
@@ -49,6 +51,15 @@ where
         self.skills
             .as_ref()
             .map(FirstPartySkillsExtension::host_skill_context_source)
+    }
+
+    pub fn selectable_skill_context_source(
+        &self,
+        config: SkillActivationSelectorConfig,
+    ) -> Option<Arc<SelectableSkillContextSource<FilesystemSkillBundleSource<F>>>> {
+        self.skills
+            .as_ref()
+            .map(|skills| skills.selectable_skill_context_source(config))
     }
 }
 

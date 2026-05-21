@@ -11,12 +11,13 @@ repository = "https://github.com/nearai/ironclaw"
 publish = false
 
 [dependencies]
+async-trait = "0.1"
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_loop_support = { path = "../ironclaw_loop_support" }
+ironclaw_skills = { path = "../ironclaw_skills" }
+ironclaw_turns = { path = "../ironclaw_turns" }
 thiserror = "2"
 
 [dev-dependencies]
-ironclaw_skills = { path = "../ironclaw_skills" }
-ironclaw_turns = { path = "../ironclaw_turns" }
 tokio = { version = "1", features = ["macros", "rt"] }
