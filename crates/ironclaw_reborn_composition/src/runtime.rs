@@ -157,7 +157,7 @@ pub struct RebornRuntime {
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
 }
 
-type LocalDevSelectableSkillContextSource =
+pub(crate) type LocalDevSelectableSkillContextSource =
     SelectableSkillContextSource<FilesystemSkillBundleSource<LocalFilesystem>>;
 
 impl RebornRuntime {
@@ -178,6 +178,12 @@ impl RebornRuntime {
 
     pub(crate) fn webui_turn_coordinator(&self) -> Arc<dyn TurnCoordinator> {
         self.turn_coordinator.clone()
+    }
+
+    pub(crate) fn webui_skill_activation_source(
+        &self,
+    ) -> Option<Arc<LocalDevSelectableSkillContextSource>> {
+        self.skill_activation_source.clone()
     }
 
     /// Create a fresh conversation. Returns the opaque conversation id used
@@ -238,7 +244,9 @@ impl RebornRuntime {
         }
         let scope = self.turn_scope_for(&conversation.0);
         if let Some(skill_activation_source) = &self.skill_activation_source {
-            skill_activation_source.record_user_message(scope.clone(), text);
+            skill_activation_source
+                .record_user_message(scope.clone(), text)
+                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
         }
         let accepted = self
             .thread_service
@@ -1583,6 +1591,74 @@ mod tests {
                 .expect("recording gateway requests lock poisoned")
                 .is_empty(),
             "invalid filesystem skill should fail before model dispatch"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_fails_closed_for_ambiguous_explicit_skill_before_model_call() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/skills/code-review"))
+            .expect("system skill dir");
+        std::fs::write(
+            storage_root.join("system/skills/code-review/SKILL.md"),
+            skill_md(
+                "code-review",
+                "system review description",
+                "SYSTEM_REVIEW_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write system skill");
+        std::fs::create_dir_all(storage_root.join("skills/code-review")).expect("user skill dir");
+        std::fs::write(
+            storage_root.join("skills/code-review/SKILL.md"),
+            skill_md(
+                "code-review",
+                "user review description",
+                "USER_REVIEW_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write user skill");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "should not reach model".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-ambiguous-skill-owner", storage_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-ambiguous-skill-tenant".to_string(),
+            agent_id: "runtime-ambiguous-skill-agent".to_string(),
+            source_binding_id: "runtime-ambiguous-skill-source".to_string(),
+            reply_target_binding_id: "runtime-ambiguous-skill-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.send_user_message(&conversation, "/code-review this PR"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+
+        assert_ne!(reply.status, TurnStatus::Completed);
+        assert!(
+            requests
+                .lock()
+                .expect("recording gateway requests lock poisoned")
+                .is_empty(),
+            "ambiguous explicit skill should fail before model dispatch"
         );
 
         runtime.shutdown().await.expect("runtime shutdown");
