@@ -743,7 +743,7 @@ mod mount_view_tests {
             .await
             .expect("user skills should be writable through the scoped alias");
         let content = scoped
-            .read_file(&scope, &user_path)
+            .read_bytes(&scope, &user_path)
             .await
             .expect("user skill should be readable");
         assert_eq!(content, b"user skill");
