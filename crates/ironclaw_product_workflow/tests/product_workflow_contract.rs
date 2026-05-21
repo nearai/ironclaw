@@ -453,6 +453,10 @@ async fn before_inbound_policy_rewrite_reaches_inbound_turn_service() {
         request.source_binding_key.as_str(),
         "space:0:;conversation:5:conv1;topic:0:;"
     );
+    assert_eq!(
+        request.rate_limit_key.as_str(),
+        "space:0:;conversation:5:conv1;topic:0:;"
+    );
     let accepted = inbound.accepted_envelopes();
     assert_eq!(accepted.len(), 1);
     let ProductInboundPayload::UserMessage(payload) = accepted[0].payload() else {
@@ -578,6 +582,9 @@ async fn before_inbound_policy_retryable_rejection_releases_fingerprint() {
     assert_eq!(inbound.accepted_count(), 0);
     assert_eq!(ledger.settled_count(), 0);
     assert_eq!(ledger.in_flight_count(), 0);
+    let released = ledger.released_actions();
+    assert_eq!(released.len(), 1);
+    assert!(released[0].dispatch_kind.is_none());
 
     // Re-submitting the same envelope must re-invoke the policy (no duplicate
     // replay caching), because retryable rejections release the fingerprint.
@@ -785,6 +792,46 @@ async fn before_inbound_policy_permanent_failure_settles_terminal_rejection() {
         rejection.disposition(),
         ProductRejectionDisposition::Permanent
     );
+}
+
+#[tokio::test]
+async fn fake_before_inbound_policy_uses_programmed_outcomes_in_order() {
+    let policy = FakeBeforeInboundPolicy::new();
+    let envelope = sample_envelope("fake-policy-sequence");
+    let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
+        panic!("expected user message")
+    };
+    policy.program_outcomes([
+        Ok(BeforeInboundPolicyOutcome::RewriteUserMessage(
+            UserMessagePayload::new("first", vec![], ProductTriggerReason::DirectChat)
+                .expect("valid rewrite"),
+        )),
+        Ok(BeforeInboundPolicyOutcome::Reject(
+            ProductRejection::retryable(ProductRejectionKind::PolicyDenied, "try later"),
+        )),
+    ]);
+    policy.allow();
+
+    let first = policy
+        .check_user_message(BeforeInboundPolicyRequest::new(&envelope, payload).expect("request"))
+        .await
+        .expect("first policy result");
+    assert!(matches!(
+        first,
+        BeforeInboundPolicyOutcome::RewriteUserMessage(rewritten) if rewritten.text == "first"
+    ));
+
+    let second = policy
+        .check_user_message(BeforeInboundPolicyRequest::new(&envelope, payload).expect("request"))
+        .await
+        .expect("second policy result");
+    assert!(matches!(second, BeforeInboundPolicyOutcome::Reject(_)));
+
+    let third = policy
+        .check_user_message(BeforeInboundPolicyRequest::new(&envelope, payload).expect("request"))
+        .await
+        .expect("fallback policy result");
+    assert_eq!(third, BeforeInboundPolicyOutcome::Allow);
 }
 
 #[tokio::test]

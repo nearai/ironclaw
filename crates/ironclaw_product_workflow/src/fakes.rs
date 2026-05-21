@@ -17,7 +17,7 @@ use crate::binding::{
     ResolvedBinding,
 };
 use crate::error::ProductWorkflowError;
-use crate::inbound_turn::{InboundTurnOutcome, InboundTurnService};
+use crate::inbound_turn::{InboundTurnOutcome, InboundTurnService, check_before_inbound_policy};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 use crate::policy::{BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest};
 
@@ -152,6 +152,7 @@ pub struct FakeIdempotencyLedger {
 struct FakeIdempotencyState {
     in_flight: HashMap<ActionFingerprintKey, ProductInboundAction>,
     settled: HashMap<ActionFingerprintKey, ProductInboundAction>,
+    released: Vec<ProductInboundAction>,
     fail_with: Option<ProductWorkflowError>,
     settle_fail_with: Option<ProductWorkflowError>,
 }
@@ -202,6 +203,12 @@ impl FakeIdempotencyLedger {
     pub fn settled_actions(&self) -> Vec<ProductInboundAction> {
         let state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
         state.settled.values().cloned().collect()
+    }
+
+    /// Get all released non-terminal actions.
+    pub fn released_actions(&self) -> Vec<ProductInboundAction> {
+        let state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
+        state.released.clone()
     }
 }
 
@@ -255,6 +262,7 @@ impl IdempotencyLedger for FakeIdempotencyLedger {
             return Err(error);
         }
         state.in_flight.remove(&action.fingerprint);
+        state.released.push(action);
         Ok(())
     }
 }
@@ -272,7 +280,8 @@ pub struct FakeBeforeInboundPolicy {
 #[derive(Default)]
 struct FakeBeforeInboundPolicyState {
     requests: Vec<BeforeInboundPolicyRequest>,
-    outcome: Option<Result<BeforeInboundPolicyOutcome, ProductWorkflowError>>,
+    programmed_outcomes: VecDeque<Result<BeforeInboundPolicyOutcome, ProductWorkflowError>>,
+    fallback_outcome: Option<Result<BeforeInboundPolicyOutcome, ProductWorkflowError>>,
 }
 
 impl FakeBeforeInboundPolicy {
@@ -288,7 +297,7 @@ impl FakeBeforeInboundPolicy {
             .state
             .lock()
             .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
-        state.outcome = Some(Ok(BeforeInboundPolicyOutcome::Allow));
+        state.fallback_outcome = Some(Ok(BeforeInboundPolicyOutcome::Allow));
     }
 
     /// Rewrite all user-message payloads.
@@ -297,7 +306,7 @@ impl FakeBeforeInboundPolicy {
             .state
             .lock()
             .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
-        state.outcome = Some(Ok(BeforeInboundPolicyOutcome::RewriteUserMessage(payload)));
+        state.fallback_outcome = Some(Ok(BeforeInboundPolicyOutcome::RewriteUserMessage(payload)));
     }
 
     /// Reject all user messages.
@@ -306,7 +315,7 @@ impl FakeBeforeInboundPolicy {
             .state
             .lock()
             .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
-        state.outcome = Some(Ok(BeforeInboundPolicyOutcome::Reject(rejection)));
+        state.fallback_outcome = Some(Ok(BeforeInboundPolicyOutcome::Reject(rejection)));
     }
 
     /// Fail all policy checks.
@@ -315,7 +324,31 @@ impl FakeBeforeInboundPolicy {
             .state
             .lock()
             .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
-        state.outcome = Some(Err(error));
+        state.fallback_outcome = Some(Err(error));
+    }
+
+    /// Append one policy result consumed by the next request.
+    pub fn program_outcome(
+        &self,
+        outcome: Result<BeforeInboundPolicyOutcome, ProductWorkflowError>,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
+        state.programmed_outcomes.push_back(outcome);
+    }
+
+    /// Append policy results consumed in request order before the fallback outcome.
+    pub fn program_outcomes(
+        &self,
+        outcomes: impl IntoIterator<Item = Result<BeforeInboundPolicyOutcome, ProductWorkflowError>>,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
+        state.programmed_outcomes.extend(outcomes);
     }
 
     /// How many user messages reached policy checks.
@@ -355,8 +388,9 @@ impl BeforeInboundPolicy for FakeBeforeInboundPolicy {
             .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
         state.requests.push(request);
         state
-            .outcome
-            .clone()
+            .programmed_outcomes
+            .pop_front()
+            .or_else(|| state.fallback_outcome.clone())
             .unwrap_or(Ok(BeforeInboundPolicyOutcome::Allow))
     }
 }
@@ -552,9 +586,11 @@ impl InboundTurnService for FakeInboundTurnService {
                 kind: "non_user_message".into(),
             });
         };
-        let policy_outcome = before_inbound_policy
-            .check_user_message(BeforeInboundPolicyRequest::new(envelope, payload)?)
-            .await?;
+        let policy_outcome = check_before_inbound_policy(
+            before_inbound_policy,
+            BeforeInboundPolicyRequest::new(envelope, payload)?,
+        )
+        .await?;
         let dispatch_envelope;
         let envelope_for_turn = match policy_outcome {
             BeforeInboundPolicyOutcome::Allow => envelope,

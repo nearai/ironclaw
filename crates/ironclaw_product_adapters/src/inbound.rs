@@ -648,6 +648,16 @@ mod tests {
     }
 
     #[test]
+    fn user_message_text_length_bounded_through_serde() {
+        let forged = serde_json::json!({
+            "text": "a".repeat(USER_MESSAGE_TEXT_MAX_BYTES + 1),
+            "attachments": [],
+            "trigger": "direct_chat"
+        });
+        assert!(serde_json::from_value::<UserMessagePayload>(forged).is_err());
+    }
+
+    #[test]
     fn command_payload_bounds_are_enforced_through_serde() {
         assert!(
             InboundCommandPayload::new(

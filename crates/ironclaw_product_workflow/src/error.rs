@@ -136,17 +136,19 @@ impl From<ProductWorkflowError> for ProductAdapterError {
             ProductWorkflowError::Transient { reason } => ProductAdapterError::WorkflowTransient {
                 reason: RedactedString::new(reason),
             },
-            ProductWorkflowError::BeforeInboundPolicyFailed { reason, permanent } => {
+            ProductWorkflowError::BeforeInboundPolicyFailed { permanent, .. } => {
                 if permanent {
                     ProductAdapterError::WorkflowRejected {
                         kind: ProductWorkflowRejectionKind::AdmissionRejected,
                         status_code: 403,
                         retryable: false,
-                        reason: RedactedString::new(reason),
+                        reason: RedactedString::new("before-inbound policy failed"),
                     }
                 } else {
                     ProductAdapterError::WorkflowTransient {
-                        reason: RedactedString::new(reason),
+                        reason: RedactedString::new(
+                            "before-inbound policy temporarily unavailable",
+                        ),
                     }
                 }
             }

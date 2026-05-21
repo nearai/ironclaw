@@ -6,6 +6,8 @@
 //! submit/deferred handling behind that seam prevents adapter-specific binding
 //! code from owning the whole inbound turn pipeline.
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::UserId;
@@ -33,6 +35,23 @@ use crate::policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
 };
+
+const BEFORE_INBOUND_POLICY_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub(crate) async fn check_before_inbound_policy(
+    before_inbound_policy: &dyn BeforeInboundPolicy,
+    request: BeforeInboundPolicyRequest,
+) -> Result<BeforeInboundPolicyOutcome, ProductWorkflowError> {
+    tokio::time::timeout(
+        BEFORE_INBOUND_POLICY_TIMEOUT,
+        before_inbound_policy.check_user_message(request),
+    )
+    .await
+    .map_err(|_| ProductWorkflowError::BeforeInboundPolicyFailed {
+        reason: "before-inbound policy timed out".into(),
+        permanent: false,
+    })?
+}
 
 /// Result of the inbound turn submission flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,9 +187,11 @@ where
             .await?
         {
             InboundUserMessageDispatch::Accepted(outcome) => Ok(outcome),
-            InboundUserMessageDispatch::Rejected(_) => Err(ProductWorkflowError::Transient {
-                reason: "noop before-inbound policy unexpectedly rejected message".into(),
-            }),
+            InboundUserMessageDispatch::Rejected(_) => {
+                Err(ProductWorkflowError::TurnSubmissionRejected {
+                    reason: "noop before-inbound policy unexpectedly rejected message".into(),
+                })
+            }
         }
     }
 
@@ -184,6 +205,7 @@ where
                 kind: "non_user_message".into(),
             });
         };
+        let original_trigger = payload.trigger;
         let prepared = self.prepare_user_message(envelope).await?;
         if let Some(outcome) = self
             .replay_prepared_user_message(envelope, &prepared)
@@ -192,21 +214,28 @@ where
             return Ok(InboundUserMessageDispatch::Accepted(outcome));
         }
 
-        let policy_outcome = before_inbound_policy
-            .check_user_message(BeforeInboundPolicyRequest::new(envelope, payload)?)
-            .await?;
+        let policy_outcome = check_before_inbound_policy(
+            before_inbound_policy,
+            BeforeInboundPolicyRequest::new(envelope, payload)?,
+        )
+        .await?;
         let dispatch_envelope;
         let (prepared_for_turn, envelope_for_turn) = match policy_outcome {
             BeforeInboundPolicyOutcome::Allow => (prepared, envelope),
             BeforeInboundPolicyOutcome::RewriteUserMessage(payload) => {
+                let rewritten_trigger = payload.trigger;
                 dispatch_envelope =
                     envelope.with_rewritten_user_message(payload).map_err(|_| {
                         ProductWorkflowError::TurnSubmissionRejected {
                             reason: "invalid policy-rewritten user message".into(),
                         }
                     })?;
-                let rewritten_prepared = self.prepare_user_message(&dispatch_envelope).await?;
-                (rewritten_prepared, &dispatch_envelope)
+                let prepared_for_turn = if rewritten_trigger == original_trigger {
+                    prepared
+                } else {
+                    self.prepare_user_message(&dispatch_envelope).await?
+                };
+                (prepared_for_turn, &dispatch_envelope)
             }
             BeforeInboundPolicyOutcome::Reject(rejection) => {
                 return Ok(InboundUserMessageDispatch::Rejected(rejection));
