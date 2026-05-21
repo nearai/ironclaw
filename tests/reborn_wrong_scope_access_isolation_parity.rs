@@ -101,6 +101,28 @@ async fn reborn_wrong_scope_access_isolation_parity() {
         "wrong actor resume must not mutate original run"
     );
 
+    assert!(
+        harness
+            .cancel_run_as(
+                submitted.scope.clone(),
+                wrong_actor,
+                submitted.run_id,
+                format!("wrong-actor-cancel-{}", submitted.run_id),
+            )
+            .await
+            .is_err(),
+        "wrong actor must not cancel another user's blocked run"
+    );
+    assert_eq!(
+        harness
+            .run_state(submitted.run_id)
+            .await
+            .expect("state after wrong actor cancel")
+            .status,
+        TurnStatus::BlockedApproval,
+        "wrong actor cancel must not mutate original run"
+    );
+
     harness
         .cancel_blocked_turn(submitted.run_id)
         .await

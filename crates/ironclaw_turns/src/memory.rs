@@ -1258,6 +1258,9 @@ impl Inner {
             if record.scope != request.scope {
                 return Err(TurnError::ScopeNotFound);
             }
+            if record.actor != request.actor {
+                return Err(TurnError::Unauthorized);
+            }
             if record.status.is_terminal() {
                 return Ok(CancelRunResponse {
                     run_id: record.run_id,
