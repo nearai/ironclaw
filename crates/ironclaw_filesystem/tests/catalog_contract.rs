@@ -113,6 +113,24 @@ async fn composite_routes_filesystem_operations_to_matching_backend() {
             .unwrap(),
         b"project readme"
     );
+    assert_eq!(
+        root.read_file_bounded(&VirtualPath::new("/memory/MEMORY.md").unwrap(), 13)
+            .await
+            .unwrap(),
+        Some(b"remember this".to_vec())
+    );
+    assert_eq!(
+        root.read_file_bounded(&VirtualPath::new("/projects/README.md").unwrap(), 14)
+            .await
+            .unwrap(),
+        Some(b"project readme".to_vec())
+    );
+    assert_eq!(
+        root.read_file_bounded(&VirtualPath::new("/projects/README.md").unwrap(), 12)
+            .await
+            .unwrap(),
+        None
+    );
 
     root.write_file(
         &VirtualPath::new("/memory/notes/new.md").unwrap(),
@@ -223,6 +241,13 @@ async fn missing_composite_mount_fails_without_backend_side_effects() {
     let root = CompositeRootFilesystem::new();
     let err = root
         .read_file(&VirtualPath::new("/memory/MEMORY.md").unwrap())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, FilesystemError::MountNotFound { .. }));
+
+    let err = root
+        .read_file_bounded(&VirtualPath::new("/memory/MEMORY.md").unwrap(), 1024)
         .await
         .unwrap_err();
 

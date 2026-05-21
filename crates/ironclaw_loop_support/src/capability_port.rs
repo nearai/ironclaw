@@ -218,6 +218,7 @@ struct PreparedProviderToolCall {
     surface_version: ironclaw_turns::run_profile::CapabilitySurfaceVersion,
     capability_id: CapabilityId,
     provider_turn_id: String,
+    normalized_arguments: serde_json::Value,
 }
 
 const MAX_IN_MEMORY_DISPATCH_RECORDS: usize = 128;
@@ -663,10 +664,17 @@ impl HostRuntimeLoopCapabilityPort {
                 "provider tool call was not advertised to the model",
             ));
         }
+        let normalized_arguments = normalize_provider_arguments(
+            &tool_call.arguments,
+            &capability.parameters_schema,
+            "provider arguments",
+        )?;
+        validate_provider_arguments(&normalized_arguments)?;
         Ok(PreparedProviderToolCall {
             surface_version: loop_surface_version(&version)?,
             capability_id,
             provider_turn_id,
+            normalized_arguments,
         })
     }
 }
@@ -713,9 +721,11 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
         tool_call: ProviderToolCall,
     ) -> Result<ironclaw_turns::run_profile::CapabilityCallCandidate, AgentLoopHostError> {
         let prepared = self.prepare_provider_tool_call(&tool_call)?;
+        let mut normalized_tool_call = tool_call.clone();
+        normalized_tool_call.arguments = prepared.normalized_arguments;
         let input_ref = self
             .input_resolver
-            .register_provider_tool_call_input(&self.run_context, &tool_call)
+            .register_provider_tool_call_input(&self.run_context, &normalized_tool_call)
             .await?;
         Ok(ironclaw_turns::run_profile::CapabilityCallCandidate {
             surface_version: prepared.surface_version,
@@ -938,12 +948,182 @@ fn provider_schema_is_usable(schema: &serde_json::Value) -> bool {
     let Some(object) = schema.as_object() else {
         return false;
     };
+    if object
+        .get("$ref")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+    {
+        return true;
+    }
     matches!(
         object.get("type").and_then(serde_json::Value::as_str),
         Some("object")
     ) && object
         .get("properties")
         .is_none_or(serde_json::Value::is_object)
+}
+
+fn normalize_provider_arguments(
+    arguments: &serde_json::Value,
+    schema: &serde_json::Value,
+    label: &'static str,
+) -> Result<serde_json::Value, AgentLoopHostError> {
+    normalize_provider_value(arguments, schema, label)
+}
+
+fn normalize_provider_value(
+    value: &serde_json::Value,
+    schema: &serde_json::Value,
+    label: &'static str,
+) -> Result<serde_json::Value, AgentLoopHostError> {
+    if schema_type_matches(schema, "object") {
+        let object_value = coerce_json_string(value, label)?;
+        let Some(object) = object_value.as_object() else {
+            if is_json_container_string(value) {
+                return Err(provider_coercion_error(label, "object"));
+            }
+            return Ok(object_value);
+        };
+        let Some(properties) = schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+        else {
+            return Ok(object_value);
+        };
+        let mut normalized = object.clone();
+        for (property, property_schema) in properties {
+            if let Some(property_value) = normalized.get(property).cloned() {
+                normalized.insert(
+                    property.clone(),
+                    normalize_provider_value(&property_value, property_schema, label)?,
+                );
+            }
+        }
+        return Ok(serde_json::Value::Object(normalized));
+    }
+
+    if schema_type_matches(schema, "array") {
+        let array_value = coerce_json_string(value, label)?;
+        let Some(array) = array_value.as_array() else {
+            if is_json_container_string(value) {
+                return Err(provider_coercion_error(label, "array"));
+            }
+            return Ok(array_value);
+        };
+        let Some(items) = schema.get("items") else {
+            return Ok(array_value);
+        };
+        return array
+            .iter()
+            .map(|item| normalize_provider_value(item, items, label))
+            .collect::<Result<Vec<_>, _>>()
+            .map(serde_json::Value::Array);
+    }
+
+    if schema_type_matches(schema, "integer") {
+        return coerce_integer_string(value, label);
+    }
+
+    if schema_type_matches(schema, "number") {
+        return coerce_number_string(value, label);
+    }
+
+    if schema_type_matches(schema, "boolean") {
+        return coerce_boolean_string(value, label);
+    }
+
+    Ok(value.clone())
+}
+
+fn schema_type_matches(schema: &serde_json::Value, expected: &str) -> bool {
+    match schema.get("type") {
+        Some(serde_json::Value::String(actual)) => actual == expected,
+        Some(serde_json::Value::Array(types)) => {
+            types.iter().any(|actual| actual.as_str() == Some(expected))
+        }
+        _ => false,
+    }
+}
+
+fn is_json_container_string(value: &serde_json::Value) -> bool {
+    value
+        .as_str()
+        .map(str::trim)
+        .is_some_and(|text| text.starts_with('{') || text.starts_with('['))
+}
+
+fn coerce_json_string(
+    value: &serde_json::Value,
+    label: &'static str,
+) -> Result<serde_json::Value, AgentLoopHostError> {
+    let Some(text) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let trimmed = text.trim();
+    if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
+        return Ok(value.clone());
+    }
+    serde_json::from_str(trimmed).map_err(|_| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::InvalidInvocation,
+            format!("{label} could not be parsed as schema-declared JSON"),
+        )
+    })
+}
+
+fn coerce_integer_string(
+    value: &serde_json::Value,
+    label: &'static str,
+) -> Result<serde_json::Value, AgentLoopHostError> {
+    let Some(text) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() || trimmed.contains('.') || trimmed.contains('e') || trimmed.contains('E')
+    {
+        return Err(provider_coercion_error(label, "integer"));
+    }
+    let parsed = trimmed
+        .parse::<i64>()
+        .map_err(|_| provider_coercion_error(label, "integer"))?;
+    Ok(serde_json::Value::Number(parsed.into()))
+}
+
+fn coerce_number_string(
+    value: &serde_json::Value,
+    label: &'static str,
+) -> Result<serde_json::Value, AgentLoopHostError> {
+    let Some(text) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    let parsed = text
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| provider_coercion_error(label, "number"))?;
+    let number = serde_json::Number::from_f64(parsed)
+        .ok_or_else(|| provider_coercion_error(label, "number"))?;
+    Ok(serde_json::Value::Number(number))
+}
+
+fn coerce_boolean_string(
+    value: &serde_json::Value,
+    label: &'static str,
+) -> Result<serde_json::Value, AgentLoopHostError> {
+    let Some(text) = value.as_str() else {
+        return Ok(value.clone());
+    };
+    match text.trim().to_ascii_lowercase().as_str() {
+        "true" => Ok(serde_json::Value::Bool(true)),
+        "false" => Ok(serde_json::Value::Bool(false)),
+        _ => Err(provider_coercion_error(label, "boolean")),
+    }
+}
+
+fn provider_coercion_error(label: &'static str, expected: &'static str) -> AgentLoopHostError {
+    AgentLoopHostError::new(
+        AgentLoopHostErrorKind::InvalidInvocation,
+        format!("{label} could not be coerced to schema-declared {expected}"),
+    )
 }
 
 fn provider_tool_name(
@@ -1793,6 +1973,9 @@ mod tests {
         assert!(provider_schema_is_usable(
             &serde_json::json!({"type":"object","properties":{}})
         ));
+        assert!(provider_schema_is_usable(&serde_json::json!({
+            "$ref": "schemas/builtin/write-file.input.v1.json"
+        })));
         assert!(!provider_schema_is_usable(
             &serde_json::json!({"type":"string"})
         ));
@@ -1859,6 +2042,163 @@ mod tests {
         let mut call = provider_tool_call();
         call.reasoning = Some("provider error included traceback".to_string());
         assert!(validate_provider_tool_call(&call).is_err());
+    }
+
+    #[test]
+    fn provider_argument_normalization_coerces_schema_declared_scalars() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "limit": { "type": "integer" },
+                "enabled": { "type": "boolean" },
+                "threshold": { "type": "number" },
+                "message": { "type": "string" }
+            }
+        });
+        let normalized = normalize_provider_arguments(
+            &serde_json::json!({
+                "limit": "10",
+                "enabled": "true",
+                "threshold": "1.5",
+                "message": "10"
+            }),
+            &schema,
+            "provider arguments",
+        )
+        .expect("normalized arguments");
+
+        assert_eq!(
+            normalized,
+            serde_json::json!({
+                "limit": 10,
+                "enabled": true,
+                "threshold": 1.5,
+                "message": "10"
+            })
+        );
+    }
+
+    #[test]
+    fn provider_argument_normalization_coerces_stringified_containers() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "rows": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "index": { "type": "integer" },
+                            "bold": { "type": "boolean" }
+                        }
+                    }
+                }
+            }
+        });
+        let normalized = normalize_provider_arguments(
+            &serde_json::json!({
+                "rows": "[{\"index\":\"1\",\"bold\":\"false\"}]"
+            }),
+            &schema,
+            "provider arguments",
+        )
+        .expect("normalized arguments");
+
+        assert_eq!(
+            normalized,
+            serde_json::json!({
+                "rows": [{ "index": 1, "bold": false }]
+            })
+        );
+    }
+
+    #[test]
+    fn provider_argument_normalization_rejects_invalid_schema_declared_integer() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "limit": { "type": "integer" }
+            }
+        });
+
+        let error = normalize_provider_arguments(
+            &serde_json::json!({ "limit": "ten" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("invalid integer should fail closed");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn provider_argument_normalization_rejects_mismatched_stringified_object() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "options": {
+                    "type": "object",
+                    "properties": {
+                        "enabled": { "type": "boolean" }
+                    }
+                }
+            }
+        });
+
+        let error = normalize_provider_arguments(
+            &serde_json::json!({ "options": "[{\"enabled\":\"true\"}]" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("stringified array should not satisfy object schema");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn provider_argument_normalization_rejects_mismatched_stringified_array() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "rows": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "index": { "type": "integer" }
+                        }
+                    }
+                }
+            }
+        });
+
+        let error = normalize_provider_arguments(
+            &serde_json::json!({ "rows": "{\"index\":\"1\"}" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("stringified object should not satisfy array schema");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
+    }
+
+    #[test]
+    fn provider_argument_normalization_rejects_mismatched_stringified_array_without_items() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "rows": { "type": "array" }
+            }
+        });
+
+        let error = normalize_provider_arguments(
+            &serde_json::json!({ "rows": "{\"index\":\"1\"}" }),
+            &schema,
+            "provider arguments",
+        )
+        .expect_err("stringified object should not satisfy array schema without items");
+
+        assert_eq!(error.kind, AgentLoopHostErrorKind::InvalidInvocation);
     }
 
     fn provider_tool_call() -> ProviderToolCall {

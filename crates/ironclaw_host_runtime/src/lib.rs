@@ -45,16 +45,28 @@ use serde_json::Value;
 use std::{collections::BTreeMap, fmt, sync::Arc};
 use thiserror::Error;
 
+mod capability_catalog;
+mod extension_contracts;
 mod first_party;
 mod first_party_tools;
 pub mod memory_context;
 mod obligations;
 mod planner;
+mod process_port;
 mod production;
 mod services;
 mod surface;
 mod turn_scheduler;
 
+pub use capability_catalog::{
+    HotCapabilityCatalog, HotCapabilityRecord, MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES,
+    publish_hot_capability_catalog,
+};
+pub use extension_contracts::{
+    default_host_api_contract_registry, default_host_port_catalog,
+    discover_extensions_with_default_host_api_contracts,
+    discover_extensions_with_default_host_api_contracts_and_catalog,
+};
 pub use first_party::{
     FirstPartyCapabilityError, FirstPartyCapabilityHandler, FirstPartyCapabilityRegistry,
     FirstPartyCapabilityRequest, FirstPartyCapabilityResult,
@@ -62,14 +74,19 @@ pub use first_party::{
 pub use first_party_tools::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools,
     ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
-    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, TIME_CAPABILITY_ID,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_package,
 };
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, ProcessObligationLifecycleStore,
 };
 use obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
+pub use process_port::{
+    CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,
+    RuntimeProcessPort,
+};
 pub use production::DefaultHostRuntime;
 pub use services::{
     HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssue,
@@ -825,6 +842,41 @@ impl<N, S> HostHttpEgressService<N, S> {
             store.discard_for_capability(&request.scope, &request.capability_id);
         }
     }
+
+    fn validate_credential_sources_for_request(
+        &self,
+        request: &RuntimeHttpEgressRequest,
+    ) -> Result<(), RuntimeHttpEgressError> {
+        if matches!(
+            self.network_policy_source,
+            NetworkPolicySource::RequestPolicyFallback
+        ) {
+            return Ok(());
+        }
+
+        for injection in &request.credential_injections {
+            match &injection.source {
+                RuntimeCredentialSource::SecretStoreLease => {
+                    return Err(RuntimeHttpEgressError::Credential {
+                        reason:
+                            "direct secret-store leases are unavailable for production runtime egress"
+                                .to_string(),
+                    });
+                }
+                RuntimeCredentialSource::StagedObligation { capability_id }
+                    if capability_id != &request.capability_id =>
+                {
+                    return Err(RuntimeHttpEgressError::Credential {
+                        reason: "staged credential capability does not match request capability"
+                            .to_string(),
+                    });
+                }
+                RuntimeCredentialSource::StagedObligation { .. } => {}
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl<N, S> RuntimeHttpEgress for HostHttpEgressService<N, S>
@@ -837,6 +889,10 @@ where
         mut request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         let network_policy = self.network_policy_for_request(&mut request)?;
+        if let Err(error) = self.validate_credential_sources_for_request(&request) {
+            self.discard_staged_policy_for_request(&request);
+            return Err(error);
+        }
         if let Err(error) = validate_runtime_request(&request) {
             self.discard_staged_policy_for_request(&request);
             return Err(error);

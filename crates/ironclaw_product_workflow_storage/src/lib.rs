@@ -358,6 +358,14 @@ fn entry_for_action(action: &ProductInboundAction) -> Result<Entry, ProductWorkf
             text(action.fingerprint.installation_id.as_str()),
         )
         .with_indexed(
+            index_key("external_actor_kind")?,
+            text(action.fingerprint.external_actor_ref.kind()),
+        )
+        .with_indexed(
+            index_key("external_actor_id")?,
+            text(action.fingerprint.external_actor_ref.id()),
+        )
+        .with_indexed(
             index_key("source_binding_key")?,
             text(action.fingerprint.source_binding_key.as_str()),
         )
@@ -395,10 +403,12 @@ fn action_path(
     fingerprint: &ActionFingerprintKey,
 ) -> Result<VirtualPath, ProductWorkflowError> {
     let path = format!(
-        "{}/{}/{}/{}/{}.json",
+        "{}/{}/{}/{}/{}/{}/{}.json",
         root.as_str().trim_end_matches('/'),
         hex_component(fingerprint.adapter_id.as_str()),
         hex_component(fingerprint.installation_id.as_str()),
+        hex_component(fingerprint.external_actor_ref.kind()),
+        hex_component(fingerprint.external_actor_ref.id()),
         hex_component(fingerprint.source_binding_key.as_str()),
         hex_component(fingerprint.external_event_id.as_str())
     );

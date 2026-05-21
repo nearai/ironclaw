@@ -111,6 +111,31 @@ pub trait RootFilesystem: Send + Sync {
     /// Returns metadata for a canonical virtual path without revealing raw host paths.
     async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError>;
 
+    /// Read an opaque file only when its body is at most `max_bytes`.
+    ///
+    /// Returns `Ok(None)` when the file exists but exceeds the caller's limit.
+    /// Streaming backends should enforce this before materializing the full body.
+    async fn read_file_bounded(
+        &self,
+        path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        let stat = self.stat(path).await?;
+        if stat.len > max_bytes as u64 {
+            return Ok(None);
+        }
+        let Some(entry) = self.get(path).await? else {
+            return Err(FilesystemError::NotFound {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+            });
+        };
+        if entry.entry.body.len() > max_bytes {
+            return Ok(None);
+        }
+        Ok(Some(entry.entry.body))
+    }
+
     /// Deletes an existing canonical virtual file or directory. Missing paths
     /// return [`FilesystemError::NotFound`]; backends that do not support
     /// delete must fail closed before side effects.

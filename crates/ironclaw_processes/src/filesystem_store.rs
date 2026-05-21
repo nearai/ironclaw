@@ -28,8 +28,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_events::sanitize_error_kind;
 use ironclaw_filesystem::{
-    CasExpectation, ContentType, Entry, FilesystemError, Filter, IndexKey, IndexKind, IndexName,
-    IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem,
+    CasExpectation, ContentType, Entry, FilesystemError, FilesystemOperation, Filter, IndexKey,
+    IndexKind, IndexName, IndexSpec, IndexValue, Page, RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{ProcessId, ResourceScope, ScopedPath, VirtualPath};
 use serde::{Deserialize, Serialize};
@@ -176,8 +176,8 @@ where
         error_kind: Option<String>,
     ) -> Result<ProcessRecord, ProcessError> {
         let _guard = self.transition_lock.lock().await;
+        let path = process_record_path(scope, process_id)?;
         for _ in 0..MAX_CAS_RETRIES {
-            let path = process_record_path(scope, process_id)?;
             let Some(versioned) = self.filesystem.get(scope, &path).await? else {
                 return Err(ProcessError::UnknownProcess { process_id });
             };
@@ -206,9 +206,14 @@ where
                 Err(error) => return Err(error.into()),
             }
         }
-        Err(ProcessError::Filesystem(format!(
-            "process {process_id} status transition exhausted {MAX_CAS_RETRIES} CAS retries"
-        )))
+        let virtual_path = self.filesystem.resolve(scope, &path)?;
+        Err(ProcessError::Filesystem(FilesystemError::Backend {
+            path: virtual_path,
+            operation: FilesystemOperation::WriteFile,
+            reason: format!(
+                "process {process_id} status transition exhausted {MAX_CAS_RETRIES} CAS retries"
+            ),
+        }))
     }
 }
 
@@ -388,10 +393,14 @@ where
             // the same failure shape they got with the legacy `read_file`
             // path.
             let Some(versioned) = self.filesystem.get(scope, &scoped_child).await? else {
-                return Err(ProcessError::Filesystem(format!(
-                    "process record listed but missing at {}",
-                    scoped_child.as_str()
-                )));
+                return Err(ProcessError::Filesystem(FilesystemError::Backend {
+                    path: entry.path,
+                    operation: FilesystemOperation::ReadFile,
+                    reason: format!(
+                        "process record listed but missing at {}",
+                        scoped_child.as_str()
+                    ),
+                }));
             };
             let record = deserialize::<ProcessRecord>(&versioned.entry.body)?;
             if same_scope_owner(&record.scope, scope) {
@@ -449,7 +458,7 @@ where
         let virtual_path = self
             .filesystem
             .resolve(scope, &path)
-            .map_err(|error| ProcessError::Filesystem(error.to_string()))?;
+            .map_err(ProcessError::Filesystem)?;
         Ok(virtual_path)
     }
 
@@ -577,7 +586,7 @@ where
         let expected_virtual = self
             .filesystem
             .resolve(scope, &expected_scoped)
-            .map_err(|error| ProcessError::Filesystem(error.to_string()))?;
+            .map_err(ProcessError::Filesystem)?;
         if output_ref != expected_virtual {
             return Err(invalid_stored_record(format!(
                 "process result output ref {} does not match expected {}",

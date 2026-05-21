@@ -1,3 +1,7 @@
+mod support;
+
+use support::legacy_capability_fixture_to_v2_with_schema_suffix as legacy_capability_fixture_to_v2;
+
 use std::{
     collections::BTreeMap,
     sync::{
@@ -9,18 +13,321 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use ironclaw_authorization::{GrantAuthorizer, TrustAwareCapabilityDispatchAuthorizer};
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage, ExtensionRegistry};
+use ironclaw_extensions::{
+    CapabilityVisibility, ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+};
+use ironclaw_filesystem::{
+    DirEntry, FileStat, FileType, FilesystemError, FilesystemOperation, LocalFilesystem,
+    RootFilesystem,
+};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     CapabilitySurfacePolicy, CapabilitySurfaceVersion, DefaultHostRuntime, HostRuntime,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, SurfaceKind, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, VisibleCapabilitySurface,
+    MAX_HOT_PROMPT_BYTES, MAX_HOT_SCHEMA_BYTES, RuntimeCapabilityOutcome, RuntimeCapabilityRequest,
+    RuntimeFailureKind, SurfaceKind, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    VisibleCapabilitySurface, publish_hot_capability_catalog,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustError, TrustPolicy, TrustPolicyInput, TrustProvenance,
 };
 use serde_json::json;
+use tempfile::tempdir;
+
+#[tokio::test]
+async fn hot_capability_catalog_resolves_schema_and_prompt_refs() {
+    let (_storage, fs, registry) = hot_catalog_fixture(
+        Some(r#"{"type":"object","properties":{"message":{"type":"string"}}}"#),
+        r#"{"type":"object","properties":{"ok":{"type":"boolean"}}}"#,
+        "Use this tool to echo user text.",
+    );
+
+    let catalog = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap();
+
+    let record = catalog.get(&capability_id("echo.say")).unwrap();
+    assert_eq!(record.descriptor.id, capability_id("echo.say"));
+    assert_eq!(
+        record.descriptor.parameters_schema,
+        json!({"type":"object","properties":{"message":{"type":"string"}}})
+    );
+    assert_eq!(
+        record.output_schema,
+        json!({"type":"object","properties":{"ok":{"type":"boolean"}}})
+    );
+    assert_eq!(
+        record.prompt_doc.as_deref(),
+        Some("Use this tool to echo user text.")
+    );
+}
+
+#[tokio::test]
+async fn hot_capability_catalog_fails_closed_for_missing_schema_file() {
+    let (_storage, fs, registry) =
+        hot_catalog_fixture(None, r#"{"type":"object"}"#, "Prompt docs exist.");
+
+    let err = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ironclaw_host_runtime::HostRuntimeError::InvalidRequest { ref reason }
+            if reason.contains("missing input_schema_ref")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn hot_capability_catalog_fails_closed_for_invalid_json_schema_file() {
+    let (_storage, fs, registry) = hot_catalog_fixture(
+        Some("not-json"),
+        r#"{"type":"object"}"#,
+        "Prompt docs exist.",
+    );
+
+    let err = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ironclaw_host_runtime::HostRuntimeError::InvalidRequest { ref reason }
+            if reason.contains("input_schema_ref") && reason.contains("valid JSON schema")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn hot_capability_catalog_fails_closed_for_invalid_json_schema_semantics() {
+    let (_storage, fs, registry) = hot_catalog_fixture(
+        Some(r#"{"type":"not-a-json-schema-type"}"#),
+        r#"{"type":"object"}"#,
+        "Prompt docs exist.",
+    );
+
+    let err = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ironclaw_host_runtime::HostRuntimeError::InvalidRequest { ref reason }
+            if reason.contains("input_schema_ref") && reason.contains("valid JSON schema")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn hot_capability_catalog_fails_closed_for_invalid_output_schema_file() {
+    let (_storage, fs, registry) = hot_catalog_fixture(
+        Some(r#"{"type":"object"}"#),
+        "not-json",
+        "Prompt docs exist.",
+    );
+
+    let err = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ironclaw_host_runtime::HostRuntimeError::InvalidRequest { ref reason }
+            if reason.contains("output_schema_ref") && reason.contains("valid JSON schema")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn hot_capability_catalog_fails_closed_for_missing_output_schema_file() {
+    let (storage, fs, registry) = hot_catalog_fixture(
+        Some(r#"{"type":"object"}"#),
+        r#"{"type":"object"}"#,
+        "Prompt docs exist.",
+    );
+    std::fs::remove_file(storage.path().join("echo/schemas/echo/say.output.v1.json")).unwrap();
+
+    let err = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ironclaw_host_runtime::HostRuntimeError::InvalidRequest { ref reason }
+            if reason.contains("missing output_schema_ref")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn hot_capability_catalog_fails_closed_for_invalid_output_schema_semantics() {
+    let (_storage, fs, registry) = hot_catalog_fixture(
+        Some(r#"{"type":"object"}"#),
+        r#"{"type":"not-a-json-schema-type"}"#,
+        "Prompt docs exist.",
+    );
+
+    let err = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ironclaw_host_runtime::HostRuntimeError::InvalidRequest { ref reason }
+            if reason.contains("output_schema_ref") && reason.contains("valid JSON schema")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn hot_capability_catalog_fails_closed_for_missing_prompt_doc_file() {
+    let (storage, fs, registry) = hot_catalog_fixture(
+        Some(r#"{"type":"object"}"#),
+        r#"{"type":"object"}"#,
+        "Prompt docs exist.",
+    );
+    std::fs::remove_file(storage.path().join("echo/prompts/echo/say.md")).unwrap();
+
+    let err = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ironclaw_host_runtime::HostRuntimeError::InvalidRequest { ref reason }
+            if reason.contains("missing prompt_doc_ref")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn hot_capability_catalog_fails_closed_for_model_visible_capability_without_prompt_doc_ref() {
+    let (_storage, fs, registry) = hot_catalog_fixture_with_manifest(
+        Some(r#"{"type":"object"}"#),
+        r#"{"type":"object"}"#,
+        b"Prompt docs exist.",
+        manifest_without_prompt_doc_ref(),
+    );
+
+    let err = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ironclaw_host_runtime::HostRuntimeError::InvalidRequest { ref reason }
+            if reason.contains("model-visible capability echo.say is missing prompt_doc_ref")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn hot_capability_catalog_fails_closed_for_invalid_utf8_prompt_doc() {
+    let (_storage, fs, registry) = hot_catalog_fixture_with_prompt_bytes(
+        Some(r#"{"type":"object"}"#),
+        r#"{"type":"object"}"#,
+        &[0xff, 0xfe, 0xfd],
+    );
+
+    let err = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ironclaw_host_runtime::HostRuntimeError::InvalidRequest { ref reason }
+            if reason.contains("prompt_doc_ref") && reason.contains("valid UTF-8")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn hot_capability_catalog_fails_closed_for_oversized_schema_file() {
+    let oversized_schema = " ".repeat(MAX_HOT_SCHEMA_BYTES + 1);
+    let (_storage, fs, registry) = hot_catalog_fixture(
+        Some(&oversized_schema),
+        r#"{"type":"object"}"#,
+        "Prompt docs exist.",
+    );
+
+    let err = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ironclaw_host_runtime::HostRuntimeError::InvalidRequest { ref reason }
+            if reason.contains("input_schema_ref") && reason.contains("exceeds")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn hot_capability_catalog_fails_closed_for_oversized_prompt_doc() {
+    let oversized_prompt = vec![b'a'; MAX_HOT_PROMPT_BYTES + 1];
+    let (_storage, fs, registry) = hot_catalog_fixture_with_prompt_bytes(
+        Some(r#"{"type":"object"}"#),
+        r#"{"type":"object"}"#,
+        &oversized_prompt,
+    );
+
+    let err = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ironclaw_host_runtime::HostRuntimeError::InvalidRequest { ref reason }
+            if reason.contains("prompt_doc_ref") && reason.contains("exceeds")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn hot_capability_catalog_skips_non_model_capabilities() {
+    let (_storage, fs, registry) = hot_catalog_fixture_with_manifest(
+        Some(r#"{"type":"object"}"#),
+        r#"{"type":"object"}"#,
+        b"Prompt docs exist.",
+        manifest_with_visibility(CapabilityVisibility::Api),
+    );
+
+    let catalog = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap();
+
+    assert!(catalog.capabilities.is_empty());
+    assert!(catalog.get(&capability_id("echo.say")).is_none());
+}
+
+#[tokio::test]
+async fn hot_capability_catalog_fails_closed_when_bounded_backend_returns_too_many_bytes() {
+    let (_storage, _fs, registry) = hot_catalog_fixture(
+        Some(r#"{"type":"object"}"#),
+        r#"{"type":"object"}"#,
+        "Prompt docs exist.",
+    );
+
+    let err = publish_hot_capability_catalog(&OversizedReadFilesystem, &registry)
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(err, ironclaw_host_runtime::HostRuntimeError::InvalidRequest { ref reason }
+            if reason.contains("input_schema_ref") && reason.contains("exceeds")),
+        "unexpected error: {err:?}"
+    );
+}
+
+#[test]
+fn hot_capability_manifest_rejects_traversal_schema_ref_at_parse_boundary() {
+    let manifest = HOT_CAPABILITY_MANIFEST.replace(
+        r#"input_schema_ref = "schemas/echo/say.input.v1.json""#,
+        r#"input_schema_ref = "../secrets/schema.json""#,
+    );
+
+    let err = ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string().contains("..") || err.to_string().contains("dot path segments"),
+        "unexpected error: {err:?}"
+    );
+}
 
 #[tokio::test]
 async fn visible_surface_empty_registry_returns_deterministic_empty_version() {
@@ -286,6 +593,7 @@ async fn hidden_capability_direct_invoke_still_fails_closed_through_authorizatio
         dispatcher.clone(),
         Arc::new(GrantAuthorizer),
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_dev_runtime_policy(),
     )
     .with_trust_policy(Arc::new(trust_policy_for([(
         "echo",
@@ -362,6 +670,45 @@ async fn visible_surface_version_changes_with_schema_and_policy_changes() {
         .await
         .unwrap();
     assert_ne!(surface_a.version, narrowed.version);
+}
+
+#[tokio::test]
+async fn visible_surface_version_changes_with_runtime_policy_changes() {
+    let context = context_with_grants([(
+        capability_id("echo.say"),
+        vec![EffectKind::DispatchCapability],
+    )]);
+    let trust_policy = Arc::new(trust_policy_for([(
+        "echo",
+        "/system/extensions/echo/manifest.toml",
+        vec![EffectKind::DispatchCapability],
+    )]));
+    let runtime_a = runtime_with(
+        registry_from_manifests([(ECHO_MANIFEST, "/system/extensions/echo")]),
+        Arc::new(GrantAuthorizer),
+    )
+    .with_trust_policy(Arc::clone(&trust_policy));
+    let runtime_b = runtime_with(
+        registry_from_manifests([(ECHO_MANIFEST, "/system/extensions/echo")]),
+        Arc::new(GrantAuthorizer),
+    )
+    .with_trust_policy(trust_policy)
+    .with_runtime_policy(secret_denied_runtime_policy());
+
+    let surface_a = runtime_a
+        .visible_capabilities(visible_request(context.clone()))
+        .await
+        .unwrap();
+    let surface_b = runtime_b
+        .visible_capabilities(visible_request(context))
+        .await
+        .unwrap();
+
+    assert_eq!(visible_ids(&surface_a), visible_ids(&surface_b));
+    assert_ne!(
+        surface_a.version, surface_b.version,
+        "surface version must change when runtime policy changes even if visible descriptors do not"
+    );
 }
 
 #[tokio::test]
@@ -607,6 +954,236 @@ async fn visible_surface_requires_every_descriptor_effect_to_be_policy_allowed()
 }
 
 #[tokio::test]
+async fn visible_surface_hides_mcp_http_when_policy_denies_network_even_if_effect_underdeclared() {
+    let runtime = runtime_with(
+        registry_from_manifests([(MCP_UNDERDECLARED_NETWORK_MANIFEST, "/system/extensions/mcp")]),
+        Arc::new(GrantAuthorizer),
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "mcp",
+        "/system/extensions/mcp/manifest.toml",
+        vec![EffectKind::DispatchCapability],
+    )])))
+    .with_runtime_policy(network_denied_runtime_policy());
+
+    let context = context_with_grants([(
+        capability_id("mcp.search"),
+        vec![EffectKind::DispatchCapability],
+    )]);
+    let surface = runtime
+        .visible_capabilities(visible_request(context))
+        .await
+        .unwrap();
+
+    assert!(
+        surface.capabilities.is_empty(),
+        "NetworkMode::Deny must hide HTTP/SSE MCP even if the manifest omits the network effect"
+    );
+}
+
+#[tokio::test]
+async fn visible_surface_hides_script_when_policy_denies_processes_even_if_effect_underdeclared() {
+    let runtime = runtime_with(
+        registry_from_manifests([(
+            SCRIPT_UNDERDECLARED_PROCESS_MANIFEST,
+            "/system/extensions/scripts",
+        )]),
+        Arc::new(PanicAuthorizer),
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "scripts",
+        "/system/extensions/scripts/manifest.toml",
+        vec![EffectKind::DispatchCapability],
+    )])))
+    .with_runtime_policy(network_denied_runtime_policy());
+
+    let context = context_with_grants([(
+        capability_id("scripts.run"),
+        vec![EffectKind::DispatchCapability],
+    )]);
+    let surface = runtime
+        .visible_capabilities(request_with_provider_trust(
+            context,
+            vec![("scripts", vec![EffectKind::DispatchCapability])],
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        surface.capabilities.is_empty(),
+        "ProcessBackendKind::None must hide script tools even if the manifest omits process effects"
+    );
+}
+
+#[tokio::test]
+async fn visible_surface_hides_secret_when_policy_denies_secrets() {
+    let runtime = runtime_with(
+        registry_from_manifests([(SECRET_MANIFEST, "/system/extensions/secret-tool")]),
+        Arc::new(PanicAuthorizer),
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "secret-tool",
+        "/system/extensions/secret-tool/manifest.toml",
+        vec![EffectKind::UseSecret],
+    )])))
+    .with_runtime_policy(secret_denied_runtime_policy());
+
+    let surface = runtime
+        .visible_capabilities(request_with_provider_trust(
+            context_with_secret_grant(),
+            vec![("secret-tool", vec![EffectKind::UseSecret])],
+        ))
+        .await
+        .unwrap();
+
+    assert!(
+        surface.capabilities.is_empty(),
+        "SecretMode::Deny must hide tools that require secret access"
+    );
+}
+
+#[tokio::test]
+async fn runtime_policy_denied_extension_invoke_does_not_dispatch() {
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher_for_runtime: Arc<dyn CapabilityDispatcher> = dispatcher.clone();
+    let runtime = runtime_with_dispatcher(
+        registry_from_manifests([(ECHO_NETWORK_MANIFEST, "/system/extensions/echo")]),
+        Arc::new(GrantAuthorizer),
+        dispatcher_for_runtime,
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "echo",
+        "/system/extensions/echo/manifest.toml",
+        vec![EffectKind::DispatchCapability, EffectKind::Network],
+    )])))
+    .with_runtime_policy(network_denied_runtime_policy());
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context_with_grants([(
+                capability_id("echo.say"),
+                vec![EffectKind::DispatchCapability, EffectKind::Network],
+            )]),
+            capability_id("echo.say"),
+            ResourceEstimate::default(),
+            json!({"message": "blocked before dispatch"}),
+            trust_decision_for(vec![EffectKind::DispatchCapability, EffectKind::Network]),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected runtime-policy failure, got {outcome:?}");
+    };
+    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert_eq!(failure.capability_id, capability_id("echo.say"));
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("NetworkMode::Deny")
+    );
+    assert!(
+        !dispatcher.has_request(),
+        "runtime-policy denial must happen before generic extension dispatch"
+    );
+}
+
+#[tokio::test]
+async fn runtime_policy_denied_secret_invoke_does_not_dispatch() {
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher_for_runtime: Arc<dyn CapabilityDispatcher> = dispatcher.clone();
+    let runtime = runtime_with_dispatcher(
+        registry_from_manifests([(SECRET_MANIFEST, "/system/extensions/secret-tool")]),
+        Arc::new(GrantAuthorizer),
+        dispatcher_for_runtime,
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "secret-tool",
+        "/system/extensions/secret-tool/manifest.toml",
+        vec![EffectKind::UseSecret],
+    )])))
+    .with_runtime_policy(secret_denied_runtime_policy());
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context_with_secret_grant(),
+            capability_id("secret-tool.read"),
+            ResourceEstimate::default(),
+            json!({}),
+            trust_decision_for(vec![EffectKind::UseSecret]),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected runtime-policy failure, got {outcome:?}");
+    };
+    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert_eq!(failure.capability_id, capability_id("secret-tool.read"));
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("SecretMode::Deny")
+    );
+    assert!(
+        !dispatcher.has_request(),
+        "runtime-policy secret denial must happen before generic extension dispatch"
+    );
+}
+
+#[tokio::test]
+async fn runtime_policy_denied_mcp_http_invoke_does_not_dispatch_when_effect_underdeclared() {
+    let dispatcher = Arc::new(RecordingDispatcher::default());
+    let dispatcher_for_runtime: Arc<dyn CapabilityDispatcher> = dispatcher.clone();
+    let runtime = runtime_with_dispatcher(
+        registry_from_manifests([(MCP_UNDERDECLARED_NETWORK_MANIFEST, "/system/extensions/mcp")]),
+        Arc::new(GrantAuthorizer),
+        dispatcher_for_runtime,
+    )
+    .with_trust_policy(Arc::new(trust_policy_for([(
+        "mcp",
+        "/system/extensions/mcp/manifest.toml",
+        vec![EffectKind::DispatchCapability],
+    )])))
+    .with_runtime_policy(network_denied_runtime_policy());
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            context_with_grants([(
+                capability_id("mcp.search"),
+                vec![EffectKind::DispatchCapability],
+            )]),
+            capability_id("mcp.search"),
+            ResourceEstimate::default(),
+            json!({"query": "blocked before mcp dispatch"}),
+            trust_decision_for(vec![EffectKind::DispatchCapability]),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected runtime-policy failure, got {outcome:?}");
+    };
+    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert_eq!(failure.capability_id, capability_id("mcp.search"));
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("NetworkMode::Deny")
+    );
+    assert!(
+        !dispatcher.has_request(),
+        "runtime-policy denial must happen before MCP dispatch"
+    );
+}
+
+#[tokio::test]
 async fn visible_surface_rejects_invalid_execution_context() {
     let runtime = runtime_with(
         registry_from_manifests([(ECHO_MANIFEST, "/system/extensions/echo")]),
@@ -711,27 +1288,209 @@ fn visible_ids(surface: &VisibleCapabilitySurface) -> Vec<CapabilityId> {
         .collect()
 }
 
+fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn network_denied_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Deny,
+        secret_mode: SecretMode::BrokeredHandles,
+        approval_policy: ApprovalPolicy::AskAlways,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn secret_denied_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Deny,
+        secret_mode: SecretMode::Deny,
+        approval_policy: ApprovalPolicy::AskAlways,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn hot_catalog_fixture(
+    input_schema: Option<&str>,
+    output_schema: &str,
+    prompt_doc: &str,
+) -> (tempfile::TempDir, LocalFilesystem, ExtensionRegistry) {
+    hot_catalog_fixture_with_prompt_bytes(input_schema, output_schema, prompt_doc.as_bytes())
+}
+
+fn hot_catalog_fixture_with_prompt_bytes(
+    input_schema: Option<&str>,
+    output_schema: &str,
+    prompt_doc: &[u8],
+) -> (tempfile::TempDir, LocalFilesystem, ExtensionRegistry) {
+    let manifest = ExtensionManifest::parse(
+        HOT_CAPABILITY_MANIFEST,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
+    hot_catalog_fixture_with_manifest(input_schema, output_schema, prompt_doc, manifest)
+}
+
+fn hot_catalog_fixture_with_manifest(
+    input_schema: Option<&str>,
+    output_schema: &str,
+    prompt_doc: &[u8],
+    manifest: ExtensionManifest,
+) -> (tempfile::TempDir, LocalFilesystem, ExtensionRegistry) {
+    let storage = tempdir().unwrap();
+    let extension_root = storage.path().join("echo");
+    std::fs::create_dir_all(extension_root.join("schemas/echo")).unwrap();
+    std::fs::create_dir_all(extension_root.join("prompts/echo")).unwrap();
+    if let Some(input_schema) = input_schema {
+        std::fs::write(
+            extension_root.join("schemas/echo/say.input.v1.json"),
+            input_schema,
+        )
+        .unwrap();
+    }
+    std::fs::write(
+        extension_root.join("schemas/echo/say.output.v1.json"),
+        output_schema,
+    )
+    .unwrap();
+    std::fs::write(extension_root.join("prompts/echo/say.md"), prompt_doc).unwrap();
+
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/system/extensions").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+
+    let package = ExtensionPackage::from_manifest(
+        manifest,
+        VirtualPath::new("/system/extensions/echo").unwrap(),
+    )
+    .unwrap();
+    let mut registry = ExtensionRegistry::new();
+    registry.insert(package).unwrap();
+
+    (storage, fs, registry)
+}
+
+fn manifest_without_prompt_doc_ref() -> ExtensionManifest {
+    let mut manifest = ExtensionManifest::parse(
+        HOT_CAPABILITY_MANIFEST,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
+    manifest.capabilities[0].prompt_doc_ref = None;
+    manifest
+}
+
+fn manifest_with_visibility(visibility: CapabilityVisibility) -> ExtensionManifest {
+    let mut manifest = ExtensionManifest::parse(
+        HOT_CAPABILITY_MANIFEST,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap();
+    manifest.capabilities[0].visibility = visibility;
+    manifest.capabilities[0].prompt_doc_ref = None;
+    manifest
+}
+
+struct OversizedReadFilesystem;
+
+#[async_trait]
+impl RootFilesystem for OversizedReadFilesystem {
+    async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+        Err(FilesystemError::Unsupported {
+            path: path.clone(),
+            operation: FilesystemOperation::ListDir,
+        })
+    }
+
+    async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+        Ok(FileStat {
+            path: path.clone(),
+            file_type: FileType::File,
+            len: 1,
+            modified: None,
+            sensitive: false,
+        })
+    }
+
+    async fn read_file_bounded(
+        &self,
+        _path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        Ok(Some(vec![b'a'; max_bytes + 1]))
+    }
+}
+
 fn runtime_with(
     registry: ExtensionRegistry,
     authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
 ) -> DefaultHostRuntime {
+    runtime_with_dispatcher(
+        registry,
+        authorizer,
+        Arc::new(RecordingDispatcher::default()),
+    )
+}
+
+fn runtime_with_dispatcher(
+    registry: ExtensionRegistry,
+    authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer>,
+    dispatcher: Arc<dyn CapabilityDispatcher>,
+) -> DefaultHostRuntime {
     DefaultHostRuntime::new(
         Arc::new(registry),
-        Arc::new(RecordingDispatcher::default()),
+        dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_dev_runtime_policy(),
     )
 }
 
 fn registry_from_manifests<const N: usize>(manifests: [(&str, &str); N]) -> ExtensionRegistry {
     let mut registry = ExtensionRegistry::new();
     for (manifest, root) in manifests {
-        let manifest = ExtensionManifest::parse(manifest).unwrap();
+        let manifest = parse_manifest(manifest);
         let package =
             ExtensionPackage::from_manifest(manifest, VirtualPath::new(root).unwrap()).unwrap();
         registry.insert(package).unwrap();
     }
     registry
+}
+
+fn parse_manifest(manifest: &str) -> ExtensionManifest {
+    let manifest = legacy_capability_fixture_to_v2(manifest);
+    ExtensionManifest::parse(
+        &manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+    )
+    .unwrap()
 }
 
 fn trust_policy_for<const N: usize>(
@@ -941,6 +1700,28 @@ impl TrustAwareCapabilityDispatchAuthorizer for PanicAuthorizer {
     }
 }
 
+const HOT_CAPABILITY_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "echo"
+name = "Echo"
+version = "0.1.0"
+description = "Echo test extension"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "echo.wasm"
+
+[[capabilities]]
+id = "echo.say"
+description = "Echoes input"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/echo/say.input.v1.json"
+output_schema_ref = "schemas/echo/say.output.v1.json"
+prompt_doc_ref = "prompts/echo/say.md"
+"#;
+
 const ECHO_MANIFEST: &str = r#"
 id = "echo"
 name = "Echo"
@@ -975,6 +1756,26 @@ module = "echo.wasm"
 id = "echo.say"
 description = "Echoes input over network"
 effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+parameters_schema = {}
+"#;
+
+const MCP_UNDERDECLARED_NETWORK_MANIFEST: &str = r#"
+id = "mcp"
+name = "MCP Search"
+version = "0.1.0"
+description = "MCP integration extension"
+trust = "third_party"
+
+[runtime]
+kind = "mcp"
+transport = "http"
+url = "https://mcp.example.test/rpc"
+
+[[capabilities]]
+id = "mcp.search"
+description = "Search through MCP"
+effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = {}
 "#;
@@ -1091,6 +1892,27 @@ args = ["tests/"]
 id = "scripts.run"
 description = "Runs a script"
 effects = ["execute_code"]
+default_permission = "allow"
+parameters_schema = {}
+"#;
+
+const SCRIPT_UNDERDECLARED_PROCESS_MANIFEST: &str = r#"
+id = "scripts"
+name = "Scripts"
+version = "0.1.0"
+description = "Script runner"
+trust = "third_party"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "pytest"
+args = ["tests/"]
+
+[[capabilities]]
+id = "scripts.run"
+description = "Runs a script"
+effects = ["dispatch_capability"]
 default_permission = "allow"
 parameters_schema = {}
 "#;

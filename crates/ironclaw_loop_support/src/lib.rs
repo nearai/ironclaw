@@ -7,16 +7,21 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 mod cancellation_port;
 mod capability_allow_set;
 mod capability_port;
 mod capability_surface_filter;
+mod filesystem_skill_bundle_source;
 pub mod identity_context;
 mod input_port;
 mod input_queue;
+mod skill_bundle_source;
 mod skill_context;
 
 pub use cancellation_port::{
@@ -37,13 +42,20 @@ pub use capability_port::{
 pub use capability_surface_filter::{
     CapabilitySurfaceProfileFilter, CapabilitySurfaceVisibleFilter,
 };
+pub use filesystem_skill_bundle_source::{FilesystemSkillBundleRoot, FilesystemSkillBundleSource};
 pub use identity_context::{
     HostIdentityContextBuildError, HostIdentityContextCandidate, HostIdentityContextSource,
     HostIdentityMessageContent, IdentityApplicability, IdentityBudget, IdentityFileName,
-    IdentityTrustLevel, build_identity_messages, identity_message_ref,
+    IdentityMessageBuildOutcome, IdentityTrustLevel, build_identity_messages,
+    build_identity_messages_for_run_detailed, identity_applicability_allowed_for_run,
+    identity_message_ref,
 };
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
+pub use skill_bundle_source::{
+    SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,
+    SkillBundleSourceError, SkillFilePath, SkillSourceKind, sort_skill_bundle_descriptors,
+};
 pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     build_skill_run_snapshot,
@@ -68,8 +80,8 @@ use ironclaw_turns::{
         CapabilityDeniedReasonKind, CapabilityInvocation, CapabilityOutcome,
         CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
         LoopCapabilityPort, LoopContextBundle, LoopContextMessage, LoopContextPort,
-        LoopContextRequest, LoopHostMilestoneEmitter, LoopHostMilestoneSink, LoopInputCursor,
-        LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
+        LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
         LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
         LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
         VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
@@ -93,11 +105,16 @@ where
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     identity_budget: IdentityBudget,
     identity_candidates: Arc<IdentityCandidateCache>,
+    milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
 }
 
 struct IdentityCandidateCache {
     text_only: OnceCell<Vec<HostIdentityContextCandidate>>,
     codeact: OnceCell<Vec<HostIdentityContextCandidate>>,
+    text_only_personal_context_admitted: OnceCell<()>,
+    codeact_personal_context_admitted: OnceCell<()>,
+    text_only_personal_context_admitted_in_flight: AtomicBool,
+    codeact_personal_context_admitted_in_flight: AtomicBool,
 }
 
 impl IdentityCandidateCache {
@@ -105,6 +122,10 @@ impl IdentityCandidateCache {
         Self {
             text_only: OnceCell::new(),
             codeact: OnceCell::new(),
+            text_only_personal_context_admitted: OnceCell::new(),
+            codeact_personal_context_admitted: OnceCell::new(),
+            text_only_personal_context_admitted_in_flight: AtomicBool::new(false),
+            codeact_personal_context_admitted_in_flight: AtomicBool::new(false),
         }
     }
 
@@ -112,6 +133,20 @@ impl IdentityCandidateCache {
         match mode {
             PromptMode::TextOnly => &self.text_only,
             PromptMode::CodeAct => &self.codeact,
+        }
+    }
+
+    fn personal_context_admitted_cell_for_mode(&self, mode: PromptMode) -> &OnceCell<()> {
+        match mode {
+            PromptMode::TextOnly => &self.text_only_personal_context_admitted,
+            PromptMode::CodeAct => &self.codeact_personal_context_admitted,
+        }
+    }
+
+    fn personal_context_admitted_in_flight_for_mode(&self, mode: PromptMode) -> &AtomicBool {
+        match mode {
+            PromptMode::TextOnly => &self.text_only_personal_context_admitted_in_flight,
+            PromptMode::CodeAct => &self.codeact_personal_context_admitted_in_flight,
         }
     }
 }
@@ -135,6 +170,7 @@ where
             identity_context_source: None,
             identity_budget: IdentityBudget::default(),
             identity_candidates: Arc::new(IdentityCandidateCache::new()),
+            milestone_sink: None,
         }
     }
 
@@ -153,6 +189,11 @@ where
 
     pub fn with_identity_budget(mut self, budget: IdentityBudget) -> Self {
         self.identity_budget = budget;
+        self
+    }
+
+    pub fn with_milestone_sink(mut self, sink: Arc<dyn LoopHostMilestoneSink>) -> Self {
+        self.milestone_sink = Some(sink);
         self
     }
 }
@@ -207,11 +248,17 @@ where
                             .map_err(HostIdentityContextBuildError::into_host_error)
                     })
                     .await?;
-                identity_context::build_identity_messages_from_candidates(
+                let outcome = identity_context::build_identity_messages_for_run_detailed(
                     candidates,
+                    &self.run_context,
                     mode,
                     self.identity_budget,
-                )?
+                )?;
+                self.publish_personal_context_admitted(
+                    mode,
+                    &outcome.admitted_personal_context_paths,
+                );
+                outcome.messages
             }
             None => Vec::new(),
         };
@@ -227,6 +274,102 @@ where
             memory_snippets: Vec::new(),
         })
     }
+}
+
+impl<S> ThreadBackedLoopContextPort<S>
+where
+    S: SessionThreadService + ?Sized + Send + Sync,
+{
+    fn publish_personal_context_admitted(
+        &self,
+        mode: PromptMode,
+        admitted_paths: &[IdentityFileName],
+    ) {
+        if admitted_paths.is_empty() {
+            return;
+        }
+        let Some(milestone_sink) = self.milestone_sink.as_ref() else {
+            return;
+        };
+        let emitted_cell = self
+            .identity_candidates
+            .personal_context_admitted_cell_for_mode(mode);
+        if emitted_cell.get().is_some() {
+            return;
+        }
+        let in_flight = self
+            .identity_candidates
+            .personal_context_admitted_in_flight_for_mode(mode);
+        if in_flight.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let summary = match personal_context_admitted_summary(admitted_paths) {
+            Ok(summary) => summary,
+            Err(error) => {
+                in_flight.store(false, Ordering::Release);
+                tracing::debug!("failed to build personal context admitted milestone: {error}");
+                return;
+            }
+        };
+        let context = self.run_context.clone();
+        let milestone_sink = Arc::clone(milestone_sink);
+        let identity_candidates = Arc::clone(&self.identity_candidates);
+        tokio::spawn(async move {
+            let publish_result = LoopHostMilestoneEmitter::new(context, milestone_sink)
+                .driver_note(LoopDriverNoteKind::Context, summary)
+                .await;
+            if let Err(error) = publish_result {
+                tracing::debug!("failed to emit personal context admitted milestone: {error}");
+            } else {
+                let _ = identity_candidates
+                    .personal_context_admitted_cell_for_mode(mode)
+                    .set(());
+            }
+            identity_candidates
+                .personal_context_admitted_in_flight_for_mode(mode)
+                .store(false, Ordering::Release);
+        });
+    }
+}
+
+fn personal_context_admitted_summary(
+    admitted_paths: &[IdentityFileName],
+) -> Result<LoopSafeSummary, AgentLoopHostError> {
+    let source_labels = admitted_paths
+        .iter()
+        .filter_map(|path| personal_context_source_label(path.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let summary = if source_labels.is_empty() {
+        format!("personal context admitted count {}", admitted_paths.len())
+    } else {
+        format!(
+            "personal context admitted count {} sources {}",
+            admitted_paths.len(),
+            source_labels
+        )
+    };
+    LoopSafeSummary::new(summary).map_err(|reason| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Internal,
+            format!("personal context milestone summary invalid: {reason}"),
+        )
+    })
+}
+
+fn personal_context_source_label(path: &str) -> Option<String> {
+    let basename = path
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|label| !label.is_empty())
+        .unwrap_or(path);
+    let label = basename
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
+        .collect::<String>();
+    (!label.is_empty()).then_some(label)
 }
 
 /// Thread-backed transcript adapter for text-only assistant replies.
@@ -1398,5 +1541,48 @@ fn safe_model_summary(kind: HostManagedModelErrorKind) -> &'static str {
         HostManagedModelErrorKind::CredentialUnavailable => "model credentials are unavailable",
         HostManagedModelErrorKind::Unavailable => "model service is unavailable",
         HostManagedModelErrorKind::Cancelled => "model request was cancelled",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn personal_context_admitted_summary_empty_paths_uses_count_only() {
+        let summary = personal_context_admitted_summary(&[]).unwrap();
+
+        assert_eq!(summary.as_str(), "personal context admitted count 0");
+    }
+
+    #[test]
+    fn personal_context_admitted_summary_uses_safe_basenames_only() {
+        let paths = vec![
+            IdentityFileName::new("USER.md").unwrap(),
+            IdentityFileName::new("context/assistant-directives.md").unwrap(),
+        ];
+
+        let summary = personal_context_admitted_summary(&paths).unwrap();
+
+        assert_eq!(
+            summary.as_str(),
+            "personal context admitted count 2 sources USER.md assistant-directives.md"
+        );
+        assert!(!summary.as_str().contains("context/assistant-directives.md"));
+        assert!(!summary.as_str().contains('/'));
+        assert!(!summary.as_str().contains('\\'));
+    }
+
+    #[test]
+    fn personal_context_source_label_drops_empty_and_separator_only_labels() {
+        assert_eq!(
+            personal_context_source_label(r"private\USER.md").as_deref(),
+            Some("USER.md")
+        );
+        assert_eq!(
+            personal_context_source_label("context/%2Fassistant-directives.md").as_deref(),
+            Some("2Fassistant-directives.md")
+        );
+        assert_eq!(personal_context_source_label("///"), None);
     }
 }

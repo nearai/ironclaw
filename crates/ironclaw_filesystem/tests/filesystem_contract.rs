@@ -43,6 +43,28 @@ async fn scoped_read_resolves_mount_view_and_reads_bytes() {
 }
 
 #[tokio::test]
+async fn bounded_read_returns_none_without_materializing_oversized_local_file() {
+    let storage = tempdir().unwrap();
+    std::fs::create_dir_all(storage.path().join("project1")).unwrap();
+    std::fs::write(storage.path().join("project1/schema.json"), b"abcdef").unwrap();
+
+    let mut root = LocalFilesystem::new();
+    root.mount_local(
+        VirtualPath::new("/projects").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+
+    let path = VirtualPath::new("/projects/project1/schema.json").unwrap();
+
+    assert_eq!(
+        root.read_file_bounded(&path, 6).await.unwrap(),
+        Some(b"abcdef".to_vec())
+    );
+    assert_eq!(root.read_file_bounded(&path, 5).await.unwrap(), None);
+}
+
+#[tokio::test]
 async fn scoped_write_is_denied_on_read_only_mount() {
     let storage = tempdir().unwrap();
     std::fs::create_dir_all(storage.path().join("project1")).unwrap();

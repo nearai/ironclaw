@@ -120,6 +120,12 @@ impl SessionThreadService for InMemorySessionThreadService {
                 .ok_or(SessionThreadError::UnknownMessage {
                     message_id: record.message_id,
                 })?;
+            if existing.actor_id.as_deref() != Some(request.actor_id.as_str()) {
+                return Err(SessionThreadError::IdempotentReplayActorMismatch {
+                    stored_actor_id: existing.actor_id.clone().unwrap_or_default(),
+                    requested_actor_id: request.actor_id,
+                });
+            }
             return Ok(AcceptedInboundMessage {
                 thread_id: existing.thread_id.clone(),
                 message_id: record.message_id,
@@ -174,7 +180,8 @@ impl SessionThreadService for InMemorySessionThreadService {
     ) -> Result<Option<AcceptedInboundMessageReplay>, SessionThreadError> {
         let state = self.state.lock().await;
         let Some((key, record)) = state.inbound_idempotency.iter().find(|(key, _)| {
-            key.source_binding_id == request.source_binding_id
+            key.scope == request.scope
+                && key.source_binding_id == request.source_binding_id
                 && key.external_event_id == request.external_event_id
         }) else {
             return Ok(None);
@@ -187,6 +194,9 @@ impl SessionThreadService for InMemorySessionThreadService {
             .ok_or(SessionThreadError::UnknownMessage {
                 message_id: record.message_id,
             })?;
+        if message.actor_id.as_deref() != Some(request.actor_id.as_str()) {
+            return Ok(None);
+        }
         Ok(Some(AcceptedInboundMessageReplay {
             scope: key.scope.clone(),
             thread_id: record.thread_id.clone(),
@@ -415,6 +425,15 @@ impl SessionThreadService for InMemorySessionThreadService {
             messages: history_messages(thread),
             summary_artifacts: history_summary_artifacts(thread),
         })
+    }
+
+    async fn read_thread(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        let state = self.state.lock().await;
+        let thread = get_thread(&state, &request.scope, &request.thread_id)?;
+        Ok(thread.record.clone())
     }
 
     async fn create_summary_artifact(

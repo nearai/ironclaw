@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use ironclaw_host_api::{HostPath, VirtualPath};
 use ironclaw_safety::sensitive_paths::is_sensitive_path;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::{
     CasExpectation, DirEntry, Entry, FileStat, FileType, FilesystemError, FilesystemOperation,
@@ -226,6 +226,43 @@ impl RootFilesystem for LocalFilesystem {
         tokio::fs::read(resolved)
             .await
             .map_err(|error| io_error(path.clone(), FilesystemOperation::ReadFile, error))
+    }
+
+    async fn read_file_bounded(
+        &self,
+        path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        let resolved = self
+            .resolve_existing(path, FilesystemOperation::ReadFile)
+            .await?;
+        let file = tokio::fs::File::open(&resolved)
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        let metadata = file
+            .metadata()
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        if !metadata.is_file() {
+            return Err(FilesystemError::Backend {
+                path: path.clone(),
+                operation: FilesystemOperation::ReadFile,
+                reason: "not a file".to_string(),
+            });
+        }
+        if metadata.len() > max_bytes as u64 {
+            return Ok(None);
+        }
+
+        let mut bytes = Vec::with_capacity(max_bytes.min(metadata.len() as usize));
+        file.take((max_bytes as u64).saturating_add(1))
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|error| io_error(path.clone(), FilesystemOperation::ReadFile, error))?;
+        if bytes.len() > max_bytes {
+            return Ok(None);
+        }
+        Ok(Some(bytes))
     }
 
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {

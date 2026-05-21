@@ -12,7 +12,7 @@ use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::PostgresRootFilesystem;
 use ironclaw_host_api::VirtualPath;
 use ironclaw_product_adapters::{
-    AdapterInstallationId, ExternalEventId, ProductAdapterId, ProductInboundAck,
+    AdapterInstallationId, ExternalActorRef, ExternalEventId, ProductAdapterId, ProductInboundAck,
 };
 use ironclaw_product_workflow::{
     ActionFingerprintKey, IdempotencyDecision, IdempotencyLedger, ProductInboundAction,
@@ -24,9 +24,14 @@ use ironclaw_product_workflow_storage::RebornLibSqlIdempotencyLedger;
 use ironclaw_product_workflow_storage::RebornPostgresIdempotencyLedger;
 
 fn fingerprint(suffix: &str) -> ActionFingerprintKey {
+    fingerprint_for_actor(suffix, "user1")
+}
+
+fn fingerprint_for_actor(suffix: &str, actor_id: &str) -> ActionFingerprintKey {
     ActionFingerprintKey::new(
         ProductAdapterId::new("test_adapter").expect("valid adapter"),
         AdapterInstallationId::new("install_alpha").expect("valid installation"),
+        ExternalActorRef::new("test", actor_id, Option::<String>::None).expect("valid actor"),
         SourceBindingKey::new("space:0:;conversation:5:conv1;topic:0:;")
             .expect("valid source binding key"),
         ExternalEventId::new(format!("evt:{suffix}")).expect("valid event"),
@@ -246,6 +251,30 @@ async fn assert_custom_root_isolated_from_default_root(
     assert!(matches!(default_decision, IdempotencyDecision::New(_)));
 }
 
+async fn assert_actor_identity_is_part_of_fingerprint_path(
+    ledger: &dyn IdempotencyLedger,
+    suffix: &str,
+) {
+    let received_at = Utc::now();
+    let first_actor = fingerprint_for_actor(suffix, "user1");
+    let second_actor = fingerprint_for_actor(suffix, "user2");
+
+    assert!(matches!(
+        ledger
+            .begin_or_replay(first_actor, received_at)
+            .await
+            .expect("begin first actor"),
+        IdempotencyDecision::New(_)
+    ));
+    assert!(matches!(
+        ledger
+            .begin_or_replay(second_actor, received_at)
+            .await
+            .expect("begin second actor"),
+        IdempotencyDecision::New(_)
+    ));
+}
+
 #[cfg(feature = "libsql")]
 #[tokio::test]
 async fn libsql_settled_action_survives_reopen_and_replays() {
@@ -339,6 +368,17 @@ async fn libsql_custom_root_isolated_from_default_root() {
     let default = RebornLibSqlIdempotencyLedger::new(filesystem);
 
     assert_custom_root_isolated_from_default_root(&custom, &default, "libsql-custom-root").await;
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
+async fn libsql_actor_identity_is_part_of_fingerprint_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("workflow-ledger.db");
+    let db_path = db_path.display().to_string();
+    let ledger = RebornLibSqlIdempotencyLedger::new(libsql_filesystem(&db_path).await);
+
+    assert_actor_identity_is_part_of_fingerprint_path(&ledger, "libsql-actor-isolation").await;
 }
 
 #[cfg(feature = "postgres")]
@@ -453,6 +493,21 @@ async fn postgres_custom_root_isolated_from_default_root_when_configured() {
         &custom,
         &default,
         &unique_suffix("postgres-custom-root"),
+    )
+    .await;
+}
+
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_actor_identity_is_part_of_fingerprint_path_when_configured() {
+    let Some(filesystem) = postgres_filesystem().await else {
+        return;
+    };
+    let ledger = RebornPostgresIdempotencyLedger::new(filesystem);
+
+    assert_actor_identity_is_part_of_fingerprint_path(
+        &ledger,
+        &unique_suffix("postgres-actor-isolation"),
     )
     .await;
 }

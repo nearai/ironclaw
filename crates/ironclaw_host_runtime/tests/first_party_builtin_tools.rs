@@ -2,25 +2,32 @@ use std::{
     collections::BTreeMap,
     net::{IpAddr, Ipv4Addr},
     path::Path,
-    sync::Arc,
+    sync::{Arc, LazyLock},
     thread,
     time::Duration,
 };
 
+use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
 #[cfg(feature = "libsql")]
 use ironclaw_filesystem::LibSqlRootFilesystem;
 use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
+use ironclaw_host_api::runtime_policy::{
+    ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
+    NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
+};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
-    ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime,
-    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, SurfaceKind,
-    TIME_CAPABILITY_ID, VisibleCapabilityAccess, VisibleCapabilityRequest,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    CommandExecutionOutput, CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID,
+    LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
+    SHELL_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID, VisibleCapabilityAccess,
+    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_package,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpResponse, NetworkHttpTransport,
@@ -83,6 +90,33 @@ async fn builtin_first_party_surface_lists_allowed_tools_in_registry_order() {
             .iter()
             .all(|capability| capability.estimated_resources.output_bytes.is_some())
     );
+    let shell = surface
+        .capabilities
+        .iter()
+        .find(|capability| capability.descriptor.id.as_str() == SHELL_CAPABILITY_ID)
+        .expect("shell capability must be visible");
+    assert_eq!(shell.estimated_resources.process_count, Some(1));
+}
+
+#[tokio::test]
+async fn builtin_first_party_surface_hides_runtime_policy_impossible_tools() {
+    let runtime = runtime_with_policy(network_denied_policy());
+    let request = VisibleCapabilityRequest::new(
+        execution_context(all_builtin_capability_ids()),
+        SurfaceKind::new("agent_loop").unwrap(),
+    )
+    .with_policy(CapabilitySurfacePolicy::allow_all())
+    .with_provider_trust(provider_trust());
+
+    let surface = runtime.visible_capabilities(request).await.unwrap();
+
+    let ids = surface
+        .capabilities
+        .iter()
+        .map(|capability| capability.descriptor.id.as_str())
+        .collect::<Vec<_>>();
+    assert!(!ids.contains(&HTTP_CAPABILITY_ID));
+    assert!(ids.contains(&ECHO_CAPABILITY_ID));
 }
 
 #[tokio::test]
@@ -129,6 +163,194 @@ async fn builtin_echo_invokes_through_host_runtime() {
         .await
         .unwrap();
     assert_eq!(output, Value::String("hello reborn".to_string()));
+}
+
+#[tokio::test]
+async fn builtin_shell_invokes_copied_shell_core_through_host_runtime() {
+    let outcome = runtime()
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+            capability_id(SHELL_CAPABILITY_ID),
+            ResourceEstimate::default(),
+            json!({"command": "echo hello reborn"}),
+            trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::Completed(completed) = outcome else {
+        panic!("expected completed shell invocation, got {outcome:?}");
+    };
+    let output = &completed.output;
+    assert_eq!(output["exit_code"], json!(0));
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["sandboxed"], json!(false));
+    assert!(
+        output["output"]
+            .as_str()
+            .expect("shell output must be text")
+            .contains("hello reborn")
+    );
+    assert_eq!(completed.usage.process_count, 1);
+}
+
+#[tokio::test]
+async fn builtin_shell_delegates_command_execution_to_process_port() {
+    let process_port = Arc::new(RecordingProcessPort::default());
+    let runtime = runtime_with_process_port(Arc::clone(&process_port));
+
+    let output = invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "echo via port", "timeout": 9, "workdir": "port-workdir"}),
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["exit_code"], json!(0));
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["sandboxed"], json!(true));
+    assert_eq!(output["output"], json!("process port: echo via port"));
+    let requests = process_port.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].command, "echo via port");
+    assert_eq!(requests[0].workdir.as_deref(), Some("port-workdir"));
+    assert_eq!(requests[0].timeout_secs, Some(9));
+    assert!(
+        requests[0]
+            .mounts
+            .as_ref()
+            .is_some_and(|mounts| mounts.mounts.is_empty())
+    );
+    assert!(requests[0].extra_env.is_empty());
+    assert_eq!(requests[0].scope.user_id.as_str(), "user");
+}
+
+#[tokio::test]
+async fn builtin_shell_returns_stderr_and_nonzero_exit_without_dispatch_failure() {
+    let output = invoke_shell(json!({"command": "printf shell-error >&2; exit 7"}))
+        .await
+        .unwrap();
+
+    assert_eq!(output["exit_code"], json!(7));
+    assert_eq!(output["success"], json!(false));
+    assert_eq!(output["sandboxed"], json!(false));
+    assert_eq!(output["output"], json!("shell-error"));
+}
+
+#[tokio::test]
+async fn builtin_shell_reuses_v1_shell_validation() {
+    for input in [
+        json!({"command": "cat ~/server.key"}),
+        json!({"command": "printf '\\x65\\x63\\x68\\x6f hi'|dash"}),
+        json!({"command": "wc < ~/server.key"}),
+    ] {
+        let err = invoke_shell(input).await.unwrap_err();
+
+        assert_eq!(err, RuntimeFailureKind::Backend);
+    }
+}
+
+#[tokio::test]
+async fn builtin_shell_rejects_invalid_inputs_before_spawn() {
+    for input in [
+        json!({}),
+        json!({"command": 123}),
+        json!({"command": "echo hi", "workdir": 123}),
+        json!({"command": "echo hi", "timeout": 0}),
+        json!({"command": "echo hi", "timeout": "1"}),
+    ] {
+        let err = invoke_shell(input).await.unwrap_err();
+
+        assert_eq!(err, RuntimeFailureKind::InvalidInput);
+    }
+}
+
+#[tokio::test]
+async fn builtin_shell_rejects_timeout_above_manifest_ceiling() {
+    let err = invoke_shell(json!({"command": "echo hi", "timeout": 121}))
+        .await
+        .unwrap_err();
+
+    assert_eq!(err, RuntimeFailureKind::Resource);
+}
+
+#[tokio::test]
+async fn builtin_shell_maps_timeout_and_spawn_failures() {
+    let timeout = invoke_shell(json!({"command": "sleep 2", "timeout": 1}))
+        .await
+        .unwrap_err();
+    assert_eq!(timeout, RuntimeFailureKind::Resource);
+
+    let spawn = invoke_shell(json!({
+            "command": "echo missing",
+            "workdir": "/definitely/missing/ironclaw-shell-test"
+    }))
+    .await
+    .unwrap_err();
+    assert_eq!(spawn, RuntimeFailureKind::Backend);
+}
+
+#[tokio::test]
+async fn builtin_shell_truncates_large_output_without_output_overflow() {
+    let output = invoke_shell(json!({
+        "command": "i=0; while [ $i -lt 70000 ]; do printf x; i=$((i+1)); done",
+        "timeout": 5
+    }))
+    .await
+    .unwrap();
+
+    let output = output["output"].as_str().expect("shell output is text");
+    assert!(output.contains("[truncated"));
+    assert!(output.len() <= 66_000);
+}
+
+#[tokio::test]
+async fn builtin_shell_does_not_inherit_unlisted_parent_env() {
+    static ENV_LOCK: LazyLock<tokio::sync::Mutex<()>> =
+        LazyLock::new(|| tokio::sync::Mutex::new(()));
+    let _guard = ENV_LOCK.lock().await;
+
+    // SAFETY: test uses a crate-local mutex and a unique environment variable;
+    // no production code depends on this key.
+    unsafe {
+        std::env::set_var("IRONCLAW_SHELL_SECRET_TEST", "must_not_leak");
+    }
+    let output = invoke_shell(json!({
+        "command": "printf ${IRONCLAW_SHELL_SECRET_TEST:-missing}"
+    }))
+    .await;
+    // SAFETY: clears only the test-owned key set above.
+    unsafe {
+        std::env::remove_var("IRONCLAW_SHELL_SECRET_TEST");
+    }
+
+    let output = output.unwrap();
+    assert_eq!(output["output"], json!("missing"));
+}
+
+#[tokio::test]
+async fn builtin_shell_rejects_scoped_mount_workdir_until_process_backend_handles_it() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut permissions = MountPermissions::read_write();
+    permissions.execute = true;
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), permissions);
+    let runtime = runtime_with_filesystem(filesystem);
+    let error = invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "pwd", "workdir": "/workspace"}),
+        execution_context_with_mounts_and_network(
+            [SHELL_CAPABILITY_ID],
+            mounts,
+            shell_test_policy(),
+        ),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Backend);
 }
 
 #[tokio::test]
@@ -311,6 +533,39 @@ async fn builtin_http_invokes_through_host_runtime_egress() {
     assert_eq!(request.response_body_limit, Some(4096));
     assert_eq!(request.timeout_ms, Some(2500));
     assert!(request.credential_injections.is_empty());
+}
+
+#[tokio::test]
+async fn builtin_http_runtime_policy_denial_stops_before_egress() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        br#"{"ok":true}"#.to_vec(),
+    ));
+    let runtime = runtime_with_http_egress_and_policy(Arc::clone(&egress), network_denied_policy());
+
+    let outcome = runtime
+        .invoke_capability(RuntimeCapabilityRequest::new(
+            execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+            capability_id(HTTP_CAPABILITY_ID),
+            ResourceEstimate::default(),
+            json!({"url": "https://api.example.test/v1/items"}),
+            trust_decision(),
+        ))
+        .await
+        .unwrap();
+
+    let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+        panic!("expected runtime-policy failure, got {outcome:?}");
+    };
+    assert_eq!(failure.kind, RuntimeFailureKind::Authorization);
+    assert_eq!(failure.capability_id, capability_id(HTTP_CAPABILITY_ID));
+    assert!(
+        failure
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("NetworkMode::Deny")
+    );
+    assert!(egress.requests().is_empty());
 }
 
 #[tokio::test]
@@ -1078,8 +1333,21 @@ async fn builtin_coding_blocks_relative_workspace_protected_paths() {
     let runtime = runtime_with_filesystem(filesystem);
     let context = execution_context_with_mounts(all_builtin_capability_ids(), mounts);
 
+    let root_readme_write = invoke_with_context(
+        &runtime,
+        WRITE_FILE_CAPABILITY_ID,
+        json!({"path": "./README.md", "content": "changed\n"}),
+        context.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(root_readme_write["success"], json!(true));
+    assert_eq!(
+        std::fs::read_to_string(temp.path().join("README.md")).unwrap(),
+        "changed\n"
+    );
+
     for (tool_path, host_path) in [
-        ("./README.md", "README.md"),
         ("./daily/note.md", "daily/note.md"),
         ("./context/session.md", "context/session.md"),
     ] {
@@ -1588,6 +1856,17 @@ async fn invoke(capability: &str, input: Value) -> Result<Value, RuntimeFailureK
     invoke_with_context(&runtime, capability, input, execution_context([capability])).await
 }
 
+async fn invoke_shell(input: Value) -> Result<Value, RuntimeFailureKind> {
+    let runtime = runtime();
+    invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        input,
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await
+}
+
 async fn invoke_with_context<R: HostRuntime + ?Sized>(
     runtime: &R,
     capability: &str,
@@ -1632,11 +1911,66 @@ where
     .host_runtime_for_local_testing()
 }
 
+fn runtime_with_process_port<T>(process_port: Arc<T>) -> impl HostRuntime
+where
+    T: RuntimeProcessPort + 'static,
+{
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_process_port(process_port)
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
+fn runtime_with_policy(policy: EffectiveRuntimePolicy) -> impl HostRuntime {
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_trust_policy(Arc::new(trust_policy()))
+    .with_runtime_policy(policy)
+    .host_runtime_for_local_testing()
+}
+
 fn runtime_with_http_egress<T>(egress: Arc<T>) -> impl HostRuntime
 where
     T: RuntimeHttpEgress + 'static,
 {
     runtime_with_http_egress_and_governor(egress, Arc::new(InMemoryResourceGovernor::new()))
+}
+
+fn runtime_with_http_egress_and_policy<T>(
+    egress: Arc<T>,
+    policy: EffectiveRuntimePolicy,
+) -> impl HostRuntime
+where
+    T: RuntimeHttpEgress + 'static,
+{
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_http_egress(egress)
+    .with_trust_policy(Arc::new(trust_policy()))
+    .with_runtime_policy(policy)
+    .host_runtime_for_local_testing()
 }
 
 fn runtime_with_http_egress_and_governor<T>(
@@ -1696,12 +2030,13 @@ fn provider_id() -> ExtensionId {
     ExtensionId::new("builtin").unwrap()
 }
 
-fn all_builtin_capability_ids() -> [&'static str; 10] {
+fn all_builtin_capability_ids() -> [&'static str; 11] {
     [
         ECHO_CAPABILITY_ID,
         TIME_CAPABILITY_ID,
         JSON_CAPABILITY_ID,
         HTTP_CAPABILITY_ID,
+        SHELL_CAPABILITY_ID,
         READ_FILE_CAPABILITY_ID,
         WRITE_FILE_CAPABILITY_ID,
         LIST_DIR_CAPABILITY_ID,
@@ -1726,6 +2061,27 @@ fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFiles
     )])
     .unwrap();
     (filesystem, mounts)
+}
+
+#[derive(Debug, Default)]
+struct RecordingProcessPort {
+    requests: std::sync::Mutex<Vec<CommandExecutionRequest>>,
+}
+
+#[async_trait]
+impl RuntimeProcessPort for RecordingProcessPort {
+    async fn run_command(
+        &self,
+        request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        self.requests.lock().unwrap().push(request.clone());
+        Ok(CommandExecutionOutput {
+            output: format!("process port: {}", request.command),
+            exit_code: 0,
+            sandboxed: true,
+            duration: Duration::from_millis(7),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1881,10 +2237,20 @@ fn execution_context_with_network<const N: usize>(
     grants: [&str; N],
     network: NetworkPolicy,
 ) -> ExecutionContext {
+    execution_context_with_mounts_and_network(grants, MountView::default(), network)
+}
+
+fn execution_context_with_mounts_and_network<const N: usize>(
+    grants: [&str; N],
+    mounts: MountView,
+    network: NetworkPolicy,
+) -> ExecutionContext {
     let capability_set = CapabilitySet {
         grants: grants
             .into_iter()
-            .map(|grant| dispatch_grant_with_network(grant, network.clone()))
+            .map(|grant| {
+                dispatch_grant_with_mounts_and_network(grant, mounts.clone(), network.clone())
+            })
             .collect(),
     };
     ExecutionContext::local_default(
@@ -1893,7 +2259,7 @@ fn execution_context_with_network<const N: usize>(
         RuntimeKind::FirstParty,
         TrustClass::FirstParty,
         capability_set,
-        MountView::default(),
+        mounts,
     )
     .unwrap()
 }
@@ -1904,10 +2270,6 @@ fn dispatch_grant(capability: &str) -> CapabilityGrant {
 
 fn dispatch_grant_with_mounts(capability: &str, mounts: MountView) -> CapabilityGrant {
     dispatch_grant_with_mounts_and_network(capability, mounts, NetworkPolicy::default())
-}
-
-fn dispatch_grant_with_network(capability: &str, network: NetworkPolicy) -> CapabilityGrant {
-    dispatch_grant_with_mounts_and_network(capability, MountView::default(), network)
 }
 
 fn dispatch_grant_with_mounts_and_network(
@@ -1938,7 +2300,23 @@ fn builtin_effects() -> Vec<EffectKind> {
         EffectKind::ReadFilesystem,
         EffectKind::WriteFilesystem,
         EffectKind::Network,
+        EffectKind::SpawnProcess,
+        EffectKind::ExecuteCode,
     ]
+}
+
+fn network_denied_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Deny,
+        secret_mode: SecretMode::BrokeredHandles,
+        approval_policy: ApprovalPolicy::AskAlways,
+        audit_mode: AuditMode::LocalMinimal,
+    }
 }
 
 fn http_test_policy() -> NetworkPolicy {
@@ -1950,6 +2328,18 @@ fn http_test_policy() -> NetworkPolicy {
         }],
         deny_private_ip_ranges: true,
         max_egress_bytes: Some(10_000),
+    }
+}
+
+fn shell_test_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: None,
+            host_pattern: "*".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: false,
+        max_egress_bytes: None,
     }
 }
 

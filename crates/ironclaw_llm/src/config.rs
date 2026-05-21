@@ -103,6 +103,43 @@ pub struct RegistryProviderConfig {
     pub unsupported_params: Vec<String>,
 }
 
+impl RegistryProviderConfig {
+    /// Build a generic registry provider config with provider-specific
+    /// optional knobs left at their neutral defaults.
+    pub fn generic(
+        protocol: ProviderProtocol,
+        provider_id: impl Into<String>,
+        api_key: Option<SecretString>,
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            protocol,
+            provider_id: provider_id.into(),
+            api_key,
+            base_url: base_url.into(),
+            model: model.into(),
+            extra_headers: Vec::new(),
+            oauth_token: None,
+            is_codex_chatgpt: false,
+            refresh_token: None,
+            auth_path: None,
+            cache_retention: CacheRetention::None,
+            unsupported_params: Vec::new(),
+        }
+    }
+
+    pub fn with_extra_headers(mut self, extra_headers: Vec<(String, String)>) -> Self {
+        self.extra_headers = extra_headers;
+        self
+    }
+
+    pub fn with_unsupported_params(mut self, unsupported_params: Vec<String>) -> Self {
+        self.unsupported_params = unsupported_params;
+        self
+    }
+}
+
 /// Configuration for OpenAI Codex (ChatGPT subscription OAuth).
 #[derive(Debug, Clone)]
 pub struct OpenAiCodexConfig {

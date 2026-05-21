@@ -115,15 +115,18 @@ must derive it only after proving:
 The shared egress service intentionally does not perform that authorization
 decision; it consumes the already-approved injection plan, injects it, redacts
 it, and fails closed when a required credential is unavailable. Injection plans
-also declare a material source: `SecretStoreLease` leases and consumes directly
-from `SecretStore`, while `StagedObligation { capability_id }` consumes material
-that `BuiltinObligationHandler` already leased, consumed, and staged in
-`RuntimeSecretInjectionStore`. Runtime adapters that use the staged source must
-not lease the same handle independently; `HostHttpEgressService` removes staged
-material with `take(scope, capability_id, handle)` before outbound transport so
-the value cannot be reused after success, failure, or runtime-visible errors.
-Staged entries also expire after the store TTL (five minutes by default) and
-expired material is pruned during insertion, `take(...)`, and explicit
+also declare a material source. Production runtime tool egress uses
+`StagedObligation { capability_id }`, which consumes material that
+`BuiltinObligationHandler` already leased, consumed, and staged in
+`RuntimeSecretInjectionStore`. `SecretStoreLease` remains only for explicitly
+named legacy/test compatibility paths that lease and consume directly from
+`SecretStore`; production egress rejects it before outbound transport. Runtime
+adapters that use the staged source must not lease the same handle
+independently; `HostHttpEgressService` removes staged material with
+`take(scope, capability_id, handle)` before outbound transport so the value
+cannot be reused after success, failure, or runtime-visible errors. Staged
+entries also expire after the store TTL (five minutes by default) and expired
+material is pruned during insertion, `take(...)`, and explicit
 `prune_expired(...)` calls. If one approved request plan injects the same
 source+handle into multiple targets, the egress service consumes or leases the
 material once and reuses it only within that request. Runtime callers must not

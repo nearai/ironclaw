@@ -31,9 +31,11 @@ use std::path::Path;
 use thiserror::Error;
 
 use ironclaw_llm::{ProviderRegistry, registry::ProviderDefinition};
-use ironclaw_reborn_config::{LlmSlotSelection, reject_inline_secret};
+use ironclaw_reborn_config::{
+    LlmSlotSelection, RebornBootConfig, RebornConfigFile, reject_inline_secret,
+};
 
-use crate::runtime_input::{DEFAULT_LLM_REQUEST_TIMEOUT_SECS, RebornLlmConfig};
+use crate::runtime_input::{DEFAULT_LLM_REQUEST_TIMEOUT_SECS, RebornLlmConfig, ResolvedRebornLlm};
 
 /// Errors surfaced when resolving an `LlmSlotSelection` against the
 /// merged provider catalog.
@@ -104,6 +106,48 @@ pub enum RebornLlmCatalogError {
         env: String,
         reason: String,
     },
+    /// Environment fallback could not be resolved by the LLM provider layer.
+    #[error("could not resolve LLM environment fallback: {source}")]
+    EnvResolution {
+        #[source]
+        source: ironclaw_llm::LlmError,
+    },
+}
+
+/// Resolve the default Reborn runtime LLM from boot config, TOML selection,
+/// and environment fallback.
+///
+/// This is the composition-owned provider/auth seam for standalone Reborn
+/// ingress. Callers pass boot inputs; provider-specific auth details stay in
+/// `ironclaw_llm` and never leak into CLI commands.
+pub fn resolve_reborn_runtime_llm(
+    boot: &RebornBootConfig,
+    config_file: Option<&RebornConfigFile>,
+) -> Result<Option<ResolvedRebornLlm>, RebornLlmCatalogError> {
+    if let Some(selection) = config_file.and_then(|file| file.default_llm_slot()) {
+        return resolve_llm_selection_against_catalog(
+            selection,
+            Some(boot.home().providers_file_path().as_path()),
+        )
+        .map(ResolvedRebornLlm::from_catalog)
+        .map(Some);
+    }
+
+    resolve_llm_from_env(boot)
+}
+
+fn resolve_llm_from_env(
+    boot: &RebornBootConfig,
+) -> Result<Option<ResolvedRebornLlm>, RebornLlmCatalogError> {
+    ironclaw_llm::resolve_registry_provider_from_env(Some(
+        boot.home().providers_file_path().as_path(),
+    ))
+    .map(|maybe_config| {
+        maybe_config.map(|config| {
+            ResolvedRebornLlm::from_registry_provider(config, DEFAULT_LLM_REQUEST_TIMEOUT_SECS)
+        })
+    })
+    .map_err(|source| RebornLlmCatalogError::EnvResolution { source })
 }
 
 /// Resolve an `LlmSlotSelection` against the merged provider catalog.

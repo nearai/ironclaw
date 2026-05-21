@@ -1,7 +1,10 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ironclaw_extensions::{ExtensionManifest, ExtensionPackage};
+use ironclaw_extensions::{
+    CapabilityProviderHostApiContract, ExtensionManifest, ExtensionPackage,
+    HostApiContractRegistry, ManifestSource,
+};
 use ironclaw_host_api::*;
 use ironclaw_mcp::*;
 use ironclaw_resources::*;
@@ -123,9 +126,23 @@ fn mcp_governor() -> (InMemoryResourceGovernor, ResourceAccount) {
 }
 
 fn package_from_manifest(manifest: &str) -> ExtensionPackage {
-    let manifest = ExtensionManifest::parse(manifest).unwrap();
+    let manifest = ExtensionManifest::parse_with_optional_host_api_contracts(
+        manifest,
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        &capability_provider_contracts(),
+    )
+    .unwrap();
     let root = VirtualPath::new(format!("/system/extensions/{}", manifest.id.as_str())).unwrap();
     ExtensionPackage::from_manifest(manifest, root).unwrap()
+}
+
+fn capability_provider_contracts() -> HostApiContractRegistry {
+    let mut contracts = HostApiContractRegistry::new();
+    contracts
+        .register(Arc::new(CapabilityProviderHostApiContract::new().unwrap()))
+        .unwrap();
+    contracts
 }
 
 fn governor_with_default_limit(account: ResourceAccount) -> InMemoryResourceGovernor {
@@ -178,7 +195,7 @@ fn sample_account() -> ResourceAccount {
     ResourceAccount::tenant(TenantId::new("tenant-a").unwrap())
 }
 
-const MCP_MANIFEST: &str = r#"
+const MCP_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "github-mcp"
 name = "GitHub MCP"
 version = "0.1.0"
@@ -190,10 +207,18 @@ kind = "mcp"
 transport = "http"
 url = "https://mcp.example.test/rpc"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "github-mcp.search"
 description = "Search GitHub"
 effects = ["network", "dispatch_capability"]
 default_permission = "ask"
-parameters_schema = { type = "object" }
+visibility = "api"
+input_schema_ref = "schemas/github-mcp/search.input.v1.json"
+output_schema_ref = "schemas/github-mcp/search.output.v1.json"
 "#;

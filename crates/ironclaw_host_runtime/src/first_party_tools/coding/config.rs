@@ -8,6 +8,7 @@ pub(super) const MAX_DIR_ENTRIES: usize = 500;
 pub(super) const DEFAULT_MAX_RESULTS: usize = 200;
 pub(super) const MAX_OUTPUT_SIZE: usize = 64 * 1024;
 pub(super) const DEFAULT_HEAD_LIMIT: usize = 250;
+pub(super) const GREP_MAX_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
 pub(super) const MAX_VISITED_ENTRIES: usize = 50_000;
 pub(super) const DEFAULT_SCOPED_ROOT: &str = "/workspace";
 
@@ -18,7 +19,6 @@ pub(super) const WORKSPACE_FILES: &[&str] = &[
     "SOUL.md",
     "AGENTS.md",
     "USER.md",
-    "README.md",
 ];
 
 pub(super) const GLOB_MATCH_OPTIONS: MatchOptions = MatchOptions {

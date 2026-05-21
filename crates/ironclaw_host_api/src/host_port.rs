@@ -14,6 +14,10 @@ use crate::{
     dotted_id::{PrefixRule, VersionRule, validate_dotted_id},
 };
 
+/// Host-runtime mediated HTTP egress port for runtime lanes that delegate
+/// outbound HTTP through host policy, credential, and response-limit services.
+pub const HOST_RUNTIME_HTTP_EGRESS_PORT_ID: &str = "host.runtime.http_egress";
+
 fn validate_dotted_host_port_id(value: &str) -> Result<(), HostApiError> {
     validate_dotted_id(
         "host_port",

@@ -288,6 +288,17 @@ impl RootFilesystem for CompositeRootFilesystem {
         self.matching_mount(path)?.backend.read_file(path).await
     }
 
+    async fn read_file_bounded(
+        &self,
+        path: &VirtualPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        self.matching_mount(path)?
+            .backend
+            .read_file_bounded(path, max_bytes)
+            .await
+    }
+
     async fn write_file(&self, path: &VirtualPath, bytes: &[u8]) -> Result<(), FilesystemError> {
         self.matching_mount(path)?
             .backend
