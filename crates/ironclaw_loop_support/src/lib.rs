@@ -20,6 +20,7 @@ mod capability_surface_filter;
 pub mod identity_context;
 mod input_port;
 mod input_queue;
+mod skill_bundle_source;
 mod skill_context;
 
 pub use cancellation_port::{
@@ -49,6 +50,10 @@ pub use identity_context::{
 };
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
+pub use skill_bundle_source::{
+    SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,
+    SkillBundleSourceError, SkillFilePath, SkillSourceKind, sort_skill_bundle_descriptors,
+};
 pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     build_skill_run_snapshot,
