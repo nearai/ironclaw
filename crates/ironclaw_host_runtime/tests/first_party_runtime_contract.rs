@@ -287,6 +287,31 @@ async fn first_party_handler_maps_egress_error_codes_to_dispatch_errors() {
     assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
 }
 
+#[tokio::test]
+async fn first_party_handler_rejects_non_string_url_input() {
+    for input in [json!({"url": 123}), json!({"url": true})] {
+        let handle = SecretHandle::new("api-token").unwrap();
+        let runtime = http_first_party_services(&handle)
+            .with_runtime_http_egress(Arc::new(UnreachableRuntimeHttpEgress))
+            .with_trust_policy(Arc::new(first_party_trust_policy()))
+            .host_runtime_for_local_testing();
+
+        let outcome = invoke_http_fixture(
+            &runtime,
+            execution_context(CapabilitySet {
+                grants: vec![dispatch_grant_with_secret(&handle)],
+            }),
+            input,
+        )
+        .await;
+
+        let RuntimeCapabilityOutcome::Failed(failure) = outcome else {
+            panic!("expected non-string URL to fail, got {outcome:?}");
+        };
+        assert_eq!(failure.kind, RuntimeFailureKind::InvalidInput);
+    }
+}
+
 #[test]
 fn http_error_kind_maps_all_reason_codes() {
     let cases = [
@@ -689,6 +714,8 @@ impl FirstPartyCapabilityHandler for HttpFirstPartyHandler {
                 network_policy: NetworkPolicy::default(),
                 credential_injections: vec![RuntimeCredentialInjection {
                     handle: self.handle.clone(),
+                    // Production first-party egress must use StagedObligation;
+                    // SecretStoreLease is only for test/legacy paths.
                     source: RuntimeCredentialSource::StagedObligation {
                         capability_id: request.capability_id,
                     },
@@ -715,6 +742,7 @@ impl FirstPartyCapabilityHandler for HttpFirstPartyHandler {
     }
 }
 
+// Keep in sync with production error mapping if one is introduced.
 fn http_error_kind(reason: RuntimeHttpEgressReasonCode) -> RuntimeDispatchErrorKind {
     match reason {
         RuntimeHttpEgressReasonCode::CredentialUnavailable => RuntimeDispatchErrorKind::Client,

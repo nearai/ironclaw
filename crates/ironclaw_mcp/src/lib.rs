@@ -562,6 +562,11 @@ struct McpJsonRpcExchange {
     usage: ResourceUsage,
 }
 
+/// Known MCP JSON-RPC methods whose credential-routing behavior is host-owned.
+///
+/// Handshake methods must remain credential-free. Only `tools/call` can receive
+/// host-planned credentials, and even then only credentials staged by satisfied
+/// obligations are forwarded to production egress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum McpJsonRpcMethod {
     Initialize,

@@ -1609,6 +1609,57 @@ async fn mcp_http_client_cannot_use_direct_secret_store_lease_with_production_eg
 }
 
 #[test]
+fn first_party_http_egress_cannot_use_direct_secret_store_lease_with_production_egress() {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let services = test_obligation_services();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    let service = services.host_http_egress(network);
+
+    let error = service
+        .execute(RuntimeHttpEgressRequest {
+            runtime: RuntimeKind::FirstParty,
+            scope,
+            capability_id,
+            method: NetworkMethod::Post,
+            url: "https://api.example.test/v1/run".to_string(),
+            headers: vec![],
+            body: b"hello".to_vec(),
+            network_policy: sample_policy(),
+            credential_injections: vec![RuntimeCredentialInjection {
+                handle: SecretHandle::new("api-token").unwrap(),
+                source: RuntimeCredentialSource::SecretStoreLease,
+                target: RuntimeCredentialTarget::Header {
+                    name: "authorization".to_string(),
+                    prefix: Some("Bearer ".to_string()),
+                },
+                required: true,
+            }],
+            response_body_limit: Some(4096),
+            timeout_ms: None,
+        })
+        .expect_err("production first-party egress must require staged credentials");
+
+    assert!(matches!(
+        error,
+        RuntimeHttpEgressError::Credential { reason }
+            if reason == "direct secret-store leases are unavailable for production runtime egress"
+    ));
+    assert!(network_recorder.lock().unwrap().is_empty());
+}
+
+#[test]
 fn host_http_egress_fails_closed_without_staged_network_policy() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,

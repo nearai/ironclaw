@@ -279,9 +279,12 @@ async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange(
     let requests = egress.requests();
     assert_eq!(requests.len(), 3);
     assert!(
-        requests[..2]
-            .iter()
-            .all(|request| request.credential_injections.is_empty())
+        requests[0].credential_injections.is_empty(),
+        "initialize handshake must not receive credential injections"
+    );
+    assert!(
+        requests[1].credential_injections.is_empty(),
+        "initialized notification must not receive credential injections"
     );
     assert_eq!(
         requests[2].credential_injections,

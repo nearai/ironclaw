@@ -177,6 +177,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
 }
 
 fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
+    // Shared by local-dev and production composition so host-owned first-party
+    // capabilities expose the same built-in package contract in both profiles.
     let mut registry = ExtensionRegistry::new();
     registry
         .insert(
