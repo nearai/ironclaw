@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
@@ -8,6 +9,8 @@ use crate::{
     sort_skill_bundle_descriptors,
 };
 use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
+
+const MAX_CONCURRENT_SKILL_BUNDLE_CONTEXT_READS: usize = 8;
 
 /// Adapts portable skill bundles into model-context candidates.
 ///
@@ -67,37 +70,48 @@ where
 
         validate_descriptor_policy_metadata(&descriptors)?;
 
-        let mut candidates = Vec::with_capacity(descriptors.len());
-        for (index, descriptor) in descriptors.iter().enumerate() {
-            let trust = descriptor.trust().cloned();
-            let visibility = descriptor.visibility().copied();
-            let ordering_key = descriptor_context_ordering_key(index);
+        stream::iter(descriptors.into_iter().enumerate())
+            .map(|(index, descriptor)| async move {
+                self.load_descriptor_context_candidate(run_context, index, descriptor)
+                    .await
+            })
+            .buffered(MAX_CONCURRENT_SKILL_BUNDLE_CONTEXT_READS)
+            .try_collect()
+            .await
+    }
+}
 
-            if visibility != Some(SkillVisibility::Visible) {
-                // Preserve host policy metadata on unavailable candidates so downstream
-                // snapshot construction keeps one fail-closed validation path.
-                candidates.push(
-                    HostSkillContextCandidate::unavailable(trust, visibility)
-                        .with_ordering_key(ordering_key),
-                );
-                continue;
-            }
+impl<S> SkillBundleContextSource<S>
+where
+    S: SkillBundleSource + ?Sized,
+{
+    async fn load_descriptor_context_candidate(
+        &self,
+        run_context: &LoopRunContext,
+        index: usize,
+        descriptor: SkillBundleDescriptor,
+    ) -> Result<HostSkillContextCandidate, HostSkillContextBuildError> {
+        let trust = descriptor.trust().cloned();
+        let visibility = descriptor.visibility().copied();
+        let ordering_key = descriptor_context_ordering_key(index);
 
-            let skill_md = self
-                .bundle_source
-                .read_skill_bundle_file(run_context, descriptor.id(), descriptor.skill_md_path())
-                .await
-                .map_err(skill_bundle_source_error_to_context_error)?;
-            let skill_md =
-                String::from_utf8(skill_md).map_err(|_| HostSkillContextBuildError::ParseFailed)?;
-
-            candidates.push(
-                HostSkillContextCandidate::new(skill_md, trust, visibility)
-                    .with_ordering_key(ordering_key),
-            );
+        if visibility != Some(SkillVisibility::Visible) {
+            // Preserve host policy metadata on unavailable candidates so downstream
+            // snapshot construction keeps one fail-closed validation path.
+            return Ok(HostSkillContextCandidate::unavailable(trust, visibility)
+                .with_ordering_key(ordering_key));
         }
 
-        Ok(candidates)
+        let skill_md = self
+            .bundle_source
+            .read_skill_bundle_file(run_context, descriptor.id(), descriptor.skill_md_path())
+            .await
+            .map_err(skill_bundle_source_error_to_context_error)?;
+        let skill_md =
+            String::from_utf8(skill_md).map_err(|_| HostSkillContextBuildError::ParseFailed)?;
+
+        Ok(HostSkillContextCandidate::new(skill_md, trust, visibility)
+            .with_ordering_key(ordering_key))
     }
 }
 
