@@ -108,6 +108,7 @@ pub struct LocalInvocationServicesResolver {
     filesystem: Arc<dyn RootFilesystem>,
     runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     process: Arc<dyn RuntimeProcessPort>,
+    tenant_sandbox_process: Option<Arc<dyn RuntimeProcessPort>>,
     secret_store: Option<Arc<dyn SecretStore>>,
 }
 
@@ -122,8 +123,17 @@ impl LocalInvocationServicesResolver {
             filesystem,
             runtime_http_egress,
             process,
+            tenant_sandbox_process: None,
             secret_store,
         }
+    }
+
+    pub fn with_tenant_sandbox_process_port(
+        mut self,
+        process: Arc<dyn RuntimeProcessPort>,
+    ) -> Self {
+        self.tenant_sandbox_process = Some(process);
+        self
     }
 }
 
@@ -146,11 +156,23 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
                 backend: plan.filesystem_backend,
             });
         }
-        if plan.requires_process && !matches!(plan.process_backend, ProcessBackendKind::LocalHost) {
-            return Err(InvocationServicesError::UnsupportedProcessBackend {
-                backend: plan.process_backend,
-            });
-        }
+        let process = if plan.requires_process {
+            match plan.process_backend {
+                ProcessBackendKind::LocalHost => Arc::clone(&self.process),
+                ProcessBackendKind::TenantSandbox => self.tenant_sandbox_process.clone().ok_or(
+                    InvocationServicesError::UnsupportedProcessBackend {
+                        backend: plan.process_backend,
+                    },
+                )?,
+                _ => {
+                    return Err(InvocationServicesError::UnsupportedProcessBackend {
+                        backend: plan.process_backend,
+                    });
+                }
+            }
+        } else {
+            Arc::clone(&self.process)
+        };
         if plan.requires_network
             && !matches!(
                 plan.network_mode,
@@ -185,7 +207,7 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
                 .requires_network
                 .then(|| self.runtime_http_egress.clone())
                 .flatten(),
-            process: Arc::clone(&self.process),
+            process,
             secret_store: if plan.requires_secret {
                 self.secret_store.clone()
             } else {
@@ -239,6 +261,9 @@ mod tests {
     #[derive(Debug)]
     struct NoopProcessPort;
 
+    #[derive(Debug)]
+    struct NamedProcessPort(&'static str);
+
     #[async_trait]
     impl RuntimeProcessPort for NoopProcessPort {
         async fn run_command(
@@ -260,6 +285,21 @@ mod tests {
             ironclaw_host_api::RuntimeHttpEgressError,
         > {
             unreachable!("resolver tests must not execute HTTP requests")
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeProcessPort for NamedProcessPort {
+        async fn run_command(
+            &self,
+            _request: CommandExecutionRequest,
+        ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+            Ok(CommandExecutionOutput {
+                output: self.0.to_string(),
+                exit_code: 0,
+                sandboxed: false,
+                duration: std::time::Duration::ZERO,
+            })
         }
     }
 
@@ -309,6 +349,69 @@ mod tests {
             error,
             InvocationServicesError::UnsupportedProcessBackend {
                 backend: ProcessBackendKind::TenantSandbox
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn local_resolver_uses_configured_sandbox_process_backend() {
+        let resolver = resolver_without_http()
+            .with_tenant_sandbox_process_port(Arc::new(NamedProcessPort("sandbox")));
+        let plan = plan(
+            ProcessBackendKind::TenantSandbox,
+            true,
+            false,
+            NetworkMode::Allowlist,
+            false,
+        );
+
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap();
+
+        let output = services
+            .process
+            .run_command(CommandExecutionRequest {
+                scope: ResourceScope::system(),
+                mounts: None,
+                command: "echo hi".to_string(),
+                workdir: None,
+                timeout_secs: None,
+                extra_env: Default::default(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(output.output, "sandbox");
+    }
+
+    #[test]
+    fn local_resolver_rejects_unsupported_required_process_backend() {
+        let resolver = resolver_without_http();
+        let plan = plan(
+            ProcessBackendKind::Docker,
+            true,
+            false,
+            NetworkMode::Deny,
+            false,
+        );
+
+        let error = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::UnsupportedRunner);
+        assert!(matches!(
+            error,
+            InvocationServicesError::UnsupportedProcessBackend {
+                backend: ProcessBackendKind::Docker
             }
         ));
     }

@@ -85,8 +85,8 @@ use crate::{
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
     InvocationServicesResolutionRequest, InvocationServicesResolver, LocalHostProcessPort,
     LocalInvocationServicesResolver, PlannerError, ProcessObligationLifecycleStore,
-    RuntimeBackendHealth, RuntimeProcessPort, TurnRunExecutor, TurnRunScheduler,
-    TurnRunSchedulerConfig, plan_capability,
+    RuntimeBackendHealth, RuntimeProcessPort, TenantSandboxProcessPort, TurnRunExecutor,
+    TurnRunScheduler, TurnRunSchedulerConfig, plan_capability,
 };
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
@@ -269,6 +269,7 @@ struct ProductionComponentTypes {
     runtime_http_egress: Option<ProductionComponentType>,
     runtime_http_egress_verified: bool,
     runtime_process_port: ProductionComponentType,
+    tenant_sandbox_process_port: Option<ProductionComponentType>,
     wasm_credential_provider: Option<ProductionComponentType>,
     wasm_credential_provider_verified: bool,
     wasm_runtime_credential_provider_captured: bool,
@@ -380,6 +381,7 @@ where
     process_lifecycle_store: Arc<ProcessObligationLifecycleStore>,
     runtime_http_egress: SharedRuntimeHttpEgress,
     process_port: Arc<dyn RuntimeProcessPort>,
+    tenant_sandbox_process_port: Option<Arc<dyn RuntimeProcessPort>>,
     wasm_credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
@@ -438,6 +440,7 @@ where
             process_lifecycle_store,
             runtime_http_egress: Arc::new(Mutex::new(None)),
             process_port: Arc::new(LocalHostProcessPort::new()),
+            tenant_sandbox_process_port: None,
             wasm_credential_provider: None,
             runtime_health: None,
             runtime_policy: None,
@@ -465,6 +468,7 @@ where
                 runtime_http_egress: None,
                 runtime_http_egress_verified: false,
                 runtime_process_port: ProductionComponentType::of::<LocalHostProcessPort>(),
+                tenant_sandbox_process_port: None,
                 wasm_credential_provider: None,
                 wasm_credential_provider_verified: false,
                 wasm_runtime_credential_provider_captured: false,
@@ -506,6 +510,7 @@ where
             process_lifecycle_store,
             runtime_http_egress,
             process_port,
+            tenant_sandbox_process_port,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -541,6 +546,7 @@ where
             process_lifecycle_store,
             runtime_http_egress,
             process_port,
+            tenant_sandbox_process_port,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -597,6 +603,7 @@ where
             process_lifecycle_store: _,
             runtime_http_egress,
             process_port,
+            tenant_sandbox_process_port,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -642,6 +649,7 @@ where
             process_lifecycle_store,
             runtime_http_egress,
             process_port,
+            tenant_sandbox_process_port,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -1026,6 +1034,18 @@ where
         self
     }
 
+    pub fn with_tenant_sandbox_process_port(
+        mut self,
+        process_port: Arc<TenantSandboxProcessPort>,
+    ) -> Self {
+        self.component_types.tenant_sandbox_process_port = Some(ProductionComponentType::named(
+            "TenantSandboxProcessPort",
+            ProductionImplementationReadiness::UnverifiedProductionImplementation,
+        ));
+        self.tenant_sandbox_process_port = Some(process_port);
+        self
+    }
+
     /// Attaches the host HTTP egress shape required for production runtime
     /// adapters. The service must use staged network-policy handoffs and secret
     /// injection handoffs, not request-local/test policy fallback.
@@ -1325,11 +1345,28 @@ where
             );
         }
         if self.first_party_runtime_uses_process_port() {
-            self.push_local_only(
-                &mut issues,
-                ProductionWiringComponent::RuntimeProcessPort,
-                Some(self.component_types.runtime_process_port),
-            );
+            if self
+                .runtime_policy
+                .as_ref()
+                .is_some_and(|policy| policy.process_backend == ProcessBackendKind::TenantSandbox)
+            {
+                self.push_missing(
+                    &mut issues,
+                    ProductionWiringComponent::RuntimeProcessPort,
+                    self.tenant_sandbox_process_port.is_some(),
+                );
+                self.push_local_only(
+                    &mut issues,
+                    ProductionWiringComponent::RuntimeProcessPort,
+                    self.component_types.tenant_sandbox_process_port,
+                );
+            } else {
+                self.push_local_only(
+                    &mut issues,
+                    ProductionWiringComponent::RuntimeProcessPort,
+                    Some(self.component_types.runtime_process_port),
+                );
+            }
         }
 
         self.push_local_only(
@@ -1648,13 +1685,18 @@ where
                 .clone()
                 .unwrap_or_else(local_testing_runtime_policy),
         );
+        let mut invocation_services_resolver = LocalInvocationServicesResolver::new(
+            Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
+            runtime_http_egress(&self.runtime_http_egress),
+            Arc::clone(&self.process_port),
+            self.secret_store.clone(),
+        );
+        if let Some(process_port) = &self.tenant_sandbox_process_port {
+            invocation_services_resolver = invocation_services_resolver
+                .with_tenant_sandbox_process_port(Arc::clone(process_port));
+        }
         let invocation_services: Arc<dyn InvocationServicesResolver> =
-            Arc::new(LocalInvocationServicesResolver::new(
-                Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
-                runtime_http_egress(&self.runtime_http_egress),
-                Arc::clone(&self.process_port),
-                self.secret_store.clone(),
-            ));
+            Arc::new(invocation_services_resolver);
 
         if let Some(runtime) = &self.script_runtime {
             dispatcher = dispatcher.with_runtime_adapter_arc(

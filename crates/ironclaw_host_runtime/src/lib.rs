@@ -90,7 +90,7 @@ use obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
 pub use process_port::{
     CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,
-    RuntimeProcessPort,
+    RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
 };
 pub use production::DefaultHostRuntime;
 pub use services::{

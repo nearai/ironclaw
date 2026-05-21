@@ -47,7 +47,8 @@ use ironclaw_host_runtime::{
     ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind,
     RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
     RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort, RuntimeStatusRequest,
-    RuntimeWorkId, builtin_first_party_handlers, builtin_first_party_package,
+    RuntimeWorkId, SandboxCommandTransport, TenantSandboxProcessPort, builtin_first_party_handlers,
+    builtin_first_party_package,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use ironclaw_network::{
@@ -1153,6 +1154,63 @@ fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
             ProductionWiringIssueKind::LocalOnlyImplementation
         ),
         "custom process port should clear the process-port local-only issue: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_tracks_tenant_sandbox_process_port_for_builtin_shell() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_builtin_first_party_package()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_policy(hosted_dev_runtime_policy());
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
+        .expect_err("tenant sandbox process policy must require a sandbox process port");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RuntimeProcessPort,
+            ProductionWiringIssueKind::Missing
+        ),
+        "tenant sandbox process backend should require the tenant sandbox process port: {report:?}"
+    );
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_builtin_first_party_package()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_policy(hosted_dev_runtime_policy())
+    .with_tenant_sandbox_process_port(Arc::new(TenantSandboxProcessPort::new(Arc::new(
+        ProductionCandidateSandboxTransport,
+    ))));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
+        .expect_err(
+            "sandbox port readiness must remain explicit until a production transport is wired",
+        );
+
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RuntimeProcessPort,
+            ProductionWiringIssueKind::Missing
+        ) && report.contains(
+            ProductionWiringComponent::RuntimeProcessPort,
+            ProductionWiringIssueKind::UnverifiedProductionImplementation
+        ),
+        "configured tenant sandbox process port should clear missing but remain unverified: {report:?}"
     );
 }
 
@@ -5226,6 +5284,24 @@ impl RuntimeProcessPort for ProductionCandidateProcessPort {
             output: String::new(),
             exit_code: 0,
             sandboxed: true,
+            duration: Duration::ZERO,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ProductionCandidateSandboxTransport;
+
+#[async_trait]
+impl SandboxCommandTransport for ProductionCandidateSandboxTransport {
+    async fn run_command(
+        &self,
+        _request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        Ok(CommandExecutionOutput {
+            output: String::new(),
+            exit_code: 0,
+            sandboxed: false,
             duration: Duration::ZERO,
         })
     }
