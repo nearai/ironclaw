@@ -97,6 +97,12 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "skill_search",
     "skill_install",
     "skill_remove",
+    // IronHub catalog tools
+    "ironhub_install",
+    "ironhub_remove",
+    "ironhub_search",
+    "ironhub_list",
+    "ironhub_info",
     // Secret tools
     "secret_list",
     "secret_delete",
@@ -769,6 +775,19 @@ impl ToolRegistry {
         )));
         self.register_sync(Arc::new(SkillRemoveTool::new(registry)));
         tracing::debug!("Registered 4 skill management tools");
+    }
+
+    pub fn register_ironhub_tools(&self, deps: crate::tools::builtin::IronhubDeps) {
+        use crate::tools::builtin::{
+            IronhubInfoTool, IronhubInstallTool, IronhubListTool, IronhubRemoveTool,
+            IronhubSearchTool,
+        };
+        self.register_sync(Arc::new(IronhubInstallTool::new(deps.clone())));
+        self.register_sync(Arc::new(IronhubRemoveTool::new(deps)));
+        self.register_sync(Arc::new(IronhubSearchTool::new()));
+        self.register_sync(Arc::new(IronhubListTool::new()));
+        self.register_sync(Arc::new(IronhubInfoTool::new()));
+        tracing::debug!("Registered 5 IronHub catalog tools");
     }
 
     /// Register routine management tools.
@@ -1752,5 +1771,32 @@ mod tests {
         let removed = registry.unregister("my-mcp-search").await;
         assert!(removed.is_some(), "unregister must resolve hyphen alias");
         assert!(!registry.has("my_mcp_search").await, "tool should be gone");
+    }
+
+    #[tokio::test]
+    async fn register_ironhub_tools_exposes_all_five_names() {
+        let secrets = crate::channels::web::test_helpers::test_secrets_store();
+        let (ext_mgr, _tools_dir, _channels_dir) =
+            crate::channels::web::test_helpers::test_ext_mgr(secrets);
+        let deps = crate::tools::builtin::IronhubDeps {
+            extension_manager: ext_mgr,
+            skill_registry: None,
+        };
+        let registry = ToolRegistry::new();
+        registry.register_ironhub_tools(deps);
+
+        let names = registry.list().await;
+        for required in [
+            "ironhub_install",
+            "ironhub_remove",
+            "ironhub_search",
+            "ironhub_list",
+            "ironhub_info",
+        ] {
+            assert!(
+                names.contains(&required.to_string()),
+                "register_ironhub_tools must register {required}; got {names:?}"
+            );
+        }
     }
 }

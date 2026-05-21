@@ -1323,6 +1323,13 @@ impl AppBuilder {
             (None, None)
         };
 
+        if let Some(manager) = extension_manager.as_ref() {
+            tools.register_ironhub_tools(crate::tools::builtin::IronhubDeps {
+                extension_manager: Arc::clone(manager),
+                skill_registry: skill_registry.clone(),
+            });
+        }
+
         let context_manager = Arc::new(ContextManager::new(self.config.agent.max_parallel_jobs));
         let cost_guard = Arc::new(crate::agent::cost_guard::CostGuard::new(
             crate::agent::cost_guard::CostGuardConfig {

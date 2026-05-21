@@ -63,6 +63,8 @@ pub const APP_JS: &str = concat!(
     "\n",
     include_str!("../static/js/surfaces/settings.js"),
     "\n",
+    include_str!("../static/js/surfaces/install.js"),
+    "\n",
     include_str!("../static/js/core/ui-helpers.js"),
     "\n",
     include_str!("../static/js/surfaces/config.js"),
@@ -121,6 +123,8 @@ pub const STYLE_CSS: &str = concat!(
     include_str!("../static/styles/surfaces/tool-permissions.css"),
     "\n",
     include_str!("../static/styles/surfaces/projects.css"),
+    "\n",
+    include_str!("../static/styles/surfaces/install.css"),
 );
 
 /// Theme initialization script (runs synchronously in `<head>` to prevent FOUC).

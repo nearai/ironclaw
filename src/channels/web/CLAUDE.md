@@ -26,7 +26,8 @@ Browser-facing HTTP API and SSE/WebSocket real-time streaming. Axum-based, singl
 | `features/oauth/` | First feature slice landed per ironclaw#2599 stage 4a: OAuth callback (`/oauth/callback`), channel-relay event webhook (`/relay/events`), and the Slack-specific relay OAuth completion flow (`/oauth/slack/callback`). Owns its private helpers (`oauth_error_page`, `redact_oauth_state_for_logs`). |
 | `features/pairing/` | `GET /api/pairing/{channel}` + `POST /api/pairing/{channel}/approve` — WASM channel pairing approvals. Validates the URL path through `ExtensionName::new` at the handler boundary so invalid channel names reject with 400 instead of silently routing to a lookup-miss. Migrated from `server.rs` in ironclaw#2599 stage 4b. |
 | `features/status/` | `GET /api/gateway/status` — runtime snapshot for the admin dashboard (uptime, SSE/WS counts, cost / usage aggregates, active config). Owns the `GatewayStatusResponse` DTO. Migrated from `server.rs` in ironclaw#2599 stage 4b. |
-| `handlers/` | Transitional feature handlers that haven't migrated to `features/<slice>/` yet: `auth`, `engine`, `frontend`, `llm`, `memory`, `secrets`, `skills`, `system_prompt`, `tokens`, `tool_policy`, `users`, `webhooks`. Targeted for migration per ironclaw#2599 if churn / slice-boundary pressure justifies it. |
+| `handlers/` | Transitional feature handlers that haven't migrated to `features/<slice>/` yet: `auth`, `engine`, `frontend`, `ironhub`, `llm`, `memory`, `secrets`, `skills`, `system_prompt`, `tokens`, `tool_policy`, `users`, `webhooks`. Targeted for migration per ironclaw#2599 if churn / slice-boundary pressure justifies it. |
+| `handlers/ironhub.rs` | IronHub catalog dispatch (`install`, `search`, `list`, `info`) and the deep-link install protocol surface (`signing-key` CRUD, `register`, `verify-intent`). Owns `hmac_hex`, `install_payload`, `register_payload`, the bounded process-global nonce cache (`NONCE_CACHE_MAX_ENTRIES = 16,384`, TTL = `VERIFY_INTENT_WINDOW_SECS`), and `validate_shared_key` (enforces `ihub_sk_` prefix and at-least-32 character length). Catalog dispatch routes through `ToolDispatcher`; signing-key + register + verify-intent are direct handlers operating on `SecretsStore` under the `ironhub_signing_key` name. |
 | `openai_compat.rs` | OpenAI-compatible proxy (`/v1/chat/completions`, `/v1/models`) |
 | `util.rs` | Shared helpers (`web_incoming_message`, `build_turns_from_db_messages`, `images_to_attachments`, `truncate_preview`) |
 | `test_helpers.rs` | Always-compiled test utilities. `TestGatewayBuilder` (public) — the `tests/` crate's entry point for spinning up a `GatewayState` + optional Axum server on a random port. Plus seven `pub(crate)` `#[cfg(test)]`-gated cross-slice fixtures — `test_gateway_state(ext_mgr)`, `test_gateway_state_with_dependencies(ext_mgr, store, db_auth, pairing_store)`, `test_gateway_state_with_store_and_session_manager(store, session_manager)`, `insert_test_user`, `test_secrets_store`, `test_ext_mgr`, `test_ext_mgr_with_db` — landed in ironclaw#2599 stages 6a+6 so the chat / extensions / oauth / pairing / users slice test modules can share construction helpers without a central mega-tests block. |
@@ -200,6 +201,28 @@ Legacy cleanup note:
 - The only remaining browser compatibility path for engine v1 auth mode is `pending_auth` token submit/cancel through `/api/chat/auth-token` and `/api/chat/auth-cancel`.
 - That path exists solely for prompts that do not carry a gate `request_id`.
 - Do not expand it. When v1 auth mode is removed, delete these endpoints and the corresponding no-`request_id` branch in `static/js/core/onboarding.js`.
+
+### IronHub Catalog & Install Protocol
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/ironhub/install` | Install a tool/skill from the IronHub catalog (admin-only, dispatches `ironhub_install` tool) |
+| GET | `/api/ironhub/search` | Search the catalog (dispatches `ironhub_search` tool) |
+| GET | `/api/ironhub/list` | List catalog entries (dispatches `ironhub_list` tool) |
+| GET | `/api/ironhub/info` | Catalog entry detail (dispatches `ironhub_info` tool) |
+| POST | `/api/ironhub/signing-key` | Set the shared install key (body: `{shared_key}`; validates `ihub_sk_` prefix and minimum 32 characters) |
+| GET | `/api/ironhub/signing-key` | Get fingerprint + created_at for the stored key (never returns the key) |
+| DELETE | `/api/ironhub/signing-key` | Remove the stored key |
+| POST | `/api/ironhub/register` | IronHub-side handshake confirming the agent owns the shared key (body: `{uid, aid, ts, nonce, sig}`; sig over `register:{uid}:{aid}:{ts}:{nonce}`; returns 200 on valid, 401 on bad sig, 408 on stale timestamp, 409 on replayed nonce) |
+| POST | `/api/ironhub/verify-intent` | Browser deep-link install verification (body: `{slug, version, uid, aid, ts, nonce, sig}`; sig over `install:{slug}:{version}:{uid}:{aid}:{ts}:{nonce}`; returns `{valid, reason}`) |
+
+**Install protocol contract** (canonical shape that matches IronHub PR #43 and replaces the earlier `{tool}:{ts}` minimal verify shape):
+
+- **Shared key:** user-generated on the IronHub side (per `AgentInstallation` row, encrypted at rest with AES-256-GCM in IronHub's DB), pasted into the agent via `POST /api/ironhub/signing-key`. Format: `ihub_sk_` prefix, minimum 32 characters total.
+- **HMAC:** SHA-256 with the shared key's UTF-8 bytes as the MAC key (no hex-decode). Output is lowercase hex, 64 chars.
+- **Install payload:** `install:{slug}:{version}:{uid}:{aid}:{ts}:{nonce}` (literal `install` lead, colon-separated, `ts` decimal seconds).
+- **Register payload:** `register:{uid}:{aid}:{ts}:{nonce}`.
+- **Deep-link URL:** `https://<agent>/#/install/<slug>?slug=&version=&uid=&aid=&ts=&nonce=&sig=` parsed by `static/js/core/routing.js` and consumed by `static/js/surfaces/install.js`.
+- **Freshness window:** 300s timestamp drift + one-shot nonce enforcement via the in-memory `NONCE_CACHE`. Replay-after-window is already blocked by drift; in-window replay is blocked by the cache. Nonces are scoped per `user_id`. Cache prunes expired entries on every insert and aggressively evicts the oldest 25% when over capacity.
 
 ### Routines
 | Method | Path | Description |

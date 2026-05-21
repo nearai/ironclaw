@@ -223,6 +223,92 @@ function loadInferenceSettings() {
 
 function loadAgentSettings() {
   loadStructuredSettings('settings-agent-content', AGENT_SETTINGS);
+  loadIronhubSigningKeyCard();
+}
+
+function renderIronhubSigningKeyCard(bodyHtml) {
+  var card = document.getElementById('settings-ironhub-card');
+  if (!card) return;
+  card.innerHTML =
+    '<div class="ext-card">' +
+    '<h3>' + escapeHtml(I18n.t('ironhub.signingKey.title')) + '</h3>' +
+    '<p class="ironhub-install-source">' +
+    escapeHtml(I18n.t('ironhub.signingKey.description')) + '</p>' +
+    bodyHtml +
+    '</div>';
+}
+
+function ironhubSigningKeyFormHtml(hasKey) {
+  var submitLabel = hasKey
+    ? I18n.t('ironhub.signingKey.replace')
+    : I18n.t('ironhub.signingKey.save');
+  var revoke = hasKey
+    ? '<button class="btn-ext" type="button" onclick="ironhubRevokeSigningKey()">' +
+      escapeHtml(I18n.t('ironhub.signingKey.revoke')) + '</button>'
+    : '';
+  return '' +
+    '<form class="ironhub-install-row" onsubmit="ironhubSaveSigningKey(event); return false;">' +
+    '<input type="password" id="ironhub-key-input" autocomplete="off" ' +
+    'placeholder="' + escapeHtml(I18n.t('ironhub.signingKey.placeholder')) + '" />' +
+    '<button class="btn-ext install" type="submit">' + escapeHtml(submitLabel) + '</button>' +
+    revoke +
+    '</form>';
+}
+
+function loadIronhubSigningKeyCard() {
+  renderIronhubSigningKeyCard(
+    '<div class="empty-state">' + escapeHtml(I18n.t('extensions.loading')) + '</div>'
+  );
+  apiFetch('/api/ironhub/signing-key').then(function(meta) {
+    var status =
+      '<p>' + escapeHtml(I18n.t('ironhub.signingKey.active', {
+        fingerprint: meta.fingerprint,
+        created: meta.created_at,
+      })) + '</p>';
+    renderIronhubSigningKeyCard(status + ironhubSigningKeyFormHtml(true));
+  }).catch(function() {
+    renderIronhubSigningKeyCard(
+      '<p>' + escapeHtml(I18n.t('ironhub.signingKey.none')) + '</p>' +
+      ironhubSigningKeyFormHtml(false)
+    );
+  });
+}
+
+function ironhubSaveSigningKey(evt) {
+  if (evt && evt.preventDefault) evt.preventDefault();
+  var input = document.getElementById('ironhub-key-input');
+  if (!input) return;
+  var key = (input.value || '').trim();
+  if (key.indexOf('ihub_sk_') !== 0) {
+    showToast(I18n.t('ironhub.signingKey.invalidPrefix'), 'error');
+    return;
+  }
+  if (key.length < 32) {
+    showToast(I18n.t('ironhub.signingKey.invalidLength'), 'error');
+    return;
+  }
+  apiFetch('/api/ironhub/signing-key', {
+    method: 'POST',
+    body: { shared_key: key },
+  }).then(function() {
+    showToast(I18n.t('ironhub.signingKey.saved'), 'success');
+    loadIronhubSigningKeyCard();
+  }).catch(function(err) {
+    showToast(I18n.t('ironhub.signingKey.error', {
+      message: err && err.message ? err.message : 'unknown error',
+    }), 'error');
+  });
+}
+
+function ironhubRevokeSigningKey() {
+  apiFetch('/api/ironhub/signing-key', { method: 'DELETE' }).then(function() {
+    showToast(I18n.t('ironhub.signingKey.revoked'), 'success');
+    loadIronhubSigningKeyCard();
+  }).catch(function(err) {
+    showToast(I18n.t('ironhub.signingKey.error', {
+      message: err && err.message ? err.message : 'unknown error',
+    }), 'error');
+  });
 }
 
 function loadStructuredSettings(containerId, settingsDefs) {

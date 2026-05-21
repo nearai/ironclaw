@@ -8,6 +8,7 @@ pub mod file_history;
 mod glob_tool;
 mod grep_tool;
 mod http;
+pub mod ironhub;
 mod job;
 mod json;
 pub mod memory;
@@ -34,6 +35,10 @@ pub use file_history::{FileHistory, FileUndoTool, SharedFileHistory, shared_file
 pub use glob_tool::GlobTool;
 pub use grep_tool::GrepTool;
 pub use http::{HttpTool, extract_host_from_params, extract_path_from_params};
+pub use ironhub::{
+    IronhubDeps, IronhubInfoTool, IronhubInstallTool, IronhubListTool, IronhubRemoveTool,
+    IronhubSearchTool,
+};
 pub use job::{
     CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,
     PromptQueue, SchedulerSlot,

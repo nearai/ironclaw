@@ -1,0 +1,49 @@
+#tab-install {
+  display: flex;
+  justify-content: center;
+  padding: 48px 16px;
+}
+
+.ironhub-install-card {
+  max-width: 480px;
+  width: 100%;
+}
+
+.ironhub-install-card h2 {
+  margin: 0 0 12px;
+}
+
+.ironhub-install-source {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 0 0 16px;
+}
+
+.ironhub-install-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.ironhub-install-row span:first-child {
+  color: var(--text-muted);
+}
+
+.ironhub-install-desc {
+  margin: 16px 0 0;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.ironhub-install-error {
+  color: var(--danger, #d33);
+  margin: 0 0 16px;
+}
+
+.ironhub-install-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 24px;
+}

@@ -9,10 +9,8 @@ use crate::bootstrap::ironclaw_base_dir;
 use crate::registry::catalog::RegistryError;
 use crate::registry::manifest::{BundleDefinition, ExtensionManifest, ManifestKind, SourceSpec};
 
-// GitHub-only by design. New trusted hosts (e.g. a NEAR AI CDN) must be
-// explicitly added here; unknown hosts fall back to source build with a
-// warning rather than surfacing a clear "host not allowed" error.
 const ALLOWED_ARTIFACT_HOSTS: &[&str] = &[
+    "hub.ironclaw.com",
     "github.com",
     "objects.githubusercontent.com",
     "github-releases.githubusercontent.com",
@@ -45,7 +43,7 @@ fn is_allowed_artifact_host(host: &str) -> bool {
         || host.ends_with(".githubusercontent.com")
 }
 
-fn validate_artifact_url(
+pub(crate) fn validate_artifact_url(
     manifest_name: &str,
     field: &'static str,
     url: &str,
@@ -468,7 +466,8 @@ impl RegistryInstaller {
             "Downloading {} '{}'...",
             manifest.kind, manifest.display_name
         );
-        let bytes = download_artifact(url).await?;
+        const MAX_REGISTRY_ARTIFACT_BYTES: u64 = 64 * 1024 * 1024;
+        let bytes = download_artifact(url, MAX_REGISTRY_ARTIFACT_BYTES).await?;
         verify_sha256(&bytes, expected_sha, url)?;
 
         let target_caps = target_dir.join(format!("{}.capabilities.json", manifest.name));
@@ -495,7 +494,7 @@ impl RegistryInstaller {
                     caps_url,
                 )?;
                 const MAX_CAPS_SIZE: usize = 1024 * 1024; // 1 MB
-                match download_artifact(caps_url).await {
+                match download_artifact(caps_url, MAX_CAPS_SIZE as u64).await {
                     Ok(caps_bytes) if caps_bytes.len() <= MAX_CAPS_SIZE => {
                         fs::write(&target_caps, &caps_bytes)
                             .await
@@ -633,8 +632,22 @@ impl RegistryInstaller {
     }
 }
 
-/// Download an artifact from a URL.
-async fn download_artifact(url: &str) -> Result<bytes::Bytes, RegistryError> {
+fn enforce_size_cap(observed: u64, max_bytes: u64, url: &str) -> Result<(), RegistryError> {
+    if observed > max_bytes {
+        return Err(RegistryError::DownloadFailed {
+            url: url.to_string(),
+            reason: format!("response exceeds {max_bytes} byte size cap"),
+        });
+    }
+    Ok(())
+}
+
+/// Download an artifact from a URL, streaming with a hard size cap so a
+/// malicious or oversized response cannot exhaust memory.
+pub(crate) async fn download_artifact(
+    url: &str,
+    max_bytes: u64,
+) -> Result<bytes::Bytes, RegistryError> {
     let response = reqwest::get(url)
         .await
         .map_err(|e| RegistryError::DownloadFailed {
@@ -642,7 +655,7 @@ async fn download_artifact(url: &str) -> Result<bytes::Bytes, RegistryError> {
             reason: download_failure_reason(&e),
         })?;
 
-    let response = response
+    let mut response = response
         .error_for_status()
         .map_err(|e| RegistryError::DownloadFailed {
             url: url.to_string(),
@@ -653,17 +666,30 @@ async fn download_artifact(url: &str) -> Result<bytes::Bytes, RegistryError> {
             ),
         })?;
 
-    response
-        .bytes()
+    if let Some(len) = response.content_length() {
+        enforce_size_cap(len, max_bytes, url)?;
+    }
+
+    let mut buf: Vec<u8> = Vec::new();
+    let mut total: u64 = 0;
+    while let Some(chunk) = response
+        .chunk()
         .await
         .map_err(|e| RegistryError::DownloadFailed {
             url: url.to_string(),
             reason: format!("failed to read response body: {}", e),
-        })
+        })?
+    {
+        total += chunk.len() as u64;
+        enforce_size_cap(total, max_bytes, url)?;
+        buf.extend_from_slice(&chunk);
+    }
+
+    Ok(bytes::Bytes::from(buf))
 }
 
 /// Verify SHA256 of downloaded bytes.
-fn verify_sha256(bytes: &[u8], expected: &str, url: &str) -> Result<(), RegistryError> {
+pub(crate) fn verify_sha256(bytes: &[u8], expected: &str, url: &str) -> Result<(), RegistryError> {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -1368,6 +1394,42 @@ mod tests {
                 );
             }
             other => panic!("expected ManifestRead for channel, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn allowlist_includes_hub_and_github() {
+        assert!(is_allowed_artifact_host("hub.ironclaw.com"));
+        assert!(is_allowed_artifact_host("github.com"));
+        assert!(is_allowed_artifact_host("objects.githubusercontent.com"));
+    }
+
+    #[test]
+    fn allowlist_excludes_tigris_and_spoofs() {
+        assert!(!is_allowed_artifact_host("fly.storage.tigris.dev"));
+        assert!(!is_allowed_artifact_host("hub.ironclaw.com.evil.com"));
+        assert!(!is_allowed_artifact_host("evil.hub.ironclaw.com"));
+        assert!(!is_allowed_artifact_host("ironclaw.com"));
+    }
+
+    #[test]
+    fn validate_artifact_url_rejects_non_https_ip_and_unknown_host() {
+        assert!(validate_artifact_url("m", "f", "http://hub.ironclaw.com/x").is_err());
+        assert!(validate_artifact_url("m", "f", "https://1.2.3.4/x").is_err());
+        assert!(validate_artifact_url("m", "f", "https://evil.example.com/x").is_err());
+        assert!(validate_artifact_url("m", "f", "https://hub.ironclaw.com/catalog/x.wasm").is_ok());
+    }
+
+    #[test]
+    fn enforce_size_cap_allows_within_and_rejects_over() {
+        assert!(enforce_size_cap(0, 1024, "u").is_ok());
+        assert!(enforce_size_cap(1024, 1024, "u").is_ok());
+        let err = enforce_size_cap(1025, 1024, "u").expect_err("over cap must fail");
+        match err {
+            RegistryError::DownloadFailed { reason, .. } => {
+                assert!(reason.contains("exceeds 1024 byte size cap"));
+            }
+            other => panic!("expected DownloadFailed, got {:?}", other),
         }
     }
 }

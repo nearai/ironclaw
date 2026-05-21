@@ -228,6 +228,8 @@ async fn start_test_server_with_provider(
         oauth_rate_limiter: ironclaw::channels::web::platform::state::PerUserRateLimiter::new(
             20, 60,
         ),
+        ironhub_catalog_rate_limiter:
+            ironclaw::channels::web::platform::state::PerUserRateLimiter::new(30, 60),
         webhook_rate_limiter: ironclaw::channels::web::platform::state::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
@@ -751,6 +753,8 @@ async fn test_no_llm_provider_returns_503() {
         oauth_rate_limiter: ironclaw::channels::web::platform::state::PerUserRateLimiter::new(
             20, 60,
         ),
+        ironhub_catalog_rate_limiter:
+            ironclaw::channels::web::platform::state::PerUserRateLimiter::new(30, 60),
         webhook_rate_limiter: ironclaw::channels::web::platform::state::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,

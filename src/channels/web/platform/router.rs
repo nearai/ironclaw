@@ -46,6 +46,11 @@ use crate::channels::web::handlers::frontend::{
     frontend_layout_handler, frontend_layout_update_handler, frontend_widget_file_handler,
     frontend_widgets_handler,
 };
+use crate::channels::web::handlers::ironhub::{
+    ironhub_info_handler, ironhub_install_handler, ironhub_list_handler, ironhub_register_handler,
+    ironhub_search_handler, ironhub_signing_key_delete_handler, ironhub_signing_key_get_handler,
+    ironhub_signing_key_set_handler, ironhub_verify_intent_handler,
+};
 use crate::channels::web::handlers::llm::{
     llm_list_models_handler, llm_providers_handler, llm_test_connection_handler,
 };
@@ -307,6 +312,22 @@ pub async fn start_server(
             "/api/skills/{name}",
             axum::routing::delete(skills_remove_handler),
         )
+        // IronHub catalog
+        .route("/api/ironhub/install", post(ironhub_install_handler))
+        .route("/api/ironhub/search", get(ironhub_search_handler))
+        .route("/api/ironhub/list", get(ironhub_list_handler))
+        .route("/api/ironhub/info", get(ironhub_info_handler))
+        .route(
+            "/api/ironhub/signing-key",
+            post(ironhub_signing_key_set_handler)
+                .get(ironhub_signing_key_get_handler)
+                .delete(ironhub_signing_key_delete_handler),
+        )
+        .route(
+            "/api/ironhub/verify-intent",
+            post(ironhub_verify_intent_handler),
+        )
+        .route("/api/ironhub/register", post(ironhub_register_handler))
         // Settings
         .route("/api/settings", get(settings_list_handler))
         .route("/api/settings/export", get(settings_export_handler))

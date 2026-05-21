@@ -122,6 +122,23 @@ function restoreFromHash() {
       case 'settings':
         switchSettingsSubtab(state.detail);
         break;
+      case 'install': {
+        var raw = state.detail || '';
+        var qIdx = raw.indexOf('?');
+        var pathSlug = qIdx >= 0 ? raw.substring(0, qIdx) : raw;
+        var qs = qIdx >= 0 ? raw.substring(qIdx + 1) : '';
+        var params = new URLSearchParams(qs);
+        startIronhubInstall({
+          slug: params.get('slug') || decodeURIComponent(pathSlug),
+          version: params.get('version'),
+          uid: params.get('uid'),
+          aid: params.get('aid'),
+          ts: params.get('ts'),
+          nonce: params.get('nonce'),
+          sig: params.get('sig'),
+        });
+        break;
+      }
     }
   }
 

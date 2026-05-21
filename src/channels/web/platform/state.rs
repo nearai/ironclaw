@@ -414,6 +414,10 @@ pub struct GatewayState {
     pub chat_rate_limiter: PerUserRateLimiter,
     /// Per-IP rate limiter for OAuth/auth endpoints (20 requests per 60 seconds per IP).
     pub oauth_rate_limiter: PerUserRateLimiter,
+    /// Per-user rate limiter for IronHub catalog dispatch (30 requests per 60 seconds per user).
+    /// Each search/list/info/install triggers a remote manifest fetch + audit write; this prevents
+    /// an authenticated user from fanning out unbounded outbound work via the gateway.
+    pub ironhub_catalog_rate_limiter: PerUserRateLimiter,
     /// Rate limiter for webhook trigger endpoints (10 requests per 60 seconds).
     pub webhook_rate_limiter: RateLimiter,
     /// Registry catalog entries for the available extensions API.

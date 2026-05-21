@@ -1,5 +1,6 @@
 ---
 source: src/cli/mod.rs
+assertion_line: 521
 expression: help
 ---
 IronClaw is a secure AI assistant.
@@ -25,6 +26,7 @@ Commands:
   onboard     Run interactive setup wizard (start here if new to IronClaw)
   config      Manage app configuration settings
   tool        Manage WASM tools
+  hub         Browse and install tools and skills from IronHub
   registry    Browse/install extensions
   channels    Manage channels
   routines    Manage routines

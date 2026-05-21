@@ -70,6 +70,8 @@ async fn start_test_server() -> (
         oauth_rate_limiter: ironclaw::channels::web::platform::state::PerUserRateLimiter::new(
             20, 60,
         ),
+        ironhub_catalog_rate_limiter:
+            ironclaw::channels::web::platform::state::PerUserRateLimiter::new(30, 60),
         webhook_rate_limiter: ironclaw::channels::web::platform::state::RateLimiter::new(10, 60),
         registry_entries: Vec::new(),
         cost_guard: None,

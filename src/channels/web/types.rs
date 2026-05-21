@@ -1242,6 +1242,84 @@ pub struct EngineActionResponse {
     pub ok: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IronhubInstallRequest {
+    pub name: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub release_tag: Option<String>,
+    #[serde(default)]
+    pub force: bool,
+    #[serde(default)]
+    pub acknowledge_unverified: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IronhubSearchQuery {
+    pub query: String,
+    #[serde(default)]
+    pub release_tag: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IronhubListQuery {
+    #[serde(default)]
+    pub release_tag: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IronhubInfoQuery {
+    pub name: String,
+    #[serde(default)]
+    pub release_tag: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IronhubVerifyIntentRequest {
+    pub slug: String,
+    pub version: String,
+    pub uid: String,
+    pub aid: String,
+    pub ts: u64,
+    pub nonce: String,
+    pub sig: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IronhubRegisterRequest {
+    pub uid: String,
+    pub aid: String,
+    pub ts: u64,
+    pub nonce: String,
+    pub sig: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IronhubSigningKeySetRequest {
+    pub shared_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IronhubSigningKeyMetadata {
+    pub fingerprint: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IronhubVerifyIntentResponse {
+    pub valid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

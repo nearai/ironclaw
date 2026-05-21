@@ -22,6 +22,8 @@ mod config;
 mod doctor;
 pub mod fmt;
 mod hooks;
+mod hub;
+pub(crate) mod hub_install;
 #[cfg(feature = "import")]
 pub mod import;
 mod logs;
@@ -43,6 +45,7 @@ pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
 pub use hooks::{HooksCommand, run_hooks_command};
+pub use hub::{HubCommand, run_hub_command};
 #[cfg(feature = "import")]
 pub use import::{ImportCommand, run_import_command};
 pub use logs::{LogsCommand, run_logs_command};
@@ -182,6 +185,14 @@ pub enum Command {
         long_about = "Install, list, or remove WASM-based tools.\nExample: ironclaw tool install mytool.wasm"
     )]
     Tool(ToolCommand),
+
+    /// Browse and install tools and skills from IronHub
+    #[command(
+        subcommand,
+        about = "Browse and install tools and skills from IronHub",
+        long_about = "Catalog at hub.ironclaw.com.\nExample: ironclaw hub install clickup"
+    )]
+    Hub(HubCommand),
 
     /// Browse and install extensions from the registry
     #[command(

@@ -148,6 +148,10 @@ async fn async_main() -> anyhow::Result<()> {
             init_cli_tracing();
             return run_tool_command(tool_cmd.clone()).await;
         }
+        Some(Command::Hub(hub_cmd)) => {
+            init_cli_tracing();
+            return ironclaw::cli::run_hub_command(hub_cmd.clone()).await;
+        }
         Some(Command::Config(config_cmd)) => {
             init_cli_tracing();
             return ironclaw::cli::run_config_command(config_cmd.clone()).await;
