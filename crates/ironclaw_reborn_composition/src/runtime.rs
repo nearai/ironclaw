@@ -1551,6 +1551,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn local_dev_runtime_sends_no_skill_context_for_empty_default_skill_roots() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "empty skill roots ok".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-empty-skill-owner", storage_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-empty-skill-tenant".to_string(),
+            agent_id: "runtime-empty-skill-agent".to_string(),
+            source_binding_id: "runtime-empty-skill-source".to_string(),
+            reply_target_binding_id: "runtime-empty-skill-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.send_user_message(&conversation, "review this"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(reply.text.as_deref(), Some("empty skill roots ok"));
+        let skill_message_count = {
+            let requests = requests
+                .lock()
+                .expect("recording gateway requests lock poisoned");
+            requests[0]
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.role == HostManagedModelMessageRole::System
+                        && message
+                            .content_ref
+                            .as_str()
+                            .starts_with("msg:snippet.skill.")
+                })
+                .count()
+        };
+        assert_eq!(skill_message_count, 0);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_keeps_duplicate_system_and_user_skill_names_distinct() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/skills/shared-helper"))
+            .expect("system skill dir");
+        std::fs::write(
+            storage_root.join("system/skills/shared-helper/SKILL.md"),
+            skill_md(
+                "shared-helper",
+                "system shared helper description",
+                "SYSTEM_SHARED_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write system skill");
+        std::fs::create_dir_all(storage_root.join("skills/shared-helper")).expect("user skill dir");
+        std::fs::write(
+            storage_root.join("skills/shared-helper/SKILL.md"),
+            skill_md(
+                "shared-helper",
+                "user shared helper description",
+                "USER_SHARED_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write user skill");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "duplicate skill names ok".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-duplicate-skill-owner", storage_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-duplicate-skill-tenant".to_string(),
+            agent_id: "runtime-duplicate-skill-agent".to_string(),
+            source_binding_id: "runtime-duplicate-skill-source".to_string(),
+            reply_target_binding_id: "runtime-duplicate-skill-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let reply = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.send_user_message(&conversation, "review this"),
+        )
+        .await
+        .expect("runtime send should finish")
+        .expect("runtime send should succeed");
+
+        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(reply.text.as_deref(), Some("duplicate skill names ok"));
+        let skill_messages = {
+            let requests = requests
+                .lock()
+                .expect("recording gateway requests lock poisoned");
+            requests[0]
+                .messages
+                .iter()
+                .filter(|message| {
+                    message.role == HostManagedModelMessageRole::System
+                        && message
+                            .content_ref
+                            .as_str()
+                            .starts_with("msg:snippet.skill.")
+                })
+                .map(|message| (message.content_ref.clone(), message.content.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(skill_messages.len(), 2);
+        assert_ne!(skill_messages[0].0, skill_messages[1].0);
+        let combined_skill_context = skill_messages
+            .iter()
+            .map(|(_, content)| content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(combined_skill_context.contains("system shared helper description"));
+        assert!(combined_skill_context.contains("SYSTEM_SHARED_HELPER_PROMPT_SENTINEL"));
+        assert!(combined_skill_context.contains("user shared helper description"));
+        assert!(!combined_skill_context.contains("USER_SHARED_HELPER_PROMPT_SENTINEL"));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
     async fn local_dev_runtime_rejects_default_skill_source_when_workspace_overlaps_skill_roots() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
