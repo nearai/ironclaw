@@ -49,7 +49,7 @@ A package that passes this gate is **eligible** for production wiring. It is not
 
 For every capability the package declares, the following must hold at the manifest-source layer before any runtime wiring is considered:
 
-1. **Manifest uses the host-API capability-provider shape.** For `ManifestSource::InstalledLocal` and `ManifestSource::RegistryInstalled`, capabilities live under `[[capability_provider.tools.capabilities]]` referenced by a `[[host_api]] id = "ironclaw.capability_provider/v1"` entry. Top-level `[[capabilities]]` is rejected at parse for these sources. See `crates/ironclaw_extensions/src/v2.rs` `LegacyTopLevelCapabilitiesForInstalledSource`.
+1. **Manifest uses the host-API capability-provider shape.** For `ManifestSource::InstalledLocal` and `ManifestSource::RegistryInstalled`, capabilities live under `[[capability_provider.tools.capabilities]]` referenced by a `[[host_api]] id = "ironclaw.capability_provider/v1"` entry. Production discovery — `ExtensionDiscovery::discover_with_manifest_contracts`, which routes through `ExtensionManifestV2::parse_with_optional_host_api_contracts` — rejects top-level `[[capabilities]]` for these sources with `ManifestV2Error::LegacyTopLevelCapabilitiesForInstalledSource`. The bare `ExtensionManifestV2::parse` does not enforce this rejection and is reserved for legacy v1-envelope test fixtures and host-bundled tooling; package readiness is measured against the discovery entry point, not the bare parser.
 
 2. **Input and output schemas resolve.** Both `input_schema_ref` and `output_schema_ref` resolve to package-local files containing JSON that validates as a JSON Schema. Resolution and validation happen during hot catalog publication. Unresolvable refs and structurally invalid schemas fail closed.
 
@@ -135,7 +135,7 @@ Every case below must reject the package before any runtime side effect:
 | Capability ID not prefixed with extension ID | manifest parse | `ManifestV2Error::CapabilityIdNotPrefixed` |
 | Duplicate capability ID across packages | registry insert | `ExtensionError::DuplicateCapability` |
 | `first_party` or `system` runtime declared by non-HostBundled source | manifest parse | `ManifestV2Error::RuntimeForbiddenForSource` |
-| Legacy top-level `[[capabilities]]` from non-HostBundled source | manifest parse | `ManifestV2Error::LegacyTopLevelCapabilitiesForInstalledSource` |
+| Legacy top-level `[[capabilities]]` from non-HostBundled source | production discovery (`parse_with_optional_host_api_contracts`) | `ManifestV2Error::LegacyTopLevelCapabilitiesForInstalledSource` |
 | Unknown host port in `required_host_ports` | manifest parse | `ManifestV2Error::HostApiSectionRejected` ("unknown host port …") |
 | Manifest asset path with `..`, absolute, URL, or control chars | manifest parse | `ExtensionError::InvalidAssetPath` |
 | Manifest ID does not match package root directory | discovery | `ExtensionError::ManifestIdMismatch` |
