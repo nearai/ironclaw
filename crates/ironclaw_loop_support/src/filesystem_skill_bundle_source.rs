@@ -1,10 +1,12 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem, ScopedFilesystem};
 use ironclaw_host_api::{ResourceScope, ScopedPath};
-use ironclaw_skills::{MAX_PROMPT_FILE_SIZE, SkillTrust, normalize_line_endings, parse_skill_md};
+use ironclaw_skills::{MAX_PROMPT_FILE_SIZE, SkillTrust, parse_skill_md};
 use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
+use parking_lot::Mutex;
+use tracing::debug;
 
 use crate::{
     SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,
@@ -12,7 +14,9 @@ use crate::{
 };
 
 const DEFAULT_MAX_BUNDLE_FILE_BYTES: usize = 256 * 1024;
+const DEFAULT_MAX_BUNDLES_PER_ROOT: usize = 100;
 
+/// One scoped filesystem root that can contain portable skill bundle folders.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesystemSkillBundleRoot {
     source_kind: SkillSourceKind,
@@ -22,6 +26,7 @@ pub struct FilesystemSkillBundleRoot {
 }
 
 impl FilesystemSkillBundleRoot {
+    /// Creates a skill bundle root with caller-supplied source metadata.
     pub fn new(
         source_kind: SkillSourceKind,
         root: ScopedPath,
@@ -36,6 +41,7 @@ impl FilesystemSkillBundleRoot {
         }
     }
 
+    /// Creates a built-in system skill root.
     pub fn system(root: ScopedPath) -> Self {
         Self::new(
             SkillSourceKind::System,
@@ -45,15 +51,17 @@ impl FilesystemSkillBundleRoot {
         )
     }
 
+    /// Creates a user-owned skill root.
     pub fn user(root: ScopedPath) -> Self {
         Self::new(
             SkillSourceKind::User,
             root,
-            Some(SkillTrust::Installed),
+            Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
         )
     }
 
+    /// Creates a tenant-shared skill root.
     pub fn tenant_shared(root: ScopedPath) -> Self {
         Self::new(
             SkillSourceKind::TenantShared,
@@ -63,28 +71,35 @@ impl FilesystemSkillBundleRoot {
         )
     }
 
+    /// Returns the descriptor source kind for bundles discovered under this root.
     pub fn source_kind(&self) -> SkillSourceKind {
         self.source_kind
     }
 
+    /// Returns the scoped filesystem path for this root.
     pub fn root(&self) -> &ScopedPath {
         &self.root
     }
 
+    /// Returns trust metadata applied to bundles discovered under this root.
     pub fn trust(&self) -> Option<&SkillTrust> {
         self.trust.as_ref()
     }
 
+    /// Returns visibility metadata applied to bundles discovered under this root.
     pub fn visibility(&self) -> Option<&SkillVisibility> {
         self.visibility.as_ref()
     }
 }
 
+/// Filesystem-backed skill bundle source over host-approved scoped roots.
 pub struct FilesystemSkillBundleSource<F> {
     filesystem: Arc<ScopedFilesystem<F>>,
     roots: Vec<FilesystemSkillBundleRoot>,
+    validated_manifests: Mutex<HashSet<ScopedPath>>,
     max_skill_md_bytes: usize,
     max_bundle_file_bytes: usize,
+    max_bundles_per_root: usize,
 }
 
 impl<F> std::fmt::Debug for FilesystemSkillBundleSource<F> {
@@ -93,8 +108,13 @@ impl<F> std::fmt::Debug for FilesystemSkillBundleSource<F> {
             .debug_struct("FilesystemSkillBundleSource")
             .field("filesystem", &"<ScopedFilesystem>")
             .field("roots", &self.roots)
+            .field(
+                "validated_manifests",
+                &self.validated_manifests.lock().len(),
+            )
             .field("max_skill_md_bytes", &self.max_skill_md_bytes)
             .field("max_bundle_file_bytes", &self.max_bundle_file_bytes)
+            .field("max_bundles_per_root", &self.max_bundles_per_root)
             .finish()
     }
 }
@@ -103,28 +123,44 @@ impl<F> FilesystemSkillBundleSource<F>
 where
     F: RootFilesystem,
 {
+    /// Creates a filesystem skill bundle source.
+    ///
+    /// Each source kind must appear at most once because bundle ids intentionally
+    /// expose source kind and name, not raw host root provenance.
     pub fn new(
         filesystem: Arc<ScopedFilesystem<F>>,
         roots: Vec<FilesystemSkillBundleRoot>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, SkillBundleSourceError> {
+        ensure_unique_source_kinds(&roots)?;
+        Ok(Self {
             filesystem,
             roots,
+            validated_manifests: Mutex::new(HashSet::new()),
             max_skill_md_bytes: MAX_PROMPT_FILE_SIZE as usize,
             max_bundle_file_bytes: DEFAULT_MAX_BUNDLE_FILE_BYTES,
-        }
+            max_bundles_per_root: DEFAULT_MAX_BUNDLES_PER_ROOT,
+        })
     }
 
+    /// Overrides the maximum allowed `SKILL.md` manifest size in bytes.
     pub fn with_max_skill_md_bytes(mut self, max_skill_md_bytes: usize) -> Self {
         self.max_skill_md_bytes = max_skill_md_bytes;
         self
     }
 
+    /// Overrides the maximum allowed supporting file size in bytes.
     pub fn with_max_bundle_file_bytes(mut self, max_bundle_file_bytes: usize) -> Self {
         self.max_bundle_file_bytes = max_bundle_file_bytes;
         self
     }
 
+    /// Overrides the maximum number of bundle directories scanned per root.
+    pub fn with_max_bundles_per_root(mut self, max_bundles_per_root: usize) -> Self {
+        self.max_bundles_per_root = max_bundles_per_root;
+        self
+    }
+
+    /// Returns the configured filesystem roots.
     pub fn roots(&self) -> &[FilesystemSkillBundleRoot] {
         &self.roots
     }
@@ -141,15 +177,30 @@ where
             Err(error) => return Err(map_filesystem_error(error)),
         };
 
+        let mut directory_entries = Vec::new();
         for entry in entries {
-            if entry.file_type != FileType::Directory {
-                continue;
+            if entry.file_type == FileType::Directory {
+                directory_entries.push(entry);
+                if directory_entries.len() > self.max_bundles_per_root {
+                    return Err(SkillBundleSourceError::BundleScanLimitExceeded);
+                }
             }
+        }
+
+        let skill_md_file = SkillFilePath::skill_md();
+        for entry in directory_entries {
             let bundle_id = match SkillBundleId::new(root.source_kind(), &entry.name) {
                 Ok(bundle_id) => bundle_id,
-                Err(_) => continue,
+                Err(_) => {
+                    debug!(
+                        bundle_name = %entry.name,
+                        source_kind = %root.source_kind(),
+                        "skipping invalid skill bundle directory name"
+                    );
+                    continue;
+                }
             };
-            let skill_md_path = bundle_scoped_path(root.root(), bundle_id.name(), "SKILL.md")?;
+            let skill_md_path = bundle_scoped_path(root.root(), &bundle_id, &skill_md_file)?;
             match self
                 .validate_bundle_manifest(scope, &skill_md_path, &bundle_id)
                 .await
@@ -158,6 +209,7 @@ where
                 Err(SkillBundleSourceError::FileNotFound) => continue,
                 Err(error) => return Err(error),
             }
+            self.validated_manifests.lock().insert(skill_md_path);
 
             descriptors.push(
                 SkillBundleDescriptor::new(
@@ -181,11 +233,10 @@ where
         let skill_md = self
             .read_bounded(scope, skill_md_path, self.max_skill_md_bytes)
             .await?;
-        let skill_md =
-            String::from_utf8(skill_md).map_err(|_| SkillBundleSourceError::InvalidSkillBundle)?;
-        let skill_md = normalize_line_endings(&skill_md);
+        let skill_md = String::from_utf8(skill_md)
+            .map_err(|_| SkillBundleSourceError::BundleUtf8DecodeFailed)?;
         let parsed =
-            parse_skill_md(&skill_md).map_err(|_| SkillBundleSourceError::InvalidSkillBundle)?;
+            parse_skill_md(&skill_md).map_err(|_| SkillBundleSourceError::ManifestParseFailed)?;
         if parsed.manifest.name != bundle_id.name() {
             return Err(SkillBundleSourceError::InvalidSkillBundle);
         }
@@ -198,26 +249,11 @@ where
         path: &ScopedPath,
         max_bytes: usize,
     ) -> Result<Vec<u8>, SkillBundleSourceError> {
-        let stat = self
-            .filesystem
-            .stat(scope, path)
+        self.filesystem
+            .read_bytes_bounded(scope, path, max_bytes)
             .await
-            .map_err(map_file_read_error)?;
-        if stat.file_type != FileType::File {
-            return Err(SkillBundleSourceError::FileNotFound);
-        }
-        if stat.len > max_bytes as u64 {
-            return Err(SkillBundleSourceError::ContentTooLarge);
-        }
-        let bytes = self
-            .filesystem
-            .read_bytes(scope, path)
-            .await
-            .map_err(map_file_read_error)?;
-        if bytes.len() > max_bytes {
-            return Err(SkillBundleSourceError::ContentTooLarge);
-        }
-        Ok(bytes)
+            .map_err(map_file_read_error)?
+            .ok_or(SkillBundleSourceError::ContentTooLarge)
     }
 }
 
@@ -251,14 +287,19 @@ where
             .find(|root| root.source_kind() == bundle_id.source_kind())
             .ok_or(SkillBundleSourceError::BundleNotFound)?;
         let scope = resource_scope_for_run(run_context);
-        let skill_md_path = bundle_scoped_path(root.root(), bundle_id.name(), "SKILL.md")?;
-        self.validate_bundle_manifest(&scope, &skill_md_path, bundle_id)
-            .await
-            .map_err(|error| match error {
-                SkillBundleSourceError::FileNotFound => SkillBundleSourceError::BundleNotFound,
-                other => other,
-            })?;
-        let scoped_path = bundle_scoped_path(root.root(), bundle_id.name(), path.as_str())?;
+        let skill_md_path = bundle_scoped_path(root.root(), bundle_id, &SkillFilePath::skill_md())?;
+        if !self.validated_manifests.lock().contains(&skill_md_path) {
+            self.validate_bundle_manifest(&scope, &skill_md_path, bundle_id)
+                .await
+                .map_err(|error| match error {
+                    SkillBundleSourceError::FileNotFound => SkillBundleSourceError::BundleNotFound,
+                    other => other,
+                })?;
+            self.validated_manifests
+                .lock()
+                .insert(skill_md_path.clone());
+        }
+        let scoped_path = bundle_scoped_path(root.root(), bundle_id, path)?;
         self.read_bounded(&scope, &scoped_path, self.max_bundle_file_bytes)
             .await
     }
@@ -274,16 +315,28 @@ fn resource_scope_for_run(run_context: &LoopRunContext) -> ResourceScope {
 
 fn bundle_scoped_path(
     root: &ScopedPath,
-    bundle_name: &str,
-    path: &str,
+    bundle_id: &SkillBundleId,
+    path: &SkillFilePath,
 ) -> Result<ScopedPath, SkillBundleSourceError> {
     ScopedPath::new(format!(
         "{}/{}/{}",
         root.as_str().trim_end_matches('/'),
-        bundle_name,
-        path
+        bundle_id.name(),
+        path.as_str()
     ))
     .map_err(|_| SkillBundleSourceError::InvalidFilePath)
+}
+
+fn ensure_unique_source_kinds(
+    roots: &[FilesystemSkillBundleRoot],
+) -> Result<(), SkillBundleSourceError> {
+    let mut seen = HashSet::new();
+    for root in roots {
+        if !seen.insert(root.source_kind()) {
+            return Err(SkillBundleSourceError::DuplicateSourceKind);
+        }
+    }
+    Ok(())
 }
 
 fn map_file_read_error(error: FilesystemError) -> SkillBundleSourceError {
@@ -312,6 +365,7 @@ fn map_filesystem_error(error: FilesystemError) -> SkillBundleSourceError {
         | FilesystemError::CorruptRecordVersion { .. }
         | FilesystemError::IndexSpecMissingAfterUpsert { .. }
         | FilesystemError::BackendInfrastructure { .. } => SkillBundleSourceError::Internal,
+        // FilesystemError is #[non_exhaustive], so a wildcard remains required.
         _ => SkillBundleSourceError::Internal,
     }
 }
@@ -377,7 +431,8 @@ mod tests {
                 FilesystemSkillBundleRoot::system(ScopedPath::new("/system/skills").unwrap()),
                 FilesystemSkillBundleRoot::user(ScopedPath::new("/skills").unwrap()),
             ],
-        );
+        )
+        .unwrap();
         (root, source)
     }
 
@@ -436,7 +491,7 @@ mod tests {
             ]
         );
         assert_eq!(descriptors[0].trust(), Some(&SkillTrust::Trusted));
-        assert_eq!(descriptors[1].trust(), Some(&SkillTrust::Installed));
+        assert_eq!(descriptors[1].trust(), Some(&SkillTrust::Trusted));
         assert_eq!(descriptors[0].visibility(), Some(&SkillVisibility::Visible));
     }
 
@@ -519,7 +574,61 @@ mod tests {
             .list_skill_bundles(&run_context().await)
             .await
             .unwrap_err();
-        assert_eq!(error, SkillBundleSourceError::InvalidSkillBundle);
+        assert_eq!(error, SkillBundleSourceError::ManifestParseFailed);
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_rejects_non_utf8_skill_md() {
+        let (root, source) = mounted_source();
+        write_root(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/bad-skill/SKILL.md",
+            vec![0xff, 0xfe, 0xfd],
+        )
+        .await;
+
+        let error = source
+            .list_skill_bundles(&run_context().await)
+            .await
+            .unwrap_err();
+        assert_eq!(error, SkillBundleSourceError::BundleUtf8DecodeFailed);
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_maps_manifest_permission_denied() {
+        let root = Arc::new(InMemoryBackend::default());
+        write_root(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/local-review/SKILL.md",
+            skill_md("local-review", "Local review"),
+        )
+        .await;
+        let view = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/skills").unwrap(),
+            VirtualPath::new("/tenants/tenant-a/users/user-a/skills").unwrap(),
+            MountPermissions {
+                read: false,
+                write: false,
+                list: true,
+                delete: false,
+                execute: false,
+            },
+        )])
+        .unwrap();
+        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(Arc::clone(&root), view));
+        let source = FilesystemSkillBundleSource::new(
+            filesystem,
+            vec![FilesystemSkillBundleRoot::user(
+                ScopedPath::new("/skills").unwrap(),
+            )],
+        )
+        .unwrap();
+
+        let error = source
+            .list_skill_bundles(&run_context().await)
+            .await
+            .unwrap_err();
+        assert_eq!(error, SkillBundleSourceError::PermissionDenied);
     }
 
     #[tokio::test]
@@ -537,6 +646,96 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error, SkillBundleSourceError::InvalidSkillBundle);
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_skips_invalid_bundle_folder_names() {
+        let (root, source) = mounted_source();
+        write_root(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/valid-skill/SKILL.md",
+            skill_md("valid-skill", "Valid skill"),
+        )
+        .await;
+        for invalid_name in [
+            "has space",
+            "-starts-with-dash",
+            ".starts-with-dot",
+            "ümlaut",
+        ] {
+            write_root(
+                &root,
+                &format!("/tenants/tenant-a/users/user-a/skills/{invalid_name}/SKILL.md"),
+                skill_md(invalid_name, "Invalid skill"),
+            )
+            .await;
+        }
+
+        let descriptors = source
+            .list_skill_bundles(&run_context().await)
+            .await
+            .unwrap();
+        let ids: Vec<String> = descriptors
+            .iter()
+            .map(|descriptor| descriptor.id().to_string())
+            .collect();
+        assert_eq!(ids, vec!["user:valid-skill"]);
+    }
+
+    #[test]
+    fn filesystem_source_rejects_traversal_file_paths_before_read() {
+        for invalid in ["../sibling/SKILL.md", "..", "references/../SKILL.md"] {
+            assert_eq!(
+                SkillFilePath::new(invalid).unwrap_err(),
+                SkillBundleSourceError::InvalidFilePath
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_rejects_duplicate_source_kind_roots() {
+        let root = Arc::new(InMemoryBackend::default());
+        let view = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/skills").unwrap(),
+            VirtualPath::new("/tenants/tenant-a/users/user-a/skills").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .unwrap();
+        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(root, view));
+
+        let error = FilesystemSkillBundleSource::new(
+            filesystem,
+            vec![
+                FilesystemSkillBundleRoot::user(ScopedPath::new("/skills").unwrap()),
+                FilesystemSkillBundleRoot::user(ScopedPath::new("/skills/other").unwrap()),
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(error, SkillBundleSourceError::DuplicateSourceKind);
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_enforces_bundle_scan_limit() {
+        let (root, source) = mounted_source();
+        let source = source.with_max_bundles_per_root(1);
+        write_root(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/alpha/SKILL.md",
+            skill_md("alpha", "Alpha"),
+        )
+        .await;
+        write_root(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/beta/SKILL.md",
+            skill_md("beta", "Beta"),
+        )
+        .await;
+
+        let error = source
+            .list_skill_bundles(&run_context().await)
+            .await
+            .unwrap_err();
+        assert_eq!(error, SkillBundleSourceError::BundleScanLimitExceeded);
     }
 
     #[tokio::test]
