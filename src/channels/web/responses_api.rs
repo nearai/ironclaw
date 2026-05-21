@@ -740,6 +740,19 @@ pub async fn create_response_handler(
             "invalid_request_error",
         ));
     }
+    // Reject non-finite or out-of-range temperature at the API boundary.
+    // The provider-side path clamps to [0, 2] later, but callers modelling
+    // against the OpenAI Responses contract expect a 400 here rather than
+    // silent normalization (e.g. 9.0 → 2.0).
+    if let Some(t) = req.temperature
+        && (!t.is_finite() || !(0.0..=2.0).contains(&t))
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "The 'temperature' field must be a finite number in [0, 2]",
+            "invalid_request_error",
+        ));
+    }
 
     let mut content = extract_user_content(&req.input)
         .map_err(|e| api_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
