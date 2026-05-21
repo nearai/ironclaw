@@ -11,18 +11,26 @@
 //! deployments wire their own `SessionStore` (Postgres, libSQL,
 //! filesystem) by implementing the trait.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_reborn_composition::WebuiAuthenticator;
-use parking_lot::RwLock;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
 use thiserror::Error;
+
+// Imports below are only used by `InMemorySessionStore`, which is gated
+// behind `dev-in-memory-session`. Gate the imports too so non-feature
+// production builds don't warn about unused imports.
+#[cfg(any(test, feature = "dev-in-memory-session"))]
+use parking_lot::RwLock;
+#[cfg(any(test, feature = "dev-in-memory-session"))]
+use std::collections::HashMap;
+#[cfg(any(test, feature = "dev-in-memory-session"))]
+use subtle::ConstantTimeEq;
+#[cfg(any(test, feature = "dev-in-memory-session"))]
 use uuid::Uuid;
 
 /// Persisted session record. The token value itself is the lookup key
@@ -83,11 +91,17 @@ pub trait SessionStore: Send + Sync + 'static {
 /// Process-local session store. Sessions vanish on restart. Useful
 /// for local dev and the caller-level test harness — production
 /// deployments wire a durable `SessionStore` impl.
+///
+/// Gated behind `dev-in-memory-session` so a production binary cannot
+/// accidentally name this type as its `SessionStore`. Tests are
+/// implicitly enabled via `cfg(test)`.
+#[cfg(any(test, feature = "dev-in-memory-session"))]
 #[derive(Debug, Default)]
 pub struct InMemorySessionStore {
     inner: RwLock<HashMap<String, SessionRecord>>,
 }
 
+#[cfg(any(test, feature = "dev-in-memory-session"))]
 impl InMemorySessionStore {
     pub fn new() -> Self {
         Self::default()
@@ -114,6 +128,7 @@ impl InMemorySessionStore {
     }
 }
 
+#[cfg(any(test, feature = "dev-in-memory-session"))]
 #[async_trait]
 impl SessionStore for InMemorySessionStore {
     async fn create_session(

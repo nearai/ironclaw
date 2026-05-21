@@ -87,17 +87,25 @@ pub trait WebuiAuthenticator: Send + Sync + 'static {
 /// Host-installation composition the Reborn HTTP gateway needs in
 /// addition to the [`RebornWebuiBundle`] it serves over.
 ///
-/// All fields are required so callers cannot accidentally ship a
-/// gateway with auth disabled or CORS wide open.
+/// Fields are `pub(crate)` so the public surface is the typed builder
+/// methods only. This routes every host through `new` /
+/// `parse_allowed_origins` / `with_*`, which fail-closed on invalid
+/// input (empty token, malformed origin, bad CSP). The fail-closed
+/// defaults — empty allow-origin list, locked-down CSP, 14 MiB outer
+/// body cap — apply unless an explicit builder override changes them.
+///
+/// Read access is intentionally not re-exposed: host binaries should
+/// keep their own config sources of truth (`[webui]` TOML, env vars)
+/// and feed builders, not round-trip through this struct.
 #[derive(Clone)]
 pub struct WebuiServeConfig {
     /// Host installation tenant id. Stamped onto every
     /// [`WebUiAuthenticatedCaller`]; the browser body cannot influence
     /// it. Matches the trusted host config rule documented in
     /// `crates/ironclaw_product_workflow/CLAUDE.md`.
-    pub tenant_id: TenantId,
+    pub(crate) tenant_id: TenantId,
     /// Bearer-token verifier supplied by host composition.
-    pub authenticator: Arc<dyn WebuiAuthenticator>,
+    pub(crate) authenticator: Arc<dyn WebuiAuthenticator>,
     /// Outer per-request body cap applied as defense in depth for
     /// paths that don't match any v2 descriptor (e.g. axum's 404
     /// fallback). v2 routes are additionally enforced against the
@@ -105,14 +113,14 @@ pub struct WebuiServeConfig {
     /// declared in `ironclaw_webui_v2::webui_v2_routes()`; that
     /// descriptor cap is always strictly tighter than this global
     /// fallback. Defaults to [`DEFAULT_WEBUI_MAX_BODY_BYTES`].
-    pub max_body_bytes: usize,
+    pub(crate) max_body_bytes: usize,
     /// CORS allow-origin list. Empty means "no cross-origin requests
     /// accepted at all" — explicitly fail-closed; pre-flight checks
     /// against an empty list never echo the attacker-supplied origin.
-    pub allowed_origins: Vec<HeaderValue>,
+    pub(crate) allowed_origins: Vec<HeaderValue>,
     /// Content-Security-Policy header value. Defaults to
     /// [`DEFAULT_WEBUI_CSP`] if `None`.
-    pub csp_header: Option<HeaderValue>,
+    pub(crate) csp_header: Option<HeaderValue>,
     /// Canonical host the WebChat v2 listener is reachable on (e.g.
     /// `"app.example.com"` or `"127.0.0.1:3000"`). When set, the
     /// WebSocket same-origin middleware compares the request's
@@ -121,7 +129,7 @@ pub struct WebuiServeConfig {
     /// that forwards an attacker-controlled Host would otherwise let
     /// the same-origin check pass for a forged Origin. Defaults to
     /// `None` (fall back to Host-header comparison + allowlist).
-    pub canonical_host: Option<String>,
+    pub(crate) canonical_host: Option<String>,
 }
 
 impl WebuiServeConfig {
@@ -332,6 +340,18 @@ pub fn webui_v2_app(
         .layer(SetResponseHeaderLayer::if_not_present(
             HeaderName::from_static("content-security-policy"),
             csp_value,
+        ))
+        // Defense in depth for the SSE `?token=` shim: browsers honor
+        // Referrer-Policy when deciding whether to attach the
+        // referring URL to subsequent navigation requests, third-party
+        // resource loads, or downstream-link clicks. `no-referrer`
+        // stops the gateway URL (which may contain `?token=…`) from
+        // bleeding into any cross-origin destination's logs. Does not
+        // protect against server-side access-log capture — operators
+        // still need to scrub URL query strings before retention.
+        .layer(SetResponseHeaderLayer::if_not_present(
+            HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("no-referrer"),
         ));
 
     Ok(app)
@@ -397,6 +417,18 @@ fn extract_bearer_token(request: &Request) -> Option<String> {
     // because `EventSource` cannot set request headers. Mutations and
     // timeline reads stay bearer-only so a query-token leak in a
     // referer chain cannot authenticate a state change.
+    //
+    // **Operational warning:** the token-as-URL-parameter pattern is
+    // a documented industry trade-off (SSE has no header-supplying
+    // client primitive). The token value appears in the URL and will
+    // therefore land in any HTTP access log, intermediate proxy log,
+    // or analytics pipeline that sees the request line. Composition
+    // emits `Referrer-Policy: no-referrer` on every response as
+    // defense in depth, but operators MUST still scrub
+    // `?token=<value>` from any log destination that retains URLs.
+    // The acceptance check is narrowed to GET on the exact
+    // `…/threads/{id}/events` path by `is_v2_sse_event_request` so
+    // the leak surface is one route, not the whole gateway.
     if is_v2_sse_event_request(request) {
         return query_token(request);
     }
@@ -602,5 +634,58 @@ mod tests {
             HeaderValue::from_static("bEaReR mytoken"),
         );
         assert_eq!(extract_bearer_token(&req).as_deref(), Some("mytoken"));
+    }
+
+    #[test]
+    fn extract_bearer_token_rejects_query_token_on_non_sse_paths() {
+        // `?token=` is an EventSource-only escape hatch on the SSE
+        // route. Mutations and reads MUST stay bearer-only — a future
+        // regression that widens query-token acceptance to other
+        // routes would silently downgrade auth on every state change
+        // (no bearer header means an attacker only needs the URL).
+        // This test pins extract_bearer_token's behavior on every
+        // non-SSE shape we care about.
+        for (method, path_and_query) in [
+            (Method::POST, "/api/webchat/v2/threads?token=stealme"),
+            (
+                Method::POST,
+                "/api/webchat/v2/threads/abc/messages?token=stealme",
+            ),
+            (
+                Method::GET,
+                "/api/webchat/v2/threads/abc/timeline?token=stealme",
+            ),
+            (
+                Method::POST,
+                "/api/webchat/v2/threads/abc/runs/r/cancel?token=stealme",
+            ),
+            (
+                Method::POST,
+                "/api/webchat/v2/threads/abc/runs/r/gates/g/resolve?token=stealme",
+            ),
+            // Even on the SSE path, the wrong METHOD must reject.
+            (
+                Method::POST,
+                "/api/webchat/v2/threads/abc/events?token=stealme",
+            ),
+            // List threads shares the same path as create_thread but
+            // is read-only; query-token still rejected because no
+            // bearer header is present.
+            (Method::GET, "/api/webchat/v2/threads?token=stealme"),
+        ] {
+            let req = fake_request(method.clone(), path_and_query);
+            assert!(
+                extract_bearer_token(&req).is_none(),
+                "extract_bearer_token must NOT accept ?token= on {method} {path_and_query}",
+            );
+        }
+    }
+
+    #[test]
+    fn extract_bearer_token_accepts_query_token_only_on_sse_get() {
+        // Companion to the rejection test: the one place `?token=` is
+        // honored — GET on the SSE events route — must still work.
+        let req = fake_request(Method::GET, "/api/webchat/v2/threads/abc/events?token=ok");
+        assert_eq!(extract_bearer_token(&req).as_deref(), Some("ok"));
     }
 }

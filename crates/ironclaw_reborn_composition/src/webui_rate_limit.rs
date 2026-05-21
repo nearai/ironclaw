@@ -16,15 +16,19 @@
 //!   `PerCaller`; other scopes (`PerTenant`, `PerIp`, `PerRoute`,
 //!   `Global`) are explicit `Err` at composition time so a future
 //!   policy change cannot silently degrade enforcement.
-//! - **LRU eviction** — the counters map is capped at 8 192 entries to
-//!   bound memory under sustained churn (many distinct callers / many
-//!   routes). Evicted entries simply reset their window; a caller that
-//!   loses its counter and then bursts is no worse off than a brand-new
-//!   caller.
+//! - **Sharded LRU eviction** — counters live in 16 independent
+//!   `Mutex<LruCache>` shards picked by a hash of the caller identity.
+//!   Each shard is capped at 512 entries (16 × 512 = 8192-entry total
+//!   budget). Concurrent requests for different callers very rarely
+//!   contend on the same shard's mutex; a single caller's bursts
+//!   serialize against their own shard only. Evicted entries simply
+//!   reset their window; a caller that loses its counter and then
+//!   bursts is no worse off than a brand-new caller.
 //! - **Disabled routes pass through.** A descriptor with
 //!   `RateLimitPolicy::Disabled` (the v2 beta does not have any, but
 //!   the type allows it) records no counters and never returns 429.
 
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -39,19 +43,23 @@ use lru::LruCache;
 
 use crate::webui_route_match::{network_method_to_axum, parse_pattern, segments_match};
 
+/// Number of sharded counter maps. Each authenticated request takes
+/// exactly one shard's mutex, so contention scales as 1/SHARD_COUNT in
+/// the limit. 16 is the standard cache-line-friendly value; benchmarks
+/// can move this if a higher-tenancy deployment demands more.
+const SHARD_COUNT: usize = 16;
+
 /// Hard cap on the number of `(route, caller)` counter entries kept in
-/// memory. Sized to comfortably cover ~1300 distinct callers across all
-/// 6 v2 routes without eviction, while still bounding worst-case
-/// memory consumption when a buggy or hostile client cycles through
-/// many caller identities.
+/// memory **per shard**. Sized so the SHARD_COUNT × this product
+/// matches the original 8_192-entry budget (8_192 / 16 = 512). A
+/// caller's counter lives in exactly one shard; cross-shard eviction
+/// is independent.
 ///
 /// Stored as a `NonZeroUsize` const so the runtime constructor doesn't
 /// have to `.expect()` on a value the compiler can prove is non-zero.
-/// Mirrors the pattern in `src/channels/web/platform/state.rs`
-/// (`PerUserRateLimiter::MAX_KEYS`) for the v1 surface.
-const RATE_LIMIT_LRU_CAPACITY: NonZeroUsize = match NonZeroUsize::new(8_192) {
+const RATE_LIMIT_PER_SHARD_CAPACITY: NonZeroUsize = match NonZeroUsize::new(512) {
     Some(value) => value,
-    // SAFETY: 8_192 is a non-zero compile-time constant; the match arm
+    // SAFETY: 512 is a non-zero compile-time constant; the match arm
     // is unreachable. Written as `unreachable!()` rather than
     // `unwrap()` so the rule against `.expect()` / `.unwrap()` in
     // production code is satisfied without a runtime panic site.
@@ -92,19 +100,23 @@ enum ResolvedPolicy {
     Disabled,
 }
 
-/// Shared state for [`enforce_rate_limit`]. Cheap to clone — the inner
-/// counter map is wrapped in `Arc<Mutex<…>>` so a single process-wide
-/// instance is shared across every per-request invocation.
+/// Shared state for [`enforce_rate_limit`]. Cheap to clone — the
+/// inner counter maps are sharded across [`SHARD_COUNT`] independent
+/// `Mutex<LruCache<…>>`s, picked by a hash of the caller identity, so
+/// concurrent rate-limit checks for different callers don't contend
+/// on the same mutex. Each shard's lock is held only for the window
+/// update + counter decrement — microseconds in the warm path.
 #[derive(Clone)]
 pub(crate) struct RateLimitState {
     routes: Arc<Vec<RouteLimit>>,
-    counters: Arc<Mutex<LruCache<CounterKey, Window>>>,
+    shards: Arc<Vec<Mutex<LruCache<CounterKey, Window>>>>,
 }
 
 impl std::fmt::Debug for RateLimitState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RateLimitState")
             .field("routes", &self.routes.len())
+            .field("shards", &self.shards.len())
             .finish_non_exhaustive()
     }
 }
@@ -147,10 +159,24 @@ pub(crate) fn build_rate_limit_state(
         });
     }
 
+    let shards = (0..SHARD_COUNT)
+        .map(|_| Mutex::new(LruCache::new(RATE_LIMIT_PER_SHARD_CAPACITY)))
+        .collect::<Vec<_>>();
     Ok(RateLimitState {
         routes: Arc::new(routes),
-        counters: Arc::new(Mutex::new(LruCache::new(RATE_LIMIT_LRU_CAPACITY))),
+        shards: Arc::new(shards),
     })
+}
+
+/// Pick the shard for a given caller. Uses `DefaultHasher` for
+/// uniform-enough distribution across 16 buckets; we don't need
+/// adversarial-resistance because the caller identity is already host-
+/// authenticated and trusted to not be attacker-controlled in a way
+/// that could collide on a specific shard.
+fn shard_index(caller_key: &str) -> usize {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    caller_key.hash(&mut hasher);
+    (hasher.finish() as usize) % SHARD_COUNT
 }
 
 fn resolve_policy(
@@ -262,8 +288,9 @@ pub(crate) async fn enforce_rate_limit(
     let now = now_epoch_secs();
     let window_seconds = window.as_secs().max(1);
 
+    let shard = &state.shards[shard_index(&key.caller_key)];
     let allowed = {
-        let mut guard = match state.counters.lock() {
+        let mut guard = match shard.lock() {
             Ok(guard) => guard,
             Err(poisoned) => {
                 tracing::debug!(
@@ -328,18 +355,23 @@ mod tests {
                 window: Duration::from_secs(u64::from(window_secs)),
             },
         };
+        let shards = (0..SHARD_COUNT)
+            .map(|_| Mutex::new(LruCache::new(RATE_LIMIT_PER_SHARD_CAPACITY)))
+            .collect::<Vec<_>>();
         RateLimitState {
             routes: Arc::new(vec![route]),
-            counters: Arc::new(Mutex::new(LruCache::new(RATE_LIMIT_LRU_CAPACITY))),
+            shards: Arc::new(shards),
         }
     }
 
     fn consume(state: &RateLimitState, caller: &WebUiAuthenticatedCaller) -> bool {
-        let mut guard = state.counters.lock().expect("lock");
         let key = CounterKey {
             route_idx: 0,
             caller_key: caller_key(caller),
         };
+        let mut guard = state.shards[shard_index(&key.caller_key)]
+            .lock()
+            .expect("lock");
         let route = &state.routes[0];
         let (max, window) = match route.policy {
             ResolvedPolicy::Limited {

@@ -28,9 +28,12 @@ pub use oidc::{
     AudienceClaim, ClaimToUserIdFn, IdTokenClaims, OidcAuthenticator, OidcAuthenticatorConfig,
     OidcAuthenticatorError,
 };
-pub use session::{
-    InMemorySessionStore, SessionAuthenticator, SessionRecord, SessionStore, SessionStoreError,
-};
+pub use session::{SessionAuthenticator, SessionRecord, SessionStore, SessionStoreError};
+// `InMemorySessionStore` is gated behind `dev-in-memory-session` so a
+// production binary cannot accidentally wire a process-local store as
+// a `SessionStore` impl. Local dev and tests opt in via the feature.
+#[cfg(any(test, feature = "dev-in-memory-session"))]
+pub use session::InMemorySessionStore;
 
 use std::net::SocketAddr;
 use std::sync::Arc;

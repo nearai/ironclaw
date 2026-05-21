@@ -10,6 +10,16 @@ homepage = "https://github.com/nearai/ironclaw"
 repository = "https://github.com/nearai/ironclaw"
 publish = false
 
+[features]
+default = []
+# Compile in `InMemorySessionStore` as a public crate item. Off by
+# default so a production deployment cannot accidentally wire the
+# process-local store as a `SessionStore` impl — `SessionAuthenticator`
+# would happily accept it, but sessions would vanish on every restart
+# and the O(n) constant-time lookup would scale poorly under real
+# user load. Local dev and tests opt in by enabling this feature.
+dev-in-memory-session = []
+
 [dependencies]
 async-trait = "0.1"
 axum = "0.8"
