@@ -9,7 +9,9 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use ironclaw_host_api::UserId;
-use ironclaw_product_adapters::{ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload};
+use ironclaw_product_adapters::{
+    ProductInboundAck, ProductInboundEnvelope, ProductInboundPayload, ProductRejection,
+};
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessageReplay, EnsureThreadRequest, MessageContent,
     MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadService, ThreadMessageId,
@@ -27,6 +29,10 @@ use crate::binding::{
     ResolvedBinding,
 };
 use crate::error::ProductWorkflowError;
+use crate::policy::{
+    BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
+    NoopBeforeInboundPolicy,
+};
 
 /// Result of the inbound turn submission flow.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,17 +76,48 @@ impl InboundTurnOutcome {
     }
 }
 
+/// Result of running replay, before-inbound policy, and fresh user-message acceptance.
+pub enum InboundUserMessageDispatch {
+    Accepted(InboundTurnOutcome),
+    Rejected(ProductRejection),
+}
+
+struct PreparedUserMessage {
+    binding: ResolvedBinding,
+    thread_scope: ThreadScope,
+    source_binding_id: String,
+    submit_idempotency_key: String,
+}
+
 /// Port for the inbound turn submission path.
 ///
 /// Implementations coordinate binding resolution, message acceptance into the
 /// session thread service, and turn submission to the coordinator.
 #[async_trait]
 pub trait InboundTurnService: Send + Sync {
+    /// Replay an already-accepted inbound message, if one exists.
+    ///
+    /// The product workflow calls this before before-inbound policy so retries
+    /// of staged messages are not blocked by later policy changes. Implementors
+    /// must keep this probe separate from fresh acceptance so callers never
+    /// perform replay lookup twice for one inbound dispatch.
+    async fn replay_accepted_user_message(
+        &self,
+        envelope: &ProductInboundEnvelope,
+    ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError>;
+
     /// Accept a user message envelope: resolve binding, stage message, submit turn.
     async fn accept_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
     ) -> Result<InboundTurnOutcome, ProductWorkflowError>;
+
+    /// Accept a user message while preserving the replay-before-policy ordering.
+    async fn accept_user_message_with_before_policy(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        before_inbound_policy: &dyn BeforeInboundPolicy,
+    ) -> Result<InboundUserMessageDispatch, ProductWorkflowError>;
 }
 
 /// Default implementation that composes a [`ConversationBindingService`] with a
@@ -113,10 +150,85 @@ where
     T: SessionThreadService,
     C: TurnCoordinator,
 {
+    async fn replay_accepted_user_message(
+        &self,
+        envelope: &ProductInboundEnvelope,
+    ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError> {
+        let prepared = self.prepare_user_message(envelope).await?;
+        self.replay_prepared_user_message(envelope, &prepared).await
+    }
+
     async fn accept_user_message(
         &self,
         envelope: &ProductInboundEnvelope,
     ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
+        let policy = NoopBeforeInboundPolicy;
+        match self
+            .accept_user_message_with_before_policy(envelope, &policy)
+            .await?
+        {
+            InboundUserMessageDispatch::Accepted(outcome) => Ok(outcome),
+            InboundUserMessageDispatch::Rejected(_) => Err(ProductWorkflowError::Transient {
+                reason: "noop before-inbound policy unexpectedly rejected message".into(),
+            }),
+        }
+    }
+
+    async fn accept_user_message_with_before_policy(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        before_inbound_policy: &dyn BeforeInboundPolicy,
+    ) -> Result<InboundUserMessageDispatch, ProductWorkflowError> {
+        let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
+            return Err(ProductWorkflowError::UnsupportedActionKind {
+                kind: "non_user_message".into(),
+            });
+        };
+        let prepared = self.prepare_user_message(envelope).await?;
+        if let Some(outcome) = self
+            .replay_prepared_user_message(envelope, &prepared)
+            .await?
+        {
+            return Ok(InboundUserMessageDispatch::Accepted(outcome));
+        }
+
+        let policy_outcome = before_inbound_policy
+            .check_user_message(BeforeInboundPolicyRequest::new(envelope, payload)?)
+            .await?;
+        let dispatch_envelope;
+        let (prepared_for_turn, envelope_for_turn) = match policy_outcome {
+            BeforeInboundPolicyOutcome::Allow => (prepared, envelope),
+            BeforeInboundPolicyOutcome::RewriteUserMessage(payload) => {
+                dispatch_envelope =
+                    envelope.with_rewritten_user_message(payload).map_err(|_| {
+                        ProductWorkflowError::TurnSubmissionRejected {
+                            reason: "invalid policy-rewritten user message".into(),
+                        }
+                    })?;
+                let rewritten_prepared = self.prepare_user_message(&dispatch_envelope).await?;
+                (rewritten_prepared, &dispatch_envelope)
+            }
+            BeforeInboundPolicyOutcome::Reject(rejection) => {
+                return Ok(InboundUserMessageDispatch::Rejected(rejection));
+            }
+        };
+
+        self.accept_prepared_user_message(prepared_for_turn, envelope_for_turn)
+            .await
+            .map(InboundUserMessageDispatch::Accepted)
+    }
+}
+
+impl<B, T, C> DefaultInboundTurnService<B, T, C>
+where
+    B: ConversationBindingService,
+    T: SessionThreadService,
+    C: TurnCoordinator,
+{
+    async fn prepare_user_message(
+        &self,
+        envelope: &ProductInboundEnvelope,
+    ) -> Result<PreparedUserMessage, ProductWorkflowError> {
         let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
             return Err(ProductWorkflowError::UnsupportedActionKind {
                 kind: "non_user_message".into(),
@@ -124,7 +236,6 @@ where
         };
         let source_binding_id = product_source_binding_id(envelope);
         let submit_idempotency_key = submit_idempotency_key(envelope);
-
         let route_kind = route_kind_for_user_message(payload.trigger);
         let binding = self
             .binding_service
@@ -139,35 +250,61 @@ where
             })
             .await?;
         let thread_scope = thread_scope_from_binding(&binding, route_kind)?;
+        Ok(PreparedUserMessage {
+            binding,
+            thread_scope,
+            source_binding_id,
+            submit_idempotency_key,
+        })
+    }
 
-        if let Some(replay) = self
+    async fn replay_prepared_user_message(
+        &self,
+        envelope: &ProductInboundEnvelope,
+        prepared: &PreparedUserMessage,
+    ) -> Result<Option<InboundTurnOutcome>, ProductWorkflowError> {
+        let Some(replay) = self
             .thread_service
             .replay_accepted_inbound_message(ReplayAcceptedInboundMessageRequest {
-                scope: thread_scope.clone(),
-                actor_id: binding.user_id.as_str().to_string(),
-                source_binding_id: source_binding_id.clone(),
+                scope: prepared.thread_scope.clone(),
+                actor_id: prepared.binding.user_id.as_str().to_string(),
+                source_binding_id: prepared.source_binding_id.clone(),
                 external_event_id: envelope.external_event_id().as_str().to_string(),
             })
             .await
             .map_err(|e| ProductWorkflowError::Transient {
                 reason: format!("failed to replay accepted inbound message: {e}"),
             })?
-        {
-            return submit_or_replay_accepted_message(
-                &self.thread_service,
-                &self.turn_coordinator,
-                replay,
-                submit_idempotency_key.clone(),
-                envelope.received_at(),
-            )
-            .await;
-        }
+        else {
+            return Ok(None);
+        };
 
+        submit_or_replay_accepted_message(
+            &self.thread_service,
+            &self.turn_coordinator,
+            replay,
+            prepared.submit_idempotency_key.clone(),
+            envelope.received_at(),
+        )
+        .await
+        .map(Some)
+    }
+
+    async fn accept_prepared_user_message(
+        &self,
+        prepared: PreparedUserMessage,
+        envelope: &ProductInboundEnvelope,
+    ) -> Result<InboundTurnOutcome, ProductWorkflowError> {
+        let ProductInboundPayload::UserMessage(payload) = envelope.payload() else {
+            return Err(ProductWorkflowError::UnsupportedActionKind {
+                kind: "non_user_message".into(),
+            });
+        };
         self.thread_service
             .ensure_thread(EnsureThreadRequest {
-                scope: thread_scope.clone(),
-                thread_id: Some(binding.thread_id.clone()),
-                created_by_actor_id: binding.user_id.as_str().to_string(),
+                scope: prepared.thread_scope.clone(),
+                thread_id: Some(prepared.binding.thread_id.clone()),
+                created_by_actor_id: prepared.binding.user_id.as_str().to_string(),
                 title: None,
                 metadata_json: None,
             })
@@ -176,14 +313,14 @@ where
                 reason: format!("failed to ensure thread: {e}"),
             })?;
 
-        let reply_target_binding_id = source_binding_id.clone();
+        let reply_target_binding_id = prepared.source_binding_id.clone();
         let accepted = self
             .thread_service
             .accept_inbound_message(AcceptInboundMessageRequest {
-                scope: thread_scope.clone(),
-                thread_id: binding.thread_id.clone(),
-                actor_id: binding.user_id.as_str().to_string(),
-                source_binding_id: Some(source_binding_id.clone()),
+                scope: prepared.thread_scope.clone(),
+                thread_id: prepared.binding.thread_id.clone(),
+                actor_id: prepared.binding.user_id.as_str().to_string(),
+                source_binding_id: Some(prepared.source_binding_id.clone()),
                 reply_target_binding_id: Some(reply_target_binding_id.clone()),
                 external_event_id: Some(envelope.external_event_id().as_str().to_string()),
                 content: MessageContent::text(payload.text.clone()),
@@ -194,12 +331,12 @@ where
             })?;
 
         ProductInboundTurnHandoff::NeedsSubmission(AcceptedProductInboundTurn {
-            binding,
-            thread_scope,
+            binding: prepared.binding,
+            thread_scope: prepared.thread_scope,
             message_id: accepted.message_id,
-            source_binding_id,
+            source_binding_id: prepared.source_binding_id,
             reply_target_binding_id,
-            idempotency_key_raw: submit_idempotency_key,
+            idempotency_key_raw: prepared.submit_idempotency_key,
             received_at: envelope.received_at(),
         })
         .submit_or_replay(&self.thread_service, &self.turn_coordinator)

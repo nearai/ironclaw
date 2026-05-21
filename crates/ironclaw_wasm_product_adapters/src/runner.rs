@@ -27,9 +27,9 @@ use ironclaw_product_adapters::auth::{
 };
 use ironclaw_product_adapters::redaction::RedactedString;
 use ironclaw_product_adapters::{
-    AuthRequirement, ProductAdapter, ProductAdapterError, ProductInboundAck,
-    ProductInboundEnvelope, ProductWorkflow, ProtocolAuthEvidence, ProtocolAuthFailure,
-    TrustedInboundContext,
+    AuthRequirement, InboundRetryDisposition, ProductAdapter, ProductAdapterError,
+    ProductInboundAck, ProductInboundEnvelope, ProductWorkflow, ProtocolAuthEvidence,
+    ProtocolAuthFailure, TrustedInboundContext,
 };
 use thiserror::Error;
 use tokio::sync::Semaphore;
@@ -308,6 +308,12 @@ impl NativeProductAdapterRunner {
                 });
             }
         };
+        if ack.retry_disposition() == InboundRetryDisposition::Retry {
+            return Err(ProductAdapterError::WorkflowTransient {
+                reason: RedactedString::new("workflow requested inbound retry"),
+            }
+            .into());
+        }
         Ok(WebhookProcessOutcome::Acknowledged { ack })
     }
 }
@@ -330,8 +336,9 @@ mod tests {
     };
     use ironclaw_product_adapters::{
         AuthRequirement, OutboundDeliverySink, ParsedProductInbound, ProductInboundPayload,
-        ProductOutboundEnvelope, ProductRenderOutcome, ProductTriggerReason,
-        ProjectionSubscriptionRequest, ProtocolHttpEgress, UserMessagePayload,
+        ProductOutboundEnvelope, ProductRejection, ProductRejectionKind, ProductRenderOutcome,
+        ProductTriggerReason, ProjectionSubscriptionRequest, ProtocolHttpEgress,
+        UserMessagePayload,
     };
     use tokio::sync::Notify;
 
@@ -500,6 +507,28 @@ mod tests {
             _envelope: ProductInboundEnvelope,
         ) -> Result<ProductInboundAck, ProductAdapterError> {
             Ok(ProductInboundAck::NoOp)
+        }
+
+        async fn resolve_projection_subscription(
+            &self,
+            _envelope: ProductInboundEnvelope,
+        ) -> Result<ProjectionSubscriptionRequest, ProductAdapterError> {
+            Err(projection_subscription_unimplemented())
+        }
+    }
+
+    struct RetryableRejectedWorkflow;
+
+    #[async_trait]
+    impl ProductWorkflow for RetryableRejectedWorkflow {
+        async fn accept_inbound(
+            &self,
+            _envelope: ProductInboundEnvelope,
+        ) -> Result<ProductInboundAck, ProductAdapterError> {
+            Ok(ProductInboundAck::Rejected(ProductRejection::retryable(
+                ProductRejectionKind::PolicyDenied,
+                "policy temporarily unavailable",
+            )))
         }
 
         async fn resolve_projection_subscription(
@@ -700,6 +729,27 @@ mod tests {
             WebhookProcessOutcome::Acknowledged {
                 ack: ProductInboundAck::NoOp
             }
+        ));
+    }
+
+    #[tokio::test]
+    async fn process_webhook_surfaces_retryable_policy_rejection_as_retryable_error() {
+        let runner = NativeProductAdapterRunner::with_config(
+            Arc::new(StaticAdapter::new(sample_parsed())),
+            Arc::new(RetryableRejectedWorkflow),
+            shared_secret_auth(),
+            test_config(1, Duration::from_secs(1)),
+        );
+
+        let err = runner
+            .process_webhook(&auth_headers(), b"{}")
+            .await
+            .expect_err("retryable workflow ack should ask protocol to redeliver");
+
+        assert!(err.is_retryable());
+        assert!(matches!(
+            err,
+            RunnerError::Adapter(ProductAdapterError::WorkflowTransient { .. })
         ));
     }
 

@@ -22,8 +22,9 @@ use crate::binding::{
     ResolvedBinding,
 };
 use crate::error::ProductWorkflowError;
-use crate::inbound_turn::InboundTurnService;
+use crate::inbound_turn::{InboundTurnService, InboundUserMessageDispatch};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
+use crate::policy::{BeforeInboundPolicy, NoopBeforeInboundPolicy};
 
 /// Host-side implementation of [`ProductWorkflow`] that dispatches inbound
 /// envelopes through the idempotency ledger and routes to the appropriate
@@ -31,6 +32,7 @@ use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 pub struct DefaultProductWorkflow {
     inbound_turn_service: Arc<dyn InboundTurnService>,
     idempotency_ledger: Arc<dyn IdempotencyLedger>,
+    before_inbound_policy: Arc<dyn BeforeInboundPolicy>,
     binding_service: Arc<dyn ConversationBindingService>,
 }
 
@@ -43,8 +45,17 @@ impl DefaultProductWorkflow {
         Self {
             inbound_turn_service,
             idempotency_ledger,
+            before_inbound_policy: Arc::new(NoopBeforeInboundPolicy),
             binding_service,
         }
+    }
+
+    pub fn with_before_inbound_policy(
+        mut self,
+        before_inbound_policy: Arc<dyn BeforeInboundPolicy>,
+    ) -> Self {
+        self.before_inbound_policy = before_inbound_policy;
+        self
     }
 }
 
@@ -90,13 +101,18 @@ impl ProductWorkflow for DefaultProductWorkflow {
                 })
             }
             IdempotencyDecision::New(mut action) => {
-                let result = dispatch_payload(&envelope, &*self.inbound_turn_service).await;
+                let result = dispatch_payload(
+                    &envelope,
+                    &*self.inbound_turn_service,
+                    &*self.before_inbound_policy,
+                )
+                .await;
 
                 match result {
-                    Ok(ack) => {
-                        action.mark_dispatched(dispatch_kind_from_ack(&ack, envelope.payload())?);
-                        if is_terminal_success_ack(&ack) {
-                            action.settle(ack.clone());
+                    Ok(dispatched) => {
+                        action.mark_dispatched(dispatched.dispatch_kind);
+                        if should_settle_ack(&dispatched.ack) {
+                            action.settle(dispatched.ack.clone());
                             self.idempotency_ledger.settle(action).await.map_err(|e| {
                                 ProductAdapterError::from(ProductWorkflowError::Transient {
                                     reason: format!(
@@ -113,13 +129,12 @@ impl ProductWorkflow for DefaultProductWorkflow {
                                 })
                             })?;
                         }
-                        Ok(ack)
+                        Ok(dispatched.ack)
                     }
                     Err(e) => {
                         if let Some(ack) = terminal_ack_for_error(&e) {
-                            action.mark_dispatched(ActionDispatchKind::try_from_payload(
-                                envelope.payload(),
-                            )?);
+                            action
+                                .mark_dispatched(dispatch_kind_from_ack(&ack, envelope.payload())?);
                             action.settle(ack);
                             self.idempotency_ledger.settle(action).await.map_err(|settle_err| {
                                 ProductAdapterError::from(ProductWorkflowError::Transient {
@@ -174,6 +189,11 @@ impl ProductWorkflow for DefaultProductWorkflow {
             after_cursor: payload.after_cursor.clone(),
         })
     }
+}
+
+struct DispatchedAction {
+    ack: ProductInboundAck,
+    dispatch_kind: ActionDispatchKind,
 }
 
 fn resolve_binding_request(envelope: &ProductInboundEnvelope) -> ResolveBindingRequest {
@@ -235,11 +255,30 @@ fn projection_thread_id_from_binding(
 async fn dispatch_payload(
     envelope: &ProductInboundEnvelope,
     inbound_turn_service: &dyn InboundTurnService,
-) -> Result<ProductInboundAck, ProductWorkflowError> {
+    before_inbound_policy: &dyn BeforeInboundPolicy,
+) -> Result<DispatchedAction, ProductWorkflowError> {
     match envelope.payload() {
         ProductInboundPayload::UserMessage(_) => {
-            let outcome = inbound_turn_service.accept_user_message(envelope).await?;
-            Ok(outcome.to_ack())
+            match inbound_turn_service
+                .accept_user_message_with_before_policy(envelope, before_inbound_policy)
+                .await?
+            {
+                InboundUserMessageDispatch::Accepted(outcome) => {
+                    let ack = outcome.to_ack();
+                    let dispatch_kind = dispatch_kind_from_ack(&ack, envelope.payload())?;
+                    Ok(DispatchedAction { ack, dispatch_kind })
+                }
+                InboundUserMessageDispatch::Rejected(rejection) => {
+                    debug!(
+                        rejection_kind = ?rejection.kind,
+                        disposition = ?rejection.disposition(),
+                        "before-inbound policy rejected user message"
+                    );
+                    let ack = ProductInboundAck::Rejected(rejection);
+                    let dispatch_kind = dispatch_kind_from_ack(&ack, envelope.payload())?;
+                    Ok(DispatchedAction { ack, dispatch_kind })
+                }
+            }
         }
         ProductInboundPayload::Command(cmd) => {
             Err(ProductWorkflowError::CommandRoutingUnavailable {
@@ -266,7 +305,10 @@ async fn dispatch_payload(
                 kind: "linked_thread_action".into(),
             })
         }
-        ProductInboundPayload::NoOp => Ok(ProductInboundAck::NoOp),
+        ProductInboundPayload::NoOp => Ok(DispatchedAction {
+            ack: ProductInboundAck::NoOp,
+            dispatch_kind: ActionDispatchKind::NoOp,
+        }),
     }
 }
 
@@ -285,12 +327,15 @@ fn dispatch_kind_from_ack(
                 run_id: *active_run_id,
             })
         }
+        ProductInboundAck::Rejected(rejection) => Ok(ActionDispatchKind::Rejected {
+            kind: rejection.kind.clone(),
+        }),
         _ => ActionDispatchKind::try_from_payload(payload),
     }
 }
 
-fn is_terminal_success_ack(ack: &ProductInboundAck) -> bool {
-    !matches!(ack, ProductInboundAck::DeferredBusy { .. })
+fn should_settle_ack(ack: &ProductInboundAck) -> bool {
+    !matches!(ack, ProductInboundAck::DeferredBusy { .. }) && ack.is_durable_outcome()
 }
 
 fn turn_error_is_retryable(error: &TurnError) -> bool {
@@ -360,11 +405,21 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
                 format!("turn submission rejected: {error}"),
             )))
         }
+        ProductWorkflowError::BeforeInboundPolicyFailed {
+            reason,
+            permanent: true,
+        } => Some(ProductInboundAck::Rejected(ProductRejection::permanent(
+            ProductRejectionKind::PolicyDenied,
+            format!("before-inbound policy failed: {reason}"),
+        ))),
         ProductWorkflowError::BindingResolutionFailed { .. }
         | ProductWorkflowError::TurnSubmissionRejected { .. }
         | ProductWorkflowError::TurnSubmissionFailed { .. }
         | ProductWorkflowError::TurnResumeRejected { .. }
         | ProductWorkflowError::Transient { .. }
+        | ProductWorkflowError::BeforeInboundPolicyFailed {
+            permanent: false, ..
+        }
         | ProductWorkflowError::DuplicateAction { .. } => None,
     }
 }
@@ -492,8 +547,8 @@ mod tests {
 
     #[test]
     fn terminal_success_ack_excludes_deferred_busy() {
-        assert!(is_terminal_success_ack(&ProductInboundAck::NoOp));
-        assert!(!is_terminal_success_ack(&ProductInboundAck::DeferredBusy {
+        assert!(should_settle_ack(&ProductInboundAck::NoOp));
+        assert!(!should_settle_ack(&ProductInboundAck::DeferredBusy {
             accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("valid ref"),
             active_run_id: TurnRunId::new(),
         }));
