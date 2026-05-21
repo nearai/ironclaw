@@ -440,3 +440,4 @@ const activeWorkStore = new ActiveWorkStore();
 //   #/routines/{id}            → routine detail
 //   #/settings/{subtab}        → settings tab with specific sub-tab
 //   #/logs                     → logs tab
+

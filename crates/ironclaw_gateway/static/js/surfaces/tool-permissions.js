@@ -173,3 +173,4 @@ document.querySelectorAll('.settings-subtab').forEach(function(btn) {
     switchSettingsSubtab(btn.getAttribute('data-settings-subtab'));
   });
 });
+

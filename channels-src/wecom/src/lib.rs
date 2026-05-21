@@ -1667,7 +1667,7 @@ fn start_websocket_media_batch(
                 });
                 sends.push(send);
             }
-            Err(error) => errors.push(error),
+            Err(error) => push_websocket_media_error(&mut errors, error),
         }
     }
 
@@ -1691,7 +1691,10 @@ fn start_websocket_media_batch(
             for send in &sends {
                 cleanup_websocket_media_chunks(send);
             }
-            errors.push(format!("Failed to persist WeCom websocket media state: {error}"));
+            push_websocket_media_error(
+                &mut errors,
+                format!("Failed to persist WeCom websocket media state: {error}"),
+            );
             channel_host::log(
                 channel_host::LogLevel::Warn,
                 &format!("Failed to persist WeCom websocket media state: {error}"),
@@ -3058,6 +3061,38 @@ mod tests {
 
         assert_eq!(capped.len(), MAX_WEBSOCKET_MEDIA_BATCH_ERRORS + 1);
         assert!(capped.last().unwrap().contains("omitted"));
+    }
+
+    #[test]
+    fn websocket_media_batch_caps_startup_validation_errors() {
+        test_reset_websocket_state();
+        let metadata = WecomMessageMetadata {
+            to_user: "ZhangSan".to_string(),
+            target: Some("chat-1".to_string()),
+            chat_id: Some("chat-1".to_string()),
+            chat_type: Some("private".to_string()),
+            source_msg_id: Some("msg-1".to_string()),
+            ws_req_id: Some("req-1".to_string()),
+            ws_chat_id: Some("chat-1".to_string()),
+            ws_chat_type: Some("private".to_string()),
+            ws_reply_cmd: Some(WECOM_WS_REPLY_CMD.to_string()),
+        };
+        let attachments: Vec<Attachment> = (0..(MAX_WEBSOCKET_MEDIA_BATCH_ERRORS + 5))
+            .map(|idx| make_outbound_attachment(&format!("empty-{idx}.png"), "image/png", 0))
+            .collect();
+
+        let result = start_websocket_media_batch(
+            &metadata,
+            "req-1",
+            WECOM_WS_REPLY_CMD,
+            "caption",
+            &attachments,
+        );
+
+        assert_eq!(result.started, 0);
+        assert_eq!(result.errors.len(), MAX_WEBSOCKET_MEDIA_BATCH_ERRORS + 1);
+        assert!(result.errors.last().unwrap().contains("omitted"));
+        assert!(load_pending_websocket_media_state().sends.is_empty());
     }
 
     #[test]

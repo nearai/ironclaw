@@ -514,3 +514,4 @@ function humanizeToolName(rawName) {
 function shouldShowChannelConnectedMessage(extensionName, success) {
   return false;
 }
+

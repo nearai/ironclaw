@@ -49,13 +49,6 @@ function switchLanguage(lang) {
         loadInferenceSettings();
       }
     }
-    if (
-      typeof refreshCurrentSettingsTab === 'function'
-      && typeof currentTab !== 'undefined'
-      && currentTab === 'settings'
-    ) {
-      refreshCurrentSettingsTab();
-    }
     // Refresh debug panel dynamic content (stats, SSE health)
     if (window.DebugPanel && typeof window.DebugPanel.onLanguageChange === 'function') {
       window.DebugPanel.onLanguageChange();
@@ -98,3 +91,4 @@ document.addEventListener('click', (e) => {
     }
   }
 });
+

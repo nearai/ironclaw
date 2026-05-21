@@ -781,6 +781,7 @@ impl Agent {
                     crate::agent::dispatcher::extract_suggestions(&response);
 
                 // Hook: TransformResponse — allow hooks to modify or reject the final response
+                let mut response_attachments_allowed = true;
                 let mut response = {
                     let event = crate::hooks::HookEvent::ResponseTransform {
                         user_id: message.user_id.clone(),
@@ -789,9 +790,11 @@ impl Agent {
                     };
                     match self.hooks().run(&event).await {
                         Err(crate::hooks::HookError::Rejected { reason }) => {
+                            response_attachments_allowed = false;
                             format!("[Response filtered: {}]", reason)
                         }
                         Err(err) => {
+                            response_attachments_allowed = false;
                             format!("[Response blocked by hook policy: {}]", err)
                         }
                         Ok(crate::hooks::HookOutcome::Continue {
@@ -801,13 +804,16 @@ impl Agent {
                     }
                 };
 
-                let current_tool_calls = thread
-                    .turns
-                    .last()
-                    .map(|turn| turn.tool_calls.clone())
-                    .unwrap_or_default();
-                let response_attachments =
-                    stage_generated_image_response_attachments(&current_tool_calls);
+                let response_attachments = if response_attachments_allowed {
+                    let current_tool_calls = thread
+                        .turns
+                        .last()
+                        .map(|turn| turn.tool_calls.clone())
+                        .unwrap_or_default();
+                    stage_generated_image_response_attachments(&current_tool_calls)
+                } else {
+                    Vec::new()
+                };
                 if !response_attachments.is_empty() {
                     response = strip_markdown_image_lines(&response);
                 }
@@ -4019,6 +4025,77 @@ mod tests {
                 ..
             } if event_id == "call_img_0" && data_url == TEST_IMAGE_DATA_URL
         )));
+    }
+
+    #[tokio::test]
+    async fn test_response_transform_rejection_blocks_generated_image_attachment() {
+        use crate::agent::session::{Session, Thread};
+        use crate::hooks::{Hook, HookContext, HookError, HookEvent, HookOutcome, HookPoint};
+        use uuid::Uuid;
+
+        struct RejectGeneratedImageResponseHook;
+
+        #[async_trait::async_trait]
+        impl Hook for RejectGeneratedImageResponseHook {
+            fn name(&self) -> &str {
+                "reject-generated-image-response"
+            }
+
+            fn hook_points(&self) -> &[HookPoint] {
+                const POINTS: &[HookPoint] = &[HookPoint::TransformResponse];
+                POINTS
+            }
+
+            async fn execute(
+                &self,
+                _event: &HookEvent,
+                _ctx: &HookContext,
+            ) -> Result<HookOutcome, HookError> {
+                Ok(HookOutcome::reject("blocked by response policy"))
+            }
+        }
+
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(GeneratedImageTool)).await;
+        let llm: Arc<dyn ironclaw_llm::LlmProvider> = Arc::new(SequencedImageLlm::new());
+        let (agent, _statuses) = make_thread_ops_test_agent_with(llm, tools).await;
+        agent
+            .hooks()
+            .register(Arc::new(RejectGeneratedImageResponseHook))
+            .await;
+        let session_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let thread = Thread::with_id(thread_id, session_id, Some("test"));
+
+        let mut sess = Session::new("test-user");
+        sess.threads.insert(thread_id, thread);
+        let session = Arc::new(TokioMutex::new(sess));
+        let message = IncomingMessage::new("test", "test-user", "生成一张小猫图片");
+
+        let result = agent
+            .process_user_input(
+                &message,
+                agent.tenant_ctx("test-user").await,
+                Arc::clone(&session),
+                thread_id,
+                "生成一张小猫图片",
+            )
+            .await
+            .expect("image generation turn handled");
+
+        match result {
+            SubmissionResult::Response {
+                content,
+                attachments,
+            } => {
+                assert_eq!(content, "[Response filtered: blocked by response policy]");
+                assert!(
+                    attachments.is_empty(),
+                    "rejected response must not deliver generated image attachments"
+                );
+            }
+            other => panic!("expected response result, got {other:?}"),
+        }
     }
 
     #[tokio::test]

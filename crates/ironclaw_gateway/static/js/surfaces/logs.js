@@ -175,3 +175,4 @@ function loadServerLogLevel() {
 // --- Extensions ---
 
 var kindLabels = { 'wasm_channel': 'Channel', 'wasm_tool': 'Tool', 'mcp_server': 'MCP' };
+
