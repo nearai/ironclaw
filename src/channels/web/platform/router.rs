@@ -26,7 +26,7 @@ use axum::{
     routing::{get, post, put},
 };
 use tokio::sync::oneshot;
-use tower_http::cors::{AllowHeaders, CorsLayer};
+use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::channels::web::auth::{CombinedAuthState, auth_middleware};
@@ -98,6 +98,23 @@ use crate::channels::web::features::settings::{
     settings_tools_list_handler, settings_tools_set_handler,
 };
 use crate::channels::web::features::status::gateway_status_handler;
+
+/// Terminal-3 FE origins baked into the CORS allowlist by default.
+///
+/// These are the canonical staging + prod hosts for the Trinity FE
+/// (`apps/trinity` in `Terminal-3/t3-apps`) — operationally fixed
+/// targets that every public deployment of t3-claw needs to accept.
+/// Including them in the binary removes the per-cluster env-var
+/// configuration step that otherwise turns into an opaque "Browser
+/// blocked the upload — most likely CORS" message in the FE.
+///
+/// Custom deployments (other domains, partner integrations, embedded
+/// apps) extend the set at runtime via the `T3CLAW_ALLOWED_ORIGINS`
+/// env var; entries here always pass the allowlist check.
+const DEFAULT_T3_FE_ORIGINS: &[&str] = &[
+    "https://staging.network.terminal3.io",
+    "https://network.terminal3.io",
+];
 
 /// Start the gateway HTTP server.
 ///
@@ -479,12 +496,14 @@ pub async fn start_server(
     // startup bug, not a request-time error — so we fail the bootstrap
     // with `ChannelError::StartupFailed` rather than panic.
     //
-    // Operators running a separate FE on a different localhost port
-    // (e.g. the trinity payroll-v2 FE on :3200, per the runbook's #24)
-    // must opt in via `T3CLAW_ALLOWED_ORIGINS` — a comma-separated
-    // list of fully-qualified origins like `http://localhost:3200`.
-    // Each entry is parsed independently; an invalid value is logged
-    // and skipped rather than aborting startup.
+    // Bundled defaults: the Terminal-3 Trinity FE origins (staging + prod)
+    // are baked in so a fresh deploy serves the standard FE without any
+    // per-cluster env config. Custom deployments (other domains, additional
+    // localhost ports, embedded apps) extend the set via
+    // `T3CLAW_ALLOWED_ORIGINS` — a comma-separated list of fully-qualified
+    // origins like `http://localhost:3200`. Each entry is parsed
+    // independently; an invalid value is logged and skipped rather than
+    // aborting startup.
     let ip_origin = format!("http://{addr}").parse().map_err(|e| {
         crate::error::ChannelError::StartupFailed {
             name: "gateway".to_string(),
@@ -498,6 +517,16 @@ pub async fn start_server(
             reason: format!("Invalid CORS origin for localhost:{}: {e}", addr.port()),
         })?;
     let mut allowed_origins: Vec<header::HeaderValue> = vec![ip_origin, localhost_origin];
+    for default in DEFAULT_T3_FE_ORIGINS {
+        match default.parse::<header::HeaderValue>() {
+            Ok(origin) => allowed_origins.push(origin),
+            Err(err) => tracing::warn!(
+                %err,
+                origin = default,
+                "default T3 FE origin failed to parse — skipping",
+            ),
+        }
+    }
     if let Ok(extra) = std::env::var("T3CLAW_ALLOWED_ORIGINS") {
         for raw in extra.split(',') {
             let trimmed = raw.trim();
@@ -505,7 +534,14 @@ pub async fn start_server(
                 continue;
             }
             match trimmed.parse::<header::HeaderValue>() {
-                Ok(origin) => allowed_origins.push(origin),
+                Ok(origin) => {
+                    // Skip duplicates so the rejection log stays readable
+                    // when an operator sets the env var to a superset of
+                    // the defaults.
+                    if !allowed_origins.contains(&origin) {
+                        allowed_origins.push(origin);
+                    }
+                }
                 Err(err) => tracing::warn!(
                     %err,
                     origin = trimmed,
@@ -514,8 +550,39 @@ pub async fn start_server(
             }
         }
     }
+    let origin_strings: Vec<&str> = allowed_origins
+        .iter()
+        .filter_map(|h| h.to_str().ok())
+        .collect();
+    tracing::info!(
+        count = allowed_origins.len(),
+        origins = ?origin_strings,
+        "CORS allow_origin list resolved at startup",
+    );
+
+    // Wrap the allowlist in a predicate so we can log per-rejection.
+    // Without this, a missing entry surfaces only as a silent missing
+    // `Access-Control-Allow-Origin` header — the operator has to diff
+    // browser devtools to spot the problem. Logging at WARN at the
+    // gateway means a single `grep CORS preflight rejected` finds the
+    // exact origin the FE was using.
+    let allowed_for_predicate = allowed_origins.clone();
+    let allow_origin = AllowOrigin::predicate(
+        move |origin: &header::HeaderValue, _parts: &axum::http::request::Parts| {
+            let allowed = allowed_for_predicate.contains(origin);
+            if !allowed {
+                tracing::warn!(
+                    origin = ?origin,
+                    allowed_count = allowed_for_predicate.len(),
+                    "CORS preflight rejected: origin not in allowlist \
+                     (add to T3CLAW_ALLOWED_ORIGINS env var to grant)",
+                );
+            }
+            allowed
+        },
+    );
     let cors = CorsLayer::new()
-        .allow_origin(allowed_origins)
+        .allow_origin(allow_origin)
         .allow_methods([
             axum::http::Method::GET,
             axum::http::Method::POST,
