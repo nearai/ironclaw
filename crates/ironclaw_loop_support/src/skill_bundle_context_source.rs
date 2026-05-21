@@ -1,17 +1,19 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::future::try_join_all;
 
 use crate::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
-    SkillBundleSource, SkillBundleSourceError, sort_skill_bundle_descriptors,
+    SkillBundleDescriptor, SkillBundleSource, SkillBundleSourceError,
+    sort_skill_bundle_descriptors,
 };
 use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
 
 /// Adapts portable skill bundles into model-context candidates.
 ///
 /// This adapter is intentionally policy-thin: it requires host-supplied trust
-/// and visibility metadata from [`SkillBundleDescriptor`], reads raw `SKILL.md`
+/// and visibility metadata from [`crate::SkillBundleDescriptor`], reads raw `SKILL.md`
 /// content only for visible bundles, and leaves final snapshot trust/visibility
 /// enforcement to [`crate::build_skill_run_snapshot`].
 pub struct SkillBundleContextSource<S>
@@ -25,10 +27,12 @@ impl<S> SkillBundleContextSource<S>
 where
     S: SkillBundleSource + ?Sized,
 {
+    /// Creates an adapter over a host-approved skill bundle source.
     pub fn new(bundle_source: Arc<S>) -> Self {
         Self { bundle_source }
     }
 
+    /// Returns the wrapped bundle source.
     pub fn bundle_source(&self) -> &Arc<S> {
         &self.bundle_source
     }
@@ -62,13 +66,48 @@ where
             .map_err(skill_bundle_source_error_to_context_error)?;
         sort_skill_bundle_descriptors(&mut descriptors);
 
+        validate_descriptor_policy_metadata(&descriptors)?;
+
+        let visible_candidates = try_join_all(
+            descriptors
+                .iter()
+                .enumerate()
+                .filter(|(_, descriptor)| {
+                    descriptor.visibility() == Some(&SkillVisibility::Visible)
+                })
+                .map(|(index, descriptor)| async move {
+                    let skill_md = self
+                        .bundle_source
+                        .read_skill_bundle_file(
+                            run_context,
+                            descriptor.id(),
+                            descriptor.skill_md_path(),
+                        )
+                        .await
+                        .map_err(skill_bundle_source_error_to_context_error)?;
+                    let skill_md = String::from_utf8(skill_md)
+                        .map_err(|_| HostSkillContextBuildError::ParseFailed)?;
+
+                    Ok::<_, HostSkillContextBuildError>((
+                        index,
+                        HostSkillContextCandidate::new(
+                            skill_md,
+                            descriptor.trust().cloned(),
+                            descriptor.visibility().copied(),
+                        )
+                        .with_ordering_key(descriptor_context_ordering_key(descriptor)),
+                    ))
+                }),
+        )
+        .await?;
+        let mut visible_candidates = visible_candidates.into_iter().peekable();
         let mut candidates = Vec::with_capacity(descriptors.len());
-        for descriptor in descriptors {
+        for (index, descriptor) in descriptors.iter().enumerate() {
             let trust = descriptor.trust().cloned();
             let visibility = descriptor.visibility().copied();
-            let ordering_key = descriptor.id().to_string();
+            let ordering_key = descriptor_context_ordering_key(descriptor);
 
-            if trust.is_none() || visibility != Some(SkillVisibility::Visible) {
+            if visibility != Some(SkillVisibility::Visible) {
                 candidates.push(
                     HostSkillContextCandidate::unavailable(trust, visibility)
                         .with_ordering_key(ordering_key),
@@ -76,18 +115,13 @@ where
                 continue;
             }
 
-            let skill_md = self
-                .bundle_source
-                .read_skill_bundle_file(run_context, descriptor.id(), descriptor.skill_md_path())
-                .await
-                .map_err(skill_bundle_source_error_to_context_error)?;
-            let skill_md =
-                String::from_utf8(skill_md).map_err(|_| HostSkillContextBuildError::ParseFailed)?;
-
-            candidates.push(
-                HostSkillContextCandidate::new(skill_md, trust, visibility)
-                    .with_ordering_key(ordering_key),
-            );
+            let (read_index, candidate) = visible_candidates
+                .next()
+                .ok_or(HostSkillContextBuildError::Internal)?;
+            if read_index != index {
+                return Err(HostSkillContextBuildError::Internal);
+            }
+            candidates.push(candidate);
         }
 
         Ok(candidates)
@@ -112,6 +146,36 @@ fn skill_bundle_source_error_to_context_error(
     }
 }
 
+fn validate_descriptor_policy_metadata(
+    descriptors: &[SkillBundleDescriptor],
+) -> Result<(), HostSkillContextBuildError> {
+    for descriptor in descriptors {
+        if descriptor.trust().is_none() {
+            return Err(HostSkillContextBuildError::TrustDataMissing);
+        }
+        if descriptor.visibility().is_none() {
+            return Err(HostSkillContextBuildError::VisibilityDataMissing);
+        }
+    }
+    Ok(())
+}
+
+fn descriptor_context_ordering_key(descriptor: &SkillBundleDescriptor) -> String {
+    let (source_kind, name, path) = descriptor.ordering_key();
+    length_prefixed_key_components([source_kind.as_str(), name, path])
+}
+
+fn length_prefixed_key_components<const N: usize>(components: [&str; N]) -> String {
+    let mut key = String::new();
+    for component in components {
+        key.push_str(&component.len().to_string());
+        key.push(':');
+        key.push_str(component);
+        key.push('|');
+    }
+    key
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -128,8 +192,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        SkillBundleDescriptor, build_skill_run_snapshot,
-        skill_context::build_skill_instruction_snippets,
+        SkillBundleDescriptor, SkillFilePath, skill_context::build_skill_instruction_snippets,
     };
     use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
 
@@ -168,6 +231,8 @@ mod tests {
     struct StaticSkillBundleSource {
         descriptors: Vec<SkillBundleDescriptor>,
         files: Mutex<HashMap<String, Vec<u8>>>,
+        list_error: Option<SkillBundleSourceError>,
+        read_errors: Mutex<HashMap<String, SkillBundleSourceError>>,
         reads: Mutex<Vec<String>>,
     }
 
@@ -176,8 +241,15 @@ mod tests {
             Self {
                 descriptors,
                 files: Mutex::new(HashMap::new()),
+                list_error: None,
+                read_errors: Mutex::new(HashMap::new()),
                 reads: Mutex::new(Vec::new()),
             }
+        }
+
+        fn with_list_error(mut self, error: SkillBundleSourceError) -> Self {
+            self.list_error = Some(error);
+            self
         }
 
         fn with_skill_md(
@@ -186,10 +258,34 @@ mod tests {
             name: &str,
             body: Vec<u8>,
         ) -> Self {
+            self.with_file(source_kind, name, "SKILL.md", body)
+        }
+
+        fn with_file(
+            self,
+            source_kind: crate::SkillSourceKind,
+            name: &str,
+            path: &str,
+            body: Vec<u8>,
+        ) -> Self {
             self.files
                 .lock()
                 .unwrap()
-                .insert(format!("{source_kind}:{name}:SKILL.md"), body);
+                .insert(format!("{source_kind}:{name}:{path}"), body);
+            self
+        }
+
+        fn with_read_error(
+            self,
+            source_kind: crate::SkillSourceKind,
+            name: &str,
+            path: &str,
+            error: SkillBundleSourceError,
+        ) -> Self {
+            self.read_errors
+                .lock()
+                .unwrap()
+                .insert(format!("{source_kind}:{name}:{path}"), error);
             self
         }
 
@@ -204,6 +300,9 @@ mod tests {
             &self,
             _run_context: &LoopRunContext,
         ) -> Result<Vec<SkillBundleDescriptor>, SkillBundleSourceError> {
+            if let Some(error) = &self.list_error {
+                return Err(error.clone());
+            }
             Ok(self.descriptors.clone())
         }
 
@@ -215,6 +314,9 @@ mod tests {
         ) -> Result<Vec<u8>, SkillBundleSourceError> {
             let key = format!("{bundle_id}:{path}");
             self.reads.lock().unwrap().push(key.clone());
+            if let Some(error) = self.read_errors.lock().unwrap().get(&key) {
+                return Err(error.clone());
+            }
             self.files
                 .lock()
                 .unwrap()
@@ -325,13 +427,65 @@ mod tests {
         )]));
         let adapter = SkillBundleContextSource::new(Arc::clone(&source));
 
-        let candidates = adapter
+        let error = adapter
             .load_skill_context_candidates(&run_context().await)
             .await
-            .unwrap();
-        let error = build_skill_run_snapshot(candidates).unwrap_err();
+            .unwrap_err();
 
         assert_eq!(error, HostSkillContextBuildError::TrustDataMissing);
+        assert!(source.reads().is_empty());
+    }
+
+    #[tokio::test]
+    async fn adapter_fails_closed_when_visibility_metadata_is_missing_without_reads() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![descriptor(
+            crate::SkillSourceKind::User,
+            "alpha",
+            Some(SkillTrust::Trusted),
+            None,
+        )]));
+        let adapter = SkillBundleContextSource::new(Arc::clone(&source));
+
+        let error = adapter
+            .load_skill_context_candidates(&run_context().await)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, HostSkillContextBuildError::VisibilityDataMissing);
+        assert!(source.reads().is_empty());
+    }
+
+    #[tokio::test]
+    async fn adapter_validates_all_policy_metadata_before_reading_visible_bundles() {
+        let source = Arc::new(
+            StaticSkillBundleSource::new(vec![
+                descriptor(
+                    crate::SkillSourceKind::System,
+                    "alpha",
+                    Some(SkillTrust::Trusted),
+                    Some(SkillVisibility::Visible),
+                ),
+                descriptor(
+                    crate::SkillSourceKind::User,
+                    "bravo",
+                    Some(SkillTrust::Trusted),
+                    None,
+                ),
+            ])
+            .with_skill_md(
+                crate::SkillSourceKind::System,
+                "alpha",
+                skill_md("alpha", "alpha description", "alpha prompt"),
+            ),
+        );
+        let adapter = SkillBundleContextSource::new(Arc::clone(&source));
+
+        let error = adapter
+            .load_skill_context_candidates(&run_context().await)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, HostSkillContextBuildError::VisibilityDataMissing);
         assert!(source.reads().is_empty());
     }
 
@@ -375,7 +529,151 @@ mod tests {
                 .iter()
                 .map(|candidate| candidate.ordering_key.as_deref().unwrap())
                 .collect::<Vec<_>>(),
-            vec!["system:alpha", "user:bravo"]
+            vec![
+                length_prefixed_key_components(["system", "alpha", "SKILL.md"]),
+                length_prefixed_key_components(["user", "bravo", "SKILL.md"])
+            ]
         );
+    }
+
+    #[tokio::test]
+    async fn adapter_preserves_descriptor_path_in_ordering_key() {
+        let nested_descriptor = descriptor(
+            crate::SkillSourceKind::User,
+            "alpha",
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        )
+        .with_skill_md_path(SkillFilePath::new("nested/SKILL.md").unwrap());
+        let source = Arc::new(
+            StaticSkillBundleSource::new(vec![
+                nested_descriptor,
+                descriptor(
+                    crate::SkillSourceKind::User,
+                    "alpha",
+                    Some(SkillTrust::Trusted),
+                    Some(SkillVisibility::Visible),
+                ),
+            ])
+            .with_skill_md(
+                crate::SkillSourceKind::User,
+                "alpha",
+                skill_md("alpha", "root description", "root prompt"),
+            )
+            .with_file(
+                crate::SkillSourceKind::User,
+                "alpha",
+                "nested/SKILL.md",
+                skill_md("alpha", "nested description", "nested prompt"),
+            ),
+        );
+        let adapter = SkillBundleContextSource::new(source);
+
+        let candidates = adapter
+            .load_skill_context_candidates(&run_context().await)
+            .await
+            .unwrap();
+        let ordering_keys = candidates
+            .iter()
+            .map(|candidate| candidate.ordering_key.as_deref().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ordering_keys,
+            vec![
+                length_prefixed_key_components(["user", "alpha", "SKILL.md"]),
+                length_prefixed_key_components(["user", "alpha", "nested/SKILL.md"])
+            ]
+        );
+        assert_ne!(ordering_keys[0], ordering_keys[1]);
+    }
+
+    #[tokio::test]
+    async fn adapter_maps_list_source_errors() {
+        let source = Arc::new(
+            StaticSkillBundleSource::new(Vec::new())
+                .with_list_error(SkillBundleSourceError::SourceUnavailable),
+        );
+        let adapter = SkillBundleContextSource::new(source);
+
+        let error = adapter
+            .load_skill_context_candidates(&run_context().await)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, HostSkillContextBuildError::SourceUnavailable);
+    }
+
+    #[tokio::test]
+    async fn adapter_maps_visible_bundle_read_permission_errors() {
+        let source = Arc::new(
+            StaticSkillBundleSource::new(vec![descriptor(
+                crate::SkillSourceKind::User,
+                "alpha",
+                Some(SkillTrust::Trusted),
+                Some(SkillVisibility::Visible),
+            )])
+            .with_read_error(
+                crate::SkillSourceKind::User,
+                "alpha",
+                "SKILL.md",
+                SkillBundleSourceError::PermissionDenied,
+            ),
+        );
+        let adapter = SkillBundleContextSource::new(source);
+
+        let error = adapter
+            .load_skill_context_candidates(&run_context().await)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, HostSkillContextBuildError::SourceUnavailable);
+    }
+
+    #[tokio::test]
+    async fn adapter_maps_content_too_large_read_errors() {
+        let source = Arc::new(
+            StaticSkillBundleSource::new(vec![descriptor(
+                crate::SkillSourceKind::User,
+                "alpha",
+                Some(SkillTrust::Trusted),
+                Some(SkillVisibility::Visible),
+            )])
+            .with_read_error(
+                crate::SkillSourceKind::User,
+                "alpha",
+                "SKILL.md",
+                SkillBundleSourceError::ContentTooLarge,
+            ),
+        );
+        let adapter = SkillBundleContextSource::new(source);
+
+        let error = adapter
+            .load_skill_context_candidates(&run_context().await)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, HostSkillContextBuildError::ContextBudgetExceeded);
+    }
+
+    #[tokio::test]
+    async fn adapter_rejects_invalid_utf8_skill_md() {
+        let source = Arc::new(
+            StaticSkillBundleSource::new(vec![descriptor(
+                crate::SkillSourceKind::User,
+                "alpha",
+                Some(SkillTrust::Trusted),
+                Some(SkillVisibility::Visible),
+            )])
+            .with_skill_md(crate::SkillSourceKind::User, "alpha", vec![0xff, 0xfe]),
+        );
+        let adapter = SkillBundleContextSource::new(source);
+
+        let error = adapter
+            .load_skill_context_candidates(&run_context().await)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, HostSkillContextBuildError::ParseFailed);
     }
 }
