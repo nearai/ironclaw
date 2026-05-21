@@ -1,0 +1,309 @@
+//! Resolved cost-based budget defaults for IronClaw Reborn.
+//!
+//! Three layers merge to produce a [`BudgetDefaults`]:
+//!
+//! 1. Compiled defaults — production-tuned safe ceilings ($5/day/user,
+//!    $2/day/project, $0.05/tick heartbeat, etc.).
+//! 2. The `[budget]` section of the TOML config file
+//!    ([`crate::BudgetSection`]).
+//! 3. Environment variables (highest precedence) — see the `*_ENV`
+//!    constants. Setting any USD field to `0` makes that dimension
+//!    unlimited.
+//!
+//! This crate stays free of workspace dependencies on the host_api/types
+//! family, so timezone and threshold validation happen here as plain
+//! string + f64 checks; the composition root promotes them into the
+//! typed `BudgetPeriod::Calendar { tz, … }` / `BudgetThresholds { … }`
+//! when seeding the governor.
+
+use std::env;
+
+use crate::BudgetSection;
+
+/// Per-user daily ceiling in USD. `0` = unlimited.
+pub const USER_DAILY_USD_ENV: &str = "IRONCLAW_BUDGET_USER_DAILY_USD";
+/// Per-project daily ceiling in USD. `0` = unlimited.
+pub const PROJECT_DAILY_USD_ENV: &str = "IRONCLAW_BUDGET_PROJECT_DAILY_USD";
+/// Per-tick budget for background missions. `0` = unlimited.
+pub const MISSION_PER_TICK_USD_ENV: &str = "IRONCLAW_BUDGET_MISSION_PER_TICK_USD";
+/// Per-tick budget for heartbeat ticks. `0` = unlimited.
+pub const HEARTBEAT_PER_TICK_USD_ENV: &str = "IRONCLAW_BUDGET_HEARTBEAT_PER_TICK_USD";
+/// Per-fire budget for lightweight routines. `0` = unlimited.
+pub const ROUTINE_LIGHTWEIGHT_USD_ENV: &str = "IRONCLAW_BUDGET_ROUTINE_LIGHTWEIGHT_USD";
+/// Per-fire budget for standard routines. `0` = unlimited.
+pub const ROUTINE_STANDARD_USD_ENV: &str = "IRONCLAW_BUDGET_ROUTINE_STANDARD_USD";
+/// Default per-job budget for one-shot container jobs. `0` = unlimited.
+pub const BACKGROUND_JOB_DEFAULT_USD_ENV: &str = "IRONCLAW_BUDGET_BACKGROUND_JOB_DEFAULT_USD";
+/// IANA timezone for calendar-period rollover.
+pub const BUDGET_DEFAULT_TZ_ENV: &str = "IRONCLAW_BUDGET_DEFAULT_TZ";
+/// Warn threshold fraction in `[0.0, 1.0]`.
+pub const BUDGET_WARN_AT_ENV: &str = "IRONCLAW_BUDGET_WARN_AT";
+/// Pause-with-approval threshold fraction in `[0.0, 1.0]`.
+pub const BUDGET_PAUSE_AT_ENV: &str = "IRONCLAW_BUDGET_PAUSE_AT";
+/// Pre-call estimate inflation multiplier.
+pub const BUDGET_OVERESTIMATE_FACTOR_ENV: &str = "IRONCLAW_BUDGET_OVERESTIMATE_FACTOR";
+
+/// Fully-resolved budget defaults handed to composition.
+///
+/// USD amounts are stored as `f64` (parsed from TOML/env); the composition
+/// root converts to `Decimal` at the governor boundary. Any USD field
+/// equal to `0.0` is preserved as-is — the governor interprets that as
+/// "unlimited" via its `0 = unlimited` convention.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BudgetDefaults {
+    pub user_daily_usd: f64,
+    pub project_daily_usd: f64,
+    pub mission_per_tick_usd: f64,
+    pub heartbeat_per_tick_usd: f64,
+    pub routine_lightweight_usd: f64,
+    pub routine_standard_usd: f64,
+    pub background_job_default_usd: f64,
+    pub default_tz: String,
+    pub warn_at: f64,
+    pub pause_at: f64,
+    pub overestimate_factor: f64,
+}
+
+impl BudgetDefaults {
+    /// Production-baseline defaults.
+    pub fn compiled_defaults() -> Self {
+        Self {
+            user_daily_usd: 5.00,
+            project_daily_usd: 2.00,
+            mission_per_tick_usd: 0.50,
+            heartbeat_per_tick_usd: 0.05,
+            routine_lightweight_usd: 0.02,
+            routine_standard_usd: 0.10,
+            background_job_default_usd: 1.00,
+            default_tz: "UTC".to_string(),
+            warn_at: 0.75,
+            pause_at: 0.90,
+            overestimate_factor: 1.20,
+        }
+    }
+
+    /// Apply the `[budget]` TOML section over compiled defaults.
+    pub fn with_section(mut self, section: &BudgetSection) -> Self {
+        if let Some(v) = section.user_daily_usd {
+            self.user_daily_usd = v;
+        }
+        if let Some(v) = section.project_daily_usd {
+            self.project_daily_usd = v;
+        }
+        if let Some(v) = section.mission_per_tick_usd {
+            self.mission_per_tick_usd = v;
+        }
+        if let Some(v) = section.heartbeat_per_tick_usd {
+            self.heartbeat_per_tick_usd = v;
+        }
+        if let Some(v) = section.routine_lightweight_usd {
+            self.routine_lightweight_usd = v;
+        }
+        if let Some(v) = section.routine_standard_usd {
+            self.routine_standard_usd = v;
+        }
+        if let Some(v) = section.background_job_default_usd {
+            self.background_job_default_usd = v;
+        }
+        if let Some(tz) = section.default_tz.as_deref() {
+            self.default_tz = tz.to_string();
+        }
+        if let Some(v) = section.warn_at {
+            self.warn_at = v;
+        }
+        if let Some(v) = section.pause_at {
+            self.pause_at = v;
+        }
+        if let Some(v) = section.overestimate_factor {
+            self.overestimate_factor = v;
+        }
+        self
+    }
+
+    /// Apply env-var overrides over the current set.
+    pub fn with_env(mut self) -> Result<Self, BudgetDefaultsError> {
+        if let Some(v) = read_f64_env(USER_DAILY_USD_ENV)? {
+            self.user_daily_usd = v;
+        }
+        if let Some(v) = read_f64_env(PROJECT_DAILY_USD_ENV)? {
+            self.project_daily_usd = v;
+        }
+        if let Some(v) = read_f64_env(MISSION_PER_TICK_USD_ENV)? {
+            self.mission_per_tick_usd = v;
+        }
+        if let Some(v) = read_f64_env(HEARTBEAT_PER_TICK_USD_ENV)? {
+            self.heartbeat_per_tick_usd = v;
+        }
+        if let Some(v) = read_f64_env(ROUTINE_LIGHTWEIGHT_USD_ENV)? {
+            self.routine_lightweight_usd = v;
+        }
+        if let Some(v) = read_f64_env(ROUTINE_STANDARD_USD_ENV)? {
+            self.routine_standard_usd = v;
+        }
+        if let Some(v) = read_f64_env(BACKGROUND_JOB_DEFAULT_USD_ENV)? {
+            self.background_job_default_usd = v;
+        }
+        if let Ok(tz) = env::var(BUDGET_DEFAULT_TZ_ENV)
+            && !tz.is_empty()
+        {
+            self.default_tz = tz;
+        }
+        if let Some(v) = read_f64_env(BUDGET_WARN_AT_ENV)? {
+            self.warn_at = v;
+        }
+        if let Some(v) = read_f64_env(BUDGET_PAUSE_AT_ENV)? {
+            self.pause_at = v;
+        }
+        if let Some(v) = read_f64_env(BUDGET_OVERESTIMATE_FACTOR_ENV)? {
+            self.overestimate_factor = v;
+        }
+        Ok(self)
+    }
+
+    /// Validate the resolved set. USD ceilings must be `>= 0` (`0` =
+    /// unlimited); thresholds in `[0, 1]`; pause >= warn; overestimate
+    /// factor `>= 1.0`.
+    pub fn validate(&self) -> Result<(), BudgetDefaultsError> {
+        for (label, value) in [
+            ("user_daily_usd", self.user_daily_usd),
+            ("project_daily_usd", self.project_daily_usd),
+            ("mission_per_tick_usd", self.mission_per_tick_usd),
+            ("heartbeat_per_tick_usd", self.heartbeat_per_tick_usd),
+            ("routine_lightweight_usd", self.routine_lightweight_usd),
+            ("routine_standard_usd", self.routine_standard_usd),
+            (
+                "background_job_default_usd",
+                self.background_job_default_usd,
+            ),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                return Err(BudgetDefaultsError::Invalid {
+                    field: label,
+                    reason: "must be a finite, non-negative number (0 = unlimited)".to_string(),
+                });
+            }
+        }
+        for (label, value) in [("warn_at", self.warn_at), ("pause_at", self.pause_at)] {
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return Err(BudgetDefaultsError::Invalid {
+                    field: label,
+                    reason: "must be in [0.0, 1.0]".to_string(),
+                });
+            }
+        }
+        if self.pause_at < self.warn_at {
+            return Err(BudgetDefaultsError::Invalid {
+                field: "pause_at",
+                reason: "must be >= warn_at".to_string(),
+            });
+        }
+        if !self.overestimate_factor.is_finite() || self.overestimate_factor < 1.0 {
+            return Err(BudgetDefaultsError::Invalid {
+                field: "overestimate_factor",
+                reason: "must be a finite number >= 1.0".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Default for BudgetDefaults {
+    fn default() -> Self {
+        Self::compiled_defaults()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BudgetDefaultsError {
+    #[error("budget default `{field}` is invalid: {reason}")]
+    Invalid { field: &'static str, reason: String },
+    #[error("environment variable `{name}` is not a valid f64: {value}")]
+    InvalidEnvF64 { name: &'static str, value: String },
+}
+
+fn read_f64_env(name: &'static str) -> Result<Option<f64>, BudgetDefaultsError> {
+    match env::var(name) {
+        Ok(raw) if !raw.is_empty() => raw
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|_| BudgetDefaultsError::InvalidEnvF64 { name, value: raw }),
+        _ => Ok(None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compiled_defaults_validate() {
+        BudgetDefaults::compiled_defaults().validate().unwrap();
+    }
+
+    #[test]
+    fn zero_usd_means_unlimited_and_validates() {
+        let mut d = BudgetDefaults::compiled_defaults();
+        d.user_daily_usd = 0.0;
+        d.project_daily_usd = 0.0;
+        d.validate().unwrap();
+    }
+
+    #[test]
+    fn negative_usd_rejected() {
+        let mut d = BudgetDefaults::compiled_defaults();
+        d.user_daily_usd = -1.0;
+        let err = d.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            BudgetDefaultsError::Invalid {
+                field: "user_daily_usd",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn pause_below_warn_rejected() {
+        let mut d = BudgetDefaults::compiled_defaults();
+        d.warn_at = 0.9;
+        d.pause_at = 0.5;
+        let err = d.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            BudgetDefaultsError::Invalid {
+                field: "pause_at",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn overestimate_factor_below_one_rejected() {
+        let mut d = BudgetDefaults::compiled_defaults();
+        d.overestimate_factor = 0.5;
+        let err = d.validate().unwrap_err();
+        assert!(matches!(
+            err,
+            BudgetDefaultsError::Invalid {
+                field: "overestimate_factor",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn section_layer_overrides_compiled() {
+        let section = BudgetSection {
+            user_daily_usd: Some(10.0),
+            warn_at: Some(0.6),
+            pause_at: Some(0.8),
+            ..Default::default()
+        };
+        let d = BudgetDefaults::compiled_defaults().with_section(&section);
+        assert_eq!(d.user_daily_usd, 10.0);
+        assert_eq!(d.warn_at, 0.6);
+        assert_eq!(d.pause_at, 0.8);
+        // Untouched defaults remain.
+        assert_eq!(d.heartbeat_per_tick_usd, 0.05);
+    }
+}

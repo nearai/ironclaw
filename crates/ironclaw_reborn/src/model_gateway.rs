@@ -927,7 +927,11 @@ fn map_capability_host_error(error: AgentLoopHostError) -> HostManagedModelError
         AgentLoopHostErrorKind::Unauthorized | AgentLoopHostErrorKind::PolicyDenied => {
             HostManagedModelErrorKind::PolicyDenied
         }
-        AgentLoopHostErrorKind::BudgetExceeded => HostManagedModelErrorKind::BudgetExceeded,
+        AgentLoopHostErrorKind::BudgetExceeded
+        | AgentLoopHostErrorKind::BudgetApprovalRequired
+        | AgentLoopHostErrorKind::BudgetAccountingFailed => {
+            HostManagedModelErrorKind::BudgetExceeded
+        }
         AgentLoopHostErrorKind::Cancelled => HostManagedModelErrorKind::Cancelled,
         AgentLoopHostErrorKind::Invalid
         | AgentLoopHostErrorKind::InvalidInvocation

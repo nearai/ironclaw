@@ -791,7 +791,7 @@ fn persistent_governor_writes_versioned_snapshot_schema() {
 
     let snapshot: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(snapshot["schema_version"], serde_json::json!(1));
+    assert_eq!(snapshot["schema_version"], serde_json::json!(2));
 }
 
 #[test]
@@ -824,7 +824,7 @@ fn persistent_governor_upgrades_legacy_unversioned_snapshot() {
 
     let snapshot: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(snapshot["schema_version"], serde_json::json!(1));
+    assert_eq!(snapshot["schema_version"], serde_json::json!(2));
 }
 
 #[test]
@@ -1664,4 +1664,436 @@ fn assert_denied_dimension(
         ResourceError::LimitExceeded(denial)
             if denial.account == account && denial.dimension == expected
     ));
+}
+
+// =====================================================================
+// Phase 0 — period, thresholds, 0=unlimited (cost-based budgeting)
+// =====================================================================
+
+#[test]
+fn zero_usd_limit_treated_as_unlimited() {
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant-zero", "user-zero", Some("project-zero"));
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account,
+            ResourceLimits {
+                max_usd: Some(dec!(0)),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    // A reservation that would clearly exceed any non-zero cap still succeeds
+    // because 0 is the "explicit no cap" sentinel.
+    governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(1_000_000)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn zero_integer_limit_treated_as_unlimited() {
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant-zero2", "user-zero2", None);
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account,
+            ResourceLimits {
+                max_concurrency_slots: Some(0),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                concurrency_slots: Some(u32::MAX),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn reserve_with_outcome_returns_warning_above_warn_threshold_below_pause() {
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant-warn", "user-warn", None);
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_usd: Some(dec!(10.00)),
+                thresholds: BudgetThresholds {
+                    warn_at: 0.75,
+                    pause_at: 0.90,
+                },
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+
+    let outcome = governor
+        .reserve_with_outcome(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(8.00)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(outcome.warnings.len(), 1);
+    assert_eq!(outcome.warnings[0].account, account);
+    assert_eq!(outcome.warnings[0].dimension, ResourceDimension::Usd);
+    assert!(outcome.warnings[0].utilization >= 0.75);
+    assert!(outcome.warnings[0].utilization < 0.90);
+}
+
+#[test]
+fn reserve_returns_requires_approval_above_pause_below_hard_limit() {
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant-pause", "user-pause", None);
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_usd: Some(dec!(10.00)),
+                thresholds: BudgetThresholds {
+                    warn_at: 0.75,
+                    pause_at: 0.90,
+                },
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+
+    let err = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(9.50)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap_err();
+    match err {
+        ResourceError::RequiresApproval(needed) => {
+            assert_eq!(needed.account, account);
+            assert_eq!(needed.dimension, ResourceDimension::Usd);
+            assert!(needed.utilization >= 0.90);
+            assert!(needed.utilization < 1.0);
+        }
+        other => panic!("expected RequiresApproval, got {other:?}"),
+    }
+}
+
+#[test]
+fn hard_limit_overrun_returns_limit_exceeded_not_requires_approval() {
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant-hard", "user-hard", None);
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_usd: Some(dec!(10.00)),
+                thresholds: BudgetThresholds {
+                    warn_at: 0.75,
+                    pause_at: 0.90,
+                },
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+
+    let err = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(11.00)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(err, ResourceError::LimitExceeded(_)));
+}
+
+#[test]
+fn account_snapshot_returns_none_for_untouched_account() {
+    let governor = InMemoryResourceGovernor::new();
+    let account = ResourceAccount::tenant(TenantId::new("untouched").unwrap());
+    assert!(governor.account_snapshot(&account).unwrap().is_none());
+}
+
+#[test]
+fn account_snapshot_reports_current_period_and_spend() {
+    let clock = FakeClock::new(chrono::Utc::now());
+    let governor = InMemoryResourceGovernor::with_clock(Arc::new(clock.clone()));
+    let scope = sample_scope("tenant-snap", "user-snap", None);
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_usd: Some(dec!(5.00)),
+                period: BudgetPeriod::Rolling24h,
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+
+    let reservation = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(0.50)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    governor
+        .reconcile(
+            reservation.id,
+            ResourceUsage {
+                usd: dec!(0.50),
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap();
+
+    let snapshot = governor.account_snapshot(&account).unwrap().unwrap();
+    assert_eq!(snapshot.account, account);
+    assert_eq!(snapshot.ledger.spent.usd, dec!(0.50));
+    assert!(snapshot.ledger.period_end > snapshot.ledger.period_start);
+}
+
+#[test]
+fn calendar_day_period_resets_at_local_midnight() {
+    // 2026-05-21 23:00 UTC → 16:00 PDT. Spend $4 (~80% of $5 daily) and
+    // verify that advancing to 09:00 UTC (~02:00 PDT next day) resets.
+    let tz = chrono_tz::America::Los_Angeles;
+    let day1_evening = chrono::DateTime::parse_from_rfc3339("2026-05-21T23:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let day2_morning_utc = chrono::DateTime::parse_from_rfc3339("2026-05-22T09:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+
+    let clock = FakeClock::new(day1_evening);
+    let governor = InMemoryResourceGovernor::with_clock(Arc::new(clock.clone()));
+    let scope = sample_scope("tenant-cal", "user-cal", None);
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    governor
+        .set_limit(
+            account.clone(),
+            ResourceLimits {
+                max_usd: Some(dec!(5.00)),
+                period: BudgetPeriod::Calendar {
+                    tz,
+                    unit: PeriodUnit::Day,
+                },
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+
+    let r1 = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(dec!(4.00)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    governor
+        .reconcile(
+            r1.id,
+            ResourceUsage {
+                usd: dec!(4.00),
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap();
+
+    // 80% spent in the day-1 window. Same window: another $1.50 should hard-deny.
+    let denied = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(dec!(1.50)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(denied, ResourceError::LimitExceeded(_)));
+
+    // Advance the clock past LA midnight into day 2. New period, full budget.
+    clock.set(day2_morning_utc);
+    governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(4.00)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn rolling_24h_period_resets_after_anchor_passes() {
+    let now = chrono::Utc::now();
+    let clock = FakeClock::new(now);
+    let governor = InMemoryResourceGovernor::with_clock(Arc::new(clock.clone()));
+    let scope = sample_scope("tenant-roll", "user-roll", None);
+    let account = ResourceAccount::tenant(scope.tenant_id.clone());
+
+    governor
+        .set_limit(
+            account,
+            ResourceLimits {
+                max_usd: Some(dec!(5.00)),
+                period: BudgetPeriod::Rolling24h,
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+
+    let r = governor
+        .reserve(
+            scope.clone(),
+            ResourceEstimate {
+                usd: Some(dec!(4.50)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+    governor
+        .reconcile(
+            r.id,
+            ResourceUsage {
+                usd: dec!(4.50),
+                ..ResourceUsage::default()
+            },
+        )
+        .unwrap();
+    // After 24h+1m the window has rolled over.
+    clock.advance(chrono::Duration::hours(24) + chrono::Duration::minutes(1));
+    governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(4.50)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn cascade_reports_first_failing_account_in_user_project_order() {
+    // User has $1 limit, project has $0.50 (more restrictive); request $0.75
+    // must deny at project, not user, because cascade walks broadest →
+    // narrowest and project comes after user.
+    let governor = InMemoryResourceGovernor::new();
+    let scope = sample_scope("tenant-cas", "user-cas", Some("project-cas"));
+    let user_account = ResourceAccount::user(scope.tenant_id.clone(), scope.user_id.clone());
+    let project_account = ResourceAccount::project(
+        scope.tenant_id.clone(),
+        scope.user_id.clone(),
+        scope.project_id.clone().unwrap(),
+    );
+    governor
+        .set_limit(
+            user_account,
+            ResourceLimits {
+                max_usd: Some(dec!(1.00)),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+    governor
+        .set_limit(
+            project_account.clone(),
+            ResourceLimits {
+                max_usd: Some(dec!(0.50)),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+
+    let err = governor
+        .reserve(
+            scope,
+            ResourceEstimate {
+                usd: Some(dec!(0.75)),
+                ..ResourceEstimate::default()
+            },
+        )
+        .unwrap_err();
+    match err {
+        ResourceError::LimitExceeded(denial) => {
+            assert_eq!(denial.account, project_account);
+        }
+        other => panic!("expected project-level denial, got {other:?}"),
+    }
+}
+
+#[test]
+fn schema_v1_snapshot_migrates_in_place_on_load() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("v1.json");
+    fs::write(
+        &path,
+        r#"{
+            "schema_version": 1,
+            "state": {
+                "limits": [],
+                "reserved_by_account": [],
+                "usage_by_account": [],
+                "reservations": []
+            }
+        }"#,
+    )
+    .unwrap();
+
+    let governor = PersistentResourceGovernor::new(JsonFileResourceGovernorStore::new(&path));
+    governor
+        .try_set_limit(
+            ResourceAccount::tenant(TenantId::new("tenant1").unwrap()),
+            ResourceLimits {
+                max_usd: Some(dec!(1.00)),
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
+
+    // After the first successful mutation, the file is rewritten as v2.
+    let snapshot: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(snapshot["schema_version"], serde_json::json!(2));
+}
+
+#[test]
+fn thresholds_validation_rejects_pause_below_warn() {
+    assert!(
+        BudgetThresholds {
+            warn_at: 0.9,
+            pause_at: 0.5
+        }
+        .validate()
+        .is_err()
+    );
 }

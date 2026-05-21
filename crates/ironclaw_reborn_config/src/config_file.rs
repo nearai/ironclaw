@@ -69,6 +69,11 @@ pub struct RebornConfigFile {
     /// becomes live when the planned driver lands. Operators are free
     /// to populate `mission` ahead of time.
     pub llm: Option<std::collections::BTreeMap<String, LlmSlotSelection>>,
+    /// Cost-based budgets. Composition seeds defaults on first reservation
+    /// for each user/project; per-account overrides happen through the
+    /// `budget_set` tool or CLI at runtime. Setting any limit to `0` means
+    /// "unlimited" for that dimension.
+    pub budget: Option<BudgetSection>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -127,6 +132,41 @@ pub struct HarnessSection {
 pub struct RunnerSection {
     pub heartbeat_interval_secs: Option<u64>,
     pub poll_interval_ms: Option<u64>,
+}
+
+/// `[budget]` section. All limits in USD. **0 = unlimited.**
+///
+/// Composition uses these as defaults when first seeding a user/project
+/// account. Runtime tools can install per-account overrides at any time.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetSection {
+    /// Per-user daily ceiling. Default in composition is `5.00`.
+    pub user_daily_usd: Option<f64>,
+    /// Per-project daily ceiling. Default in composition is `2.00`.
+    pub project_daily_usd: Option<f64>,
+    /// Per-tick budget for background missions. Default `0.50`.
+    pub mission_per_tick_usd: Option<f64>,
+    /// Per-tick budget for heartbeat ticks. Default `0.05`.
+    pub heartbeat_per_tick_usd: Option<f64>,
+    /// Per-fire budget for lightweight routines. Default `0.02`.
+    pub routine_lightweight_usd: Option<f64>,
+    /// Per-fire budget for standard routines. Default `0.10`.
+    pub routine_standard_usd: Option<f64>,
+    /// Default per-job budget for one-shot container jobs. Default `1.00`.
+    pub background_job_default_usd: Option<f64>,
+    /// IANA timezone for calendar-period rollover (e.g. `"UTC"`,
+    /// `"America/Los_Angeles"`). Default `"UTC"`.
+    pub default_tz: Option<String>,
+    /// Warn threshold as a fraction in `[0.0, 1.0]`. Default `0.75`.
+    pub warn_at: Option<f64>,
+    /// Pause-with-approval threshold as a fraction in `[0.0, 1.0]`.
+    /// Must be `>= warn_at`. Default `0.90`.
+    pub pause_at: Option<f64>,
+    /// Multiplier applied to upfront cost estimates before reserving.
+    /// Default `1.20` (20% safety margin); reconcile releases the
+    /// overshoot.
+    pub overestimate_factor: Option<f64>,
 }
 
 /// One `[llm.<slot>]` entry. The slot name (typically `"default"` or
@@ -303,6 +343,67 @@ impl RebornConfigFile {
                 if let Some(model) = &selection.model {
                     check(llm_slot_field_label(slot, "model"), model)?;
                 }
+            }
+        }
+        if let Some(budget) = &self.budget {
+            if let Some(tz) = &budget.default_tz {
+                check(Cow::Borrowed("budget.default_tz"), tz)?;
+            }
+            // 0 is a legitimate sentinel for "unlimited". Negative values
+            // are rejected outright so a bad number doesn't masquerade as a
+            // disabled cap.
+            for (label, value) in [
+                ("budget.user_daily_usd", budget.user_daily_usd),
+                ("budget.project_daily_usd", budget.project_daily_usd),
+                ("budget.mission_per_tick_usd", budget.mission_per_tick_usd),
+                (
+                    "budget.heartbeat_per_tick_usd",
+                    budget.heartbeat_per_tick_usd,
+                ),
+                (
+                    "budget.routine_lightweight_usd",
+                    budget.routine_lightweight_usd,
+                ),
+                ("budget.routine_standard_usd", budget.routine_standard_usd),
+                (
+                    "budget.background_job_default_usd",
+                    budget.background_job_default_usd,
+                ),
+                ("budget.overestimate_factor", budget.overestimate_factor),
+            ] {
+                if let Some(v) = value
+                    && v.is_finite()
+                    && v < 0.0
+                {
+                    return Err(RebornConfigFileError::InvalidApiVersion {
+                        path: path_str(),
+                        found: format!("{label} = {v}"),
+                        reason: "must be >= 0 (use 0 for unlimited)".to_string(),
+                    });
+                }
+            }
+            for (label, value) in [
+                ("budget.warn_at", budget.warn_at),
+                ("budget.pause_at", budget.pause_at),
+            ] {
+                if let Some(v) = value
+                    && !(0.0..=1.0).contains(&v)
+                {
+                    return Err(RebornConfigFileError::InvalidApiVersion {
+                        path: path_str(),
+                        found: format!("{label} = {v}"),
+                        reason: "thresholds must be in [0.0, 1.0]".to_string(),
+                    });
+                }
+            }
+            if let (Some(w), Some(p)) = (budget.warn_at, budget.pause_at)
+                && p < w
+            {
+                return Err(RebornConfigFileError::InvalidApiVersion {
+                    path: path_str(),
+                    found: format!("warn_at={w}, pause_at={p}"),
+                    reason: "pause_at must be >= warn_at".to_string(),
+                });
             }
         }
         Ok(())
