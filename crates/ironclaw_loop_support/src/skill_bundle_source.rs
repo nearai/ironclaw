@@ -13,11 +13,23 @@ const SKILL_MD_FILE: &str = "SKILL.md";
 /// backend internals.
 #[async_trait]
 pub trait SkillBundleSource: Send + Sync {
+    /// Lists portable skill bundles visible to the supplied run context.
+    ///
+    /// Implementations should return descriptors only for bundles that the host
+    /// authorizes for `run_context`. An empty vector means no bundles are
+    /// available; source-level failures should be reported with
+    /// [`SkillBundleSourceError`].
     async fn list_skill_bundles(
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Vec<SkillBundleDescriptor>, SkillBundleSourceError>;
 
+    /// Reads a bundle-relative file from a previously listed skill bundle.
+    ///
+    /// `path` is a validated [`SkillFilePath`], never a raw host path. Sources
+    /// should enforce bundle visibility, reject access outside the virtual
+    /// bundle root, and return [`SkillBundleSourceError::ContentTooLarge`] when
+    /// host policy refuses the requested content size.
     async fn read_skill_bundle_file(
         &self,
         run_context: &LoopRunContext,
@@ -26,6 +38,7 @@ pub trait SkillBundleSource: Send + Sync {
     ) -> Result<Vec<u8>, SkillBundleSourceError>;
 }
 
+/// Host-approved scope from which a skill bundle was discovered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum SkillSourceKind {
     System,
@@ -34,6 +47,7 @@ pub enum SkillSourceKind {
 }
 
 impl SkillSourceKind {
+    /// Returns the stable string identifier used for descriptor ordering and display.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::System => "system",
@@ -56,6 +70,7 @@ pub struct SkillBundleId {
 }
 
 impl SkillBundleId {
+    /// Builds a virtual bundle identifier from a host source and validated skill name.
     pub fn new(
         source_kind: SkillSourceKind,
         name: impl AsRef<str>,
@@ -70,10 +85,12 @@ impl SkillBundleId {
         })
     }
 
+    /// Returns the host source scope for this bundle.
     pub fn source_kind(&self) -> SkillSourceKind {
         self.source_kind
     }
 
+    /// Returns the validated skill name component of this bundle id.
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -95,6 +112,7 @@ impl std::fmt::Display for SkillBundleId {
 pub struct SkillFilePath(String);
 
 impl SkillFilePath {
+    /// Builds a validated bundle-relative file path.
     pub fn new(path: impl AsRef<str>) -> Result<Self, SkillBundleSourceError> {
         let path = path.as_ref().trim();
         if path.is_empty()
@@ -111,10 +129,12 @@ impl SkillFilePath {
         Ok(Self(path.to_string()))
     }
 
+    /// Returns the canonical descriptor path for a bundle's `SKILL.md` file.
     pub fn skill_md() -> Self {
         Self(SKILL_MD_FILE.to_string())
     }
 
+    /// Returns the validated bundle-relative path string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -126,6 +146,7 @@ impl std::fmt::Display for SkillFilePath {
     }
 }
 
+/// Provenance metadata for a skill bundle descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillBundleProvenance {
     pub source_kind: SkillSourceKind,
@@ -133,6 +154,7 @@ pub struct SkillBundleProvenance {
 }
 
 impl SkillBundleProvenance {
+    /// Creates provenance for a bundle from the supplied source scope.
     pub fn new(source_kind: SkillSourceKind) -> Self {
         Self {
             source_kind,
@@ -140,22 +162,26 @@ impl SkillBundleProvenance {
         }
     }
 
+    /// Attaches an optional content hash supplied by the host source.
+    #[must_use]
     pub fn with_content_hash(mut self, content_hash: impl Into<String>) -> Self {
         self.content_hash = Some(content_hash.into());
         self
     }
 }
 
+/// Public metadata describing one portable skill bundle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillBundleDescriptor {
-    pub id: SkillBundleId,
-    pub skill_md_path: SkillFilePath,
-    pub trust: Option<SkillTrust>,
-    pub visibility: Option<SkillVisibility>,
-    pub provenance: SkillBundleProvenance,
+    id: SkillBundleId,
+    skill_md_path: SkillFilePath,
+    trust: Option<SkillTrust>,
+    visibility: Option<SkillVisibility>,
+    provenance: SkillBundleProvenance,
 }
 
 impl SkillBundleDescriptor {
+    /// Creates a descriptor with the default `SKILL.md` descriptor path.
     pub fn new(
         id: SkillBundleId,
         trust: Option<SkillTrust>,
@@ -170,16 +196,46 @@ impl SkillBundleDescriptor {
         }
     }
 
+    /// Overrides the descriptor file path for bundles whose manifest is nested.
+    #[must_use]
     pub fn with_skill_md_path(mut self, path: SkillFilePath) -> Self {
         self.skill_md_path = path;
         self
     }
 
+    /// Overrides provenance metadata supplied by the host source.
+    #[must_use]
     pub fn with_provenance(mut self, provenance: SkillBundleProvenance) -> Self {
         self.provenance = provenance;
         self
     }
 
+    /// Returns the bundle id.
+    pub fn id(&self) -> &SkillBundleId {
+        &self.id
+    }
+
+    /// Returns the validated bundle-relative `SKILL.md` path.
+    pub fn skill_md_path(&self) -> &SkillFilePath {
+        &self.skill_md_path
+    }
+
+    /// Returns the trust metadata declared by the host source, if any.
+    pub fn trust(&self) -> Option<&SkillTrust> {
+        self.trust.as_ref()
+    }
+
+    /// Returns visibility metadata declared by the host source, if any.
+    pub fn visibility(&self) -> Option<&SkillVisibility> {
+        self.visibility.as_ref()
+    }
+
+    /// Returns provenance metadata for this descriptor.
+    pub fn provenance(&self) -> &SkillBundleProvenance {
+        &self.provenance
+    }
+
+    /// Returns the deterministic ordering key used by [`Ord`].
     pub fn ordering_key(&self) -> (&'static str, &str, &str) {
         (
             self.id.source_kind().as_str(),
@@ -189,8 +245,21 @@ impl SkillBundleDescriptor {
     }
 }
 
+impl Ord for SkillBundleDescriptor {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.ordering_key().cmp(&other.ordering_key())
+    }
+}
+
+impl PartialOrd for SkillBundleDescriptor {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Sorts descriptors by source scope, bundle name, then bundle-relative manifest path.
 pub fn sort_skill_bundle_descriptors(descriptors: &mut [SkillBundleDescriptor]) {
-    descriptors.sort_by(|left, right| left.ordering_key().cmp(&right.ordering_key()));
+    descriptors.sort();
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -278,6 +347,62 @@ mod tests {
     }
 
     #[test]
+    fn skill_bundle_descriptor_builders_and_accessors_preserve_metadata() {
+        let provenance = SkillBundleProvenance::new(SkillSourceKind::TenantShared)
+            .with_content_hash("sha256:abc123");
+        let descriptor = SkillBundleDescriptor::new(
+            id(SkillSourceKind::User, "code-review"),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        )
+        .with_skill_md_path(SkillFilePath::new("nested/SKILL.md").unwrap())
+        .with_provenance(provenance.clone());
+
+        assert_eq!(descriptor.id().source_kind(), SkillSourceKind::User);
+        assert_eq!(descriptor.id().name(), "code-review");
+        assert_eq!(descriptor.skill_md_path().as_str(), "nested/SKILL.md");
+        assert_eq!(descriptor.trust(), Some(&SkillTrust::Trusted));
+        assert_eq!(descriptor.visibility(), Some(&SkillVisibility::Visible));
+        assert_eq!(descriptor.provenance(), &provenance);
+    }
+
+    #[test]
+    fn skill_bundle_source_errors_render_stable_messages() {
+        assert_eq!(
+            SkillBundleSourceError::SourceUnavailable.to_string(),
+            "skill bundle source unavailable"
+        );
+        assert_eq!(
+            SkillBundleSourceError::InvalidBundleId.to_string(),
+            "skill bundle id is invalid"
+        );
+        assert_eq!(
+            SkillBundleSourceError::InvalidFilePath.to_string(),
+            "skill bundle file path is invalid"
+        );
+        assert_eq!(
+            SkillBundleSourceError::BundleNotFound.to_string(),
+            "skill bundle not found"
+        );
+        assert_eq!(
+            SkillBundleSourceError::FileNotFound.to_string(),
+            "skill bundle file not found"
+        );
+        assert_eq!(
+            SkillBundleSourceError::PermissionDenied.to_string(),
+            "skill bundle access denied"
+        );
+        assert_eq!(
+            SkillBundleSourceError::ContentTooLarge.to_string(),
+            "skill bundle content too large"
+        );
+        assert_eq!(
+            SkillBundleSourceError::Internal.to_string(),
+            "skill bundle source internal error"
+        );
+    }
+
+    #[test]
     fn skill_bundle_descriptors_sort_deterministically_without_host_paths() {
         let mut descriptors = vec![
             descriptor(SkillSourceKind::User, "beta"),
@@ -295,9 +420,9 @@ mod tests {
             .map(|descriptor| {
                 format!(
                     "{}:{}:{}",
-                    descriptor.id.source_kind(),
-                    descriptor.id.name(),
-                    descriptor.skill_md_path
+                    descriptor.id().source_kind(),
+                    descriptor.id().name(),
+                    descriptor.skill_md_path()
                 )
             })
             .collect();
