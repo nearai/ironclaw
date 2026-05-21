@@ -24,9 +24,18 @@ on:
 # (pull-requests:write + issues:write); the effective permissions in the
 # called job are the intersection of these two, so a hostile change in
 # the benchmarks repo can't acquire writes we didn't grant here.
+#
+# `pull-requests: write` (not just `issues: write`) is required because
+# GitHub's reactions endpoint for PR-issue-comments rejects an
+# `issues: write`-only GITHUB_TOKEN with `403 Resource not accessible by
+# integration`, despite the docs at
+# https://docs.github.com/rest/reactions/reactions#create-reaction-for-an-issue-comment
+# listing only `issues: write`. Observed in
+# https://github.com/nearai/ironclaw/actions/runs/26197185339 (the
+# canary on PR #3834 that found this bug).
 permissions:
-  pull-requests: read   # gh pr view --json headRefOid (PR metadata only)
-  issues: write         # gh pr comment + gh api .../reactions (PR comments are issue comments)
+  pull-requests: write  # gh pr view + gh pr comment + reactions on PR comments
+  issues: write         # belt-and-suspenders; also covers parse-error comment
   contents: read
 
 jobs:
@@ -124,6 +133,29 @@ jobs:
           COMMENT_ID: ${{ github.event.comment.id }}
         run: |
           gh api "/repos/${REPO}/issues/comments/${COMMENT_ID}/reactions" -F content=rocket
+
+      - name: Post "started" comment with link to dispatcher run
+        # Closes the gap between the 🚀 reaction and the eventual result
+        # comment (~5–10 min later from the called workflow). Gives the
+        # maintainer a clickable link straight to the Actions run.
+        if: steps.auth.outputs.authorized == 'yes' && steps.parse.outputs.suite != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.issue.number }}
+          SUITE: ${{ steps.parse.outputs.suite }}
+          MODEL: ${{ steps.parse.outputs.model }}
+          HEAD_SHA: ${{ steps.parse.outputs.head_sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          short_sha="${HEAD_SHA:0:10}"
+          model_part=""
+          if [ -n "$MODEL" ]; then
+            model_part=" (model \`$MODEL\`)"
+          fi
+          gh pr comment "$PR" --repo "$REPO" --body \
+            "🧪 Started \`$SUITE\`${model_part} against ironclaw \`$short_sha\` — [watch run]($RUN_URL)."
 
   bench:
     needs: parse
