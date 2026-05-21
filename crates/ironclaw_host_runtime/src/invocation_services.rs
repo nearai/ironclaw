@@ -143,7 +143,12 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
                 backend: plan.process_backend,
             });
         }
-        if plan.requires_network && !matches!(plan.network_mode, NetworkMode::DirectLogged) {
+        if plan.requires_network
+            && !matches!(
+                plan.network_mode,
+                NetworkMode::Brokered | NetworkMode::DirectLogged | NetworkMode::Direct
+            )
+        {
             return Err(InvocationServicesError::UnsupportedNetworkMode {
                 mode: plan.network_mode,
             });
@@ -158,9 +163,15 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
         }
         Ok(InvocationServices {
             filesystem: Arc::clone(&self.filesystem),
-            runtime_http_egress: self.runtime_http_egress.clone(),
+            runtime_http_egress: plan
+                .requires_network
+                .then(|| self.runtime_http_egress.clone())
+                .flatten(),
             process: Arc::clone(&self.process),
-            secret_store: self.secret_store.clone(),
+            secret_store: plan
+                .requires_secret
+                .then(|| self.secret_store.clone())
+                .flatten(),
         })
     }
 }
@@ -382,7 +393,7 @@ mod tests {
     }
 
     #[test]
-    fn local_resolver_rejects_brokered_required_network_even_with_egress_service() {
+    fn local_resolver_accepts_brokered_required_network_with_egress_service() {
         let resolver = LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
             Some(Arc::new(NoopRuntimeHttpEgress)),
@@ -397,21 +408,96 @@ mod tests {
             false,
         );
 
-        let error = resolver
+        let services = resolver
             .resolve(InvocationServicesResolutionRequest {
                 plan: &plan,
                 scope: &ResourceScope::system(),
                 mounts: None,
             })
-            .unwrap_err();
+            .unwrap();
 
-        assert_eq!(error.kind(), RuntimeDispatchErrorKind::NetworkDenied);
-        assert!(matches!(
-            error,
-            InvocationServicesError::UnsupportedNetworkMode {
-                mode: NetworkMode::Brokered
-            }
-        ));
+        assert!(services.runtime_http_egress.is_some());
+    }
+
+    #[test]
+    fn local_resolver_accepts_direct_required_network_with_egress_service() {
+        let resolver = LocalInvocationServicesResolver::new(
+            Arc::new(LocalFilesystem::new()),
+            Some(Arc::new(NoopRuntimeHttpEgress)),
+            Arc::new(NoopProcessPort),
+            None,
+        );
+        let plan = plan(
+            ProcessBackendKind::None,
+            false,
+            true,
+            NetworkMode::Direct,
+            false,
+        );
+
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap();
+
+        assert!(services.runtime_http_egress.is_some());
+    }
+
+    #[test]
+    fn local_resolver_hides_runtime_http_egress_when_network_is_not_required() {
+        let resolver = LocalInvocationServicesResolver::new(
+            Arc::new(LocalFilesystem::new()),
+            Some(Arc::new(NoopRuntimeHttpEgress)),
+            Arc::new(NoopProcessPort),
+            None,
+        );
+        let plan = plan(
+            ProcessBackendKind::None,
+            false,
+            false,
+            NetworkMode::DirectLogged,
+            false,
+        );
+
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap();
+
+        assert!(services.runtime_http_egress.is_none());
+    }
+
+    #[test]
+    fn local_resolver_hides_secret_store_when_secret_is_not_required() {
+        let resolver = LocalInvocationServicesResolver::new(
+            Arc::new(LocalFilesystem::new()),
+            None,
+            Arc::new(NoopProcessPort),
+            Some(Arc::new(InMemorySecretStore::new())),
+        );
+        let plan = plan(
+            ProcessBackendKind::None,
+            false,
+            false,
+            NetworkMode::Deny,
+            false,
+        );
+
+        let services = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap();
+
+        assert!(services.secret_store.is_none());
     }
 
     #[test]

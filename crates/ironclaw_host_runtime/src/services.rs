@@ -3018,6 +3018,66 @@ mod tests {
         assert_eq!(inner.call_count(), 0);
     }
 
+    #[tokio::test]
+    async fn first_party_adapter_releases_reservation_when_invocation_service_resolution_denies() {
+        let descriptor = test_descriptor(RuntimeKind::FirstParty, vec![EffectKind::Network]);
+        let registry = Arc::new(
+            FirstPartyCapabilityRegistry::new()
+                .with_handler(descriptor.id.clone(), Arc::new(PanicFirstPartyHandler)),
+        );
+        let adapter = FirstPartyRuntimeAdapter::from_registry(
+            registry,
+            Arc::new(LocalInvocationServicesResolver::new(
+                Arc::new(LocalFilesystem::new()),
+                None,
+                Arc::new(LocalHostProcessPort::new()),
+                None,
+            )),
+        );
+        let filesystem = LocalFilesystem::new();
+        let governor = InMemoryResourceGovernor::new();
+        let scope = sample_scope();
+        let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
+        let estimate = ResourceEstimate {
+            network_egress_bytes: Some(1),
+            ..ResourceEstimate::default()
+        };
+        let package = test_package(WASM_MANIFEST, "test-wasm");
+        let policy = policy_with(
+            FilesystemBackendKind::HostWorkspace,
+            ProcessBackendKind::LocalHost,
+            NetworkMode::DirectLogged,
+            SecretMode::ScrubbedEnv,
+        );
+
+        let result = adapter
+            .dispatch_json(RuntimeAdapterRequest {
+                package: &package,
+                descriptor: &descriptor,
+                filesystem: &filesystem,
+                governor: &governor,
+                runtime_policy: &policy,
+                capability_id: &descriptor.id,
+                scope,
+                estimate,
+                mounts: None,
+                resource_reservation: None,
+                input: json!({}),
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::FirstParty {
+                kind: RuntimeDispatchErrorKind::NetworkDenied
+            })
+        ));
+        assert_eq!(
+            governor.reserved_for(&tenant_account),
+            ResourceTally::default()
+        );
+    }
+
     fn test_services() -> HostRuntimeServices<
         LocalFilesystem,
         InMemoryResourceGovernor,
@@ -3138,6 +3198,18 @@ mod tests {
                 receipt,
                 output_bytes: 0,
             })
+        }
+    }
+
+    struct PanicFirstPartyHandler;
+
+    #[async_trait]
+    impl crate::FirstPartyCapabilityHandler for PanicFirstPartyHandler {
+        async fn dispatch(
+            &self,
+            _request: crate::FirstPartyCapabilityRequest,
+        ) -> Result<crate::FirstPartyCapabilityResult, crate::FirstPartyCapabilityError> {
+            panic!("service-resolution denial should happen before handler dispatch")
         }
     }
 
