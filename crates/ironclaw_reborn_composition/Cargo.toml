@@ -52,11 +52,14 @@ ironclaw_llm = { path = "../ironclaw_llm", optional = true, default-features = f
 ironclaw_loop_support = { path = "../ironclaw_loop_support" }
 ironclaw_network = { path = "../ironclaw_network" }
 ironclaw_processes = { path = "../ironclaw_processes" }
+ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
+ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
 ironclaw_reborn = { path = "../ironclaw_reborn" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config" }
 ironclaw_reborn_event_store = { path = "../ironclaw_reborn_event_store" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 ironclaw_run_state = { path = "../ironclaw_run_state" }
+ironclaw_runtime_policy = { path = "../ironclaw_runtime_policy" }
 ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_trust = { path = "../ironclaw_trust" }
@@ -72,6 +75,7 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_threads = { path = "../ironclaw_threads" }
 tempfile = "3"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }

@@ -947,6 +947,20 @@ where
         })
     }
 
+    async fn read_thread(
+        &self,
+        request: ThreadHistoryRequest,
+    ) -> Result<SessionThreadRecord, SessionThreadError> {
+        let thread = self
+            .read_thread_versioned(&request.scope, &request.thread_id)
+            .await?
+            .ok_or_else(|| SessionThreadError::UnknownThread {
+                thread_id: request.thread_id.clone(),
+            })?
+            .0;
+        Ok(thread.record)
+    }
+
     async fn create_summary_artifact(
         &self,
         request: CreateSummaryArtifactRequest,

@@ -114,6 +114,7 @@ fn test_resolved_profile_with_driver(
 fn test_run_state(scope: TurnScope, status: TurnStatus) -> TurnRunState {
     TurnRunState {
         scope,
+        actor: None,
         turn_id: TurnId::new(),
         run_id: TurnRunId::new(),
         status,

@@ -73,8 +73,9 @@ pub use first_party::{
 pub use first_party_tools::{
     APPLY_PATCH_CAPABILITY_ID, BUILTIN_FIRST_PARTY_PROVIDER, BuiltinFirstPartyTools,
     ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID,
-    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, TIME_CAPABILITY_ID,
-    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
+    JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, SHELL_CAPABILITY_ID,
+    TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
+    builtin_first_party_package,
 };
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, ProcessObligationLifecycleStore,
@@ -836,6 +837,41 @@ impl<N, S> HostHttpEgressService<N, S> {
             store.discard_for_capability(&request.scope, &request.capability_id);
         }
     }
+
+    fn validate_credential_sources_for_request(
+        &self,
+        request: &RuntimeHttpEgressRequest,
+    ) -> Result<(), RuntimeHttpEgressError> {
+        if matches!(
+            self.network_policy_source,
+            NetworkPolicySource::RequestPolicyFallback
+        ) {
+            return Ok(());
+        }
+
+        for injection in &request.credential_injections {
+            match &injection.source {
+                RuntimeCredentialSource::SecretStoreLease => {
+                    return Err(RuntimeHttpEgressError::Credential {
+                        reason:
+                            "direct secret-store leases are unavailable for production runtime egress"
+                                .to_string(),
+                    });
+                }
+                RuntimeCredentialSource::StagedObligation { capability_id }
+                    if capability_id != &request.capability_id =>
+                {
+                    return Err(RuntimeHttpEgressError::Credential {
+                        reason: "staged credential capability does not match request capability"
+                            .to_string(),
+                    });
+                }
+                RuntimeCredentialSource::StagedObligation { .. } => {}
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl<N, S> RuntimeHttpEgress for HostHttpEgressService<N, S>
@@ -848,6 +884,10 @@ where
         mut request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         let network_policy = self.network_policy_for_request(&mut request)?;
+        if let Err(error) = self.validate_credential_sources_for_request(&request) {
+            self.discard_staged_policy_for_request(&request);
+            return Err(error);
+        }
         if let Err(error) = validate_runtime_request(&request) {
             self.discard_staged_policy_for_request(&request);
             return Err(error);

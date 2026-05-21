@@ -2,6 +2,11 @@
 
 use std::sync::Arc;
 
+use ironclaw_host_api::{
+    AuditMode, DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
+    RuntimeProfile, SecretMode,
+    runtime_policy::{ApprovalPolicy, EffectiveRuntimePolicy},
+};
 use ironclaw_host_runtime::{CapabilitySurfaceVersion, ProductionWiringConfig};
 use ironclaw_reborn_composition::{
     LibSqlProductionSubstrateConfig, RebornCompositionError,
@@ -32,6 +37,7 @@ async fn libsql_substrate_builder_wires_production_components_without_local_only
         },
         secret_master_key: Some(SecretString::from("01234567890123456789012345678901")),
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
+        runtime_policy: production_runtime_policy(),
         turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
         surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
     })
@@ -64,6 +70,7 @@ async fn libsql_substrate_builder_rejects_missing_secret_master_key() {
         },
         secret_master_key: None,
         trust_policy: Arc::new(ironclaw_trust::HostTrustPolicy::fail_closed()),
+        runtime_policy: production_runtime_policy(),
         turn_run_wake_notifier: Arc::new(RecordingSchedulerWakeNotifier),
         surface_version: CapabilitySurfaceVersion::new("test-surface").unwrap(),
     })
@@ -73,6 +80,20 @@ async fn libsql_substrate_builder_rejects_missing_secret_master_key() {
         result,
         Err(RebornCompositionError::MissingSecretMasterKey)
     ));
+}
+
+fn production_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    }
 }
 
 #[derive(Debug)]

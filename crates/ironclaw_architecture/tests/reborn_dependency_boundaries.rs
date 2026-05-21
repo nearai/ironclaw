@@ -133,6 +133,7 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         "crates/ironclaw_reborn_cli/src/commands/doctor.rs",
         "crates/ironclaw_reborn_cli/src/commands/repl.rs",
         "crates/ironclaw_reborn_cli/src/commands/run.rs",
+        "crates/ironclaw_reborn_cli/src/commands/serve.rs",
         "crates/ironclaw_reborn_cli/src/context.rs",
     ];
     for path in command_module_paths {
@@ -167,6 +168,27 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
         [],
         "ironclaw_reborn_config must remain a standalone boot contract crate with no IronClaw workspace dependencies of any dependency kind",
     );
+
+    let cli_runtime_source =
+        std::fs::read_to_string(root.join("crates/ironclaw_reborn_cli/src/runtime.rs"))
+            .expect("Reborn CLI runtime.rs must be readable");
+    assert!(
+        cli_runtime_source.contains("build_reborn_runtime"),
+        "Reborn CLI should enter the assembled runtime through ironclaw_reborn_composition::build_reborn_runtime"
+    );
+    for forbidden in [
+        "use ironclaw_host_runtime::",
+        "use ironclaw_reborn::",
+        "use ironclaw_threads::",
+        "use ironclaw_turns::",
+        "HostRuntimeServices",
+        "build_default_planned_runtime",
+    ] {
+        assert!(
+            !cli_runtime_source.contains(forbidden),
+            "Reborn CLI runtime.rs must not wire lower-level Reborn runtime pieces directly via `{forbidden}`; keep REPL as a UX shell over ironclaw_reborn_composition."
+        );
+    }
 }
 
 #[test]
@@ -462,17 +484,29 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
     // otherwise have to live in the CLI or root app, which the dep rules
     // forbid).
     let composition_runtime = root.join("crates/ironclaw_reborn_composition/src/runtime.rs");
+    let composition_local_dev_runtime =
+        root.join("crates/ironclaw_reborn_composition/src/runtime/local_dev.rs");
     assert!(
         composition_runtime.exists(),
         "expected Reborn runtime assembly at {}",
         composition_runtime.display()
     );
+    assert!(
+        composition_local_dev_runtime.exists(),
+        "expected local-dev runtime assembly at {}",
+        composition_local_dev_runtime.display()
+    );
     let composition_runtime_source = std::fs::read_to_string(&composition_runtime)
         .expect("composition runtime.rs must be readable");
+    let composition_runtime_sources = format!(
+        "{}\n{}",
+        composition_runtime_source,
+        std::fs::read_to_string(&composition_local_dev_runtime)
+            .expect("composition runtime/local_dev.rs must be readable")
+    );
     for required in [
         "pub async fn build_reborn_runtime",
         "pub struct RebornRuntime",
-        "use ironclaw_reborn::loop_driver_host::",
         "use ironclaw_reborn::runtime::",
         "build_default_planned_runtime",
         "DefaultPlannedRuntimeParts",
@@ -484,6 +518,12 @@ fn reborn_internal_crate_keeps_directory_of_modules_lib_rs() {
              ingress points can avoid importing `ironclaw_reborn` directly."
         );
     }
+    assert!(
+        composition_runtime_sources.contains("use ironclaw_reborn::loop_driver_host::"),
+        "composition runtime module set missing `use ironclaw_reborn::loop_driver_host::` -- \
+         the host adapter assembly may live in a runtime submodule, but it must stay inside \
+         `ironclaw_reborn_composition` rather than the CLI or other ingress points."
+    );
 }
 
 /// Lock the boot-config TOML + provider-catalog layering for the
@@ -1010,6 +1050,12 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         "crates/ironclaw_turns/src",
         "crates/ironclaw_threads/src",
         "crates/ironclaw_loop_support/src",
+        // WebChat v2 route surface: a Product/API crate that exposes
+        // axum handler functions and `IngressRouteDescriptor`s but must
+        // never bind sockets or call `axum::serve` itself — that is
+        // host composition's job. Without this entry the contract fails
+        // open for the new route crate.
+        "crates/ironclaw_webui_v2/src",
     ];
 
     let mut violations = Vec::new();
@@ -1087,6 +1133,59 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_network",
                 "ironclaw_engine",
                 "ironclaw_gateway",
+            ],
+        },
+        BoundaryRule {
+            // WebChat v2 route surface must only reach into Reborn through
+            // the host-facing facade and the ingress vocabulary; anything
+            // that lets a handler touch the dispatcher, runtime lane, run
+            // state, or a storage backend directly would defeat the
+            // single-facade discipline that this crate exists to enforce.
+            crate_name: "ironclaw_webui_v2",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                // Single-facade boundary: route handlers consume only the
+                // `ironclaw_product_workflow` facade plus the ingress + error
+                // vocabulary. Projection types are re-exported through the
+                // facade crate so handlers never reach into the adapter
+                // surface directly.
+                "ironclaw_product_adapters",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_storage",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
             ],
         },
         BoundaryRule {

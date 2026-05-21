@@ -1267,6 +1267,9 @@ where
             claimed.state.run_id,
             claimed.resolved_run_profile.clone(),
         );
+        if let Some(actor) = claimed.state.actor.clone() {
+            loop_run_context = loop_run_context.with_actor(actor);
+        }
         if let Some(snapshot) = claimed.state.resolved_model_route.clone() {
             loop_run_context = loop_run_context.with_resolved_model_route(snapshot);
         }

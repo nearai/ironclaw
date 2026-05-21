@@ -8,6 +8,8 @@ pub enum RebornBuildError {
     MissingDatabaseHandle { backend: &'static str },
     #[error("reborn composition requires configured production trust policy")]
     MissingProductionTrustPolicy,
+    #[error("reborn composition requires resolved runtime policy")]
+    MissingRuntimePolicy,
     #[error("reborn composition production trust policy must contain at least one source")]
     EmptyProductionTrustPolicy,
     #[error("reborn composition requires live turn scheduler wake notifier")]

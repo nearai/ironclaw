@@ -24,6 +24,14 @@ use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
 use ironclaw_trust::{AuthorityCeiling, EffectiveTrustClass, TrustDecision, TrustProvenance};
 use serde_json::json;
 
+fn local_test_runtime_policy() -> ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy {
+    ironclaw_runtime_policy::resolve(ironclaw_runtime_policy::ResolveRequest::new(
+        ironclaw_host_api::runtime_policy::DeploymentMode::LocalSingleUser,
+        ironclaw_host_api::runtime_policy::RuntimeProfile::LocalDev,
+    ))
+    .unwrap()
+}
+
 fn obligation_services(
     secret_store: Arc<InMemorySecretStore>,
     governor: Arc<InMemoryResourceGovernor>,
@@ -955,6 +963,7 @@ async fn default_host_runtime_fails_closed_when_resource_ceiling_lacks_required_
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_builtin_obligation_handler();
 
@@ -999,6 +1008,7 @@ async fn default_host_runtime_dispatches_when_resource_ceiling_is_satisfied() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_builtin_obligation_handler();
 
@@ -1032,6 +1042,7 @@ async fn default_host_runtime_installs_configured_obligation_handler() {
         dispatcher,
         authorizer,
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+        local_test_runtime_policy(),
     )
     .with_obligation_handler(handler);
 

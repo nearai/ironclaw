@@ -4019,6 +4019,7 @@ impl TurnRunTransitionPort for AtomicLoopExitPort {
         drop(status);
         Ok(TurnRunState {
             scope: scope("thread-a"),
+            actor: Some(TurnActor::new(UserId::new("user-thread-a").unwrap())),
             turn_id: ironclaw_turns::TurnId::new(),
             run_id: request.run_id,
             status: next_status,

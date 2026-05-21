@@ -1,7 +1,7 @@
 # ironclaw_reborn_composition guardrails
 
 - Own only top-level Reborn composition for production/app startup.
-- Expose facade-shaped handles only: `HostRuntime`, `TurnCoordinator`, readiness.
+- Expose facade-shaped handles only: `HostRuntime`, `TurnCoordinator`, WebUI `RebornServicesApi`, readiness.
 - Keep lower substrate handles private to factories and owning crates.
 - Do not depend on the root `ironclaw` crate or `src/` modules.
 - Do not add legacy bridge modes here until an accepted migration contract exists.

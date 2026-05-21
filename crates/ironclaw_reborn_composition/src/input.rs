@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_runtime::SchedulerTurnRunWakeNotifier;
 use ironclaw_trust::HostTrustPolicy;
 
@@ -11,6 +12,7 @@ pub struct RebornBuildInput {
     pub(crate) owner_id: String,
     pub(crate) storage: RebornStorageInput,
     pub(crate) production_trust_policy: Option<Arc<HostTrustPolicy>>,
+    pub(crate) runtime_policy: Option<EffectiveRuntimePolicy>,
     pub(crate) turn_run_wake_notifier: Option<Arc<SchedulerTurnRunWakeNotifier>>,
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
@@ -21,6 +23,7 @@ pub(crate) enum RebornStorageInput {
     Disabled,
     LocalDev {
         root: PathBuf,
+        workspace_root: Option<PathBuf>,
     },
     #[cfg(feature = "libsql")]
     Libsql {
@@ -61,8 +64,22 @@ impl RebornBuildInput {
         Self::new(
             RebornCompositionProfile::LocalDev,
             owner_id,
-            RebornStorageInput::LocalDev { root },
+            RebornStorageInput::LocalDev {
+                root,
+                workspace_root: None,
+            },
         )
+    }
+
+    pub fn with_local_dev_workspace_root(mut self, workspace_root: PathBuf) -> Self {
+        if let RebornStorageInput::LocalDev {
+            workspace_root: root,
+            ..
+        } = &mut self.storage
+        {
+            *root = Some(workspace_root);
+        }
+        self
     }
 
     #[cfg(feature = "libsql")]
@@ -118,6 +135,15 @@ impl RebornBuildInput {
         self
     }
 
+    pub fn with_runtime_policy(mut self, policy: EffectiveRuntimePolicy) -> Self {
+        self.runtime_policy = Some(policy);
+        self
+    }
+
+    pub fn runtime_policy(&self) -> Option<&EffectiveRuntimePolicy> {
+        self.runtime_policy.as_ref()
+    }
+
     pub fn with_turn_run_wake_notifier(
         mut self,
         notifier: Arc<SchedulerTurnRunWakeNotifier>,
@@ -146,6 +172,7 @@ impl RebornBuildInput {
             owner_id: owner_id.into(),
             storage,
             production_trust_policy: None,
+            runtime_policy: None,
             turn_run_wake_notifier: None,
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,

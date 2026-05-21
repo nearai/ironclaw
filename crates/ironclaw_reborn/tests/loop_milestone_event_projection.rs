@@ -38,9 +38,9 @@ use ironclaw_turns::{
     InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
     LoopCompletionKind, LoopExitId, LoopFailureKind, ReplyTargetBindingRef, ResumeTurnRequest,
     RunProfileId, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
-    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnAdmissionPolicy, TurnCheckpointId,
-    TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
-    TurnStateStore, TurnStatus,
+    SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy,
+    TurnCheckpointId, TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId,
+    TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopHostErrorKind, BatchPolicyKind, FinalizeAssistantMessage, LoopCheckpointKind,
         LoopDriverId, LoopGateKind, LoopHostMilestone, LoopHostMilestoneEmitter,
@@ -770,6 +770,7 @@ impl HostFixture {
         let run_id = TurnRunId::new();
         let state = TurnRunState {
             scope: turn_scope.clone(),
+            actor: Some(TurnActor::new(user_id())),
             turn_id,
             run_id,
             status: TurnStatus::Running,
