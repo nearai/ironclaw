@@ -2,7 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use async_trait::async_trait;
 use ironclaw_filesystem::{FileType, FilesystemError, RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::{ResourceScope, ScopedPath};
+use ironclaw_host_api::{ResourceScope, ScopedPath, TenantId};
 use ironclaw_skills::{MAX_PROMPT_FILE_SIZE, SkillTrust, parse_skill_md};
 use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
 use parking_lot::Mutex;
@@ -21,6 +21,7 @@ const DEFAULT_MAX_BUNDLES_PER_ROOT: usize = 100;
 pub struct FilesystemSkillBundleRoot {
     source_kind: SkillSourceKind,
     root: ScopedPath,
+    tenant_id: Option<TenantId>,
     trust: Option<SkillTrust>,
     visibility: Option<SkillVisibility>,
 }
@@ -36,6 +37,7 @@ impl FilesystemSkillBundleRoot {
         Self {
             source_kind,
             root,
+            tenant_id: None,
             trust,
             visibility,
         }
@@ -62,13 +64,15 @@ impl FilesystemSkillBundleRoot {
     }
 
     /// Creates a tenant-shared skill root.
-    pub fn tenant_shared(root: ScopedPath) -> Self {
-        Self::new(
+    pub fn tenant_shared(root: ScopedPath, tenant_id: TenantId) -> Self {
+        let mut root = Self::new(
             SkillSourceKind::TenantShared,
             root,
             Some(SkillTrust::Installed),
             Some(SkillVisibility::Visible),
-        )
+        );
+        root.tenant_id = Some(tenant_id);
+        root
     }
 
     /// Returns the descriptor source kind for bundles discovered under this root.
@@ -79,6 +83,11 @@ impl FilesystemSkillBundleRoot {
     /// Returns the scoped filesystem path for this root.
     pub fn root(&self) -> &ScopedPath {
         &self.root
+    }
+
+    /// Returns the tenant that owns this root when the root is tenant-scoped.
+    pub fn tenant_id(&self) -> Option<&TenantId> {
+        self.tenant_id.as_ref()
     }
 
     /// Returns trust metadata applied to bundles discovered under this root.
@@ -206,7 +215,14 @@ where
                 .await
             {
                 Ok(()) => {}
-                Err(SkillBundleSourceError::FileNotFound) => continue,
+                Err(error) if is_skippable_manifest_error(&error) => {
+                    debug!(
+                        bundle_id = %bundle_id,
+                        error = ?error,
+                        "skipping invalid skill bundle manifest"
+                    );
+                    continue;
+                }
                 Err(error) => return Err(error),
             }
             self.validated_manifests.lock().insert(skill_md_path);
@@ -269,6 +285,9 @@ where
         let scope = resource_scope_for_run(run_context);
         let mut descriptors = Vec::new();
         for root in &self.roots {
+            if !root_visible_for_run(root, run_context) {
+                continue;
+            }
             self.list_root(&scope, root, &mut descriptors).await?;
         }
         sort_skill_bundle_descriptors(&mut descriptors);
@@ -284,11 +303,13 @@ where
         let root = self
             .roots
             .iter()
+            .filter(|root| root_visible_for_run(root, run_context))
             .find(|root| root.source_kind() == bundle_id.source_kind())
             .ok_or(SkillBundleSourceError::BundleNotFound)?;
         let scope = resource_scope_for_run(run_context);
         let skill_md_path = bundle_scoped_path(root.root(), bundle_id, &SkillFilePath::skill_md())?;
         if !self.validated_manifests.lock().contains(&skill_md_path) {
+            // Re-validates manifests before uncached reads for security defense-in-depth.
             self.validate_bundle_manifest(&scope, &skill_md_path, bundle_id)
                 .await
                 .map_err(|error| match error {
@@ -311,6 +332,15 @@ fn resource_scope_for_run(run_context: &LoopRunContext) -> ResourceScope {
         scope.user_id = actor.user_id.clone();
     }
     scope
+}
+
+fn root_visible_for_run(root: &FilesystemSkillBundleRoot, run_context: &LoopRunContext) -> bool {
+    match root.source_kind() {
+        SkillSourceKind::TenantShared => root
+            .tenant_id()
+            .is_some_and(|tenant_id| tenant_id == &run_context.scope.tenant_id),
+        SkillSourceKind::System | SkillSourceKind::User => true,
+    }
 }
 
 fn bundle_scoped_path(
@@ -349,6 +379,9 @@ fn map_file_read_error(error: FilesystemError) -> SkillBundleSourceError {
 fn map_filesystem_error(error: FilesystemError) -> SkillBundleSourceError {
     match error {
         FilesystemError::PermissionDenied { .. } => SkillBundleSourceError::PermissionDenied,
+        // Kept for API completeness: some callers route filesystem errors through
+        // this general mapper without first applying the list/read-specific
+        // not-found semantics.
         FilesystemError::NotFound { .. } => SkillBundleSourceError::BundleNotFound,
         FilesystemError::Unsupported { .. } => SkillBundleSourceError::SourceUnavailable,
         FilesystemError::Contract(_)
@@ -372,6 +405,17 @@ fn map_filesystem_error(error: FilesystemError) -> SkillBundleSourceError {
 
 fn is_not_found(error: &FilesystemError) -> bool {
     matches!(error, FilesystemError::NotFound { .. })
+}
+
+fn is_skippable_manifest_error(error: &SkillBundleSourceError) -> bool {
+    matches!(
+        error,
+        SkillBundleSourceError::FileNotFound
+            | SkillBundleSourceError::InvalidSkillBundle
+            | SkillBundleSourceError::BundleUtf8DecodeFailed
+            | SkillBundleSourceError::ManifestParseFailed
+            | SkillBundleSourceError::ContentTooLarge
+    )
 }
 
 #[cfg(test)]
@@ -561,7 +605,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filesystem_source_rejects_invalid_skill_md_frontmatter() {
+    async fn filesystem_source_skips_invalid_skill_md_frontmatter() {
         let (root, source) = mounted_source();
         write_root(
             &root,
@@ -570,15 +614,15 @@ mod tests {
         )
         .await;
 
-        let error = source
+        let descriptors = source
             .list_skill_bundles(&run_context().await)
             .await
-            .unwrap_err();
-        assert_eq!(error, SkillBundleSourceError::ManifestParseFailed);
+            .unwrap();
+        assert!(descriptors.is_empty());
     }
 
     #[tokio::test]
-    async fn filesystem_source_rejects_non_utf8_skill_md() {
+    async fn filesystem_source_skips_non_utf8_skill_md() {
         let (root, source) = mounted_source();
         write_root(
             &root,
@@ -587,11 +631,11 @@ mod tests {
         )
         .await;
 
-        let error = source
+        let descriptors = source
             .list_skill_bundles(&run_context().await)
             .await
-            .unwrap_err();
-        assert_eq!(error, SkillBundleSourceError::BundleUtf8DecodeFailed);
+            .unwrap();
+        assert!(descriptors.is_empty());
     }
 
     #[tokio::test]
@@ -632,7 +676,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn filesystem_source_rejects_manifest_name_mismatches() {
+    async fn filesystem_source_skips_manifest_name_mismatches() {
         let (root, source) = mounted_source();
         write_root(
             &root,
@@ -641,11 +685,38 @@ mod tests {
         )
         .await;
 
-        let error = source
+        let descriptors = source
             .list_skill_bundles(&run_context().await)
             .await
-            .unwrap_err();
-        assert_eq!(error, SkillBundleSourceError::InvalidSkillBundle);
+            .unwrap();
+        assert!(descriptors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_skips_bad_manifest_without_hiding_valid_bundles() {
+        let (root, source) = mounted_source();
+        write_root(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/bad-skill/SKILL.md",
+            "not frontmatter",
+        )
+        .await;
+        write_root(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/good-skill/SKILL.md",
+            skill_md("good-skill", "Good skill"),
+        )
+        .await;
+
+        let descriptors = source
+            .list_skill_bundles(&run_context().await)
+            .await
+            .unwrap();
+        let ids: Vec<String> = descriptors
+            .iter()
+            .map(|descriptor| descriptor.id().to_string())
+            .collect();
+        assert_eq!(ids, vec!["user:good-skill"]);
     }
 
     #[tokio::test]
@@ -683,13 +754,104 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_source_rejects_traversal_file_paths_before_read() {
-        for invalid in ["../sibling/SKILL.md", "..", "references/../SKILL.md"] {
+    fn filesystem_source_rejects_path_traversal_in_file_path() {
+        for invalid in [
+            "../../etc/passwd",
+            "../sibling/SKILL.md",
+            "..",
+            "references/../SKILL.md",
+        ] {
             assert_eq!(
                 SkillFilePath::new(invalid).unwrap_err(),
                 SkillBundleSourceError::InvalidFilePath
             );
         }
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_returns_bundle_not_found_when_no_root_matches_source_kind() {
+        let (_root, source) = mounted_source();
+
+        let error = source
+            .read_skill_bundle_file(
+                &run_context().await,
+                &SkillBundleId::new(SkillSourceKind::TenantShared, "shared-review").unwrap(),
+                &SkillFilePath::new("SKILL.md").unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error, SkillBundleSourceError::BundleNotFound);
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_list_skill_bundles_aborts_on_root_error() {
+        let root = Arc::new(InMemoryBackend::default());
+        write_root(
+            &root,
+            "/tenants/tenant-a/users/user-a/skills/local-review/SKILL.md",
+            skill_md("local-review", "Local review"),
+        )
+        .await;
+        let view = MountView::new(vec![
+            MountGrant::new(
+                MountAlias::new("/system/skills").unwrap(),
+                VirtualPath::new("/system/skills").unwrap(),
+                MountPermissions::none(),
+            ),
+            MountGrant::new(
+                MountAlias::new("/skills").unwrap(),
+                VirtualPath::new("/tenants/tenant-a/users/user-a/skills").unwrap(),
+                MountPermissions::read_write_list_delete(),
+            ),
+        ])
+        .unwrap();
+        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(root, view));
+        let source = FilesystemSkillBundleSource::new(
+            filesystem,
+            vec![
+                FilesystemSkillBundleRoot::system(ScopedPath::new("/system/skills").unwrap()),
+                FilesystemSkillBundleRoot::user(ScopedPath::new("/skills").unwrap()),
+            ],
+        )
+        .unwrap();
+
+        let error = source
+            .list_skill_bundles(&run_context().await)
+            .await
+            .unwrap_err();
+        assert_eq!(error, SkillBundleSourceError::PermissionDenied);
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_filters_tenant_shared_roots_by_tenant() {
+        let root = Arc::new(InMemoryBackend::default());
+        write_root(
+            &root,
+            "/tenant-shared/tenant-a/skills/team-review/SKILL.md",
+            skill_md("team-review", "Team review"),
+        )
+        .await;
+        let view = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/tenant-shared/skills").unwrap(),
+            VirtualPath::new("/tenant-shared/tenant-a/skills").unwrap(),
+            MountPermissions::read_only(),
+        )])
+        .unwrap();
+        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(root, view));
+        let source = FilesystemSkillBundleSource::new(
+            filesystem,
+            vec![FilesystemSkillBundleRoot::tenant_shared(
+                ScopedPath::new("/tenant-shared/skills").unwrap(),
+                TenantId::new("tenant-b").unwrap(),
+            )],
+        )
+        .unwrap();
+
+        let descriptors = source
+            .list_skill_bundles(&run_context().await)
+            .await
+            .unwrap();
+        assert!(descriptors.is_empty());
     }
 
     #[tokio::test]
@@ -777,10 +939,10 @@ mod tests {
         )
         .await;
 
-        let error = source
+        let descriptors = source
             .list_skill_bundles(&run_context().await)
             .await
-            .unwrap_err();
-        assert_eq!(error, SkillBundleSourceError::ContentTooLarge);
+            .unwrap();
+        assert!(descriptors.is_empty());
     }
 }
