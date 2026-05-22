@@ -4,8 +4,7 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_loop_support::{FilesystemSkillBundleSource, HostSkillContextSource};
 
 use crate::{
-    SelectableSkillContextSource, SkillActivationSelectorConfig, SkillExecutionAdapter,
-    skills::FirstPartySkillsExtension,
+    SelectableSkillContextSource, SkillExecutionAdapter, skills::FirstPartySkillsExtension,
 };
 
 /// Loaded first-party extension ports exposed to Reborn composition.
@@ -56,20 +55,18 @@ where
 
     pub fn selectable_skill_context_source(
         &self,
-        config: SkillActivationSelectorConfig,
     ) -> Option<Arc<SelectableSkillContextSource<FilesystemSkillBundleSource<F>>>> {
         self.skills
             .as_ref()
-            .map(|skills| skills.selectable_skill_context_source(config))
+            .map(FirstPartySkillsExtension::selectable_skill_context_source)
     }
 
     pub fn skill_execution_adapter(
         &self,
-        config: SkillActivationSelectorConfig,
     ) -> Option<Arc<SkillExecutionAdapter<FilesystemSkillBundleSource<F>>>> {
         self.skills
             .as_ref()
-            .map(|skills| skills.skill_execution_adapter(config))
+            .map(FirstPartySkillsExtension::skill_execution_adapter)
     }
 }
 
@@ -113,11 +110,7 @@ mod tests {
 
         assert!(loaded.skills().is_none());
         assert!(loaded.skill_context_source().is_none());
-        assert!(
-            loaded
-                .skill_execution_adapter(SkillActivationSelectorConfig::default())
-                .is_none()
-        );
+        assert!(loaded.skill_execution_adapter().is_none());
     }
 
     #[test]
@@ -126,10 +119,6 @@ mod tests {
 
         assert!(loaded.skills().is_some());
         assert!(loaded.skill_context_source().is_some());
-        assert!(
-            loaded
-                .skill_execution_adapter(SkillActivationSelectorConfig::default())
-                .is_some()
-        );
+        assert!(loaded.skill_execution_adapter().is_some());
     }
 }

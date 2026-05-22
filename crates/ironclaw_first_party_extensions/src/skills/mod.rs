@@ -113,6 +113,8 @@ where
 {
     bundle_source: Arc<FilesystemSkillBundleSource<F>>,
     context_source: Arc<SkillBundleContextSource<FilesystemSkillBundleSource<F>>>,
+    selectable_context_source: Arc<SelectableSkillContextSource<FilesystemSkillBundleSource<F>>>,
+    execution_adapter: Arc<SkillExecutionAdapter<FilesystemSkillBundleSource<F>>>,
 }
 
 impl<F> std::fmt::Debug for FirstPartySkillsExtension<F>
@@ -140,18 +142,23 @@ where
             handles.bundle_roots(),
         ));
         let context_source = Arc::new(SkillBundleContextSource::new(Arc::clone(&bundle_source)));
+        let selectable_context_source = Arc::new(SelectableSkillContextSource::new(
+            Arc::clone(&bundle_source),
+            SkillActivationSelectorConfig::default(),
+        ));
+        let execution_adapter = Arc::new(SkillExecutionAdapter::new(Arc::clone(
+            &selectable_context_source,
+        )));
         Self {
             bundle_source,
             context_source,
+            selectable_context_source,
+            execution_adapter,
         }
     }
 
     pub fn bundle_source(&self) -> Arc<FilesystemSkillBundleSource<F>> {
         Arc::clone(&self.bundle_source)
-    }
-
-    pub fn context_source(&self) -> Arc<SkillBundleContextSource<FilesystemSkillBundleSource<F>>> {
-        Arc::clone(&self.context_source)
     }
 
     pub fn host_skill_context_source(&self) -> Arc<dyn HostSkillContextSource> {
@@ -160,21 +167,14 @@ where
 
     pub fn selectable_skill_context_source(
         &self,
-        config: SkillActivationSelectorConfig,
     ) -> Arc<SelectableSkillContextSource<FilesystemSkillBundleSource<F>>> {
-        Arc::new(SelectableSkillContextSource::new(
-            Arc::clone(&self.bundle_source),
-            config,
-        ))
+        Arc::clone(&self.selectable_context_source)
     }
 
     pub fn skill_execution_adapter(
         &self,
-        config: SkillActivationSelectorConfig,
     ) -> Arc<SkillExecutionAdapter<FilesystemSkillBundleSource<F>>> {
-        Arc::new(SkillExecutionAdapter::new(
-            self.selectable_skill_context_source(config),
-        ))
+        Arc::clone(&self.execution_adapter)
     }
 }
 

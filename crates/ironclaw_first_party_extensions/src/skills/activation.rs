@@ -85,7 +85,17 @@ pub struct SkillActivationPlan {
 }
 
 impl SkillActivationPlan {
-    pub fn new(selection: SkillActivationSelection, activated_bundles: Vec<SkillBundleId>) -> Self {
+    pub fn empty(selection: SkillActivationSelection) -> Self {
+        Self {
+            selection,
+            activated_bundles: Vec::new(),
+        }
+    }
+
+    pub(crate) fn new(
+        selection: SkillActivationSelection,
+        activated_bundles: Vec<SkillBundleId>,
+    ) -> Self {
         Self {
             selection,
             activated_bundles,
@@ -193,7 +203,7 @@ where
         Ok(())
     }
 
-    pub fn bundle_source(&self) -> Arc<S> {
+    pub(crate) fn bundle_source(&self) -> Arc<S> {
         Arc::clone(&self.bundle_source)
     }
 

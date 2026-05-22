@@ -6,7 +6,8 @@ use ironclaw_turns::{TurnRunId, TurnScope};
 use thiserror::Error;
 
 use super::{
-    SelectableSkillContextSource, SkillActivationSelection, SkillActivationSelectionError,
+    SelectableSkillContextSource, SkillActivationPlan, SkillActivationRequest,
+    SkillActivationSelection, SkillActivationSelectionError, SkillBundleAsset,
     SkillBundleAssetReadError, SkillBundleAssetReader,
 };
 
@@ -32,10 +33,6 @@ where
         Self { selector }
     }
 
-    pub fn selector(&self) -> &Arc<SelectableSkillContextSource<S>> {
-        &self.selector
-    }
-
     pub fn capture_next_activation_plan(
         &self,
         scope: TurnScope,
@@ -48,6 +45,10 @@ where
         scope: &TurnScope,
     ) -> Result<(), SkillActivationSelectionError> {
         self.selector.cancel_next_activation_plan_capture(scope)
+    }
+
+    pub fn clear_scope(&self, scope: &TurnScope) -> Result<(), SkillActivationSelectionError> {
+        self.selector.clear_scope(scope)
     }
 
     pub fn take_activation_plan_for_run(
@@ -78,6 +79,22 @@ where
             activated_bundles,
             asset_reader,
         })
+    }
+
+    pub async fn read_file_for_activation(
+        &self,
+        run_context: &LoopRunContext,
+        plan: &SkillActivationPlan,
+        activation: &SkillActivationRequest,
+        path: impl AsRef<str>,
+    ) -> Result<SkillBundleAsset, SkillBundleAssetReadError> {
+        let asset_reader = SkillBundleAssetReader::new(
+            self.selector.bundle_source(),
+            plan.activated_bundles().iter().cloned(),
+        );
+        asset_reader
+            .read_file_for_activation(run_context, activation, path)
+            .await
     }
 }
 

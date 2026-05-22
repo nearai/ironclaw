@@ -34,16 +34,13 @@ use uuid::Uuid;
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_first_party_extensions::{
     FirstPartySkillsExtension, FirstPartySkillsExtensionHandles, LoadedFirstPartyExtensions,
-    SelectableSkillContextSource, SkillActivationMode as FirstPartySkillActivationMode,
-    SkillActivationPlan, SkillActivationRequest as FirstPartySkillActivationRequest,
-    SkillActivationSelectorConfig, SkillBundleAsset as FirstPartySkillBundleAsset,
-    SkillBundleAssetReadError, SkillExecutionAdapter,
+    SelectableSkillContextSource, SkillExecutionAdapter,
 };
 use ironclaw_host_api::{AgentId, TenantId, ThreadId, UserId};
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     FilesystemSkillBundleSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostSkillContextSource, SkillBundleId, SkillSourceKind,
+    HostIdentityContextSource, HostSkillContextSource,
 };
 use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
 use ironclaw_reborn::runtime::{
@@ -67,6 +64,14 @@ use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInp
 use crate::{RebornBuildError, RebornCompositionProfile, RebornServices, build_reborn_services};
 
 mod local_dev;
+mod skills;
+
+pub use skills::{
+    RebornSkillActivation, RebornSkillActivationMode, RebornSkillAsset, RebornSkillBundle,
+    RebornSkillExecutionPlan, RebornSkillExecutionResult, RebornSkillSourceKind,
+};
+
+use skills::skill_asset_error;
 
 #[cfg(feature = "root-llm-provider")]
 use crate::runtime_input::{ResolvedRebornLlm, ResolvedRebornLlmSource};
@@ -171,183 +176,6 @@ pub(crate) type LocalDevSelectableSkillContextSource =
 type LocalDevSkillExecutionAdapter =
     SkillExecutionAdapter<FilesystemSkillBundleSource<LocalFilesystem>>;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornSkillExecutionPlan {
-    activations: Vec<RebornSkillActivation>,
-    rewritten_message: String,
-    feedback: Vec<String>,
-    active_bundles: Vec<RebornSkillBundle>,
-    asset_scope_bundles: Vec<SkillBundleId>,
-}
-
-impl RebornSkillExecutionPlan {
-    pub fn activations(&self) -> &[RebornSkillActivation] {
-        &self.activations
-    }
-
-    pub fn rewritten_message(&self) -> &str {
-        &self.rewritten_message
-    }
-
-    pub fn feedback(&self) -> &[String] {
-        &self.feedback
-    }
-
-    pub fn active_bundles(&self) -> &[RebornSkillBundle] {
-        &self.active_bundles
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornSkillExecutionResult {
-    pub plan: RebornSkillExecutionPlan,
-    pub reply: AssistantReply,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornSkillActivation {
-    pub name: String,
-    pub source: Option<RebornSkillSourceKind>,
-    pub mode: RebornSkillActivationMode,
-    bundle_id: Option<SkillBundleId>,
-}
-
-impl RebornSkillActivation {
-    fn into_first_party_request(self) -> FirstPartySkillActivationRequest {
-        FirstPartySkillActivationRequest {
-            name: self.name,
-            source: self.source.map(SkillSourceKind::from),
-            bundle_id: self.bundle_id,
-            mode: FirstPartySkillActivationMode::from(self.mode),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornSkillBundle {
-    pub source: RebornSkillSourceKind,
-    pub skill_name: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RebornSkillSourceKind {
-    System,
-    TenantShared,
-    User,
-}
-
-impl From<SkillSourceKind> for RebornSkillSourceKind {
-    fn from(value: SkillSourceKind) -> Self {
-        match value {
-            SkillSourceKind::System => Self::System,
-            SkillSourceKind::TenantShared => Self::TenantShared,
-            SkillSourceKind::User => Self::User,
-        }
-    }
-}
-
-impl From<RebornSkillSourceKind> for SkillSourceKind {
-    fn from(value: RebornSkillSourceKind) -> Self {
-        match value {
-            RebornSkillSourceKind::System => Self::System,
-            RebornSkillSourceKind::TenantShared => Self::TenantShared,
-            RebornSkillSourceKind::User => Self::User,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RebornSkillActivationMode {
-    ExplicitMention,
-    ActivationCriteria,
-}
-
-impl From<FirstPartySkillActivationMode> for RebornSkillActivationMode {
-    fn from(value: FirstPartySkillActivationMode) -> Self {
-        match value {
-            FirstPartySkillActivationMode::ExplicitMention => Self::ExplicitMention,
-            FirstPartySkillActivationMode::ActivationCriteria => Self::ActivationCriteria,
-        }
-    }
-}
-
-impl From<RebornSkillActivationMode> for FirstPartySkillActivationMode {
-    fn from(value: RebornSkillActivationMode) -> Self {
-        match value {
-            RebornSkillActivationMode::ExplicitMention => Self::ExplicitMention,
-            RebornSkillActivationMode::ActivationCriteria => Self::ActivationCriteria,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RebornSkillAsset {
-    pub source: RebornSkillSourceKind,
-    pub skill_name: String,
-    pub path: String,
-    pub bytes: Vec<u8>,
-}
-
-impl RebornSkillAsset {
-    pub fn into_utf8(self) -> Result<String, std::string::FromUtf8Error> {
-        String::from_utf8(self.bytes)
-    }
-}
-
-impl From<SkillActivationPlan> for RebornSkillExecutionPlan {
-    fn from(value: SkillActivationPlan) -> Self {
-        let asset_scope_bundles = value.activated_bundles().to_vec();
-        let active_bundles = value
-            .activated_bundles()
-            .iter()
-            .map(RebornSkillBundle::from)
-            .collect();
-        Self {
-            activations: value
-                .selection
-                .activations
-                .into_iter()
-                .map(RebornSkillActivation::from)
-                .collect(),
-            rewritten_message: value.selection.rewritten_message,
-            feedback: value.selection.feedback,
-            active_bundles,
-            asset_scope_bundles,
-        }
-    }
-}
-
-impl From<FirstPartySkillActivationRequest> for RebornSkillActivation {
-    fn from(value: FirstPartySkillActivationRequest) -> Self {
-        Self {
-            name: value.name,
-            source: value.source.map(RebornSkillSourceKind::from),
-            mode: RebornSkillActivationMode::from(value.mode),
-            bundle_id: value.bundle_id,
-        }
-    }
-}
-
-impl From<&SkillBundleId> for RebornSkillBundle {
-    fn from(value: &SkillBundleId) -> Self {
-        Self {
-            source: RebornSkillSourceKind::from(value.source_kind()),
-            skill_name: value.name().to_string(),
-        }
-    }
-}
-
-impl From<FirstPartySkillBundleAsset> for RebornSkillAsset {
-    fn from(value: FirstPartySkillBundleAsset) -> Self {
-        Self {
-            source: RebornSkillSourceKind::from(value.bundle_id.source_kind()),
-            skill_name: value.bundle_id.name().to_string(),
-            path: value.path.as_str().to_string(),
-            bytes: value.bytes,
-        }
-    }
-}
-
 impl RebornRuntime {
     /// Snapshot of the substrate facades produced by `build_reborn_services`.
     /// Exposed for diagnostics / readiness reporting; **not** for traffic.
@@ -427,10 +255,21 @@ impl RebornRuntime {
     ) -> Result<AssistantReply, RebornRuntimeError> {
         let send_lock = self.send_lock_for(conversation).await;
         let _send_guard = send_lock.lock().await;
+        let scope = self.turn_scope_for(&conversation.0);
+        self.submit_user_message_locked(conversation, text, cancellation, scope)
+            .await
+    }
+
+    async fn submit_user_message_locked(
+        &self,
+        conversation: &ConversationId,
+        text: &str,
+        cancellation: CancellationToken,
+        scope: TurnScope,
+    ) -> Result<AssistantReply, RebornRuntimeError> {
         if self.worker_handle.is_finished() {
             return Err(RebornRuntimeError::WorkerStopped);
         }
-        let scope = self.turn_scope_for(&conversation.0);
         if let Some(skill_activation_source) = &self.skill_activation_source {
             skill_activation_source
                 .record_user_message(scope.clone(), text)
@@ -520,17 +359,28 @@ impl RebornRuntime {
             .as_ref()
             .ok_or(RebornRuntimeError::SkillExecutionUnavailable)?;
         let scope = self.turn_scope_for(&conversation.0);
+        let send_lock = self.send_lock_for(conversation).await;
+        let _send_guard = send_lock.lock().await;
         adapter
             .capture_next_activation_plan(scope.clone())
             .map_err(|error| RebornRuntimeError::SkillExecution(error.to_string()))?;
-        let reply = match self.send_user_message(conversation, text).await {
+        let reply = match self
+            .submit_user_message_locked(conversation, text, CancellationToken::new(), scope.clone())
+            .await
+        {
             Ok(reply) => reply,
             Err(error) => {
-                let _ = adapter.cancel_next_activation_plan_capture(&scope);
+                let _ = adapter.clear_scope(&scope);
                 return Err(error);
             }
         };
-        let plan = self.skill_execution_plan_for_run(&scope, reply.run_id)?;
+        let plan = match self.skill_execution_plan_for_run(&scope, reply.run_id) {
+            Ok(plan) => plan,
+            Err(error) => {
+                let _ = adapter.clear_scope(&scope);
+                return Err(error);
+            }
+        };
         Ok(RebornSkillExecutionResult { plan, reply })
     }
 
@@ -548,14 +398,11 @@ impl RebornRuntime {
             .as_ref()
             .ok_or(RebornRuntimeError::SkillExecutionUnavailable)?;
         let run_context = self.skill_execution_run_context(conversation);
-        let reader = ironclaw_first_party_extensions::SkillBundleAssetReader::new(
-            adapter.selector().bundle_source(),
-            plan.asset_scope_bundles.iter().cloned(),
-        );
-        reader
+        adapter
             .read_file_for_activation(
                 &run_context,
-                &activation.clone().into_first_party_request(),
+                plan.first_party_plan(),
+                &activation.to_first_party_request(),
                 path,
             )
             .await
@@ -973,12 +820,17 @@ fn local_dev_filesystem_skill_context_source(
     );
     let loaded_extensions = LoadedFirstPartyExtensions::new().with_skills(skills_extension);
     let activation_source = loaded_extensions
-        .selectable_skill_context_source(SkillActivationSelectorConfig::default())
+        .selectable_skill_context_source()
         .ok_or_else(|| RebornRuntimeError::InvalidArgument {
             reason: "first-party skills extension did not expose a skill context source"
                 .to_string(),
         })?;
-    let execution_adapter = Arc::new(SkillExecutionAdapter::new(Arc::clone(&activation_source)));
+    let execution_adapter = loaded_extensions.skill_execution_adapter().ok_or_else(|| {
+        RebornRuntimeError::InvalidArgument {
+            reason: "first-party skills extension did not expose a skill execution adapter"
+                .to_string(),
+        }
+    })?;
     let source: Arc<dyn HostSkillContextSource> = activation_source.clone();
     Ok(LocalDevSkillContextSource {
         source,
@@ -1022,10 +874,6 @@ fn validate_runtime_identity(
         source_binding_ref,
         reply_target_binding_ref,
     })
-}
-
-fn skill_asset_error(error: SkillBundleAssetReadError) -> RebornRuntimeError {
-    RebornRuntimeError::SkillExecution(error.to_string())
 }
 
 struct AllowAllCapabilitySurfaceResolver;
@@ -1917,12 +1765,23 @@ mod tests {
             "SYSTEM_HELPER_POLICY_SENTINEL"
         );
 
-        let inactive = RebornSkillActivation {
-            name: "local-helper".to_string(),
-            source: Some(RebornSkillSourceKind::User),
-            mode: RebornSkillActivationMode::ExplicitMention,
-            bundle_id: None,
-        };
+        let invalid_path = runtime
+            .read_skill_execution_asset(&conversation, &result.plan, activation, "../secret")
+            .await
+            .expect_err("invalid bundle-relative path should be rejected");
+        assert!(
+            matches!(
+                invalid_path,
+                RebornRuntimeError::SkillExecution(ref reason) if reason.contains("path is invalid")
+            ),
+            "unexpected invalid path error: {invalid_path}"
+        );
+
+        let inactive = RebornSkillActivation::for_test(
+            "local-helper",
+            Some(RebornSkillSourceKind::User),
+            RebornSkillActivationMode::ExplicitMention,
+        );
         let error = runtime
             .read_skill_execution_asset(
                 &conversation,
@@ -1989,19 +1848,12 @@ mod tests {
             "skill execution should fail before model dispatch when the execution adapter is unavailable"
         );
 
-        let plan = RebornSkillExecutionPlan {
-            activations: Vec::new(),
-            rewritten_message: String::new(),
-            feedback: Vec::new(),
-            active_bundles: Vec::new(),
-            asset_scope_bundles: Vec::new(),
-        };
-        let activation = RebornSkillActivation {
-            name: "system-helper".to_string(),
-            source: Some(RebornSkillSourceKind::System),
-            mode: RebornSkillActivationMode::ExplicitMention,
-            bundle_id: None,
-        };
+        let plan = RebornSkillExecutionPlan::empty_for_test();
+        let activation = RebornSkillActivation::for_test(
+            "system-helper",
+            Some(RebornSkillSourceKind::System),
+            RebornSkillActivationMode::ExplicitMention,
+        );
         let error = runtime
             .read_skill_execution_asset(&conversation, &plan, &activation, "references/policy.md")
             .await
@@ -2135,6 +1987,96 @@ mod tests {
                 .expect("recording gateway requests lock poisoned")
                 .is_empty(),
             "ambiguous explicit skill should fail before model dispatch"
+        );
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn execute_skill_message_clears_capture_after_activation_failure() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("system/skills/code-review"))
+            .expect("system skill dir");
+        std::fs::write(
+            storage_root.join("system/skills/code-review/SKILL.md"),
+            skill_md(
+                "code-review",
+                "system review description",
+                "SYSTEM_REVIEW_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write system skill");
+        std::fs::create_dir_all(storage_root.join("skills/code-review")).expect("user skill dir");
+        std::fs::write(
+            storage_root.join("skills/code-review/SKILL.md"),
+            skill_md(
+                "code-review",
+                "user review description",
+                "USER_REVIEW_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write user skill");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "plain send ok".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-capture-cleanup-owner", storage_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-capture-cleanup-tenant".to_string(),
+            agent_id: "runtime-capture-cleanup-agent".to_string(),
+            source_binding_id: "runtime-capture-cleanup-source".to_string(),
+            reply_target_binding_id: "runtime-capture-cleanup-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let skill_error = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.execute_skill_message(&conversation, "/code-review this PR"),
+        )
+        .await
+        .expect("skill execution should finish")
+        .expect_err("ambiguous skill execution should fail");
+        assert!(
+            matches!(skill_error, RebornRuntimeError::SkillExecution(ref reason) if reason.contains("plan unavailable")),
+            "unexpected skill execution error: {skill_error}"
+        );
+
+        let plain_reply = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.send_user_message(&conversation, "plain ping"),
+        )
+        .await
+        .expect("plain send should finish")
+        .expect("plain send should succeed");
+
+        assert_eq!(plain_reply.status, TurnStatus::Completed);
+        assert_eq!(plain_reply.text.as_deref(), Some("plain send ok"));
+        assert_eq!(
+            requests
+                .lock()
+                .expect("recording gateway requests lock poisoned")
+                .len(),
+            1,
+            "failed skill execution should not dispatch before the plain follow-up"
+        );
+        let scope = runtime.turn_scope_for(&conversation.0);
+        let no_stale_plan = runtime
+            .skill_execution_plan_for_run(&scope, plain_reply.run_id)
+            .expect_err("plain follow-up should not consume stale skill capture");
+        assert!(
+            matches!(no_stale_plan, RebornRuntimeError::SkillExecution(ref reason) if reason.contains("plan unavailable")),
+            "unexpected stale plan check error: {no_stale_plan}"
         );
 
         runtime.shutdown().await.expect("runtime shutdown");
