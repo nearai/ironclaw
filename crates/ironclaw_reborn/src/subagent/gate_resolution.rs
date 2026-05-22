@@ -37,7 +37,7 @@ pub struct BoundedSubagentGateResolutionStore {
 
 #[derive(Default)]
 struct GateResolutionInner {
-    by_gate: HashMap<GateRef, AwaitedChildState>,
+    by_gate: HashMap<GateRef, Vec<AwaitedChildState>>,
     gates_by_child: HashMap<TurnRunId, Vec<GateRef>>,
     deliverable_by_child: HashMap<TurnRunId, VecDeque<GateRef>>,
 }
@@ -66,10 +66,19 @@ impl BoundedSubagentGateResolutionStore {
             return Ok(());
         };
         for gate_ref in gate_refs {
-            if let Some(state) = inner.by_gate.get_mut(&gate_ref) {
-                state.terminal_status = Some(terminal_status);
-                state.terminal_event = Some(terminal_event.clone());
-                if !state.delivery_claimed && !state.delivered_to_parent {
+            if let Some(states) = inner.by_gate.get_mut(&gate_ref) {
+                let mut any_deliverable = false;
+                for state in states
+                    .iter_mut()
+                    .filter(|state| state.record.child_run_id == child_run_id)
+                {
+                    state.terminal_status = Some(terminal_status);
+                    state.terminal_event = Some(terminal_event.clone());
+                    if !state.delivery_claimed && !state.delivered_to_parent {
+                        any_deliverable = true;
+                    }
+                }
+                if any_deliverable {
                     deliverable.push(gate_ref);
                 }
             }
@@ -92,13 +101,17 @@ impl BoundedSubagentGateResolutionStore {
             .get_mut(&child_run_id)
             .and_then(VecDeque::pop_front)
         {
-            if let Some(state) = inner.by_gate.get_mut(&gate_ref)
-                && state.terminal_status.is_some()
-                && !state.delivery_claimed
-                && !state.delivered_to_parent
-            {
-                state.delivery_claimed = true;
-                return Ok(Some(state.clone()));
+            if let Some(states) = inner.by_gate.get_mut(&gate_ref) {
+                if !states.iter().all(|state| state.terminal_status.is_some()) {
+                    continue;
+                }
+                if let Some(state) = states
+                    .iter_mut()
+                    .find(|state| !state.delivery_claimed && !state.delivered_to_parent)
+                {
+                    state.delivery_claimed = true;
+                    return Ok(Some(state.clone()));
+                }
             }
         }
         inner.deliverable_by_child.remove(&child_run_id);
@@ -107,27 +120,32 @@ impl BoundedSubagentGateResolutionStore {
 
     pub fn mark_delivered(&self, gate_ref: &GateRef) -> Result<(), AgentLoopHostError> {
         let mut inner = lock(&self.inner)?;
-        if let Some(state) = inner.by_gate.get_mut(gate_ref) {
-            state.delivery_claimed = false;
-            state.delivered_to_parent = true;
+        if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            for state in states {
+                state.delivery_claimed = false;
+                state.delivered_to_parent = true;
+            }
         }
         Ok(())
     }
 
     pub fn release_terminal_claim(&self, gate_ref: &GateRef) -> Result<(), AgentLoopHostError> {
         let mut inner = lock(&self.inner)?;
-        let child_run_id = if let Some(state) = inner.by_gate.get_mut(gate_ref)
-            && !state.delivered_to_parent
-        {
-            state.delivery_claimed = false;
-            state
-                .terminal_status
-                .is_some()
-                .then_some(state.record.child_run_id)
+        let to_requeue: Vec<TurnRunId> = if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            let mut cids = Vec::new();
+            for state in states.iter_mut().filter(|state| !state.delivered_to_parent) {
+                if state.delivery_claimed {
+                    state.delivery_claimed = false;
+                    if state.terminal_status.is_some() {
+                        cids.push(state.record.child_run_id);
+                    }
+                }
+            }
+            cids
         } else {
-            None
+            Vec::new()
         };
-        if let Some(child_run_id) = child_run_id {
+        for child_run_id in to_requeue {
             inner
                 .deliverable_by_child
                 .entry(child_run_id)
@@ -144,7 +162,9 @@ impl BoundedSubagentGateResolutionStore {
         Ok(inner
             .by_gate
             .values()
-            .filter(|state| state.terminal_status.is_some() && !state.delivered_to_parent)
+            .filter(|states| states.iter().all(|state| state.terminal_status.is_some()))
+            .flat_map(|states| states.iter())
+            .filter(|state| !state.delivered_to_parent)
             .cloned()
             .collect())
     }
@@ -154,7 +174,13 @@ impl BoundedSubagentGateResolutionStore {
         gate_ref: &GateRef,
     ) -> Result<bool, AgentLoopHostError> {
         let mut inner = lock(&self.inner)?;
-        let Some(state) = inner.by_gate.get_mut(gate_ref) else {
+        let Some(states) = inner.by_gate.get_mut(gate_ref) else {
+            return Ok(false);
+        };
+        let Some(state) = states
+            .iter_mut()
+            .find(|state| !state.descendant_reservation_released)
+        else {
             return Ok(false);
         };
         if state.descendant_reservation_released || state.descendant_reservation_release_claimed {
@@ -169,9 +195,11 @@ impl BoundedSubagentGateResolutionStore {
         gate_ref: &GateRef,
     ) -> Result<(), AgentLoopHostError> {
         let mut inner = lock(&self.inner)?;
-        if let Some(state) = inner.by_gate.get_mut(gate_ref) {
-            state.descendant_reservation_release_claimed = false;
-            state.descendant_reservation_released = true;
+        if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            for state in states {
+                state.descendant_reservation_release_claimed = false;
+                state.descendant_reservation_released = true;
+            }
         }
         Ok(())
     }
@@ -181,10 +209,10 @@ impl BoundedSubagentGateResolutionStore {
         gate_ref: &GateRef,
     ) -> Result<(), AgentLoopHostError> {
         let mut inner = lock(&self.inner)?;
-        if let Some(state) = inner.by_gate.get_mut(gate_ref)
-            && !state.descendant_reservation_released
-        {
-            state.descendant_reservation_release_claimed = false;
+        if let Some(states) = inner.by_gate.get_mut(gate_ref) {
+            for state in states.iter_mut().filter(|s| !s.descendant_reservation_released) {
+                state.descendant_reservation_release_claimed = false;
+            }
         }
         Ok(())
     }
@@ -193,7 +221,10 @@ impl BoundedSubagentGateResolutionStore {
         &self,
         gate_ref: &GateRef,
     ) -> Result<Option<AwaitedChildState>, AgentLoopHostError> {
-        Ok(lock(&self.inner)?.by_gate.get(gate_ref).cloned())
+        Ok(lock(&self.inner)?
+            .by_gate
+            .get(gate_ref)
+            .and_then(|states| states.first().cloned()))
     }
 
     pub fn subagent_kind_for_child(
@@ -206,7 +237,8 @@ impl BoundedSubagentGateResolutionStore {
         };
         Ok(gates
             .iter()
-            .find_map(|gate| inner.by_gate.get(gate))
+            .filter_map(|gate| inner.by_gate.get(gate))
+            .find_map(|states| states.first())
             .map(|state| state.record.subagent_kind.clone()))
     }
 
@@ -227,12 +259,6 @@ impl SubagentGateResolutionStore for BoundedSubagentGateResolutionStore {
     ) -> Result<(), AgentLoopHostError> {
         let mut inner = lock(&self.inner)?;
         let gate_ref = record.gate_ref.clone();
-        if inner.by_gate.contains_key(&gate_ref) {
-            return Err(AgentLoopHostError::new(
-                AgentLoopHostErrorKind::InvalidInvocation,
-                "subagent awaited-child gate already exists",
-            ));
-        }
         if inner.by_gate.len() >= MAX_GATE_RECORDS {
             return Err(AgentLoopHostError::new(
                 AgentLoopHostErrorKind::BudgetExceeded,
@@ -244,9 +270,11 @@ impl SubagentGateResolutionStore for BoundedSubagentGateResolutionStore {
             .entry(record.child_run_id)
             .or_default()
             .push(gate_ref.clone());
-        inner.by_gate.insert(
-            gate_ref.clone(),
-            AwaitedChildState {
+        inner
+            .by_gate
+            .entry(gate_ref.clone())
+            .or_default()
+            .push(AwaitedChildState {
                 record,
                 terminal_status: None,
                 terminal_event: None,
@@ -254,20 +282,25 @@ impl SubagentGateResolutionStore for BoundedSubagentGateResolutionStore {
                 descendant_reservation_released: false,
                 delivery_claimed: false,
                 delivered_to_parent: false,
-            },
-        );
+            });
         Ok(())
     }
 
     async fn delete_awaited_child(&self, gate_ref: &GateRef) -> Result<(), AgentLoopHostError> {
         let mut inner = lock(&self.inner)?;
         if let Some(old) = inner.by_gate.remove(gate_ref) {
-            prune_child_index(&mut inner.gates_by_child, old.record.child_run_id, gate_ref);
-            prune_deliverable_child_index(
-                &mut inner.deliverable_by_child,
-                old.record.child_run_id,
-                gate_ref,
-            );
+            for state in old {
+                prune_child_index(
+                    &mut inner.gates_by_child,
+                    state.record.child_run_id,
+                    gate_ref,
+                );
+                prune_deliverable_child_index(
+                    &mut inner.deliverable_by_child,
+                    state.record.child_run_id,
+                    gate_ref,
+                );
+            }
         }
         Ok(())
     }

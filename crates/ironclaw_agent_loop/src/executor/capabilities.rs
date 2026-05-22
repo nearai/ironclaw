@@ -164,6 +164,53 @@ impl ExecutorStage<CapabilityInput> for CapabilityStage {
             .await;
 
         let outcomes = batch.outcomes;
+        // Multiple AwaitDependentRun outcomes within the same batch that
+        // share a single gate_ref must coalesce into ONE gate exit: each
+        // outcome's result_ref still gets appended (so the parent observes
+        // every child's result on resume), but the loop transitions to
+        // BlockedDependentRun via a single gate step rather than firing
+        // handle_gate once per outcome. Falling through to the per-outcome
+        // loop would call handle_gate N times for the same gate, causing
+        // duplicate gate records and (worse) racing resume attempts.
+        if !batch.stopped_on_suspension
+            && let Some((shared_gate_ref, first_call)) =
+                shared_await_dependent_gate(&visible_calls, &outcomes)
+        {
+            for (call, outcome) in visible_calls.iter().zip(outcomes.iter()) {
+                push_call_signature_once(&mut state, &mut signatures, call)?;
+                if let CapabilityOutcome::AwaitDependentRun {
+                    result_ref,
+                    safe_summary,
+                    ..
+                } = outcome
+                {
+                    let result = CapabilityResultMessage {
+                        result_ref: result_ref.clone(),
+                        safe_summary: safe_summary.clone(),
+                        terminate_hint: false,
+                    };
+                    append_capability_result_ref(ctx.host, call, &result).await?;
+                    push_completed_result(&mut state, result);
+                }
+            }
+            match GateStage
+                .process(
+                    ctx,
+                    GateInput {
+                        state,
+                        call: first_call,
+                        kind: GateKind::AwaitDependentRun,
+                        gate_ref: shared_gate_ref,
+                    },
+                )
+                .await?
+            {
+                BatchStep::Continue(next) => {
+                    return self.completed_turn(ctx, *next, result_refs_start).await;
+                }
+                BatchStep::Exit(exit) => return Ok(TurnCompletedStep::Exit(exit)),
+            }
+        }
         if !batch.stopped_on_suspension {
             // Non-suspended batches record completed outcomes before gates so
             // partial parallel progress is durable in any later suspension
@@ -581,4 +628,33 @@ async fn append_spawned_child_result(
     append_capability_result_ref(host, call, &result).await?;
     push_completed_result(state, result);
     Ok(())
+}
+
+fn shared_await_dependent_gate(
+    calls: &[CapabilityCallCandidate],
+    outcomes: &[CapabilityOutcome],
+) -> Option<(ironclaw_turns::LoopGateRef, CapabilityCallCandidate)> {
+    let mut shared_gate: Option<ironclaw_turns::LoopGateRef> = None;
+    let mut first_call: Option<CapabilityCallCandidate> = None;
+    let mut count = 0_usize;
+    for (call, outcome) in calls.iter().zip(outcomes.iter()) {
+        let CapabilityOutcome::AwaitDependentRun { gate_ref, .. } = outcome else {
+            continue;
+        };
+        if let Some(existing) = shared_gate.as_ref() {
+            if existing != gate_ref {
+                return None;
+            }
+        } else {
+            shared_gate = Some(gate_ref.clone());
+            first_call = Some(call.clone());
+        }
+        count += 1;
+    }
+    (count > 1).then(|| {
+        (
+            shared_gate.expect("counted gate"),
+            first_call.expect("counted call"),
+        )
+    })
 }

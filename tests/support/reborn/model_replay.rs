@@ -1,6 +1,7 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -49,6 +50,11 @@ pub enum RebornModelReplayStep {
     AssertProviderToolsThenResponse {
         capability_ids: Vec<CapabilityId>,
         response: HostManagedModelResponse,
+        expected_tool_results: Vec<ExpectedToolResult>,
+    },
+    DelayedResponse {
+        response: HostManagedModelResponse,
+        delay: Duration,
         expected_tool_results: Vec<ExpectedToolResult>,
     },
     ProviderToolCalls {
@@ -100,6 +106,10 @@ enum ReplayOutput {
         capability_ids: Vec<CapabilityId>,
         response: HostManagedModelResponse,
     },
+    DelayedResponse {
+        response: HostManagedModelResponse,
+        delay: Duration,
+    },
     ProviderToolCalls(Vec<RebornScriptedProviderToolCall>),
 }
 
@@ -148,6 +158,14 @@ impl RebornTraceReplayModelGateway {
                             capability_ids,
                             response,
                         },
+                        expected_tool_results,
+                    },
+                    RebornModelReplayStep::DelayedResponse {
+                        response,
+                        delay,
+                        expected_tool_results,
+                    } => ReplayStep {
+                        output: ReplayOutput::DelayedResponse { response, delay },
                         expected_tool_results,
                     },
                     RebornModelReplayStep::ProviderToolCalls {
@@ -207,6 +225,10 @@ impl HostManagedModelGateway for RebornTraceReplayModelGateway {
                     "trace replay provider tool assertions require capability-aware model streaming",
                 ))
             }
+            ReplayOutput::DelayedResponse { response, delay } => {
+                tokio::time::sleep(delay).await;
+                Ok(response)
+            }
             ReplayOutput::ProviderToolCalls(_) => Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::InvalidRequest,
                 "trace replay provider tool calls require capability-aware model streaming",
@@ -227,6 +249,10 @@ impl HostManagedModelGateway for RebornTraceReplayModelGateway {
                 response,
             } => {
                 assert_provider_tools(capabilities, &capability_ids).await?;
+                Ok(response)
+            }
+            ReplayOutput::DelayedResponse { response, delay } => {
+                tokio::time::sleep(delay).await;
                 Ok(response)
             }
             ReplayOutput::ProviderToolCalls(calls) => {
