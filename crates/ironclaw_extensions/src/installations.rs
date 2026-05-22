@@ -73,7 +73,7 @@ impl ExtensionManifestRecord {
         contracts: &HostApiContractRegistry,
     ) -> Result<Self, ExtensionInstallationError> {
         let raw_toml = raw_toml.into();
-        let manifest = ExtensionManifestV2::parse_with_host_api_contracts(
+        let manifest = ExtensionManifestV2::parse_with_optional_host_api_contracts(
             &raw_toml,
             source,
             host_port_catalog,
@@ -430,6 +430,14 @@ impl<'de> Deserialize<'de> for ExtensionInstallation {
     }
 }
 
+/// Generic extension installation state store.
+///
+/// Implementations own product-agnostic manifest records, installation
+/// activation state, opaque credential bindings, health snapshots, and
+/// manifest-hash consistency. Domain crates validate domain-specific binding
+/// semantics when projecting their host-api sections from these records.
+/// `list_enabled_installations` returns enabled installations in
+/// newest-updated order with a deterministic installation-id tie-breaker.
 #[async_trait]
 pub trait ExtensionInstallationStore: Send + Sync {
     async fn list_manifests(

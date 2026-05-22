@@ -4,7 +4,7 @@ use ironclaw_extensions::{
     ExtensionHealthStatus, ExtensionInstallation, ExtensionInstallationError,
     ExtensionInstallationId, ExtensionInstallationStore, ExtensionManifestRecord,
     ExtensionManifestRef, InMemoryExtensionInstallationStore, MANIFEST_SCHEMA_VERSION,
-    ManifestHash, ManifestSource,
+    ManifestHash, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{ExtensionId, HostPortCatalog};
 
@@ -20,8 +20,8 @@ fn manifest_hash(value: &str) -> ManifestHash {
     ManifestHash::new(value).unwrap()
 }
 
-fn manifest(hash: &str) -> ExtensionManifestRecord {
-    let raw = format!(
+fn raw_legacy_capability_manifest() -> String {
+    format!(
         r#"
 schema_version = "{schema}"
 id = "acme-tools"
@@ -44,10 +44,13 @@ output_schema_ref = "schemas/acme/echo.output.v1.json"
 prompt_doc_ref = "prompts/acme/echo.md"
 "#,
         schema = MANIFEST_SCHEMA_VERSION,
-    );
+    )
+}
+
+fn manifest(hash: &str) -> ExtensionManifestRecord {
     ExtensionManifestRecord::from_toml(
-        raw,
-        ManifestSource::InstalledLocal,
+        raw_legacy_capability_manifest(),
+        ManifestSource::HostBundled,
         &HostPortCatalog::empty(),
         Some(manifest_hash(hash)),
     )
@@ -64,6 +67,38 @@ fn installation(hash: &str) -> ExtensionInstallation {
         Utc::now(),
     )
     .unwrap()
+}
+
+fn installation_with_manifest_hash(hash: Option<&str>) -> ExtensionInstallation {
+    ExtensionInstallation::new(
+        installation_id("acme-tools-prod"),
+        extension_id("acme-tools"),
+        ExtensionActivationState::Installed,
+        ExtensionManifestRef::new(extension_id("acme-tools"), hash.map(manifest_hash)),
+        vec![],
+        Utc::now(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn installed_legacy_top_level_capabilities_are_rejected() {
+    let err = ExtensionManifestRecord::from_toml(
+        raw_legacy_capability_manifest(),
+        ManifestSource::InstalledLocal,
+        &HostPortCatalog::empty(),
+        Some(manifest_hash("sha256:abc")),
+    )
+    .unwrap_err();
+
+    assert!(matches!(
+        err,
+        ExtensionInstallationError::Manifest(
+            ManifestV2Error::LegacyTopLevelCapabilitiesForInstalledSource {
+                manifest_source: ManifestSource::InstalledLocal
+            }
+        )
+    ));
 }
 
 #[tokio::test]
@@ -114,6 +149,64 @@ async fn upsert_manifest_rejects_manifest_hash_change_for_existing_installation(
     ));
 }
 
+#[tokio::test]
+async fn missing_installation_mutations_return_not_found() {
+    let store = InMemoryExtensionInstallationStore::default();
+    let missing = installation_id("missing-prod");
+
+    let activation_err = store
+        .set_activation_state(&missing, ExtensionActivationState::Enabled)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        activation_err,
+        ExtensionInstallationError::InstallationNotFound { .. }
+    ));
+
+    let health_err = store
+        .update_health(&missing, ExtensionHealthSnapshot::healthy())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        health_err,
+        ExtensionInstallationError::InstallationNotFound { .. }
+    ));
+}
+
+#[tokio::test]
+async fn manifest_hash_presence_mismatch_is_rejected() {
+    let store = InMemoryExtensionInstallationStore::default();
+    store.upsert_manifest(manifest("sha256:abc")).await.unwrap();
+
+    let missing_ref_hash = store
+        .upsert_installation(installation_with_manifest_hash(None))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        missing_ref_hash,
+        ExtensionInstallationError::ManifestHashMismatch { .. }
+    ));
+
+    let store = InMemoryExtensionInstallationStore::default();
+    let manifest_without_hash = ExtensionManifestRecord::from_toml(
+        raw_legacy_capability_manifest(),
+        ManifestSource::HostBundled,
+        &HostPortCatalog::empty(),
+        None,
+    )
+    .unwrap();
+    store.upsert_manifest(manifest_without_hash).await.unwrap();
+
+    let unexpected_ref_hash = store
+        .upsert_installation(installation_with_manifest_hash(Some("sha256:abc")))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        unexpected_ref_hash,
+        ExtensionInstallationError::ManifestHashMismatch { .. }
+    ));
+}
+
 #[test]
 fn extension_health_message_redacts_public_renderings() {
     let message = ExtensionHealthMessage::new("provider stack trace with /host/path secret-token");
@@ -159,6 +252,31 @@ fn extension_health_message_round_trip_stays_redacted() {
     assert!(serialized.contains(ExtensionHealthMessage::placeholder()));
     assert!(!serialized.contains("secret-token"));
     assert!(!serialized.contains("/host/path"));
+}
+
+#[test]
+fn extension_installation_identifiers_reject_empty_and_control_chars() {
+    assert!(matches!(
+        ManifestHash::new(""),
+        Err(ExtensionInstallationError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        ExtensionInstallationId::new("install\nbad"),
+        Err(ExtensionInstallationError::InvalidValue { .. })
+    ));
+    assert!(matches!(
+        ironclaw_extensions::ExtensionCredentialHandle::new("credential\rbad"),
+        Err(ExtensionInstallationError::InvalidValue { .. })
+    ));
+
+    assert!(serde_json::from_str::<ManifestHash>("\"\"").is_err());
+    assert!(serde_json::from_str::<ExtensionInstallationId>(r#""install\nbad""#).is_err());
+    assert!(
+        serde_json::from_str::<ironclaw_extensions::ExtensionCredentialHandle>(
+            r#""credential\rbad""#
+        )
+        .is_err()
+    );
 }
 
 #[test]

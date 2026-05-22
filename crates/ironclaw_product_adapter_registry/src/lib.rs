@@ -16,10 +16,10 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use ironclaw_extensions::{
-    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationId,
-    ExtensionInstallationStore, ExtensionManifestRecord, ExtensionManifestV2,
-    HostApiContractRegistry, HostApiId, HostApiManifestContext, HostApiManifestContract,
-    HostApiMultiplicity, HostApiRefV2, ManifestSectionPath, ManifestSource, ManifestV2Error,
+    ExtensionInstallation, ExtensionInstallationError, ExtensionInstallationStore,
+    ExtensionManifestRecord, ExtensionManifestV2, HostApiContractRegistry, HostApiId,
+    HostApiManifestContext, HostApiManifestContract, HostApiMultiplicity, HostApiRefV2,
+    ManifestSectionPath, ManifestSource, ManifestV2Error,
 };
 use ironclaw_host_api::{ExtensionId, HostPortCatalog};
 use ironclaw_product_adapters::{
@@ -58,6 +58,7 @@ pub fn parse_product_adapter_manifest_record(
         ExtensionInstallationError::Manifest(error) => RegistryError::Manifest(error),
         other => RegistryError::Installation(other),
     })?;
+    product_adapter_sections(&record)?;
     Ok(record)
 }
 
@@ -206,6 +207,10 @@ impl ProductAdapterRuntimeEntry {
 /// sections are intentionally ignored by this projection, not reported as
 /// unknown manifests. Results follow the installation store's enabled ordering:
 /// updated_at descending with installation_id as a deterministic tie-breaker.
+///
+/// ProductAdapter sections are projected from generic manifest records on read.
+/// If profiling shows this path is hot, add a ProductAdapter read model or
+/// targeted projection cache in the owning composition layer.
 pub async fn list_enabled_product_adapter_entries(
     store: &dyn ExtensionInstallationStore,
 ) -> Result<Vec<ProductAdapterRuntimeEntry>, RegistryError> {
@@ -335,8 +340,6 @@ pub enum RegistryError {
     InlineSecretMaterial { field: String },
     #[error("duplicate credential handle {handle}")]
     DuplicateCredentialHandle { handle: EgressCredentialHandle },
-    #[error("duplicate credential binding {handle}")]
-    DuplicateCredentialBinding { handle: EgressCredentialHandle },
     #[error("duplicate egress target")]
     DuplicateEgressTarget,
     #[error("egress references undeclared credential handle {handle}")]
@@ -356,10 +359,6 @@ pub enum RegistryError {
         "installation manifest hash does not match registered manifest hash for {extension_id}"
     )]
     ManifestHashMismatch { extension_id: ExtensionId },
-    #[error("installation {installation_id} was not found")]
-    InstallationNotFound {
-        installation_id: ExtensionInstallationId,
-    },
 }
 
 // ---------------------------------------------------------------------------

@@ -1190,10 +1190,10 @@ fn boundary_rules() -> Vec<BoundaryRule> {
         },
         BoundaryRule {
             // Registry projects ProductAdapter host-api sections from the single
-            // Extension Manifest v2 and owns activation state. Runtime/dispatcher/engine
-            // crates would invert ownership, secrets crates could expose raw
-            // material instead of opaque handles, and v1 WASM/channel crates
-            // would bypass the Reborn registry boundary.
+            // Extension Manifest v2 over extension-owned installation and activation
+            // state. Runtime/dispatcher/engine crates would invert ownership, secrets
+            // crates could expose raw material instead of opaque handles, and v1
+            // WASM/channel crates would bypass the Reborn registry boundary.
             crate_name: "ironclaw_product_adapter_registry",
             forbidden: vec![
                 "ironclaw",

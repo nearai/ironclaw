@@ -151,7 +151,7 @@ prompt_doc_ref = "prompts/do.md"
     let plain_id = ExtensionId::new("plain-tool").unwrap();
     let plain_manifest = ExtensionManifestRecord::from_toml(
         plain_raw,
-        ManifestSource::InstalledLocal,
+        ManifestSource::HostBundled,
         &ironclaw_host_api::HostPortCatalog::empty(),
         Some(manifest_hash("sha256:plain")),
     )
