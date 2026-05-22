@@ -150,6 +150,32 @@ pub struct SubmittedTurn {
     pub actor: TurnActor,
 }
 
+#[derive(Clone)]
+pub struct RebornHarnessSharedStorage {
+    product_backend: Arc<LocalFilesystem>,
+    product_root: Arc<tempfile::TempDir>,
+    thread_backend: Arc<LocalFilesystem>,
+    thread_root: Arc<tempfile::TempDir>,
+    turn_backend: Arc<LocalFilesystem>,
+    turn_root: Arc<tempfile::TempDir>,
+}
+
+impl RebornHarnessSharedStorage {
+    pub fn new() -> HarnessResult<Self> {
+        let product_root = Arc::new(tempfile::tempdir()?);
+        let thread_root = Arc::new(tempfile::tempdir()?);
+        let turn_root = Arc::new(tempfile::tempdir()?);
+        Ok(Self {
+            product_backend: Arc::new(local_filesystem(product_root.path())?),
+            product_root,
+            thread_backend: Arc::new(local_filesystem(thread_root.path())?),
+            thread_root,
+            turn_backend: Arc::new(local_filesystem(turn_root.path())?),
+            turn_root,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RecordedCapabilityResult {
     pub capability_id: CapabilityId,
@@ -225,6 +251,106 @@ impl RebornBinaryE2EHarness {
             capability_port,
             false,
             false,
+        )
+        .await
+    }
+
+    pub async fn with_model_gateway_scope_shared_storage_unscoped_worker(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+        capability_port: RecordingTestCapabilityPort,
+        scope: ResourceScope,
+        shared_storage: RebornHarnessSharedStorage,
+    ) -> HarnessResult<Self> {
+        Self::with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+            conversation_id,
+            model_gateway,
+            capability_port,
+            scope,
+            Arc::new(EmptyIdentityContextSource),
+            ProductTriggerReason::DirectChat,
+            "reborn-test",
+            "install-1",
+            "alice",
+            shared_storage,
+        )
+        .await
+    }
+
+    pub async fn with_model_gateway_scope_installation_shared_storage_unscoped_worker(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+        capability_port: RecordingTestCapabilityPort,
+        scope: ResourceScope,
+        adapter_id: &str,
+        installation_id: &str,
+        shared_storage: RebornHarnessSharedStorage,
+    ) -> HarnessResult<Self> {
+        Self::with_model_gateway_scope_initial_actor_installation_shared_storage_unscoped_worker(
+            conversation_id,
+            "alice",
+            model_gateway,
+            capability_port,
+            scope,
+            adapter_id,
+            installation_id,
+            shared_storage,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn with_model_gateway_scope_initial_actor_installation_shared_storage_unscoped_worker(
+        conversation_id: &str,
+        initial_actor_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+        capability_port: RecordingTestCapabilityPort,
+        scope: ResourceScope,
+        adapter_id: &str,
+        installation_id: &str,
+        shared_storage: RebornHarnessSharedStorage,
+    ) -> HarnessResult<Self> {
+        Self::with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+            conversation_id,
+            model_gateway,
+            capability_port,
+            scope,
+            Arc::new(EmptyIdentityContextSource),
+            ProductTriggerReason::DirectChat,
+            adapter_id,
+            installation_id,
+            initial_actor_id,
+            shared_storage,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn with_model_gateway_scope_identity_source_trigger_installation_shared_storage_unscoped_worker(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+        capability_port: RecordingTestCapabilityPort,
+        scope: ResourceScope,
+        identity_context_source: Arc<dyn HostIdentityContextSource>,
+        initial_trigger: ProductTriggerReason,
+        adapter_id: &str,
+        installation_id: &str,
+        initial_actor_id: &str,
+        shared_storage: RebornHarnessSharedStorage,
+    ) -> HarnessResult<Self> {
+        Self::with_model_gateway_capability_mode_identity_source_trigger_worker_scope_storage_and_adapter(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::Recording(capability_port),
+            false,
+            false,
+            initial_trigger,
+            identity_context_source,
+            scope,
+            Some(shared_storage),
+            adapter_id,
+            installation_id,
+            initial_actor_id,
         )
         .await
     }
@@ -468,14 +594,55 @@ impl RebornBinaryE2EHarness {
         initial_trigger: ProductTriggerReason,
         identity_context_source: Arc<dyn HostIdentityContextSource>,
     ) -> HarnessResult<Self> {
-        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1")?;
+        Self::with_model_gateway_capability_mode_identity_source_trigger_worker_scope_storage_and_adapter(
+            conversation_id,
+            model_gateway,
+            capability_mode,
+            accept_harness_blocked_evidence,
+            restrict_worker_to_initial_scope,
+            initial_trigger,
+            identity_context_source,
+            product_scope(),
+            None,
+            "reborn-test",
+            "install-1",
+            "alice",
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn with_model_gateway_capability_mode_identity_source_trigger_worker_scope_storage_and_adapter(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+        capability_mode: HarnessCapabilityMode,
+        accept_harness_blocked_evidence: bool,
+        restrict_worker_to_initial_scope: bool,
+        initial_trigger: ProductTriggerReason,
+        identity_context_source: Arc<dyn HostIdentityContextSource>,
+        product_scope: ResourceScope,
+        shared_storage: Option<RebornHarnessSharedStorage>,
+        adapter_id: &str,
+        installation_id: &str,
+        initial_actor_id: &str,
+    ) -> HarnessResult<Self> {
+        let adapter = RebornTestProductAdapter::new(adapter_id, installation_id)?;
         let ingress = RebornTestIngress::new(adapter);
-        let product_harness = RebornProductWorkflowHarness::filesystem_temp(product_scope())?;
+        let product_harness = if let Some(storage) = shared_storage.as_ref() {
+            RebornProductWorkflowHarness::filesystem_shared_backend(
+                product_scope.clone(),
+                Arc::clone(&storage.product_backend),
+                Arc::clone(&storage.product_root),
+            )?
+        } else {
+            RebornProductWorkflowHarness::filesystem_temp(product_scope)?
+        };
         let binding = product_harness
             .binding_service()?
-            .resolve_binding(binding_request_with_trigger(
+            .resolve_binding(binding_request_with_trigger_and_actor(
                 &ingress,
                 conversation_id,
+                initial_actor_id,
                 initial_trigger,
             )?)
             .await?;
@@ -489,10 +656,26 @@ impl RebornBinaryE2EHarness {
             binding.project_id.clone(),
             binding.thread_id.clone(),
         );
-        let thread_harness = RebornThreadHarness::filesystem_temp(thread_scope.clone())?;
-        let turn_root = Arc::new(tempfile::tempdir()?);
+        let thread_harness = if let Some(storage) = shared_storage.as_ref() {
+            RebornThreadHarness::filesystem_shared_backend(
+                thread_scope.clone(),
+                Arc::clone(&storage.thread_backend),
+                Arc::clone(&storage.thread_root),
+            )?
+        } else {
+            RebornThreadHarness::filesystem_temp(thread_scope.clone())?
+        };
+        let (turn_backend, turn_root) = if let Some(storage) = shared_storage.as_ref() {
+            (
+                Arc::clone(&storage.turn_backend),
+                Arc::clone(&storage.turn_root),
+            )
+        } else {
+            let turn_root = Arc::new(tempfile::tempdir()?);
+            (Arc::new(local_filesystem(turn_root.path())?), turn_root)
+        };
         let turn_store = Arc::new(FilesystemTurnStateStore::new(scoped_turns_fs(
-            Arc::new(local_filesystem(turn_root.path())?),
+            turn_backend,
             &binding,
         )?));
         let checkpoint_state_store = Arc::new(InMemoryCheckpointStateStore::default());
@@ -715,16 +898,34 @@ impl RebornBinaryE2EHarness {
         run_id: TurnRunId,
         gate_ref: GateRef,
     ) -> HarnessResult<()> {
+        self.resume_with_gate_as(
+            self.turn_scope.clone(),
+            TurnActor::new(self.binding.user_id.clone()),
+            run_id,
+            gate_ref,
+            format!("resume-{run_id}"),
+        )
+        .await
+    }
+
+    pub async fn resume_with_gate_as(
+        &self,
+        scope: TurnScope,
+        actor: TurnActor,
+        run_id: TurnRunId,
+        gate_ref: GateRef,
+        idempotency_key: impl Into<String>,
+    ) -> HarnessResult<()> {
         let response = self
             .coordinator
             .resume_turn(ResumeTurnRequest {
-                scope: self.turn_scope.clone(),
-                actor: TurnActor::new(self.binding.user_id.clone()),
+                scope,
+                actor,
                 run_id,
                 gate_resolution_ref: gate_ref,
                 source_binding_ref: SourceBindingRef::new("src:resume")?,
                 reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
-                idempotency_key: IdempotencyKey::new(format!("resume-{run_id}"))?,
+                idempotency_key: IdempotencyKey::new(idempotency_key.into())?,
             })
             .await?;
         if response.status != TurnStatus::Queued {
@@ -734,14 +935,30 @@ impl RebornBinaryE2EHarness {
     }
 
     pub async fn cancel_blocked_turn(&self, run_id: TurnRunId) -> HarnessResult<()> {
+        self.cancel_run_as(
+            self.turn_scope.clone(),
+            TurnActor::new(self.binding.user_id.clone()),
+            run_id,
+            format!("cancel-{run_id}"),
+        )
+        .await
+    }
+
+    pub async fn cancel_run_as(
+        &self,
+        scope: TurnScope,
+        actor: TurnActor,
+        run_id: TurnRunId,
+        idempotency_key: impl Into<String>,
+    ) -> HarnessResult<()> {
         let response = self
             .coordinator
             .cancel_run(CancelRunRequest {
-                scope: self.turn_scope.clone(),
-                actor: TurnActor::new(self.binding.user_id.clone()),
+                scope,
+                actor,
                 run_id,
                 reason: SanitizedCancelReason::UserRequested,
-                idempotency_key: IdempotencyKey::new(format!("cancel-{run_id}"))?,
+                idempotency_key: IdempotencyKey::new(idempotency_key.into())?,
             })
             .await?;
         if !matches!(
@@ -1604,11 +1821,20 @@ impl HostIdentityContextSource for EmptyIdentityContextSource {
 }
 
 fn product_scope() -> ResourceScope {
+    test_product_scope("tenant-e2e", "host-user", "agent-e2e", Some("project-e2e"))
+}
+
+pub fn test_product_scope(
+    tenant_id: &str,
+    host_user_id: &str,
+    agent_id: &str,
+    project_id: Option<&str>,
+) -> ResourceScope {
     resource_scope(
-        TenantId::new("tenant-e2e").expect("valid tenant"),
-        UserId::new("host-user").expect("valid user"),
-        AgentId::new("agent-e2e").expect("valid agent"),
-        Some(ProjectId::new("project-e2e").expect("valid project")),
+        TenantId::new(tenant_id).expect("valid tenant"),
+        UserId::new(host_user_id).expect("valid user"),
+        AgentId::new(agent_id).expect("valid agent"),
+        project_id.map(|id| ProjectId::new(id).expect("valid project")),
     )
 }
 
@@ -1624,9 +1850,18 @@ fn binding_request_with_trigger(
     conversation_id: &str,
     trigger: ProductTriggerReason,
 ) -> HarnessResult<ResolveBindingRequest> {
+    binding_request_with_trigger_and_actor(ingress, conversation_id, "alice", trigger)
+}
+
+fn binding_request_with_trigger_and_actor(
+    ingress: &RebornTestIngress,
+    conversation_id: &str,
+    actor_id: &str,
+    trigger: ProductTriggerReason,
+) -> HarnessResult<ResolveBindingRequest> {
     let envelope = ingress.verified_text_envelope_with_trigger(
         "binding-probe",
-        "alice",
+        actor_id,
         conversation_id,
         "hi",
         trigger,

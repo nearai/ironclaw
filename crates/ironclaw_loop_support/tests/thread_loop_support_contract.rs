@@ -1,6 +1,9 @@
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use async_trait::async_trait;
@@ -11,8 +14,10 @@ use ironclaw_loop_support::{
     HostManagedModelErrorKind, HostManagedModelGateway, HostManagedModelMessageRole,
     HostManagedModelRequest, HostManagedModelResponse, HostSkillContextBuildError,
     HostSkillContextCandidate, HostSkillContextSource, IdentityApplicability, IdentityBudget,
-    IdentityFileName, ThreadBackedLoopContextPort, ThreadBackedLoopModelPort,
-    ThreadBackedLoopTranscriptPort, build_skill_run_snapshot, identity_message_ref,
+    IdentityFileName, SkillBundleContextSource, SkillBundleDescriptor, SkillBundleId,
+    SkillBundleSource, SkillBundleSourceError, SkillFilePath, SkillSourceKind,
+    ThreadBackedLoopContextPort, ThreadBackedLoopModelPort, ThreadBackedLoopTranscriptPort,
+    build_skill_run_snapshot, identity_message_ref,
 };
 use ironclaw_skills::SkillTrust;
 use ironclaw_threads::{
@@ -175,6 +180,131 @@ async fn thread_context_port_builds_skill_instruction_snippets_from_real_skill_m
             .contains("Use alpha prompt content.")
     );
     assert!(!bundle.instruction_snippets[0].safe_summary.contains("/tmp"));
+}
+
+#[tokio::test]
+async fn thread_context_port_builds_skill_instruction_snippets_from_skill_bundle_context_source() {
+    let fixture = ThreadFixture::new().await;
+    let bundle_source = Arc::new(
+        StaticSkillBundleSource::new(vec![
+            skill_bundle_descriptor(
+                SkillSourceKind::System,
+                "alpha",
+                Some(SkillTrust::Trusted),
+                Some(SkillVisibility::Visible),
+            ),
+            skill_bundle_descriptor(
+                SkillSourceKind::User,
+                "bravo",
+                Some(SkillTrust::Installed),
+                Some(SkillVisibility::Visible),
+            ),
+        ])
+        .with_skill_md(
+            SkillSourceKind::System,
+            "alpha",
+            skill_md(
+                "alpha",
+                "safe alpha description",
+                "Use trusted alpha prompt content.",
+            )
+            .into_bytes(),
+        )
+        .with_skill_md(
+            SkillSourceKind::User,
+            "bravo",
+            skill_md(
+                "bravo",
+                "safe bravo description",
+                "RAW_INSTALLED_PROMPT_SENTINEL",
+            )
+            .into_bytes(),
+        ),
+    );
+    let source = Arc::new(SkillBundleContextSource::new(Arc::clone(&bundle_source)));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_skill_context_source(source);
+
+    let bundle = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(
+        bundle
+            .instruction_snippets
+            .iter()
+            .map(|snippet| snippet.snippet_ref.as_str())
+            .collect::<Vec<_>>(),
+        vec!["skill:alpha", "skill:bravo"]
+    );
+    assert!(
+        bundle.instruction_snippets[0]
+            .safe_summary
+            .contains("safe alpha description")
+    );
+    assert!(
+        bundle.instruction_snippets[0]
+            .safe_summary
+            .contains("Use trusted alpha prompt content.")
+    );
+    assert!(
+        bundle.instruction_snippets[1]
+            .safe_summary
+            .contains("safe bravo description")
+    );
+    assert!(
+        !bundle.instruction_snippets[1]
+            .safe_summary
+            .contains("RAW_INSTALLED_PROMPT_SENTINEL")
+    );
+    assert_eq!(
+        bundle_source.reads(),
+        vec![
+            "system:alpha:SKILL.md".to_string(),
+            "user:bravo:SKILL.md".to_string()
+        ]
+    );
+}
+
+#[tokio::test]
+async fn thread_context_port_skill_bundle_source_fails_closed_when_visibility_missing() {
+    let fixture = ThreadFixture::new().await;
+    let bundle_source = Arc::new(StaticSkillBundleSource::new(vec![skill_bundle_descriptor(
+        SkillSourceKind::User,
+        "alpha",
+        Some(SkillTrust::Trusted),
+        None,
+    )]));
+    let source = Arc::new(SkillBundleContextSource::new(Arc::clone(&bundle_source)));
+    let adapter = ThreadBackedLoopContextPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        16,
+    )
+    .with_skill_context_source(source);
+
+    let error = adapter
+        .load_loop_context(LoopContextRequest {
+            after: None,
+            limit: 16,
+            mode: PromptMode::TextOnly,
+        })
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.kind, AgentLoopHostErrorKind::PolicyDenied);
+    assert!(bundle_source.reads().is_empty());
 }
 
 #[tokio::test]
@@ -1072,6 +1202,102 @@ async fn prompt_and_model_ports_send_selected_skill_context_to_gateway() {
     );
     assert_eq!(calls[0].messages[1].role, HostManagedModelMessageRole::User);
     assert_eq!(calls[0].messages[1].content, "hello reborn");
+}
+
+#[tokio::test]
+async fn prompt_and_model_ports_resolve_skill_refs_after_prompt_sorting() {
+    let fixture = ThreadFixture::new().await;
+    let source = Arc::new(StaticSkillContextSource::new(vec![
+        HostSkillContextCandidate::new(
+            skill_md("zeta", "safe zeta description", "Use zeta prompt content."),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        )
+        .with_ordering_key("0000000000000000"),
+        HostSkillContextCandidate::new(
+            skill_md(
+                "alpha",
+                "safe alpha description",
+                "Use alpha prompt content.",
+            ),
+            Some(SkillTrust::Trusted),
+            Some(SkillVisibility::Visible),
+        )
+        .with_ordering_key("0000000000000001"),
+    ]));
+    let context_port = Arc::new(
+        ThreadBackedLoopContextPort::new(
+            Arc::clone(&fixture.thread_service),
+            fixture.thread_scope.clone(),
+            fixture.run_context.clone(),
+            16,
+        )
+        .with_skill_context_source(source.clone()),
+    );
+    let milestones = Arc::new(InMemoryLoopHostMilestoneSink::default());
+    let prompt_port =
+        HostManagedLoopPromptPort::new(fixture.run_context.clone(), context_port, milestones);
+    let prompt_bundle = prompt_port
+        .build_prompt_bundle(ironclaw_turns::run_profile::LoopPromptBundleRequest {
+            mode: ironclaw_turns::run_profile::PromptMode::TextOnly,
+            context_cursor: None,
+            surface_version: None,
+            checkpoint_state_ref: None,
+            max_messages: None,
+            inline_messages: Vec::new(),
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(prompt_bundle.messages.len(), 3);
+    assert_eq!(prompt_bundle.messages[0].role, "system");
+    assert!(
+        prompt_bundle.messages[0]
+            .content_ref
+            .as_str()
+            .contains("skill.alpha")
+    );
+    assert_eq!(prompt_bundle.messages[1].role, "system");
+    assert!(
+        prompt_bundle.messages[1]
+            .content_ref
+            .as_str()
+            .contains("skill.zeta")
+    );
+
+    let gateway = Arc::new(RecordingGateway::reply("model says hi"));
+    let model_port = ThreadBackedLoopModelPort::new(
+        Arc::clone(&fixture.thread_service),
+        fixture.thread_scope.clone(),
+        fixture.run_context.clone(),
+        gateway.clone(),
+        16,
+    )
+    .with_skill_context_source(source);
+
+    model_port
+        .stream_model(LoopModelRequest {
+            messages: prompt_bundle.messages,
+            surface_version: None,
+            model_preference: None,
+            capability_view: None,
+        })
+        .await
+        .unwrap();
+
+    let calls = gateway.calls.lock().unwrap();
+    assert!(
+        calls[0].messages[0]
+            .content
+            .contains("safe alpha description")
+    );
+    assert!(
+        calls[0].messages[1]
+            .content
+            .contains("safe zeta description")
+    );
+    assert_eq!(calls[0].messages[2].role, HostManagedModelMessageRole::User);
 }
 
 #[tokio::test]
@@ -2661,6 +2887,70 @@ impl HostSkillContextSource for StaticSkillContextSource {
     }
 }
 
+struct StaticSkillBundleSource {
+    descriptors: Vec<SkillBundleDescriptor>,
+    files: Mutex<HashMap<String, Vec<u8>>>,
+    reads: Mutex<Vec<String>>,
+}
+
+impl StaticSkillBundleSource {
+    fn new(descriptors: Vec<SkillBundleDescriptor>) -> Self {
+        Self {
+            descriptors,
+            files: Mutex::new(HashMap::new()),
+            reads: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn with_skill_md(self, source_kind: SkillSourceKind, name: &str, body: Vec<u8>) -> Self {
+        self.with_file(source_kind, name, "SKILL.md", body)
+    }
+
+    fn with_file(
+        self,
+        source_kind: SkillSourceKind,
+        name: &str,
+        path: &str,
+        body: Vec<u8>,
+    ) -> Self {
+        self.files
+            .lock()
+            .unwrap()
+            .insert(format!("{source_kind}:{name}:{path}"), body);
+        self
+    }
+
+    fn reads(&self) -> Vec<String> {
+        self.reads.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl SkillBundleSource for StaticSkillBundleSource {
+    async fn list_skill_bundles(
+        &self,
+        _run_context: &LoopRunContext,
+    ) -> Result<Vec<SkillBundleDescriptor>, SkillBundleSourceError> {
+        Ok(self.descriptors.clone())
+    }
+
+    async fn read_skill_bundle_file(
+        &self,
+        _run_context: &LoopRunContext,
+        bundle_id: &SkillBundleId,
+        path: &SkillFilePath,
+    ) -> Result<Vec<u8>, SkillBundleSourceError> {
+        let key = format!("{bundle_id}:{path}");
+        self.reads.lock().unwrap().push(key.clone());
+        self.files
+            .lock()
+            .unwrap()
+            .get(&key)
+            .cloned()
+            .ok_or(SkillBundleSourceError::FileNotFound)
+    }
+}
+
 #[derive(Clone)]
 struct StaticIdentityContextSource {
     candidates: Vec<HostIdentityContextCandidate>,
@@ -2799,6 +3089,19 @@ fn personal_identity(name: &str, content: &str) -> (HostIdentityContextCandidate
         name,
         content,
         IdentityApplicability::OnPersonalContextAllowed,
+    )
+}
+
+fn skill_bundle_descriptor(
+    source_kind: SkillSourceKind,
+    name: &str,
+    trust: Option<SkillTrust>,
+    visibility: Option<SkillVisibility>,
+) -> SkillBundleDescriptor {
+    SkillBundleDescriptor::new(
+        SkillBundleId::new(source_kind, name).unwrap(),
+        trust,
+        visibility,
     )
 }
 
