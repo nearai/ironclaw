@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::ScopedPath;
+use ironclaw_host_api::{ScopedPath, TenantId};
 use ironclaw_loop_support::{
     FilesystemSkillBundleRoot, FilesystemSkillBundleSource, HostSkillContextSource,
     SkillBundleContextSource,
@@ -75,13 +75,16 @@ impl FirstPartySkillsExtensionHandles {
         self.tenant_shared_skills.as_ref()
     }
 
-    fn bundle_roots(&self) -> Vec<FilesystemSkillBundleRoot> {
+    fn bundle_roots(&self, tenant_id: &TenantId) -> Vec<FilesystemSkillBundleRoot> {
         let mut roots = Vec::new();
         if let Some(root) = &self.system_skills {
             roots.push(FilesystemSkillBundleRoot::system(root.clone()));
         }
         if let Some(root) = &self.tenant_shared_skills {
-            roots.push(FilesystemSkillBundleRoot::tenant_shared(root.clone()));
+            roots.push(FilesystemSkillBundleRoot::tenant_shared(
+                root.clone(),
+                tenant_id.clone(),
+            ));
         }
         if let Some(root) = &self.user_skills {
             roots.push(FilesystemSkillBundleRoot::user(root.clone()));
@@ -123,16 +126,19 @@ where
     pub fn new(
         filesystem: Arc<ScopedFilesystem<F>>,
         handles: FirstPartySkillsExtensionHandles,
-    ) -> Self {
-        let bundle_source = Arc::new(FilesystemSkillBundleSource::new(
-            filesystem,
-            handles.bundle_roots(),
-        ));
+        tenant_id: TenantId,
+    ) -> Result<Self, FirstPartySkillsExtensionError> {
+        let bundle_source = Arc::new(
+            FilesystemSkillBundleSource::new(filesystem, handles.bundle_roots(&tenant_id))
+                .map_err(|error| {
+                    FirstPartySkillsExtensionError::InvalidBundleSource(error.to_string())
+                })?,
+        );
         let context_source = Arc::new(SkillBundleContextSource::new(Arc::clone(&bundle_source)));
-        Self {
+        Ok(Self {
             bundle_source,
             context_source,
-        }
+        })
     }
 
     pub fn bundle_source(&self) -> Arc<FilesystemSkillBundleSource<F>> {
@@ -338,7 +344,9 @@ mod tests {
         let extension = FirstPartySkillsExtension::new(
             scoped_filesystem(root),
             FirstPartySkillsExtensionHandles::without_tenant_shared().unwrap(),
-        );
+            TenantId::new("tenant-a").unwrap(),
+        )
+        .unwrap();
 
         let candidates = extension
             .host_skill_context_source()
@@ -382,7 +390,9 @@ mod tests {
         let extension = FirstPartySkillsExtension::new(
             scoped_filesystem(root),
             FirstPartySkillsExtensionHandles::without_tenant_shared().unwrap(),
-        );
+            TenantId::new("tenant-a").unwrap(),
+        )
+        .unwrap();
 
         let descriptors = extension
             .bundle_source()

@@ -21,6 +21,7 @@ pub(super) async fn read_file(
     let limit = optional_usize(&request.input, "limit")?;
     let has_explicit_range = offset > 0 || limit.is_some();
     let stat = request
+        .services
         .filesystem
         .stat(&resolved.virtual_path)
         .await
@@ -37,6 +38,7 @@ pub(super) async fn read_file(
     }
 
     let bytes = request
+        .services
         .filesystem
         .read_file(&resolved.virtual_path)
         .await

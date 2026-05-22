@@ -42,11 +42,12 @@ use ironclaw_filesystem::{LocalFilesystem, RootFilesystem};
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     BuiltinObligationHandler, BuiltinObligationServices, CancelReason, CancelRuntimeWorkRequest,
-    CapabilitySurfaceVersion, DefaultHostRuntime, HostHttpEgressService, HostRuntime,
-    HostRuntimeServices, ProcessObligationLifecycleStore, ProductionWiringComponent,
-    ProductionWiringConfig, ProductionWiringIssueKind, RuntimeCapabilityOutcome,
-    RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest, RuntimeFailureKind,
-    RuntimeStatusRequest, RuntimeWorkId,
+    CapabilitySurfaceVersion, CommandExecutionOutput, CommandExecutionRequest, DefaultHostRuntime,
+    HostHttpEgressService, HostRuntime, HostRuntimeServices, ProcessObligationLifecycleStore,
+    ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssueKind,
+    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeCapabilityResumeRequest,
+    RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort, RuntimeStatusRequest,
+    RuntimeWorkId, builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_mcp::{McpError, McpExecutionRequest, McpExecutionResult, McpExecutor};
 use ironclaw_network::{
@@ -1104,6 +1105,54 @@ fn production_wiring_validation_rejects_unverified_runtime_http_egress() {
             ProductionWiringIssueKind::UnverifiedProductionImplementation
         ),
         "runtime HTTP egress should require production verification: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_tracks_process_port_for_builtin_shell() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_builtin_first_party_package()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
+        .expect_err("default local process port must not satisfy production shell wiring");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::RuntimeProcessPort,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "builtin shell should make the local process port visible to production guardrails: {report:?}"
+    );
+
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_builtin_first_party_package()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_process_port(Arc::new(ProductionCandidateProcessPort));
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([RuntimeKind::FirstParty]))
+        .expect_err("other local defaults should still keep this graph non-production");
+
+    assert!(
+        !report.contains(
+            ProductionWiringComponent::RuntimeProcessPort,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "custom process port should clear the process-port local-only issue: {report:?}"
     );
 }
 
@@ -5164,6 +5213,24 @@ impl ObligatingAuthorizer {
     }
 }
 
+#[derive(Debug)]
+struct ProductionCandidateProcessPort;
+
+#[async_trait]
+impl RuntimeProcessPort for ProductionCandidateProcessPort {
+    async fn run_command(
+        &self,
+        _request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        Ok(CommandExecutionOutput {
+            output: String::new(),
+            exit_code: 0,
+            sandboxed: true,
+            duration: Duration::ZERO,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct RecordingNetworkHttpEgress {
     requests: Arc<std::sync::Mutex<Vec<NetworkHttpRequest>>>,
@@ -5457,28 +5524,34 @@ impl ResourceGovernor for FailingCleanupResourceGovernor {
         Ok(())
     }
 
-    fn reserve(
+    fn reserve_with_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
-    ) -> Result<ResourceReservation, ResourceError> {
-        Ok(ResourceReservation {
-            id: ResourceReservationId::new(),
-            scope,
-            estimate,
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        Ok(ironclaw_resources::ReservationOutcome {
+            reservation: ResourceReservation {
+                id: ResourceReservationId::new(),
+                scope,
+                estimate,
+            },
+            warnings: Vec::new(),
         })
     }
 
-    fn reserve_with_id(
+    fn reserve_with_id_and_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
         reservation_id: ResourceReservationId,
-    ) -> Result<ResourceReservation, ResourceError> {
-        Ok(ResourceReservation {
-            id: reservation_id,
-            scope,
-            estimate,
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        Ok(ironclaw_resources::ReservationOutcome {
+            reservation: ResourceReservation {
+                id: reservation_id,
+                scope,
+                estimate,
+            },
+            warnings: Vec::new(),
         })
     }
 
@@ -5495,6 +5568,13 @@ impl ResourceGovernor for FailingCleanupResourceGovernor {
         reservation_id: ResourceReservationId,
     ) -> Result<ResourceReceipt, ResourceError> {
         Err(ResourceError::ReservationMismatch { id: reservation_id })
+    }
+
+    fn account_snapshot(
+        &self,
+        _account: &ResourceAccount,
+    ) -> Result<Option<ironclaw_resources::AccountSnapshot>, ResourceError> {
+        Ok(None)
     }
 }
 
@@ -5862,6 +5942,14 @@ impl McpExecutor for PanicMcpExecutor {
 
 fn registry_with_manifest(manifest: &str) -> ExtensionRegistry {
     registry_with_manifests(&[manifest])
+}
+
+fn registry_with_builtin_first_party_package() -> ExtensionRegistry {
+    let mut registry = ExtensionRegistry::new();
+    registry
+        .insert(builtin_first_party_package().unwrap())
+        .unwrap();
+    registry
 }
 
 fn registry_with_manifests(manifests: &[&str]) -> ExtensionRegistry {

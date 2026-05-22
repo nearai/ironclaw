@@ -18,7 +18,8 @@ use crate::error::ProductWorkflowError;
 /// This intentionally excludes the full trusted envelope and host-stamped auth
 /// claim. Policies see only the user-message payload plus product identity and
 /// binding refs needed for policy decisions; the workflow keeps trusted context
-/// for downstream staging and turn submission.
+/// for downstream staging and turn submission. Policy implementations should use
+/// `rate_limit_key` for throttling and must not log raw external refs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BeforeInboundPolicyRequest {
     pub adapter_id: ProductAdapterId,
@@ -26,6 +27,8 @@ pub struct BeforeInboundPolicyRequest {
     pub external_actor_ref: ExternalActorRef,
     pub external_conversation_ref: ExternalConversationRef,
     pub source_binding_key: SourceBindingKey,
+    /// Stable, workflow-validated partition key for policy-side rate limits.
+    pub rate_limit_key: SourceBindingKey,
     pub user_message: UserMessagePayload,
 }
 
@@ -41,7 +44,8 @@ impl BeforeInboundPolicyRequest {
             installation_id: envelope.installation_id().clone(),
             external_actor_ref: envelope.external_actor_ref().clone(),
             external_conversation_ref: envelope.external_conversation_ref().clone(),
-            source_binding_key,
+            source_binding_key: source_binding_key.clone(),
+            rate_limit_key: source_binding_key,
             user_message: user_message.clone(),
         })
     }
@@ -63,11 +67,9 @@ pub enum BeforeInboundPolicyOutcome {
 ///
 /// Implementations must be bounded: the workflow runs `check_user_message`
 /// inline on the inbound dispatch path while holding an in-flight idempotency
-/// fingerprint, so a slow or stuck policy will stall inbound submissions for
-/// the same `(adapter, installation, source binding, external event)` tuple.
-/// Callers are responsible for enforcing wall-clock timeouts on any
-/// production policy implementation (for example by wrapping the port in a
-/// `tokio::time::timeout` decorator).
+/// fingerprint. The default workflow path wraps policy calls in a bounded
+/// `tokio::time::timeout`; production decorators should use `rate_limit_key`
+/// for quota decisions and avoid logging raw external refs.
 ///
 /// Returning [`ProductWorkflowError::BeforeInboundPolicyFailed`] with
 /// `permanent: true` settles the action as a terminal policy rejection.

@@ -14,6 +14,10 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityDescriptor, CapabilityId, ExtensionId, MountView, ResourceEstimate, ResourceReceipt,
     ResourceReservation, ResourceScope, ResourceUsage, RuntimeKind,
+    runtime_policy::{
+        ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
+        NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
+    },
 };
 pub use ironclaw_host_api::{
     CapabilityDispatchRequest, CapabilityDispatchResult, CapabilityDispatcher, DispatchError,
@@ -58,6 +62,7 @@ where
     pub descriptor: &'a CapabilityDescriptor,
     pub filesystem: &'a F,
     pub governor: &'a G,
+    pub runtime_policy: &'a EffectiveRuntimePolicy,
     pub capability_id: &'a CapabilityId,
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
@@ -101,6 +106,7 @@ where
     registry: ServiceHandle<'a, ExtensionRegistry>,
     filesystem: ServiceHandle<'a, F>,
     governor: ServiceHandle<'a, G>,
+    runtime_policy: EffectiveRuntimePolicy,
     runtime_adapters: HashMap<RuntimeKind, ServiceHandle<'a, dyn RuntimeAdapter<F, G> + 'a>>,
     event_sink: Option<ServiceHandle<'a, dyn EventSink + 'a>>,
 }
@@ -115,6 +121,7 @@ where
             registry: ServiceHandle::Borrowed(registry),
             filesystem: ServiceHandle::Borrowed(filesystem),
             governor: ServiceHandle::Borrowed(governor),
+            runtime_policy: default_runtime_policy(),
             runtime_adapters: HashMap::new(),
             event_sink: None,
         }
@@ -133,9 +140,19 @@ where
             registry: ServiceHandle::Shared(registry),
             filesystem: ServiceHandle::Shared(filesystem),
             governor: ServiceHandle::Shared(governor),
+            runtime_policy: default_runtime_policy(),
             runtime_adapters: HashMap::new(),
             event_sink: None,
         }
+    }
+
+    /// Replaces the effective runtime policy passed to runtime adapters.
+    ///
+    /// The dispatcher does not resolve profiles; callers must supply the
+    /// concrete policy that should govern each dispatch request.
+    pub fn with_runtime_policy(mut self, runtime_policy: EffectiveRuntimePolicy) -> Self {
+        self.runtime_policy = runtime_policy;
+        self
     }
 
     pub fn with_runtime_adapter<T>(mut self, runtime: RuntimeKind, adapter: &'a T) -> Self
@@ -266,6 +283,7 @@ where
                 descriptor,
                 filesystem: self.filesystem.as_ref(),
                 governor: self.governor.as_ref(),
+                runtime_policy: &self.runtime_policy,
                 capability_id: &request.capability_id,
                 scope: request.scope,
                 estimate: request.estimate,
@@ -343,6 +361,20 @@ where
             let _ = sink.as_ref().emit(event).await;
         }
         Ok(())
+    }
+}
+
+fn default_runtime_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::SecureDefault,
+        resolved_profile: RuntimeProfile::SecureDefault,
+        filesystem_backend: FilesystemBackendKind::ScopedVirtual,
+        process_backend: ProcessBackendKind::None,
+        network_mode: NetworkMode::Deny,
+        secret_mode: SecretMode::BrokeredHandles,
+        approval_policy: ApprovalPolicy::AskAlways,
+        audit_mode: AuditMode::LocalMinimal,
     }
 }
 

@@ -298,7 +298,8 @@ where
         }
     }
 
-    /// Read body bytes at `path` only when the file is at most `max_bytes`.
+    /// Read the body bytes at `path` only when the backend can enforce the
+    /// supplied size bound before materializing oversized content.
     pub async fn read_bytes_bounded(
         &self,
         scope: &ResourceScope,
@@ -577,6 +578,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_bytes_bounded_enforces_size_at_scoped_boundary() {
+        let scoped = scoped_in_memory(no_op(true, true, false, false));
+        scoped
+            .write_bytes(
+                &test_scope(),
+                &ScopedPath::new("/workspace/large.txt").unwrap(),
+                b"large body".to_vec(),
+            )
+            .await
+            .unwrap();
+
+        let body = scoped
+            .read_bytes_bounded(
+                &test_scope(),
+                &ScopedPath::new("/workspace/large.txt").unwrap(),
+                4,
+            )
+            .await
+            .unwrap();
+        assert_eq!(body, None);
+    }
+
+    #[tokio::test]
+    async fn read_bytes_bounded_denies_when_read_missing() {
+        let scoped = scoped_in_memory(no_op(false, true, false, false));
+        let err = scoped
+            .read_bytes_bounded(
+                &test_scope(),
+                &ScopedPath::new("/workspace/large.txt").unwrap(),
+                4,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            FilesystemError::PermissionDenied {
+                operation: FilesystemOperation::ReadFile,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn ensure_index_denies_when_write_missing() {
         let scoped = scoped_in_memory(no_op(true, false, true, false));
         let spec = IndexSpec::new(
@@ -702,64 +746,6 @@ mod tests {
             .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].seq, s1);
-    }
-
-    #[tokio::test]
-    async fn read_bytes_bounded_succeeds_with_read_and_enforces_limit() {
-        let scoped = scoped_in_memory(no_op(true, true, false, false));
-        scoped
-            .put(
-                &test_scope(),
-                &ScopedPath::new("/workspace/file.bin").unwrap(),
-                Entry::bytes(b"bounded".to_vec()),
-                CasExpectation::Absent,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(
-            scoped
-                .read_bytes_bounded(
-                    &test_scope(),
-                    &ScopedPath::new("/workspace/file.bin").unwrap(),
-                    7,
-                )
-                .await
-                .unwrap(),
-            Some(b"bounded".to_vec())
-        );
-        assert_eq!(
-            scoped
-                .read_bytes_bounded(
-                    &test_scope(),
-                    &ScopedPath::new("/workspace/file.bin").unwrap(),
-                    6,
-                )
-                .await
-                .unwrap(),
-            None
-        );
-    }
-
-    #[tokio::test]
-    async fn read_bytes_bounded_denies_when_read_missing() {
-        let scoped = scoped_in_memory(no_op(false, true, true, false));
-        let err = scoped
-            .read_bytes_bounded(
-                &test_scope(),
-                &ScopedPath::new("/workspace/file.bin").unwrap(),
-                1024,
-            )
-            .await
-            .unwrap_err();
-
-        assert!(matches!(
-            err,
-            FilesystemError::PermissionDenied {
-                operation: FilesystemOperation::ReadFile,
-                ..
-            }
-        ));
     }
 
     #[tokio::test]

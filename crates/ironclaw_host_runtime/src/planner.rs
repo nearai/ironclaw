@@ -51,7 +51,8 @@
 //! planner-write-scope).
 
 use ironclaw_host_api::runtime_policy::{
-    EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, ProcessBackendKind, SecretMode,
+    DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
+    RuntimeProfile, SecretMode,
 };
 use ironclaw_host_api::{CapabilityDescriptor, CapabilityId, EffectKind, RuntimeKind};
 use thiserror::Error;
@@ -67,10 +68,16 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionPlan {
     pub capability: CapabilityId,
+    pub deployment: DeploymentMode,
+    pub resolved_profile: RuntimeProfile,
     pub filesystem_backend: FilesystemBackendKind,
     pub process_backend: ProcessBackendKind,
     pub network_mode: NetworkMode,
     pub secret_mode: SecretMode,
+    pub requires_filesystem: bool,
+    pub requires_process: bool,
+    pub requires_network: bool,
+    pub requires_secret: bool,
 }
 
 /// Reasons the planner refuses to produce an `ExecutionPlan`.
@@ -114,6 +121,12 @@ pub fn plan_capability(
     policy: &EffectiveRuntimePolicy,
 ) -> Result<ExecutionPlan, PlannerError> {
     let effects = &descriptor.effects;
+    let needs_filesystem = effects.iter().any(|e| {
+        matches!(
+            e,
+            EffectKind::ReadFilesystem | EffectKind::WriteFilesystem | EffectKind::DeleteFilesystem
+        )
+    });
     let needs_process = descriptor.runtime == RuntimeKind::Script
         || effects
             .iter()
@@ -143,10 +156,16 @@ pub fn plan_capability(
 
     Ok(ExecutionPlan {
         capability: descriptor.id.clone(),
+        deployment: policy.deployment,
+        resolved_profile: policy.resolved_profile,
         filesystem_backend: policy.filesystem_backend,
         process_backend: policy.process_backend,
         network_mode: policy.network_mode,
         secret_mode: policy.secret_mode,
+        requires_filesystem: needs_filesystem,
+        requires_process: needs_process,
+        requires_network: needs_network,
+        requires_secret: needs_secret,
     })
 }
 
@@ -204,7 +223,7 @@ mod tests {
         // read under selected root`. The planner forwards the
         // resolved filesystem backend; downstream composition picks
         // the actual root.
-        let desc = descriptor(vec![EffectKind::ReadFilesystem]);
+        let desc = descriptor_with_runtime(RuntimeKind::Wasm, vec![EffectKind::ReadFilesystem]);
         let policy = policy_with(
             FilesystemBackendKind::HostWorkspace,
             ProcessBackendKind::None,
@@ -216,6 +235,61 @@ mod tests {
             plan.filesystem_backend,
             FilesystemBackendKind::HostWorkspace
         );
+    }
+
+    #[test]
+    fn marks_required_services_from_declared_effects() {
+        let policy = policy_with(
+            FilesystemBackendKind::HostWorkspace,
+            ProcessBackendKind::LocalHost,
+            NetworkMode::DirectLogged,
+            SecretMode::ScrubbedEnv,
+        );
+
+        let cases = [
+            (
+                vec![EffectKind::ReadFilesystem],
+                (true, false, false, false),
+            ),
+            (
+                vec![EffectKind::WriteFilesystem],
+                (true, false, false, false),
+            ),
+            (
+                vec![EffectKind::DeleteFilesystem],
+                (true, false, false, false),
+            ),
+            (vec![EffectKind::SpawnProcess], (false, true, false, false)),
+            (vec![EffectKind::ExecuteCode], (false, true, false, false)),
+            (vec![EffectKind::Network], (false, false, true, false)),
+            (vec![EffectKind::UseSecret], (false, false, false, true)),
+            (
+                vec![EffectKind::ReadFilesystem, EffectKind::Network],
+                (true, false, true, false),
+            ),
+            (
+                vec![EffectKind::SpawnProcess, EffectKind::UseSecret],
+                (false, true, false, true),
+            ),
+            (Vec::new(), (false, false, false, false)),
+        ];
+
+        for (effects, expected) in cases {
+            let plan = plan_capability(
+                &descriptor_with_runtime(RuntimeKind::Wasm, effects),
+                &policy,
+            )
+            .unwrap();
+            assert_eq!(
+                (
+                    plan.requires_filesystem,
+                    plan.requires_process,
+                    plan.requires_network,
+                    plan.requires_secret,
+                ),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -293,7 +367,7 @@ mod tests {
 
     #[test]
     fn rejects_network_capability_when_policy_denies_network() {
-        let desc = descriptor(vec![EffectKind::Network]);
+        let desc = descriptor_with_runtime(RuntimeKind::Wasm, vec![EffectKind::Network]);
         let policy = policy_with(
             FilesystemBackendKind::ScopedVirtual,
             ProcessBackendKind::None,
@@ -309,7 +383,7 @@ mod tests {
 
     #[test]
     fn rejects_secret_capability_when_policy_denies_secrets() {
-        let desc = descriptor(vec![EffectKind::UseSecret]);
+        let desc = descriptor_with_runtime(RuntimeKind::Wasm, vec![EffectKind::UseSecret]);
         let policy = policy_with(
             FilesystemBackendKind::ScopedVirtual,
             ProcessBackendKind::None,

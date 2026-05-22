@@ -50,6 +50,7 @@ async fn collect_list_entries(
     let mut visited = 0usize;
     while let Some((dir, depth)) = stack.pop() {
         let entries = request
+            .services
             .filesystem
             .list_dir(&dir)
             .await
@@ -71,6 +72,7 @@ async fn collect_list_entries(
                 format!("{relative}/")
             } else {
                 let stat = request
+                    .services
                     .filesystem
                     .stat(&entry.path)
                     .await

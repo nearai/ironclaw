@@ -512,12 +512,14 @@ pub async fn build_reborn_runtime(
     let checkpoint_state_store = Arc::clone(&local_runtime.checkpoint_state_store);
     let loop_checkpoint_store = Arc::clone(&local_runtime.loop_checkpoint_store);
     let thread_service = Arc::clone(&local_runtime.thread_service);
+    let validated_identity = validate_runtime_identity(identity)?;
     let skill_context_source = match configured_skill_context_source {
         Some(source) => Some(source),
-        None => Some(local_dev_filesystem_skill_context_source(local_runtime)?),
+        None => Some(local_dev_filesystem_skill_context_source(
+            local_runtime,
+            &validated_identity.tenant_id,
+        )?),
     };
-
-    let validated_identity = validate_runtime_identity(identity)?;
 
     let tenant_id = validated_identity.tenant_id.clone();
     let agent_id = validated_identity.agent_id.clone();
@@ -580,7 +582,7 @@ pub async fn build_reborn_runtime(
         &services,
         actor_user_id.clone(),
         model_gateway,
-        Some(milestone_sink.clone()),
+        milestone_sink.clone(),
     )
     .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
     let capability_factory = local_dev_capabilities.capability_factory;
@@ -657,6 +659,7 @@ pub async fn build_reborn_runtime(
 
 fn local_dev_filesystem_skill_context_source(
     local_runtime: &crate::factory::RebornLocalRuntimeServices,
+    tenant_id: &TenantId,
 ) -> Result<Arc<dyn HostSkillContextSource>, RebornRuntimeError> {
     let extension = FirstPartySkillsExtension::new(
         Arc::clone(&local_runtime.skill_filesystem),
@@ -665,7 +668,11 @@ fn local_dev_filesystem_skill_context_source(
                 reason: format!("first-party skills extension handles: {reason}"),
             }
         })?,
-    );
+        tenant_id.clone(),
+    )
+    .map_err(|reason| RebornRuntimeError::InvalidArgument {
+        reason: format!("first-party skills extension source: {reason}"),
+    })?;
     Ok(extension.host_skill_context_source())
 }
 
@@ -1548,7 +1555,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_dev_runtime_fails_closed_for_invalid_filesystem_skill_before_model_call() {
+    async fn local_dev_runtime_skips_invalid_filesystem_skill_before_model_call() {
         let root = tempfile::tempdir().expect("tempdir");
         let storage_root = root.path().join("local-dev");
         std::fs::create_dir_all(storage_root.join("skills/bad-helper")).expect("bad skill dir");
@@ -1563,7 +1570,7 @@ mod tests {
         .expect("write bad skill");
         let requests = Arc::new(StdMutex::new(Vec::new()));
         let gateway = Arc::new(RecordingGateway {
-            reply: "should not reach model".to_string(),
+            reply: "invalid skill skipped".to_string(),
             requests: Arc::clone(&requests),
         });
         let input = RebornRuntimeInput::from_services(
@@ -1592,14 +1599,17 @@ mod tests {
         .expect("runtime send should finish")
         .expect("runtime send should succeed");
 
-        assert_ne!(reply.status, TurnStatus::Completed);
-        assert!(
-            requests
-                .lock()
-                .expect("recording gateway requests lock poisoned")
-                .is_empty(),
-            "invalid filesystem skill should fail before model dispatch"
-        );
+        assert_eq!(reply.status, TurnStatus::Completed);
+        assert_eq!(reply.text.as_deref(), Some("invalid skill skipped"));
+        let combined_request_content = requests
+            .lock()
+            .expect("recording gateway requests lock poisoned")
+            .iter()
+            .flat_map(|request| request.messages.iter())
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!combined_request_content.contains("BAD_HELPER_PROMPT_SENTINEL"));
 
         runtime.shutdown().await.expect("runtime shutdown");
     }
