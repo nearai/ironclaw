@@ -140,7 +140,25 @@ impl AuthFlowManager for InMemoryAuthProductServices {
         };
 
         let account_id = match exchange.account_id {
-            Some(account_id) => account_id,
+            Some(account_id) => {
+                let account = state
+                    .accounts
+                    .get_mut(&account_id)
+                    .ok_or(AuthProductError::CredentialMissing)?;
+                if !scope_matches(&flow_scope, &account.scope) {
+                    return Err(AuthProductError::CrossScopeDenied);
+                }
+                if account.provider != exchange.provider {
+                    return Err(AuthProductError::TokenExchangeFailed);
+                }
+                account.label = exchange.account_label.clone();
+                account.status = credential_status_for_completed_flow();
+                account.access_secret = Some(exchange.access_secret.clone());
+                account.refresh_secret = exchange.refresh_secret.clone();
+                account.scopes = exchange.scopes.clone();
+                account.updated_at = now;
+                account_id
+            }
             None => {
                 create_account_in_state(
                     &mut state,
@@ -297,7 +315,27 @@ impl CredentialSetupService for InMemoryAuthProductServices {
         &self,
         request: NewCredentialAccount,
     ) -> Result<CredentialAccount, AuthProductError> {
-        create_account_in_state(&mut self.lock_state(), request)
+        let mut state = self.lock_state();
+        let existing_id = state
+            .accounts
+            .values()
+            .find(|account| {
+                account.scope == request.scope
+                    && account.provider == request.provider
+                    && account.label == request.label
+            })
+            .map(|account| account.id);
+
+        if let Some(account_id) = existing_id {
+            let now = Utc::now();
+            let account = state
+                .accounts
+                .get_mut(&account_id)
+                .ok_or(AuthProductError::CredentialMissing)?;
+            return update_account_from_request(account, request, now);
+        }
+
+        create_account_in_state(&mut state, request)
     }
 }
 
@@ -442,12 +480,7 @@ fn create_account_in_state(
     state: &mut AuthState,
     request: NewCredentialAccount,
 ) -> Result<CredentialAccount, AuthProductError> {
-    if request.ownership == CredentialOwnership::ExtensionOwned && request.owner_extension.is_none()
-    {
-        return Err(AuthProductError::invalid_request(
-            "extension-owned credential accounts require owner_extension",
-        ));
-    }
+    validate_new_credential_account(&request)?;
     let now = Utc::now();
     let account = CredentialAccount {
         id: CredentialAccountId::new(),
@@ -466,6 +499,36 @@ fn create_account_in_state(
     };
     state.accounts.insert(account.id, account.clone());
     Ok(account)
+}
+
+fn update_account_from_request(
+    account: &mut CredentialAccount,
+    request: NewCredentialAccount,
+    now: crate::Timestamp,
+) -> Result<CredentialAccount, AuthProductError> {
+    validate_new_credential_account(&request)?;
+    account.scope = request.scope;
+    account.provider = request.provider;
+    account.label = request.label;
+    account.status = request.status;
+    account.ownership = request.ownership;
+    account.owner_extension = request.owner_extension;
+    account.granted_extensions = request.granted_extensions;
+    account.access_secret = request.access_secret;
+    account.refresh_secret = request.refresh_secret;
+    account.scopes = request.scopes;
+    account.updated_at = now;
+    Ok(account.clone())
+}
+
+fn validate_new_credential_account(request: &NewCredentialAccount) -> Result<(), AuthProductError> {
+    if request.ownership == CredentialOwnership::ExtensionOwned && request.owner_extension.is_none()
+    {
+        return Err(AuthProductError::invalid_request(
+            "extension-owned credential accounts require owner_extension",
+        ));
+    }
+    Ok(())
 }
 
 fn generated_secret_handle(prefix: &str) -> Result<SecretHandle, AuthProductError> {

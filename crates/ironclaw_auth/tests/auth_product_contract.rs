@@ -4,11 +4,11 @@ use ironclaw_auth::{
     AuthFlowStatus, AuthGateRef, AuthInteractionService, AuthProductError, AuthProductScope,
     AuthProviderClient, AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash,
     CredentialAccountLabel, CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
-    InMemoryAuthProductServices, LifecyclePackageRef, ManualTokenSetupRequest, NewAuthFlow,
-    NewCredentialAccount, OAuthAuthorizationCode, OAuthCallbackInput, OAuthProviderCallbackRequest,
-    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderCallbackOutcome,
-    SecretCleanupAction, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
-    TurnRunRef,
+    CredentialSetupService, InMemoryAuthProductServices, LifecyclePackageRef,
+    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthAuthorizationCode,
+    OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchange, OpaqueStateHash,
+    PkceVerifierHash, PkceVerifierSecret, ProviderCallbackOutcome, SecretCleanupAction,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, TurnRunRef,
 };
 use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, SecretHandle, UserId};
 use secrecy::SecretString;
@@ -124,6 +124,70 @@ async fn oauth_callback_exchanges_provider_code_then_completes_once() {
         .expect_err("terminal flow rejects callback replay");
     assert_eq!(replay, AuthProductError::FlowAlreadyTerminal);
     assert_eq!(services.continuations().len(), 1);
+}
+
+#[tokio::test]
+async fn oauth_callback_updates_existing_account_from_provider_exchange() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let existing = services
+        .create_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("work github"),
+            status: CredentialAccountStatus::PendingSetup,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-old-access").unwrap()),
+            refresh_secret: None,
+            scopes: vec!["read:user".to_string()],
+        })
+        .await
+        .expect("existing account");
+    let flow = oauth_flow(&services, owner.clone()).await;
+    let access_secret = SecretHandle::new("github-new-access").unwrap();
+    let refresh_secret = SecretHandle::new("github-new-refresh").unwrap();
+
+    let completed = services
+        .complete_oauth_callback(
+            &owner,
+            OAuthCallbackInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("state-hash"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: OAuthProviderExchange {
+                        provider: provider(),
+                        account_label: label("renamed github"),
+                        authorization_code_hash: code_hash("code-hash"),
+                        pkce_verifier_hash: pkce_hash("pkce-hash"),
+                        access_secret: access_secret.clone(),
+                        refresh_secret: Some(refresh_secret.clone()),
+                        scopes: vec!["repo".to_string(), "workflow".to_string()],
+                        account_id: Some(existing.id),
+                    },
+                },
+            },
+        )
+        .await
+        .expect("callback updates account");
+
+    assert_eq!(completed.credential_account_id, Some(existing.id));
+    let updated = services
+        .get_account(&owner, existing.id)
+        .await
+        .expect("lookup")
+        .expect("updated account");
+    assert_eq!(updated.id, existing.id);
+    assert_eq!(updated.created_at, existing.created_at);
+    assert_eq!(updated.label, label("renamed github"));
+    assert_eq!(updated.status, CredentialAccountStatus::Configured);
+    assert_eq!(updated.access_secret, Some(access_secret));
+    assert_eq!(updated.refresh_secret, Some(refresh_secret));
+    assert_eq!(
+        updated.scopes,
+        vec!["repo".to_string(), "workflow".to_string()]
+    );
 }
 
 #[tokio::test]
@@ -333,6 +397,55 @@ async fn expired_manual_token_interaction_fails_closed() {
 }
 
 #[tokio::test]
+async fn credential_setup_create_or_update_reuses_matching_account() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let first = services
+        .create_or_update_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("work"),
+            status: CredentialAccountStatus::PendingSetup,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: None,
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("create account");
+    let access_secret = SecretHandle::new("github-updated-access").unwrap();
+    let second = services
+        .create_or_update_account(NewCredentialAccount {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("work"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(access_secret.clone()),
+            refresh_secret: None,
+            scopes: vec!["repo".to_string()],
+        })
+        .await
+        .expect("update account");
+
+    assert_eq!(second.id, first.id);
+    assert_eq!(second.created_at, first.created_at);
+    assert_eq!(second.status, CredentialAccountStatus::Configured);
+    assert_eq!(second.access_secret, Some(access_secret));
+    assert_eq!(second.scopes, vec!["repo".to_string()]);
+    let accounts = services
+        .list_accounts(&owner, &provider())
+        .await
+        .expect("list accounts");
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0].id, first.id);
+}
+
+#[tokio::test]
 async fn credential_account_selection_requires_user_choice_for_multiple_configured_accounts() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");
@@ -490,6 +603,10 @@ fn serde_contracts_are_validated_snake_case_and_redacted() {
 
     let code = serde_json::to_value(AuthErrorCode::InvalidRequest).expect("serialize");
     assert_eq!(code, serde_json::json!("invalid_request"));
+    assert_eq!(
+        AuthProductError::RefreshFailed.code(),
+        AuthErrorCode::RefreshFailed
+    );
 
     let continuation = AuthContinuationRef::TurnGateResume {
         turn_run_ref: TurnRunRef::new("run-ref").unwrap(),
