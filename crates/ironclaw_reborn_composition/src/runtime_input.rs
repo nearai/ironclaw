@@ -22,7 +22,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use ironclaw_loop_support::HostManagedModelGateway;
 use ironclaw_loop_support::HostSkillContextSource;
 
@@ -211,8 +211,15 @@ pub struct RebornRuntimeInput {
     pub poll: PollSettings,
     pub identity: RebornRuntimeIdentity,
     pub skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) model_gateway_override: Option<Arc<dyn HostManagedModelGateway>>,
+    /// Cost table to pair with the model-gateway override. Without this,
+    /// tests that use `with_test_model_gateway` would lose the accountant
+    /// entirely (the LLM-resolved cost table comes from
+    /// `LlmModelProfilePolicy::build_cost_table()` which the test
+    /// override skips).
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) model_cost_table_override: Option<Arc<dyn ironclaw_loop_support::ModelCostTable>>,
 }
 
 impl RebornRuntimeInput {
@@ -229,8 +236,10 @@ impl RebornRuntimeInput {
             poll: PollSettings::default(),
             identity: RebornRuntimeIdentity::default(),
             skill_context_source: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             model_gateway_override: None,
+            #[cfg(any(test, feature = "test-support"))]
+            model_cost_table_override: None,
         }
     }
 
@@ -272,6 +281,33 @@ impl RebornRuntimeInput {
         gateway: Arc<dyn HostManagedModelGateway>,
     ) -> Self {
         self.model_gateway_override = Some(gateway);
+        self
+    }
+
+    /// Test-only hook used by `test_support::RebornRuntimeInputTestExt`
+    /// and by integration tests in this crate. Exposed under the
+    /// `test-support` feature so downstream tests can drive
+    /// `build_reborn_runtime` with a stub `HostManagedModelGateway`
+    /// (e.g. `BudgetTestGateway`) without reaching into private fields.
+    #[cfg(feature = "test-support")]
+    pub fn with_model_gateway_override_for_tests(
+        mut self,
+        gateway: Arc<dyn HostManagedModelGateway>,
+    ) -> Self {
+        self.model_gateway_override = Some(gateway);
+        self
+    }
+
+    /// Test-only hook to pair a model gateway override with a custom
+    /// cost table. The accountant uses this table to compute USD spend
+    /// from the gateway's reported tokens, so tests that want to assert
+    /// specific ledger movements provide deterministic prices here.
+    #[cfg(feature = "test-support")]
+    pub fn with_model_cost_table_override_for_tests(
+        mut self,
+        cost_table: Arc<dyn ironclaw_loop_support::ModelCostTable>,
+    ) -> Self {
+        self.model_cost_table_override = Some(cost_table);
         self
     }
 }

@@ -14,13 +14,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use dashmap::{DashMap, DashSet};
 use ironclaw_host_api::{
     InvocationId, ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage,
     SYSTEM_RESERVED_ID, UserId,
 };
 use ironclaw_resources::{
-    BudgetPeriod, BudgetThresholds, ResourceAccount, ResourceError, ResourceGovernor,
+    BudgetApprovalGate, BudgetGateId, BudgetGateStatus, BudgetGateStore, BudgetPeriod,
+    BudgetThresholds, ResourceAccount, ResourceApprovalNeeded, ResourceError, ResourceGovernor,
     ResourceLimits,
 };
 use ironclaw_turns::TurnRunId;
@@ -181,6 +183,16 @@ pub struct GovernorBackedAccountant {
     /// Bounded by the number of distinct (user, project) pairs the
     /// process sees; production tenants typically have O(1k) entries.
     seeded: Arc<DashSet<ResourceAccount>>,
+    /// Optional approval-gate store. When set, every
+    /// `ResourceError::RequiresApproval` from the governor opens a new
+    /// `BudgetApprovalGate` here so a user-facing handler (or a test)
+    /// can resolve it. Without a store, the approval-required error
+    /// still propagates — the only thing the store adds is durable
+    /// pending-gate state.
+    gate_store: Option<Arc<dyn BudgetGateStore>>,
+    /// Default expiry window for gates opened by this accountant. Tests
+    /// can shrink this to drive F5 (expiry).
+    gate_expires_after: chrono::Duration,
 }
 
 /// Per-run reservation bookkeeping. Held until `post_model_call` reconciles
@@ -210,6 +222,8 @@ impl GovernorBackedAccountant {
             in_flight: Arc::new(DashMap::new()),
             seeding_policy: None,
             seeded: Arc::new(DashSet::new()),
+            gate_store: None,
+            gate_expires_after: chrono::Duration::hours(24),
         }
     }
 
@@ -224,6 +238,51 @@ impl GovernorBackedAccountant {
     pub fn with_seeding_policy(mut self, policy: BudgetSeedingPolicy) -> Self {
         self.seeding_policy = Some(policy);
         self
+    }
+
+    /// Install an approval-gate store. When set, the accountant opens a
+    /// new [`BudgetApprovalGate`] every time the governor cascade
+    /// returns [`ResourceError::RequiresApproval`]. The gate id is
+    /// available to user-facing handlers / tests via
+    /// `gate_store.list_pending()`; resolving the gate (Approve with a
+    /// higher limit, Cancel, or expiry) is the caller's responsibility.
+    pub fn with_gate_store(mut self, store: Arc<dyn BudgetGateStore>) -> Self {
+        self.gate_store = Some(store);
+        self
+    }
+
+    /// Override the default 24h gate-expiry window. Tests set a short
+    /// window to drive the F5 (expired) scenario.
+    pub fn with_gate_expiry(mut self, duration: chrono::Duration) -> Self {
+        self.gate_expires_after = duration;
+        self
+    }
+
+    /// Open a pending approval gate for the given `needed`. Returns the
+    /// new gate id. Best-effort: storage errors are logged and the
+    /// caller still sees the `BudgetApprovalRequired` host error so the
+    /// run fails closed.
+    fn open_approval_gate(&self, needed: &ResourceApprovalNeeded) -> Option<BudgetGateId> {
+        let store = self.gate_store.as_ref()?;
+        let now = Utc::now();
+        let gate = BudgetApprovalGate {
+            id: BudgetGateId::new(),
+            needed: needed.clone(),
+            opened_at: now,
+            expires_at: now + self.gate_expires_after,
+            status: BudgetGateStatus::Pending,
+        };
+        let id = gate.id;
+        if let Err(error) = store.open(gate) {
+            tracing::warn!(
+                ?error,
+                "budget accountant failed to persist pending approval gate; \
+                 the user will still see the approval-required error but the \
+                 durable gate record is missing"
+            );
+            return None;
+        }
+        Some(id)
     }
 
     fn seed_if_missing(&self, scope: &ResourceScope) {
@@ -397,11 +456,19 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
                 }
                 Ok(())
             }
-            Err(ResourceError::RequiresApproval { needed, .. }) => Err(LoopModelGatewayError::new(
-                AgentLoopHostErrorKind::BudgetApprovalRequired,
-                format!("budget approval required for {}", needed.dimension),
-            )
-            .map_err(internal_summary_error)?),
+            Err(ResourceError::RequiresApproval { needed, .. }) => {
+                // Side-effect: persist a pending gate when a store is
+                // wired. The error returned to the run is unchanged so
+                // existing callers still fail closed; the gate is what
+                // lets a user-facing handler (or test) resolve the
+                // approval out-of-band.
+                let _ = self.open_approval_gate(needed.as_ref());
+                Err(LoopModelGatewayError::new(
+                    AgentLoopHostErrorKind::BudgetApprovalRequired,
+                    format!("budget approval required for {}", needed.dimension),
+                )
+                .map_err(internal_summary_error)?)
+            }
             Err(ResourceError::LimitExceeded { denial, .. }) => Err(LoopModelGatewayError::new(
                 AgentLoopHostErrorKind::BudgetExceeded,
                 format!("budget exhausted for {}", denial.dimension),

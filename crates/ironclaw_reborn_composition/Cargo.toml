@@ -22,6 +22,11 @@ root-llm-provider = [
     "ironclaw_llm/registry-provider-factory",
     "ironclaw_reborn/root-llm-provider",
 ]
+# Expose test-only helpers (mock LLM gateway, budget runtime accessors)
+# so integration tests in this crate's `tests/` directory and downstream
+# crates can drive `build_reborn_runtime` with a stub model gateway and
+# inspect the budget pipeline end-to-end.
+test-support = []
 libsql = [
     "dep:libsql",
     "ironclaw_filesystem/libsql",
@@ -75,8 +80,11 @@ tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+ironclaw_reborn_composition = { path = ".", features = ["test-support"] }
 ironclaw_skills = { path = "../ironclaw_skills" }
 ironclaw_threads = { path = "../ironclaw_threads" }
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
+rust_decimal_macros = "1"
 tempfile = "3"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 tokio = { version = "1", features = ["macros", "rt", "time"] }

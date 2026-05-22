@@ -53,6 +53,16 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// stream".
     #[allow(dead_code)]
     pub(crate) budget_event_sink: Arc<dyn ironclaw_resources::BudgetEventSink>,
+    /// Same sink as `budget_event_sink` but typed as the concrete
+    /// `InMemoryBudgetEventSink` so the runtime can expose `drain()` /
+    /// `snapshot()` to tests without leaking the concrete type into the
+    /// production `BudgetEventSink` boundary.
+    pub(crate) in_memory_budget_event_sink: Arc<ironclaw_resources::InMemoryBudgetEventSink>,
+    /// Approval-gate store used to surface `BudgetApprovalRequired` to a
+    /// user. Stays in-memory in local-dev; production composition will
+    /// swap in the filesystem-backed `FilesystemBudgetGateStore`.
+    #[allow(dead_code)]
+    pub(crate) budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -150,10 +160,13 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let turn_state = Arc::new(InMemoryTurnStateStore::default());
+    let in_memory_budget_event_sink = Arc::new(ironclaw_resources::InMemoryBudgetEventSink::new());
     let budget_event_sink: Arc<dyn ironclaw_resources::BudgetEventSink> =
-        Arc::new(ironclaw_resources::InMemoryBudgetEventSink::new());
+        Arc::clone(&in_memory_budget_event_sink) as Arc<dyn ironclaw_resources::BudgetEventSink>;
     let resource_governor =
         Arc::new(InMemoryResourceGovernor::new().with_event_sink(Arc::clone(&budget_event_sink)));
+    let budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore> =
+        Arc::new(ironclaw_resources::InMemoryBudgetGateStore::new());
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         turn_state: Arc::clone(&turn_state),
         checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
@@ -162,6 +175,8 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         resource_governor: Arc::clone(&resource_governor)
             as Arc<dyn ironclaw_resources::ResourceGovernor>,
         budget_event_sink,
+        in_memory_budget_event_sink,
+        budget_gate_store,
     });
 
     let mut services = HostRuntimeServices::new(

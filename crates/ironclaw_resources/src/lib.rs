@@ -625,6 +625,18 @@ pub trait ResourceGovernor: Send + Sync {
         &self,
         account: &ResourceAccount,
     ) -> Result<Option<AccountSnapshot>, ResourceError>;
+
+    /// Convenience helper that returns the recorded spend tally for an
+    /// account. Default impl reads through [`Self::account_snapshot`].
+    /// Implementations that hold spend directly may override for cheaper
+    /// access. Returns the zero tally when the account has never been
+    /// touched.
+    fn usage_for(&self, account: &ResourceAccount) -> Result<ResourceTally, ResourceError> {
+        Ok(self
+            .account_snapshot(account)?
+            .map(|snapshot| snapshot.ledger.spent)
+            .unwrap_or_default())
+    }
 }
 
 /// Snapshot schema version.

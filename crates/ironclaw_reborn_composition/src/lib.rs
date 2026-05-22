@@ -28,6 +28,8 @@ mod profile;
 mod readiness;
 mod runtime;
 mod runtime_input;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 mod webui;
 
 use ironclaw_runtime_policy::{EffectiveRuntimePolicy as ResolvedRuntimePolicy, ResolveError};

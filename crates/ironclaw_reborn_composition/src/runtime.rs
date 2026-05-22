@@ -170,6 +170,83 @@ impl RebornRuntime {
         self.turn_coordinator.clone()
     }
 
+    /// Test-only handle on the resource governor backing the budget
+    /// accountant. Exposed under `test-support` so integration tests can
+    /// assert ledger state after a `send_user_message` round-trip.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn budget_resource_governor(
+        &self,
+    ) -> Option<Arc<dyn ironclaw_resources::ResourceGovernor>> {
+        self.services
+            .local_runtime
+            .as_ref()
+            .map(|rt| Arc::clone(&rt.resource_governor))
+    }
+
+    /// Test-only handle on the in-memory budget event sink wired to the
+    /// governor. Tests use `.drain()` / `.snapshot()` to inspect the
+    /// audit-event stream produced by a run.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn budget_event_sink(&self) -> Option<Arc<ironclaw_resources::InMemoryBudgetEventSink>> {
+        self.services
+            .local_runtime
+            .as_ref()
+            .map(|rt| Arc::clone(&rt.in_memory_budget_event_sink))
+    }
+
+    /// Test-only handle on the budget approval-gate store. Tests resolve
+    /// pending gates here (Approve / Cancel / let-expire) to drive the
+    /// F3/F4/F5 approval-flow scenarios.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn budget_gate_store(&self) -> Option<Arc<dyn ironclaw_resources::BudgetGateStore>> {
+        self.services
+            .local_runtime
+            .as_ref()
+            .map(|rt| Arc::clone(&rt.budget_gate_store))
+    }
+
+    /// Apply the outcome of a resolved [`BudgetApprovalGate`]: when the
+    /// gate is approved, raise the affected account's limit so a
+    /// subsequent `send_user_message` can re-issue the reservation that
+    /// previously crossed the pause threshold. Returns the resolved
+    /// gate.
+    ///
+    /// Production wires this through a gate-resolution route on the web
+    /// gateway; the test-only accessor lets E2E tests drive F3 / F4 / F5
+    /// without booting that surface.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn apply_resolved_budget_gate(
+        &self,
+        gate_id: ironclaw_resources::BudgetGateId,
+    ) -> Result<ironclaw_resources::BudgetApprovalGate, RebornRuntimeError> {
+        let local_runtime = self.services.local_runtime.as_ref().ok_or_else(|| {
+            RebornRuntimeError::InvalidArgument {
+                reason: "local-dev runtime substrate required to apply a budget gate".to_string(),
+            }
+        })?;
+        let gate = local_runtime
+            .budget_gate_store
+            .get(gate_id)
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("budget gate read failed: {error}"),
+            })?
+            .ok_or_else(|| RebornRuntimeError::InvalidArgument {
+                reason: format!("unknown budget gate: {gate_id}"),
+            })?;
+        if let ironclaw_resources::BudgetGateStatus::Approved {
+            increased_limit, ..
+        } = &gate.status
+        {
+            local_runtime
+                .resource_governor
+                .set_limit(gate.needed.account.clone(), increased_limit.clone())
+                .map_err(|error| RebornRuntimeError::InvalidArgument {
+                    reason: format!("failed to apply approved budget limit: {error}"),
+                })?;
+        }
+        Ok(gate)
+    }
+
     /// Create a fresh conversation. Returns the opaque conversation id used
     /// in subsequent `send_user_message` calls.
     ///
@@ -472,8 +549,10 @@ pub async fn build_reborn_runtime(
         poll,
         identity,
         skill_context_source,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         model_gateway_override,
+        #[cfg(any(test, feature = "test-support"))]
+        model_cost_table_override,
     } = input;
 
     let services_input = services_input.ok_or(RebornRuntimeError::InvalidArgument {
@@ -530,9 +609,15 @@ pub async fn build_reborn_runtime(
         mission_id: None,
     };
 
+    // Resolved cost table is either: the LLM-policy-derived table (real
+    // LLM wired), a test override (so tests can drive deterministic
+    // prices through stub gateways), or None — in which case the
+    // accountant doesn't get built (no spend, no cascade).
+    let mut resolved_cost_table: Option<Arc<dyn ironclaw_loop_support::ModelCostTable>> = None;
+
     #[cfg(feature = "root-llm-provider")]
     let (model_gateway, llm_cost_table) = {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let bundle = if let Some(gateway) = model_gateway_override {
             (gateway, None)
         } else {
@@ -544,7 +629,7 @@ pub async fn build_reborn_runtime(
                 None => (build_stub_gateway(), None),
             }
         };
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let bundle = match llm {
             Some(cfg) => {
                 let LlmGatewayBundle { gateway, policy } = build_llm_gateway(cfg)?;
@@ -556,7 +641,7 @@ pub async fn build_reborn_runtime(
     };
     #[cfg(not(feature = "root-llm-provider"))]
     let (model_gateway, llm_cost_table) = {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let bundle = if let Some(gateway) = model_gateway_override {
             (gateway, None::<ironclaw_loop_support::StaticModelCostTable>)
         } else {
@@ -565,7 +650,7 @@ pub async fn build_reborn_runtime(
                 None::<ironclaw_loop_support::StaticModelCostTable>,
             )
         };
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let bundle = (
             build_stub_gateway(),
             None::<ironclaw_loop_support::StaticModelCostTable>,
@@ -573,20 +658,31 @@ pub async fn build_reborn_runtime(
         bundle
     };
 
-    // Build the model budget accountant from the resolved LLM cost table
-    // (real per-provider prices via `ironclaw_llm::costs::model_cost`) plus
-    // the local-dev governor. When the gateway is the stub (no LLM wired)
-    // we deliberately skip the accountant — there's no spend to track and
-    // the cascade would never fire. Production composition reuses the
-    // same shape over the persistent governor.
+    if let Some(cost_table) = llm_cost_table {
+        resolved_cost_table = Some(Arc::new(cost_table));
+    }
+    // Test-only: callers using `with_test_model_gateway` can pair the
+    // override with a `model_cost_table_override` so the accountant fires
+    // with deterministic per-token prices. When both the LLM-derived
+    // table AND the test override are set, the test override wins (the
+    // test is being explicit about what costs it wants).
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(table) = model_cost_table_override {
+        resolved_cost_table = Some(table);
+    }
+
+    // Build the model budget accountant from the resolved cost table plus
+    // the local-dev governor. When neither an LLM policy nor a test
+    // override supplies a cost table we deliberately skip the accountant
+    // — there's no spend to track and the cascade would never fire.
     let model_budget_accountant: Option<
         Arc<dyn ironclaw_turns::run_profile::LoopModelBudgetAccountant>,
-    > = match llm_cost_table {
+    > = match resolved_cost_table {
         Some(cost_table) => {
             let governor = Arc::clone(&local_runtime.resource_governor);
-            let cost_table: Arc<dyn ironclaw_loop_support::ModelCostTable> = Arc::new(cost_table);
             let accountant =
-                ironclaw_loop_support::GovernorBackedAccountant::new(governor, cost_table);
+                ironclaw_loop_support::GovernorBackedAccountant::new(governor, cost_table)
+                    .with_gate_store(Arc::clone(&local_runtime.budget_gate_store));
             Some(Arc::new(accountant))
         }
         None => None,
