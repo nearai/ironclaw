@@ -3,47 +3,42 @@
 //! This module consumes the `ironclaw_auth` continuation vocabulary and routes
 //! turn-gate resume continuations through the same trusted `TurnCoordinator`
 //! boundary as the WebUI gate-resolution path. It intentionally does not define
-//! another auth-flow model.
+//! another auth-flow model or handle non-turn continuation variants.
 
 use std::sync::Arc;
 
 use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef};
 use ironclaw_turns::{
-    GateRef, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnRequest, SourceBindingRef, TurnActor,
-    TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
+    GateRef, IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnActor, TurnCoordinator,
+    TurnError, TurnRunId, TurnScope,
 };
 use uuid::Uuid;
 
 use crate::ProductWorkflowError;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthContinuationDispatchOutcome {
-    SetupOnly,
-    LifecycleActivation,
-    ProductActionResume,
-    TurnGateResumed { run_id: TurnRunId },
-}
+use crate::binding_ref::{bounded_reply_target_binding_ref, bounded_source_binding_ref};
 
 #[derive(Clone)]
-pub struct ProductAuthContinuationDispatcher {
+pub struct ProductAuthTurnGateResumeDispatcher {
     turn_coordinator: Arc<dyn TurnCoordinator>,
 }
 
-impl ProductAuthContinuationDispatcher {
+impl ProductAuthTurnGateResumeDispatcher {
     pub fn new(turn_coordinator: Arc<dyn TurnCoordinator>) -> Self {
         Self { turn_coordinator }
     }
 
-    pub async fn dispatch(
+    pub async fn dispatch_turn_gate_resume(
         &self,
         event: AuthContinuationEvent,
-    ) -> Result<AuthContinuationDispatchOutcome, ProductWorkflowError> {
+    ) -> Result<TurnRunId, ProductWorkflowError> {
         let AuthContinuationRef::TurnGateResume {
             turn_run_ref,
             gate_ref,
         } = &event.continuation
         else {
-            return Ok(outcome_for_non_turn_continuation(&event.continuation));
+            return Err(ProductWorkflowError::TurnSubmissionRejected {
+                reason: "auth continuation is not a turn-gate resume".to_string(),
+            });
         };
 
         let scope = turn_scope_from_auth_event(&event)?;
@@ -58,15 +53,25 @@ impl ProductAuthContinuationDispatcher {
                 actor,
                 run_id,
                 gate_resolution_ref,
-                expected_status: Some(TurnStatus::BlockedAuth),
-                source_binding_ref: bounded_ref("auth-continuation-src", &binding_id)?,
-                reply_target_binding_ref: bounded_ref("auth-continuation-reply", &binding_id)?,
+                precondition: ResumeTurnPrecondition::BlockedAuthGate,
+                source_binding_ref: bounded_source_binding_ref(
+                    "auth-continuation-src",
+                    &binding_id,
+                    220,
+                )
+                .map_err(binding_ref_error)?,
+                reply_target_binding_ref: bounded_reply_target_binding_ref(
+                    "auth-continuation-reply",
+                    &binding_id,
+                    220,
+                )
+                .map_err(binding_ref_error)?,
                 idempotency_key: idempotency_key_for_flow(event.flow_id.to_string())?,
             })
             .await
             .map_err(map_auth_resume_error)?;
 
-        Ok(AuthContinuationDispatchOutcome::TurnGateResumed { run_id })
+        Ok(run_id)
     }
 }
 
@@ -78,21 +83,6 @@ fn map_auth_resume_error(error: TurnError) -> ProductWorkflowError {
             }
         }
         error => ProductWorkflowError::TurnSubmissionFailed { error },
-    }
-}
-
-fn outcome_for_non_turn_continuation(
-    continuation: &AuthContinuationRef,
-) -> AuthContinuationDispatchOutcome {
-    match continuation {
-        AuthContinuationRef::SetupOnly => AuthContinuationDispatchOutcome::SetupOnly,
-        AuthContinuationRef::LifecycleActivation { .. } => {
-            AuthContinuationDispatchOutcome::LifecycleActivation
-        }
-        AuthContinuationRef::ProductActionResume { .. } => {
-            AuthContinuationDispatchOutcome::ProductActionResume
-        }
-        AuthContinuationRef::TurnGateResume { .. } => unreachable!("handled by caller"),
     }
 }
 
@@ -134,32 +124,10 @@ fn idempotency_key_for_flow(flow_id: String) -> Result<IdempotencyKey, ProductWo
     })
 }
 
-trait RefFactory: Sized {
-    fn build(value: String) -> Result<Self, String>;
-}
-
-impl RefFactory for SourceBindingRef {
-    fn build(value: String) -> Result<Self, String> {
-        Self::new(value)
-    }
-}
-
-impl RefFactory for ReplyTargetBindingRef {
-    fn build(value: String) -> Result<Self, String> {
-        Self::new(value)
-    }
-}
-
-fn bounded_ref<T: RefFactory>(prefix: &str, raw: &str) -> Result<T, ProductWorkflowError> {
-    let value = if raw.len() <= 220 && !raw.chars().any(|c| c == '\0' || c.is_control()) {
-        format!("{prefix}:{raw}")
-    } else {
-        let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, raw.as_bytes());
-        format!("{prefix}:{id}")
-    };
-    T::build(value).map_err(|reason| ProductWorkflowError::TurnSubmissionRejected {
+fn binding_ref_error(reason: String) -> ProductWorkflowError {
+    ProductWorkflowError::TurnSubmissionRejected {
         reason: format!("invalid auth continuation binding ref: {reason}"),
-    })
+    }
 }
 
 #[cfg(test)]
@@ -233,9 +201,8 @@ mod tests {
                 .expect("state lock")
                 .clone()
                 .ok_or(TurnError::ScopeNotFound)?;
-            if request
-                .expected_status
-                .is_some_and(|expected| state.status != expected)
+            if let Some(required) = request.precondition.required_status()
+                && state.status != required
             {
                 return Err(TurnError::InvalidTransition {
                     from: state.status,
@@ -337,7 +304,7 @@ mod tests {
     #[tokio::test]
     async fn turn_gate_continuation_resumes_through_turn_coordinator() {
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
-        let dispatcher = ProductAuthContinuationDispatcher::new(coordinator.clone());
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
         let run_id = TurnRunId::new();
         coordinator.set_state(run_state(
             run_id,
@@ -349,17 +316,20 @@ mod tests {
             gate_ref: AuthGateRef::new("gate:auth").unwrap(),
         });
 
-        let outcome = dispatcher.dispatch(event).await.expect("dispatch");
+        let resumed_run_id = dispatcher
+            .dispatch_turn_gate_resume(event)
+            .await
+            .expect("dispatch");
 
-        assert_eq!(
-            outcome,
-            AuthContinuationDispatchOutcome::TurnGateResumed { run_id }
-        );
+        assert_eq!(resumed_run_id, run_id);
         let resumes = coordinator.resumes();
         assert_eq!(resumes.len(), 1);
         assert_eq!(resumes[0].run_id, run_id);
         assert_eq!(resumes[0].gate_resolution_ref.as_str(), "gate:auth");
-        assert_eq!(resumes[0].expected_status, Some(TurnStatus::BlockedAuth));
+        assert_eq!(
+            resumes[0].precondition,
+            ResumeTurnPrecondition::BlockedAuthGate
+        );
         assert_eq!(resumes[0].actor.user_id.as_str(), "alice");
         assert_eq!(resumes[0].scope.thread_id.as_str(), "thread-auth");
         assert!(
@@ -373,7 +343,7 @@ mod tests {
     #[tokio::test]
     async fn turn_gate_continuation_rejects_non_auth_gate() {
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
-        let dispatcher = ProductAuthContinuationDispatcher::new(coordinator.clone());
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
         let run_id = TurnRunId::new();
         coordinator.set_state(run_state(
             run_id,
@@ -386,7 +356,7 @@ mod tests {
         });
 
         let err = dispatcher
-            .dispatch(event)
+            .dispatch_turn_gate_resume(event)
             .await
             .expect_err("non-auth gates must not resume through auth continuation");
 
@@ -400,7 +370,7 @@ mod tests {
     #[tokio::test]
     async fn turn_gate_continuation_rejects_mismatched_auth_gate_ref() {
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
-        let dispatcher = ProductAuthContinuationDispatcher::new(coordinator.clone());
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
         let run_id = TurnRunId::new();
         coordinator.set_state(run_state(
             run_id,
@@ -413,7 +383,7 @@ mod tests {
         });
 
         let err = dispatcher
-            .dispatch(event)
+            .dispatch_turn_gate_resume(event)
             .await
             .expect_err("stale auth gate callbacks must not resume a different gate");
 
@@ -427,7 +397,7 @@ mod tests {
     #[tokio::test]
     async fn turn_gate_continuation_maps_resume_failure_to_turn_submission_failed() {
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
-        let dispatcher = ProductAuthContinuationDispatcher::new(coordinator.clone());
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
         let run_id = TurnRunId::new();
         coordinator.set_state(run_state(
             run_id,
@@ -443,7 +413,7 @@ mod tests {
         });
 
         let err = dispatcher
-            .dispatch(event)
+            .dispatch_turn_gate_resume(event)
             .await
             .expect_err("resume failure should be preserved");
 
@@ -456,14 +426,14 @@ mod tests {
     #[tokio::test]
     async fn turn_gate_continuation_rejects_invalid_turn_run_ref() {
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
-        let dispatcher = ProductAuthContinuationDispatcher::new(coordinator.clone());
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
         let event = scoped_event(AuthContinuationRef::TurnGateResume {
             turn_run_ref: TurnRunRef::new("not-a-uuid").unwrap(),
             gate_ref: AuthGateRef::new("gate:auth").unwrap(),
         });
 
         let err = dispatcher
-            .dispatch(event)
+            .dispatch_turn_gate_resume(event)
             .await
             .expect_err("invalid run ref should reject before resume");
 
@@ -475,26 +445,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn non_turn_continuations_do_not_resume_turns() {
+    async fn turn_gate_dispatcher_rejects_non_turn_continuations() {
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
-        let dispatcher = ProductAuthContinuationDispatcher::new(coordinator.clone());
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator.clone());
         let event = scoped_event(AuthContinuationRef::LifecycleActivation {
             package_ref: LifecyclePackageRef::new("github").unwrap(),
         });
 
-        let outcome = dispatcher.dispatch(event).await.expect("dispatch");
+        let err = dispatcher
+            .dispatch_turn_gate_resume(event)
+            .await
+            .expect_err("non-turn continuations are owned by the caller");
 
-        assert_eq!(
-            outcome,
-            AuthContinuationDispatchOutcome::LifecycleActivation
-        );
+        assert!(matches!(
+            err,
+            ProductWorkflowError::TurnSubmissionRejected { .. }
+        ));
         assert!(coordinator.resumes().is_empty());
     }
 
     #[tokio::test]
     async fn turn_gate_continuation_requires_thread_scope() {
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
-        let dispatcher = ProductAuthContinuationDispatcher::new(coordinator);
+        let dispatcher = ProductAuthTurnGateResumeDispatcher::new(coordinator);
         let run_id = TurnRunId::new();
         let mut event = scoped_event(AuthContinuationRef::TurnGateResume {
             turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
@@ -503,7 +476,7 @@ mod tests {
         event.scope.resource.thread_id = None;
 
         let err = dispatcher
-            .dispatch(event)
+            .dispatch_turn_gate_resume(event)
             .await
             .expect_err("thread scope is required");
 

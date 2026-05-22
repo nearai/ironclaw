@@ -1221,9 +1221,8 @@ impl Inner {
                     to: TurnStatus::Queued,
                 });
             }
-            if request
-                .expected_status
-                .is_some_and(|expected| record.status != expected)
+            if let Some(required) = request.precondition.required_status()
+                && record.status != required
             {
                 return Err(TurnError::InvalidTransition {
                     from: record.status,

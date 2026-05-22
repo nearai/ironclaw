@@ -19,16 +19,18 @@ use ironclaw_threads::{
     MessageStatus, ReplayAcceptedInboundMessageRequest, SessionThreadService, ThreadMessageId,
     ThreadScope,
 };
-use ironclaw_turns::{AcceptedMessageRef, TurnError, TurnRunId};
 use ironclaw_turns::{
-    IdempotencyKey, ReplyTargetBindingRef, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
-    TurnActor, TurnCoordinator, TurnScope,
+    AcceptedMessageRef, SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator,
+    TurnError, TurnRunId, TurnScope,
 };
 use uuid::Uuid;
 
 use crate::binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,
+};
+use crate::binding_ref::{
+    bounded_idempotency_key, bounded_reply_target_binding_ref, bounded_source_binding_ref,
 };
 use crate::error::ProductWorkflowError;
 use crate::policy::{
@@ -546,11 +548,23 @@ impl AcceptedProductInboundTurn {
             binding.thread_id.clone(),
         );
         let actor = TurnActor::new(binding.user_id.clone());
-        let source_binding_ref = bounded_ref::<SourceBindingRef>("src", &source_binding_id)?;
+        let source_binding_ref = bounded_source_binding_ref("src", &source_binding_id, 240)
+            .map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
+                reason: format!("invalid src ref: {e}"),
+            })?;
         let accepted_message_ref = accepted_message_ref(message_id)?;
         let reply_target_binding_ref =
-            bounded_ref::<ReplyTargetBindingRef>("reply", &reply_target_binding_id)?;
-        let idempotency_key = bounded_ref::<IdempotencyKey>("turn", &idempotency_key_raw)?;
+            bounded_reply_target_binding_ref("reply", &reply_target_binding_id, 240).map_err(
+                |e| ProductWorkflowError::TurnSubmissionRejected {
+                    reason: format!("invalid reply ref: {e}"),
+                },
+            )?;
+        let idempotency_key =
+            bounded_idempotency_key("turn", &idempotency_key_raw, 240).map_err(|e| {
+                ProductWorkflowError::TurnSubmissionRejected {
+                    reason: format!("invalid turn ref: {e}"),
+                }
+            })?;
 
         let request = SubmitTurnRequest {
             scope: turn_scope,
@@ -658,28 +672,6 @@ fn thread_scope_from_binding(
     })
 }
 
-trait RefFactory: Sized {
-    fn build(value: String) -> Result<Self, String>;
-}
-
-impl RefFactory for SourceBindingRef {
-    fn build(value: String) -> Result<Self, String> {
-        Self::new(value)
-    }
-}
-
-impl RefFactory for ReplyTargetBindingRef {
-    fn build(value: String) -> Result<Self, String> {
-        Self::new(value)
-    }
-}
-
-impl RefFactory for IdempotencyKey {
-    fn build(value: String) -> Result<Self, String> {
-        Self::new(value)
-    }
-}
-
 fn product_source_binding_id(
     envelope: &ProductInboundEnvelope,
     binding: &ResolvedBinding,
@@ -719,18 +711,6 @@ fn submit_idempotency_key(envelope: &ProductInboundEnvelope, binding: &ResolvedB
 
 fn segment(name: &str, value: &str) -> String {
     format!("{name}:{}:{value};", value.len())
-}
-
-fn bounded_ref<T: RefFactory>(prefix: &str, raw: &str) -> Result<T, ProductWorkflowError> {
-    let value = if raw.len() <= 240 && !raw.chars().any(|c| c == '\0' || c.is_control()) {
-        format!("{prefix}:{raw}")
-    } else {
-        let id = Uuid::new_v5(&Uuid::NAMESPACE_OID, raw.as_bytes());
-        format!("{prefix}:{id}")
-    };
-    T::build(value).map_err(|e| ProductWorkflowError::TurnSubmissionRejected {
-        reason: format!("invalid {prefix} ref: {e}"),
-    })
 }
 
 #[cfg(test)]

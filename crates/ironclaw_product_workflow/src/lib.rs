@@ -27,6 +27,7 @@
 mod action;
 mod auth_continuation;
 mod binding;
+mod binding_ref;
 mod conversation_binding;
 mod error;
 #[cfg(any(test, feature = "test-support"))]
@@ -43,7 +44,7 @@ pub use action::{
     ActionDispatchKind, ActionFingerprintKey, ActionPhase, AuthRequestRef, LinkedThreadActionId,
     ProductActionId, ProductCommandName, ProductInboundAction, SourceBindingKey,
 };
-pub use auth_continuation::{AuthContinuationDispatchOutcome, ProductAuthContinuationDispatcher};
+pub use auth_continuation::ProductAuthTurnGateResumeDispatcher;
 pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,

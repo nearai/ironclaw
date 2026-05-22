@@ -10,7 +10,7 @@ use ironclaw_auth::{
     OAuthCallbackInput, OAuthProviderCallbackRequest, OpaqueStateHash, ProviderCallbackOutcome,
     SecretCleanupService,
 };
-use ironclaw_product_workflow::ProductAuthContinuationDispatcher;
+use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_turns::TurnCoordinator;
 use serde::{Deserialize, Serialize};
 
@@ -36,13 +36,13 @@ impl RebornAuthContinuationDispatcher for NoopAuthContinuationDispatcher {
 }
 
 pub(crate) struct RebornProductWorkflowAuthContinuationDispatcher {
-    dispatcher: ProductAuthContinuationDispatcher,
+    turn_gate_dispatcher: ProductAuthTurnGateResumeDispatcher,
 }
 
 impl RebornProductWorkflowAuthContinuationDispatcher {
     pub(crate) fn new(turn_coordinator: Arc<dyn TurnCoordinator>) -> Self {
         Self {
-            dispatcher: ProductAuthContinuationDispatcher::new(turn_coordinator),
+            turn_gate_dispatcher: ProductAuthTurnGateResumeDispatcher::new(turn_coordinator),
         }
     }
 }
@@ -53,19 +53,26 @@ impl RebornAuthContinuationDispatcher for RebornProductWorkflowAuthContinuationD
         &self,
         event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
-        let flow_id = event.flow_id;
-        self.dispatcher
-            .dispatch(event)
-            .await
-            .map(|_| ())
-            .map_err(|error| {
-                tracing::debug!(
-                    %flow_id,
-                    error = %error,
-                    "product auth continuation dispatch through product workflow failed"
-                );
-                AuthProductError::BackendUnavailable
-            })
+        if matches!(
+            &event.continuation,
+            AuthContinuationRef::TurnGateResume { .. }
+        ) {
+            let flow_id = event.flow_id;
+            self.turn_gate_dispatcher
+                .dispatch_turn_gate_resume(event)
+                .await
+                .map(|_| ())
+                .map_err(|error| {
+                    tracing::debug!(
+                        %flow_id,
+                        error = %error,
+                        "product auth turn-gate continuation dispatch failed"
+                    );
+                    AuthProductError::BackendUnavailable
+                })
+        } else {
+            Ok(())
+        }
     }
 }
 

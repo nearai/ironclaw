@@ -58,14 +58,14 @@ may re-dispatch the typed continuation without re-exchanging provider code.
 Callback route code must not activate extensions, resume turns, replay prompts,
 or dispatch runtime work directly.
 
-`ironclaw_product_workflow::ProductAuthContinuationDispatcher` is the
+`ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher` is the
 product-workflow bridge for `AuthContinuationRef::TurnGateResume`. It converts
-the typed auth continuation into a `TurnCoordinator::resume_turn` call using
-the canonical turn scope, actor, run id, and gate ref carried by the auth
-event. It does not define auth state or credential vocabulary. Setup-only,
-lifecycle-activation, and product-action continuations remain explicit
-continuation outcomes for future handlers and must not be performed inline by
-the OAuth callback route.
+that specific typed auth continuation into a `TurnCoordinator::resume_turn` call
+using the canonical turn scope, actor, run id, and gate ref carried by the auth
+event. It does not define auth state, credential vocabulary, or generic
+continuation dispatch. Setup-only, lifecycle-activation, and product-action
+continuations remain explicit non-turn cases for their owning handlers and must
+not be performed inline by the OAuth callback route.
 
 The blocked-run interaction loop is separate: #3094 owns listing/rendering
 approval/auth gates from blocked run-state and routing user decisions back into
@@ -236,7 +236,7 @@ strings.
 | Product behavior | V1 evidence path | Reborn owner | First-slice status |
 | --- | --- | --- | --- |
 | Extension/provider OAuth start | `src/extensions/manager.rs`, `src/auth/mod.rs` | `AuthFlowManager`, `CredentialSetupService`, `AuthProviderClient` | Contracted; production migration deferred |
-| Hosted OAuth callback | `src/channels/web/features/oauth/mod.rs` | `RebornProductAuthServices::handle_oauth_callback`, `ProductAuthContinuationDispatcher` for turn-gate resume continuations | Reborn handler seam ready; HTTP route mounting deferred |
+| Hosted OAuth callback | `src/channels/web/features/oauth/mod.rs` | `RebornProductAuthServices::handle_oauth_callback`, `ProductAuthTurnGateResumeDispatcher` for turn-gate resume continuations | Reborn handler seam ready; HTTP route mounting deferred |
 | Local OAuth callback | `src/extensions/manager.rs`, `src/auth/oauth.rs` | `AuthFlowManager`, `AuthProviderClient` | Inventory only |
 | Manual token entry from chat | `src/agent/agent_loop.rs`, `src/agent/thread_ops.rs` | `AuthInteractionService` secure submit | Contracted; route migration deferred |
 | Engine/gate auth credential submit | `src/bridge/router.rs` | `AuthInteractionService`, `CredentialSetupService`, typed continuation | Contracted; migration deferred |
