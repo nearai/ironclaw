@@ -43,7 +43,7 @@ use ironclaw_secrets::{SecretMaterial, SecretStore, SecretStoreError};
 use ironclaw_trust::TrustDecision;
 use secrecy::ExposeSecret;
 use serde_json::Value;
-use std::{collections::BTreeMap, env, fmt, sync::Arc};
+use std::{borrow::Cow, collections::BTreeMap, env, fmt, sync::Arc};
 use thiserror::Error;
 
 mod capability_catalog;
@@ -1459,27 +1459,24 @@ fn apply_credential_injection(
                     reason: "credential injection path placeholder is invalid".to_string(),
                 });
             }
+            if value.is_empty() || value.contains('/') || value.contains('?') || value.contains('#')
+            {
+                return Err(RuntimeHttpEgressError::Credential {
+                    reason: "credential injection path value is invalid".to_string(),
+                });
+            }
             let mut url =
                 url::Url::parse(&request.url).map_err(|_| RuntimeHttpEgressError::Credential {
                     reason: "credential injection target URL is invalid".to_string(),
                 })?;
-            let Some(segments) = url.path_segments() else {
+            let Some(_) = url.path_segments() else {
                 return Err(RuntimeHttpEgressError::Credential {
                     reason: "credential injection target URL has no path segments".to_string(),
                 });
             };
-            let mut replaced = false;
-            let rewritten = segments
-                .map(|segment| {
-                    if segment == placeholder {
-                        replaced = true;
-                        value.to_string()
-                    } else {
-                        segment.to_string()
-                    }
-                })
-                .collect::<Vec<_>>();
-            if !replaced {
+            let path = url.path().to_string();
+            let path = path.strip_prefix('/').unwrap_or(&path);
+            if !path.split('/').any(|segment| segment == placeholder) {
                 return Err(RuntimeHttpEgressError::Credential {
                     reason: "credential injection path placeholder was not found".to_string(),
                 });
@@ -1490,8 +1487,13 @@ fn apply_credential_injection(
                         reason: "credential injection target URL cannot be rewritten".to_string(),
                     })?;
             path_segments.clear();
-            for segment in &rewritten {
-                path_segments.push(segment);
+            for segment in path.split('/') {
+                let rewritten = if segment == placeholder {
+                    Cow::Borrowed(value)
+                } else {
+                    Cow::Borrowed(segment)
+                };
+                path_segments.push(rewritten.as_ref());
             }
             drop(path_segments);
             request.url = url.to_string();

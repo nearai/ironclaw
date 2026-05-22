@@ -8,8 +8,8 @@ use ironclaw_host_api::{
     MountGrant, MountPermissions, MountView, NetworkMethod, NetworkPolicy, NetworkScheme,
     NetworkTargetPattern, Obligation, ResourceEstimate, ResourceScope, RuntimeCredentialInjection,
     RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgress, RuntimeHttpEgressError,
-    RuntimeHttpEgressRequest, RuntimeHttpSaveTarget, RuntimeKind, ScopedPath, SecretHandle,
-    TenantId, TrustClass, UserId, VirtualPath,
+    RuntimeHttpEgressRequest, RuntimeHttpEgressResponse, RuntimeHttpSaveTarget, RuntimeKind,
+    ScopedPath, SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     BuiltinObligationServices, HostHttpEgressService, RuntimeHttpBodyStore,
@@ -381,6 +381,59 @@ fn host_http_egress_rejects_invalid_path_placeholder_before_transport() {
         assert!(
             network_recorder.lock().unwrap().is_empty(),
             "case {placeholder:?} must not dispatch to the network"
+        );
+    }
+}
+
+#[test]
+fn host_http_egress_rejects_path_placeholder_value_breaking_chars_before_transport() {
+    for material in [
+        "",
+        "sk-staged/secret",
+        "sk-staged?secret",
+        "sk-staged#secret",
+    ] {
+        let (error, network_recorder) = execute_path_placeholder_egress(
+            "https://api.example.test/v1/__credential__/run",
+            "__credential__",
+            material,
+        )
+        .expect_err("invalid path placeholder credential value must fail before network dispatch");
+
+        assert!(matches!(
+            error,
+            ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ));
+        assert!(error.to_string().contains("path value is invalid"));
+        assert!(
+            network_recorder.lock().unwrap().is_empty(),
+            "material {material:?} must not dispatch to the network"
+        );
+    }
+}
+
+#[test]
+fn host_http_egress_rejects_path_placeholder_target_url_errors_before_transport() {
+    for (url, expected_reason) in [
+        ("not a url", "credential injection target URL is invalid"),
+        (
+            "mailto:security@example.test",
+            "credential injection target URL has no path segments",
+        ),
+    ] {
+        let (error, network_recorder) =
+            execute_path_placeholder_egress(url, "__credential__", "sk-staged-secret").expect_err(
+                "invalid path placeholder target URL must fail before network dispatch",
+            );
+
+        assert!(matches!(
+            error,
+            ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ));
+        assert!(error.to_string().contains(expected_reason));
+        assert!(
+            network_recorder.lock().unwrap().is_empty(),
+            "url {url:?} must not dispatch to the network"
         );
     }
 }
@@ -3147,6 +3200,62 @@ impl NetworkHttpEgress for RecordingNetwork {
         self.requests.lock().unwrap().push(request);
         self.response.clone()
     }
+}
+
+type RecordedRequests = Arc<Mutex<Vec<NetworkHttpRequest>>>;
+type PathPlaceholderEgressResult = Result<
+    (RuntimeHttpEgressResponse, RecordedRequests),
+    (RuntimeHttpEgressError, RecordedRequests),
+>;
+
+fn execute_path_placeholder_egress(
+    url: &str,
+    placeholder: &str,
+    material: &str,
+) -> PathPlaceholderEgressResult {
+    let network = RecordingNetwork::ok(NetworkHttpResponse {
+        status: 200,
+        headers: vec![],
+        body: br#"{"ok":true}"#.to_vec(),
+        usage: NetworkUsage {
+            request_bytes: 5,
+            response_bytes: 11,
+            resolved_ip: None,
+        },
+    });
+    let network_recorder = network.requests.clone();
+    let scope = sample_scope();
+    let capability_id = sample_capability_id();
+    let handle = SecretHandle::new("api-token").unwrap();
+    let services = test_obligation_services();
+    stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+    stage_secret_sync(&services, &scope, &capability_id, &handle, material);
+    let service = services.host_http_egress(network);
+
+    let response = service.execute(RuntimeHttpEgressRequest {
+        runtime: RuntimeKind::Script,
+        scope,
+        capability_id: capability_id.clone(),
+        method: NetworkMethod::Post,
+        url: url.to_string(),
+        headers: vec![],
+        body: b"hello".to_vec(),
+        network_policy: sample_policy(),
+        credential_injections: vec![RuntimeCredentialInjection {
+            handle,
+            source: RuntimeCredentialSource::StagedObligation { capability_id },
+            target: RuntimeCredentialTarget::PathPlaceholder {
+                placeholder: placeholder.to_string(),
+            },
+            required: true,
+        }],
+        response_body_limit: Some(4096),
+        timeout_ms: None,
+    });
+
+    response
+        .map(|response| (response, network_recorder.clone()))
+        .map_err(|error| (error, network_recorder))
 }
 
 struct TokioBackedSecretStore {
