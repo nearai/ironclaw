@@ -1535,6 +1535,7 @@ checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
 dependencies = [
  "chrono",
  "phf 0.12.1",
+ "serde",
 ]
 
 [[package]]
@@ -2316,6 +2317,20 @@ dependencies = [
  "darling_core",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "dashmap"
+version = "6.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6361d5c062261c78a176addb82d4c821ae42bed6089de0e12603cd25de2059c"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
 ]
 
 [[package]]
@@ -4446,15 +4461,19 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "dashmap",
  "futures",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
  "ironclaw_memory",
+ "ironclaw_resources",
  "ironclaw_skills",
  "ironclaw_threads",
  "ironclaw_turns",
  "parking_lot",
+ "rust_decimal",
+ "rust_decimal_macros",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -4805,6 +4824,8 @@ dependencies = [
 name = "ironclaw_resources"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "chrono-tz",
  "deadpool-postgres",
  "fs2",
  "ironclaw_filesystem",
@@ -4818,6 +4839,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-postgres",
+ "tracing",
+ "uuid",
  "windows-sys 0.61.2",
 ]
 

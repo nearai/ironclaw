@@ -1416,7 +1416,7 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
             visible_request,
             self.harness.io.clone(),
             result_writer,
-            Some(milestone_sink),
+            milestone_sink,
         )
         .with_execution_mounts(execution_mounts)
         .for_run_context(run_context.clone());

@@ -574,7 +574,7 @@ pub async fn build_reborn_runtime(
         &services,
         actor_user_id.clone(),
         model_gateway,
-        Some(milestone_sink.clone()),
+        milestone_sink.clone(),
     )
     .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
     let capability_factory = local_dev_capabilities.capability_factory;

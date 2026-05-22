@@ -74,6 +74,11 @@ pub struct RebornConfigFile {
     /// `serve` subcommand is invoked. Optional — sparse configs
     /// fall back to compiled defaults documented on each field.
     pub webui: Option<WebuiSection>,
+    /// Cost-based budgets. Composition seeds defaults on first reservation
+    /// for each user/project; per-account overrides happen through the
+    /// `budget_set` tool or CLI at runtime. Setting any limit to `0` means
+    /// "unlimited" for that dimension.
+    pub budget: Option<BudgetSection>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -196,6 +201,41 @@ pub struct WebuiSection {
     /// `host:port`; composition does not parse further. Default
     /// `None` (fall back to Host-header compare + allowlist).
     pub canonical_host: Option<String>,
+}
+
+/// `[budget]` section. All limits in USD. **0 = unlimited.**
+///
+/// Composition uses these as defaults when first seeding a user/project
+/// account. Runtime tools can install per-account overrides at any time.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetSection {
+    /// Per-user daily ceiling. Default in composition is `5.00`.
+    pub user_daily_usd: Option<f64>,
+    /// Per-project daily ceiling. Default in composition is `2.00`.
+    pub project_daily_usd: Option<f64>,
+    /// Per-tick budget for background missions. Default `0.50`.
+    pub mission_per_tick_usd: Option<f64>,
+    /// Per-tick budget for heartbeat ticks. Default `0.05`.
+    pub heartbeat_per_tick_usd: Option<f64>,
+    /// Per-fire budget for lightweight routines. Default `0.02`.
+    pub routine_lightweight_usd: Option<f64>,
+    /// Per-fire budget for standard routines. Default `0.10`.
+    pub routine_standard_usd: Option<f64>,
+    /// Default per-job budget for one-shot container jobs. Default `1.00`.
+    pub background_job_default_usd: Option<f64>,
+    /// IANA timezone for calendar-period rollover (e.g. `"UTC"`,
+    /// `"America/Los_Angeles"`). Default `"UTC"`.
+    pub default_tz: Option<String>,
+    /// Warn threshold as a fraction in `[0.0, 1.0]`. Default `0.75`.
+    pub warn_at: Option<f64>,
+    /// Pause-with-approval threshold as a fraction in `[0.0, 1.0]`.
+    /// Must be `>= warn_at`. Default `0.90`.
+    pub pause_at: Option<f64>,
+    /// Multiplier applied to upfront cost estimates before reserving.
+    /// Default `1.20` (20% safety margin); reconcile releases the
+    /// overshoot.
+    pub overestimate_factor: Option<f64>,
 }
 
 /// One `[llm.<slot>]` entry. The slot name (typically `"default"` or
@@ -396,6 +436,67 @@ impl RebornConfigFile {
             }
             if let Some(host) = &webui.canonical_host {
                 check(Cow::Borrowed("webui.canonical_host"), host)?;
+            }
+        }
+        if let Some(budget) = &self.budget {
+            if let Some(tz) = &budget.default_tz {
+                check(Cow::Borrowed("budget.default_tz"), tz)?;
+            }
+            // 0 is a legitimate sentinel for "unlimited". Negative values
+            // are rejected outright so a bad number doesn't masquerade as a
+            // disabled cap.
+            for (label, value) in [
+                ("budget.user_daily_usd", budget.user_daily_usd),
+                ("budget.project_daily_usd", budget.project_daily_usd),
+                ("budget.mission_per_tick_usd", budget.mission_per_tick_usd),
+                (
+                    "budget.heartbeat_per_tick_usd",
+                    budget.heartbeat_per_tick_usd,
+                ),
+                (
+                    "budget.routine_lightweight_usd",
+                    budget.routine_lightweight_usd,
+                ),
+                ("budget.routine_standard_usd", budget.routine_standard_usd),
+                (
+                    "budget.background_job_default_usd",
+                    budget.background_job_default_usd,
+                ),
+                ("budget.overestimate_factor", budget.overestimate_factor),
+            ] {
+                if let Some(v) = value
+                    && v.is_finite()
+                    && v < 0.0
+                {
+                    return Err(RebornConfigFileError::InvalidApiVersion {
+                        path: path_str(),
+                        found: format!("{label} = {v}"),
+                        reason: "must be >= 0 (use 0 for unlimited)".to_string(),
+                    });
+                }
+            }
+            for (label, value) in [
+                ("budget.warn_at", budget.warn_at),
+                ("budget.pause_at", budget.pause_at),
+            ] {
+                if let Some(v) = value
+                    && !(0.0..=1.0).contains(&v)
+                {
+                    return Err(RebornConfigFileError::InvalidApiVersion {
+                        path: path_str(),
+                        found: format!("{label} = {v}"),
+                        reason: "thresholds must be in [0.0, 1.0]".to_string(),
+                    });
+                }
+            }
+            if let (Some(w), Some(p)) = (budget.warn_at, budget.pause_at)
+                && p < w
+            {
+                return Err(RebornConfigFileError::InvalidApiVersion {
+                    path: path_str(),
+                    found: format!("warn_at={w}, pause_at={p}"),
+                    reason: "pause_at must be >= warn_at".to_string(),
+                });
             }
         }
         Ok(())
@@ -704,5 +805,89 @@ api_version = "ironclaw.runtime/v1.not-a-number"
             err,
             RebornConfigFileError::InvalidApiVersion { .. }
         ));
+    }
+
+    #[test]
+    fn parses_valid_budget_section() {
+        let toml = r#"
+[budget]
+user_daily_usd = 7.50
+project_daily_usd = 0.00
+mission_per_tick_usd = 0.25
+heartbeat_per_tick_usd = 0.05
+routine_lightweight_usd = 0.01
+routine_standard_usd = 0.20
+background_job_default_usd = 2.00
+default_tz = "America/Los_Angeles"
+warn_at = 0.60
+pause_at = 0.85
+overestimate_factor = 1.50
+"#;
+        let cfg = RebornConfigFile::parse_text(toml, &attributed())
+            .expect("valid budget section must parse");
+        let budget = cfg.budget.as_ref().expect("budget section present");
+        assert_eq!(budget.user_daily_usd, Some(7.50));
+        assert_eq!(budget.project_daily_usd, Some(0.00));
+        assert_eq!(budget.default_tz.as_deref(), Some("America/Los_Angeles"));
+        assert_eq!(budget.warn_at, Some(0.60));
+        assert_eq!(budget.pause_at, Some(0.85));
+        assert_eq!(budget.overestimate_factor, Some(1.50));
+    }
+
+    #[test]
+    fn rejects_negative_budget_usd_field() {
+        let toml = r#"
+[budget]
+user_daily_usd = -1.0
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("negative USD must be rejected");
+        assert!(matches!(
+            err,
+            RebornConfigFileError::InvalidApiVersion { .. }
+        ));
+        assert!(err.to_string().contains("user_daily_usd"));
+    }
+
+    #[test]
+    fn rejects_budget_threshold_out_of_range() {
+        let toml = r#"
+[budget]
+warn_at = 1.5
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("out-of-range threshold must be rejected");
+        assert!(matches!(
+            err,
+            RebornConfigFileError::InvalidApiVersion { .. }
+        ));
+        assert!(err.to_string().contains("warn_at"));
+    }
+
+    #[test]
+    fn rejects_budget_pause_below_warn() {
+        let toml = r#"
+[budget]
+warn_at = 0.90
+pause_at = 0.50
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("pause_at < warn_at must be rejected");
+        assert!(matches!(
+            err,
+            RebornConfigFileError::InvalidApiVersion { .. }
+        ));
+        assert!(err.to_string().contains("pause_at"));
+    }
+
+    #[test]
+    fn rejects_unknown_budget_section_key() {
+        let toml = r#"
+[budget]
+not_a_field = 1.0
+"#;
+        let err = RebornConfigFile::parse_text(toml, &attributed())
+            .expect_err("deny_unknown_fields must catch typos in [budget]");
+        assert!(matches!(err, RebornConfigFileError::Toml { .. }));
     }
 }

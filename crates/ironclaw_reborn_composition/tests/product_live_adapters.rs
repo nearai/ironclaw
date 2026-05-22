@@ -1192,7 +1192,7 @@ fn adapter_config() -> ProductLivePlannedRuntimeAdapterConfig {
             "adapter test safety policy",
         )
         .unwrap(),
-        milestone_sink: None,
+        milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
     }
 }
 
