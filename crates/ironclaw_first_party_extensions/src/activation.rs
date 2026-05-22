@@ -1692,7 +1692,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_capture_lifecycle_captures_cancels_and_consumes_once() {
+    async fn execution_message_capture_stores_and_consumes_plan_once() {
         let source = Arc::new(StaticSkillBundleSource::new(vec![(
             SkillSourceKind::User,
             "code-review",
@@ -1708,10 +1708,7 @@ mod tests {
         let context = run_context().await;
 
         selectable
-            .capture_next_activation_plan(context.scope.clone())
-            .expect("capture next plan");
-        selectable
-            .record_user_message(
+            .record_user_message_for_execution(
                 context.scope.clone(),
                 accepted_message_ref(&context),
                 "please review this",
@@ -1726,7 +1723,7 @@ mod tests {
             .take_activation_plan_for_run(&context.scope, context.run_id)
             .expect("take captured plan")
             .expect("plan should be captured");
-        assert_eq!(plan.selection.activations.len(), 1);
+        assert_eq!(plan.plan.selection.activations.len(), 1);
         assert!(
             selectable
                 .take_activation_plan_for_run(&context.scope, context.run_id)
@@ -1734,72 +1731,10 @@ mod tests {
                 .is_none(),
             "captured plans are single-consumer"
         );
-
-        let cancelled = run_context_for("thread-a", "msg:cancelled").await;
-        selectable
-            .capture_next_activation_plan(cancelled.scope.clone())
-            .expect("capture before cancel");
-        selectable
-            .cancel_next_activation_plan_capture(&cancelled.scope)
-            .expect("cancel capture");
-        selectable
-            .cancel_next_activation_plan_capture(&cancelled.scope)
-            .expect("extra cancel must not underflow");
-        selectable
-            .record_user_message(
-                cancelled.scope.clone(),
-                accepted_message_ref(&cancelled),
-                "please review this",
-            )
-            .expect("record cancelled message");
-        let selected = selectable
-            .load_skill_context_candidates(&cancelled)
-            .await
-            .expect("cancelled selection succeeds");
-        assert_eq!(selected.len(), 1);
-        assert!(
-            selectable
-                .take_activation_plan_for_run(&cancelled.scope, cancelled.run_id)
-                .expect("take after cancel")
-                .is_none(),
-            "cancelled capture should not store a plan"
-        );
-
-        let partially_cancelled = run_context_for("thread-a", "msg:partial-cancel").await;
-        selectable
-            .capture_next_activation_plan(partially_cancelled.scope.clone())
-            .expect("first capture");
-        selectable
-            .capture_next_activation_plan(partially_cancelled.scope.clone())
-            .expect("second capture");
-        selectable
-            .cancel_next_activation_plan_capture(&partially_cancelled.scope)
-            .expect("cancel one capture");
-        selectable
-            .record_user_message(
-                partially_cancelled.scope.clone(),
-                accepted_message_ref(&partially_cancelled),
-                "please review this",
-            )
-            .expect("record partially cancelled message");
-        selectable
-            .load_skill_context_candidates(&partially_cancelled)
-            .await
-            .expect("partial cancel selection succeeds");
-        assert!(
-            selectable
-                .take_activation_plan_for_run(
-                    &partially_cancelled.scope,
-                    partially_cancelled.run_id
-                )
-                .expect("take partial-cancel plan")
-                .is_some(),
-            "one remaining capture should store the next plan"
-        );
     }
 
     #[tokio::test]
-    async fn clear_scope_removes_messages_pending_captures_and_captured_plans() {
+    async fn clear_accepted_message_removes_pending_execution_capture() {
         let source = Arc::new(StaticSkillBundleSource::new(vec![(
             SkillSourceKind::User,
             "code-review",
@@ -1817,10 +1752,7 @@ mod tests {
         let captured_b = run_context_for("thread-b", "msg:b-captured").await;
 
         selectable
-            .capture_next_activation_plan(captured_a.scope.clone())
-            .expect("capture scope a");
-        selectable
-            .record_user_message(
+            .record_user_message_for_execution(
                 captured_a.scope.clone(),
                 accepted_message_ref(&captured_a),
                 "please review this",
@@ -1832,10 +1764,7 @@ mod tests {
             .expect("scope a selection succeeds");
 
         selectable
-            .capture_next_activation_plan(pending_a.scope.clone())
-            .expect("capture pending scope a");
-        selectable
-            .record_user_message(
+            .record_user_message_for_execution(
                 pending_a.scope.clone(),
                 accepted_message_ref(&pending_a),
                 "please review this",
@@ -1843,10 +1772,7 @@ mod tests {
             .expect("record pending scope a message");
 
         selectable
-            .capture_next_activation_plan(captured_b.scope.clone())
-            .expect("capture scope b");
-        selectable
-            .record_user_message(
+            .record_user_message_for_execution(
                 captured_b.scope.clone(),
                 accepted_message_ref(&captured_b),
                 "please review this",
@@ -1858,15 +1784,15 @@ mod tests {
             .expect("scope b selection succeeds");
 
         selectable
-            .clear_scope(&captured_a.scope)
-            .expect("clear scope a");
+            .clear_accepted_message(&pending_a.scope, &accepted_message_ref(&pending_a))
+            .expect("clear pending scope a message");
 
         assert!(
             selectable
                 .take_activation_plan_for_run(&captured_a.scope, captured_a.run_id)
                 .expect("take cleared scope a plan")
-                .is_none(),
-            "clear_scope removes captured plans for that scope"
+                .is_some(),
+            "clearing a pending message must not remove an already captured plan"
         );
         assert!(
             selectable
@@ -1874,14 +1800,14 @@ mod tests {
                 .await
                 .expect("pending scope a selection after clear succeeds")
                 .is_empty(),
-            "clear_scope removes recorded messages and pending captures"
+            "clearing the accepted message removes its pending execution capture"
         );
         assert!(
             selectable
                 .take_activation_plan_for_run(&captured_b.scope, captured_b.run_id)
                 .expect("take scope b plan")
                 .is_some(),
-            "clear_scope must not remove another scope's plan"
+            "clearing one accepted message must not remove another scope's plan"
         );
     }
 
