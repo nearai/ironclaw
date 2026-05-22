@@ -12,8 +12,8 @@ use ironclaw_loop_support::{
 use ironclaw_skills::{
     LoadedSkill, SkillSource, extract_skill_mentions, parse_skill_md, prefilter_skills,
 };
-use ironclaw_turns::TurnScope;
 use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
+use ironclaw_turns::{TurnRunId, TurnScope};
 use thiserror::Error;
 
 /// Maximum number of first-party skills selected for one turn by default.
@@ -124,7 +124,7 @@ where
 {
     bundle_source: Arc<S>,
     config: SkillActivationSelectorConfig,
-    messages_by_scope: Mutex<HashMap<TurnScope, String>>,
+    messages_by_run: Mutex<HashMap<SkillActivationMessageKey, String>>,
 }
 
 impl<S> SelectableSkillContextSource<S>
@@ -135,39 +135,48 @@ where
         Self {
             bundle_source,
             config,
-            messages_by_scope: Mutex::new(HashMap::new()),
+            messages_by_run: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn record_user_message(
         &self,
         scope: TurnScope,
+        run_id: TurnRunId,
         message: impl Into<String>,
     ) -> Result<(), SkillActivationSelectionError> {
-        self.messages_by_scope
+        self.messages_by_run
             .lock()
             .map_err(|_| SkillActivationSelectionError::Internal)?
-            .insert(scope, message.into());
+            .insert(
+                SkillActivationMessageKey::new(scope, run_id),
+                message.into(),
+            );
         Ok(())
     }
 
-    pub fn clear_scope(&self, scope: &TurnScope) -> Result<(), SkillActivationSelectionError> {
-        self.messages_by_scope
-            .lock()
-            .map_err(|_| SkillActivationSelectionError::Internal)?
-            .remove(scope);
-        Ok(())
-    }
-
-    fn message_for_scope(
+    pub fn clear_run_message(
         &self,
         scope: &TurnScope,
-    ) -> Result<Option<String>, SkillActivationSelectionError> {
-        Ok(self
-            .messages_by_scope
+        run_id: TurnRunId,
+    ) -> Result<(), SkillActivationSelectionError> {
+        self.messages_by_run
             .lock()
             .map_err(|_| SkillActivationSelectionError::Internal)?
-            .get(scope)
+            .remove(&SkillActivationMessageKey::new(scope.clone(), run_id));
+        Ok(())
+    }
+
+    fn message_for_run(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<Option<String>, SkillActivationSelectionError> {
+        Ok(self
+            .messages_by_run
+            .lock()
+            .map_err(|_| SkillActivationSelectionError::Internal)?
+            .get(&SkillActivationMessageKey::new(scope.clone(), run_id))
             .cloned())
     }
 
@@ -220,6 +229,18 @@ where
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SkillActivationMessageKey {
+    scope: TurnScope,
+    run_id: TurnRunId,
+}
+
+impl SkillActivationMessageKey {
+    fn new(scope: TurnScope, run_id: TurnRunId) -> Self {
+        Self { scope, run_id }
+    }
+}
+
 #[async_trait]
 impl<S> HostSkillContextSource for SelectableSkillContextSource<S>
 where
@@ -230,7 +251,7 @@ where
         run_context: &LoopRunContext,
     ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
         let Some(message) = self
-            .message_for_scope(&run_context.scope)
+            .message_for_run(&run_context.scope, run_context.run_id)
             .map_err(SkillActivationSelectionError::into_context_error)?
         else {
             return Ok(Vec::new());
@@ -705,7 +726,7 @@ mod tests {
             SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
         let context = run_context().await;
         selectable
-            .record_user_message(context.scope.clone(), "hello there")
+            .record_user_message(context.scope.clone(), context.run_id, "hello there")
             .expect("record message");
 
         let selected = selectable
@@ -744,7 +765,11 @@ mod tests {
             SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
         let context = run_context().await;
         selectable
-            .record_user_message(context.scope.clone(), "please review this PR")
+            .record_user_message(
+                context.scope.clone(),
+                context.run_id,
+                "please review this PR",
+            )
             .expect("record message");
 
         let selected = selectable
@@ -773,7 +798,11 @@ mod tests {
             SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
         let context = run_context().await;
         selectable
-            .record_user_message(context.scope.clone(), "$code-review this PR")
+            .record_user_message(
+                context.scope.clone(),
+                context.run_id,
+                "$code-review this PR",
+            )
             .expect("record message");
 
         let selected = selectable
@@ -807,7 +836,11 @@ mod tests {
             SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
         let context = run_context().await;
         selectable
-            .record_user_message(context.scope.clone(), "/code-review this PR")
+            .record_user_message(
+                context.scope.clone(),
+                context.run_id,
+                "/code-review this PR",
+            )
             .expect("record message");
 
         let error = selectable
@@ -852,7 +885,11 @@ mod tests {
             SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
         let context = run_context().await;
         selectable
-            .record_user_message(context.scope.clone(), "review release deploy plan")
+            .record_user_message(
+                context.scope.clone(),
+                context.run_id,
+                "review release deploy plan",
+            )
             .expect("record message");
 
         let selected = selectable
@@ -902,7 +939,7 @@ mod tests {
         );
         let context = run_context().await;
         selectable
-            .record_user_message(context.scope.clone(), "shared")
+            .record_user_message(context.scope.clone(), context.run_id, "shared")
             .expect("record message");
 
         let selected = selectable
@@ -913,7 +950,11 @@ mod tests {
         assert_eq!(selected.len(), 1);
 
         selectable
-            .record_user_message(context.scope.clone(), "/alpha-helper /beta-helper")
+            .record_user_message(
+                context.scope.clone(),
+                context.run_id,
+                "/alpha-helper /beta-helper",
+            )
             .expect("record message");
         let error = selectable
             .selected_candidates(&context, "/alpha-helper /beta-helper")

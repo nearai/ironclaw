@@ -42,7 +42,7 @@ pub use types::{
 };
 
 type SkillActivationRecorder =
-    dyn Fn(&TurnScope, &str) -> Result<(), RebornServicesError> + Send + Sync;
+    dyn Fn(&TurnScope, TurnRunId, &str) -> Result<(), RebornServicesError> + Send + Sync;
 
 /// Stable WebUI-facing facade surface for beta Reborn routes.
 #[async_trait]
@@ -119,7 +119,10 @@ impl RebornServices {
 
     pub fn with_skill_activation_recorder<F>(mut self, recorder: F) -> Self
     where
-        F: Fn(&TurnScope, &str) -> Result<(), RebornServicesError> + Send + Sync + 'static,
+        F: Fn(&TurnScope, TurnRunId, &str) -> Result<(), RebornServicesError>
+            + Send
+            + Sync
+            + 'static,
     {
         self.skill_activation_recorder = Some(Arc::new(recorder));
         self
@@ -128,10 +131,11 @@ impl RebornServices {
     fn record_skill_activation_message(
         &self,
         scope: &TurnScope,
+        run_id: TurnRunId,
         content: &str,
     ) -> Result<(), RebornServicesError> {
         if let Some(recorder) = &self.skill_activation_recorder {
-            recorder(scope, content)?;
+            recorder(scope, run_id, content)?;
         }
         Ok(())
     }
@@ -296,10 +300,8 @@ impl RebornServicesApi for RebornServices {
             bounded_ref::<SourceBindingRef>("webui-src", &handoff.source_binding_id)?;
         let reply_target_binding_ref =
             bounded_ref::<ReplyTargetBindingRef>("webui-reply", &handoff.reply_target_binding_id)?;
-        self.record_skill_activation_message(&scope, &content)?;
-
         let submit = SubmitTurnRequest {
-            scope,
+            scope: scope.clone(),
             actor,
             accepted_message_ref: accepted_message_ref.clone(),
             source_binding_ref,
@@ -319,6 +321,7 @@ impl RebornServicesApi for RebornServices {
                 event_cursor,
                 ..
             }) => {
+                self.record_skill_activation_message(&scope, run_id, &content)?;
                 mark_message_submitted_or_replay(
                     &*self.thread_service,
                     &thread_scope,

@@ -567,22 +567,23 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
 }
 
 #[tokio::test]
-async fn submit_turn_records_skill_activation_message_before_turn_submission() {
+async fn submit_turn_records_skill_activation_message_after_turn_acceptance() {
     let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
     let coordinator = Arc::new(FakeTurnCoordinator::default());
     let recorded = Arc::new(Mutex::new(Vec::new()));
     let recorded_for_hook = Arc::clone(&recorded);
     let services = RebornServices::new(threads, coordinator.clone())
-        .with_skill_activation_recorder(move |scope, message| {
-            recorded_for_hook
-                .lock()
-                .expect("lock")
-                .push((scope.thread_id.as_str().to_string(), message.to_string()));
+        .with_skill_activation_recorder(move |scope, run_id, message| {
+            recorded_for_hook.lock().expect("lock").push((
+                scope.thread_id.as_str().to_string(),
+                run_id.to_string(),
+                message.to_string(),
+            ));
             Ok(())
         });
     create_thread_for(&services, caller(), "thread-alpha").await;
 
-    services
+    let submitted = services
         .submit_turn(
             caller(),
             serde_json::from_value::<WebUiSendMessageRequest>(json!({
@@ -594,14 +595,69 @@ async fn submit_turn_records_skill_activation_message_before_turn_submission() {
         )
         .await
         .expect("submit succeeds");
+    let RebornSubmitTurnResponse::Submitted { run_id, .. } = submitted else {
+        panic!("first submit should be accepted")
+    };
 
     assert_eq!(coordinator.submission_count(), 1);
     assert_eq!(
         recorded.lock().expect("lock").as_slice(),
         &[(
             "thread-alpha".to_string(),
+            run_id.to_string(),
             "/code-review inspect this".to_string()
         )]
+    );
+}
+
+#[tokio::test]
+async fn busy_submit_does_not_record_skill_activation_message() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(17),
+        }),
+    ));
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let recorded_for_hook = Arc::clone(&recorded);
+    let services = RebornServices::new(threads, coordinator.clone())
+        .with_skill_activation_recorder(move |scope, run_id, message| {
+            recorded_for_hook.lock().expect("lock").push((
+                scope.thread_id.as_str().to_string(),
+                run_id.to_string(),
+                message.to_string(),
+            ));
+            Ok(())
+        });
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let deferred = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-skill-activation-busy",
+                "thread_id": "thread-alpha",
+                "content": "/code-review inspect this"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("busy submit is deferred");
+
+    assert!(matches!(
+        deferred,
+        RebornSubmitTurnResponse::DeferredBusy {
+            active_run_id: id,
+            ..
+        } if id == active_run_id
+    ));
+    assert_eq!(coordinator.submission_count(), 0);
+    assert!(
+        recorded.lock().expect("lock").is_empty(),
+        "deferred submissions must not overwrite activation input for the active run"
     );
 }
 

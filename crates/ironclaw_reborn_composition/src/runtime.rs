@@ -243,11 +243,6 @@ impl RebornRuntime {
             return Err(RebornRuntimeError::WorkerStopped);
         }
         let scope = self.turn_scope_for(&conversation.0);
-        if let Some(skill_activation_source) = &self.skill_activation_source {
-            skill_activation_source
-                .record_user_message(scope.clone(), text)
-                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
-        }
         let accepted = self
             .thread_service
             .accept_inbound_message(AcceptInboundMessageRequest {
@@ -303,21 +298,40 @@ impl RebornRuntime {
             .await?;
             return Err(RebornRuntimeError::OperationCancelled);
         }
+        if let Some(skill_activation_source) = &self.skill_activation_source {
+            skill_activation_source
+                .record_user_message(scope.clone(), run_id, text)
+                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
+        }
         self.wake_sender.wake();
 
-        let terminal_status = self
-            .wait_for_terminal(&scope, run_id, &cancellation)
-            .await?;
-        let assistant_text = self
-            .read_latest_assistant_text(&conversation.0, run_id)
-            .await?;
+        let reply = async {
+            let terminal_status = self
+                .wait_for_terminal(&scope, run_id, &cancellation)
+                .await?;
+            let assistant_text = self
+                .read_latest_assistant_text(&conversation.0, run_id)
+                .await?;
 
-        Ok(AssistantReply {
-            conversation: conversation.clone(),
-            run_id,
-            status: terminal_status,
-            text: assistant_text,
-        })
+            Ok(AssistantReply {
+                conversation: conversation.clone(),
+                run_id,
+                status: terminal_status,
+                text: assistant_text,
+            })
+        }
+        .await;
+
+        if let Some(skill_activation_source) = &self.skill_activation_source {
+            let clear_result = skill_activation_source
+                .clear_run_message(&scope, run_id)
+                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()));
+            if reply.is_ok() {
+                clear_result?;
+            }
+        }
+
+        reply
     }
 
     /// Stop the turn-runner worker. Awaits the worker task to finish before

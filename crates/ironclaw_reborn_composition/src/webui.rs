@@ -49,9 +49,9 @@ pub(crate) fn build_webui_services(
         runtime.webui_turn_coordinator(),
     );
     if let Some(skill_activation_source) = runtime.webui_skill_activation_source() {
-        api = api.with_skill_activation_recorder(move |scope, message| {
+        api = api.with_skill_activation_recorder(move |scope, run_id, message| {
             skill_activation_source
-                .record_user_message(scope.clone(), message)
+                .record_user_message(scope.clone(), run_id, message)
                 .map_err(|_| RebornServicesError {
                     code: RebornServicesErrorCode::Internal,
                     status_code: 500,
