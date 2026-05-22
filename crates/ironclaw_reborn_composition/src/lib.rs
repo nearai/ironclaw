@@ -47,6 +47,7 @@ use ironclaw_runtime_policy::{EffectiveRuntimePolicy as ResolvedRuntimePolicy, R
 pub use auth::{
     RebornAuthContinuationDispatcher, RebornOAuthCallbackError, RebornOAuthCallbackOutcome,
     RebornOAuthCallbackRequest, RebornOAuthCallbackResponse, RebornProductAuthServices,
+    RebornProductWorkflowAuthContinuationDispatcher,
 };
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};

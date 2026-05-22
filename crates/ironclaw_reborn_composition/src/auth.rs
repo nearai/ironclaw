@@ -10,6 +10,8 @@ use ironclaw_auth::{
     OAuthCallbackInput, OAuthProviderCallbackRequest, OpaqueStateHash, ProviderCallbackOutcome,
     SecretCleanupService,
 };
+use ironclaw_product_workflow::ProductAuthContinuationDispatcher;
+use ironclaw_turns::TurnCoordinator;
 use serde::{Deserialize, Serialize};
 
 #[async_trait]
@@ -30,6 +32,38 @@ impl RebornAuthContinuationDispatcher for NoopAuthContinuationDispatcher {
         _event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
         Ok(())
+    }
+}
+
+pub struct RebornProductWorkflowAuthContinuationDispatcher {
+    dispatcher: ProductAuthContinuationDispatcher,
+}
+
+impl RebornProductWorkflowAuthContinuationDispatcher {
+    pub fn new(turn_coordinator: Arc<dyn TurnCoordinator>) -> Self {
+        Self {
+            dispatcher: ProductAuthContinuationDispatcher::new(turn_coordinator),
+        }
+    }
+}
+
+#[async_trait]
+impl RebornAuthContinuationDispatcher for RebornProductWorkflowAuthContinuationDispatcher {
+    async fn dispatch_auth_continuation(
+        &self,
+        event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        self.dispatcher
+            .dispatch(event)
+            .await
+            .map(|_| ())
+            .map_err(|error| {
+                tracing::warn!(
+                    error = %error,
+                    "product auth continuation dispatch through product workflow failed"
+                );
+                AuthProductError::BackendUnavailable
+            })
     }
 }
 

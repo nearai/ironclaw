@@ -25,6 +25,7 @@
 #![forbid(unsafe_code)]
 
 mod action;
+mod auth_continuation;
 mod binding;
 mod conversation_binding;
 mod error;
@@ -42,6 +43,7 @@ pub use action::{
     ActionDispatchKind, ActionFingerprintKey, ActionPhase, AuthRequestRef, LinkedThreadActionId,
     ProductActionId, ProductCommandName, ProductInboundAction, SourceBindingKey,
 };
+pub use auth_continuation::{AuthContinuationDispatchOutcome, ProductAuthContinuationDispatcher};
 pub use binding::{
     ConversationBindingService, ProductConversationRouteKind, ResolveBindingRequest,
     ResolvedBinding,

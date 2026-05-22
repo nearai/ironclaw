@@ -30,7 +30,8 @@ use ironclaw_turns::{
 use crate::input::RebornStorageInput;
 use crate::{
     RebornBuildError, RebornBuildInput, RebornCompositionProfile, RebornFacadeReadiness,
-    RebornProductAuthServices, RebornReadiness, RebornReadinessState,
+    RebornProductAuthServices, RebornProductWorkflowAuthContinuationDispatcher, RebornReadiness,
+    RebornReadinessState,
 };
 
 pub struct RebornServices {
@@ -197,10 +198,15 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         Arc::new(services.host_runtime_for_local_testing());
     let turn_coordinator: Arc<dyn ironclaw_turns::TurnCoordinator> =
         Arc::new(DefaultTurnCoordinator::new(turn_state));
-    let product_auth = Some(
-        product_auth_services
-            .unwrap_or_else(|| Arc::new(RebornProductAuthServices::local_dev_in_memory())),
-    );
+    let product_auth = Some(product_auth_services.unwrap_or_else(|| {
+        Arc::new(
+            RebornProductAuthServices::local_dev_in_memory().with_continuation_dispatcher(
+                Arc::new(RebornProductWorkflowAuthContinuationDispatcher::new(
+                    turn_coordinator.clone(),
+                )),
+            ),
+        )
+    }));
     let product_auth_ready = product_auth.is_some();
 
     Ok(RebornServices {
