@@ -103,7 +103,7 @@ impl HookRegistrar {
         // `ironclaw_host_api::ExtensionId` is the authority-bearing identifier
         // (validated, comparable across the host); `crate::identity::ExtensionId`
         // is a transparent string newtype the hash derivation consumes.
-        let identity_extension = ExtensionId(extension.as_str().to_string());
+        let identity_extension: ExtensionId = (&extension).into();
         Self::enforce_registration_caps(&extension, &entries, builder.dispatcher_mut())?;
         let mut installed = Vec::with_capacity(entries.len());
         for entry in entries {
@@ -290,12 +290,12 @@ mod tests {
     }
 
     fn identity_extension() -> ExtensionId {
-        ExtensionId(extension().as_str().to_string())
+        (&extension()).into()
     }
 
     fn predicate_entry(local: &str) -> HookManifestEntry {
         HookManifestEntry {
-            id: HookLocalId(local.to_string()),
+            id: HookLocalId::new(local).expect("valid HookLocalId in test"),
             kind: HookManifestKind::BeforeCapability,
             scope: HookManifestScope::OwnCapabilities,
             phase: HookPhase::Policy,
@@ -349,7 +349,7 @@ mod tests {
         let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
         let builder = HookDispatcherBuilder::new(HookRegistry::new());
         let entry = HookManifestEntry {
-            id: HookLocalId("wasm-hook".to_string()),
+            id: HookLocalId::new("wasm-hook").expect("valid HookLocalId in test"),
             kind: HookManifestKind::BeforeCapability,
             scope: HookManifestScope::OwnCapabilities,
             phase: HookPhase::Policy,
@@ -399,7 +399,7 @@ mod tests {
         let registrar = HookRegistrar::new(Arc::new(PredicateEvaluator::new()));
         let builder = HookDispatcherBuilder::new(HookRegistry::new());
         let entry = HookManifestEntry {
-            id: HookLocalId("rate-cap-with-code".to_string()),
+            id: HookLocalId::new("rate-cap-with-code").expect("valid HookLocalId in test"),
             kind: HookManifestKind::BeforeCapability,
             scope: HookManifestScope::OwnCapabilities,
             phase: HookPhase::Policy,

@@ -220,7 +220,7 @@ impl HookManifestEntry {
     /// (trust class assignment, scope grant matching, hook-id pinning all
     /// happen later in the installer).
     pub fn validate(&self) -> Result<(), HookManifestValidationError> {
-        if self.id.0.is_empty() {
+        if self.id.as_str().is_empty() {
             return Err(HookManifestValidationError("hook id is empty".to_string()));
         }
         // Phase × Trust: a manifest hook is always Installed, so it cannot
@@ -228,14 +228,15 @@ impl HookManifestEntry {
         if matches!(self.phase, HookPhase::Validation | HookPhase::Authorization) {
             return Err(HookManifestValidationError(format!(
                 "hook `{}` cannot register at phase {:?}: that phase is reserved for builtin hooks",
-                self.id.0, self.phase
+                self.id.as_str(),
+                self.phase
             )));
         }
         // SameTenant scope requires an explicit grant identifier.
         if matches!(self.scope, HookManifestScope::SameTenant) && self.requires_grant.is_none() {
             return Err(HookManifestValidationError(format!(
                 "hook `{}` scope = same_tenant requires `requires_grant` to be set",
-                self.id.0
+                self.id.as_str()
             )));
         }
         // Cross-extension scope cannot be combined with Mutator kinds without
@@ -246,7 +247,7 @@ impl HookManifestEntry {
         {
             return Err(HookManifestValidationError(format!(
                 "hook `{}` cannot combine scope = same_tenant with kind = before_prompt",
-                self.id.0
+                self.id.as_str()
             )));
         }
         // Validate predicate bodies that carry a sliding-window string. We
@@ -282,13 +283,13 @@ impl HookManifestEntry {
                 }
             };
             if let Some(when) = when {
-                validate_predicate_tree(&self.id.0, when)?;
+                validate_predicate_tree(self.id.as_str(), when)?;
             }
             for reason in reason_strs {
                 if reason.len() > MAX_MANIFEST_REASON_BYTES {
                     return Err(HookManifestValidationError(format!(
                         "hook `{}` reason exceeds {} bytes (got {})",
-                        self.id.0,
+                        self.id.as_str(),
                         MAX_MANIFEST_REASON_BYTES,
                         reason.len()
                     )));
@@ -298,7 +299,8 @@ impl HookManifestEntry {
                 validate_window(window).map_err(|msg| {
                     HookManifestValidationError(format!(
                         "hook `{}` has invalid window: {}",
-                        self.id.0, msg
+                        self.id.as_str(),
+                        msg
                     ))
                 })?;
             }
@@ -392,7 +394,7 @@ mod tests {
     #[test]
     fn minimal_entry_validates() {
         let entry = HookManifestEntry {
-            id: HookLocalId("daily-cap".to_string()),
+            id: HookLocalId::new("daily-cap").expect("valid HookLocalId in test"),
             kind: HookManifestKind::BeforeCapability,
             scope: HookManifestScope::OwnCapabilities,
             phase: HookPhase::Policy,
@@ -407,7 +409,7 @@ mod tests {
     #[test]
     fn rejects_validation_phase_for_manifest_hooks() {
         let entry = HookManifestEntry {
-            id: HookLocalId("h".to_string()),
+            id: HookLocalId::new("h").expect("valid HookLocalId in test"),
             kind: HookManifestKind::BeforeCapability,
             scope: HookManifestScope::OwnCapabilities,
             phase: HookPhase::Validation,
@@ -422,7 +424,7 @@ mod tests {
     #[test]
     fn same_tenant_requires_grant() {
         let entry = HookManifestEntry {
-            id: HookLocalId("h".to_string()),
+            id: HookLocalId::new("h").expect("valid HookLocalId in test"),
             kind: HookManifestKind::BeforeCapability,
             scope: HookManifestScope::SameTenant,
             phase: HookPhase::Policy,
@@ -438,7 +440,7 @@ mod tests {
     #[test]
     fn same_tenant_with_grant_succeeds() {
         let entry = HookManifestEntry {
-            id: HookLocalId("h".to_string()),
+            id: HookLocalId::new("h").expect("valid HookLocalId in test"),
             kind: HookManifestKind::BeforeCapability,
             scope: HookManifestScope::SameTenant,
             phase: HookPhase::Policy,
@@ -453,7 +455,7 @@ mod tests {
     #[test]
     fn same_tenant_mutator_rejected() {
         let entry = HookManifestEntry {
-            id: HookLocalId("h".to_string()),
+            id: HookLocalId::new("h").expect("valid HookLocalId in test"),
             kind: HookManifestKind::BeforePrompt,
             scope: HookManifestScope::SameTenant,
             phase: HookPhase::Policy,
@@ -468,7 +470,7 @@ mod tests {
     #[test]
     fn validate_rejects_unparseable_window() {
         let entry = HookManifestEntry {
-            id: HookLocalId("bad-window".to_string()),
+            id: HookLocalId::new("bad-window").expect("valid HookLocalId in test"),
             kind: HookManifestKind::BeforeCapability,
             scope: HookManifestScope::OwnCapabilities,
             phase: HookPhase::Policy,
@@ -495,7 +497,7 @@ mod tests {
     #[test]
     fn validate_rejects_zero_duration_window() {
         let entry = HookManifestEntry {
-            id: HookLocalId("zero".to_string()),
+            id: HookLocalId::new("zero").expect("valid HookLocalId in test"),
             kind: HookManifestKind::BeforeCapability,
             scope: HookManifestScope::OwnCapabilities,
             phase: HookPhase::Policy,
@@ -521,7 +523,7 @@ mod tests {
     #[test]
     fn full_entry_round_trips_through_toml() {
         let entry = HookManifestEntry {
-            id: HookLocalId("daily-cap".to_string()),
+            id: HookLocalId::new("daily-cap").expect("valid HookLocalId in test"),
             kind: HookManifestKind::BeforeCapability,
             scope: HookManifestScope::OwnCapabilities,
             phase: HookPhase::Policy,
@@ -554,7 +556,7 @@ mod tests {
             };
         }
         let entry = HookManifestEntry::new(
-            HookLocalId("deep".to_string()),
+            HookLocalId::new("deep").expect("valid HookLocalId in test"),
             HookManifestKind::BeforeCapability,
             HookManifestBody::Predicate {
                 spec: HookPredicateSpec::DenyCapability {
@@ -579,7 +581,7 @@ mod tests {
             })
             .collect();
         let entry = HookManifestEntry::new(
-            HookLocalId("fanout".to_string()),
+            HookLocalId::new("fanout").expect("valid HookLocalId in test"),
             HookManifestKind::BeforeCapability,
             HookManifestBody::Predicate {
                 spec: HookPredicateSpec::DenyCapability {
@@ -599,7 +601,7 @@ mod tests {
     #[test]
     fn rejects_predicate_string_exceeding_max_bytes() {
         let entry = HookManifestEntry::new(
-            HookLocalId("huge-name".to_string()),
+            HookLocalId::new("huge-name").expect("valid HookLocalId in test"),
             HookManifestKind::BeforeCapability,
             HookManifestBody::Predicate {
                 spec: HookPredicateSpec::DenyCapability {
@@ -617,7 +619,7 @@ mod tests {
     #[test]
     fn rejects_manifest_reason_exceeding_max_bytes() {
         let entry = HookManifestEntry::new(
-            HookLocalId("verbose".to_string()),
+            HookLocalId::new("verbose").expect("valid HookLocalId in test"),
             HookManifestKind::BeforeCapability,
             HookManifestBody::Predicate {
                 spec: HookPredicateSpec::DenyCapability {
@@ -681,7 +683,7 @@ gas = 999
     #[test]
     fn wasm_body_round_trips_with_defaults() {
         let entry = HookManifestEntry {
-            id: HookLocalId("telemetry".to_string()),
+            id: HookLocalId::new("telemetry").expect("valid HookLocalId in test"),
             kind: HookManifestKind::AfterCapability,
             scope: HookManifestScope::OwnCapabilities,
             phase: HookPhase::Telemetry,

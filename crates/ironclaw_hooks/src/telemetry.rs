@@ -148,9 +148,9 @@ mod tests {
             HookId::for_builtin("crate::a::b", HookVersion::ONE),
             HookId::for_builtin("crate::a::b", HookVersion(2)),
             HookId::derive(
-                &crate::identity::ExtensionId("ext".to_string()),
+                &crate::identity::ExtensionId::new("ext").expect("valid ExtensionId in test"),
                 "1.0",
-                &crate::identity::HookLocalId("h".to_string()),
+                &crate::identity::HookLocalId::new("h").expect("valid HookLocalId in test"),
                 HookVersion::ONE,
             ),
         ];

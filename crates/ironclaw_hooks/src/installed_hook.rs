@@ -87,9 +87,9 @@ mod tests {
 
     fn hook_id() -> HookId {
         HookId::derive(
-            &ExtensionId("ext".to_string()),
+            &ExtensionId::new("ext").expect("valid ExtensionId in test"),
             "1.0",
-            &HookLocalId("h".to_string()),
+            &HookLocalId::new("h").expect("valid HookLocalId in test"),
             HookVersion::ONE,
         )
     }

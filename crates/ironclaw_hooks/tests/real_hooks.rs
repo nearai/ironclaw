@@ -58,7 +58,7 @@ use ironclaw_host_api::{ExtensionId, TenantId};
 /// registrar consumes the same struct either way.
 fn polymarket_daily_cap_manifest() -> HookManifestEntry {
     HookManifestEntry::new(
-        HookLocalId("polymarket-daily-cap".to_string()),
+        HookLocalId::new("polymarket-daily-cap").expect("valid HookLocalId in test"),
         HookManifestKind::BeforeCapability,
         HookManifestBody::Predicate {
             spec: HookPredicateSpec::RateOrValueCap {
@@ -179,7 +179,7 @@ async fn polymarket_daily_cap_does_not_fire_for_other_capabilities() {
 /// `crates/ironclaw_reborn/tests/hooks_integration.rs::numeric_sum_predicate_caps_total_value_against_real_inputs`.
 fn large_stake_approval_manifest() -> HookManifestEntry {
     HookManifestEntry::new(
-        HookLocalId("large-stake-approval-gate".to_string()),
+        HookLocalId::new("large-stake-approval-gate").expect("valid HookLocalId in test"),
         HookManifestKind::BeforeCapability,
         HookManifestBody::Predicate {
             spec: HookPredicateSpec::RateOrValueCap {
@@ -301,9 +301,9 @@ async fn pii_redaction_warning_injects_trusted_snippet() {
     use ironclaw_hooks::identity::{ExtensionId as IdentExtensionId, HookId, HookVersion};
 
     let hook_id = HookId::derive(
-        &IdentExtensionId("ironclaw-builtin".to_string()),
+        &IdentExtensionId::new("ironclaw-builtin").expect("valid IdentExtensionId in test"),
         "1.0.0",
-        &HookLocalId("pii-redaction-warning".to_string()),
+        &HookLocalId::new("pii-redaction-warning").expect("valid HookLocalId in test"),
         HookVersion::ONE,
     );
 
@@ -359,9 +359,9 @@ async fn pii_redaction_warning_skips_when_budget_too_small() {
     use ironclaw_hooks::identity::{ExtensionId as IdentExtensionId, HookId, HookVersion};
 
     let hook_id = HookId::derive(
-        &IdentExtensionId("ironclaw-builtin".to_string()),
+        &IdentExtensionId::new("ironclaw-builtin").expect("valid IdentExtensionId in test"),
         "1.0.0",
-        &HookLocalId("pii-redaction-warning".to_string()),
+        &HookLocalId::new("pii-redaction-warning").expect("valid HookLocalId in test"),
         HookVersion::ONE,
     );
     let dispatcher = HookDispatcherBuilder::new(HookRegistry::new())
