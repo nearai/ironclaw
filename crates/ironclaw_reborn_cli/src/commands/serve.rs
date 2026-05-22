@@ -234,45 +234,10 @@ impl ServeCommand {
             .build()
             .context("failed to build tokio runtime for `serve`")?;
 
-        // No production `ProjectionStream` port is wired into the
-        // Reborn runtime in this slice. Without one,
-        // `RebornServices::stream_events` returns `Unavailable` for
-        // every poll, so `/events` (SSE) and `/ws` would advertise
-        // streaming routes that only emit 503 Unavailable.
-        //
-        // Per #3580 review feedback, fail serve startup by default so
-        // the binary cannot advertise streaming routes that cannot
-        // deliver projections. The
-        // `IRONCLAW_REBORN_ALLOW_NO_PROJECTION_STREAM` env opt-in is
-        // reserved for tests and for installations that genuinely
-        // only care about the non-streaming v2 routes (create-thread,
-        // send-message, get-timeline, cancel-run, resolve-gate,
-        // setup-extension, list-threads); it surfaces a startup
-        // warning so the trade-off is visible in logs.
-        let allow_no_stream = env::var("IRONCLAW_REBORN_ALLOW_NO_PROJECTION_STREAM")
-            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes"));
-        if !allow_no_stream {
-            anyhow::bail!(
-                "Reborn `serve` cannot start: no `ProjectionStream` is wired into the WebUI \
-                 bundle, so /events (SSE) and /ws would advertise streaming routes that only \
-                 emit 503 Unavailable. The v2 streaming surface requires a real projection \
-                 stream port — wire one through `build_webui_services(&runtime, Some(stream))` \
-                 once the host installation exposes it, then re-run `ironclaw-reborn serve`. \
-                 To start anyway for non-streaming routes only, set \
-                 IRONCLAW_REBORN_ALLOW_NO_PROJECTION_STREAM=1."
-            );
-        }
-
         rt.block_on(async move {
             let runtime = build_reborn_runtime(runtime_input)
                 .await
                 .context("failed to assemble Reborn runtime for `serve`")?;
-            tracing::warn!(
-                target = "ironclaw::reborn::cli::serve",
-                "IRONCLAW_REBORN_ALLOW_NO_PROJECTION_STREAM is set; /events and /ws will \
-                 return 503 Unavailable until a real ProjectionStream is wired into \
-                 build_webui_services",
-            );
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
 
             print_serve_banner(

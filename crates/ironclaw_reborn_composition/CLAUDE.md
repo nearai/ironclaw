@@ -21,7 +21,7 @@ middleware with v1's `src/channels/web/`.
 | Symbol | Role |
 |---|---|
 | `RebornWebuiBundle` (in [`src/webui.rs`](src/webui.rs)) | `{ api: Arc<dyn RebornServicesApi>, readiness }` — the v2 facade plus readiness snapshot |
-| `build_webui_services(runtime, event_stream)` | Compose a `RebornWebuiBundle` from an already-built `RebornRuntime`; reuses the runtime's thread service / turn coordinator (no second turn loop) |
+| `build_webui_services(runtime, event_stream)` | Compose a `RebornWebuiBundle` from an already-built `RebornRuntime`; reuses the runtime's thread service / turn coordinator and attaches the runtime-owned `EventStreamManager` projection stream unless a caller supplies a custom stream |
 | `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<UserId>` |
 | `WebuiServeConfig { tenant_id, authenticator, max_body_bytes, allowed_origins, csp_header }` | Required config for `webui_v2_app`; no defaults that silently disable security |
 | `webui_v2_app(bundle, config) -> Router` | Build the fully-composed axum `Router`. This is the seam between this product/API crate and host-owned HTTP ingress: tests drive it via `tower::ServiceExt::oneshot`; the `ironclaw-reborn serve` subcommand (follow-up PR) hands it to `axum::serve` from a host-owned listener |
@@ -153,9 +153,13 @@ Per Path A in `docs/reborn/how-to-port-channel-to-reborn.md`:
 
 ### How the standalone `ironclaw-reborn serve` consumes this
 
-The `serve` subcommand on `feat/reborn-cli-serve` currently bails with
-"composition not linked yet". The intended completion is one call
-site:
+The `serve` subcommand builds a full local-dev `RebornRuntime`, asks
+`build_webui_services(&runtime, None)` for the WebUI bundle, and hands
+the resulting router to the host-owned `ironclaw_reborn_webui_ingress`
+listener lifecycle. The bundle's default projection stream is backed by
+the runtime's in-memory durable event log plus `EventStreamManager`, so
+`/events` and `/ws` no longer advertise routes that only return
+`Unavailable`.
 
 ```rust
 // Inside a host-owned ingress crate / binary (NOT in this crate —
@@ -173,15 +177,11 @@ let listener = tokio::net::TcpListener::bind(addr).await?;
 axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
 ```
 
-Until that host-side wiring lands, `webui_v2_app` is reachable
-through tests
-(`crates/ironclaw_reborn_composition/tests/webui_v2_serve.rs` —
-drives the `Router` via `tower::ServiceExt::oneshot`) and by any
-host-owned Reborn ingress crate that wants to mount the same routes
-under its own listener.
-
 ### Tests
 
+- `src/runtime.rs::tests::local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades`
+  — regression guard that the WebUI bundle reuses the runtime turn/thread
+  facades and exposes the runtime-owned projection stream.
 - `tests/webui_v2_serve.rs` — caller-level tests driving the composed
   `Router` through `tower::ServiceExt::oneshot`: bearer happy path,
   missing/invalid bearer 401, SSE `?token=`, timeline rejects `?token=`,
