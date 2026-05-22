@@ -216,34 +216,58 @@ impl ProjectionSubscription {
         if self.terminated {
             return None;
         }
-        match self.terminal_receiver.try_recv() {
-            Ok(item) => {
-                self.terminated = true;
-                self.receiver.close();
-                self.release_admission();
-                return Some(with_observed_terminal_cursor(
-                    item,
-                    self.observed_cursor.as_ref(),
-                ));
+
+        match self.receiver.try_recv() {
+            Ok(item) => return self.observe_item(Some(item)),
+            Err(mpsc::error::TryRecvError::Empty) => {}
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                return self.observe_terminal_or_close();
             }
-            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {}
+        }
+
+        if let Some(item) = self.try_terminal_item() {
+            return Some(item);
         }
 
         tokio::select! {
             biased;
-            terminal = self.terminal_receiver.recv() => {
-                if let Some(item) = terminal {
-                    self.terminated = true;
-                    self.receiver.close();
-                    self.release_admission();
-                    Some(with_observed_terminal_cursor(item, self.observed_cursor.as_ref()))
-                } else {
-                    let item = self.receiver.recv().await;
+            item = self.receiver.recv() => {
+                if item.is_some() {
                     self.observe_item(item)
+                } else {
+                    self.observe_terminal_or_close()
                 }
-            }
-            item = self.receiver.recv() => self.observe_item(item),
+            },
+            terminal = self.terminal_receiver.recv() => self.observe_terminal_item(terminal),
         }
+    }
+
+    fn observe_terminal_or_close(&mut self) -> Option<ProjectionStreamItem> {
+        if let Some(item) = self.try_terminal_item() {
+            return Some(item);
+        }
+        self.observe_item(None)
+    }
+
+    fn try_terminal_item(&mut self) -> Option<ProjectionStreamItem> {
+        match self.terminal_receiver.try_recv() {
+            Ok(item) => self.observe_terminal_item(Some(item)),
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => None,
+        }
+    }
+
+    fn observe_terminal_item(
+        &mut self,
+        item: Option<ProjectionStreamItem>,
+    ) -> Option<ProjectionStreamItem> {
+        let item = item?;
+        self.terminated = true;
+        self.receiver.close();
+        self.release_admission();
+        Some(with_observed_terminal_cursor(
+            item,
+            self.observed_cursor.as_ref(),
+        ))
     }
 
     fn observe_item(&mut self, item: Option<ProjectionStreamItem>) -> Option<ProjectionStreamItem> {

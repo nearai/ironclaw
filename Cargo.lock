@@ -4266,6 +4266,7 @@ dependencies = [
  "ironclaw_host_api",
  "ironclaw_outbound",
  "ironclaw_turns",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
