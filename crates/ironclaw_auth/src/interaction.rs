@@ -2,6 +2,7 @@ use std::fmt;
 
 use async_trait::async_trait;
 use secrecy::{ExposeSecret, SecretString};
+use serde::{Deserialize, Serialize};
 
 use crate::{
     AuthContinuationRef, AuthProductError, CredentialAccountId, CredentialAccountLabel,
@@ -54,7 +55,7 @@ impl fmt::Debug for SecretSubmitRequest {
 }
 
 /// Manual-token setup result safe for product surfaces.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SecretSubmitResult {
     pub account_id: CredentialAccountId,
     pub status: CredentialAccountStatus,

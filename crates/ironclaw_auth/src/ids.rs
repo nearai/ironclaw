@@ -127,20 +127,20 @@ impl fmt::Display for OAuthAuthorizationUrl {
 }
 
 fn validate_https_authorization_url(value: &str) -> Result<(), AuthProductError> {
-    let Some(rest) = value.strip_prefix("https://") else {
+    let parsed = url::Url::parse(value).map_err(|_| {
+        AuthProductError::invalid_request("oauth authorization url must be a valid absolute url")
+    })?;
+    if parsed.scheme() != "https" {
         return Err(AuthProductError::invalid_request(
             "oauth authorization url must use https",
         ));
-    };
-    let authority = rest.split(['/', '?', '#']).next().ok_or_else(|| {
-        AuthProductError::invalid_request("oauth authorization url host is required")
-    })?;
-    if authority.is_empty() {
+    }
+    if parsed.host_str().is_none() {
         return Err(AuthProductError::invalid_request(
             "oauth authorization url host is required",
         ));
     }
-    if authority.contains('@') {
+    if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(AuthProductError::invalid_request(
             "oauth authorization url must not contain userinfo",
         ));

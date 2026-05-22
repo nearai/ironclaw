@@ -1,11 +1,12 @@
 use async_trait::async_trait;
+use ironclaw_host_api::ExtensionId;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     AuthErrorCode, AuthProductError, AuthorizationCodeHash, CredentialAccountId,
     CredentialAccountLabel, LifecyclePackageRef, OpaqueStateHash, ProductActionRef, Timestamp,
     TurnRunRef,
-    credential::CredentialAccountStatus,
+    credential::{CredentialAccountStatus, CredentialOwnership},
     ids::{AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, OAuthAuthorizationUrl},
     scope::AuthProductScope,
 };
@@ -90,6 +91,17 @@ pub struct AuthContinuationEvent {
     pub emitted_at: Timestamp,
 }
 
+/// Pre-authorized credential update target captured before OAuth completion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialAccountUpdateBinding {
+    pub account_id: CredentialAccountId,
+    pub ownership: CredentialOwnership,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_extension: Option<ExtensionId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub granted_extensions: Vec<ExtensionId>,
+}
+
 /// Durable scoped auth flow record. OAuth state/verifier/code values are
 /// represented by hashes only; raw callback material must stay in one-shot
 /// provider-client inputs.
@@ -104,6 +116,8 @@ pub struct AuthFlowRecord {
     pub continuation: AuthContinuationRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_account_id: Option<CredentialAccountId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_binding: Option<CredentialAccountUpdateBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opaque_state_hash: Option<OpaqueStateHash>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -125,6 +139,7 @@ pub struct NewAuthFlow {
     pub provider: AuthProviderId,
     pub challenge: AuthChallenge,
     pub continuation: AuthContinuationRef,
+    pub update_binding: Option<CredentialAccountUpdateBinding>,
     pub opaque_state_hash: Option<OpaqueStateHash>,
     pub pkce_verifier_hash: Option<crate::PkceVerifierHash>,
     pub expires_at: Timestamp,

@@ -8,8 +8,8 @@ use ironclaw_host_api::SecretHandle;
 use crate::{
     AuthChallenge, AuthContinuationEvent, AuthFlowId, AuthFlowManager, AuthFlowRecord,
     AuthFlowStatus, AuthInteractionId, AuthInteractionService, AuthProductError,
-    AuthProviderClient, AuthProviderId, CredentialAccount, CredentialAccountId,
-    CredentialAccountListPage, CredentialAccountListRequest, CredentialAccountProjection,
+    AuthProviderClient, CredentialAccount, CredentialAccountId, CredentialAccountListPage,
+    CredentialAccountListRequest, CredentialAccountProjection, CredentialAccountSelectionRequest,
     CredentialAccountService, CredentialAccountStatus, CredentialOwnership, CredentialSetupService,
     ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackInput,
     OAuthProviderCallbackRequest, OAuthProviderExchange, ProviderCallbackOutcome,
@@ -57,6 +57,14 @@ impl InMemoryAuthProductServices {
 impl AuthFlowManager for InMemoryAuthProductServices {
     async fn create_flow(&self, request: NewAuthFlow) -> Result<AuthFlowRecord, AuthProductError> {
         let now = Utc::now();
+        let mut state = self.lock_state();
+        if let Some(binding) = &request.update_binding {
+            let account = state
+                .accounts
+                .get(&binding.account_id)
+                .ok_or(AuthProductError::CredentialMissing)?;
+            validate_flow_update_binding(account, &request)?;
+        }
         let record = AuthFlowRecord {
             id: AuthFlowId::new(),
             scope: request.scope,
@@ -66,6 +74,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             challenge: Some(request.challenge),
             continuation: request.continuation,
             credential_account_id: None,
+            update_binding: request.update_binding,
             opaque_state_hash: request.opaque_state_hash,
             pkce_verifier_hash: request.pkce_verifier_hash,
             authorization_code_hash: None,
@@ -74,7 +83,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             updated_at: now,
             expires_at: request.expires_at,
         };
-        self.lock_state().flows.insert(record.id, record.clone());
+        state.flows.insert(record.id, record.clone());
         Ok(record)
     }
 
@@ -123,6 +132,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             return Err(AuthProductError::CrossScopeDenied);
         }
         let flow_scope = record.scope.clone();
+        let update_binding = record.update_binding.clone();
         let expected_pkce_verifier_hash = record.pkce_verifier_hash.clone();
 
         let exchange = match input.outcome {
@@ -145,6 +155,12 @@ impl AuthFlowManager for InMemoryAuthProductServices {
 
         let account_id = match exchange.account_id {
             Some(account_id) => {
+                let Some(binding) = update_binding.as_ref() else {
+                    return Err(AuthProductError::CrossScopeDenied);
+                };
+                if binding.account_id != account_id {
+                    return Err(AuthProductError::CrossScopeDenied);
+                }
                 let account = state
                     .accounts
                     .get_mut(&account_id)
@@ -155,10 +171,14 @@ impl AuthFlowManager for InMemoryAuthProductServices {
                 if account.provider != exchange.provider {
                     return Err(AuthProductError::TokenExchangeFailed);
                 }
+                validate_bound_update_authority(account, binding)?;
                 update_account_from_exchange(account, &exchange, now);
                 account_id
             }
             None => {
+                if update_binding.is_some() {
+                    return Err(AuthProductError::CrossScopeDenied);
+                }
                 create_account_in_state(
                     &mut state,
                     NewCredentialAccount {
@@ -302,22 +322,29 @@ impl CredentialAccountService for InMemoryAuthProductServices {
 
     async fn select_unique_configured_account(
         &self,
-        scope: &crate::AuthProductScope,
-        provider: &AuthProviderId,
+        request: CredentialAccountSelectionRequest,
     ) -> Result<CredentialAccountProjection, AuthProductError> {
-        let configured = self
-            .lock_state()
+        let state = self.lock_state();
+        let configured = state
             .accounts
             .values()
             .filter(|account| {
-                scope_matches(scope, &account.scope)
-                    && &account.provider == provider
+                scope_matches(&request.scope, &account.scope)
+                    && account.provider == request.provider
                     && account.status == CredentialAccountStatus::Configured
             })
+            .collect::<Vec<_>>();
+        if configured.is_empty() {
+            return Err(AuthProductError::CredentialMissing);
+        }
+        let selectable = configured
+            .iter()
+            .copied()
+            .filter(|account| account_is_selectable_for_requester(account, &request))
             .map(CredentialAccount::projection)
             .collect::<Vec<_>>();
-        match configured.as_slice() {
-            [] => Err(AuthProductError::CredentialMissing),
+        match selectable.as_slice() {
+            [] => Err(AuthProductError::CrossScopeDenied),
             [account] => Ok(account.clone()),
             _ => Err(AuthProductError::AccountSelectionRequired),
         }
@@ -560,6 +587,59 @@ fn validate_account_update_target(
         return Err(AuthProductError::CrossScopeDenied);
     }
     Ok(())
+}
+
+fn validate_flow_update_binding(
+    account: &CredentialAccount,
+    request: &NewAuthFlow,
+) -> Result<(), AuthProductError> {
+    if !scope_matches(&request.scope, &account.scope) {
+        return Err(AuthProductError::CrossScopeDenied);
+    }
+    if account.provider != request.provider {
+        return Err(AuthProductError::invalid_request(
+            "auth flow update target provider mismatch",
+        ));
+    }
+    let Some(binding) = request.update_binding.as_ref() else {
+        return Ok(());
+    };
+    validate_bound_update_authority(account, binding)
+}
+
+fn validate_bound_update_authority(
+    account: &CredentialAccount,
+    binding: &crate::CredentialAccountUpdateBinding,
+) -> Result<(), AuthProductError> {
+    if account.ownership != binding.ownership
+        || account.owner_extension != binding.owner_extension
+        || account.granted_extensions != binding.granted_extensions
+    {
+        return Err(AuthProductError::CrossScopeDenied);
+    }
+    Ok(())
+}
+
+fn account_is_selectable_for_requester(
+    account: &CredentialAccount,
+    request: &CredentialAccountSelectionRequest,
+) -> bool {
+    match account.ownership {
+        CredentialOwnership::UserReusable => true,
+        CredentialOwnership::ExtensionOwned => {
+            account
+                .owner_extension
+                .as_ref()
+                .is_some_and(|owner_extension| {
+                    request.requester_extension.as_ref() == Some(owner_extension)
+                })
+        }
+        CredentialOwnership::SharedAdminManaged => request
+            .requester_extension
+            .as_ref()
+            .is_some_and(|requester| account.granted_extensions.contains(requester)),
+        CredentialOwnership::System => false,
+    }
 }
 
 fn validate_new_credential_account(request: &NewCredentialAccount) -> Result<(), AuthProductError> {

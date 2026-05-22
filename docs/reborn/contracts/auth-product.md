@@ -1,7 +1,7 @@
 # Reborn Product Auth Contract
 
-**Status:** first-slice contract draft  
-**Issue:** #3289 / #3810  
+**Status:** first-slice contract draft
+**Issue:** #3289 / #3810
 **Crate:** `crates/ironclaw_auth`
 
 ---
@@ -123,6 +123,9 @@ Rules:
 - Account updates must name the target `CredentialAccountId` and preserve the
   existing ownership/grant authority. Matching label/provider/scope is not
   enough to replace handles or ownership.
+- OAuth callback account updates must be bound to a pre-authorized
+  `CredentialAccountUpdateBinding` on the flow before provider exchange
+  completion.
 - Account listing uses explicit limit/cursor pagination and returns redacted
   projections only.
 
@@ -182,8 +185,8 @@ Cleanup is ownership-aware:
 | `deactivate` | retain account metadata, remove active visibility/grants | remove extension grant/visibility only |
 | `uninstall` | revoke/delete/tombstone owned account and grants | keep account, remove extension grant/visibility |
 
-Reports contain account ids and redacted diagnostics only, never secret handles
-or backend detail strings.
+Reports contain account ids only, never secret handles or backend detail
+strings.
 
 ---
 

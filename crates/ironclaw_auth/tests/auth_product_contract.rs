@@ -3,13 +3,15 @@ use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowKind, AuthFlowManager,
     AuthFlowStatus, AuthGateRef, AuthInteractionService, AuthProductError, AuthProductScope,
     AuthProviderClient, AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash,
-    CredentialAccountLabel, CredentialAccountListRequest, CredentialAccountService,
-    CredentialAccountStatus, CredentialOwnership, CredentialSetupService,
+    CredentialAccount, CredentialAccountLabel, CredentialAccountListRequest,
+    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
+    CredentialAccountUpdateBinding, CredentialOwnership, CredentialSetupService,
     InMemoryAuthProductServices, LifecyclePackageRef, ManualTokenSetupRequest, NewAuthFlow,
     NewCredentialAccount, OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackInput,
     OAuthProviderCallbackRequest, OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash,
     PkceVerifierSecret, ProviderCallbackOutcome, ProviderScope, SecretCleanupAction,
-    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, TurnRunRef,
+    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
+    TurnRunRef,
 };
 use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, SecretHandle, UserId};
 use secrecy::SecretString;
@@ -79,6 +81,15 @@ fn account_request(
     }
 }
 
+fn update_binding(account: &CredentialAccount) -> CredentialAccountUpdateBinding {
+    CredentialAccountUpdateBinding {
+        account_id: account.id,
+        ownership: account.ownership,
+        owner_extension: account.owner_extension.clone(),
+        granted_extensions: account.granted_extensions.clone(),
+    }
+}
+
 async fn oauth_flow(
     services: &InMemoryAuthProductServices,
     owner: AuthProductScope,
@@ -95,12 +106,39 @@ async fn oauth_flow(
             continuation: AuthContinuationRef::LifecycleActivation {
                 package_ref: LifecyclePackageRef::new("github-extension").expect("valid package"),
             },
+            update_binding: None,
             opaque_state_hash: Some(state_hash("state-hash")),
             pkce_verifier_hash: Some(pkce_hash("pkce-hash")),
             expires_at: Utc::now() + Duration::minutes(5),
         })
         .await
         .expect("flow")
+}
+
+async fn oauth_update_flow(
+    services: &InMemoryAuthProductServices,
+    owner: AuthProductScope,
+    account: &CredentialAccount,
+) -> ironclaw_auth::AuthFlowRecord {
+    services
+        .create_flow(NewAuthFlow {
+            scope: owner,
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: authorization_url("https://provider.example/oauth"),
+                expires_at: Utc::now() + Duration::minutes(5),
+            },
+            continuation: AuthContinuationRef::LifecycleActivation {
+                package_ref: LifecyclePackageRef::new("github-extension").expect("valid package"),
+            },
+            update_binding: Some(update_binding(account)),
+            opaque_state_hash: Some(state_hash("state-hash")),
+            pkce_verifier_hash: Some(pkce_hash("pkce-hash")),
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("update flow")
 }
 
 #[tokio::test]
@@ -179,7 +217,7 @@ async fn oauth_callback_updates_existing_account_from_provider_exchange() {
         })
         .await
         .expect("existing account");
-    let flow = oauth_flow(&services, owner.clone()).await;
+    let flow = oauth_update_flow(&services, owner.clone(), &existing).await;
     let access_secret = SecretHandle::new("github-new-access").unwrap();
     let refresh_secret = SecretHandle::new("github-new-refresh").unwrap();
 
@@ -279,12 +317,12 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
         .expect_err("flow provider must match exchange provider");
     assert_eq!(provider_mismatch_err, AuthProductError::TokenExchangeFailed);
 
-    let missing_account_flow = oauth_flow(&services, owner.clone()).await;
-    let missing_account_err = services
+    let unbound_account_flow = oauth_flow(&services, owner.clone()).await;
+    let unbound_account_err = services
         .complete_oauth_callback(
             &owner,
             OAuthCallbackInput {
-                flow_id: missing_account_flow.id,
+                flow_id: unbound_account_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
                     exchange: OAuthProviderExchange {
@@ -295,16 +333,16 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
                         access_secret: SecretHandle::new("missing-access").unwrap(),
                         refresh_secret: None,
                         scopes: provider_scopes(&["repo"]),
-                        account_id: Some(ironclaw_auth::CredentialAccountId::new()),
+                        account_id: Some(existing.id),
                     },
                 },
             },
         )
         .await
-        .expect_err("missing account id is rejected");
-    assert_eq!(missing_account_err, AuthProductError::CredentialMissing);
+        .expect_err("unbound account id is rejected");
+    assert_eq!(unbound_account_err, AuthProductError::CrossScopeDenied);
 
-    let cross_scope_flow = oauth_flow(&services, owner.clone()).await;
+    let cross_scope_flow = oauth_update_flow(&services, owner.clone(), &existing).await;
     let cross_scope_err = services
         .complete_oauth_callback(
             &owner,
@@ -326,15 +364,15 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
             },
         )
         .await
-        .expect_err("cross-scope account id is rejected");
+        .expect_err("callback account id must match bound update target");
     assert_eq!(cross_scope_err, AuthProductError::CrossScopeDenied);
 
-    let account_provider_flow = oauth_flow(&services, owner.clone()).await;
-    let account_provider_err = services
+    let unbound_provider_mismatch_flow = oauth_flow(&services, owner.clone()).await;
+    let unbound_provider_mismatch_err = services
         .complete_oauth_callback(
             &owner,
             OAuthCallbackInput {
-                flow_id: account_provider_flow.id,
+                flow_id: unbound_provider_mismatch_flow.id,
                 opaque_state_hash: state_hash("state-hash"),
                 outcome: ProviderCallbackOutcome::Authorized {
                     exchange: OAuthProviderExchange {
@@ -351,10 +389,13 @@ async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account
             },
         )
         .await
-        .expect_err("account provider must match exchange provider");
-    assert_eq!(account_provider_err, AuthProductError::TokenExchangeFailed);
+        .expect_err("unbound provider-mismatch account id is rejected");
+    assert_eq!(
+        unbound_provider_mismatch_err,
+        AuthProductError::CrossScopeDenied
+    );
 
-    let valid_update_flow = oauth_flow(&services, owner.clone()).await;
+    let valid_update_flow = oauth_update_flow(&services, owner.clone(), &existing).await;
     services
         .complete_oauth_callback(
             &owner,
@@ -502,6 +543,7 @@ async fn terminal_flow_status_is_not_rewritten_after_expiry() {
                 expires_at: Utc::now() - Duration::seconds(1),
             },
             continuation: AuthContinuationRef::SetupOnly,
+            update_binding: None,
             opaque_state_hash: Some(state_hash("state-hash")),
             pkce_verifier_hash: Some(pkce_hash("pkce-hash")),
             expires_at: Utc::now() - Duration::seconds(1),
@@ -633,6 +675,98 @@ async fn manual_token_submit_is_secure_scoped_and_rejects_invalid_inputs() {
         .await
         .expect_err("manual-token interaction is consumed once");
     assert_eq!(replay, AuthProductError::UnknownOrExpiredFlow);
+}
+
+#[tokio::test]
+async fn manual_token_submit_consumes_interaction_once() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let challenge = services
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("manual github"),
+            continuation: AuthContinuationRef::SetupOnly,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("manual challenge");
+    let interaction_id = match challenge {
+        AuthChallenge::ManualTokenRequired { interaction_id, .. } => interaction_id,
+        other => panic!("unexpected challenge {other:?}"),
+    };
+
+    services
+        .submit_manual_token(
+            &owner,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: secret("ghp_first_submit"),
+            },
+        )
+        .await
+        .expect("first submit succeeds");
+    let second_submit = services
+        .submit_manual_token(
+            &owner,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: secret("ghp_second_submit"),
+            },
+        )
+        .await
+        .expect_err("interaction is consumed after success");
+    assert_eq!(second_submit, AuthProductError::UnknownOrExpiredFlow);
+
+    let accounts = services
+        .list_accounts(CredentialAccountListRequest::new(owner, provider()).with_limit(10))
+        .await
+        .expect("list accounts");
+    assert_eq!(accounts.accounts.len(), 1);
+}
+
+#[tokio::test]
+async fn manual_token_submit_rejects_control_characters_without_consuming_interaction() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let challenge = services
+        .request_secret_input(ManualTokenSetupRequest {
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("manual github"),
+            continuation: AuthContinuationRef::SetupOnly,
+            expires_at: Utc::now() + Duration::minutes(5),
+        })
+        .await
+        .expect("manual challenge");
+    let interaction_id = match challenge {
+        AuthChallenge::ManualTokenRequired { interaction_id, .. } => interaction_id,
+        other => panic!("unexpected challenge {other:?}"),
+    };
+
+    let invalid = services
+        .submit_manual_token(
+            &owner,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: secret("ghp_bad\nsecret"),
+            },
+        )
+        .await
+        .expect_err("control characters are rejected");
+    assert_eq!(invalid.code(), AuthErrorCode::InvalidRequest);
+
+    let result = services
+        .submit_manual_token(
+            &owner,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: secret("ghp_valid_after_invalid"),
+            },
+        )
+        .await
+        .expect("valid retry succeeds because invalid input did not consume interaction");
+    assert_eq!(result.status, CredentialAccountStatus::Configured);
 }
 
 #[tokio::test]
@@ -861,7 +995,10 @@ async fn credential_account_selection_requires_user_choice_for_multiple_configur
     let owner = scope("alice");
 
     let missing = services
-        .select_unique_configured_account(&owner, &provider())
+        .select_unique_configured_account(CredentialAccountSelectionRequest::new(
+            owner.clone(),
+            provider(),
+        ))
         .await
         .expect_err("no configured account");
     assert_eq!(missing, AuthProductError::CredentialMissing);
@@ -883,7 +1020,10 @@ async fn credential_account_selection_requires_user_choice_for_multiple_configur
         .await
         .expect("refresh-failed account");
     let still_missing = services
-        .select_unique_configured_account(&owner, &provider())
+        .select_unique_configured_account(CredentialAccountSelectionRequest::new(
+            owner.clone(),
+            provider(),
+        ))
         .await
         .expect_err("refresh-failed account is not selectable");
     assert_eq!(still_missing, AuthProductError::CredentialMissing);
@@ -905,7 +1045,10 @@ async fn credential_account_selection_requires_user_choice_for_multiple_configur
         .await
         .expect("work account");
     let selected = services
-        .select_unique_configured_account(&owner, &provider())
+        .select_unique_configured_account(CredentialAccountSelectionRequest::new(
+            owner.clone(),
+            provider(),
+        ))
         .await
         .expect("single configured account");
     assert_eq!(selected.id, work.id);
@@ -927,10 +1070,93 @@ async fn credential_account_selection_requires_user_choice_for_multiple_configur
         .await
         .expect("personal account");
     let err = services
-        .select_unique_configured_account(&owner, &provider())
+        .select_unique_configured_account(CredentialAccountSelectionRequest::new(
+            owner.clone(),
+            provider(),
+        ))
         .await
         .expect_err("multiple accounts require choice");
     assert_eq!(err, AuthProductError::AccountSelectionRequired);
+}
+
+#[tokio::test]
+async fn credential_account_selection_filters_by_requester_authority() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let github_extension = ExtensionId::new("github-extension").unwrap();
+    let other_extension = ExtensionId::new("other-extension").unwrap();
+
+    let extension_owned = services
+        .create_account(NewCredentialAccount {
+            update_account_id: None,
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("extension owned"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(github_extension.clone()),
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-extension-owned").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("extension-owned account");
+
+    let unauthorized = services
+        .select_unique_configured_account(CredentialAccountSelectionRequest::new(
+            owner.clone(),
+            provider(),
+        ))
+        .await
+        .expect_err("no requester cannot select extension-owned account");
+    assert_eq!(unauthorized, AuthProductError::CrossScopeDenied);
+    let wrong_requester = services
+        .select_unique_configured_account(
+            CredentialAccountSelectionRequest::new(owner.clone(), provider())
+                .for_extension(other_extension.clone()),
+        )
+        .await
+        .expect_err("wrong requester cannot select extension-owned account");
+    assert_eq!(wrong_requester, AuthProductError::CrossScopeDenied);
+
+    let selected = services
+        .select_unique_configured_account(
+            CredentialAccountSelectionRequest::new(owner.clone(), provider())
+                .for_extension(github_extension.clone()),
+        )
+        .await
+        .expect("owning requester can select account");
+    assert_eq!(selected.id, extension_owned.id);
+
+    services
+        .update_status(&owner, extension_owned.id, CredentialAccountStatus::Revoked)
+        .await
+        .expect("hide extension-owned account for shared test");
+    let shared = services
+        .create_account(NewCredentialAccount {
+            update_account_id: None,
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("shared"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::SharedAdminManaged,
+            owner_extension: None,
+            granted_extensions: vec![github_extension.clone()],
+            access_secret: Some(SecretHandle::new("github-shared").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("shared account");
+    let selected_shared = services
+        .select_unique_configured_account(
+            CredentialAccountSelectionRequest::new(owner, provider())
+                .for_extension(github_extension),
+        )
+        .await
+        .expect("granted requester can select shared account");
+    assert_eq!(selected_shared.id, shared.id);
 }
 
 #[tokio::test]
@@ -1012,6 +1238,73 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
     assert!(uninstall.revoked_accounts.contains(&owned.id));
 }
 
+#[tokio::test]
+async fn cleanup_for_lifecycle_ignores_cross_scope_accounts() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let foreign_owner = scope("bob");
+    let extension = ExtensionId::new("github").unwrap();
+
+    let foreign_owned = services
+        .create_account(NewCredentialAccount {
+            update_account_id: None,
+            scope: foreign_owner.clone(),
+            provider: provider(),
+            label: label("foreign owned"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(extension.clone()),
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-foreign-owned").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("foreign owned account");
+    let foreign_granted = services
+        .create_account(NewCredentialAccount {
+            update_account_id: None,
+            scope: foreign_owner.clone(),
+            provider: provider(),
+            label: label("foreign granted"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: vec![extension.clone()],
+            access_secret: Some(SecretHandle::new("github-foreign-granted").unwrap()),
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("foreign granted account");
+
+    let report = services
+        .cleanup_for_lifecycle(SecretCleanupRequest {
+            scope: owner,
+            extension_id: extension.clone(),
+            action: SecretCleanupAction::Uninstall,
+        })
+        .await
+        .expect("cleanup");
+    assert!(report.revoked_accounts.is_empty());
+    assert!(report.retained_accounts.is_empty());
+    assert!(report.removed_grants.is_empty());
+
+    let owned_after = services
+        .get_account(&foreign_owner, foreign_owned.id)
+        .await
+        .expect("lookup")
+        .expect("foreign owned remains");
+    assert_eq!(owned_after.status, CredentialAccountStatus::Configured);
+    assert_eq!(owned_after.owner_extension, Some(extension.clone()));
+    let granted_after = services
+        .get_account(&foreign_owner, foreign_granted.id)
+        .await
+        .expect("lookup")
+        .expect("foreign granted remains");
+    assert_eq!(granted_after.granted_extensions, vec![extension]);
+}
+
 #[test]
 fn serde_contracts_are_validated_snake_case_and_redacted() {
     assert!(serde_json::from_str::<AuthProviderId>("\"bad\nprovider\"").is_err());
@@ -1020,6 +1313,9 @@ fn serde_contracts_are_validated_snake_case_and_redacted() {
     assert!(
         serde_json::from_str::<OAuthAuthorizationUrl>("\"http://provider.example/oauth\"").is_err()
     );
+    assert!(OAuthAuthorizationUrl::new("https://:443/oauth").is_err());
+    assert!(OAuthAuthorizationUrl::new("https://user@provider.example/oauth").is_err());
+    assert!(OAuthAuthorizationUrl::new("https://provider example/oauth").is_err());
     assert_eq!(
         serde_json::to_value(authorization_url("https://provider.example/oauth")).expect("url"),
         serde_json::json!("https://provider.example/oauth")
@@ -1039,6 +1335,17 @@ fn serde_contracts_are_validated_snake_case_and_redacted() {
     let rendered = serde_json::to_string(&continuation).expect("serialize");
     assert!(rendered.contains("turn_gate_resume"));
     assert!(!rendered.contains("raw prompt"));
+
+    let submit_result = SecretSubmitResult {
+        account_id: ironclaw_auth::CredentialAccountId::new(),
+        status: CredentialAccountStatus::Configured,
+        continuation: AuthContinuationRef::SetupOnly,
+    };
+    let submit_result_json = serde_json::to_string(&submit_result).expect("serialize result");
+    assert!(submit_result_json.contains("configured"));
+    let round_trip: SecretSubmitResult =
+        serde_json::from_str(&submit_result_json).expect("deserialize result");
+    assert_eq!(round_trip, submit_result);
 }
 
 #[tokio::test]

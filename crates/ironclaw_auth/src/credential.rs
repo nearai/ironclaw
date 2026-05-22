@@ -164,6 +164,28 @@ pub struct CredentialAccountListPage {
     pub next_cursor: Option<CredentialAccountId>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialAccountSelectionRequest {
+    pub scope: AuthProductScope,
+    pub provider: AuthProviderId,
+    pub requester_extension: Option<ExtensionId>,
+}
+
+impl CredentialAccountSelectionRequest {
+    pub fn new(scope: AuthProductScope, provider: AuthProviderId) -> Self {
+        Self {
+            scope,
+            provider,
+            requester_extension: None,
+        }
+    }
+
+    pub fn for_extension(mut self, extension_id: ExtensionId) -> Self {
+        self.requester_extension = Some(extension_id);
+        self
+    }
+}
+
 /// Input used to create or update an account from an OAuth/manual setup result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewCredentialAccount {
@@ -207,8 +229,7 @@ pub trait CredentialAccountService: Send + Sync {
 
     async fn select_unique_configured_account(
         &self,
-        scope: &AuthProductScope,
-        provider: &AuthProviderId,
+        request: CredentialAccountSelectionRequest,
     ) -> Result<CredentialAccountProjection, AuthProductError>;
 }
 

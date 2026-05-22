@@ -29,8 +29,6 @@ pub struct SecretCleanupReport {
     pub retained_accounts: Vec<CredentialAccountId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed_grants: Vec<CredentialAccountId>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub quarantine_diagnostics: Vec<String>,
 }
 
 #[async_trait]

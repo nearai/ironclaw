@@ -23,14 +23,15 @@ pub use cleanup::{
 };
 pub use credential::{
     CredentialAccount, CredentialAccountListPage, CredentialAccountListRequest,
-    CredentialAccountProjection, CredentialAccountService, CredentialAccountStatus,
-    CredentialOwnership, CredentialSetupService, NewCredentialAccount,
+    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountService,
+    CredentialAccountStatus, CredentialOwnership, CredentialSetupService, NewCredentialAccount,
 };
 pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
 pub use flow::{
     AuthChallenge, AuthContinuationEvent, AuthContinuationRef, AuthFlowKind, AuthFlowManager,
-    AuthFlowRecord, AuthFlowStatus, NewAuthFlow, OAuthCallbackInput, ProviderCallbackOutcome,
+    AuthFlowRecord, AuthFlowStatus, CredentialAccountUpdateBinding, NewAuthFlow,
+    OAuthCallbackInput, ProviderCallbackOutcome,
 };
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,
