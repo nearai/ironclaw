@@ -15,7 +15,7 @@ ironclaw_turns = { path = "../ironclaw_turns" }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["sync", "rt"] }
+tokio = { version = "1", features = ["macros", "sync", "rt"] }
 
 [dev-dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
