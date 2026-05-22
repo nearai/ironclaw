@@ -857,7 +857,7 @@ where
             &path,
             SESSION_CAS_OPS,
             || CredentialBrokerError::UnknownSession { session_id },
-            || session_retry_exhausted("consume use"),
+            || session_retry_exhausted("use"),
             |mut stored: StoredSession| async move {
                 let aad = credential_session_aad(scope, session_id);
                 let wire: SerializableCredentialSession =
@@ -1241,19 +1241,21 @@ enum CasDecision<T, R, E> {
 /// `consume`, `revoke`, and `consume_session_use`. The caller supplies the
 /// per-call decision logic; this function owns the retry loop, the
 /// versioned-get, the serialize-and-CAS-write, and the exhaustion error.
-async fn cas_mutate<T, R, E, F, Decide, Fut>(
+async fn cas_mutate<T, R, E, F, Decide, Fut, NotFound, RetryExhausted>(
     filesystem: &ScopedFilesystem<F>,
     scope: &ResourceScope,
     path: &ScopedPath,
     ops: CasMutateOps<T, E>,
-    not_found: impl Fn() -> E,
-    retry_exhausted: impl Fn() -> E,
+    not_found: NotFound,
+    retry_exhausted: RetryExhausted,
     mut decide: Decide,
 ) -> Result<R, E>
 where
     F: RootFilesystem,
-    Decide: FnMut(T) -> Fut,
+    Decide: FnMut(T) -> Fut + Send,
     Fut: std::future::Future<Output = Result<CasDecision<T, R, E>, E>> + Send,
+    NotFound: Fn() -> E + Send,
+    RetryExhausted: Fn() -> E + Send,
 {
     for _ in 0..CAS_RETRY_ATTEMPTS {
         let Some(versioned) = filesystem
@@ -1904,7 +1906,7 @@ mod tests {
     // second attempt succeeds.
 
     use std::sync::Arc as StdArc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use ironclaw_filesystem::{
         BackendCapabilities, DirEntry, FileStat, Filter, IndexSpec, Page, RecordVersion,
@@ -1958,6 +1960,89 @@ mod tests {
                 // bump the caller's CAS version is stale, so the delegated
                 // put below will return VersionMismatch — exactly the
                 // contention shape the retry loop must absorb.
+                let _ = self
+                    .inner
+                    .put(path, current.entry, CasExpectation::Any)
+                    .await;
+            }
+            self.inner.put(path, entry, cas).await
+        }
+
+        async fn get(&self, path: &VirtualPath) -> Result<Option<VersionedEntry>, FilesystemError> {
+            self.inner.get(path).await
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            self.inner.list_dir(path).await
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            self.inner.stat(path).await
+        }
+
+        async fn delete(&self, path: &VirtualPath) -> Result<(), FilesystemError> {
+            self.inner.delete(path).await
+        }
+
+        async fn query(
+            &self,
+            path: &VirtualPath,
+            filter: &Filter,
+            page: Page,
+        ) -> Result<Vec<VersionedEntry>, FilesystemError> {
+            self.inner.query(path, filter, page).await
+        }
+
+        async fn ensure_index(
+            &self,
+            path: &VirtualPath,
+            spec: &IndexSpec,
+        ) -> Result<(), FilesystemError> {
+            self.inner.ensure_index(path, spec).await
+        }
+    }
+
+    /// Sibling of [`VersionRacingBackend`] for CAS-exhaustion tests: races
+    /// *every* versioned `put` against the watched path rather than only the
+    /// first. Used to drive `cas_mutate` past its `CAS_RETRY_ATTEMPTS` budget
+    /// so the exhaustion branch and its caller-visible reason string are
+    /// exercised end-to-end.
+    struct AlwaysRacingBackend {
+        inner: StdArc<InMemoryBackend>,
+        watched: String,
+        races: AtomicUsize,
+    }
+
+    impl AlwaysRacingBackend {
+        fn new(inner: StdArc<InMemoryBackend>, watched: VirtualPath) -> Self {
+            Self {
+                inner,
+                watched: watched.as_str().to_string(),
+                races: AtomicUsize::new(0),
+            }
+        }
+
+        fn races(&self) -> usize {
+            self.races.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl RootFilesystem for AlwaysRacingBackend {
+        fn capabilities(&self) -> BackendCapabilities {
+            self.inner.capabilities()
+        }
+
+        async fn put(
+            &self,
+            path: &VirtualPath,
+            entry: Entry,
+            cas: CasExpectation,
+        ) -> Result<RecordVersion, FilesystemError> {
+            let should_race =
+                path.as_str() == self.watched && matches!(cas, CasExpectation::Version(_));
+            if should_race && let Some(current) = self.inner.get(path).await? {
+                self.races.fetch_add(1, Ordering::SeqCst);
                 let _ = self
                     .inner
                     .put(path, current.entry, CasExpectation::Any)
@@ -2115,6 +2200,162 @@ mod tests {
             .await
             .unwrap_err();
         assert!(exceeded.is_use_limit_exceeded());
+    }
+
+    /// `revoke` shares the same CAS retry loop as `consume`. A single
+    /// out-of-band version bump between read and write must be absorbed by
+    /// the helper, and the second attempt must land the `Revoked` marker.
+    /// Mirrors `filesystem_secret_store_consume_retries_on_version_mismatch`.
+    #[tokio::test]
+    async fn filesystem_secret_store_revoke_retries_on_version_mismatch() {
+        let inner = StdArc::new(InMemoryBackend::new());
+        let bootstrap_scoped = default_scoped_fs(StdArc::clone(&inner));
+        let bootstrap_store = FilesystemSecretStore::new(bootstrap_scoped, test_crypto());
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("api_key").unwrap();
+        bootstrap_store
+            .put(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("super-secret-revoke-cas"),
+            )
+            .await
+            .unwrap();
+        let lease = bootstrap_store.lease_once(&scope, &handle).await.unwrap();
+
+        let scoped_lease = lease_path(&scope, lease.id).unwrap();
+        let watched = bootstrap_store
+            .filesystem
+            .resolve(&scope, &scoped_lease)
+            .unwrap();
+        let racing = StdArc::new(VersionRacingBackend::new(StdArc::clone(&inner), watched));
+        let racing_scoped = default_scoped_fs(StdArc::clone(&racing));
+        let racing_store = FilesystemSecretStore::new(racing_scoped, test_crypto());
+
+        let revoked = racing_store.revoke(&scope, lease.id).await.unwrap();
+        assert_eq!(revoked.status, SecretLeaseStatus::Revoked);
+        assert!(
+            racing.raced(),
+            "racing backend must have observed the first put and bumped the version"
+        );
+
+        // The retried CAS write actually persisted the Revoked status —
+        // a follow-up consume must see Revoked, not Active.
+        let blocked = racing_store.consume(&scope, lease.id).await.unwrap_err();
+        assert!(blocked.is_revoked());
+    }
+
+    /// A backend that races *every* versioned put exhausts the CAS retry
+    /// budget. `revoke` must surface this as
+    /// `StoreUnavailable { reason: "secret lease revoke retry limit exceeded" }`.
+    /// The wire string is part of the caller-visible contract — locking it
+    /// in here catches regressions like #3880's first review pass, where the
+    /// session-use exhaustion reason silently changed during refactor.
+    #[tokio::test]
+    async fn filesystem_secret_store_revoke_exhausts_cas_retry_budget() {
+        let inner = StdArc::new(InMemoryBackend::new());
+        let bootstrap_scoped = default_scoped_fs(StdArc::clone(&inner));
+        let bootstrap_store = FilesystemSecretStore::new(bootstrap_scoped, test_crypto());
+        let scope = sample_scope("tenant-a", "user-a");
+        let handle = SecretHandle::new("api_key").unwrap();
+        bootstrap_store
+            .put(
+                scope.clone(),
+                handle.clone(),
+                SecretMaterial::from("super-secret-revoke-exhaust"),
+            )
+            .await
+            .unwrap();
+        let lease = bootstrap_store.lease_once(&scope, &handle).await.unwrap();
+
+        let scoped_lease = lease_path(&scope, lease.id).unwrap();
+        let watched = bootstrap_store
+            .filesystem
+            .resolve(&scope, &scoped_lease)
+            .unwrap();
+        let racing = StdArc::new(AlwaysRacingBackend::new(StdArc::clone(&inner), watched));
+        let racing_scoped = default_scoped_fs(StdArc::clone(&racing));
+        let racing_store = FilesystemSecretStore::new(racing_scoped, test_crypto());
+
+        let error = racing_store.revoke(&scope, lease.id).await.unwrap_err();
+        match error {
+            SecretStoreError::StoreUnavailable { reason } => assert_eq!(
+                reason, "secret lease revoke retry limit exceeded",
+                "wire string for revoke retry exhaustion must be stable"
+            ),
+            other => panic!("expected StoreUnavailable, got {other:?}"),
+        }
+        assert_eq!(
+            racing.races(),
+            CAS_RETRY_ATTEMPTS,
+            "each retry attempt must have been raced"
+        );
+    }
+
+    /// `consume_session_use` exhaustion path: locks in
+    /// `BrokerUnavailable { reason: "credential session use retry limit exceeded" }`
+    /// against regressions like the one caught in #3880 review where the
+    /// helper-op string drifted from `"use"` to `"consume use"`.
+    #[tokio::test]
+    async fn filesystem_broker_consume_session_use_exhausts_cas_retry_budget() {
+        let inner = StdArc::new(InMemoryBackend::new());
+        let bootstrap_scoped = default_scoped_fs(StdArc::clone(&inner));
+        let bootstrap_broker = FilesystemCredentialBroker::new(bootstrap_scoped, test_crypto());
+        let scope = sample_scope("tenant-a", "user-a");
+        let account_id = CredentialAccountId::new("openai_exhaust").unwrap();
+        let account = sample_account(
+            scope.clone(),
+            account_id.clone(),
+            SecretHandle::new("openai_exhaust_key").unwrap(),
+        );
+        bootstrap_broker.put_account(account.clone()).await.unwrap();
+
+        let in_memory = InMemoryCredentialBroker::new();
+        in_memory.put_account(account).unwrap();
+        let session = in_memory
+            .create_session(crate::CredentialSessionRequest {
+                scope: scope.clone(),
+                invocation_id: scope.invocation_id,
+                capability_id: CapabilityId::new("openai.chat").unwrap(),
+                extension_id: ExtensionId::new("openai").unwrap(),
+                account_id: account_id.clone(),
+                method: NetworkMethod::Get,
+                url: "https://api.example.com/v1/models".to_string(),
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(60)),
+                max_uses: Some(5),
+            })
+            .unwrap();
+        bootstrap_broker
+            .issue_session(session.clone())
+            .await
+            .unwrap();
+        let correlation = session.correlation_id();
+        let scoped_session_path = credential_session_path(&scope, correlation).unwrap();
+        let watched = bootstrap_broker
+            .filesystem
+            .resolve(&scope, &scoped_session_path)
+            .unwrap();
+
+        let racing = StdArc::new(AlwaysRacingBackend::new(StdArc::clone(&inner), watched));
+        let racing_scoped = default_scoped_fs(StdArc::clone(&racing));
+        let racing_broker = FilesystemCredentialBroker::new(racing_scoped, test_crypto());
+
+        let error = racing_broker
+            .consume_session_use(&scope, correlation, Utc::now())
+            .await
+            .unwrap_err();
+        match error {
+            CredentialBrokerError::BrokerUnavailable { reason } => assert_eq!(
+                reason, "credential session use retry limit exceeded",
+                "wire string for consume_session_use retry exhaustion must be stable"
+            ),
+            other => panic!("expected BrokerUnavailable, got {other:?}"),
+        }
+        assert_eq!(
+            racing.races(),
+            CAS_RETRY_ATTEMPTS,
+            "each retry attempt must have been raced"
+        );
     }
 
     /// Regression for the ScopedFilesystem migration: two stores share one
