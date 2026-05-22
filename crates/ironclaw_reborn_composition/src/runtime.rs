@@ -898,7 +898,7 @@ mod tests {
 
     use async_trait::async_trait;
     use ironclaw_host_api::{
-        CapabilityId,
+        AgentId, CapabilityId, TenantId, UserId,
         runtime_policy::{
             ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy,
             FilesystemBackendKind, NetworkMode, ProcessBackendKind, RuntimeProfile, SecretMode,
@@ -909,14 +909,19 @@ mod tests {
         HostManagedModelMessageRole, HostManagedModelRequest, HostManagedModelResponse,
         HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     };
+    use ironclaw_product_workflow::{
+        RebornSubmitTurnResponse, WebUiAuthenticatedCaller, WebUiCreateThreadRequest,
+        WebUiSendMessageRequest,
+    };
     use ironclaw_skills::SkillTrust;
     use ironclaw_threads::{
         LoadContextMessagesRequest, MessageKind, SessionThreadService, ThreadHistoryRequest,
     };
     use ironclaw_turns::{
-        TurnStatus,
+        TurnActor, TurnId, TurnRunId, TurnStatus,
         run_profile::{
-            LoopCapabilityPort, LoopRunContext, ProviderToolCall, SkillVisibility,
+            InMemoryRunProfileResolver, LoopCapabilityPort, LoopRunContext, ProviderToolCall,
+            RunProfileResolutionRequest, RunProfileResolver, SkillVisibility,
             VisibleCapabilityRequest,
         },
     };
@@ -1778,6 +1783,113 @@ mod tests {
         ));
         assert_eq!(bundle.readiness, runtime.services().readiness);
         assert_eq!(bundle.readiness.state, RebornReadinessState::DevOnly);
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_webui_bundle_records_selectable_filesystem_skill_context() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("skills/webui-helper")).expect("user skill dir");
+        std::fs::write(
+            storage_root.join("skills/webui-helper/SKILL.md"),
+            skill_md(
+                "webui-helper",
+                "webui helper description",
+                "WEBUI_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write user skill");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "webui skill context ok".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-webui-skill-owner", storage_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-webui-skill-tenant".to_string(),
+            agent_id: "runtime-webui-skill-agent".to_string(),
+            source_binding_id: "runtime-webui-skill-source".to_string(),
+            reply_target_binding_id: "runtime-webui-skill-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let bundle = build_webui_services(&runtime, None).expect("webui bundle");
+        let caller = WebUiAuthenticatedCaller::new(
+            TenantId::new("runtime-webui-skill-tenant").unwrap(),
+            UserId::new("runtime-webui-skill-user").unwrap(),
+            Some(AgentId::new("runtime-webui-skill-agent").unwrap()),
+            None,
+        );
+        let created = bundle
+            .api
+            .create_thread(
+                caller.clone(),
+                WebUiCreateThreadRequest {
+                    client_action_id: Some("create-webui-skill-thread".to_string()),
+                    requested_thread_id: None,
+                },
+            )
+            .await
+            .expect("create thread");
+        let submitted = bundle
+            .api
+            .submit_turn(
+                caller,
+                WebUiSendMessageRequest {
+                    client_action_id: Some("send-webui-skill-message".to_string()),
+                    thread_id: Some(created.thread.thread_id.to_string()),
+                    content: Some("please use webui-helper".to_string()),
+                },
+            )
+            .await
+            .expect("submit turn");
+        let RebornSubmitTurnResponse::Submitted {
+            thread_id,
+            accepted_message_ref,
+            ..
+        } = submitted
+        else {
+            panic!("webui submit should start a run");
+        };
+        let resolved_run_profile = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("resolve run profile");
+        let source = runtime
+            .webui_skill_activation_source()
+            .expect("webui skill activation source");
+        let context = LoopRunContext::new(
+            runtime.turn_scope_for(&thread_id),
+            TurnId::new(),
+            TurnRunId::new(),
+            resolved_run_profile,
+        )
+        .with_accepted_message_ref(accepted_message_ref)
+        .with_actor(TurnActor::new(
+            UserId::new("runtime-webui-skill-user").unwrap(),
+        ));
+        let selected = source
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("webui-recorded skill context should load");
+        let combined_skill_context = selected
+            .iter()
+            .map(|candidate| candidate.skill_md.as_deref().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(selected.len(), 1);
+        assert!(combined_skill_context.contains("webui helper description"));
+        assert!(combined_skill_context.contains("WEBUI_HELPER_PROMPT_SENTINEL"));
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

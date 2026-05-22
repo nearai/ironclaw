@@ -251,13 +251,15 @@ where
             .find(|root| root.source_kind() == bundle_id.source_kind())
             .ok_or(SkillBundleSourceError::BundleNotFound)?;
         let scope = resource_scope_for_run(run_context);
-        let skill_md_path = bundle_scoped_path(root.root(), bundle_id.name(), "SKILL.md")?;
-        self.validate_bundle_manifest(&scope, &skill_md_path, bundle_id)
-            .await
-            .map_err(|error| match error {
-                SkillBundleSourceError::FileNotFound => SkillBundleSourceError::BundleNotFound,
-                other => other,
-            })?;
+        if path.as_str() != "SKILL.md" {
+            let skill_md_path = bundle_scoped_path(root.root(), bundle_id.name(), "SKILL.md")?;
+            self.validate_bundle_manifest(&scope, &skill_md_path, bundle_id)
+                .await
+                .map_err(|error| match error {
+                    SkillBundleSourceError::FileNotFound => SkillBundleSourceError::BundleNotFound,
+                    other => other,
+                })?;
+        }
         let scoped_path = bundle_scoped_path(root.root(), bundle_id.name(), path.as_str())?;
         self.read_bounded(&scope, &scoped_path, self.max_bundle_file_bytes)
             .await
