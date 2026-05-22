@@ -38,6 +38,12 @@ pub enum RebornBuildError {
     Turn(#[from] ironclaw_turns::TurnError),
     #[error("reborn mount view construction failed")]
     Mount(#[from] ironclaw_host_api::HostApiError),
+    #[error("reborn native extension registration failed")]
+    NativeExtension(#[from] ironclaw_native_extensions::NativeExtensionError),
+    #[error("reborn native extension registry build failed")]
+    Extension(#[from] ironclaw_extensions::ExtensionError),
+    #[error("reborn OAuth runtime build failed")]
+    OAuth(#[from] ironclaw_oauth::OAuthError),
 }
 
 impl From<ironclaw_host_runtime::ProductionWiringReport> for RebornBuildError {

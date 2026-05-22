@@ -131,6 +131,14 @@ impl FirstPartyCapabilityRegistry {
         T: FirstPartyCapabilityHandler + 'static,
     {
         let handler: Arc<dyn FirstPartyCapabilityHandler> = handler;
+        self.insert_dyn_handler(capability_id, handler);
+    }
+
+    pub fn insert_dyn_handler(
+        &mut self,
+        capability_id: CapabilityId,
+        handler: Arc<dyn FirstPartyCapabilityHandler>,
+    ) {
         self.handlers.insert(capability_id, handler);
     }
 

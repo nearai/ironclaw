@@ -22,6 +22,11 @@ root-llm-provider = [
     "ironclaw_llm/registry-provider-factory",
     "ironclaw_reborn/root-llm-provider",
 ]
+webui-v2-beta = [
+    "dep:axum",
+    "dep:ironclaw_webui_v2",
+    "ironclaw_webui_v2/webui-v2-beta",
+]
 libsql = [
     "dep:libsql",
     "ironclaw_filesystem/libsql",
@@ -41,6 +46,7 @@ postgres = [
 
 [dependencies]
 async-trait = "0.1"
+axum = { version = "0.8", optional = true }
 chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
@@ -50,7 +56,9 @@ ironclaw_host_api = { path = "../ironclaw_host_api" }
 ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
 ironclaw_llm = { path = "../ironclaw_llm", optional = true, default-features = false }
 ironclaw_loop_support = { path = "../ironclaw_loop_support" }
+ironclaw_native_extensions = { path = "../ironclaw_native_extensions" }
 ironclaw_network = { path = "../ironclaw_network" }
+ironclaw_oauth = { path = "../ironclaw_oauth" }
 ironclaw_processes = { path = "../ironclaw_processes" }
 ironclaw_product_adapters = { path = "../ironclaw_product_adapters" }
 ironclaw_product_workflow = { path = "../ironclaw_product_workflow" }
@@ -64,6 +72,7 @@ ironclaw_secrets = { path = "../ironclaw_secrets" }
 ironclaw_threads = { path = "../ironclaw_threads" }
 ironclaw_trust = { path = "../ironclaw_trust" }
 ironclaw_turns = { path = "../ironclaw_turns" }
+ironclaw_webui_v2 = { path = "../ironclaw_webui_v2", optional = true }
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication", "remote", "tls"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }

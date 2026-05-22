@@ -5,14 +5,18 @@ use ironclaw_extensions::ExtensionRegistry;
 use ironclaw_filesystem::LocalFilesystem;
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
-use ironclaw_host_api::{EffectKind, PackageId};
+use ironclaw_host_api::{EffectKind, NetworkPolicy, PackageId};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
     builtin_first_party_handlers, builtin_first_party_package,
 };
+use ironclaw_native_extensions::EnvConfig;
+use ironclaw_network::{PolicyNetworkHttpEgress, ReqwestNetworkTransport};
+use ironclaw_oauth::{OAuthRuntime, ProviderRegistry};
 use ironclaw_processes::ProcessServices;
 use ironclaw_resources::InMemoryResourceGovernor;
-use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore};
+use ironclaw_run_state::{InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateStore};
+use ironclaw_secrets::{InMemorySecretStore, SecretStore};
 use ironclaw_threads::InMemorySessionThreadService;
 use ironclaw_trust::{AdminConfig, AdminEntry, HostTrustAssignment, HostTrustPolicy};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
@@ -31,8 +35,46 @@ use crate::{
 pub struct RebornServices {
     pub host_runtime: Option<Arc<dyn ironclaw_host_runtime::HostRuntime>>,
     pub turn_coordinator: Option<Arc<dyn ironclaw_turns::TurnCoordinator>>,
+    pub native_extensions: Option<Arc<NativeExtensionServices>>,
     pub readiness: RebornReadiness,
     pub(crate) local_runtime: Option<Arc<RebornLocalRuntimeServices>>,
+}
+
+#[derive(Clone)]
+pub struct NativeExtensionServices {
+    oauth_runtime: OAuthRuntime,
+    oauth_provider_ids: Vec<String>,
+    network_policies: Vec<NetworkPolicy>,
+}
+
+impl std::fmt::Debug for NativeExtensionServices {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("NativeExtensionServices")
+            .field("oauth_provider_ids", &self.oauth_provider_ids)
+            .field("network_policy_count", &self.network_policies.len())
+            .finish()
+    }
+}
+
+impl NativeExtensionServices {
+    pub fn oauth_runtime(&self) -> OAuthRuntime {
+        self.oauth_runtime.clone()
+    }
+
+    pub fn oauth_provider_ids(&self) -> &[String] {
+        &self.oauth_provider_ids
+    }
+
+    pub fn network_policies(&self) -> &[NetworkPolicy] {
+        &self.network_policies
+    }
+}
+
+struct NativeExtensionComposition {
+    extension_registry: ExtensionRegistry,
+    first_party_capabilities: FirstPartyCapabilityRegistry,
+    services: NativeExtensionServices,
 }
 
 pub(crate) struct RebornLocalRuntimeServices {
@@ -48,6 +90,7 @@ impl std::fmt::Debug for RebornServices {
             .debug_struct("RebornServices")
             .field("host_runtime", &self.host_runtime.is_some())
             .field("turn_coordinator", &self.turn_coordinator.is_some())
+            .field("native_extensions", &self.native_extensions)
             .field("readiness", &self.readiness)
             .field("local_runtime", &self.local_runtime.is_some())
             .finish()
@@ -59,6 +102,7 @@ impl RebornServices {
         Self {
             host_runtime: None,
             turn_coordinator: None,
+            native_extensions: None,
             readiness: RebornReadiness::disabled(),
             local_runtime: None,
         }
@@ -136,6 +180,15 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
 
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
+    let secret_store = Arc::new(InMemorySecretStore::new());
+    let run_state_for_native: Arc<dyn RunStateStore> = run_state.clone();
+    let native = compose_native_extensions(
+        local_dev_extension_registry()?,
+        local_dev_first_party_handlers()?,
+        &EnvConfig::from_env(),
+        Arc::clone(&secret_store),
+        Some(run_state_for_native),
+    )?;
     let turn_state = Arc::new(InMemoryTurnStateStore::default());
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         turn_state: Arc::clone(&turn_state),
@@ -145,15 +198,16 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     });
 
     let mut services = HostRuntimeServices::new(
-        Arc::new(local_dev_extension_registry()?),
+        Arc::new(native.extension_registry),
         Arc::new(filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_first_party_capabilities(Arc::new(local_dev_first_party_handlers()?))
+    .with_first_party_capabilities(Arc::new(native.first_party_capabilities))
     .with_trust_policy(Arc::new(local_dev_first_party_trust_policy()?))
+    .with_secret_store(Arc::clone(&secret_store))
     .with_run_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_turn_state(Arc::clone(&turn_state));
@@ -171,8 +225,58 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     Ok(RebornServices {
         host_runtime: Some(host_runtime),
         turn_coordinator: Some(turn_coordinator),
+        native_extensions: Some(Arc::new(native.services)),
         readiness: readiness_for(input.profile, true, true),
         local_runtime: Some(local_runtime),
+    })
+}
+
+fn compose_native_extensions<S>(
+    mut extension_registry: ExtensionRegistry,
+    mut first_party_capabilities: FirstPartyCapabilityRegistry,
+    env: &EnvConfig,
+    secrets: Arc<S>,
+    run_state: Option<Arc<dyn RunStateStore>>,
+) -> Result<NativeExtensionComposition, RebornBuildError>
+where
+    S: SecretStore + 'static,
+{
+    let registration = ironclaw_native_extensions::register_all(env, secrets.clone())?;
+
+    for package in registration.packages {
+        extension_registry.insert(package)?;
+    }
+    for (capability_id, handler) in registration.handlers {
+        first_party_capabilities.insert_dyn_handler(capability_id, handler);
+    }
+
+    let mut provider_registry = ProviderRegistry::new();
+    for provider in registration.oauth_providers {
+        provider_registry.register(provider)?;
+    }
+    let oauth_provider_ids = provider_registry
+        .ids()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let provider_registry = Arc::new(provider_registry);
+    let egress: Arc<dyn ironclaw_network::NetworkHttpEgress> = Arc::new(
+        PolicyNetworkHttpEgress::new(ReqwestNetworkTransport::default()),
+    );
+    let secrets: Arc<dyn SecretStore> = secrets;
+    let mut oauth_builder = OAuthRuntime::builder(provider_registry, egress, secrets);
+    if let Some(run_state) = run_state {
+        oauth_builder = oauth_builder.run_state(run_state);
+    }
+    let oauth_runtime = oauth_builder.from_env()?;
+
+    Ok(NativeExtensionComposition {
+        extension_registry,
+        first_party_capabilities,
+        services: NativeExtensionServices {
+            oauth_runtime,
+            oauth_provider_ids,
+            network_policies: registration.network_policies,
+        },
     })
 }
 
@@ -372,8 +476,9 @@ async fn build_libsql_production(
     let leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
-
-    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
+    let run_state = Arc::new(ironclaw_run_state::FilesystemRunStateStore::new(
+        Arc::clone(&scoped_filesystem),
+    ));
 
     let secret_crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(secret_master_key)?);
     let secret_store = Arc::new(FilesystemSecretStore::new(
@@ -386,14 +491,24 @@ async fn build_libsql_production(
         auth_token,
     };
 
+    let run_state_for_native: Arc<dyn RunStateStore> = run_state.clone();
+    let native = compose_native_extensions(
+        ExtensionRegistry::new(),
+        FirstPartyCapabilityRegistry::new(),
+        &EnvConfig::from_env(),
+        Arc::clone(&secret_store),
+        Some(run_state_for_native),
+    )?;
+
     let services = HostRuntimeServices::new(
-        Arc::new(ExtensionRegistry::new()),
+        Arc::new(native.extension_registry),
         Arc::clone(&filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::filesystem(Arc::clone(&scoped_filesystem)),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
+    .with_first_party_capabilities(Arc::new(native.first_party_capabilities))
     .with_trust_policy(production_wiring.trust_policy)
     .with_runtime_policy(production_wiring.runtime_policy)
     .with_capability_leases(leases)
@@ -414,6 +529,7 @@ async fn build_libsql_production(
     Ok(RebornServices {
         host_runtime: Some(host_runtime),
         turn_coordinator: Some(turn_coordinator),
+        native_extensions: Some(Arc::new(native.services)),
         readiness: readiness_for(profile, true, true),
         local_runtime: None,
     })
@@ -439,8 +555,9 @@ async fn build_postgres_production(
     let leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
         &scoped_filesystem,
     )));
-
-    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
+    let run_state = Arc::new(ironclaw_run_state::FilesystemRunStateStore::new(
+        Arc::clone(&scoped_filesystem),
+    ));
 
     let secret_crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(secret_master_key)?);
     let secret_store = Arc::new(FilesystemSecretStore::new(
@@ -450,14 +567,24 @@ async fn build_postgres_production(
 
     let event_store = ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url };
 
+    let run_state_for_native: Arc<dyn RunStateStore> = run_state.clone();
+    let native = compose_native_extensions(
+        ExtensionRegistry::new(),
+        FirstPartyCapabilityRegistry::new(),
+        &EnvConfig::from_env(),
+        Arc::clone(&secret_store),
+        Some(run_state_for_native),
+    )?;
+
     let services = HostRuntimeServices::new(
-        Arc::new(ExtensionRegistry::new()),
+        Arc::new(native.extension_registry),
         Arc::clone(&filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::filesystem(Arc::clone(&scoped_filesystem)),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
+    .with_first_party_capabilities(Arc::new(native.first_party_capabilities))
     .with_trust_policy(production_wiring.trust_policy)
     .with_runtime_policy(production_wiring.runtime_policy)
     .with_capability_leases(leases)
@@ -478,6 +605,7 @@ async fn build_postgres_production(
     Ok(RebornServices {
         host_runtime: Some(host_runtime),
         turn_coordinator: Some(turn_coordinator),
+        native_extensions: Some(Arc::new(native.services)),
         readiness: readiness_for(profile, true, true),
         local_runtime: None,
     })

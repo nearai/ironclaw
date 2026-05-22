@@ -308,6 +308,7 @@ async fn disabled_returns_empty_services() {
 
     assert!(services.host_runtime.is_none());
     assert!(services.turn_coordinator.is_none());
+    assert!(services.native_extensions.is_none());
     assert_eq!(services.readiness.state, RebornReadinessState::Disabled);
 }
 
@@ -323,6 +324,7 @@ async fn local_dev_builds_facades_without_production_claim() {
 
     assert!(services.host_runtime.is_some());
     assert!(services.turn_coordinator.is_some());
+    assert!(services.native_extensions.is_some());
     assert_eq!(services.readiness.state, RebornReadinessState::DevOnly);
     assert!(services.readiness.facades.host_runtime);
     assert!(services.readiness.facades.turn_coordinator);
@@ -539,6 +541,37 @@ async fn production_rejects_memory_libsql_event_store() {
 
 #[cfg(feature = "libsql")]
 #[tokio::test]
+async fn production_composes_native_extension_services() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("reborn-native.db");
+    let db = libsql_db_at(&db_path).await;
+    let (notifier, handle) = live_wake_notifier();
+
+    let services = build_reborn_services(
+        RebornBuildInput::libsql(
+            RebornCompositionProfile::MigrationDryRun,
+            "test-owner",
+            db,
+            db_path.to_string_lossy(),
+            None,
+            test_master_key(),
+        )
+        .with_production_trust_policy(production_trust_policy())
+        .with_runtime_policy(production_runtime_policy())
+        .with_turn_run_wake_notifier(notifier),
+    )
+    .await
+    .unwrap();
+
+    handle.shutdown().await;
+
+    assert!(services.host_runtime.is_some());
+    assert!(services.turn_coordinator.is_some());
+    assert!(services.native_extensions.is_some());
+}
+
+#[cfg(feature = "libsql")]
+#[tokio::test]
 async fn migration_dry_run_validates_libsql_shape() {
     let dir = tempfile::tempdir().unwrap();
     let db_path = dir.path().join("reborn.db");
@@ -585,6 +618,7 @@ async fn migration_dry_run_validates_libsql_shape() {
     );
     assert!(services.host_runtime.is_some());
     assert!(services.turn_coordinator.is_some());
+    assert!(services.native_extensions.is_some());
 }
 
 #[cfg(feature = "postgres")]
@@ -634,4 +668,5 @@ async fn migration_dry_run_validates_postgres_planned_turn_profile() {
     );
     assert!(services.host_runtime.is_some());
     assert!(services.turn_coordinator.is_some());
+    assert!(services.native_extensions.is_some());
 }

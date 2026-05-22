@@ -54,3 +54,17 @@ pub(crate) fn build_webui_services(
         readiness: services.readiness,
     })
 }
+
+/// Build the WebChat v2 router with the Reborn OAuth callback router mounted.
+///
+/// The WebUI crate owns authenticated product routes; the OAuth crate owns
+/// `/auth/callback/{provider_id}`. Composition is the only layer that sees both
+/// route sets and the native extension OAuth runtime.
+#[cfg(feature = "webui-v2-beta")]
+pub fn build_webui_v2_router_with_oauth(
+    state: ironclaw_webui_v2::WebUiV2State,
+    native_extensions: &crate::NativeExtensionServices,
+) -> axum::Router {
+    ironclaw_webui_v2::webui_v2_router(state)
+        .merge(ironclaw_oauth::router(native_extensions.oauth_runtime()))
+}

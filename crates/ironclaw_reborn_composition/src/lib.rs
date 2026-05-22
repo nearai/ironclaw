@@ -33,7 +33,7 @@ mod webui;
 use ironclaw_runtime_policy::{EffectiveRuntimePolicy as ResolvedRuntimePolicy, ResolveError};
 
 pub use error::RebornBuildError;
-pub use factory::{RebornServices, build_reborn_services};
+pub use factory::{NativeExtensionServices, RebornServices, build_reborn_services};
 pub use input::RebornBuildInput;
 #[cfg(feature = "root-llm-provider")]
 pub use llm_catalog::{
@@ -57,6 +57,8 @@ pub use runtime_input::{
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornLlmConfig, ResolvedRebornLlm};
+#[cfg(feature = "webui-v2-beta")]
+pub use webui::build_webui_v2_router_with_oauth;
 
 /// Reborn model purpose slot names exposed for diagnostic callers.
 ///

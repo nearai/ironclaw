@@ -4718,6 +4718,7 @@ name = "ironclaw_reborn_composition"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum 0.8.9",
  "chrono",
  "deadpool-postgres",
  "ironclaw_authorization",
@@ -4727,7 +4728,9 @@ dependencies = [
  "ironclaw_host_runtime",
  "ironclaw_llm",
  "ironclaw_loop_support",
+ "ironclaw_native_extensions",
  "ironclaw_network",
+ "ironclaw_oauth",
  "ironclaw_processes",
  "ironclaw_product_adapters",
  "ironclaw_product_workflow",
@@ -4742,6 +4745,7 @@ dependencies = [
  "ironclaw_threads",
  "ironclaw_trust",
  "ironclaw_turns",
+ "ironclaw_webui_v2",
  "libsql",
  "secrecy",
  "serde",
