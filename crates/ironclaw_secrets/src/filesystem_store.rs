@@ -403,106 +403,71 @@ where
         let lock = filesystem_secret_lock_for_lease(scope, lease_id);
         let _guard = lock.lock().await;
         // The process-local mutex above only serializes writers in this
-        // process; multi-process callers sharing the same backend root could
-        // otherwise both observe an `Active` lease, both decrypt, and both
-        // overwrite the consumed marker. Re-read and retry on
-        // `FilesystemError::VersionMismatch` so a concurrent consume from
-        // another process loses the race deterministically.
+        // process; the CAS retry inside `cas_mutate` is what makes a
+        // concurrent consume from another process lose the race
+        // deterministically.
         let path = lease_path(scope, lease_id)?;
-        for _ in 0..CAS_RETRY_ATTEMPTS {
-            let Some(versioned) = self
-                .filesystem
-                .get(scope, &path)
-                .await
-                .map_err(fs_to_secret_store_error)?
-            else {
-                return Err(SecretStoreError::UnknownLease {
-                    scope: Box::new(scope.clone()),
-                    lease_id,
-                });
-            };
-            let mut lease: StoredLease = deserialize_secret(&versioned.entry.body)?;
-            if !same_scope_for_lease(&lease.scope, scope) {
-                return Err(SecretStoreError::UnknownLease {
-                    scope: Box::new(scope.clone()),
-                    lease_id,
-                });
-            }
-            let now = Utc::now();
-            let effective = Self::effective_status(&lease, now);
-            match effective {
-                SecretLeaseStatus::Active => {}
-                SecretLeaseStatus::Consumed => {
-                    return Err(SecretStoreError::LeaseConsumed { lease_id });
+        cas_mutate(
+            &self.filesystem,
+            scope,
+            &path,
+            LEASE_CAS_OPS,
+            || unknown_lease(scope, lease_id),
+            || lease_retry_exhausted("consume"),
+            |mut lease: StoredLease| async move {
+                if !same_scope_for_lease(&lease.scope, scope) {
+                    return Ok(CasDecision::Settle(Err(unknown_lease(scope, lease_id))));
                 }
-                SecretLeaseStatus::Revoked => {
-                    return Err(SecretStoreError::LeaseRevoked { lease_id });
-                }
-                SecretLeaseStatus::Expired => {
-                    if lease.status != SecretLeaseStatus::Expired {
-                        lease.status = SecretLeaseStatus::Expired;
-                        // Best-effort expiry promotion. If another writer
-                        // raced us we'll observe Expired on the next read
-                        // and return the same error to the caller.
-                        let body = serialize_secret(&lease)?;
-                        let entry = tag_entry_with_tenant(
-                            Entry::bytes(body).with_content_type(ContentType::json()),
-                            &lease.scope,
-                        );
-                        match put_with_version_fallback(
-                            &*self.filesystem,
-                            &lease.scope,
-                            &path,
-                            entry,
-                            CasExpectation::Version(versioned.version),
-                        )
-                        .await
-                        {
-                            Ok(_) | Err(FilesystemError::VersionMismatch { .. }) => {}
-                            Err(error) => return Err(fs_to_secret_store_error(error)),
+                match Self::effective_status(&lease, Utc::now()) {
+                    SecretLeaseStatus::Consumed => {
+                        Ok(CasDecision::Settle(Err(SecretStoreError::LeaseConsumed {
+                            lease_id,
+                        })))
+                    }
+                    SecretLeaseStatus::Revoked => {
+                        Ok(CasDecision::Settle(Err(SecretStoreError::LeaseRevoked {
+                            lease_id,
+                        })))
+                    }
+                    SecretLeaseStatus::Expired => {
+                        let already_marked = lease.status == SecretLeaseStatus::Expired;
+                        let outcome = Err(SecretStoreError::LeaseExpired { lease_id });
+                        if already_marked {
+                            Ok(CasDecision::Settle(outcome))
+                        } else {
+                            // Best-effort expiry promotion: if a peer races us
+                            // to the Expired marker we still return LeaseExpired.
+                            lease.status = SecretLeaseStatus::Expired;
+                            Ok(CasDecision::BestEffortCommit {
+                                record: lease,
+                                outcome,
+                            })
                         }
                     }
-                    return Err(SecretStoreError::LeaseExpired { lease_id });
+                    SecretLeaseStatus::Active => {
+                        let stored =
+                            self.read_secret(scope, &lease.handle)
+                                .await?
+                                .ok_or_else(|| SecretStoreError::UnknownSecret {
+                                    scope: Box::new(scope.clone()),
+                                    handle: lease.handle.clone(),
+                                })?;
+                        let aad = filesystem_secret_aad(scope, &lease.handle);
+                        let decrypted = self
+                            .crypto
+                            .decrypt(&stored.encrypted_value, &stored.key_salt, &aad)
+                            .map_err(secret_error_to_store_error)?;
+                        let material = SecretMaterial::from(decrypted.expose().to_string());
+                        lease.status = SecretLeaseStatus::Consumed;
+                        Ok(CasDecision::Commit {
+                            record: lease,
+                            value: material,
+                        })
+                    }
                 }
-            }
-
-            let stored = self
-                .read_secret(scope, &lease.handle)
-                .await?
-                .ok_or_else(|| SecretStoreError::UnknownSecret {
-                    scope: Box::new(scope.clone()),
-                    handle: lease.handle.clone(),
-                })?;
-            let aad = filesystem_secret_aad(scope, &lease.handle);
-            let decrypted = self
-                .crypto
-                .decrypt(&stored.encrypted_value, &stored.key_salt, &aad)
-                .map_err(secret_error_to_store_error)?;
-            let material = SecretMaterial::from(decrypted.expose().to_string());
-
-            lease.status = SecretLeaseStatus::Consumed;
-            let body = serialize_secret(&lease)?;
-            let entry = tag_entry_with_tenant(
-                Entry::bytes(body).with_content_type(ContentType::json()),
-                &lease.scope,
-            );
-            match put_with_version_fallback(
-                &*self.filesystem,
-                &lease.scope,
-                &path,
-                entry,
-                CasExpectation::Version(versioned.version),
-            )
-            .await
-            {
-                Ok(_) => return Ok(material),
-                Err(FilesystemError::VersionMismatch { .. }) => continue,
-                Err(error) => return Err(fs_to_secret_store_error(error)),
-            }
-        }
-        Err(SecretStoreError::StoreUnavailable {
-            reason: "secret lease consume retry limit exceeded".to_string(),
-        })
+            },
+        )
+        .await
     }
 
     async fn revoke(
@@ -512,77 +477,56 @@ where
     ) -> Result<SecretLease, SecretStoreError> {
         let lock = filesystem_secret_lock_for_lease(scope, lease_id);
         let _guard = lock.lock().await;
-        // The process-local mutex above only serializes writers in this
-        // process; multi-process callers sharing the same backend root could
-        // otherwise both observe an `Active` lease and the slower `revoke`
-        // could clobber a `Consumed` marker written by a concurrent
-        // `consume`. Re-read with the row version and write with
-        // `CasExpectation::Version`, retrying on `VersionMismatch`. Pattern
-        // mirrors `consume` and `consume_session_use` above. See F2 (Medium)
-        // in the 2026-05 audit.
+        // Process-local mutex serializes writers in this process; the CAS
+        // retry inside `cas_mutate` is what stops a multi-process race from
+        // clobbering a concurrent `consume`'s Consumed marker. Pattern
+        // mirrors `consume` and `consume_session_use`. See F2 (Medium) in
+        // the 2026-05 audit.
         let path = lease_path(scope, lease_id)?;
-        for _ in 0..CAS_RETRY_ATTEMPTS {
-            let Some(versioned) = self
-                .filesystem
-                .get(scope, &path)
-                .await
-                .map_err(fs_to_secret_store_error)?
-            else {
-                return Err(SecretStoreError::UnknownLease {
-                    scope: Box::new(scope.clone()),
-                    lease_id,
-                });
-            };
-            let mut lease: StoredLease = deserialize_secret(&versioned.entry.body)?;
-            if !same_scope_for_lease(&lease.scope, scope) {
-                return Err(SecretStoreError::UnknownLease {
-                    scope: Box::new(scope.clone()),
-                    lease_id,
-                });
-            }
-            // Idempotent on terminal states: revoking an already-Consumed or
-            // already-Revoked lease succeeds without rewriting the marker, so
-            // a race with `consume` cannot overwrite the Consumed signal.
-            // Expired is similarly terminal — `effective_status` decides
-            // whether an Active lease has aged into Expired.
-            match lease.status {
-                SecretLeaseStatus::Consumed
-                | SecretLeaseStatus::Revoked
-                | SecretLeaseStatus::Expired => {
-                    return Ok(Self::lease_to_public(&lease));
+        cas_mutate(
+            &self.filesystem,
+            scope,
+            &path,
+            LEASE_CAS_OPS,
+            || unknown_lease(scope, lease_id),
+            || lease_retry_exhausted("revoke"),
+            |mut lease: StoredLease| async move {
+                if !same_scope_for_lease(&lease.scope, scope) {
+                    return Ok(CasDecision::Settle(Err(unknown_lease(scope, lease_id))));
                 }
-                SecretLeaseStatus::Active => {}
-            }
-            let now = Utc::now();
-            // Promote a stale Active lease to Expired before revoking, mirroring
-            // the in-memory adapter's `expire_stale_active_leases` step.
-            if Self::effective_status(&lease, now) == SecretLeaseStatus::Expired {
-                lease.status = SecretLeaseStatus::Expired;
-            } else {
-                lease.status = SecretLeaseStatus::Revoked;
-            }
-            let body = serialize_secret(&lease)?;
-            let entry = tag_entry_with_tenant(
-                Entry::bytes(body).with_content_type(ContentType::json()),
-                &lease.scope,
-            );
-            match put_with_version_fallback(
-                &*self.filesystem,
-                &lease.scope,
-                &path,
-                entry,
-                CasExpectation::Version(versioned.version),
-            )
-            .await
-            {
-                Ok(_) => return Ok(Self::lease_to_public(&lease)),
-                Err(FilesystemError::VersionMismatch { .. }) => continue,
-                Err(error) => return Err(fs_to_secret_store_error(error)),
-            }
-        }
-        Err(SecretStoreError::StoreUnavailable {
-            reason: "secret lease revoke retry limit exceeded".to_string(),
-        })
+                // Idempotent on terminal states: revoking an already-Consumed
+                // or already-Revoked lease succeeds without rewriting the
+                // marker, so a race with `consume` cannot overwrite the
+                // Consumed signal. Expired is similarly terminal —
+                // `effective_status` decides whether an Active lease has
+                // aged into Expired.
+                match lease.status {
+                    SecretLeaseStatus::Consumed
+                    | SecretLeaseStatus::Revoked
+                    | SecretLeaseStatus::Expired => {
+                        Ok(CasDecision::Settle(Ok(Self::lease_to_public(&lease))))
+                    }
+                    SecretLeaseStatus::Active => {
+                        // Promote a stale Active lease to Expired before
+                        // revoking, mirroring the in-memory adapter's
+                        // `expire_stale_active_leases` step.
+                        lease.status = if Self::effective_status(&lease, Utc::now())
+                            == SecretLeaseStatus::Expired
+                        {
+                            SecretLeaseStatus::Expired
+                        } else {
+                            SecretLeaseStatus::Revoked
+                        };
+                        let value = Self::lease_to_public(&lease);
+                        Ok(CasDecision::Commit {
+                            record: lease,
+                            value,
+                        })
+                    }
+                }
+            },
+        )
+        .await
     }
 
     async fn leases_for_scope(
@@ -904,51 +848,42 @@ where
         let path = credential_session_path(scope, session_id)?;
         let lock = filesystem_session_lock(&path);
         let _guard = lock.lock().await;
-        // Multi-process callers sharing the same backend root must not both
-        // pass the max-uses check and overwrite each other's increment. We
-        // load the current version, evaluate the use-limit condition, and
-        // write the incremented counter with a CAS expectation. On
-        // `VersionMismatch` we re-read, re-evaluate the condition, and retry.
-        for _ in 0..CAS_RETRY_ATTEMPTS {
-            let Some(versioned) = self
-                .filesystem
-                .get(scope, &path)
-                .await
-                .map_err(fs_to_broker_error)?
-            else {
-                return Err(CredentialBrokerError::UnknownSession { session_id });
-            };
-            let mut stored: StoredSession = deserialize_credential(&versioned.entry.body)?;
-            let aad = credential_session_aad(scope, session_id);
-            let wire: SerializableCredentialSession =
-                self.decrypt_payload(&stored.encrypted_payload, &stored.key_salt, &aad)?;
-            if wire.scope != *scope {
-                return Err(CredentialBrokerError::UnknownSession { session_id });
-            }
-            ensure_stored_session_usable(&wire, stored.uses, session_id, now)?;
-            stored.uses += 1;
-            let body = serialize_credential(&stored)?;
-            let entry = tag_entry_with_tenant(
-                Entry::bytes(body).with_content_type(ContentType::json()),
-                scope,
-            );
-            match put_with_version_fallback(
-                &*self.filesystem,
-                scope,
-                &path,
-                entry,
-                CasExpectation::Version(versioned.version),
-            )
-            .await
-            {
-                Ok(_) => return wire.into_session(),
-                Err(FilesystemError::VersionMismatch { .. }) => continue,
-                Err(error) => return Err(fs_to_broker_error(error)),
-            }
-        }
-        Err(CredentialBrokerError::BrokerUnavailable {
-            reason: "credential session use retry limit exceeded".to_string(),
-        })
+        // Process-local mutex serializes writers in this process; the CAS
+        // retry inside `cas_mutate` stops multi-process callers from both
+        // passing the max-uses check and overwriting each other's increment.
+        cas_mutate(
+            &self.filesystem,
+            scope,
+            &path,
+            SESSION_CAS_OPS,
+            || CredentialBrokerError::UnknownSession { session_id },
+            || session_retry_exhausted("consume use"),
+            |mut stored: StoredSession| async move {
+                let aad = credential_session_aad(scope, session_id);
+                let wire: SerializableCredentialSession =
+                    self.decrypt_payload(&stored.encrypted_payload, &stored.key_salt, &aad)?;
+                if wire.scope != *scope {
+                    return Ok(CasDecision::Settle(Err(
+                        CredentialBrokerError::UnknownSession { session_id },
+                    )));
+                }
+                if let Err(error) =
+                    ensure_stored_session_usable(&wire, stored.uses, session_id, now)
+                {
+                    return Ok(CasDecision::Settle(Err(error)));
+                }
+                let session = match wire.into_session() {
+                    Ok(session) => session,
+                    Err(error) => return Ok(CasDecision::Settle(Err(error))),
+                };
+                stored.uses += 1;
+                Ok(CasDecision::Commit {
+                    record: stored,
+                    value: session,
+                })
+            },
+        )
+        .await
     }
 }
 
@@ -1211,6 +1146,160 @@ where
         }
         Err(error) => Err(error),
     }
+}
+
+// -- CAS retry helper -------------------------------------------------------
+
+/// Type-level witnesses bundled per record shape so [`cas_mutate`] can stay
+/// generic over `(T, E)` without dragging six function pointers across each
+/// call site. The lease ops bind `T = StoredLease, E = SecretStoreError`; the
+/// session ops bind `T = StoredSession, E = CredentialBrokerError`.
+struct CasMutateOps<T, E> {
+    deserialize: fn(&[u8]) -> Result<T, E>,
+    serialize: fn(&T, &ResourceScope) -> Result<Entry, E>,
+    map_fs_error: fn(FilesystemError) -> E,
+}
+
+const LEASE_CAS_OPS: CasMutateOps<StoredLease, SecretStoreError> = CasMutateOps {
+    deserialize: deserialize_secret::<StoredLease>,
+    serialize: serialize_lease_entry,
+    map_fs_error: fs_to_secret_store_error,
+};
+
+const SESSION_CAS_OPS: CasMutateOps<StoredSession, CredentialBrokerError> = CasMutateOps {
+    deserialize: deserialize_credential::<StoredSession>,
+    serialize: serialize_session_entry,
+    map_fs_error: fs_to_broker_error,
+};
+
+fn serialize_lease_entry(
+    lease: &StoredLease,
+    _scope: &ResourceScope,
+) -> Result<Entry, SecretStoreError> {
+    let body = serialize_secret(lease)?;
+    Ok(tag_entry_with_tenant(
+        Entry::bytes(body).with_content_type(ContentType::json()),
+        &lease.scope,
+    ))
+}
+
+fn serialize_session_entry(
+    stored: &StoredSession,
+    scope: &ResourceScope,
+) -> Result<Entry, CredentialBrokerError> {
+    let body = serialize_credential(stored)?;
+    Ok(tag_entry_with_tenant(
+        Entry::bytes(body).with_content_type(ContentType::json()),
+        scope,
+    ))
+}
+
+fn unknown_lease(scope: &ResourceScope, lease_id: SecretLeaseId) -> SecretStoreError {
+    SecretStoreError::UnknownLease {
+        scope: Box::new(scope.clone()),
+        lease_id,
+    }
+}
+
+fn lease_retry_exhausted(op: &str) -> SecretStoreError {
+    SecretStoreError::StoreUnavailable {
+        reason: format!("secret lease {op} retry limit exceeded"),
+    }
+}
+
+fn session_retry_exhausted(op: &str) -> CredentialBrokerError {
+    CredentialBrokerError::BrokerUnavailable {
+        reason: format!("credential session {op} retry limit exceeded"),
+    }
+}
+
+/// Decision returned by a `cas_mutate` step inside the retry loop.
+///
+/// Each iteration reloads the latest version, deserializes the record, and
+/// calls the caller-supplied `decide` closure with the typed body. The
+/// closure returns one of these variants to drive the rest of the loop:
+///
+/// * [`Commit`](CasDecision::Commit) writes `record` under
+///   `CasExpectation::Version(<latest version>)`. On
+///   `FilesystemError::VersionMismatch` the loop re-reads and calls `decide`
+///   again; on success it returns `Ok(value)`.
+/// * [`BestEffortCommit`](CasDecision::BestEffortCommit) writes `record`
+///   under the same CAS expectation but treats a `VersionMismatch` as if the
+///   write succeeded — used when a concurrent peer promoting the same
+///   terminal state would be observationally equivalent (e.g. the
+///   stale-Active → Expired transition). Returns `outcome` either way.
+/// * [`Settle`](CasDecision::Settle) skips the write and returns `outcome`
+///   immediately. Used for short-circuits (unknown record, scope mismatch,
+///   already-terminal state, validation failure).
+enum CasDecision<T, R, E> {
+    Commit { record: T, value: R },
+    BestEffortCommit { record: T, outcome: Result<R, E> },
+    Settle(Result<R, E>),
+}
+
+/// Read-modify-write helper for the per-record CAS retry pattern used by
+/// `consume`, `revoke`, and `consume_session_use`. The caller supplies the
+/// per-call decision logic; this function owns the retry loop, the
+/// versioned-get, the serialize-and-CAS-write, and the exhaustion error.
+async fn cas_mutate<T, R, E, F, Decide, Fut>(
+    filesystem: &ScopedFilesystem<F>,
+    scope: &ResourceScope,
+    path: &ScopedPath,
+    ops: CasMutateOps<T, E>,
+    not_found: impl Fn() -> E,
+    retry_exhausted: impl Fn() -> E,
+    mut decide: Decide,
+) -> Result<R, E>
+where
+    F: RootFilesystem,
+    Decide: FnMut(T) -> Fut,
+    Fut: std::future::Future<Output = Result<CasDecision<T, R, E>, E>> + Send,
+{
+    for _ in 0..CAS_RETRY_ATTEMPTS {
+        let Some(versioned) = filesystem
+            .get(scope, path)
+            .await
+            .map_err(ops.map_fs_error)?
+        else {
+            return Err(not_found());
+        };
+        let record = (ops.deserialize)(&versioned.entry.body)?;
+        match decide(record).await? {
+            CasDecision::Settle(outcome) => return outcome,
+            CasDecision::Commit { record, value } => {
+                let entry = (ops.serialize)(&record, scope)?;
+                match put_with_version_fallback(
+                    filesystem,
+                    scope,
+                    path,
+                    entry,
+                    CasExpectation::Version(versioned.version),
+                )
+                .await
+                {
+                    Ok(()) => return Ok(value),
+                    Err(FilesystemError::VersionMismatch { .. }) => continue,
+                    Err(error) => return Err((ops.map_fs_error)(error)),
+                }
+            }
+            CasDecision::BestEffortCommit { record, outcome } => {
+                let entry = (ops.serialize)(&record, scope)?;
+                match put_with_version_fallback(
+                    filesystem,
+                    scope,
+                    path,
+                    entry,
+                    CasExpectation::Version(versioned.version),
+                )
+                .await
+                {
+                    Ok(()) | Err(FilesystemError::VersionMismatch { .. }) => return outcome,
+                    Err(error) => return Err((ops.map_fs_error)(error)),
+                }
+            }
+        }
+    }
+    Err(retry_exhausted())
 }
 
 // -- Error mapping ----------------------------------------------------------
