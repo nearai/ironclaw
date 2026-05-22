@@ -1,24 +1,16 @@
 use std::sync::Arc;
 
-mod activation;
-mod assets;
-mod execution;
-
 use ironclaw_filesystem::{RootFilesystem, ScopedFilesystem};
-use ironclaw_host_api::ScopedPath;
+use ironclaw_host_api::{ScopedPath, TenantId};
 use ironclaw_loop_support::{
     FilesystemSkillBundleRoot, FilesystemSkillBundleSource, HostSkillContextSource,
     SkillBundleContextSource,
 };
-use thiserror::Error;
 
-pub use activation::{
-    DEFAULT_MAX_ACTIVE_SKILLS, DEFAULT_MAX_SKILL_CONTEXT_TOKENS, SelectableSkillContextSource,
-    SkillActivationMode, SkillActivationPlan, SkillActivationRequest, SkillActivationSelection,
-    SkillActivationSelectionError, SkillActivationSelectorConfig,
+use crate::{
+    SelectableSkillContextSource, SkillActivationSelectorConfig, SkillExecutionAdapter,
+    error::FirstPartySkillsExtensionError,
 };
-pub use assets::{SkillBundleAsset, SkillBundleAssetReadError, SkillBundleAssetReader};
-pub use execution::{SkillExecutionAdapter, SkillExecutionAdapterError, SkillExecutionPlan};
 
 const SYSTEM_SKILLS_ROOT: &str = "/system/skills";
 const USER_SKILLS_ROOT: &str = "/skills";
@@ -33,13 +25,9 @@ pub struct FirstPartySkillsExtensionHandles {
 }
 
 impl FirstPartySkillsExtensionHandles {
-    /// Handles for the standard Reborn skill roots.
+    /// Handles for the standard first-slice Reborn skill roots.
     pub fn reborn_default() -> Result<Self, FirstPartySkillsExtensionError> {
-        Ok(Self {
-            system_skills: Some(scoped_root(SYSTEM_SKILLS_ROOT)?),
-            user_skills: Some(scoped_root(USER_SKILLS_ROOT)?),
-            tenant_shared_skills: Some(scoped_root(TENANT_SHARED_SKILLS_ROOT)?),
-        })
+        Self::without_tenant_shared()
     }
 
     /// Handles for deployments that do not expose tenant-shared skills.
@@ -86,13 +74,16 @@ impl FirstPartySkillsExtensionHandles {
         self.tenant_shared_skills.as_ref()
     }
 
-    fn bundle_roots(&self) -> Vec<FilesystemSkillBundleRoot> {
+    fn bundle_roots(&self, tenant_id: &TenantId) -> Vec<FilesystemSkillBundleRoot> {
         let mut roots = Vec::new();
         if let Some(root) = &self.system_skills {
             roots.push(FilesystemSkillBundleRoot::system(root.clone()));
         }
         if let Some(root) = &self.tenant_shared_skills {
-            roots.push(FilesystemSkillBundleRoot::tenant_shared(root.clone()));
+            roots.push(FilesystemSkillBundleRoot::tenant_shared(
+                root.clone(),
+                tenant_id.clone(),
+            ));
         }
         if let Some(root) = &self.user_skills {
             roots.push(FilesystemSkillBundleRoot::user(root.clone()));
@@ -113,7 +104,8 @@ where
 {
     bundle_source: Arc<FilesystemSkillBundleSource<F>>,
     context_source: Arc<SkillBundleContextSource<FilesystemSkillBundleSource<F>>>,
-    selectable_context_source: Arc<SelectableSkillContextSource<FilesystemSkillBundleSource<F>>>,
+    default_selectable_context_source:
+        Arc<SelectableSkillContextSource<FilesystemSkillBundleSource<F>>>,
     execution_adapter: Arc<SkillExecutionAdapter<FilesystemSkillBundleSource<F>>>,
 }
 
@@ -136,29 +128,36 @@ where
     pub fn new(
         filesystem: Arc<ScopedFilesystem<F>>,
         handles: FirstPartySkillsExtensionHandles,
-    ) -> Self {
-        let bundle_source = Arc::new(FilesystemSkillBundleSource::new(
-            filesystem,
-            handles.bundle_roots(),
-        ));
+        tenant_id: TenantId,
+    ) -> Result<Self, FirstPartySkillsExtensionError> {
+        let bundle_source = Arc::new(
+            FilesystemSkillBundleSource::new(filesystem, handles.bundle_roots(&tenant_id))
+                .map_err(|error| {
+                    FirstPartySkillsExtensionError::InvalidBundleSource(error.to_string())
+                })?,
+        );
         let context_source = Arc::new(SkillBundleContextSource::new(Arc::clone(&bundle_source)));
-        let selectable_context_source = Arc::new(SelectableSkillContextSource::new(
+        let default_selectable_context_source = Arc::new(SelectableSkillContextSource::new(
             Arc::clone(&bundle_source),
             SkillActivationSelectorConfig::default(),
         ));
         let execution_adapter = Arc::new(SkillExecutionAdapter::new(Arc::clone(
-            &selectable_context_source,
+            &default_selectable_context_source,
         )));
-        Self {
+        Ok(Self {
             bundle_source,
             context_source,
-            selectable_context_source,
+            default_selectable_context_source,
             execution_adapter,
-        }
+        })
     }
 
     pub fn bundle_source(&self) -> Arc<FilesystemSkillBundleSource<F>> {
         Arc::clone(&self.bundle_source)
+    }
+
+    pub fn context_source(&self) -> Arc<SkillBundleContextSource<FilesystemSkillBundleSource<F>>> {
+        Arc::clone(&self.context_source)
     }
 
     pub fn host_skill_context_source(&self) -> Arc<dyn HostSkillContextSource> {
@@ -167,8 +166,15 @@ where
 
     pub fn selectable_skill_context_source(
         &self,
+        config: SkillActivationSelectorConfig,
     ) -> Arc<SelectableSkillContextSource<FilesystemSkillBundleSource<F>>> {
-        Arc::clone(&self.selectable_context_source)
+        if config == SkillActivationSelectorConfig::default() {
+            return Arc::clone(&self.default_selectable_context_source);
+        }
+        Arc::new(SelectableSkillContextSource::new(
+            Arc::clone(&self.bundle_source),
+            config,
+        ))
     }
 
     pub fn skill_execution_adapter(
@@ -176,20 +182,6 @@ where
     ) -> Arc<SkillExecutionAdapter<FilesystemSkillBundleSource<F>>> {
         Arc::clone(&self.execution_adapter)
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum FirstPartySkillsExtensionError {
-    #[error(
-        "invalid first-party skills extension handle {handle}: expected {expected}, got {actual}"
-    )]
-    InvalidHandle {
-        handle: &'static str,
-        expected: &'static str,
-        actual: String,
-    },
-    #[error("invalid first-party skills extension root path: {0}")]
-    InvalidRootPath(String),
 }
 
 fn scoped_root(path: &'static str) -> Result<ScopedPath, FirstPartySkillsExtensionError> {
@@ -299,10 +291,7 @@ mod tests {
             handles.user_skills().map(ScopedPath::as_str),
             Some("/skills")
         );
-        assert_eq!(
-            handles.tenant_shared_skills().map(ScopedPath::as_str),
-            Some("/tenant-shared/skills")
-        );
+        assert_eq!(handles.tenant_shared_skills().map(ScopedPath::as_str), None);
     }
 
     #[test]
@@ -360,7 +349,9 @@ mod tests {
         let extension = FirstPartySkillsExtension::new(
             scoped_filesystem(root),
             FirstPartySkillsExtensionHandles::without_tenant_shared().unwrap(),
-        );
+            TenantId::new("tenant-a").unwrap(),
+        )
+        .unwrap();
 
         let candidates = extension
             .host_skill_context_source()
@@ -382,9 +373,12 @@ mod tests {
         }));
         assert!(entries.iter().any(|entry| {
             entry.name == "user-helper"
-                && entry.trust == SkillTrustLevel::Installed
+                && entry.trust == SkillTrustLevel::Trusted
                 && entry.visibility == SkillVisibility::Visible
-                && entry.prompt_content.is_none()
+                && entry
+                    .prompt_content
+                    .as_deref()
+                    .is_some_and(|content| content.contains("USER_HELPER_PROMPT_SENTINEL"))
         }));
         assert!(!entries.iter().any(|entry| entry.name == "workspace-helper"));
     }
@@ -401,7 +395,9 @@ mod tests {
         let extension = FirstPartySkillsExtension::new(
             scoped_filesystem(root),
             FirstPartySkillsExtensionHandles::without_tenant_shared().unwrap(),
-        );
+            TenantId::new("tenant-a").unwrap(),
+        )
+        .unwrap();
 
         let descriptors = extension
             .bundle_source()
@@ -411,7 +407,7 @@ mod tests {
 
         assert_eq!(descriptors.len(), 1);
         assert_eq!(descriptors[0].id().name(), "user-helper");
-        assert_eq!(descriptors[0].trust(), Some(&SkillTrust::Installed));
+        assert_eq!(descriptors[0].trust(), Some(&SkillTrust::Trusted));
         assert_eq!(descriptors[0].visibility(), Some(&SkillVisibility::Visible));
     }
 }

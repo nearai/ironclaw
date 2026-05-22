@@ -25,7 +25,7 @@ pub(crate) fn init_tracing() {
 }
 
 pub(crate) fn execute(context: RebornCliContext, message: Option<String>) -> anyhow::Result<()> {
-    let runtime_input = build_runtime_input(context.boot_config())?;
+    let runtime_input = build_runtime_input(context.boot_config(), RuntimeInputCaller::Run)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -185,7 +185,25 @@ fn install_ctrl_c_cancellation() -> CancellationToken {
     cancellation
 }
 
-fn build_runtime_input(config: &RebornBootConfig) -> anyhow::Result<RebornRuntimeInput> {
+/// Which subcommand is asking for the runtime input. Used to decide
+/// which `[identity]` / `[…]` config sections are legitimate vs.
+/// "parsed but not wired" — the runtime slice today does not honor
+/// `[identity].default_project`, but the `serve` subcommand stamps it
+/// onto every authenticated WebUI caller and therefore consumes it
+/// directly. Without this discriminator the shared `build_runtime_input`
+/// would reject `serve` configs that legitimately set
+/// `default_project`. See the `reject_unsupported_runtime_sections`
+/// branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeInputCaller {
+    Run,
+    Serve,
+}
+
+pub(crate) fn build_runtime_input(
+    config: &RebornBootConfig,
+    caller: RuntimeInputCaller,
+) -> anyhow::Result<RebornRuntimeInput> {
     use ironclaw_reborn_composition::RebornBuildInput;
 
     // Read the operator's boot TOML if present. Missing file is OK
@@ -194,7 +212,7 @@ fn build_runtime_input(config: &RebornBootConfig) -> anyhow::Result<RebornRuntim
     // CLI-shaped default baked into composition).
     let config_file = read_config_file(config)?;
 
-    reject_unsupported_runtime_sections(config_file.as_ref())?;
+    reject_unsupported_runtime_sections(config_file.as_ref(), caller)?;
 
     let owner_id = config_file
         .as_ref()
@@ -321,13 +339,20 @@ fn effective_profile(
 
 fn reject_unsupported_runtime_sections(
     config_file: Option<&ironclaw_reborn_config::RebornConfigFile>,
+    caller: RuntimeInputCaller,
 ) -> anyhow::Result<()> {
     let Some(file) = config_file else {
         return Ok(());
     };
 
+    // `[identity].default_project` is parsed but not yet wired into
+    // the generic runtime slice — `run` / `repl` would silently drop
+    // the value, so we fail-loud. The `serve` subcommand DOES consume
+    // it (stamped onto every `WebUiAuthenticatedCaller`), so for that
+    // caller the field is supported, not "parsed but not wired".
     if let Some(identity) = file.identity.as_ref()
         && identity.default_project.is_some()
+        && caller != RuntimeInputCaller::Serve
     {
         anyhow::bail!(
             "config file [identity] field default_project is parsed but not wired in this runtime slice; \
@@ -383,7 +408,7 @@ fn runner_settings(
 mod tests {
     use ironclaw_reborn_config::RebornBootConfig;
 
-    use super::build_runtime_input;
+    use super::{RuntimeInputCaller, build_runtime_input};
 
     #[test]
     fn build_runtime_input_maps_configured_cli_identity() {
@@ -408,11 +433,72 @@ default_owner = "custom-owner"
         )
         .expect("boot config");
 
-        let runtime_input = build_runtime_input(&config).expect("runtime input");
+        let runtime_input =
+            build_runtime_input(&config, RuntimeInputCaller::Run).expect("runtime input");
 
         assert_eq!(runtime_input.identity.tenant_id, "custom-tenant");
         assert_eq!(runtime_input.identity.agent_id, "custom-agent");
         assert_eq!(runtime_input.identity.source_binding_id, "reborn-cli");
         assert_eq!(runtime_input.identity.reply_target_binding_id, "reborn-cli");
+    }
+
+    // Regression for the review point that `serve` rejected legitimate
+    // `[identity].default_project` configs at runtime-input build time
+    // because the unsupported-section check was shared with `run` / `repl`.
+    // `serve` consumes the value, `run` does not — the discriminator
+    // ensures both branches do the right thing.
+    #[test]
+    fn build_runtime_input_for_run_rejects_default_project() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[identity]
+default_project = "project-alpha"
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let err = build_runtime_input(&config, RuntimeInputCaller::Run)
+            .err()
+            .expect("run must reject default_project");
+        assert!(
+            err.to_string().contains("default_project"),
+            "error must mention the rejected field, got: {err}",
+        );
+    }
+
+    #[test]
+    fn build_runtime_input_for_serve_accepts_default_project() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let reborn_home = temp.path().join("reborn-home");
+        std::fs::create_dir_all(&reborn_home).expect("mkdir");
+        std::fs::write(
+            reborn_home.join("config.toml"),
+            r#"
+[identity]
+default_project = "project-alpha"
+"#,
+        )
+        .expect("write config");
+        let config = RebornBootConfig::resolve_from_env_parts(
+            Some(reborn_home.into_os_string()),
+            None,
+            None,
+            None,
+        )
+        .expect("boot config");
+
+        let _runtime_input = build_runtime_input(&config, RuntimeInputCaller::Serve)
+            .expect("serve must accept default_project");
     }
 }

@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -17,7 +18,7 @@ use crate::binding::{
     ResolvedBinding,
 };
 use crate::error::ProductWorkflowError;
-use crate::inbound_turn::{InboundTurnOutcome, InboundTurnService};
+use crate::inbound_turn::{InboundTurnOutcome, InboundTurnService, check_before_inbound_policy};
 use crate::ledger::{IdempotencyDecision, IdempotencyLedger};
 use crate::policy::{BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest};
 
@@ -152,6 +153,8 @@ pub struct FakeIdempotencyLedger {
 struct FakeIdempotencyState {
     in_flight: HashMap<ActionFingerprintKey, ProductInboundAction>,
     settled: HashMap<ActionFingerprintKey, ProductInboundAction>,
+    released_count: usize,
+    last_released: Option<ProductInboundAction>,
     fail_with: Option<ProductWorkflowError>,
     settle_fail_with: Option<ProductWorkflowError>,
 }
@@ -202,6 +205,18 @@ impl FakeIdempotencyLedger {
     pub fn settled_actions(&self) -> Vec<ProductInboundAction> {
         let state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
         state.settled.values().cloned().collect()
+    }
+
+    /// How many non-terminal actions were released.
+    pub fn released_count(&self) -> usize {
+        let state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
+        state.released_count
+    }
+
+    /// Most recent released non-terminal action, retained for targeted assertions.
+    pub fn last_released_action(&self) -> Option<ProductInboundAction> {
+        let state = self.state.lock().expect("fake ledger state lock poisoned"); // safety: test-support fake
+        state.last_released.clone()
     }
 }
 
@@ -255,6 +270,8 @@ impl IdempotencyLedger for FakeIdempotencyLedger {
             return Err(error);
         }
         state.in_flight.remove(&action.fingerprint);
+        state.released_count += 1;
+        state.last_released = Some(action);
         Ok(())
     }
 }
@@ -264,6 +281,12 @@ impl IdempotencyLedger for FakeIdempotencyLedger {
 // ---------------------------------------------------------------------------
 
 /// In-memory fake for before-inbound policy checks.
+///
+/// Queued `program_outcome(s)` results are consumed first; `allow`, `rewrite_*`,
+/// `reject`, and `force_failure` configure the fallback used after the queue.
+/// `delay_responses_by` composes with both queued and fallback outcomes: every
+/// subsequent policy response waits for the configured delay until a new fake is
+/// created.
 #[derive(Clone)]
 pub struct FakeBeforeInboundPolicy {
     state: Arc<Mutex<FakeBeforeInboundPolicyState>>,
@@ -272,7 +295,9 @@ pub struct FakeBeforeInboundPolicy {
 #[derive(Default)]
 struct FakeBeforeInboundPolicyState {
     requests: Vec<BeforeInboundPolicyRequest>,
-    outcome: Option<Result<BeforeInboundPolicyOutcome, ProductWorkflowError>>,
+    programmed_outcomes: VecDeque<Result<BeforeInboundPolicyOutcome, ProductWorkflowError>>,
+    fallback_outcome: Option<Result<BeforeInboundPolicyOutcome, ProductWorkflowError>>,
+    response_delay: Option<Duration>,
 }
 
 impl FakeBeforeInboundPolicy {
@@ -282,40 +307,89 @@ impl FakeBeforeInboundPolicy {
         }
     }
 
-    /// Allow all messages without modification.
+    /// Use allow as the fallback after queued outcomes are exhausted.
+    ///
+    /// This does not clear `delay_responses_by`; delayed fakes continue to
+    /// delay allow outcomes.
     pub fn allow(&self) {
         let mut state = self
             .state
             .lock()
             .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
-        state.outcome = Some(Ok(BeforeInboundPolicyOutcome::Allow));
+        state.fallback_outcome = Some(Ok(BeforeInboundPolicyOutcome::Allow));
     }
 
-    /// Rewrite all user-message payloads.
+    /// Use this rewrite as the fallback after queued outcomes are exhausted.
+    ///
+    /// This does not clear `delay_responses_by`; delayed fakes continue to
+    /// delay rewrite outcomes.
     pub fn rewrite_user_message(&self, payload: UserMessagePayload) {
         let mut state = self
             .state
             .lock()
             .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
-        state.outcome = Some(Ok(BeforeInboundPolicyOutcome::RewriteUserMessage(payload)));
+        state.fallback_outcome = Some(Ok(BeforeInboundPolicyOutcome::RewriteUserMessage(payload)));
     }
 
-    /// Reject all user messages.
+    /// Use this rejection as the fallback after queued outcomes are exhausted.
+    ///
+    /// This does not clear `delay_responses_by`; delayed fakes continue to
+    /// delay rejection outcomes.
     pub fn reject(&self, rejection: ProductRejection) {
         let mut state = self
             .state
             .lock()
             .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
-        state.outcome = Some(Ok(BeforeInboundPolicyOutcome::Reject(rejection)));
+        state.fallback_outcome = Some(Ok(BeforeInboundPolicyOutcome::Reject(rejection)));
     }
 
-    /// Fail all policy checks.
+    /// Use this failure as the fallback after queued outcomes are exhausted.
+    ///
+    /// This does not clear `delay_responses_by`; delayed fakes continue to
+    /// delay failure outcomes.
     pub fn force_failure(&self, error: ProductWorkflowError) {
         let mut state = self
             .state
             .lock()
             .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
-        state.outcome = Some(Err(error));
+        state.fallback_outcome = Some(Err(error));
+    }
+
+    /// Append one policy result consumed by the next request before fallback.
+    pub fn program_outcome(
+        &self,
+        outcome: Result<BeforeInboundPolicyOutcome, ProductWorkflowError>,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
+        state.programmed_outcomes.push_back(outcome);
+    }
+
+    /// Append policy results consumed in order before the fallback outcome.
+    pub fn program_outcomes(
+        &self,
+        outcomes: impl IntoIterator<Item = Result<BeforeInboundPolicyOutcome, ProductWorkflowError>>,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
+        state.programmed_outcomes.extend(outcomes);
+    }
+
+    /// Delay every policy response after recording the request.
+    ///
+    /// Use a delay longer than the workflow timeout to exercise the timeout
+    /// and retry-release path. The delay composes with queued outcomes and the
+    /// fallback outcome; create a new fake when an immediate response is needed.
+    pub fn delay_responses_by(&self, delay: Duration) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
+        state.response_delay = Some(delay);
     }
 
     /// How many user messages reached policy checks.
@@ -328,6 +402,10 @@ impl FakeBeforeInboundPolicy {
     }
 
     /// Recorded policy requests.
+    ///
+    /// These are intentionally raw test-support requests, including external
+    /// actor/conversation refs, so contract tests can assert exact routing
+    /// context. Do not log this collection from production-like tests.
     pub fn requests(&self) -> Vec<BeforeInboundPolicyRequest> {
         let state = self
             .state
@@ -349,15 +427,26 @@ impl BeforeInboundPolicy for FakeBeforeInboundPolicy {
         &self,
         request: BeforeInboundPolicyRequest,
     ) -> Result<BeforeInboundPolicyOutcome, ProductWorkflowError> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
-        state.requests.push(request);
-        state
-            .outcome
-            .clone()
-            .unwrap_or(Ok(BeforeInboundPolicyOutcome::Allow))
+        let (delay, outcome) = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("fake before-inbound policy state lock poisoned"); // safety: test-support fake
+            state.requests.push(request);
+            let delay = state.response_delay;
+            let outcome = state
+                .programmed_outcomes
+                .pop_front()
+                .or_else(|| state.fallback_outcome.clone())
+                .unwrap_or(Ok(BeforeInboundPolicyOutcome::Allow));
+            (delay, outcome)
+        };
+
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+
+        outcome
     }
 }
 
@@ -552,9 +641,11 @@ impl InboundTurnService for FakeInboundTurnService {
                 kind: "non_user_message".into(),
             });
         };
-        let policy_outcome = before_inbound_policy
-            .check_user_message(BeforeInboundPolicyRequest::new(envelope, payload)?)
-            .await?;
+        let policy_outcome = check_before_inbound_policy(
+            before_inbound_policy,
+            BeforeInboundPolicyRequest::new(envelope, payload)?,
+        )
+        .await?;
         let dispatch_envelope;
         let envelope_for_turn = match policy_outcome {
             BeforeInboundPolicyOutcome::Allow => envelope,

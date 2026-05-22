@@ -142,13 +142,18 @@ impl SkillBundleAssetReadError {
             SkillBundleSourceError::InvalidBundleId | SkillBundleSourceError::InvalidFilePath => {
                 Self::InvalidPath
             }
-            SkillBundleSourceError::InvalidSkillBundle => Self::InvalidBundle,
+            SkillBundleSourceError::InvalidSkillBundle
+            | SkillBundleSourceError::BundleUtf8DecodeFailed
+            | SkillBundleSourceError::ManifestParseFailed => Self::InvalidBundle,
             SkillBundleSourceError::BundleNotFound | SkillBundleSourceError::FileNotFound => {
                 Self::NotFound
             }
             SkillBundleSourceError::PermissionDenied => Self::PermissionDenied,
-            SkillBundleSourceError::ContentTooLarge => Self::ContentTooLarge,
-            SkillBundleSourceError::Internal => Self::Internal,
+            SkillBundleSourceError::ContentTooLarge
+            | SkillBundleSourceError::BundleScanLimitExceeded => Self::ContentTooLarge,
+            SkillBundleSourceError::DuplicateSourceKind | SkillBundleSourceError::Internal => {
+                Self::Internal
+            }
         }
     }
 }

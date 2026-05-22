@@ -4,7 +4,8 @@ use ironclaw_filesystem::RootFilesystem;
 use ironclaw_loop_support::{FilesystemSkillBundleSource, HostSkillContextSource};
 
 use crate::{
-    SelectableSkillContextSource, SkillExecutionAdapter, skills::FirstPartySkillsExtension,
+    SelectableSkillContextSource, SkillActivationSelectorConfig, SkillExecutionAdapter,
+    skills::FirstPartySkillsExtension,
 };
 
 /// Loaded first-party extension ports exposed to Reborn composition.
@@ -55,10 +56,11 @@ where
 
     pub fn selectable_skill_context_source(
         &self,
+        config: SkillActivationSelectorConfig,
     ) -> Option<Arc<SelectableSkillContextSource<FilesystemSkillBundleSource<F>>>> {
         self.skills
             .as_ref()
-            .map(FirstPartySkillsExtension::selectable_skill_context_source)
+            .map(|skills| skills.selectable_skill_context_source(config))
     }
 
     pub fn skill_execution_adapter(
@@ -76,7 +78,7 @@ mod tests {
     use crate::{FirstPartySkillsExtensionHandles, skills::FirstPartySkillsExtension};
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
-        MountAlias, MountGrant, MountPermissions, MountView, ScopedPath, VirtualPath,
+        MountAlias, MountGrant, MountPermissions, MountView, ScopedPath, TenantId, VirtualPath,
     };
 
     fn filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
@@ -101,7 +103,9 @@ mod tests {
                 None,
             )
             .unwrap(),
+            TenantId::new("tenant-a").unwrap(),
         )
+        .unwrap()
     }
 
     #[test]

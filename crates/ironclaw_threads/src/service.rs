@@ -4,11 +4,11 @@ use ironclaw_host_api::ThreadId;
 use crate::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
     AppendAssistantDraftRequest, AppendToolResultReferenceRequest, ContextMessages, ContextWindow,
-    CreateSummaryArtifactRequest, EnsureThreadRequest, LoadContextMessagesRequest,
-    LoadContextWindowRequest, MessageContent, RedactMessageRequest,
-    ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord, SummaryArtifact,
-    ThreadHistory, ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    UpdateAssistantDraftRequest,
+    CreateSummaryArtifactRequest, EnsureThreadRequest, ListThreadsForScopeRequest,
+    ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
+    MessageContent, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
+    SessionThreadRecord, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
+    ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
 };
 
 /// Canonical Reborn session thread and transcript boundary.
@@ -120,4 +120,26 @@ pub trait SessionThreadService: Send + Sync {
         &self,
         request: CreateSummaryArtifactRequest,
     ) -> Result<SummaryArtifact, SessionThreadError>;
+
+    /// List threads scoped to the supplied `ThreadScope`. The default
+    /// impl fails closed (`SessionThreadError::Backend`) so backends
+    /// that do not yet implement enumeration surface a clear
+    /// `503 Service Unavailable` at the gateway instead of pretending
+    /// the caller has zero threads. Production backends override this
+    /// method with their own pagination strategy.
+    ///
+    /// Implementations MUST scope the listing by `owner_user_id` (or
+    /// equivalent caller-binding fields on the scope) — otherwise a
+    /// caller could enumerate threads owned by other users in the
+    /// same `(tenant, agent, project)` triple.
+    async fn list_threads_for_scope(
+        &self,
+        _request: ListThreadsForScopeRequest,
+    ) -> Result<ListThreadsForScopeResponse, SessionThreadError> {
+        Err(SessionThreadError::Backend(
+            "list_threads_for_scope is not implemented by this SessionThreadService backend; \
+             override this method before exposing the v2 list-threads route"
+                .to_string(),
+        ))
+    }
 }

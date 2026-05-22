@@ -1161,7 +1161,13 @@ trust = "untrusted"
 kind = "wasm"
 module = "wasm/trap.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "wasm-smoke.trap"
 description = "Trap through WASM"
 effects = ["dispatch_capability"]
@@ -1182,7 +1188,13 @@ trust = "untrusted"
 kind = "wasm"
 module = "wasm/http-trap.wasm"
 
-[[capabilities]]
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
 id = "wasm-smoke.httptrap"
 description = "Trap after host HTTP through WASM"
 effects = ["dispatch_capability", "network"]

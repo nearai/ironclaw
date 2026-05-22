@@ -9,12 +9,13 @@
 use std::{collections::HashMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
-use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     CapabilityId, MountView, ResourceEstimate, ResourceScope, ResourceUsage,
-    RuntimeDispatchErrorKind, RuntimeHttpEgress,
+    RuntimeDispatchErrorKind,
 };
 use serde_json::Value;
+
+use crate::InvocationServices;
 
 /// Already-authorized first-party capability dispatch input.
 ///
@@ -28,8 +29,7 @@ pub struct FirstPartyCapabilityRequest {
     pub scope: ResourceScope,
     pub estimate: ResourceEstimate,
     pub mounts: Option<MountView>,
-    pub filesystem: Arc<dyn RootFilesystem>,
-    pub runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
+    pub services: InvocationServices,
     pub input: Value,
 }
 
@@ -41,14 +41,7 @@ impl fmt::Debug for FirstPartyCapabilityRequest {
             .field("scope", &self.scope)
             .field("estimate", &self.estimate)
             .field("mounts", &self.mounts)
-            .field("filesystem", &"<root filesystem>")
-            .field(
-                "runtime_http_egress",
-                &self
-                    .runtime_http_egress
-                    .as_ref()
-                    .map(|_| "<runtime http egress>"),
-            )
+            .field("services", &self.services)
             .field("input", &self.input)
             .finish()
     }

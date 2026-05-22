@@ -20,6 +20,7 @@
 //!   crate has no workspace deps, per boundary rules).
 
 mod boot;
+mod budget;
 mod config_file;
 mod doctor;
 mod home;
@@ -27,9 +28,16 @@ mod profile;
 mod secrets_guard;
 
 pub use boot::RebornBootConfig;
+pub use budget::{
+    BACKGROUND_JOB_DEFAULT_USD_ENV, BUDGET_DEFAULT_TZ_ENV, BUDGET_OVERESTIMATE_FACTOR_ENV,
+    BUDGET_PAUSE_AT_ENV, BUDGET_WARN_AT_ENV, BudgetDefaults, BudgetDefaultsError,
+    HEARTBEAT_PER_TICK_USD_ENV, MISSION_PER_TICK_USD_ENV, PROJECT_DAILY_USD_ENV,
+    ROUTINE_LIGHTWEIGHT_USD_ENV, ROUTINE_STANDARD_USD_ENV, USER_DAILY_USD_ENV,
+};
 pub use config_file::{
-    BootSection, DriversSection, HarnessSection, IdentitySection, LlmSlotSelection, PolicySection,
-    REBORN_CONFIG_API_VERSION, RebornConfigFile, RebornConfigFileError, RunnerSection,
+    BootSection, BudgetSection, DriversSection, HarnessSection, IdentitySection, LlmSlotSelection,
+    PolicySection, REBORN_CONFIG_API_VERSION, RebornConfigFile, RebornConfigFileError,
+    RunnerSection,
 };
 pub use doctor::RebornDoctorReport;
 pub use home::{REBORN_HOME_ENV, RebornConfigError, RebornHome, RebornHomeSource};

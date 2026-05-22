@@ -289,6 +289,12 @@ pub enum SkillBundleSourceError {
     InvalidFilePath,
     #[error("skill bundle content is invalid")]
     InvalidSkillBundle,
+    #[error("skill bundle manifest is not valid UTF-8")]
+    BundleUtf8DecodeFailed,
+    #[error("skill bundle manifest failed to parse")]
+    ManifestParseFailed,
+    #[error("skill bundle source has duplicate source-kind roots")]
+    DuplicateSourceKind,
     #[error("skill bundle not found")]
     BundleNotFound,
     #[error("skill bundle file not found")]
@@ -297,6 +303,8 @@ pub enum SkillBundleSourceError {
     PermissionDenied,
     #[error("skill bundle content too large")]
     ContentTooLarge,
+    #[error("skill bundle source scan limit exceeded")]
+    BundleScanLimitExceeded,
     #[error("skill bundle source internal error")]
     Internal,
 }
@@ -416,6 +424,22 @@ mod tests {
             "skill bundle file path is invalid"
         );
         assert_eq!(
+            SkillBundleSourceError::InvalidSkillBundle.to_string(),
+            "skill bundle content is invalid"
+        );
+        assert_eq!(
+            SkillBundleSourceError::BundleUtf8DecodeFailed.to_string(),
+            "skill bundle manifest is not valid UTF-8"
+        );
+        assert_eq!(
+            SkillBundleSourceError::ManifestParseFailed.to_string(),
+            "skill bundle manifest failed to parse"
+        );
+        assert_eq!(
+            SkillBundleSourceError::DuplicateSourceKind.to_string(),
+            "skill bundle source has duplicate source-kind roots"
+        );
+        assert_eq!(
             SkillBundleSourceError::BundleNotFound.to_string(),
             "skill bundle not found"
         );
@@ -430,6 +454,10 @@ mod tests {
         assert_eq!(
             SkillBundleSourceError::ContentTooLarge.to_string(),
             "skill bundle content too large"
+        );
+        assert_eq!(
+            SkillBundleSourceError::BundleScanLimitExceeded.to_string(),
+            "skill bundle source scan limit exceeded"
         );
         assert_eq!(
             SkillBundleSourceError::Internal.to_string(),

@@ -241,6 +241,59 @@ async fn concrete_mcp_http_client_routes_json_rpc_through_shared_egress() {
 }
 
 #[tokio::test]
+async fn concrete_mcp_http_client_sends_credentials_only_for_tool_call_exchange() {
+    let scope = sample_scope();
+    let mut plan = host_http_plan();
+    let staged_obligation = plan.credential_injections[0].clone();
+    let secret_store_lease = RuntimeCredentialInjection {
+        handle: SecretHandle::new("legacy-token").unwrap(),
+        source: RuntimeCredentialSource::SecretStoreLease,
+        target: RuntimeCredentialTarget::Header {
+            name: "Authorization".to_string(),
+            prefix: Some("Bearer ".to_string()),
+        },
+        required: true,
+    };
+    plan.credential_injections = vec![secret_store_lease, staged_obligation.clone()];
+    let egress = RecordingRuntimeEgress::json_rpc();
+    let client = McpHostHttpClient::new(
+        McpRuntimeHttpAdapter::new(Arc::new(egress.clone())),
+        RecordingEgressPlanner::new(plan.clone()),
+    );
+
+    client
+        .call_tool(McpClientRequest {
+            provider: ExtensionId::new("github-mcp").unwrap(),
+            capability_id: CapabilityId::new("github-mcp.search").unwrap(),
+            scope,
+            transport: "http".to_string(),
+            command: None,
+            args: vec![],
+            url: Some("https://mcp.example.test/mcp".to_string()),
+            input: json!({"query": "ironclaw"}),
+            max_output_bytes: 4096,
+        })
+        .await
+        .unwrap();
+
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[0].credential_injections.is_empty(),
+        "initialize handshake must not receive credential injections"
+    );
+    assert!(
+        requests[1].credential_injections.is_empty(),
+        "initialized notification must not receive credential injections"
+    );
+    assert_eq!(
+        requests[2].credential_injections,
+        vec![staged_obligation],
+        "MCP tools/call must only receive credentials staged by satisfied obligations"
+    );
+}
+
+#[tokio::test]
 async fn concrete_mcp_http_client_scopes_session_ids_per_invocation() {
     let egress = ScopedSessionRuntimeEgress::new();
     let client = McpHostHttpClient::new(
@@ -1339,21 +1392,22 @@ impl ResourceGovernor for ReleaseFailingGovernor {
         self.inner.set_limit(account, limits)
     }
 
-    fn reserve(
+    fn reserve_with_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
-    ) -> Result<ResourceReservation, ResourceError> {
-        self.inner.reserve(scope, estimate)
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        self.inner.reserve_with_outcome(scope, estimate)
     }
 
-    fn reserve_with_id(
+    fn reserve_with_id_and_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
         reservation_id: ResourceReservationId,
-    ) -> Result<ResourceReservation, ResourceError> {
-        self.inner.reserve_with_id(scope, estimate, reservation_id)
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        self.inner
+            .reserve_with_id_and_outcome(scope, estimate, reservation_id)
     }
 
     fn reconcile(
@@ -1369,6 +1423,13 @@ impl ResourceGovernor for ReleaseFailingGovernor {
         reservation_id: ResourceReservationId,
     ) -> Result<ResourceReceipt, ResourceError> {
         Err(ResourceError::UnknownReservation { id: reservation_id })
+    }
+
+    fn account_snapshot(
+        &self,
+        account: &ResourceAccount,
+    ) -> Result<Option<ironclaw_resources::AccountSnapshot>, ResourceError> {
+        self.inner.account_snapshot(account)
     }
 }
 

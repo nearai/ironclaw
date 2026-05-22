@@ -220,6 +220,25 @@ pub struct ThreadHistoryRequest {
     pub thread_id: ThreadId,
 }
 
+/// Browser-driven list-threads query scoped to a single caller.
+///
+/// Pagination is opaque: `cursor` is whatever value the backend
+/// returned as `next_cursor` in a prior response. Stores that have
+/// no enumeration support today return an empty list + `None`
+/// cursor, which is the default trait impl on `SessionThreadService`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListThreadsForScopeRequest {
+    pub scope: ThreadScope,
+    pub limit: Option<u32>,
+    pub cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListThreadsForScopeResponse {
+    pub threads: Vec<SessionThreadRecord>,
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadHistory {
     pub thread: SessionThreadRecord,

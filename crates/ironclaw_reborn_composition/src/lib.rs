@@ -29,6 +29,16 @@ mod readiness;
 mod runtime;
 mod runtime_input;
 mod webui;
+#[cfg(feature = "webui-v2-beta")]
+mod webui_body_limit;
+#[cfg(feature = "webui-v2-beta")]
+mod webui_rate_limit;
+#[cfg(feature = "webui-v2-beta")]
+mod webui_route_match;
+#[cfg(feature = "webui-v2-beta")]
+mod webui_serve;
+#[cfg(feature = "webui-v2-beta")]
+mod webui_ws_origin;
 
 use ironclaw_runtime_policy::{EffectiveRuntimePolicy as ResolvedRuntimePolicy, ResolveError};
 
@@ -59,6 +69,23 @@ pub use runtime_input::{
 };
 #[cfg(feature = "root-llm-provider")]
 pub use runtime_input::{RebornLlmConfig, ResolvedRebornLlm};
+pub use webui::{RebornWebuiBundle, build_webui_services};
+#[cfg(feature = "webui-v2-beta")]
+pub use webui_rate_limit::RateLimitConfigError;
+#[cfg(feature = "webui-v2-beta")]
+pub use webui_serve::{
+    WebuiAuthenticator, WebuiServeConfig, WebuiServeConfigError, WebuiServeError, webui_v2_app,
+};
+
+/// Re-exported identity vocabulary host binaries need to construct
+/// [`WebuiServeConfig`] (and any other public type on this crate whose
+/// signature mentions a host-api identity). Kept narrow on purpose —
+/// the composition CLAUDE.md says "Expose facade-shaped handles only";
+/// these four newtypes are the WebUI gateway's host-identity facade.
+#[cfg(feature = "webui-v2-beta")]
+pub mod host_api {
+    pub use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
+}
 
 /// Reborn model purpose slot names exposed for diagnostic callers.
 ///

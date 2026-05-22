@@ -36,17 +36,6 @@ impl RebornSkillExecutionPlan {
     pub(super) fn first_party_plan(&self) -> &SkillActivationPlan {
         &self.first_party_plan
     }
-
-    #[cfg(test)]
-    pub(super) fn empty_for_test() -> Self {
-        Self::from(SkillActivationPlan::empty(
-            ironclaw_first_party_extensions::SkillActivationSelection {
-                activations: Vec::new(),
-                rewritten_message: String::new(),
-                feedback: Vec::new(),
-            },
-        ))
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,20 +59,6 @@ impl RebornSkillActivation {
             source: self.source.map(SkillSourceKind::from),
             bundle_id: self.bundle_id.clone(),
             mode: FirstPartySkillActivationMode::from(self.mode),
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) fn for_test(
-        name: impl Into<String>,
-        source: Option<RebornSkillSourceKind>,
-        mode: RebornSkillActivationMode,
-    ) -> Self {
-        Self {
-            name: name.into(),
-            source,
-            mode,
-            bundle_id: None,
         }
     }
 }
