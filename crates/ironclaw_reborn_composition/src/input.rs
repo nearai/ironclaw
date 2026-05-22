@@ -192,3 +192,30 @@ impl RebornBuildInput {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use ironclaw_auth::InMemoryAuthProductServices;
+
+    use super::*;
+
+    #[test]
+    fn with_product_auth_services_records_injected_bundle() {
+        let product_auth = Arc::new(RebornProductAuthServices::from_shared(Arc::new(
+            InMemoryAuthProductServices::new(),
+        )));
+
+        let input = RebornBuildInput::disabled("test-owner")
+            .with_product_auth_services(Arc::clone(&product_auth));
+
+        assert!(Arc::ptr_eq(
+            input
+                .product_auth_services
+                .as_ref()
+                .expect("builder should retain injected product auth services"),
+            &product_auth
+        ));
+    }
+}

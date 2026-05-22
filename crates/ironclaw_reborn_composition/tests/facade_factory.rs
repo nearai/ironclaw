@@ -391,10 +391,13 @@ async fn local_dev_product_auth_entrypoint_redacts_manual_token_submit() {
 
     let accounts = product_auth
         .credential_account_service()
-        .list_accounts(&scope, &provider)
+        .list_accounts(ironclaw_auth::CredentialAccountListRequest::new(
+            scope.clone(),
+            provider,
+        ))
         .await
         .unwrap();
-    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts.accounts.len(), 1);
     let serialized = serde_json::to_string(&accounts).unwrap();
     assert!(!serialized.contains("super-secret-token"));
     assert!(!serialized.contains("manual-access-"));
