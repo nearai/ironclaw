@@ -197,7 +197,7 @@ where
         let binding = ResolvedBinding {
             tenant_id: self.scope.tenant_id.clone(),
             user_id: user_id_for_binding(&self.scope.tenant_id, &request)?,
-            thread_id: thread_id_for_binding(&self.scope.tenant_id, &request)?,
+            thread_id: thread_id_for_binding(&self.scope, &request)?,
             agent_id: Some(self.agent_id.clone()),
             project_id: self.project_id.clone(),
         };
@@ -269,7 +269,7 @@ where
         fingerprint: ActionFingerprintKey,
         received_at: DateTime<Utc>,
     ) -> Result<IdempotencyDecision, ProductWorkflowError> {
-        let path = ledger_path(&fingerprint)?;
+        let path = ledger_path(&self.scope, &fingerprint)?;
         let _guard = self.lock.lock().await;
         let Some(stored) =
             read_json::<F, StoredIdempotencyAction>(&self.filesystem, &self.scope, &path).await?
@@ -296,7 +296,7 @@ where
     }
 
     async fn settle(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
-        let path = ledger_path(&action.fingerprint)?;
+        let path = ledger_path(&self.scope, &action.fingerprint)?;
         let _guard = self.lock.lock().await;
         let Some(stored) =
             read_json::<F, StoredIdempotencyAction>(&self.filesystem, &self.scope, &path).await?
@@ -320,7 +320,7 @@ where
     }
 
     async fn release(&self, action: ProductInboundAction) -> Result<(), ProductWorkflowError> {
-        let path = ledger_path(&action.fingerprint)?;
+        let path = ledger_path(&self.scope, &action.fingerprint)?;
         let _guard = self.lock.lock().await;
         let Some(stored) =
             read_json::<F, StoredIdempotencyAction>(&self.filesystem, &self.scope, &path).await?
@@ -482,10 +482,17 @@ fn binding_path(
     )
 }
 
-fn ledger_path(fingerprint: &ActionFingerprintKey) -> Result<ScopedPath, ProductWorkflowError> {
+fn ledger_path(
+    scope: &ResourceScope,
+    fingerprint: &ActionFingerprintKey,
+) -> Result<ScopedPath, ProductWorkflowError> {
+    let agent_id = scope.agent_id.as_ref().map_or("", AgentId::as_str);
+    let project_id = scope.project_id.as_ref().map_or("", ProjectId::as_str);
     hashed_scoped_path(
         "/workflow/idempotency",
         &[
+            agent_id,
+            project_id,
             fingerprint.adapter_id.as_str(),
             fingerprint.installation_id.as_str(),
             fingerprint.external_actor_ref.kind(),
@@ -527,13 +534,17 @@ fn user_id_for_binding(
 }
 
 fn thread_id_for_binding(
-    tenant_id: &TenantId,
+    scope: &ResourceScope,
     request: &ResolveBindingRequest,
 ) -> Result<ThreadId, ProductWorkflowError> {
+    let agent_id = scope.agent_id.as_ref().map_or("", AgentId::as_str);
+    let project_id = scope.project_id.as_ref().map_or("", ProjectId::as_str);
     scoped_id(
         "thread",
         &[
-            tenant_id.as_str(),
+            scope.tenant_id.as_str(),
+            agent_id,
+            project_id,
             request.installation_id.as_str(),
             &request.external_conversation_ref.conversation_fingerprint(),
         ],

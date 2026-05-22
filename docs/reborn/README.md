@@ -48,6 +48,7 @@ docs/reborn/contracts/events-projections.md
 docs/reborn/contracts/memory.md
 docs/reborn/contracts/secrets.md
 docs/reborn/contracts/network.md
+docs/reborn/contracts/skills-extension.md
 docs/reborn/contracts/migration-compatibility.md
 ```
 

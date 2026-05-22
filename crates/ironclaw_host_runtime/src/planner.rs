@@ -204,7 +204,7 @@ mod tests {
         // read under selected root`. The planner forwards the
         // resolved filesystem backend; downstream composition picks
         // the actual root.
-        let desc = descriptor(vec![EffectKind::ReadFilesystem]);
+        let desc = descriptor_with_runtime(RuntimeKind::Wasm, vec![EffectKind::ReadFilesystem]);
         let policy = policy_with(
             FilesystemBackendKind::HostWorkspace,
             ProcessBackendKind::None,
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn rejects_network_capability_when_policy_denies_network() {
-        let desc = descriptor(vec![EffectKind::Network]);
+        let desc = descriptor_with_runtime(RuntimeKind::Wasm, vec![EffectKind::Network]);
         let policy = policy_with(
             FilesystemBackendKind::ScopedVirtual,
             ProcessBackendKind::None,
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn rejects_secret_capability_when_policy_denies_secrets() {
-        let desc = descriptor(vec![EffectKind::UseSecret]);
+        let desc = descriptor_with_runtime(RuntimeKind::Wasm, vec![EffectKind::UseSecret]);
         let policy = policy_with(
             FilesystemBackendKind::ScopedVirtual,
             ProcessBackendKind::None,

@@ -60,6 +60,7 @@ pub(super) async fn dispatch(
     request: &FirstPartyCapabilityRequest,
 ) -> Result<HttpDispatchOutput, FirstPartyCapabilityError> {
     let egress = request
+        .services
         .runtime_http_egress
         .as_ref()
         .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::NetworkDenied))?

@@ -42,6 +42,7 @@ pub(super) async fn write_file(
     }
     create_parent_dir(request, &resolved.virtual_path).await?;
     request
+        .services
         .filesystem
         .write_file(&resolved.virtual_path, content.as_bytes())
         .await

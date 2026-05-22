@@ -23,8 +23,8 @@ use futures::stream::Stream;
 use ironclaw_product_workflow::{
     ProjectionCursor, RebornCancelRunResponse, RebornCreateThreadResponse,
     RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
     WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
 };
 use serde::{Deserialize, Serialize};
@@ -163,6 +163,7 @@ pub async fn stream_events(
 fn sse_concurrency_exhausted() -> WebUiV2HttpError {
     WebUiV2HttpError::from(RebornServicesError {
         code: RebornServicesErrorCode::RateLimited,
+        kind: RebornServicesErrorKind::Busy,
         status_code: 429,
         retryable: true,
         field: None,
@@ -185,6 +186,7 @@ pub struct StreamEventsQuery {
 #[derive(Debug, Clone, Serialize)]
 struct SseErrorPayload {
     error: RebornServicesErrorCode,
+    kind: RebornServicesErrorKind,
     retryable: bool,
 }
 
@@ -282,6 +284,7 @@ fn build_sse_stream(
                     );
                     let payload = SseErrorPayload {
                         error: error.code,
+                        kind: error.kind,
                         retryable: error.retryable,
                     };
                     yield Ok(Event::default()
