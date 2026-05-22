@@ -1423,6 +1423,7 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_capabilities",
                 "ironclaw_dispatcher",
                 "ironclaw_events",
+                "ironclaw_first_party_extensions",
                 "ironclaw_host_runtime",
                 "ironclaw_secrets",
                 "ironclaw_network",
