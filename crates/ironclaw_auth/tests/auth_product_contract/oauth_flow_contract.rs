@@ -62,7 +62,6 @@ async fn oauth_callback_updates_existing_account_from_provider_exchange() {
     let owner = scope("alice");
     let existing = services
         .create_account(NewCredentialAccount {
-            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("work github"),

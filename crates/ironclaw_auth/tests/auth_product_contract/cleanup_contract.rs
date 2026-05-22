@@ -7,7 +7,6 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
     let extension = ExtensionId::new("github").unwrap();
     let orphan = services
         .create_account(NewCredentialAccount {
-            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("orphan"),
@@ -25,7 +24,6 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
 
     let owned = services
         .create_account(NewCredentialAccount {
-            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("owned"),
@@ -41,7 +39,6 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
         .expect("owned account");
     let reusable = services
         .create_account(NewCredentialAccount {
-            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("reusable"),
@@ -72,11 +69,10 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
         .await
         .expect("lookup")
         .expect("owned account remains");
-    assert_eq!(inactive_owned.status, CredentialAccountStatus::Missing);
+    assert_eq!(inactive_owned.status, CredentialAccountStatus::Inactive);
     let isolated_services = InMemoryAuthProductServices::new();
     let isolated_owned = isolated_services
         .create_account(NewCredentialAccount {
-            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("isolated owned"),
@@ -111,7 +107,7 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
         .await
         .expect("lookup")
         .expect("isolated account remains");
-    assert_eq!(isolated_after.status, CredentialAccountStatus::Missing);
+    assert_eq!(isolated_after.status, CredentialAccountStatus::Inactive);
 
     let uninstall = services
         .cleanup_for_lifecycle(SecretCleanupRequest {
@@ -133,7 +129,6 @@ async fn cleanup_for_lifecycle_ignores_cross_scope_accounts() {
 
     let foreign_owned = services
         .create_account(NewCredentialAccount {
-            update_account_id: None,
             scope: foreign_owner.clone(),
             provider: provider(),
             label: label("foreign owned"),
@@ -149,7 +144,6 @@ async fn cleanup_for_lifecycle_ignores_cross_scope_accounts() {
         .expect("foreign owned account");
     let foreign_granted = services
         .create_account(NewCredentialAccount {
-            update_account_id: None,
             scope: foreign_owner.clone(),
             provider: provider(),
             label: label("foreign granted"),

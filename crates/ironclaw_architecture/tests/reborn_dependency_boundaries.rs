@@ -1006,31 +1006,31 @@ fn reborn_runtime_http_egress_has_single_network_boundary() {
 #[test]
 fn reborn_product_api_crates_do_not_bind_http_ingress() {
     let forbidden = [
-        ForbiddenRebornIngressUse {
+        ForbiddenUse {
             pattern: "tokio::net::TcpListener::bind",
             reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
         },
-        ForbiddenRebornIngressUse {
+        ForbiddenUse {
             pattern: "std::net::TcpListener::bind",
             reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
         },
-        ForbiddenRebornIngressUse {
+        ForbiddenUse {
             pattern: "TcpListener::bind",
             reason: "Reborn product/API crates must expose route descriptors, not bind listeners",
         },
-        ForbiddenRebornIngressUse {
+        ForbiddenUse {
             pattern: "axum::serve",
             reason: "Reborn product/API crates must not own server lifecycle",
         },
-        ForbiddenRebornIngressUse {
+        ForbiddenUse {
             pattern: "hyper::Server",
             reason: "Reborn product/API crates must not own server lifecycle",
         },
-        ForbiddenRebornIngressUse {
+        ForbiddenUse {
             pattern: "Server::bind",
             reason: "Reborn product/API crates must not own server lifecycle",
         },
-        ForbiddenRebornIngressUse {
+        ForbiddenUse {
             pattern: "axum_server::bind",
             reason: "Reborn product/API crates must not own server lifecycle",
         },
@@ -1068,7 +1068,7 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
         if !dir.exists() {
             continue;
         }
-        collect_forbidden_reborn_ingress_uses(&dir, &root, &forbidden, &mut violations);
+        collect_forbidden_uses(&dir, &root, &forbidden, &mut violations);
     }
 
     assert!(
@@ -1081,55 +1081,55 @@ fn reborn_product_api_crates_do_not_bind_http_ingress() {
 #[test]
 fn reborn_product_auth_contract_stays_reborn_native() {
     let forbidden = [
-        ForbiddenRebornAuthUse {
+        ForbiddenUse {
             pattern: "ironclaw::",
             reason: "Reborn product auth must not depend on the v1 root crate",
         },
-        ForbiddenRebornAuthUse {
+        ForbiddenUse {
             pattern: "src/extensions",
             reason: "v1 extension paths are inventory only, not Reborn auth implementation",
         },
-        ForbiddenRebornAuthUse {
+        ForbiddenUse {
             pattern: "src/channels/web",
             reason: "v1 web routes are inventory only, not Reborn auth implementation",
         },
-        ForbiddenRebornAuthUse {
+        ForbiddenUse {
             pattern: "ExtensionManager",
             reason: "Reborn product auth must not call through the v1 extension manager",
         },
-        ForbiddenRebornAuthUse {
+        ForbiddenUse {
             pattern: "PendingOAuth",
             reason: "Reborn product auth must not reuse v1 pending OAuth maps",
         },
-        ForbiddenRebornAuthUse {
+        ForbiddenUse {
             pattern: "PendingGate",
             reason: "Reborn product auth must not reuse v1 pending gate maps",
         },
-        ForbiddenRebornAuthUse {
+        ForbiddenUse {
             pattern: "SecretsStore",
             reason: "Reborn product auth must use opaque handles, not raw v1 secrets storage",
         },
-        ForbiddenRebornAuthUse {
+        ForbiddenUse {
             pattern: "get_decrypted",
             reason: "Reborn product auth must not retrieve raw secret material directly",
         },
-        ForbiddenRebornAuthUse {
+        ForbiddenUse {
             pattern: "reqwest",
             reason: "Reborn product auth must not own outbound HTTP transport",
         },
-        ForbiddenRebornAuthUse {
+        ForbiddenUse {
             pattern: "authorization_code: String",
             reason: "raw OAuth codes must be one-shot non-serializable provider inputs",
         },
-        ForbiddenRebornAuthUse {
+        ForbiddenUse {
             pattern: "pkce_verifier: String",
             reason: "raw PKCE verifiers must be one-shot non-serializable provider inputs",
         },
-        ForbiddenRebornAuthUse {
+        ForbiddenUse {
             pattern: "access_token: String",
             reason: "raw provider tokens must not enter product auth contract records",
         },
-        ForbiddenRebornAuthUse {
+        ForbiddenUse {
             pattern: "refresh_token: String",
             reason: "raw provider tokens must not enter product auth contract records",
         },
@@ -1151,7 +1151,7 @@ fn reborn_product_auth_contract_stays_reborn_native() {
     );
 
     let mut violations = Vec::new();
-    collect_forbidden_reborn_auth_uses(&auth_src, &root, &forbidden, &mut violations);
+    collect_forbidden_uses(&auth_src, &root, &forbidden, &mut violations);
 
     assert!(
         violations.is_empty(),
@@ -1165,12 +1165,7 @@ struct ForbiddenRuntimeNetworkUse {
     reason: &'static str,
 }
 
-struct ForbiddenRebornIngressUse {
-    pattern: &'static str,
-    reason: &'static str,
-}
-
-struct ForbiddenRebornAuthUse {
+struct ForbiddenUse {
     pattern: &'static str,
     reason: &'static str,
 }
@@ -2176,10 +2171,10 @@ fn collect_forbidden_runtime_network_uses(
     }
 }
 
-fn collect_forbidden_reborn_ingress_uses(
+fn collect_forbidden_uses(
     dir: &std::path::Path,
     root: &std::path::Path,
-    forbidden: &[ForbiddenRebornIngressUse],
+    forbidden: &[ForbiddenUse],
     violations: &mut Vec<String>,
 ) {
     let entries = std::fs::read_dir(dir)
@@ -2188,44 +2183,7 @@ fn collect_forbidden_reborn_ingress_uses(
         let entry = entry.unwrap_or_else(|error| panic!("failed to read dir entry: {error}"));
         let path = entry.path();
         if path.is_dir() {
-            collect_forbidden_reborn_ingress_uses(&path, root, forbidden, violations);
-            continue;
-        }
-        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
-            continue;
-        }
-        let contents = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
-        for (line_number, line) in contents.lines().enumerate() {
-            for rule in forbidden {
-                if line.contains(rule.pattern) {
-                    let relative = path.strip_prefix(root).unwrap_or(&path);
-                    violations.push(format!(
-                        "{}:{} contains `{}` ({})",
-                        relative.display(),
-                        line_number + 1,
-                        rule.pattern,
-                        rule.reason
-                    ));
-                }
-            }
-        }
-    }
-}
-
-fn collect_forbidden_reborn_auth_uses(
-    dir: &std::path::Path,
-    root: &std::path::Path,
-    forbidden: &[ForbiddenRebornAuthUse],
-    violations: &mut Vec<String>,
-) {
-    let entries = std::fs::read_dir(dir)
-        .unwrap_or_else(|error| panic!("failed to read {}: {error}", dir.display()));
-    for entry in entries {
-        let entry = entry.unwrap_or_else(|error| panic!("failed to read dir entry: {error}"));
-        let path = entry.path();
-        if path.is_dir() {
-            collect_forbidden_reborn_auth_uses(&path, root, forbidden, violations);
+            collect_forbidden_uses(&path, root, forbidden, violations);
             continue;
         }
         if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {

@@ -5,8 +5,7 @@ async fn credential_setup_updates_only_explicit_authorized_account() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");
     let first = services
-        .create_or_update_account(NewCredentialAccount {
-            update_account_id: None,
+        .create_or_update_account(CredentialAccountMutation::Create(NewCredentialAccount {
             scope: owner.clone(),
             provider: provider(),
             label: label("work"),
@@ -17,24 +16,26 @@ async fn credential_setup_updates_only_explicit_authorized_account() {
             access_secret: None,
             refresh_secret: None,
             scopes: Vec::new(),
-        })
+        }))
         .await
         .expect("create account");
     let access_secret = SecretHandle::new("github-updated-access").unwrap();
     let second = services
-        .create_or_update_account(NewCredentialAccount {
-            update_account_id: Some(first.id),
-            scope: owner.clone(),
-            provider: provider(),
-            label: label("work renamed"),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: Some(access_secret.clone()),
-            refresh_secret: None,
-            scopes: provider_scopes(&["repo"]),
-        })
+        .create_or_update_account(CredentialAccountMutation::Update(CredentialAccountUpdate {
+            account_id: first.id,
+            account: NewCredentialAccount {
+                scope: owner.clone(),
+                provider: provider(),
+                label: label("work renamed"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::UserReusable,
+                owner_extension: None,
+                granted_extensions: Vec::new(),
+                access_secret: Some(access_secret.clone()),
+                refresh_secret: None,
+                scopes: provider_scopes(&["repo"]),
+            },
+        }))
         .await
         .expect("update account");
 
@@ -46,8 +47,7 @@ async fn credential_setup_updates_only_explicit_authorized_account() {
     assert_eq!(second.scopes, provider_scopes(&["repo"]));
 
     let same_label_without_target_creates_new_account = services
-        .create_or_update_account(NewCredentialAccount {
-            update_account_id: None,
+        .create_or_update_account(CredentialAccountMutation::Create(NewCredentialAccount {
             scope: owner.clone(),
             provider: provider(),
             label: label("work renamed"),
@@ -58,25 +58,27 @@ async fn credential_setup_updates_only_explicit_authorized_account() {
             access_secret: None,
             refresh_secret: None,
             scopes: Vec::new(),
-        })
+        }))
         .await
         .expect("same label without target is create");
     assert_ne!(same_label_without_target_creates_new_account.id, first.id);
 
     let rejected_takeover = services
-        .create_or_update_account(NewCredentialAccount {
-            update_account_id: Some(first.id),
-            scope: owner.clone(),
-            provider: provider(),
-            label: label("takeover"),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::ExtensionOwned,
-            owner_extension: Some(ExtensionId::new("attacker").unwrap()),
-            granted_extensions: Vec::new(),
-            access_secret: Some(SecretHandle::new("github-takeover").unwrap()),
-            refresh_secret: None,
-            scopes: provider_scopes(&["repo"]),
-        })
+        .create_or_update_account(CredentialAccountMutation::Update(CredentialAccountUpdate {
+            account_id: first.id,
+            account: NewCredentialAccount {
+                scope: owner.clone(),
+                provider: provider(),
+                label: label("takeover"),
+                status: CredentialAccountStatus::Configured,
+                ownership: CredentialOwnership::ExtensionOwned,
+                owner_extension: Some(ExtensionId::new("attacker").unwrap()),
+                granted_extensions: Vec::new(),
+                access_secret: Some(SecretHandle::new("github-takeover").unwrap()),
+                refresh_secret: None,
+                scopes: provider_scopes(&["repo"]),
+            },
+        }))
         .await
         .expect_err("ownership changes require a separate authority flow");
     assert_eq!(rejected_takeover, AuthProductError::CrossScopeDenied);
@@ -137,37 +139,6 @@ async fn credential_account_update_status_updates_owner_record_and_rejects_missi
         .expect("lookup")
         .expect("owner account");
     assert_eq!(still_owner.status, CredentialAccountStatus::RefreshFailed);
-}
-
-#[tokio::test]
-async fn create_account_rejects_update_account_id() {
-    let services = InMemoryAuthProductServices::new();
-    let owner = scope("alice");
-    let existing = services
-        .create_account(account_request(
-            owner.clone(),
-            "work",
-            CredentialAccountStatus::Configured,
-        ))
-        .await
-        .expect("create account");
-    let invalid = services
-        .create_account(NewCredentialAccount {
-            update_account_id: Some(existing.id),
-            scope: owner,
-            provider: provider(),
-            label: label("work renamed"),
-            status: CredentialAccountStatus::Configured,
-            ownership: CredentialOwnership::UserReusable,
-            owner_extension: None,
-            granted_extensions: Vec::new(),
-            access_secret: None,
-            refresh_secret: None,
-            scopes: Vec::new(),
-        })
-        .await
-        .expect_err("create-only API rejects update ids");
-    assert_eq!(invalid.code(), AuthErrorCode::InvalidRequest);
 }
 
 #[tokio::test]
@@ -236,7 +207,6 @@ async fn credential_account_selection_requires_user_choice_for_multiple_configur
 
     services
         .create_account(NewCredentialAccount {
-            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("expired"),
@@ -261,7 +231,6 @@ async fn credential_account_selection_requires_user_choice_for_multiple_configur
 
     let work = services
         .create_account(NewCredentialAccount {
-            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("work"),
@@ -286,7 +255,6 @@ async fn credential_account_selection_requires_user_choice_for_multiple_configur
 
     services
         .create_account(NewCredentialAccount {
-            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("personal"),
@@ -319,7 +287,6 @@ async fn credential_account_selection_filters_by_requester_authority() {
 
     let extension_owned = services
         .create_account(NewCredentialAccount {
-            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("extension owned"),
@@ -366,7 +333,6 @@ async fn credential_account_selection_filters_by_requester_authority() {
         .expect("hide extension-owned account for shared test");
     let shared = services
         .create_account(NewCredentialAccount {
-            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("shared"),

@@ -23,8 +23,9 @@ pub use cleanup::{
 };
 pub use credential::{
     CredentialAccount, CredentialAccountListPage, CredentialAccountListRequest,
-    CredentialAccountProjection, CredentialAccountSelectionRequest, CredentialAccountService,
-    CredentialAccountStatus, CredentialOwnership, CredentialSetupService, NewCredentialAccount,
+    CredentialAccountMutation, CredentialAccountProjection, CredentialAccountSelectionRequest,
+    CredentialAccountService, CredentialAccountStatus, CredentialAccountUpdate,
+    CredentialOwnership, CredentialSetupService, NewCredentialAccount,
 };
 pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;

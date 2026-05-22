@@ -14,6 +14,7 @@ use crate::{
 #[serde(rename_all = "snake_case")]
 pub enum CredentialAccountStatus {
     Configured,
+    Inactive,
     Missing,
     Expired,
     RefreshFailed,
@@ -189,7 +190,6 @@ impl CredentialAccountSelectionRequest {
 /// Input used to create or update an account from an OAuth/manual setup result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewCredentialAccount {
-    pub update_account_id: Option<CredentialAccountId>,
     pub scope: AuthProductScope,
     pub provider: AuthProviderId,
     pub label: CredentialAccountLabel,
@@ -200,6 +200,18 @@ pub struct NewCredentialAccount {
     pub access_secret: Option<SecretHandle>,
     pub refresh_secret: Option<SecretHandle>,
     pub scopes: Vec<ProviderScope>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialAccountUpdate {
+    pub account_id: CredentialAccountId,
+    pub account: NewCredentialAccount,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CredentialAccountMutation {
+    Create(NewCredentialAccount),
+    Update(CredentialAccountUpdate),
 }
 
 #[async_trait]
@@ -237,6 +249,6 @@ pub trait CredentialAccountService: Send + Sync {
 pub trait CredentialSetupService: Send + Sync {
     async fn create_or_update_account(
         &self,
-        request: NewCredentialAccount,
+        request: CredentialAccountMutation,
     ) -> Result<CredentialAccount, AuthProductError>;
 }

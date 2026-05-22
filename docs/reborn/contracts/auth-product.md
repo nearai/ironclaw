@@ -105,8 +105,8 @@ refresh_secret?
 ProviderScope[]
 ```
 
-Statuses are `configured`, `missing`, `expired`, `refresh_failed`, `revoked`,
-and `pending_setup`.
+Statuses are `configured`, `inactive`, `missing`, `expired`, `refresh_failed`,
+`revoked`, and `pending_setup`.
 
 Ownership classes are `extension_owned`, `user_reusable`,
 `shared_admin_managed`, and `system`.

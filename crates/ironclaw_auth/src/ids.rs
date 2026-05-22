@@ -41,15 +41,15 @@ macro_rules! uuid_id {
     };
 }
 
-macro_rules! validated_string {
-    ($name:ident, $label:literal, $max:expr) => {
+macro_rules! string_newtype {
+    ($name:ident, $validate:expr) => {
         #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
         #[serde(try_from = "String", into = "String")]
         pub struct $name(String);
 
         impl $name {
             pub fn new(value: impl Into<String>) -> Result<Self, AuthProductError> {
-                Ok(Self(validate_public_text(value, $label, $max)?))
+                Ok(Self($validate(value.into())?))
             }
 
             pub fn as_str(&self) -> &str {
@@ -83,53 +83,26 @@ macro_rules! validated_string {
     };
 }
 
+macro_rules! validated_string {
+    ($name:ident, $label:literal, $max:expr) => {
+        string_newtype!($name, |value| validate_public_text(value, $label, $max));
+    };
+}
+
 macro_rules! digest_string {
     ($name:ident, $label:literal) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-        #[serde(try_from = "String", into = "String")]
-        pub struct $name(String);
-
-        impl $name {
-            pub fn new(value: impl Into<String>) -> Result<Self, AuthProductError> {
-                let value = validate_public_text(value, $label, 64)?;
-                if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-                    return Err(AuthProductError::invalid_request(format!(
-                        "{label} must be a 64-character hex digest",
-                        label = $label
-                    )));
-                }
-                Ok(Self(value))
-            }
-
-            pub fn as_str(&self) -> &str {
-                &self.0
-            }
-
-            pub fn into_string(self) -> String {
-                self.0
-            }
-        }
-
-        impl TryFrom<String> for $name {
-            type Error = AuthProductError;
-
-            fn try_from(value: String) -> Result<Self, Self::Error> {
-                Self::new(value)
-            }
-        }
-
-        impl From<$name> for String {
-            fn from(value: $name) -> Self {
-                value.0
-            }
-        }
-
-        impl fmt::Display for $name {
-            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str(&self.0)
-            }
-        }
+        string_newtype!($name, |value| validate_digest_text(value, $label));
     };
+}
+
+fn validate_digest_text(value: String, label: &'static str) -> Result<String, AuthProductError> {
+    let value = validate_public_text(value, label, 64)?;
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(AuthProductError::invalid_request(format!(
+            "{label} must be a 64-character hex digest"
+        )));
+    }
+    Ok(value)
 }
 
 /// HTTPS authorization URL emitted to product surfaces for OAuth redirects.

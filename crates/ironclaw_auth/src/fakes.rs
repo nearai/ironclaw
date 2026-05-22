@@ -9,14 +9,15 @@ use crate::{
     AuthChallenge, AuthContinuationEvent, AuthFlowId, AuthFlowManager, AuthFlowRecord,
     AuthFlowStatus, AuthInteractionId, AuthInteractionService, AuthProductError,
     AuthProviderClient, CredentialAccount, CredentialAccountId, CredentialAccountListPage,
-    CredentialAccountListRequest, CredentialAccountProjection, CredentialAccountSelectionRequest,
-    CredentialAccountService, CredentialAccountStatus, CredentialOwnership, CredentialSetupService,
-    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthCallbackInput,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, ProviderCallbackOutcome,
-    SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
-    SecretSubmitRequest, SecretSubmitResult, cleanup::SecretCleanupAction::Deactivate,
-    flow::credential_status_for_completed_flow, interaction::PendingSecretInteraction,
-    provider::validate_provider_callback_request, scope_matches,
+    CredentialAccountListRequest, CredentialAccountMutation, CredentialAccountProjection,
+    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
+    CredentialOwnership, CredentialSetupService, ManualTokenSetupRequest, NewAuthFlow,
+    NewCredentialAccount, OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchange,
+    ProviderCallbackOutcome, SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest,
+    SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
+    cleanup::SecretCleanupAction::Deactivate, flow::credential_status_for_completed_flow,
+    interaction::PendingSecretInteraction, provider::validate_provider_callback_request,
+    scope_matches,
 };
 
 #[derive(Default)]
@@ -113,27 +114,7 @@ impl AuthFlowManager for InMemoryAuthProductServices {
             .flows
             .get_mut(&input.flow_id)
             .ok_or(AuthProductError::UnknownOrExpiredFlow)?;
-        if !scope_matches(scope, &record.scope) {
-            return Err(AuthProductError::CrossScopeDenied);
-        }
-        if crate::is_terminal_status(record.status) {
-            return Err(match record.status {
-                AuthFlowStatus::Canceled => AuthProductError::Canceled,
-                _ => AuthProductError::FlowAlreadyTerminal,
-            });
-        }
-        if now > record.expires_at {
-            record.status = AuthFlowStatus::Expired;
-            record.error = Some(crate::AuthErrorCode::UnknownOrExpiredFlow);
-            record.updated_at = now;
-            return Err(AuthProductError::UnknownOrExpiredFlow);
-        }
-        if record.opaque_state_hash.as_ref() != Some(&input.opaque_state_hash) {
-            return Err(AuthProductError::CrossScopeDenied);
-        }
-        let flow_scope = record.scope.clone();
-        let update_binding = record.update_binding.clone();
-        let expected_pkce_verifier_hash = record.pkce_verifier_hash.clone();
+        let callback = prepare_callback_flow(record, scope, &input.opaque_state_hash, now)?;
 
         let exchange = match input.outcome {
             ProviderCallbackOutcome::Denied => {
@@ -146,58 +127,16 @@ impl AuthFlowManager for InMemoryAuthProductServices {
                 if exchange.provider != record.provider {
                     return Err(AuthProductError::TokenExchangeFailed);
                 }
-                if expected_pkce_verifier_hash.as_ref() != Some(&exchange.pkce_verifier_hash) {
+                if callback.expected_pkce_verifier_hash.as_ref()
+                    != Some(&exchange.pkce_verifier_hash)
+                {
                     return Err(AuthProductError::CrossScopeDenied);
                 }
                 exchange
             }
         };
 
-        let account_id = match exchange.account_id {
-            Some(account_id) => {
-                let Some(binding) = update_binding.as_ref() else {
-                    return Err(AuthProductError::CrossScopeDenied);
-                };
-                if binding.account_id != account_id {
-                    return Err(AuthProductError::CrossScopeDenied);
-                }
-                let account = state
-                    .accounts
-                    .get_mut(&account_id)
-                    .ok_or(AuthProductError::CredentialMissing)?;
-                if !scope_matches(&flow_scope, &account.scope) {
-                    return Err(AuthProductError::CrossScopeDenied);
-                }
-                if account.provider != exchange.provider {
-                    return Err(AuthProductError::TokenExchangeFailed);
-                }
-                validate_bound_update_authority(account, binding)?;
-                update_account_from_exchange(account, &exchange, now);
-                account_id
-            }
-            None => {
-                if update_binding.is_some() {
-                    return Err(AuthProductError::CrossScopeDenied);
-                }
-                create_account_in_state(
-                    &mut state,
-                    NewCredentialAccount {
-                        update_account_id: None,
-                        scope: flow_scope,
-                        provider: exchange.provider.clone(),
-                        label: exchange.account_label.clone(),
-                        status: credential_status_for_completed_flow(),
-                        ownership: CredentialOwnership::UserReusable,
-                        owner_extension: None,
-                        granted_extensions: Vec::new(),
-                        access_secret: Some(exchange.access_secret.clone()),
-                        refresh_secret: exchange.refresh_secret.clone(),
-                        scopes: exchange.scopes.clone(),
-                    },
-                )?
-                .id
-            }
-        };
+        let account_id = resolve_callback_account(&mut state, callback, &exchange, now)?;
 
         let record = state
             .flows
@@ -355,20 +294,23 @@ impl CredentialAccountService for InMemoryAuthProductServices {
 impl CredentialSetupService for InMemoryAuthProductServices {
     async fn create_or_update_account(
         &self,
-        request: NewCredentialAccount,
+        request: CredentialAccountMutation,
     ) -> Result<CredentialAccount, AuthProductError> {
         let mut state = self.lock_state();
-        if let Some(account_id) = request.update_account_id {
-            let now = Utc::now();
-            let account = state
-                .accounts
-                .get_mut(&account_id)
-                .ok_or(AuthProductError::CredentialMissing)?;
-            validate_account_update_target(account, &request)?;
-            return update_account_from_request(account, request, now);
+        match request {
+            CredentialAccountMutation::Create(account) => {
+                create_account_in_state(&mut state, account)
+            }
+            CredentialAccountMutation::Update(update) => {
+                let now = Utc::now();
+                let account = state
+                    .accounts
+                    .get_mut(&update.account_id)
+                    .ok_or(AuthProductError::CredentialMissing)?;
+                validate_account_update_target(account, &update.account)?;
+                update_account_from_request(account, update.account, now)
+            }
         }
-
-        create_account_in_state(&mut state, request)
     }
 }
 
@@ -423,7 +365,6 @@ impl AuthInteractionService for InMemoryAuthProductServices {
         let account = create_account_in_state(
             &mut state,
             NewCredentialAccount {
-                update_account_id: None,
                 scope: pending.scope,
                 provider: pending.provider,
                 label: pending.label,
@@ -492,7 +433,7 @@ impl SecretCleanupService for InMemoryAuthProductServices {
             {
                 match request.action {
                     Deactivate => {
-                        account.status = CredentialAccountStatus::Missing;
+                        account.status = CredentialAccountStatus::Inactive;
                         account.updated_at = Utc::now();
                         report.retained_accounts.push(account.id);
                     }
@@ -517,11 +458,6 @@ fn create_account_in_state(
     request: NewCredentialAccount,
 ) -> Result<CredentialAccount, AuthProductError> {
     validate_new_credential_account(&request)?;
-    if request.update_account_id.is_some() {
-        return Err(AuthProductError::invalid_request(
-            "create account request must not include update_account_id",
-        ));
-    }
     let now = Utc::now();
     let account = CredentialAccount {
         id: CredentialAccountId::new(),
@@ -540,6 +476,111 @@ fn create_account_in_state(
     };
     state.accounts.insert(account.id, account.clone());
     Ok(account)
+}
+
+struct PreparedCallbackFlow {
+    scope: crate::AuthProductScope,
+    update_binding: Option<crate::CredentialAccountUpdateBinding>,
+    expected_pkce_verifier_hash: Option<crate::PkceVerifierHash>,
+}
+
+fn prepare_callback_flow(
+    record: &mut AuthFlowRecord,
+    scope: &crate::AuthProductScope,
+    opaque_state_hash: &crate::OpaqueStateHash,
+    now: crate::Timestamp,
+) -> Result<PreparedCallbackFlow, AuthProductError> {
+    if !scope_matches(scope, &record.scope) {
+        return Err(AuthProductError::CrossScopeDenied);
+    }
+    if crate::is_terminal_status(record.status) {
+        return Err(match record.status {
+            AuthFlowStatus::Canceled => AuthProductError::Canceled,
+            _ => AuthProductError::FlowAlreadyTerminal,
+        });
+    }
+    if now > record.expires_at {
+        record.status = AuthFlowStatus::Expired;
+        record.error = Some(crate::AuthErrorCode::UnknownOrExpiredFlow);
+        record.updated_at = now;
+        return Err(AuthProductError::UnknownOrExpiredFlow);
+    }
+    if record.opaque_state_hash.as_ref() != Some(opaque_state_hash) {
+        return Err(AuthProductError::CrossScopeDenied);
+    }
+    Ok(PreparedCallbackFlow {
+        scope: record.scope.clone(),
+        update_binding: record.update_binding.clone(),
+        expected_pkce_verifier_hash: record.pkce_verifier_hash.clone(),
+    })
+}
+
+fn resolve_callback_account(
+    state: &mut AuthState,
+    callback: PreparedCallbackFlow,
+    exchange: &OAuthProviderExchange,
+    now: crate::Timestamp,
+) -> Result<CredentialAccountId, AuthProductError> {
+    match exchange.account_id {
+        Some(account_id) => {
+            update_bound_callback_account(state, callback, exchange, account_id, now)
+        }
+        None => create_callback_account(state, callback, exchange),
+    }
+}
+
+fn update_bound_callback_account(
+    state: &mut AuthState,
+    callback: PreparedCallbackFlow,
+    exchange: &OAuthProviderExchange,
+    account_id: CredentialAccountId,
+    now: crate::Timestamp,
+) -> Result<CredentialAccountId, AuthProductError> {
+    let Some(binding) = callback.update_binding.as_ref() else {
+        return Err(AuthProductError::CrossScopeDenied);
+    };
+    if binding.account_id != account_id {
+        return Err(AuthProductError::CrossScopeDenied);
+    }
+    let account = state
+        .accounts
+        .get_mut(&account_id)
+        .ok_or(AuthProductError::CredentialMissing)?;
+    if !scope_matches(&callback.scope, &account.scope) {
+        return Err(AuthProductError::CrossScopeDenied);
+    }
+    if account.provider != exchange.provider {
+        return Err(AuthProductError::TokenExchangeFailed);
+    }
+    validate_bound_update_authority(account, binding)?;
+    update_account_from_exchange(account, exchange, now);
+    Ok(account_id)
+}
+
+fn create_callback_account(
+    state: &mut AuthState,
+    callback: PreparedCallbackFlow,
+    exchange: &OAuthProviderExchange,
+) -> Result<CredentialAccountId, AuthProductError> {
+    if callback.update_binding.is_some() {
+        return Err(AuthProductError::CrossScopeDenied);
+    }
+    Ok(create_account_in_state(
+        state,
+        NewCredentialAccount {
+            scope: callback.scope,
+            provider: exchange.provider.clone(),
+            label: exchange.account_label.clone(),
+            status: credential_status_for_completed_flow(),
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: Some(exchange.access_secret.clone()),
+            refresh_secret: exchange.refresh_secret.clone(),
+            scopes: exchange.scopes.clone(),
+        },
+    )?
+    .id)
 }
 
 fn update_account_from_request(

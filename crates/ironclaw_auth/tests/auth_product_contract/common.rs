@@ -4,14 +4,14 @@ pub use ironclaw_auth::{
     AuthFlowStatus, AuthGateRef, AuthInteractionService, AuthProductError, AuthProductScope,
     AuthProviderClient, AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash,
     CredentialAccount, CredentialAccountLabel, CredentialAccountListRequest,
-    CredentialAccountSelectionRequest, CredentialAccountService, CredentialAccountStatus,
-    CredentialAccountUpdateBinding, CredentialOwnership, CredentialSetupService,
-    InMemoryAuthProductServices, LifecyclePackageRef, ManualTokenSetupRequest, NewAuthFlow,
-    NewCredentialAccount, OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackInput,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash,
-    PkceVerifierSecret, ProviderCallbackOutcome, ProviderScope, SecretCleanupAction,
-    SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, SecretSubmitResult,
-    TurnRunRef,
+    CredentialAccountMutation, CredentialAccountSelectionRequest, CredentialAccountService,
+    CredentialAccountStatus, CredentialAccountUpdate, CredentialAccountUpdateBinding,
+    CredentialOwnership, CredentialSetupService, InMemoryAuthProductServices, LifecyclePackageRef,
+    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthAuthorizationCode,
+    OAuthAuthorizationUrl, OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchange,
+    OpaqueStateHash, PkceVerifierHash, PkceVerifierSecret, ProviderCallbackOutcome, ProviderScope,
+    SecretCleanupAction, SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest,
+    SecretSubmitResult, TurnRunRef,
 };
 pub use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, SecretHandle, UserId};
 pub use secrecy::SecretString;
@@ -76,7 +76,6 @@ pub fn account_request(
     status: CredentialAccountStatus,
 ) -> NewCredentialAccount {
     NewCredentialAccount {
-        update_account_id: None,
         scope: owner,
         provider: provider(),
         label: label(label_value),
