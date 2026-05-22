@@ -30,7 +30,6 @@ pub enum TurnEventKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[non_exhaustive]
 pub enum TurnBlockedGateKind {
     Approval,
     Auth,
@@ -282,7 +281,7 @@ pub(crate) fn project_turn_events(
     scoped_events.sort_by_key(|event| event.cursor);
 
     let latest_scoped_cursor = scoped_events.last().map(|event| event.cursor);
-    let rebase_required = if retention_floor > EventCursor::default() && after <= retention_floor {
+    let rebase_required = if retention_floor > EventCursor::default() && after < retention_floor {
         Some(retention_floor)
     } else if let Some(latest) = latest_scoped_cursor {
         (after > latest).then_some(latest)
@@ -313,5 +312,133 @@ pub(crate) fn project_turn_events(
         next_cursor,
         truncated,
         rebase_required: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
+
+    use crate::{
+        GateRef, TurnError, TurnRunId, TurnScope, TurnStatus,
+        events::{
+            EventCursor, TurnBlockedGateKind, TurnBlockedGateMetadata, TurnEventKind,
+            TurnEventPage, TurnEventProjectionService, TurnEventProjectionSource,
+            TurnLifecycleEvent, project_turn_events,
+        },
+    };
+
+    fn scope(thread: &str) -> TurnScope {
+        TurnScope::new(
+            TenantId::new("tenant-a").expect("tenant"),
+            Some(AgentId::new("agent-a").expect("agent")),
+            Some(ProjectId::new("project-a").expect("project")),
+            ThreadId::new(thread).expect("thread"),
+        )
+    }
+
+    fn blocked_event(cursor: u64, scope: TurnScope) -> TurnLifecycleEvent {
+        TurnLifecycleEvent {
+            cursor: EventCursor(cursor),
+            scope,
+            occurred_at: None,
+            owner_user_id: Some(UserId::new("owner-a").expect("owner")),
+            run_id: TurnRunId::new(),
+            status: TurnStatus::BlockedApproval,
+            kind: TurnEventKind::Blocked,
+            blocked_gate: Some(TurnBlockedGateMetadata {
+                gate_ref: GateRef::new("gate:approval-a").expect("gate ref"),
+                gate_kind: TurnBlockedGateKind::Approval,
+            }),
+            sanitized_reason: Some("approval_required".to_string()),
+        }
+    }
+
+    struct MemoryProjectionSource {
+        events: Vec<TurnLifecycleEvent>,
+    }
+
+    #[async_trait]
+    impl TurnEventProjectionSource for MemoryProjectionSource {
+        async fn read_turn_events_after(
+            &self,
+            scope: &TurnScope,
+            after: Option<EventCursor>,
+            limit: usize,
+        ) -> Result<TurnEventPage, TurnError> {
+            Ok(project_turn_events(
+                &self.events,
+                scope,
+                after,
+                limit,
+                EventCursor::default(),
+            ))
+        }
+    }
+
+    #[test]
+    fn blocked_gate_kind_from_status_ignores_non_blocked_statuses() {
+        for status in [
+            TurnStatus::Queued,
+            TurnStatus::Running,
+            TurnStatus::Completed,
+            TurnStatus::Failed,
+            TurnStatus::Cancelled,
+        ] {
+            assert_eq!(TurnBlockedGateKind::from_status(status), None);
+        }
+    }
+
+    #[test]
+    fn public_projection_entry_strips_blocked_gate_metadata() {
+        let event = blocked_event(1, scope("thread-a"));
+
+        let public = event.into_public_projection_entry();
+
+        assert_eq!(public.blocked_gate, None);
+        assert_eq!(
+            public.sanitized_reason.as_deref(),
+            Some("approval_required")
+        );
+    }
+
+    #[test]
+    fn project_turn_events_allows_cursor_equal_to_retention_floor() {
+        let scope = scope("thread-a");
+        let event = blocked_event(6, scope.clone());
+
+        let page = project_turn_events(
+            std::slice::from_ref(&event),
+            &scope,
+            Some(EventCursor(5)),
+            10,
+            EventCursor(5),
+        );
+
+        assert_eq!(page.rebase_required, None);
+        assert_eq!(page.entries, vec![event]);
+        assert_eq!(page.next_cursor, EventCursor(6));
+    }
+
+    #[tokio::test]
+    async fn projection_service_strips_blocked_gate_metadata_from_snapshot() {
+        let scope = scope("thread-a");
+        let source = MemoryProjectionSource {
+            events: vec![blocked_event(1, scope.clone())],
+        };
+        let service = TurnEventProjectionService::new(std::sync::Arc::new(source));
+
+        let snapshot = service
+            .snapshot(crate::events::TurnEventProjectionRequest {
+                scope,
+                after: None,
+                limit: 10,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(snapshot.entries.len(), 1);
+        assert_eq!(snapshot.entries[0].blocked_gate, None);
     }
 }
