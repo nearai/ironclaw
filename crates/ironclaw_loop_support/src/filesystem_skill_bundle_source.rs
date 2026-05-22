@@ -49,7 +49,7 @@ impl FilesystemSkillBundleRoot {
         Self::new(
             SkillSourceKind::User,
             root,
-            Some(SkillTrust::Installed),
+            Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
         )
     }
@@ -137,6 +137,7 @@ where
     ) -> Result<(), SkillBundleSourceError> {
         let entries = match self.filesystem.list_dir(scope, root.root()).await {
             Ok(entries) => entries,
+            // silent-ok: optional skill root list; missing root means no bundles for this source
             Err(error) if is_not_found(&error) => return Ok(()),
             Err(error) => return Err(map_filesystem_error(error)),
         };
@@ -209,15 +210,11 @@ where
         if stat.len > max_bytes as u64 {
             return Err(SkillBundleSourceError::ContentTooLarge);
         }
-        let bytes = self
-            .filesystem
-            .read_bytes(scope, path)
+        self.filesystem
+            .read_bytes_bounded(scope, path, max_bytes)
             .await
-            .map_err(map_file_read_error)?;
-        if bytes.len() > max_bytes {
-            return Err(SkillBundleSourceError::ContentTooLarge);
-        }
-        Ok(bytes)
+            .map_err(map_file_read_error)?
+            .ok_or(SkillBundleSourceError::ContentTooLarge)
     }
 }
 
@@ -436,7 +433,7 @@ mod tests {
             ]
         );
         assert_eq!(descriptors[0].trust(), Some(&SkillTrust::Trusted));
-        assert_eq!(descriptors[1].trust(), Some(&SkillTrust::Installed));
+        assert_eq!(descriptors[1].trust(), Some(&SkillTrust::Trusted));
         assert_eq!(descriptors[0].visibility(), Some(&SkillVisibility::Visible));
     }
 

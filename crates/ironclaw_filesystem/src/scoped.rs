@@ -298,6 +298,18 @@ where
         }
     }
 
+    /// Read body bytes at `path` only when the file is at most `max_bytes`.
+    pub async fn read_bytes_bounded(
+        &self,
+        scope: &ResourceScope,
+        path: &ScopedPath,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, FilesystemError> {
+        let virtual_path =
+            self.resolve_with_permission(scope, path, FilesystemOperation::ReadFile)?;
+        self.root.read_file_bounded(&virtual_path, max_bytes).await
+    }
+
     /// Write `body` as an opaque-file entry at `path` (no CAS precondition).
     /// Convenience wrapper over [`put`].
     pub async fn write_bytes(
@@ -690,6 +702,64 @@ mod tests {
             .unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].seq, s1);
+    }
+
+    #[tokio::test]
+    async fn read_bytes_bounded_succeeds_with_read_and_enforces_limit() {
+        let scoped = scoped_in_memory(no_op(true, true, false, false));
+        scoped
+            .put(
+                &test_scope(),
+                &ScopedPath::new("/workspace/file.bin").unwrap(),
+                Entry::bytes(b"bounded".to_vec()),
+                CasExpectation::Absent,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            scoped
+                .read_bytes_bounded(
+                    &test_scope(),
+                    &ScopedPath::new("/workspace/file.bin").unwrap(),
+                    7,
+                )
+                .await
+                .unwrap(),
+            Some(b"bounded".to_vec())
+        );
+        assert_eq!(
+            scoped
+                .read_bytes_bounded(
+                    &test_scope(),
+                    &ScopedPath::new("/workspace/file.bin").unwrap(),
+                    6,
+                )
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn read_bytes_bounded_denies_when_read_missing() {
+        let scoped = scoped_in_memory(no_op(false, true, true, false));
+        let err = scoped
+            .read_bytes_bounded(
+                &test_scope(),
+                &ScopedPath::new("/workspace/file.bin").unwrap(),
+                1024,
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            FilesystemError::PermissionDenied {
+                operation: FilesystemOperation::ReadFile,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

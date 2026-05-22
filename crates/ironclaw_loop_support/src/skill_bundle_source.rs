@@ -416,6 +416,10 @@ mod tests {
             "skill bundle file path is invalid"
         );
         assert_eq!(
+            SkillBundleSourceError::InvalidSkillBundle.to_string(),
+            "skill bundle content is invalid"
+        );
+        assert_eq!(
             SkillBundleSourceError::BundleNotFound.to_string(),
             "skill bundle not found"
         );

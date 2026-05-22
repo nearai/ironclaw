@@ -6,7 +6,8 @@ use ironclaw_loop_support::{
     FilesystemSkillBundleRoot, FilesystemSkillBundleSource, HostSkillContextSource,
     SkillBundleContextSource,
 };
-use thiserror::Error;
+
+use crate::error::FirstPartySkillsExtensionError;
 
 const SYSTEM_SKILLS_ROOT: &str = "/system/skills";
 const USER_SKILLS_ROOT: &str = "/skills";
@@ -147,20 +148,6 @@ where
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum FirstPartySkillsExtensionError {
-    #[error(
-        "invalid first-party skills extension handle {handle}: expected {expected}, got {actual}"
-    )]
-    InvalidHandle {
-        handle: &'static str,
-        expected: &'static str,
-        actual: String,
-    },
-    #[error("invalid first-party skills extension root path: {0}")]
-    InvalidRootPath(String),
-}
-
 fn scoped_root(path: &'static str) -> Result<ScopedPath, FirstPartySkillsExtensionError> {
     ScopedPath::new(path)
         .map_err(|reason| FirstPartySkillsExtensionError::InvalidRootPath(reason.to_string()))
@@ -275,22 +262,44 @@ mod tests {
     }
 
     #[test]
-    fn handles_reject_non_skill_roots() {
-        let error = FirstPartySkillsExtensionHandles::new(
-            None,
-            Some(ScopedPath::new("/workspace").unwrap()),
-            None,
-        )
-        .unwrap_err();
+    fn handles_reject_non_skill_roots_for_each_handle() {
+        let cases = [
+            (
+                "read_system_skills",
+                "/system/skills",
+                Some(ScopedPath::new("/workspace").unwrap()),
+                None,
+                None,
+            ),
+            (
+                "read_user_skills",
+                "/skills",
+                None,
+                Some(ScopedPath::new("/workspace").unwrap()),
+                None,
+            ),
+            (
+                "read_tenant_shared_skills",
+                "/tenant-shared/skills",
+                None,
+                None,
+                Some(ScopedPath::new("/workspace").unwrap()),
+            ),
+        ];
 
-        assert_eq!(
-            error,
-            FirstPartySkillsExtensionError::InvalidHandle {
-                handle: "read_user_skills",
-                expected: "/skills",
-                actual: "/workspace".to_string()
-            }
-        );
+        for (handle, expected, system, user, tenant_shared) in cases {
+            let error = FirstPartySkillsExtensionHandles::new(system, user, tenant_shared)
+                .expect_err("invalid handle should be rejected");
+
+            assert_eq!(
+                error,
+                FirstPartySkillsExtensionError::InvalidHandle {
+                    handle,
+                    expected,
+                    actual: "/workspace".to_string()
+                }
+            );
+        }
     }
 
     #[tokio::test]
@@ -351,9 +360,12 @@ mod tests {
         }));
         assert!(entries.iter().any(|entry| {
             entry.name == "user-helper"
-                && entry.trust == SkillTrustLevel::Installed
+                && entry.trust == SkillTrustLevel::Trusted
                 && entry.visibility == SkillVisibility::Visible
-                && entry.prompt_content.is_none()
+                && entry
+                    .prompt_content
+                    .as_deref()
+                    .is_some_and(|content| content.contains("USER_HELPER_PROMPT_SENTINEL"))
         }));
         assert!(!entries.iter().any(|entry| entry.name == "workspace-helper"));
     }
@@ -380,7 +392,7 @@ mod tests {
 
         assert_eq!(descriptors.len(), 1);
         assert_eq!(descriptors[0].id().name(), "user-helper");
-        assert_eq!(descriptors[0].trust(), Some(&SkillTrust::Installed));
+        assert_eq!(descriptors[0].trust(), Some(&SkillTrust::Trusted));
         assert_eq!(descriptors[0].visibility(), Some(&SkillVisibility::Visible));
     }
 }

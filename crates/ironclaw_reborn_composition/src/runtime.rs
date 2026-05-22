@@ -1435,6 +1435,17 @@ mod tests {
             ),
         )
         .expect("write user skill");
+        std::fs::create_dir_all(storage_root.join("tenant-shared/skills/shared-helper"))
+            .expect("tenant shared skill dir");
+        std::fs::write(
+            storage_root.join("tenant-shared/skills/shared-helper/SKILL.md"),
+            skill_md(
+                "shared-helper",
+                "tenant shared helper description",
+                "TENANT_SHARED_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write tenant shared skill");
         let requests = Arc::new(StdMutex::new(Vec::new()));
         let gateway = Arc::new(RecordingGateway {
             reply: "filesystem skill context ok".to_string(),
@@ -1486,13 +1497,54 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let combined_skill_context = skill_messages.join("\n");
-        assert_eq!(skill_messages.len(), 2);
+        assert_eq!(skill_messages.len(), 3);
         assert!(combined_skill_context.contains("system helper description"));
         assert!(combined_skill_context.contains("SYSTEM_HELPER_PROMPT_SENTINEL"));
         assert!(combined_skill_context.contains("local helper description"));
-        assert!(!combined_skill_context.contains("USER_HELPER_PROMPT_SENTINEL"));
+        assert!(combined_skill_context.contains("USER_HELPER_PROMPT_SENTINEL"));
+        assert!(combined_skill_context.contains("tenant shared helper description"));
+        assert!(!combined_skill_context.contains("TENANT_SHARED_PROMPT_SENTINEL"));
 
         runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn local_dev_runtime_rejects_workspace_overlapping_default_skill_roots() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        let workspace_root = storage_root.join("skills");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "should not build".to_string(),
+            requests,
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-overlap-owner", storage_root)
+                .with_local_dev_workspace_root(workspace_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-overlap-tenant".to_string(),
+            agent_id: "runtime-overlap-agent".to_string(),
+            source_binding_id: "runtime-overlap-source".to_string(),
+            reply_target_binding_id: "runtime-overlap-reply".to_string(),
+        })
+        .with_model_gateway_override(gateway);
+
+        let error = match build_reborn_runtime(input).await {
+            Ok(runtime) => {
+                runtime.shutdown().await.expect("runtime shutdown");
+                panic!("overlapping workspace and skill roots should fail closed");
+            }
+            Err(error) => error,
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("must not overlap default skill root /skills"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]

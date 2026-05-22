@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
@@ -118,6 +121,9 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     std::fs::create_dir_all(&workspace_root).map_err(|_| RebornBuildError::InvalidConfig {
         reason: "local-dev workspace root could not be initialized".to_string(),
     })?;
+    let root = canonicalize_local_dev_path(&root, "storage root")?;
+    let workspace_root = canonicalize_local_dev_path(&workspace_root, "workspace root")?;
+    validate_local_dev_workspace_skill_isolation(&root, &workspace_root)?;
     let mut filesystem = LocalFilesystem::new();
     let projects_root = ironclaw_host_api::VirtualPath::new("/projects").map_err(|error| {
         RebornBuildError::InvalidConfig {
@@ -182,6 +188,39 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         readiness: readiness_for(input.profile, true, true),
         local_runtime: Some(local_runtime),
     })
+}
+
+fn canonicalize_local_dev_path(path: &Path, label: &str) -> Result<PathBuf, RebornBuildError> {
+    std::fs::canonicalize(path).map_err(|_| RebornBuildError::InvalidConfig {
+        reason: format!("local-dev {label} could not be resolved"),
+    })
+}
+
+fn validate_local_dev_workspace_skill_isolation(
+    storage_root: &Path,
+    workspace_root: &Path,
+) -> Result<(), RebornBuildError> {
+    for (label, skill_root) in [
+        ("/skills", storage_root.join("skills")),
+        (
+            "/tenant-shared/skills",
+            storage_root.join("tenant-shared/skills"),
+        ),
+        ("/system/skills", storage_root.join("system/skills")),
+    ] {
+        if paths_overlap(workspace_root, &skill_root) {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "local-dev workspace root must not overlap default skill root {label}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
 }
 
 fn local_dev_skill_mount_view() -> Result<MountView, RebornBuildError> {

@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::future::try_join_all;
 
 use crate::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
@@ -9,6 +8,8 @@ use crate::{
     sort_skill_bundle_descriptors,
 };
 use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
+
+const MAX_SKILL_CONTEXT_CANDIDATES: usize = 256;
 
 /// Adapts portable skill bundles into model-context candidates.
 ///
@@ -67,42 +68,12 @@ where
         sort_skill_bundle_descriptors(&mut descriptors);
 
         validate_descriptor_policy_metadata(&descriptors)?;
+        if descriptors.len() > MAX_SKILL_CONTEXT_CANDIDATES {
+            return Err(HostSkillContextBuildError::ContextBudgetExceeded);
+        }
 
-        let visible_candidates = try_join_all(
-            descriptors
-                .iter()
-                .enumerate()
-                .filter(|(_, descriptor)| {
-                    descriptor.visibility() == Some(&SkillVisibility::Visible)
-                })
-                .map(|(index, descriptor)| async move {
-                    let skill_md = self
-                        .bundle_source
-                        .read_skill_bundle_file(
-                            run_context,
-                            descriptor.id(),
-                            descriptor.skill_md_path(),
-                        )
-                        .await
-                        .map_err(skill_bundle_source_error_to_context_error)?;
-                    let skill_md = String::from_utf8(skill_md)
-                        .map_err(|_| HostSkillContextBuildError::ParseFailed)?;
-
-                    Ok::<_, HostSkillContextBuildError>((
-                        index,
-                        HostSkillContextCandidate::new(
-                            skill_md,
-                            descriptor.trust().cloned(),
-                            descriptor.visibility().copied(),
-                        )
-                        .with_ordering_key(descriptor_context_ordering_key(descriptor)),
-                    ))
-                }),
-        )
-        .await?;
-        let mut visible_candidates = visible_candidates.into_iter().peekable();
         let mut candidates = Vec::with_capacity(descriptors.len());
-        for (index, descriptor) in descriptors.iter().enumerate() {
+        for descriptor in &descriptors {
             let trust = descriptor.trust().cloned();
             let visibility = descriptor.visibility().copied();
             let ordering_key = descriptor_context_ordering_key(descriptor);
@@ -115,13 +86,18 @@ where
                 continue;
             }
 
-            let (read_index, candidate) = visible_candidates
-                .next()
-                .ok_or(HostSkillContextBuildError::Internal)?;
-            if read_index != index {
-                return Err(HostSkillContextBuildError::Internal);
-            }
-            candidates.push(candidate);
+            let skill_md = self
+                .bundle_source
+                .read_skill_bundle_file(run_context, descriptor.id(), descriptor.skill_md_path())
+                .await
+                .map_err(skill_bundle_source_error_to_context_error)?;
+            let skill_md =
+                String::from_utf8(skill_md).map_err(|_| HostSkillContextBuildError::ParseFailed)?;
+
+            candidates.push(
+                HostSkillContextCandidate::new(skill_md, trust, visibility)
+                    .with_ordering_key(ordering_key),
+            );
         }
 
         Ok(candidates)
@@ -486,6 +462,30 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error, HostSkillContextBuildError::VisibilityDataMissing);
+        assert!(source.reads().is_empty());
+    }
+
+    #[tokio::test]
+    async fn adapter_rejects_too_many_candidates_before_reading() {
+        let descriptors = (0..=MAX_SKILL_CONTEXT_CANDIDATES)
+            .map(|index| {
+                descriptor(
+                    crate::SkillSourceKind::User,
+                    &format!("skill-{index}"),
+                    Some(SkillTrust::Trusted),
+                    Some(SkillVisibility::Visible),
+                )
+            })
+            .collect();
+        let source = Arc::new(StaticSkillBundleSource::new(descriptors));
+        let adapter = SkillBundleContextSource::new(Arc::clone(&source));
+
+        let error = adapter
+            .load_skill_context_candidates(&run_context().await)
+            .await
+            .unwrap_err();
+
+        assert_eq!(error, HostSkillContextBuildError::ContextBudgetExceeded);
         assert!(source.reads().is_empty());
     }
 

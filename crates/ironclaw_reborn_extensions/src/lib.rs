@@ -5,8 +5,8 @@
 //! export narrow ports back to Reborn composition.
 #![forbid(unsafe_code)]
 
+mod error;
 mod skills;
 
-pub use skills::{
-    FirstPartySkillsExtension, FirstPartySkillsExtensionError, FirstPartySkillsExtensionHandles,
-};
+pub use error::FirstPartySkillsExtensionError;
+pub use skills::{FirstPartySkillsExtension, FirstPartySkillsExtensionHandles};
