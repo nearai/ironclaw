@@ -1,4 +1,7 @@
-use std::sync::{Arc, OnceLock};
+use std::{
+    collections::HashSet,
+    sync::{Arc, OnceLock},
+};
 
 use async_trait::async_trait;
 use ironclaw_host_api::CapabilityId;
@@ -104,18 +107,14 @@ where
             .record_child_terminal(event.run_id, terminal_event_from_lifecycle(event))
             .map_err(map_host_error)?;
         self.recover_missing_gate_record(event).await?;
-        let mut claimed = Vec::new();
-        while let Some(state) = self
+        let claimed = self
             .gate_store
-            .claim_next_terminal_state_for_child(event.run_id)
-            .map_err(map_host_error)?
-        {
-            claimed.push(state);
-        }
-        let claimed_gates = claimed
+            .claim_all_terminal_states_for_child(event.run_id)
+            .map_err(map_host_error)?;
+        let claimed_gates: HashSet<GateRef> = claimed
             .iter()
             .map(|state| state.record.gate_ref.clone())
-            .collect::<Vec<_>>();
+            .collect();
         if let Err(error) = self.handle_claimed_terminal_states(claimed).await {
             for gate_ref in claimed_gates {
                 let _ = self.gate_store.release_terminal_claim(&gate_ref);
@@ -129,7 +128,8 @@ where
         &self,
         states: Vec<crate::subagent::gate_resolution::AwaitedChildState>,
     ) -> Result<(), TurnError> {
-        let mut delivered_gates = Vec::new();
+        let mut delivered_gates: HashSet<GateRef> = HashSet::new();
+        let mut parent_resume_gates = HashSet::new();
         let mut parent_resumes = Vec::new();
         for state in states {
             let terminal_event = state.terminal_event.ok_or_else(|| TurnError::Unavailable {
@@ -139,11 +139,7 @@ where
                 SpawnSubagentMode::Blocking => {
                     self.write_terminal_result(&state.record, &terminal_event)
                         .await?;
-                    if !parent_resumes.iter().any(
-                        |(record, _): &(AwaitedChildSetRecord, AwaitedChildTerminalEvent)| {
-                            record.gate_ref == state.record.gate_ref
-                        },
-                    ) {
+                    if parent_resume_gates.insert(state.record.gate_ref.clone()) {
                         parent_resumes.push((state.record.clone(), terminal_event.clone()));
                     }
                 }
@@ -157,9 +153,7 @@ where
                 .delete_goal(&state.record.child_scope, state.record.child_run_id)
                 .await
                 .map_err(map_host_error)?;
-            if !delivered_gates.contains(&state.record.gate_ref) {
-                delivered_gates.push(state.record.gate_ref.clone());
-            }
+            delivered_gates.insert(state.record.gate_ref.clone());
         }
         for (record, terminal_event) in parent_resumes {
             self.resume_parent(&terminal_event, &record).await?;
@@ -653,8 +647,8 @@ fn awaited_child_record_from_persisted(
     // The separator after the `gate:` prefix must stay colon-free because
     // `LoopGateRef` rejects additional colons in the opaque id.
     let gate_ref = GateRef::new(match metadata.mode {
-        SpawnSubagentMode::Blocking => format!("gate:subagent.{}", child_record.run_id),
-        SpawnSubagentMode::Background => format!("gate:subagent-bg.{}", child_record.run_id),
+        SpawnSubagentMode::Blocking => format!("gate:subagent-{}", child_record.run_id),
+        SpawnSubagentMode::Background => format!("gate:subagent-bg-{}", child_record.run_id),
     })
     .map_err(|reason| TurnError::InvalidRequest { reason })?;
     let parent_run_context = LoopRunContext::new(
@@ -1269,7 +1263,7 @@ mod tests {
         parent_run_context.run_id = parent_run_id;
         gate_store
             .record_awaited_child(AwaitedChildSetRecord {
-                gate_ref: GateRef::new("gate:subagent-bg:test").unwrap(),
+                gate_ref: GateRef::new("gate:subagent-bg-test").unwrap(),
                 parent_run_context,
                 tree_root_run_id,
                 child_scope: child_scope.clone(),
@@ -1418,7 +1412,7 @@ mod tests {
         parent_run_context.run_id = parent_run_id;
         gate_store
             .record_awaited_child(AwaitedChildSetRecord {
-                gate_ref: GateRef::new("gate:subagent-bg:recovered").unwrap(),
+                gate_ref: GateRef::new("gate:subagent-bg-recovered").unwrap(),
                 parent_run_context,
                 tree_root_run_id: parent_run_id,
                 child_scope: child_scope.clone(),
@@ -1725,7 +1719,7 @@ mod tests {
         parent_run_context.run_id = parent_run_id;
         gate_store
             .record_awaited_child(AwaitedChildSetRecord {
-                gate_ref: GateRef::new("gate:subagent-bg:recovery-required").unwrap(),
+                gate_ref: GateRef::new("gate:subagent-bg-recovery-required").unwrap(),
                 parent_run_context,
                 tree_root_run_id: parent_run_id,
                 child_scope: child_scope.clone(),

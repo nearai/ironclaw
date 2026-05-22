@@ -433,14 +433,6 @@ impl SubagentSpawnCapabilityPort {
         }
     }
 
-    async fn handle_spawn(
-        &self,
-        invocation: &CapabilityInvocation,
-        args: SpawnSubagentArgs,
-    ) -> Result<CapabilityOutcome, AgentLoopHostError> {
-        self.handle_spawn_with_gate(invocation, args, None).await
-    }
-
     async fn handle_spawn_with_gate(
         &self,
         invocation: &CapabilityInvocation,
@@ -612,8 +604,8 @@ impl SubagentSpawnCapabilityPort {
         let gate_ref = match gate_override {
             Some(gate_ref) => gate_ref,
             None => GateRef::new(match mode {
-                SpawnSubagentMode::Blocking => format!("gate:subagent.{child_run_id}"),
-                SpawnSubagentMode::Background => format!("gate:subagent-bg.{child_run_id}"),
+                SpawnSubagentMode::Blocking => format!("gate:subagent-{child_run_id}"),
+                SpawnSubagentMode::Background => format!("gate:subagent-bg-{child_run_id}"),
             })
             .map_err(invalid_static_ref)?,
         };
@@ -868,7 +860,7 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 .spawn_input_codec
                 .decode(&self.run_context, &request.input_ref)
                 .await?;
-            return self.handle_spawn(&request, args).await;
+            return self.handle_spawn_with_gate(&request, args, None).await;
         }
         self.inner.invoke_capability(request).await
     }
@@ -878,14 +870,29 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
         request: CapabilityBatchInvocation,
     ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
         let mut outcomes = Vec::with_capacity(request.invocations.len());
-        let spawn_count = request
-            .invocations
-            .iter()
-            .filter(|invocation| self.is_spawn(&invocation.capability_id))
-            .count();
-        let batch_blocking_gate = if spawn_count > 1 {
+        // Pre-decode every spawn invocation so we know how many are Blocking
+        // before allocating the shared batch gate. Only batches with at least
+        // two Blocking spawns benefit from gate coalescing; otherwise the gate
+        // would be created and never registered, wasting a TurnRunId.
+        let mut spawn_args: HashMap<usize, SpawnSubagentArgs> = HashMap::new();
+        let mut blocking_count = 0_usize;
+        for (idx, invocation) in request.invocations.iter().enumerate() {
+            if !self.is_spawn(&invocation.capability_id) {
+                continue;
+            }
+            let args = self
+                .deps
+                .spawn_input_codec
+                .decode(&self.run_context, &invocation.input_ref)
+                .await?;
+            if args.spawn_mode() == SpawnSubagentMode::Blocking {
+                blocking_count += 1;
+            }
+            spawn_args.insert(idx, args);
+        }
+        let batch_blocking_gate = if blocking_count > 1 {
             Some(
-                GateRef::new(format!("gate:subagent-batch.{}", TurnRunId::new()))
+                GateRef::new(format!("gate:subagent-batch-{}", TurnRunId::new()))
                     .map_err(invalid_static_ref)?,
             )
         } else {
@@ -898,20 +905,28 @@ impl LoopCapabilityPort for SubagentSpawnCapabilityPort {
                 let outcome = if let Some(outcome) = self.authorize_spawn(invocation).await? {
                     outcome
                 } else {
-                    let args = self
-                        .deps
-                        .spawn_input_codec
-                        .decode(&self.run_context, &invocation.input_ref)
-                        .await?;
+                    let args = spawn_args.remove(&index).ok_or_else(|| {
+                        AgentLoopHostError::new(
+                            AgentLoopHostErrorKind::Invalid,
+                            "subagent spawn args missing from pre-decode pass",
+                        )
+                    })?;
                     let gate_override = (args.spawn_mode() == SpawnSubagentMode::Blocking)
                         .then(|| batch_blocking_gate.clone())
                         .flatten();
                     self.handle_spawn_with_gate(invocation, args, gate_override)
                         .await?
                 };
+                let batch_await_dependent = matches!(
+                    &outcome,
+                    CapabilityOutcome::AwaitDependentRun { gate_ref, .. }
+                        if batch_blocking_gate
+                            .as_ref()
+                            .is_some_and(|batch_gate| batch_gate == gate_ref)
+                );
                 let suspended = outcome.is_suspension();
                 outcomes.push(outcome);
-                if suspended && request.stop_on_first_suspension && batch_blocking_gate.is_none() {
+                if suspended && request.stop_on_first_suspension && !batch_await_dependent {
                     return Ok(CapabilityBatchOutcome {
                         outcomes,
                         stopped_on_suspension: true,

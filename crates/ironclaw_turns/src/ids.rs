@@ -233,6 +233,22 @@ loop_ref!(LoopGateRef, "loop_gate_ref", "gate:");
 loop_ref!(LoopUsageSummaryRef, "loop_usage_summary_ref", "usage:");
 loop_ref!(LoopDiagnosticRef, "loop_diagnostic_ref", "diag:");
 
+// GateRef and LoopGateRef carry the same validated `gate:<id>` string by
+// design (the model-visible `LoopGateRef` is constructed from the host-side
+// `GateRef`). Cross-type equality enforces that invariant at the type
+// system instead of via ad-hoc `.as_str()` string compares in callers.
+impl PartialEq<LoopGateRef> for GateRef {
+    fn eq(&self, other: &LoopGateRef) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl PartialEq<GateRef> for LoopGateRef {
+    fn eq(&self, other: &GateRef) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
 impl RunProfileId {
     pub fn default_profile() -> Self {
         Self::from_trusted_static("default")

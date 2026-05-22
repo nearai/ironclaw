@@ -4800,6 +4800,7 @@ dependencies = [
  "ironclaw_trust",
  "ironclaw_turns",
  "libsql",
+ "parking_lot",
  "rust_decimal",
  "secrecy",
  "serde",

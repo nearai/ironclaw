@@ -1033,14 +1033,8 @@ impl RebornBinaryE2EHarness {
             .await?
             .gate_ref
             .ok_or("blocked run missing gate ref")?;
-        self.resume_with_gate_as(
-            scope,
-            actor,
-            run_id,
-            blocked,
-            format!("resume-{run_id}"),
-        )
-        .await
+        self.resume_with_gate_as(scope, actor, run_id, blocked, format!("resume-{run_id}"))
+            .await
     }
 
     pub async fn resume_with_gate(
