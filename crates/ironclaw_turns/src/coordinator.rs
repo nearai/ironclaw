@@ -14,9 +14,10 @@ const MAX_PREPARED_RUN_IDS: usize = 4096;
 use crate::{
     AdmissionRejection, CancelRunRequest, CancelRunResponse, GetRunStateRequest,
     InMemoryRunProfileResolver, ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver,
-    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnCapacityResource, TurnError,
-    TurnEventKind, TurnEventSink, TurnLifecycleEvent, TurnRunId, TurnRunState, TurnScope,
-    TurnSpawnTreeStateStore, TurnStateStore, TurnStatus, events::EventCursor,
+    SubmitChildRunRequest, SubmitTurnRequest, SubmitTurnResponse, TurnCapacityResource,
+    TurnCommittedEventObserver, TurnError, TurnEventKind, TurnEventSink, TurnLifecycleEvent,
+    TurnRunId, TurnRunState, TurnScope, TurnSpawnTreeStateStore, TurnStateStore, TurnStatus,
+    events::EventCursor,
 };
 
 pub trait TurnAdmissionPolicy: Send + Sync {
@@ -119,6 +120,7 @@ pub struct DefaultTurnCoordinator<S: ?Sized> {
     // when `requested_run_id` is set and rejects cross-scope submission so a
     // prepared id cannot be used to inject lineage into a different scope.
     prepared_run_id_scopes: Mutex<HashMap<TurnRunId, TurnScope>>,
+    committed_event_observer: Option<Arc<dyn TurnCommittedEventObserver>>,
 }
 
 impl<S> DefaultTurnCoordinator<S>
@@ -134,6 +136,7 @@ where
             event_sink: None,
             delivered_event_cursors: Mutex::new(HashSet::new()),
             prepared_run_id_scopes: Mutex::new(HashMap::new()),
+            committed_event_observer: None,
         }
     }
 
@@ -200,6 +203,14 @@ where
         };
         prepared.remove(&run_id)
     }
+
+    pub fn with_required_event_observer(
+        mut self,
+        observer: Arc<dyn TurnCommittedEventObserver>,
+    ) -> Self {
+        self.committed_event_observer = Some(observer);
+        self
+    }
 }
 
 fn submit_wake(scope: TurnScope, response: &SubmitTurnResponse) -> TurnRunWake {
@@ -253,6 +264,29 @@ async fn publish_turn_event_best_effort(
     if let Err(error) = sink.publish(event).await {
         debug!(error = %error, "turn lifecycle event sink publish failed");
     }
+}
+
+async fn observe_committed_event_required(
+    observer: Option<&Arc<dyn TurnCommittedEventObserver>>,
+    event: &TurnLifecycleEvent,
+) -> Result<(), TurnError> {
+    let Some(observer) = observer else {
+        return Ok(());
+    };
+    if observer.observes_event(event) {
+        observer.observe_committed_event(event.clone()).await?;
+    }
+    Ok(())
+}
+
+async fn publish_committed_event(
+    observer: Option<&Arc<dyn TurnCommittedEventObserver>>,
+    sink: Option<&Arc<dyn TurnEventSink>>,
+    event: TurnLifecycleEvent,
+) -> Result<(), TurnError> {
+    observe_committed_event_required(observer, &event).await?;
+    publish_turn_event_best_effort(sink, event).await;
+    Ok(())
 }
 
 #[async_trait]
@@ -323,7 +357,8 @@ where
             ..
         } = &response;
         if self.claim_event_cursor_for_publish(*event_cursor) {
-            publish_turn_event_best_effort(
+            publish_committed_event(
+                self.committed_event_observer.as_ref(),
                 self.event_sink.as_ref(),
                 TurnLifecycleEvent {
                     cursor: *event_cursor,
@@ -337,7 +372,7 @@ where
                     sanitized_reason: None,
                 },
             )
-            .await;
+            .await?;
         }
         Ok(response)
     }
@@ -354,7 +389,8 @@ where
             resume_wake(scope.clone(), &response),
         );
         if self.claim_event_cursor_for_publish(response.event_cursor) {
-            publish_turn_event_best_effort(
+            publish_committed_event(
+                self.committed_event_observer.as_ref(),
                 self.event_sink.as_ref(),
                 TurnLifecycleEvent {
                     cursor: response.event_cursor,
@@ -368,14 +404,13 @@ where
                     sanitized_reason: None,
                 },
             )
-            .await;
+            .await?;
         }
         Ok(response)
     }
 
     async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
         let scope = request.scope.clone();
-        let actor = request.actor.clone();
         let reason = request.reason;
         let response = self.store.request_cancel(request).await?;
         // Wake on `CancelRequested` (the cooperative case) AND on any terminal
@@ -395,21 +430,23 @@ where
             } else {
                 TurnEventKind::Cancelled
             };
-            publish_turn_event_best_effort(
+            let event = TurnLifecycleEvent {
+                cursor: response.event_cursor,
+                scope,
+                occurred_at: Some(Utc::now()),
+                owner_user_id: response.actor.clone().map(|actor| actor.user_id),
+                run_id: response.run_id,
+                status: response.status,
+                kind,
+                blocked_gate: None,
+                sanitized_reason: Some(reason.category().to_string()),
+            };
+            publish_committed_event(
+                self.committed_event_observer.as_ref(),
                 self.event_sink.as_ref(),
-                TurnLifecycleEvent {
-                    cursor: response.event_cursor,
-                    scope,
-                    occurred_at: Some(Utc::now()),
-                    owner_user_id: Some(actor.user_id),
-                    run_id: response.run_id,
-                    status: response.status,
-                    kind,
-                    blocked_gate: None,
-                    sanitized_reason: Some(reason.category().to_string()),
-                },
+                event,
             )
-            .await;
+            .await?;
         }
         Ok(response)
     }

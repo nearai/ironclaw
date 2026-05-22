@@ -43,9 +43,10 @@ pub use coordinator::{
 };
 pub use events::{
     EventCursor, InMemoryTurnEventSink, MAX_TURN_EVENT_PROJECTION_LIMIT, TurnBlockedGateKind,
-    TurnBlockedGateMetadata, TurnEventKind, TurnEventPage, TurnEventProjectionCursor,
-    TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService,
-    TurnEventProjectionSnapshot, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
+    TurnBlockedGateMetadata, TurnCommittedEventObserver, TurnEventKind, TurnEventPage,
+    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    TurnEventProjectionService, TurnEventProjectionSnapshot, TurnEventProjectionSource,
+    TurnEventSink, TurnLifecycleEvent,
 };
 pub use filesystem_store::FilesystemTurnStateStore;
 pub use ids::{

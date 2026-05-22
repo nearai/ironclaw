@@ -103,6 +103,7 @@ pub enum RebornLoopProductionComponent {
     LoopExitApplier,
     TurnStateStore,
     SubagentGoalStore,
+    SubagentCompletionObserver,
     WakeNotifier,
     ProgressEvents,
 }
@@ -354,6 +355,7 @@ pub struct RebornLoopComponentGraphReadiness {
     pub loop_exit_applier: RebornComponentReadiness,
     pub turn_state_store: RebornComponentReadiness,
     pub subagent_goal_store: RebornComponentReadiness,
+    pub subagent_completion_observer: RebornComponentReadiness,
     pub wake_notifier: RebornComponentReadiness,
     pub progress_events: RebornComponentReadiness,
 }
@@ -372,6 +374,7 @@ impl RebornLoopComponentGraphReadiness {
             loop_exit_applier: RebornComponentReadiness::production_verified(required),
             turn_state_store: RebornComponentReadiness::production_verified(required),
             subagent_goal_store: RebornComponentReadiness::production_verified(required),
+            subagent_completion_observer: RebornComponentReadiness::production_verified(required),
             wake_notifier: RebornComponentReadiness::production_verified(required),
             progress_events: RebornComponentReadiness::production_verified(required),
         }
@@ -429,6 +432,10 @@ impl RebornLoopComponentGraphReadiness {
             (
                 RebornLoopProductionComponent::SubagentGoalStore,
                 self.subagent_goal_store,
+            ),
+            (
+                RebornLoopProductionComponent::SubagentCompletionObserver,
+                self.subagent_completion_observer,
             ),
             (
                 RebornLoopProductionComponent::WakeNotifier,
@@ -724,6 +731,7 @@ fn component_subject(component: RebornLoopProductionComponent) -> &'static str {
         RebornLoopProductionComponent::LoopExitApplier => "loop_exit_applier",
         RebornLoopProductionComponent::TurnStateStore => "turn_state_store",
         RebornLoopProductionComponent::SubagentGoalStore => "subagent_goal_store",
+        RebornLoopProductionComponent::SubagentCompletionObserver => "subagent_completion_observer",
         RebornLoopProductionComponent::WakeNotifier => "wake_notifier",
         RebornLoopProductionComponent::ProgressEvents => "progress_events",
     }
@@ -746,6 +754,13 @@ pub fn tool_capable_driver_requirements() -> DriverRequirements {
 /// Utility for text-only profiles: capability calls are supported by an
 /// explicit production-safe deny capability port, not by omitting the port.
 pub fn text_only_driver_requirements() -> DriverRequirements {
+    tool_capable_driver_requirements()
+}
+
+/// Subagent profiles need the full tool-capable loop-host surface, including a
+/// real capability port for the `spawn_subagent` entry and attenuated flavor
+/// tools.
+pub fn subagent_driver_requirements() -> DriverRequirements {
     tool_capable_driver_requirements()
 }
 

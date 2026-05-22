@@ -1948,6 +1948,7 @@ impl Inner {
                     status: record.status,
                     event_cursor: record.event_cursor,
                     already_terminal: true,
+                    actor: Some(record.actor.clone()),
                 });
             }
             let (next_status, event_kind) = match record.status {
@@ -1966,6 +1967,7 @@ impl Inner {
                         status,
                         event_cursor: record.event_cursor,
                         already_terminal: true,
+                        actor: Some(record.actor.clone()),
                     });
                 }
             };
@@ -1984,6 +1986,7 @@ impl Inner {
                 status: record.status,
                 event_cursor: record.event_cursor,
                 already_terminal: false,
+                actor: Some(record.actor.clone()),
             };
             self.push_event(
                 &record,

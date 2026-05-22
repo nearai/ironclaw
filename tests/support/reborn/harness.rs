@@ -808,6 +808,7 @@ impl RebornBinaryE2EHarness {
             subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
                 capability_input_resolver,
             )),
+            subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
             loop_exit_evidence: evidence,
             config: DefaultPlannedRuntimeConfig {
                 worker: TurnRunnerWorkerConfig {
@@ -825,6 +826,7 @@ impl RebornBinaryE2EHarness {
             model_policy_guard: None,
             model_budget_accountant: None,
             safety_context: None,
+            turn_event_sink: None,
         })?;
         let binding_service: Arc<dyn ConversationBindingService> =
             Arc::new(product_harness.binding_service()?);

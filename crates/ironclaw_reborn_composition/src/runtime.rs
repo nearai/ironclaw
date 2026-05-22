@@ -1006,6 +1006,7 @@ pub async fn build_reborn_runtime(
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
             capability_input_resolver,
         )),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence,
         config: DefaultPlannedRuntimeConfig {
             worker: TurnRunnerWorkerConfig {
@@ -1023,6 +1024,7 @@ pub async fn build_reborn_runtime(
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
+        turn_event_sink: None,
     })?;
     let default_resolved_run_profile = composition
         .run_profile_resolver

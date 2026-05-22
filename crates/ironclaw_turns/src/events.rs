@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use ironclaw_host_api::{Timestamp, UserId};
 
-use crate::{GateRef, TurnError, TurnRunId, TurnScope, TurnStatus};
+use crate::{GateRef, TurnError, TurnRunId, TurnRunState, TurnScope, TurnStatus};
 
 const MAX_IN_MEMORY_EVENTS: usize = 10_000;
 pub const MAX_TURN_EVENT_PROJECTION_LIMIT: usize = 1_000;
@@ -95,6 +95,21 @@ impl TurnLifecycleEvent {
 #[async_trait]
 pub trait TurnEventSink: Send + Sync {
     async fn publish(&self, event: TurnLifecycleEvent) -> Result<(), TurnError>;
+}
+
+#[async_trait]
+pub trait TurnCommittedEventObserver: Send + Sync {
+    fn observes_state(&self, _state: &TurnRunState) -> bool {
+        true
+    }
+
+    fn observes_event(&self, _event: &TurnLifecycleEvent) -> bool {
+        true
+    }
+
+    async fn observe_committed_state(&self, state: TurnRunState) -> Result<(), TurnError>;
+
+    async fn observe_committed_event(&self, event: TurnLifecycleEvent) -> Result<(), TurnError>;
 }
 
 #[derive(Default)]

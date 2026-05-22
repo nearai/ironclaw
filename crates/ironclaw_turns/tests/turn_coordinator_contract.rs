@@ -1,7 +1,7 @@
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc,
     },
     task::{Context, Poll},
@@ -21,14 +21,14 @@ use ironclaw_turns::{
     SourceBindingRef, StaticTurnAdmissionLimitProvider, SubmitChildRunRequest, SubmitTurnRequest,
     SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionAxisKind, TurnAdmissionBucketKind,
     TurnAdmissionBucketScope, TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionPolicy,
-    TurnCapacityResource, TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory,
-    TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
-    TurnEventProjectionService, TurnEventSink, TurnIdempotencyErrorReplay,
-    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
-    TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLockVersion, TurnRunId,
-    TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
-    TurnRunnerId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateStore,
-    TurnStatus,
+    TurnCapacityResource, TurnCheckpointId, TurnCommittedEventObserver, TurnCoordinator, TurnError,
+    TurnErrorCategory, TurnEventKind, TurnEventPage, TurnEventProjectionCursor,
+    TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService, TurnEventSink,
+    TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind,
+    TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent,
+    TurnLockVersion, TurnRunId, TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier,
+    TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnSpawnTreePort, TurnSpawnTreeStateStore,
+    TurnStateStore, TurnStatus,
     events::EventCursor,
     run_profile::{CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot},
     runner::{
@@ -955,6 +955,428 @@ async fn default_turn_coordinator_does_not_publish_cancel_event_for_terminal_ret
 }
 
 #[tokio::test]
+async fn event_publishing_transition_port_publishes_blocked_and_terminal_events() {
+    let (coordinator, store) = coordinator();
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let transition_port = EventPublishingTurnRunTransitionPort::new(
+        Arc::clone(&store) as Arc<dyn TurnRunTransitionPort>,
+        Arc::clone(&sink) as Arc<dyn TurnEventSink>,
+    );
+
+    let blocked_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-transition-blocked",
+                "idem-transition-blocked",
+            ))
+            .await
+            .unwrap(),
+    );
+    let blocked_runner_id = TurnRunnerId::new();
+    let blocked_lease = TurnLeaseToken::new();
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: blocked_runner_id,
+            lease_token: blocked_lease,
+            scope_filter: Some(scope("thread-transition-blocked")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    apply_test_loop_exit(
+        &transition_port,
+        blocked_run_id,
+        blocked_runner_id,
+        blocked_lease,
+        dependent_blocked_mapping(
+            TurnCheckpointId::new(),
+            block_state_ref(),
+            &LoopGateRef::new("gate:transition-dependent").unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+
+    let completed_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-transition-completed",
+                "idem-transition-completed",
+            ))
+            .await
+            .unwrap(),
+    );
+    let completed_runner_id = TurnRunnerId::new();
+    let completed_lease = TurnLeaseToken::new();
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: completed_runner_id,
+            lease_token: completed_lease,
+            scope_filter: Some(scope("thread-transition-completed")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    apply_test_loop_exit(
+        &transition_port,
+        completed_run_id,
+        completed_runner_id,
+        completed_lease,
+        completed_mapping(),
+    )
+    .await
+    .unwrap();
+
+    let events = sink.events();
+    assert!(events.iter().any(|event| {
+        event.run_id == blocked_run_id
+            && event.kind == TurnEventKind::Blocked
+            && event.status == TurnStatus::BlockedDependentRun
+    }));
+    assert!(events.iter().any(|event| {
+        event.run_id == completed_run_id
+            && event.kind == TurnEventKind::Completed
+            && event.status == TurnStatus::Completed
+    }));
+}
+
+#[tokio::test]
+async fn event_publishing_transition_port_publishes_recovered_lease_events() {
+    let (coordinator, store) = coordinator();
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let transition_port = EventPublishingTurnRunTransitionPort::new(
+        Arc::clone(&store) as Arc<dyn TurnRunTransitionPort>,
+        Arc::clone(&sink) as Arc<dyn TurnEventSink>,
+    );
+
+    let empty = transition_port
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: Utc::now() + ChronoDuration::seconds(120),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert!(empty.recovered.is_empty());
+    assert!(sink.events().is_empty());
+
+    let first = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-recover-event-a",
+                "idem-recover-event-a",
+            ))
+            .await
+            .unwrap(),
+    );
+    let second = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-recover-event-b",
+                "idem-recover-event-b",
+            ))
+            .await
+            .unwrap(),
+    );
+    for scope_filter in [
+        Some(scope("thread-recover-event-a")),
+        Some(scope("thread-recover-event-b")),
+    ] {
+        transition_port
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    let recovered = transition_port
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: Utc::now() + ChronoDuration::seconds(120),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(recovered.recovered.len(), 2);
+    let events = sink.events();
+    let recovered_events = events
+        .iter()
+        .filter(|event| {
+            event.kind == TurnEventKind::RecoveryRequired
+                && event.sanitized_reason.as_deref() == Some("lease_expired")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(recovered_events.len(), 2);
+    assert!(recovered_events.iter().any(|event| event.run_id == first));
+    assert!(recovered_events.iter().any(|event| event.run_id == second));
+}
+
+#[tokio::test]
+async fn event_publishing_transition_port_does_not_fail_committed_claim_on_sink_error() {
+    let (coordinator, store) = coordinator();
+    let transition_port = EventPublishingTurnRunTransitionPort::new(
+        Arc::clone(&store) as Arc<dyn TurnRunTransitionPort>,
+        Arc::new(FailingTurnEventSink),
+    );
+    coordinator
+        .submit_turn(submit_request(
+            "thread-claim-sink-failure",
+            "idem-claim-sink-failure",
+        ))
+        .await
+        .unwrap();
+
+    let claimed = transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-claim-sink-failure")),
+        })
+        .await
+        .unwrap()
+        .expect("sink failure must not hide a committed claim");
+
+    assert_eq!(claimed.state.status, TurnStatus::Running);
+}
+
+#[tokio::test]
+async fn event_publishing_transition_port_required_observer_sees_terminal_state_without_sink() {
+    let (coordinator, store) = coordinator();
+    let observer = Arc::new(RecordingCommittedEventObserver::default());
+    let transition_port = EventPublishingTurnRunTransitionPort::new_optional_sink(
+        Arc::clone(&store) as Arc<dyn TurnRunTransitionPort>,
+        None,
+    )
+    .with_required_observer(Arc::clone(&observer) as Arc<dyn TurnCommittedEventObserver>);
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-required-observer",
+                "idem-required-observer",
+            ))
+            .await
+            .unwrap(),
+    );
+    let runner_id = TurnRunnerId::new();
+    let lease_token = TurnLeaseToken::new();
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id,
+            lease_token,
+            scope_filter: Some(scope("thread-required-observer")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+    let completed = apply_test_loop_exit(
+        &transition_port,
+        run_id,
+        runner_id,
+        lease_token,
+        completed_mapping(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(completed.status, TurnStatus::Completed);
+    let observed_events = observer.events();
+    assert!(
+        observed_events
+            .iter()
+            .any(|event| event.run_id == run_id && event.kind == TurnEventKind::Completed),
+        "required observer should see terminal Completed event without sink",
+    );
+}
+
+#[tokio::test]
+async fn event_publishing_transition_port_preserves_lease_expired_recovery_reason() {
+    let (coordinator, store) = coordinator();
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let transition_port = EventPublishingTurnRunTransitionPort::new(
+        Arc::clone(&store) as Arc<dyn TurnRunTransitionPort>,
+        Arc::clone(&sink) as Arc<dyn TurnEventSink>,
+    );
+    let run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request("thread-recovery-sink", "idem-recovery-sink"))
+            .await
+            .unwrap(),
+    );
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-recovery-sink")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let lease_expires_at = store
+        .persistence_snapshot()
+        .runs
+        .iter()
+        .find(|record| record.run_id == run_id)
+        .unwrap()
+        .lease_expires_at
+        .unwrap();
+
+    transition_port
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: lease_expires_at + ChronoDuration::milliseconds(1),
+            scope_filter: Some(scope("thread-recovery-sink")),
+        })
+        .await
+        .unwrap();
+
+    assert!(sink.events().iter().any(|event| {
+        event.run_id == run_id
+            && event.kind == TurnEventKind::RecoveryRequired
+            && event.sanitized_reason.as_deref() == Some("lease_expired")
+    }));
+}
+
+#[tokio::test]
+async fn event_publishing_transition_port_attempts_all_recovered_events_after_sink_error() {
+    let (coordinator, store) = coordinator();
+    let sink = Arc::new(FailFirstRecordingTurnEventSink::default());
+    let transition_port = EventPublishingTurnRunTransitionPort::new(
+        Arc::clone(&store) as Arc<dyn TurnRunTransitionPort>,
+        Arc::clone(&sink) as Arc<dyn TurnEventSink>,
+    );
+    let first_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-recovery-batch-a",
+                "idem-recovery-batch-a",
+            ))
+            .await
+            .unwrap(),
+    );
+    let second_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-recovery-batch-b",
+                "idem-recovery-batch-b",
+            ))
+            .await
+            .unwrap(),
+    );
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-recovery-batch-a")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    transition_port
+        .claim_next_run(ClaimRunRequest {
+            runner_id: TurnRunnerId::new(),
+            lease_token: TurnLeaseToken::new(),
+            scope_filter: Some(scope("thread-recovery-batch-b")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let lease_expires_at = store
+        .persistence_snapshot()
+        .runs
+        .iter()
+        .filter_map(|record| record.lease_expires_at)
+        .min()
+        .unwrap();
+
+    transition_port
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: lease_expires_at + ChronoDuration::milliseconds(1),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+
+    let events = sink.events();
+    assert!(events.iter().any(|event| event.run_id == first_run_id));
+    assert!(events.iter().any(|event| event.run_id == second_run_id));
+}
+
+#[tokio::test]
+async fn default_turn_coordinator_cancel_event_uses_committed_run_owner() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let coordinator = DefaultTurnCoordinator::new(Arc::clone(&store))
+        .with_event_sink(Arc::clone(&sink) as Arc<dyn TurnEventSink>);
+    let mut request = submit_request("thread-cancel-owner", "idem-cancel-owner-submit");
+    request.actor = TurnActor::new(UserId::new("user-run-owner").unwrap());
+    let run_id = accepted_run_id(&coordinator.submit_turn(request).await.unwrap());
+
+    coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope("thread-cancel-owner"),
+            actor: TurnActor::new(UserId::new("user-canceller").unwrap()),
+            run_id,
+            reason: SanitizedCancelReason::OperatorRequested,
+            idempotency_key: IdempotencyKey::new("idem-cancel-owner").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let cancel_event = sink
+        .events()
+        .into_iter()
+        .find(|event| event.run_id == run_id && event.kind == TurnEventKind::Cancelled)
+        .expect("terminal cancel event should be published");
+    assert_eq!(
+        cancel_event
+            .owner_user_id
+            .as_ref()
+            .map(|user| user.as_str()),
+        Some("user-run-owner")
+    );
+}
+
+#[tokio::test]
+async fn default_turn_coordinator_required_observer_sees_terminal_cancel() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let observer = Arc::new(RecordingCommittedEventObserver::default());
+    let coordinator = DefaultTurnCoordinator::new(Arc::clone(&store))
+        .with_required_event_observer(Arc::clone(&observer) as Arc<dyn TurnCommittedEventObserver>);
+    let mut request = submit_request(
+        "thread-required-cancel-observer",
+        "idem-required-cancel-observer-submit",
+    );
+    request.actor = TurnActor::new(UserId::new("user-run-owner").unwrap());
+    let run_id = accepted_run_id(&coordinator.submit_turn(request).await.unwrap());
+
+    coordinator
+        .cancel_run(CancelRunRequest {
+            scope: scope("thread-required-cancel-observer"),
+            actor: TurnActor::new(UserId::new("user-canceller").unwrap()),
+            run_id,
+            reason: SanitizedCancelReason::OperatorRequested,
+            idempotency_key: IdempotencyKey::new("idem-required-cancel-observer").unwrap(),
+        })
+        .await
+        .unwrap();
+
+    let observed_events = observer.events();
+    assert_eq!(observed_events.len(), 1);
+    assert_eq!(observed_events[0].run_id, run_id);
+    assert_eq!(observed_events[0].kind, TurnEventKind::Cancelled);
+    assert_eq!(
+        observed_events[0]
+            .owner_user_id
+            .as_ref()
+            .map(|user| user.as_str()),
+        Some("user-run-owner")
+    );
+}
+
+#[tokio::test]
+
 async fn turn_lifecycle_projection_replays_submit_block_resume_complete_without_raw_refs() {
     let (coordinator, store) = coordinator();
     let mut request = submit_request("thread-turn-events", "idem-turn-events-submit");
@@ -5460,6 +5882,98 @@ struct FailingWakeNotifier;
 impl TurnRunWakeNotifier for FailingWakeNotifier {
     fn notify_queued_run(&self, _wake: TurnRunWake) -> Result<(), TurnRunWakeNotifyError> {
         Err(TurnRunWakeNotifyError::DeliveryUnavailable)
+    }
+}
+
+struct FailingTurnEventSink;
+
+#[async_trait::async_trait]
+impl TurnEventSink for FailingTurnEventSink {
+    async fn publish(&self, _event: TurnLifecycleEvent) -> Result<(), TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test event sink unavailable".to_string(),
+        })
+    }
+}
+
+struct FailingTurnEventProjectionSource;
+
+#[async_trait::async_trait]
+impl ironclaw_turns::TurnEventProjectionSource for FailingTurnEventProjectionSource {
+    async fn read_turn_events_after(
+        &self,
+        _scope: &TurnScope,
+        _after: Option<EventCursor>,
+        _limit: usize,
+    ) -> Result<TurnEventPage, TurnError> {
+        Err(TurnError::Unavailable {
+            reason: "test projection source unavailable".to_string(),
+        })
+    }
+}
+
+#[derive(Default)]
+struct RecordingCommittedEventObserver {
+    states: Mutex<Vec<TurnRunState>>,
+    events: Mutex<Vec<TurnLifecycleEvent>>,
+}
+
+impl RecordingCommittedEventObserver {
+    fn states(&self) -> Vec<TurnRunState> {
+        self.states.lock().unwrap().clone()
+    }
+
+    fn events(&self) -> Vec<TurnLifecycleEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnCommittedEventObserver for RecordingCommittedEventObserver {
+    fn observes_state(&self, state: &TurnRunState) -> bool {
+        state.status.is_terminal()
+    }
+
+    fn observes_event(&self, event: &TurnLifecycleEvent) -> bool {
+        event.status.is_terminal()
+    }
+
+    async fn observe_committed_state(&self, state: TurnRunState) -> Result<(), TurnError> {
+        self.states.lock().unwrap().push(state);
+        Ok(())
+    }
+
+    async fn observe_committed_event(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
+        self.events.lock().unwrap().push(event);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct FailFirstRecordingTurnEventSink {
+    attempts: Mutex<Vec<TurnLifecycleEvent>>,
+    failed_recovery: AtomicBool,
+}
+
+impl FailFirstRecordingTurnEventSink {
+    fn events(&self) -> Vec<TurnLifecycleEvent> {
+        self.attempts.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl TurnEventSink for FailFirstRecordingTurnEventSink {
+    async fn publish(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
+        let mut attempts = self.attempts.lock().unwrap();
+        let should_fail = event.kind == TurnEventKind::RecoveryRequired
+            && !self.failed_recovery.swap(true, Ordering::SeqCst);
+        attempts.push(event);
+        if should_fail {
+            return Err(TurnError::Unavailable {
+                reason: "test event sink first publish failed".to_string(),
+            });
+        }
+        Ok(())
     }
 }
 

@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AcceptedMessageRef, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, TurnRunId,
-    TurnStatus, events::EventCursor,
+    AcceptedMessageRef, ReplyTargetBindingRef, RunProfileId, RunProfileVersion, TurnActor,
+    TurnRunId, TurnStatus, events::EventCursor,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,4 +39,6 @@ pub struct CancelRunResponse {
     pub status: TurnStatus,
     pub event_cursor: EventCursor,
     pub already_terminal: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<TurnActor>,
 }

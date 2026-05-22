@@ -86,15 +86,15 @@ use ironclaw_turns::{
     AgentLoopDriverResumeRequest, AgentLoopDriverRunRequest, CancelRunRequest, CancelRunResponse,
     CheckpointStateStore, DefaultTurnCoordinator, EventCursor, GetCheckpointStateRequest,
     GetLoopCheckpointRequest, GetRunStateRequest, IdempotencyKey, InMemoryCheckpointStateStore,
-    InMemoryLoopCheckpointStore, InMemoryRunProfileResolver, InMemoryTurnStateStore,
-    InMemoryTurnStateStoreLimits, LoopBlocked, LoopBlockedKind, LoopCheckpointRecord,
-    LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit, LoopExitId, LoopGateRef,
-    LoopMessageRef, LoopResultRef, PutCheckpointStateRequest, PutLoopCheckpointRequest,
-    ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId, RunProfileRequest,
-    RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnAdmissionPolicy, TurnCoordinator,
-    TurnError, TurnId, TurnLeaseToken, TurnRunId, TurnRunState, TurnRunnerId, TurnScope,
-    TurnStateStore, TurnStatus,
+    InMemoryLoopCheckpointStore, InMemoryRunProfileResolver, InMemoryTurnEventSink,
+    InMemoryTurnStateStore, InMemoryTurnStateStoreLimits, LoopBlocked, LoopBlockedKind,
+    LoopCheckpointRecord, LoopCheckpointStore, LoopCompleted, LoopCompletionKind, LoopExit,
+    LoopExitId, LoopGateRef, LoopMessageRef, LoopResultRef, PutCheckpointStateRequest,
+    PutLoopCheckpointRequest, ReplyTargetBindingRef, ResumeTurnRequest, RunProfileId,
+    RunProfileRequest, RunProfileResolutionRequest, RunProfileResolver, RunProfileVersion,
+    SourceBindingRef, SpawnTreeReservation, SubmitTurnRequest, SubmitTurnResponse, TurnActor,
+    TurnAdmissionPolicy, TurnCoordinator, TurnError, TurnId, TurnLeaseToken, TurnRunId,
+    TurnRunRecord, TurnRunState, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     run_profile::{
         AgentLoopDriverHost, AgentLoopHostError, AgentLoopHostErrorKind, AssistantReply,
         BatchPolicyKind, CapabilityDeniedReasonKind, CapabilityDescriptorView,
@@ -2170,6 +2170,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         turn_store.clone(),
         turn_store.clone(),
     ));
+    let event_sink = Arc::new(InMemoryTurnEventSink::default());
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         turn_state: turn_store.clone(),
         thread_service: fixture.thread_service.clone() as Arc<dyn SessionThreadService>,
@@ -2185,6 +2186,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence: evidence,
         config: DefaultPlannedRuntimeConfig {
             worker: TurnRunnerWorkerConfig {
@@ -2202,6 +2204,7 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         model_policy_guard: None,
         model_budget_accountant: None,
         safety_context: None,
+        turn_event_sink: Some(event_sink.clone()),
     })
     .unwrap();
 
@@ -2224,6 +2227,10 @@ async fn default_planned_runtime_composes_no_profile_coordinator_and_profiled_ho
         .await
         .unwrap();
     assert_eq!(status, TurnStatus::Queued);
+    let events = event_sink.events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].run_id, run_id);
+    assert_eq!(events[0].status, TurnStatus::Queued);
 
     let claimed = turn_store
         .claim_next_run(ClaimRunRequest {
@@ -2314,6 +2321,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
             fixture.thread_service.clone(),
             turn_state_store_dyn(&turn_store),
@@ -2328,6 +2336,7 @@ async fn product_live_runtime_builds_when_all_required_adapters_are_present() {
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
+        turn_event_sink: None,
     })
     .expect("all product-live adapters should satisfy readiness");
 
@@ -2383,6 +2392,7 @@ async fn product_live_parts_for_gate_test(
         subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
         subagent_definition_resolver: Arc::new(StaticSubagentDefinitionResolver),
         subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(io.clone())),
+        subagent_spawn_limits: ironclaw_loop_support::SubagentSpawnLimits::default(),
         loop_exit_evidence: Arc::new(ThreadCheckpointLoopExitEvidencePort::new(
             fixture.thread_service.clone(),
             turn_state_store_dyn(&turn_store),
@@ -2397,6 +2407,7 @@ async fn product_live_parts_for_gate_test(
         model_policy_guard: Some(Arc::new(NoOpPolicyGuard)),
         model_budget_accountant: Some(Arc::new(NoOpBudgetAccountant)),
         safety_context: Some(test_safety_context()),
+        turn_event_sink: None,
     }
 }
 

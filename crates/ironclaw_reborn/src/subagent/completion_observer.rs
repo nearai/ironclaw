@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use ironclaw_host_api::CapabilityId;
@@ -12,17 +12,10 @@ use ironclaw_threads::{
     ThreadHistoryRequest, ThreadScope, ToolResultSafeSummary, UpdateToolResultReferenceRequest,
 };
 use ironclaw_turns::{
-    CancelRunRequest, CancelRunResponse, GateRef, GetRunStateRequest, IdempotencyKey,
-    ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnEventKind, TurnLifecycleEvent,
+    GateRef, IdempotencyKey, ResumeTurnPrecondition, ResumeTurnRequest, TurnActor,
+    TurnCommittedEventObserver, TurnCoordinator, TurnError, TurnEventKind, TurnLifecycleEvent,
     TurnRunId, TurnRunRecord, TurnRunState, TurnSpawnTreeStateStore, TurnStatus,
     run_profile::{AgentLoopHostError, LoopRunContext, sanitize_model_visible_text},
-    runner::{
-        ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
-        ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
-        RecordModelRouteSnapshotRequest, RecordRecoveryRequiredRequest,
-        RecoverExpiredLeasesRequest, RecoverExpiredLeasesResponse, TurnRunTransitionPort,
-    },
 };
 
 use crate::subagent::gate_resolution::{
@@ -40,7 +33,7 @@ pub struct SubagentCompletionObserver<S: SessionThreadService + ?Sized> {
     goal_store: Arc<dyn SubagentSpawnGoalStore>,
     turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    coordinator: Arc<dyn TurnCoordinator>,
+    coordinator: Arc<OnceLock<Arc<dyn TurnCoordinator>>>,
     thread_service: Arc<S>,
 }
 
@@ -56,14 +49,40 @@ where
         coordinator: Arc<dyn TurnCoordinator>,
         thread_service: Arc<S>,
     ) -> Self {
+        let observer = Self::new_unbound(
+            gate_store,
+            goal_store,
+            turn_state_store,
+            result_writer,
+            thread_service,
+        );
+        let _ = observer.bind_coordinator(coordinator);
+        observer
+    }
+
+    pub fn new_unbound(
+        gate_store: Arc<BoundedSubagentGateResolutionStore>,
+        goal_store: Arc<dyn SubagentSpawnGoalStore>,
+        turn_state_store: Arc<dyn TurnSpawnTreeStateStore>,
+        result_writer: Arc<dyn LoopCapabilityResultWriter>,
+        thread_service: Arc<S>,
+    ) -> Self {
         Self {
             gate_store,
             goal_store,
             turn_state_store,
             result_writer,
-            coordinator,
+            coordinator: Arc::new(OnceLock::new()),
             thread_service,
         }
+    }
+
+    pub fn bind_coordinator(&self, coordinator: Arc<dyn TurnCoordinator>) -> Result<(), TurnError> {
+        self.coordinator
+            .set(coordinator)
+            .map_err(|_| TurnError::InvalidRequest {
+                reason: "subagent completion observer coordinator already bound".to_string(),
+            })
     }
 
     async fn handle_terminal(&self, event: &TurnLifecycleEvent) -> Result<(), TurnError> {
@@ -145,29 +164,6 @@ where
             return Ok(false);
         };
         Ok(record.parent_run_id.is_some() && record.subagent_depth > 0)
-    }
-
-    pub async fn handle_terminal_state(
-        &self,
-        state: &TurnRunState,
-        kind: TurnEventKind,
-    ) -> Result<(), TurnError> {
-        if !is_subagent_terminal_status(state.status) {
-            return Ok(());
-        }
-        let owner_user_id = state.actor.as_ref().map(|actor| actor.user_id.clone());
-        self.handle_terminal(&TurnLifecycleEvent {
-            cursor: state.event_cursor,
-            scope: state.scope.clone(),
-            occurred_at: None,
-            owner_user_id,
-            run_id: state.run_id,
-            status: state.status,
-            kind,
-            blocked_gate: None,
-            sanitized_reason: None,
-        })
-        .await
     }
 
     async fn recover_missing_gate_record(
@@ -282,7 +278,13 @@ where
         record: &ironclaw_loop_support::AwaitedChildSetRecord,
     ) -> Result<(), TurnError> {
         let actor = actor_from_terminal_event(event)?;
-        self.coordinator
+        let coordinator = self
+            .coordinator
+            .get()
+            .ok_or_else(|| TurnError::Unavailable {
+                reason: "subagent completion observer coordinator is not bound".to_string(),
+            })?;
+        coordinator
             .resume_turn(ResumeTurnRequest {
                 scope: record.parent_run_context.scope.clone(),
                 actor,
@@ -408,178 +410,26 @@ where
     }
 }
 
-pub struct SubagentCompletionTransitionPort<S: SessionThreadService + ?Sized> {
-    inner: Arc<dyn TurnRunTransitionPort>,
-    observer: Arc<SubagentCompletionObserver<S>>,
-}
-
-impl<S> SubagentCompletionTransitionPort<S>
-where
-    S: SessionThreadService + ?Sized,
-{
-    pub fn new(
-        inner: Arc<dyn TurnRunTransitionPort>,
-        observer: Arc<SubagentCompletionObserver<S>>,
-    ) -> Self {
-        Self { inner, observer }
-    }
-}
-
 #[async_trait]
-impl<S> TurnRunTransitionPort for SubagentCompletionTransitionPort<S>
+impl<S> TurnCommittedEventObserver for SubagentCompletionObserver<S>
 where
     S: SessionThreadService + ?Sized,
 {
-    async fn claim_next_run(
-        &self,
-        request: ClaimRunRequest,
-    ) -> Result<Option<ClaimedTurnRun>, TurnError> {
-        self.inner.claim_next_run(request).await
+    fn observes_state(&self, state: &TurnRunState) -> bool {
+        is_subagent_terminal_status(state.status)
     }
 
-    async fn heartbeat(
-        &self,
-        request: HeartbeatRequest,
-    ) -> Result<ironclaw_turns::EventCursor, TurnError> {
-        self.inner.heartbeat(request).await
+    fn observes_event(&self, event: &TurnLifecycleEvent) -> bool {
+        is_subagent_terminal_status(event.status)
     }
 
-    async fn recover_expired_leases(
-        &self,
-        request: RecoverExpiredLeasesRequest,
-    ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
-        self.inner.recover_expired_leases(request).await
+    async fn observe_committed_state(&self, state: TurnRunState) -> Result<(), TurnError> {
+        self.handle_terminal(&terminal_event_from_state(&state))
+            .await
     }
 
-    async fn record_model_route_snapshot(
-        &self,
-        request: RecordModelRouteSnapshotRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        self.inner.record_model_route_snapshot(request).await
-    }
-
-    async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
-        self.inner.block_run(request).await
-    }
-
-    async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
-        let state = self.inner.complete_run(request).await?;
-        self.observer
-            .handle_terminal_state(&state, TurnEventKind::Completed)
-            .await?;
-        Ok(state)
-    }
-
-    async fn cancel_run(
-        &self,
-        request: CancelRunCompletionRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        let state = self.inner.cancel_run(request).await?;
-        self.observer
-            .handle_terminal_state(&state, TurnEventKind::Cancelled)
-            .await?;
-        Ok(state)
-    }
-
-    async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
-        let state = self.inner.fail_run(request).await?;
-        self.observer
-            .handle_terminal_state(&state, TurnEventKind::Failed)
-            .await?;
-        Ok(state)
-    }
-
-    async fn record_recovery_required(
-        &self,
-        request: RecordRecoveryRequiredRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        let state = self.inner.record_recovery_required(request).await?;
-        self.observer
-            .handle_terminal_state(&state, TurnEventKind::RecoveryRequired)
-            .await?;
-        Ok(state)
-    }
-
-    async fn apply_validated_loop_exit(
-        &self,
-        request: ApplyValidatedLoopExitRequest,
-    ) -> Result<TurnRunState, TurnError> {
-        let state = self.inner.apply_validated_loop_exit(request).await?;
-        let kind = match state.status {
-            TurnStatus::Completed => TurnEventKind::Completed,
-            TurnStatus::Cancelled => TurnEventKind::Cancelled,
-            TurnStatus::Failed => TurnEventKind::Failed,
-            _ => return Ok(state),
-        };
-        self.observer.handle_terminal_state(&state, kind).await?;
-        Ok(state)
-    }
-}
-
-pub struct SubagentCompletionCoordinator<S: SessionThreadService + ?Sized> {
-    inner: Arc<dyn TurnCoordinator>,
-    observer: Arc<SubagentCompletionObserver<S>>,
-}
-
-impl<S> SubagentCompletionCoordinator<S>
-where
-    S: SessionThreadService + ?Sized,
-{
-    pub fn new(
-        inner: Arc<dyn TurnCoordinator>,
-        observer: Arc<SubagentCompletionObserver<S>>,
-    ) -> Self {
-        Self { inner, observer }
-    }
-}
-
-#[async_trait]
-impl<S> TurnCoordinator for SubagentCompletionCoordinator<S>
-where
-    S: SessionThreadService + ?Sized,
-{
-    async fn prepare_turn(&self, scope: ironclaw_turns::TurnScope) -> Result<TurnRunId, TurnError> {
-        self.inner.prepare_turn(scope).await
-    }
-
-    async fn abort_prepared_turn(&self, run_id: TurnRunId) -> Result<(), TurnError> {
-        self.inner.abort_prepared_turn(run_id).await
-    }
-
-    async fn submit_turn(
-        &self,
-        request: SubmitTurnRequest,
-    ) -> Result<SubmitTurnResponse, TurnError> {
-        self.inner.submit_turn(request).await
-    }
-
-    async fn resume_turn(
-        &self,
-        request: ResumeTurnRequest,
-    ) -> Result<ResumeTurnResponse, TurnError> {
-        self.inner.resume_turn(request).await
-    }
-
-    async fn cancel_run(&self, request: CancelRunRequest) -> Result<CancelRunResponse, TurnError> {
-        let scope = request.scope.clone();
-        let response = self.inner.cancel_run(request).await?;
-        if response.status.is_terminal() && !response.already_terminal {
-            let state = self
-                .inner
-                .get_run_state(GetRunStateRequest {
-                    scope,
-                    run_id: response.run_id,
-                })
-                .await?;
-            self.observer
-                .handle_terminal_state(&state, TurnEventKind::Cancelled)
-                .await?;
-        }
-        Ok(response)
-    }
-
-    async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError> {
-        self.inner.get_run_state(request).await
+    async fn observe_committed_event(&self, event: TurnLifecycleEvent) -> Result<(), TurnError> {
+        self.handle_terminal(&event).await
     }
 }
 
@@ -706,6 +556,39 @@ fn terminal_event_from_lifecycle(event: &TurnLifecycleEvent) -> AwaitedChildTerm
         cursor: event.cursor,
         sanitized_reason: event.sanitized_reason.clone(),
         owner_user_id: event.owner_user_id.clone(),
+    }
+}
+
+fn terminal_event_from_state(state: &TurnRunState) -> TurnLifecycleEvent {
+    TurnLifecycleEvent {
+        cursor: state.event_cursor,
+        scope: state.scope.clone(),
+        occurred_at: None,
+        owner_user_id: state.actor.clone().map(|actor| actor.user_id),
+        run_id: state.run_id,
+        status: state.status,
+        kind: event_kind_from_terminal_status(state.status),
+        blocked_gate: None,
+        sanitized_reason: state
+            .failure
+            .as_ref()
+            .map(|failure| failure.category().to_string()),
+    }
+}
+
+fn event_kind_from_terminal_status(status: TurnStatus) -> TurnEventKind {
+    match status {
+        TurnStatus::Completed => TurnEventKind::Completed,
+        TurnStatus::Failed => TurnEventKind::Failed,
+        TurnStatus::Cancelled => TurnEventKind::Cancelled,
+        TurnStatus::RecoveryRequired => TurnEventKind::RecoveryRequired,
+        other => {
+            debug_assert!(
+                false,
+                "subagent completion observer received non-terminal status {other:?}"
+            );
+            TurnEventKind::Completed
+        }
     }
 }
 
