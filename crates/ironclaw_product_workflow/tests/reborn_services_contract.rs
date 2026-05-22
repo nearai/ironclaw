@@ -14,7 +14,8 @@ use ironclaw_product_workflow::{
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiInboundValidationCode, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -866,6 +867,165 @@ async fn submit_turn_uses_facade_and_thread_history_without_route_store_access()
         submission_scope.project_id.expect("project").as_str(),
         "project-alpha"
     );
+}
+
+#[tokio::test]
+async fn submit_turn_records_skill_activation_message_before_turn_wake() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let recorded_for_hook = Arc::clone(&recorded);
+    let services = RebornServices::new(threads, coordinator.clone())
+        .with_skill_activation_recorder(move |scope, accepted_message_ref, message| {
+            recorded_for_hook.lock().expect("lock").push((
+                scope.thread_id.as_str().to_string(),
+                accepted_message_ref.as_str().to_string(),
+                message.to_string(),
+            ));
+            Ok(())
+        });
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let submitted = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-skill-activation",
+                "thread_id": "thread-alpha",
+                "content": "/code-review inspect this"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("submit succeeds");
+    let RebornSubmitTurnResponse::Submitted {
+        accepted_message_ref,
+        ..
+    } = submitted
+    else {
+        panic!("first submit should be accepted")
+    };
+
+    assert_eq!(coordinator.submission_count(), 1);
+    assert_eq!(
+        recorded.lock().expect("lock").as_slice(),
+        &[(
+            "thread-alpha".to_string(),
+            accepted_message_ref.as_str().to_string(),
+            "/code-review inspect this".to_string()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn busy_submit_clears_skill_activation_message() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let active_run_id = TurnRunId::new();
+    let coordinator = Arc::new(FakeTurnCoordinator::with_submit_error(
+        TurnError::ThreadBusy(ironclaw_turns::ThreadBusy {
+            active_run_id,
+            status: TurnStatus::Running,
+            event_cursor: EventCursor(17),
+        }),
+    ));
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let cleared = Arc::new(Mutex::new(Vec::new()));
+    let recorded_for_hook = Arc::clone(&recorded);
+    let cleared_for_hook = Arc::clone(&cleared);
+    let services = RebornServices::new(threads, coordinator.clone()).with_skill_activation_hooks(
+        move |scope, accepted_message_ref, message| {
+            recorded_for_hook.lock().expect("lock").push((
+                scope.thread_id.as_str().to_string(),
+                accepted_message_ref.as_str().to_string(),
+                message.to_string(),
+            ));
+            Ok(())
+        },
+        move |scope, accepted_message_ref| {
+            cleared_for_hook.lock().expect("lock").push((
+                scope.thread_id.as_str().to_string(),
+                accepted_message_ref.as_str().to_string(),
+            ));
+            Ok(())
+        },
+    );
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let deferred = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-skill-activation-busy",
+                "thread_id": "thread-alpha",
+                "content": "/code-review inspect this"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect("busy submit is deferred");
+
+    assert!(matches!(
+        deferred,
+        RebornSubmitTurnResponse::DeferredBusy {
+            active_run_id: id,
+            ..
+        } if id == active_run_id
+    ));
+    assert_eq!(coordinator.submission_count(), 0);
+    let recorded = recorded.lock().expect("lock");
+    let cleared = cleared.lock().expect("lock");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        cleared.as_slice(),
+        &[(recorded[0].0.clone(), recorded[0].1.clone())],
+        "deferred submissions must clear their activation input before returning"
+    );
+}
+
+#[tokio::test]
+async fn submit_turn_returns_internal_when_skill_activation_recorder_fails() {
+    let threads: Arc<dyn SessionThreadService> = Arc::new(InMemorySessionThreadService::default());
+    let coordinator = Arc::new(FakeTurnCoordinator::default());
+    let services = RebornServices::new(threads, coordinator.clone())
+        .with_skill_activation_recorder(|_, _, _| {
+            Err(ironclaw_product_workflow::RebornServicesError {
+                code: RebornServicesErrorCode::Internal,
+                kind: RebornServicesErrorKind::Internal,
+                status_code: 500,
+                retryable: false,
+                field: None,
+                validation_code: None,
+            })
+        });
+    create_thread_for(&services, caller(), "thread-alpha").await;
+
+    let err = services
+        .submit_turn(
+            caller(),
+            serde_json::from_value::<WebUiSendMessageRequest>(json!({
+                "client_action_id": "send-recorder-fails",
+                "thread_id": "thread-alpha",
+                "content": "/code-review inspect this"
+            }))
+            .expect("request"),
+        )
+        .await
+        .expect_err("recorder failure is surfaced");
+
+    assert_eq!(err.code, RebornServicesErrorCode::Internal);
+    assert_eq!(coordinator.submission_count(), 0);
+    let timeline = services
+        .get_timeline(
+            caller(),
+            RebornTimelineRequest {
+                thread_id: "thread-alpha".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("timeline");
+    assert_eq!(timeline.messages.len(), 1);
+    assert_eq!(timeline.messages[0].status, MessageStatus::Accepted);
 }
 
 #[tokio::test]
@@ -2700,4 +2860,47 @@ fn facade_source_avoids_forbidden_runtime_dependencies() {
     }
 
     let _ = Utc::now();
+}
+
+// Regression for the missing-error-path-test review (Medium): the
+// new `list_threads` facade path must fail closed until a backend
+// override for `list_threads_for_scope` is wired. The default
+// `SessionThreadService` impl returns `Backend(...)`, and the
+// facade is supposed to translate that into a retryable
+// `service_unavailable` (HTTP 503) — never an empty thread list
+// that pretends the caller owns nothing. This test pins the wire
+// contract so a future regression that quietly returns Ok([]) on a
+// missing backend would break the test, not silently mislead
+// callers.
+#[tokio::test]
+async fn list_threads_unimplemented_backend_returns_service_unavailable() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let error = services
+        .list_threads(caller(), WebUiListThreadsRequest::default())
+        .await
+        .expect_err(
+            "list_threads must fail closed when the SessionThreadService backend \
+             does not implement list_threads_for_scope",
+        );
+    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(
+        error.retryable,
+        "Backend errors are retryable so the browser can re-poll once a v2-aware \
+         backend overrides list_threads_for_scope",
+    );
+
+    // Confirm the wire shape is the snake_case enum the WebUi handler maps
+    // to its `error` field; matching on the variant alone would still pass
+    // if someone changed `#[serde(rename_all = ...)]` to PascalCase.
+    let json = serde_json::to_value(&error).expect("serialize");
+    assert_eq!(
+        json["code"], "unavailable",
+        "wire code must be snake_case `unavailable`; got: {json}"
+    );
+    assert_eq!(json["retryable"], true);
 }

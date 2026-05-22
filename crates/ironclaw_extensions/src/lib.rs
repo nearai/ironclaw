@@ -327,6 +327,7 @@ impl ExtensionPackage {
 }
 
 pub mod host_api;
+mod installations;
 mod lifecycle;
 mod registry;
 pub mod v2;
@@ -344,6 +345,13 @@ pub use v2::{
 
 pub type CapabilityManifest = CapabilityDeclV2;
 
+pub use installations::{
+    ExtensionActivationState, ExtensionCredentialBinding, ExtensionCredentialHandle,
+    ExtensionHealthMessage, ExtensionHealthSnapshot, ExtensionHealthStatus, ExtensionInstallation,
+    ExtensionInstallationError, ExtensionInstallationId, ExtensionInstallationStore,
+    ExtensionManifestRecord, ExtensionManifestRef, InMemoryExtensionInstallationStore,
+    ManifestHash,
+};
 pub use lifecycle::{
     ExtensionLifecycleEvent, ExtensionLifecycleEventSink, ExtensionLifecycleService,
 };

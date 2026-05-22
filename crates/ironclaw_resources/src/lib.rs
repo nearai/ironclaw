@@ -18,16 +18,29 @@
 //! reservation operation succeeds.
 #![warn(unreachable_pub)]
 
+mod event;
 mod filesystem_store;
+mod gate;
+mod period;
 
+pub use event::{BudgetEvent, BudgetEventSink, InMemoryBudgetEventSink, NoOpBudgetEventSink};
 pub use filesystem_store::FilesystemResourceGovernorStore;
+pub use gate::{
+    BudgetApprovalGate, BudgetGateError, BudgetGateId, BudgetGateOutcome, BudgetGateStatus,
+    BudgetGateStore, InMemoryBudgetGateStore,
+};
+pub use period::{
+    BudgetPeriod, BudgetThresholds, BudgetThresholdsError, PeriodUnit, period_bounds,
+    period_has_rolled_over,
+};
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
+use chrono::{DateTime, Duration, Utc};
 use fs2::FileExt;
 
 use ironclaw_host_api::ReservationStatus;
@@ -39,6 +52,63 @@ pub use ironclaw_host_api::{ResourceReceipt, ResourceReservation};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
+/// Source of `now` for governor period accounting.
+///
+/// The default [`SystemClock`] returns `Utc::now()`. Tests inject a
+/// [`FakeClock`] (see test helpers) for deterministic period boundaries.
+pub trait Clock: Send + Sync + std::fmt::Debug {
+    fn now(&self) -> DateTime<Utc>;
+}
+
+/// Default wall-clock implementation.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+}
+
+/// Test-only fixed-or-advanceable clock.
+#[derive(Debug, Clone)]
+pub struct FakeClock {
+    inner: Arc<Mutex<DateTime<Utc>>>,
+}
+
+impl FakeClock {
+    pub fn new(now: DateTime<Utc>) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(now)),
+        }
+    }
+
+    pub fn advance(&self, by: chrono::Duration) {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard += by;
+    }
+
+    pub fn set(&self, now: DateTime<Utc>) {
+        let mut guard = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = now;
+    }
+}
+
+impl Clock for FakeClock {
+    fn now(&self) -> DateTime<Utc> {
+        *self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
 
 /// Durable account level that can carry resource limits and ledgers.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -192,7 +262,14 @@ impl ResourceAccount {
 }
 
 /// Optional maximums for each resource dimension.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **Zero semantics:** for any dimension, `Some(zero)` means **unlimited**
+/// (explicit opt-out of enforcement). `None` is the same as the unset/
+/// uninstalled limit and also means unlimited. To deny *any* spending in a
+/// dimension, set the limit to a small non-zero value rather than zero.
+/// This convention exists so configuration files can express "no budget cap
+/// for this account" with a plain `0` rather than dropping the key.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResourceLimits {
     pub max_usd: Option<Decimal>,
@@ -203,10 +280,46 @@ pub struct ResourceLimits {
     pub max_network_egress_bytes: Option<u64>,
     pub max_process_count: Option<u32>,
     pub max_concurrency_slots: Option<u32>,
+    /// Period over which `max_*` limits accumulate. Defaults to
+    /// [`BudgetPeriod::PerInvocation`] for backwards-compatible behavior
+    /// with v1 limits that did not carry a period.
+    #[serde(default)]
+    pub period: BudgetPeriod,
+    /// Graduated-intervention thresholds. Defaults to
+    /// [`BudgetThresholds::DISABLED`] so that pre-existing limits never
+    /// emit warnings or approval gates without explicit opt-in.
+    #[serde(default)]
+    pub thresholds: BudgetThresholds,
+}
+
+impl ResourceLimits {
+    /// True when every dimension is unbounded (None or explicit zero).
+    pub fn is_unlimited(&self) -> bool {
+        is_decimal_unlimited(self.max_usd)
+            && is_integer_unlimited(self.max_input_tokens)
+            && is_integer_unlimited(self.max_output_tokens)
+            && is_integer_unlimited(self.max_wall_clock_ms)
+            && is_integer_unlimited(self.max_output_bytes)
+            && is_integer_unlimited(self.max_network_egress_bytes)
+            && is_integer_unlimited(self.max_process_count.map(u64::from))
+            && is_integer_unlimited(self.max_concurrency_slots.map(u64::from))
+    }
+}
+
+fn is_decimal_unlimited(value: Option<Decimal>) -> bool {
+    match value {
+        None => true,
+        Some(v) => v <= Decimal::ZERO,
+    }
+}
+
+fn is_integer_unlimited(value: Option<u64>) -> bool {
+    matches!(value, None | Some(0))
 }
 
 /// Resource dimension that may deny a reservation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ResourceDimension {
     Usd,
     InputTokens,
@@ -234,7 +347,8 @@ impl std::fmt::Display for ResourceDimension {
 }
 
 /// Comparable amount for denial details.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ResourceValue {
     Decimal(Decimal),
     Integer(u64),
@@ -251,11 +365,52 @@ pub struct ResourceDenial {
     pub requested: ResourceValue,
 }
 
+/// Reservation pause: utilization would cross the configured pause-threshold
+/// before reaching the hard limit. Callers route this through their
+/// approval surface (foreground modal, background notification, CLI) before
+/// retrying.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResourceApprovalNeeded {
+    pub account: ResourceAccount,
+    pub dimension: ResourceDimension,
+    pub limit: ResourceValue,
+    pub current_usage: ResourceValue,
+    pub active_reserved: ResourceValue,
+    pub requested: ResourceValue,
+    /// Fraction in `[0.0, 1.0]` (may exceed 1.0 in pathological cases) —
+    /// `(usage + reserved + requested) / limit`.
+    pub utilization: f64,
+    /// When the current period naturally rolls over and the gate would
+    /// resolve without user action. `None` for `PerInvocation`.
+    pub period_end: Option<DateTime<Utc>>,
+}
+
+/// Threshold-crossing event surfaced from `reserve()`.
+///
+/// Warnings do *not* deny the reservation. They tell callers the account
+/// has crossed [`BudgetThresholds::warn_at`] but is still below
+/// [`BudgetThresholds::pause_at`]; UI surfaces typically render a chip
+/// change but allow the work to proceed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BudgetWarning {
+    pub account: ResourceAccount,
+    pub dimension: ResourceDimension,
+    pub utilization: f64,
+    pub limit: ResourceValue,
+    pub period_end: Option<DateTime<Utc>>,
+}
+
 /// Resource governor errors.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[derive(Debug, Clone, PartialEq, Error)]
 pub enum ResourceError {
     #[error("resource limit exceeded for {dimension} at {account:?}", account = .0.account, dimension = .0.dimension)]
     LimitExceeded(Box<ResourceDenial>),
+    /// Reservation would push utilization past the configured pause
+    /// threshold. The work is not denied; callers must surface an approval
+    /// gate, capture the user's decision, and retry the reservation (with
+    /// an extended limit or after the period rolls over).
+    #[error("resource budget approval required for {dimension} at {account:?}", account = .0.account, dimension = .0.dimension)]
+    RequiresApproval(Box<ResourceApprovalNeeded>),
     #[error("resource reservation {id} already exists")]
     ReservationAlreadyExists { id: ResourceReservationId },
     #[error("invalid resource estimate for {dimension}: {reason}")]
@@ -354,6 +509,22 @@ impl ResourceTally {
     }
 }
 
+/// Successful reservation with any threshold-crossing warnings that fired
+/// during cascade evaluation.
+#[derive(Debug, Clone)]
+pub struct ReservationOutcome {
+    pub reservation: ResourceReservation,
+    pub warnings: Vec<BudgetWarning>,
+}
+
+/// Snapshot of one account's current period + utilization for UI/audit.
+#[derive(Debug, Clone)]
+pub struct AccountSnapshot {
+    pub account: ResourceAccount,
+    pub limits: Option<ResourceLimits>,
+    pub ledger: PeriodLedger,
+}
+
 /// Synchronous resource governor contract.
 ///
 /// Persistent implementations may return [`ResourceError::Storage`] from any
@@ -374,11 +545,18 @@ pub trait ResourceGovernor: Send + Sync {
     /// would remain within its limits. Limits at deeper accounts do not override
     /// shallower limits; tenant, user, project, agent, mission, and thread limits
     /// all apply when present.
+    ///
+    /// Returns just the reservation handle; any threshold-crossing warnings
+    /// are discarded. New callers should prefer
+    /// [`ResourceGovernor::reserve_with_outcome`] to receive warnings.
     fn reserve(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
-    ) -> Result<ResourceReservation, ResourceError>;
+    ) -> Result<ResourceReservation, ResourceError> {
+        self.reserve_with_outcome(scope, estimate)
+            .map(|outcome| outcome.reservation)
+    }
 
     /// Reserves estimated resources with a caller-supplied reservation id for obligation handoff.
     fn reserve_with_id(
@@ -386,7 +564,28 @@ pub trait ResourceGovernor: Send + Sync {
         scope: ResourceScope,
         estimate: ResourceEstimate,
         reservation_id: ResourceReservationId,
-    ) -> Result<ResourceReservation, ResourceError>;
+    ) -> Result<ResourceReservation, ResourceError> {
+        self.reserve_with_id_and_outcome(scope, estimate, reservation_id)
+            .map(|outcome| outcome.reservation)
+    }
+
+    /// Reserve, returning any threshold-crossing warnings alongside the
+    /// reservation handle. Production callers that surface budget UI go
+    /// through this method so the warning list reaches the event sink.
+    fn reserve_with_outcome(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+    ) -> Result<ReservationOutcome, ResourceError>;
+
+    /// Like [`Self::reserve_with_outcome`] but with a caller-supplied
+    /// reservation id for obligation handoff.
+    fn reserve_with_id_and_outcome(
+        &self,
+        scope: ResourceScope,
+        estimate: ResourceEstimate,
+        reservation_id: ResourceReservationId,
+    ) -> Result<ReservationOutcome, ResourceError>;
 
     /// Reconciles an active reservation with actual usage and releases reserved capacity exactly once.
     fn reconcile(
@@ -400,12 +599,33 @@ pub trait ResourceGovernor: Send + Sync {
         &self,
         reservation_id: ResourceReservationId,
     ) -> Result<ResourceReceipt, ResourceError>;
+
+    /// Read current account state (limits + period ledger) for UI/audit.
+    /// Returns `None` if no limit was ever set and no reservation has ever
+    /// touched the account.
+    fn account_snapshot(
+        &self,
+        account: &ResourceAccount,
+    ) -> Result<Option<AccountSnapshot>, ResourceError>;
 }
 
-const RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+/// Snapshot schema version.
+///
+/// **v1** (deprecated, read-only-compat) — `usage_by_account` and
+/// `reserved_by_account` HashMaps with no period concept.
+/// **v2** (current) — adds `ResourceLimits::period` and
+/// `ResourceLimits::thresholds`, plus per-account `period_anchors` carrying
+/// the current period's end instant for rollover.
+///
+/// Migration: v1 snapshots are accepted on read. The first write rewrites
+/// them in v2 shape. v1 entries are treated as `PerInvocation` with
+/// `BudgetThresholds::DISABLED` — no behavior change unless callers
+/// explicitly install new-shape limits.
+const RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+const RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_V1_ACCEPTED: u32 = 1;
 
 /// Serializable governor snapshot stored by durable stores.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ResourceGovernorSnapshot {
     schema_version: u32,
     state: ResourceState,
@@ -434,17 +654,28 @@ impl<'de> Deserialize<'de> for ResourceGovernorSnapshot {
         D: serde::Deserializer<'de>,
     {
         let snapshot = ResourceGovernorSnapshotSerde::deserialize(deserializer)?;
-        if snapshot.schema_version != RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION {
-            return Err(serde::de::Error::custom(format!(
-                "unsupported resource governor snapshot schema version {}; expected {}",
-                snapshot.schema_version, RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION
-            )));
+        match snapshot.schema_version {
+            RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION => Ok(Self {
+                schema_version: snapshot.schema_version,
+                state: snapshot.state,
+            }),
+            RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_V1_ACCEPTED => {
+                // v1 → v2 in-place: existing `usage_by_account` /
+                // `reserved_by_account` entries keep their values; period
+                // anchors are absent so accounts fall back to
+                // `PerInvocation` semantics until callers explicitly
+                // install a new-shape limit. Rewritten as v2 on next save.
+                Ok(Self {
+                    schema_version: RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION,
+                    state: snapshot.state,
+                })
+            }
+            other => Err(serde::de::Error::custom(format!(
+                "unsupported resource governor snapshot schema version {other}; expected {} (current) or {} (v1, migrated on first write)",
+                RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_VERSION,
+                RESOURCE_GOVERNOR_SNAPSHOT_SCHEMA_V1_ACCEPTED
+            ))),
         }
-
-        Ok(Self {
-            schema_version: snapshot.schema_version,
-            state: snapshot.state,
-        })
     }
 }
 
@@ -722,6 +953,7 @@ where
     S: ResourceGovernorStore,
 {
     store: S,
+    clock: Arc<dyn Clock>,
 }
 
 impl<S> PersistentResourceGovernor<S>
@@ -729,7 +961,17 @@ where
     S: ResourceGovernorStore,
 {
     pub fn new(store: S) -> Self {
-        Self { store }
+        Self {
+            store,
+            clock: Arc::new(SystemClock),
+        }
+    }
+
+    /// Construct with a custom clock. The clock is only consulted on
+    /// mutating operations; if you replace it after construction, in-flight
+    /// reservations keep their original anchors.
+    pub fn with_clock(store: S, clock: Arc<dyn Clock>) -> Self {
+        Self { store, clock }
     }
 
     pub fn try_set_limit(
@@ -737,15 +979,18 @@ where
         account: ResourceAccount,
         limits: ResourceLimits,
     ) -> Result<(), ResourceError> {
+        let now = self.clock.now();
         self.store.update(move |snapshot| {
-            set_limit_in_state(&mut snapshot.state, account, limits);
+            set_limit_in_state(&mut snapshot.state, account, limits, now);
             Ok(())
         })
     }
 
     pub fn reserved_for(&self, account: &ResourceAccount) -> Result<ResourceTally, ResourceError> {
         let account = account.clone();
+        let now = self.clock.now();
         self.store.update(move |snapshot| {
+            advance_period_if_rolled_over(&mut snapshot.state, &account, now);
             Ok(snapshot
                 .state
                 .reserved_by_account
@@ -757,7 +1002,9 @@ where
 
     pub fn usage_for(&self, account: &ResourceAccount) -> Result<ResourceTally, ResourceError> {
         let account = account.clone();
+        let now = self.clock.now();
         self.store.update(move |snapshot| {
+            advance_period_if_rolled_over(&mut snapshot.state, &account, now);
             Ok(snapshot
                 .state
                 .usage_by_account
@@ -780,22 +1027,23 @@ where
         self.try_set_limit(account, limits)
     }
 
-    fn reserve(
+    fn reserve_with_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
-    ) -> Result<ResourceReservation, ResourceError> {
-        self.reserve_with_id(scope, estimate, ResourceReservationId::new())
+    ) -> Result<ReservationOutcome, ResourceError> {
+        self.reserve_with_id_and_outcome(scope, estimate, ResourceReservationId::new())
     }
 
-    fn reserve_with_id(
+    fn reserve_with_id_and_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
         reservation_id: ResourceReservationId,
-    ) -> Result<ResourceReservation, ResourceError> {
+    ) -> Result<ReservationOutcome, ResourceError> {
+        let now = self.clock.now();
         self.store.update(move |snapshot| {
-            reserve_in_state(&mut snapshot.state, scope, estimate, reservation_id)
+            reserve_with_outcome_in_state(&mut snapshot.state, scope, estimate, reservation_id, now)
         })
     }
 
@@ -804,31 +1052,79 @@ where
         reservation_id: ResourceReservationId,
         actual: ResourceUsage,
     ) -> Result<ResourceReceipt, ResourceError> {
-        self.store
-            .update(move |snapshot| reconcile_in_state(&mut snapshot.state, reservation_id, actual))
+        let now = self.clock.now();
+        self.store.update(move |snapshot| {
+            reconcile_in_state(&mut snapshot.state, reservation_id, actual, now)
+        })
     }
 
     fn release(
         &self,
         reservation_id: ResourceReservationId,
     ) -> Result<ResourceReceipt, ResourceError> {
+        let now = self.clock.now();
         self.store
-            .update(move |snapshot| release_in_state(&mut snapshot.state, reservation_id))
+            .update(move |snapshot| release_in_state(&mut snapshot.state, reservation_id, now))
+    }
+
+    fn account_snapshot(
+        &self,
+        account: &ResourceAccount,
+    ) -> Result<Option<AccountSnapshot>, ResourceError> {
+        let account = account.clone();
+        let now = self.clock.now();
+        self.store.update(move |snapshot| {
+            Ok(account_snapshot_in_state(
+                &mut snapshot.state,
+                &account,
+                now,
+            ))
+        })
     }
 }
 
 /// In-memory governor used by early Reborn contract tests.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct InMemoryResourceGovernor {
     state: Mutex<ResourceState>,
+    clock: Arc<dyn Clock>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+impl Default for InMemoryResourceGovernor {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(ResourceState::default()),
+            clock: Arc::new(SystemClock),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 struct ResourceState {
     limits: HashMap<ResourceAccount, ResourceLimits>,
     reserved_by_account: HashMap<ResourceAccount, ResourceTally>,
     usage_by_account: HashMap<ResourceAccount, ResourceTally>,
     reservations: HashMap<ResourceReservationId, ReservationRecord>,
+    /// Per-account period anchors. `period_end_at_anchor[acc]` is the UTC
+    /// instant at which `usage_by_account[acc]` was last advanced; any
+    /// `now >= period_end_at_anchor[acc]` triggers a fresh window before the
+    /// next limit check. Missing entries inherit `PerInvocation` semantics
+    /// (no carry-over). Storage is best-effort and recomputed from
+    /// `ResourceLimits::period` on each mutation; v1 snapshots that lack
+    /// this field migrate transparently.
+    period_anchors: HashMap<ResourceAccount, DateTime<Utc>>,
+}
+
+/// Snapshot of accumulated period-scoped spend + reserved.
+///
+/// Returned by [`ResourceGovernor`] query helpers so callers can render
+/// utilization in UI without re-implementing the period-rollover rules.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PeriodLedger {
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
+    pub spent: ResourceTally,
+    pub reserved: ResourceTally,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -950,6 +1246,11 @@ struct ResourceStateSerde {
     reserved_by_account: Vec<(ResourceAccount, ResourceTally)>,
     usage_by_account: Vec<(ResourceAccount, ResourceTally)>,
     reservations: Vec<(ResourceReservationId, ReservationRecord)>,
+    /// Per-account period anchors, populated on v2 snapshots and absent on
+    /// v1 snapshots. v1 → v2 migration treats a missing entry as the
+    /// default `BudgetPeriod::PerInvocation` semantics (no carry-over).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    period_anchors: Option<Vec<(ResourceAccount, DateTime<Utc>)>>,
 }
 
 impl Serialize for ResourceState {
@@ -978,6 +1279,16 @@ impl Serialize for ResourceState {
                 .iter()
                 .map(|(id, record)| (*id, record.clone()))
                 .collect(),
+            period_anchors: if self.period_anchors.is_empty() {
+                None
+            } else {
+                Some(
+                    self.period_anchors
+                        .iter()
+                        .map(|(account, anchor)| (account.clone(), *anchor))
+                        .collect(),
+                )
+            },
         }
         .serialize(serializer)
     }
@@ -994,6 +1305,10 @@ impl<'de> Deserialize<'de> for ResourceState {
             reserved_by_account: value.reserved_by_account.into_iter().collect(),
             usage_by_account: value.usage_by_account.into_iter().collect(),
             reservations: value.reservations.into_iter().collect(),
+            period_anchors: value
+                .period_anchors
+                .map(|entries| entries.into_iter().collect())
+                .unwrap_or_default(),
         })
     }
 }
@@ -1003,8 +1318,18 @@ impl InMemoryResourceGovernor {
         Self::default()
     }
 
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
+        Self {
+            state: Mutex::new(ResourceState::default()),
+            clock,
+        }
+    }
+
     pub fn reserved_for(&self, account: &ResourceAccount) -> ResourceTally {
-        self.lock_state()
+        let now = self.clock.now();
+        let mut state = self.lock_state();
+        advance_period_if_rolled_over(&mut state, account, now);
+        state
             .reserved_by_account
             .get(account)
             .cloned()
@@ -1012,7 +1337,10 @@ impl InMemoryResourceGovernor {
     }
 
     pub fn usage_for(&self, account: &ResourceAccount) -> ResourceTally {
-        self.lock_state()
+        let now = self.clock.now();
+        let mut state = self.lock_state();
+        advance_period_if_rolled_over(&mut state, account, now);
+        state
             .usage_by_account
             .get(account)
             .cloned()
@@ -1032,25 +1360,27 @@ impl ResourceGovernor for InMemoryResourceGovernor {
         account: ResourceAccount,
         limits: ResourceLimits,
     ) -> Result<(), ResourceError> {
-        set_limit_in_state(&mut self.lock_state(), account, limits);
+        let now = self.clock.now();
+        set_limit_in_state(&mut self.lock_state(), account, limits, now);
         Ok(())
     }
 
-    fn reserve(
+    fn reserve_with_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
-    ) -> Result<ResourceReservation, ResourceError> {
-        self.reserve_with_id(scope, estimate, ResourceReservationId::new())
+    ) -> Result<ReservationOutcome, ResourceError> {
+        self.reserve_with_id_and_outcome(scope, estimate, ResourceReservationId::new())
     }
 
-    fn reserve_with_id(
+    fn reserve_with_id_and_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
         reservation_id: ResourceReservationId,
-    ) -> Result<ResourceReservation, ResourceError> {
-        reserve_in_state(&mut self.lock_state(), scope, estimate, reservation_id)
+    ) -> Result<ReservationOutcome, ResourceError> {
+        let now = self.clock.now();
+        reserve_with_outcome_in_state(&mut self.lock_state(), scope, estimate, reservation_id, now)
     }
 
     fn reconcile(
@@ -1058,27 +1388,84 @@ impl ResourceGovernor for InMemoryResourceGovernor {
         reservation_id: ResourceReservationId,
         actual: ResourceUsage,
     ) -> Result<ResourceReceipt, ResourceError> {
-        reconcile_in_state(&mut self.lock_state(), reservation_id, actual)
+        let now = self.clock.now();
+        reconcile_in_state(&mut self.lock_state(), reservation_id, actual, now)
     }
 
     fn release(
         &self,
         reservation_id: ResourceReservationId,
     ) -> Result<ResourceReceipt, ResourceError> {
-        release_in_state(&mut self.lock_state(), reservation_id)
+        let now = self.clock.now();
+        release_in_state(&mut self.lock_state(), reservation_id, now)
+    }
+
+    fn account_snapshot(
+        &self,
+        account: &ResourceAccount,
+    ) -> Result<Option<AccountSnapshot>, ResourceError> {
+        let now = self.clock.now();
+        Ok(account_snapshot_in_state(
+            &mut self.lock_state(),
+            account,
+            now,
+        ))
     }
 }
 
-fn set_limit_in_state(state: &mut ResourceState, account: ResourceAccount, limits: ResourceLimits) {
-    state.limits.insert(account, limits);
+fn set_limit_in_state(
+    state: &mut ResourceState,
+    account: ResourceAccount,
+    limits: ResourceLimits,
+    now: DateTime<Utc>,
+) {
+    // Advance any existing ledger to the freshly-configured period boundary.
+    // A period change resets accumulated `usage_by_account` for the account
+    // because the new period semantics may differ from the prior shape.
+    let prior_period = state.limits.get(&account).map(|l| l.period.clone());
+    let new_period = limits.period.clone();
+    if prior_period.as_ref() != Some(&new_period) {
+        state.usage_by_account.remove(&account);
+        state.period_anchors.remove(&account);
+    }
+    state.limits.insert(account.clone(), limits);
+    // Set initial period anchor so subsequent reserves see correct bounds.
+    let (_, period_end) = period_bounds(&new_period, now);
+    state.period_anchors.insert(account, period_end);
 }
 
-fn reserve_in_state(
+fn advance_period_if_rolled_over(
+    state: &mut ResourceState,
+    account: &ResourceAccount,
+    now: DateTime<Utc>,
+) {
+    let Some(limits) = state.limits.get(account) else {
+        return;
+    };
+    let period = limits.period.clone();
+    if matches!(period, BudgetPeriod::PerInvocation) {
+        // PerInvocation has no accumulating ledger; nothing to roll over.
+        return;
+    }
+    let needs_advance = state
+        .period_anchors
+        .get(account)
+        .map(|anchor| period_has_rolled_over(*anchor, now))
+        .unwrap_or(true);
+    if needs_advance {
+        state.usage_by_account.remove(account);
+        let (_, new_end) = period_bounds(&period, now);
+        state.period_anchors.insert(account.clone(), new_end);
+    }
+}
+
+fn reserve_with_outcome_in_state(
     state: &mut ResourceState,
     scope: ResourceScope,
     estimate: ResourceEstimate,
     reservation_id: ResourceReservationId,
-) -> Result<ResourceReservation, ResourceError> {
+    now: DateTime<Utc>,
+) -> Result<ReservationOutcome, ResourceError> {
     validate_estimate(&estimate)?;
 
     if state.reservations.contains_key(&reservation_id) {
@@ -1087,6 +1474,12 @@ fn reserve_in_state(
     let accounts = ResourceAccount::cascade(&scope);
     let requested = ResourceTally::from_estimate(&estimate);
 
+    // Roll over any periods whose anchors have passed before checking limits.
+    for account in &accounts {
+        advance_period_if_rolled_over(state, account, now);
+    }
+
+    let mut warnings = Vec::new();
     for account in &accounts {
         if let Some(limits) = state.limits.get(account) {
             let usage = state
@@ -1099,8 +1492,17 @@ fn reserve_in_state(
                 .get(account)
                 .cloned()
                 .unwrap_or_default();
-            if let Some(denial) = check_limits(account, limits, &usage, &reserved, &requested) {
-                return Err(ResourceError::LimitExceeded(Box::new(denial)));
+            let period_end = state.period_anchors.get(account).copied();
+            match evaluate_cascade_for_account(
+                account, limits, &usage, &reserved, &requested, period_end,
+            )? {
+                CascadeOutcome::Allow(mut acc_warnings) => warnings.append(&mut acc_warnings),
+                CascadeOutcome::RequiresApproval(needed) => {
+                    return Err(ResourceError::RequiresApproval(Box::new(needed)));
+                }
+                CascadeOutcome::Deny(denial) => {
+                    return Err(ResourceError::LimitExceeded(Box::new(denial)));
+                }
             }
         }
     }
@@ -1130,13 +1532,17 @@ fn reserve_in_state(
         },
     );
 
-    Ok(reservation)
+    Ok(ReservationOutcome {
+        reservation,
+        warnings,
+    })
 }
 
 fn reconcile_in_state(
     state: &mut ResourceState,
     reservation_id: ResourceReservationId,
     actual: ResourceUsage,
+    now: DateTime<Utc>,
 ) -> Result<ResourceReceipt, ResourceError> {
     let mut record = state
         .reservations
@@ -1158,6 +1564,7 @@ fn reconcile_in_state(
     }
 
     for account in &record.accounts {
+        advance_period_if_rolled_over(state, account, now);
         state
             .reserved_by_account
             .entry(account.clone())
@@ -1186,6 +1593,7 @@ fn reconcile_in_state(
 fn release_in_state(
     state: &mut ResourceState,
     reservation_id: ResourceReservationId,
+    now: DateTime<Utc>,
 ) -> Result<ResourceReceipt, ResourceError> {
     let mut record = state
         .reservations
@@ -1202,6 +1610,7 @@ fn release_in_state(
     }
 
     for account in &record.accounts {
+        advance_period_if_rolled_over(state, account, now);
         state
             .reserved_by_account
             .entry(account.clone())
@@ -1219,6 +1628,52 @@ fn release_in_state(
     };
     state.reservations.insert(reservation_id, record);
     Ok(receipt)
+}
+
+fn account_snapshot_in_state(
+    state: &mut ResourceState,
+    account: &ResourceAccount,
+    now: DateTime<Utc>,
+) -> Option<AccountSnapshot> {
+    advance_period_if_rolled_over(state, account, now);
+    let limits = state.limits.get(account).cloned();
+    let reserved = state
+        .reserved_by_account
+        .get(account)
+        .cloned()
+        .unwrap_or_default();
+    let spent = state
+        .usage_by_account
+        .get(account)
+        .cloned()
+        .unwrap_or_default();
+    if limits.is_none() && reserved == ResourceTally::default() && spent == ResourceTally::default()
+    {
+        return None;
+    }
+    let period = limits
+        .as_ref()
+        .map(|l| l.period.clone())
+        .unwrap_or_default();
+    // Rolling24h is anchored to when the limit was set (or last rolled
+    // over) — not to `now`. Derive the start from the stored anchor so
+    // the snapshot reports the window the ledger is actually accumulating
+    // against. For Calendar/PerInvocation, `period_bounds(now)` already
+    // returns the correct wall-clock-anchored window.
+    let (period_start, period_end) = match (state.period_anchors.get(account), &period) {
+        (Some(end), BudgetPeriod::Rolling24h) => (*end - Duration::hours(24), *end),
+        _ => period_bounds(&period, now),
+    };
+    Some(AccountSnapshot {
+        account: account.clone(),
+        limits,
+        ledger: PeriodLedger {
+            period_start,
+            period_end,
+            spent,
+            reserved,
+        },
+    })
 }
 
 fn validate_estimate(estimate: &ResourceEstimate) -> Result<(), ResourceError> {
@@ -1245,11 +1700,55 @@ fn validate_usage(usage: &ResourceUsage) -> Result<(), ResourceError> {
     Ok(())
 }
 
+/// Result of evaluating one account in the cascade.
+enum CascadeOutcome {
+    /// Reservation allowed, optionally with warning entries (warn threshold
+    /// crossed but pause threshold not yet).
+    Allow(Vec<BudgetWarning>),
+    /// Pause threshold crossed — caller must surface an approval gate.
+    RequiresApproval(ResourceApprovalNeeded),
+    /// Hard limit exceeded — fail closed.
+    Deny(ResourceDenial),
+}
+
+/// Evaluate one account in the cascade. Hard denial wins over approval
+/// requirement (a 100% overrun is never "ask the user", it's "stop").
+fn evaluate_cascade_for_account(
+    account: &ResourceAccount,
+    limits: &ResourceLimits,
+    usage: &ResourceTally,
+    reserved: &ResourceTally,
+    requested: &ResourceTally,
+    period_end: Option<DateTime<Utc>>,
+) -> Result<CascadeOutcome, ResourceError> {
+    if let Some(denial) = check_limits_first_denial(account, limits, usage, reserved, requested) {
+        return Ok(CascadeOutcome::Deny(denial));
+    }
+    let mut warnings = Vec::new();
+    if let Some(intervention) =
+        check_thresholds_first_intervention(account, limits, usage, reserved, requested, period_end)
+    {
+        match intervention {
+            ThresholdIntervention::Approval(needed) => {
+                return Ok(CascadeOutcome::RequiresApproval(needed));
+            }
+            ThresholdIntervention::Warning(warning) => warnings.push(warning),
+        }
+    }
+    Ok(CascadeOutcome::Allow(warnings))
+}
+
+/// Threshold-driven intervention (warn or pause-with-approval).
+enum ThresholdIntervention {
+    Warning(BudgetWarning),
+    Approval(ResourceApprovalNeeded),
+}
+
 /// Returns the first denied dimension in canonical resource order.
 ///
-/// This intentionally reports one denial rather than aggregating all failed
-/// dimensions so callers have a deterministic, compact failure reason.
-fn check_limits(
+/// `Some(0)` or `Some(<0)` in any dimension is treated as unlimited (see
+/// [`ResourceLimits`] docstring); `None` is also unlimited.
+fn check_limits_first_denial(
     account: &ResourceAccount,
     limits: &ResourceLimits,
     usage: &ResourceTally,
@@ -1336,6 +1835,98 @@ fn check_limits(
     })
 }
 
+fn check_thresholds_first_intervention(
+    account: &ResourceAccount,
+    limits: &ResourceLimits,
+    usage: &ResourceTally,
+    reserved: &ResourceTally,
+    requested: &ResourceTally,
+    period_end: Option<DateTime<Utc>>,
+) -> Option<ThresholdIntervention> {
+    if limits.thresholds.pause_at >= 1.0 && limits.thresholds.warn_at >= 1.0 {
+        return None;
+    }
+    // Decimal USD threshold check.
+    if let Some(intervention) = threshold_decimal(ThresholdInputs {
+        account,
+        dimension: ResourceDimension::Usd,
+        limit: limits.max_usd,
+        usage: usage.usd,
+        reserved: reserved.usd,
+        requested: requested.usd,
+        thresholds: limits.thresholds,
+        period_end,
+    }) {
+        return Some(intervention);
+    }
+    // Integer dimensions.
+    for (dimension, limit, usage_v, reserved_v, requested_v) in [
+        (
+            ResourceDimension::InputTokens,
+            limits.max_input_tokens,
+            usage.input_tokens,
+            reserved.input_tokens,
+            requested.input_tokens,
+        ),
+        (
+            ResourceDimension::OutputTokens,
+            limits.max_output_tokens,
+            usage.output_tokens,
+            reserved.output_tokens,
+            requested.output_tokens,
+        ),
+        (
+            ResourceDimension::WallClockMs,
+            limits.max_wall_clock_ms,
+            usage.wall_clock_ms,
+            reserved.wall_clock_ms,
+            requested.wall_clock_ms,
+        ),
+        (
+            ResourceDimension::OutputBytes,
+            limits.max_output_bytes,
+            usage.output_bytes,
+            reserved.output_bytes,
+            requested.output_bytes,
+        ),
+        (
+            ResourceDimension::NetworkEgressBytes,
+            limits.max_network_egress_bytes,
+            usage.network_egress_bytes,
+            reserved.network_egress_bytes,
+            requested.network_egress_bytes,
+        ),
+        (
+            ResourceDimension::ProcessCount,
+            limits.max_process_count.map(u64::from),
+            u64::from(usage.process_count),
+            u64::from(reserved.process_count),
+            u64::from(requested.process_count),
+        ),
+        (
+            ResourceDimension::ConcurrencySlots,
+            limits.max_concurrency_slots.map(u64::from),
+            u64::from(usage.concurrency_slots),
+            u64::from(reserved.concurrency_slots),
+            u64::from(requested.concurrency_slots),
+        ),
+    ] {
+        if let Some(intervention) = threshold_integer(ThresholdInputs {
+            account,
+            dimension,
+            limit,
+            usage: usage_v,
+            reserved: reserved_v,
+            requested: requested_v,
+            thresholds: limits.thresholds,
+            period_end,
+        }) {
+            return Some(intervention);
+        }
+    }
+    None
+}
+
 fn check_decimal(
     account: &ResourceAccount,
     dimension: ResourceDimension,
@@ -1344,7 +1935,8 @@ fn check_decimal(
     reserved: Decimal,
     requested: Decimal,
 ) -> Option<ResourceDenial> {
-    let limit = limit?;
+    // 0 (or negative) = unlimited per the convention in `ResourceLimits`.
+    let limit = limit.filter(|v| *v > Decimal::ZERO)?;
     let exceeds = match usage
         .checked_add(reserved)
         .and_then(|subtotal| subtotal.checked_add(requested))
@@ -1374,7 +1966,8 @@ fn check_integer(
     reserved: u64,
     requested: u64,
 ) -> Option<ResourceDenial> {
-    let limit = limit?;
+    // 0 = unlimited per the convention in `ResourceLimits`.
+    let limit = limit.filter(|v| *v > 0)?;
     if usage.saturating_add(reserved).saturating_add(requested) > limit {
         Some(ResourceDenial {
             account: account.clone(),
@@ -1387,6 +1980,105 @@ fn check_integer(
     } else {
         None
     }
+}
+
+/// Inputs to threshold evaluation. Bundled so the dimension-typed helpers stay
+/// inside clippy's `too_many_arguments` default and so the cascade can pass
+/// per-dimension snapshots without re-spelling six positional parameters.
+struct ThresholdInputs<'a, T> {
+    account: &'a ResourceAccount,
+    dimension: ResourceDimension,
+    limit: Option<T>,
+    usage: T,
+    reserved: T,
+    requested: T,
+    thresholds: BudgetThresholds,
+    period_end: Option<DateTime<Utc>>,
+}
+
+fn threshold_decimal(inputs: ThresholdInputs<'_, Decimal>) -> Option<ThresholdIntervention> {
+    let ThresholdInputs {
+        account,
+        dimension,
+        limit,
+        usage,
+        reserved,
+        requested,
+        thresholds,
+        period_end,
+    } = inputs;
+    let limit = limit.filter(|v| *v > Decimal::ZERO)?;
+    let total = usage.checked_add(reserved)?.checked_add(requested)?;
+    let utilization = decimal_to_f64(total) / decimal_to_f64(limit);
+    // A threshold at or above 1.0 is "disabled": utilization that hits 1.0
+    // is already a hard deny, so the only useful pause point is strictly
+    // below 1.0. Approval at exactly 100% utilization fires when pause_at
+    // is set below 1.0 (e.g. the recommended 0.90 default).
+    if thresholds.pause_at < 1.0 && utilization >= thresholds.pause_at {
+        return Some(ThresholdIntervention::Approval(ResourceApprovalNeeded {
+            account: account.clone(),
+            dimension,
+            limit: ResourceValue::Decimal(limit),
+            current_usage: ResourceValue::Decimal(usage),
+            active_reserved: ResourceValue::Decimal(reserved),
+            requested: ResourceValue::Decimal(requested),
+            utilization,
+            period_end,
+        }));
+    }
+    if thresholds.warn_at < 1.0 && utilization >= thresholds.warn_at {
+        return Some(ThresholdIntervention::Warning(BudgetWarning {
+            account: account.clone(),
+            dimension,
+            utilization,
+            limit: ResourceValue::Decimal(limit),
+            period_end,
+        }));
+    }
+    None
+}
+
+fn threshold_integer(inputs: ThresholdInputs<'_, u64>) -> Option<ThresholdIntervention> {
+    let ThresholdInputs {
+        account,
+        dimension,
+        limit,
+        usage,
+        reserved,
+        requested,
+        thresholds,
+        period_end,
+    } = inputs;
+    let limit = limit.filter(|v| *v > 0)?;
+    let total = usage.saturating_add(reserved).saturating_add(requested);
+    let utilization = total as f64 / limit as f64;
+    if thresholds.pause_at < 1.0 && utilization >= thresholds.pause_at {
+        return Some(ThresholdIntervention::Approval(ResourceApprovalNeeded {
+            account: account.clone(),
+            dimension,
+            limit: ResourceValue::Integer(limit),
+            current_usage: ResourceValue::Integer(usage),
+            active_reserved: ResourceValue::Integer(reserved),
+            requested: ResourceValue::Integer(requested),
+            utilization,
+            period_end,
+        }));
+    }
+    if thresholds.warn_at < 1.0 && utilization >= thresholds.warn_at {
+        return Some(ThresholdIntervention::Warning(BudgetWarning {
+            account: account.clone(),
+            dimension,
+            utilization,
+            limit: ResourceValue::Integer(limit),
+            period_end,
+        }));
+    }
+    None
+}
+
+fn decimal_to_f64(d: Decimal) -> f64 {
+    use rust_decimal::prelude::ToPrimitive;
+    d.to_f64().unwrap_or(0.0)
 }
 
 #[cfg(test)]

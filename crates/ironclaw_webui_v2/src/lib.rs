@@ -58,14 +58,16 @@ mod sse_capacity;
 #[cfg(feature = "webui-v2-beta")]
 pub use descriptors::{
     WEBUI_V2_ROUTE_CANCEL_RUN, WEBUI_V2_ROUTE_CREATE_THREAD, WEBUI_V2_ROUTE_GET_TIMELINE,
-    WEBUI_V2_ROUTE_RESOLVE_GATE, WEBUI_V2_ROUTE_SEND_MESSAGE, WEBUI_V2_ROUTE_STREAM_EVENTS,
+    WEBUI_V2_ROUTE_LIST_THREADS, WEBUI_V2_ROUTE_RESOLVE_GATE, WEBUI_V2_ROUTE_SEND_MESSAGE,
+    WEBUI_V2_ROUTE_SETUP_EXTENSION, WEBUI_V2_ROUTE_STREAM_EVENTS, WEBUI_V2_ROUTE_STREAM_EVENTS_WS,
     webui_v2_routes,
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use error::{WebUiV2HttpError, WebUiV2HttpErrorBody};
 #[cfg(feature = "webui-v2-beta")]
 pub use handlers::{
-    cancel_run, create_thread, get_timeline, resolve_gate, send_message, stream_events,
+    cancel_run, create_thread, get_timeline, list_threads, resolve_gate, send_message,
+    setup_extension, stream_events, stream_events_ws,
 };
 #[cfg(feature = "webui-v2-beta")]
 pub use router::{WebUiV2State, webui_v2_router};

@@ -43,7 +43,7 @@ pub(super) fn capability_wiring(
     services: &RebornServices,
     user_id: UserId,
     model_gateway: Arc<dyn HostManagedModelGateway>,
-    milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+    milestone_sink: Arc<dyn LoopHostMilestoneSink>,
 ) -> Option<LocalDevCapabilityWiring> {
     let runtime = services.host_runtime.clone()?;
     let capability_io = Arc::new(LocalDevCapabilityIo::default());
@@ -73,7 +73,7 @@ struct LocalDevLoopCapabilityPortFactory {
     user_id: UserId,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+    milestone_sink: Arc<dyn LoopHostMilestoneSink>,
 }
 
 impl LocalDevLoopCapabilityPortFactory {
@@ -82,7 +82,7 @@ impl LocalDevLoopCapabilityPortFactory {
         user_id: UserId,
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
-        milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+        milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     ) -> Self {
         Self {
             runtime,
@@ -111,7 +111,7 @@ impl LoopCapabilityPortFactory for LocalDevLoopCapabilityPortFactory {
             visible_request,
             Arc::clone(&self.input_resolver),
             Arc::clone(&self.result_writer),
-            self.milestone_sink.clone(),
+            Arc::clone(&self.milestone_sink),
         )
         .with_execution_mounts(execution_mounts);
         Ok(factory.for_run_context(run_context.clone()))

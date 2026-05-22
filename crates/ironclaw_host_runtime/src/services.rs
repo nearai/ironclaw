@@ -83,9 +83,10 @@ use crate::obligations::{
 use crate::{
     BuiltinObligationHandler, CapabilitySurfaceVersion, DefaultHostRuntime,
     FirstPartyCapabilityRegistry, FirstPartyCapabilityRequest, HostRuntimeError,
-    InvocationServices, LocalHostProcessPort, ProcessObligationLifecycleStore,
-    RuntimeBackendHealth, RuntimeProcessPort, TurnRunExecutor, TurnRunScheduler,
-    TurnRunSchedulerConfig,
+    InvocationServicesResolutionRequest, InvocationServicesResolver, LocalHostProcessPort,
+    LocalInvocationServicesResolver, PlannerError, ProcessObligationLifecycleStore,
+    RuntimeBackendHealth, RuntimeProcessPort, TenantSandboxProcessPort, TurnRunExecutor,
+    TurnRunScheduler, TurnRunSchedulerConfig, plan_capability,
 };
 
 type SharedRuntimeHttpEgress = Arc<Mutex<Option<Arc<dyn RuntimeHttpEgress>>>>;
@@ -268,6 +269,7 @@ struct ProductionComponentTypes {
     runtime_http_egress: Option<ProductionComponentType>,
     runtime_http_egress_verified: bool,
     runtime_process_port: ProductionComponentType,
+    tenant_sandbox_process_port: Option<ProductionComponentType>,
     wasm_credential_provider: Option<ProductionComponentType>,
     wasm_credential_provider_verified: bool,
     wasm_runtime_credential_provider_captured: bool,
@@ -379,6 +381,7 @@ where
     process_lifecycle_store: Arc<ProcessObligationLifecycleStore>,
     runtime_http_egress: SharedRuntimeHttpEgress,
     process_port: Arc<dyn RuntimeProcessPort>,
+    tenant_sandbox_process_port: Option<Arc<dyn RuntimeProcessPort>>,
     wasm_credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     runtime_health: Option<Arc<dyn RuntimeBackendHealth>>,
     runtime_policy: Option<EffectiveRuntimePolicy>,
@@ -437,6 +440,7 @@ where
             process_lifecycle_store,
             runtime_http_egress: Arc::new(Mutex::new(None)),
             process_port: Arc::new(LocalHostProcessPort::new()),
+            tenant_sandbox_process_port: None,
             wasm_credential_provider: None,
             runtime_health: None,
             runtime_policy: None,
@@ -464,6 +468,7 @@ where
                 runtime_http_egress: None,
                 runtime_http_egress_verified: false,
                 runtime_process_port: ProductionComponentType::of::<LocalHostProcessPort>(),
+                tenant_sandbox_process_port: None,
                 wasm_credential_provider: None,
                 wasm_credential_provider_verified: false,
                 wasm_runtime_credential_provider_captured: false,
@@ -505,6 +510,7 @@ where
             process_lifecycle_store,
             runtime_http_egress,
             process_port,
+            tenant_sandbox_process_port,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -540,6 +546,7 @@ where
             process_lifecycle_store,
             runtime_http_egress,
             process_port,
+            tenant_sandbox_process_port,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -596,6 +603,7 @@ where
             process_lifecycle_store: _,
             runtime_http_egress,
             process_port,
+            tenant_sandbox_process_port,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -641,6 +649,7 @@ where
             process_lifecycle_store,
             runtime_http_egress,
             process_port,
+            tenant_sandbox_process_port,
             wasm_credential_provider,
             runtime_health,
             runtime_policy,
@@ -1025,6 +1034,18 @@ where
         self
     }
 
+    pub fn with_tenant_sandbox_process_port(
+        mut self,
+        process_port: Arc<TenantSandboxProcessPort>,
+    ) -> Self {
+        self.component_types.tenant_sandbox_process_port = Some(ProductionComponentType::named(
+            "TenantSandboxProcessPort",
+            ProductionImplementationReadiness::UnverifiedProductionImplementation,
+        ));
+        self.tenant_sandbox_process_port = Some(process_port);
+        self
+    }
+
     /// Attaches the host HTTP egress shape required for production runtime
     /// adapters. The service must use staged network-policy handoffs and secret
     /// injection handoffs, not request-local/test policy fallback.
@@ -1324,11 +1345,28 @@ where
             );
         }
         if self.first_party_runtime_uses_process_port() {
-            self.push_local_only(
-                &mut issues,
-                ProductionWiringComponent::RuntimeProcessPort,
-                Some(self.component_types.runtime_process_port),
-            );
+            if self
+                .runtime_policy
+                .as_ref()
+                .is_some_and(|policy| policy.process_backend == ProcessBackendKind::TenantSandbox)
+            {
+                self.push_missing(
+                    &mut issues,
+                    ProductionWiringComponent::RuntimeProcessPort,
+                    self.tenant_sandbox_process_port.is_some(),
+                );
+                self.push_local_only(
+                    &mut issues,
+                    ProductionWiringComponent::RuntimeProcessPort,
+                    self.component_types.tenant_sandbox_process_port,
+                );
+            } else {
+                self.push_local_only(
+                    &mut issues,
+                    ProductionWiringComponent::RuntimeProcessPort,
+                    Some(self.component_types.runtime_process_port),
+                );
+            }
         }
 
         self.push_local_only(
@@ -1641,18 +1679,41 @@ where
             Arc::clone(&self.registry),
             Arc::clone(&self.filesystem),
             Arc::clone(&self.governor),
+        )
+        .with_runtime_policy(
+            self.runtime_policy
+                .clone()
+                .unwrap_or_else(local_testing_runtime_policy),
         );
+        let mut invocation_services_resolver = LocalInvocationServicesResolver::new(
+            Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
+            runtime_http_egress(&self.runtime_http_egress),
+            Arc::clone(&self.process_port),
+            self.secret_store.clone(),
+        );
+        if let Some(process_port) = &self.tenant_sandbox_process_port {
+            invocation_services_resolver = invocation_services_resolver
+                .with_tenant_sandbox_process_port(Arc::clone(process_port));
+        }
+        let invocation_services: Arc<dyn InvocationServicesResolver> =
+            Arc::new(invocation_services_resolver);
 
         if let Some(runtime) = &self.script_runtime {
             dispatcher = dispatcher.with_runtime_adapter_arc(
                 RuntimeKind::Script,
-                Arc::new(ScriptRuntimeAdapter::from_executor(Arc::clone(runtime))),
+                Arc::new(ServiceResolvedRuntimeAdapter::new(
+                    Arc::new(ScriptRuntimeAdapter::from_executor(Arc::clone(runtime))),
+                    Arc::clone(&invocation_services),
+                )),
             );
         }
         if let Some(runtime) = &self.mcp_runtime {
             dispatcher = dispatcher.with_runtime_adapter_arc(
                 RuntimeKind::Mcp,
-                Arc::new(McpRuntimeAdapter::from_executor(Arc::clone(runtime))),
+                Arc::new(ServiceResolvedRuntimeAdapter::new(
+                    Arc::new(McpRuntimeAdapter::from_executor(Arc::clone(runtime))),
+                    Arc::clone(&invocation_services),
+                )),
             );
         }
         if let Some(runtime) = &self.first_party_runtime {
@@ -1660,15 +1721,18 @@ where
                 RuntimeKind::FirstParty,
                 Arc::new(FirstPartyRuntimeAdapter::from_registry(
                     Arc::clone(runtime),
-                    Arc::clone(&self.filesystem) as Arc<dyn RootFilesystem>,
-                    Arc::clone(&self.runtime_http_egress),
-                    Arc::clone(&self.process_port),
+                    Arc::clone(&invocation_services),
                 )),
             );
         }
         if let Some(runtime) = &self.wasm_runtime {
-            dispatcher =
-                dispatcher.with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(runtime));
+            dispatcher = dispatcher.with_runtime_adapter_arc(
+                RuntimeKind::Wasm,
+                Arc::new(ServiceResolvedRuntimeAdapter::new(
+                    Arc::clone(runtime),
+                    Arc::clone(&invocation_services),
+                )),
+            );
         }
         if let Some(event_sink) = &self.event_sink {
             dispatcher = dispatcher.with_event_sink_arc(Arc::clone(event_sink));
@@ -1944,6 +2008,66 @@ impl RuntimeBackendHealth for RegisteredRuntimeHealth {
     }
 }
 
+struct ServiceResolvedRuntimeAdapter<T> {
+    inner: Arc<T>,
+    invocation_services: Arc<dyn InvocationServicesResolver>,
+}
+
+// arch-exempt: large_file, runtime adapter composition is still centralized
+// in HostRuntimeServices until the Reborn architecture decomposition tracked
+// by nearai/ironclaw#3231 splits runtime wiring into focused modules.
+impl<T> ServiceResolvedRuntimeAdapter<T> {
+    fn new(inner: Arc<T>, invocation_services: Arc<dyn InvocationServicesResolver>) -> Self {
+        Self {
+            inner,
+            invocation_services,
+        }
+    }
+}
+
+#[async_trait]
+impl<F, G, T> RuntimeAdapter<F, G> for ServiceResolvedRuntimeAdapter<T>
+where
+    F: RootFilesystem,
+    G: ResourceGovernor,
+    T: RuntimeAdapter<F, G>,
+{
+    async fn dispatch_json(
+        &self,
+        request: RuntimeAdapterRequest<'_, F, G>,
+    ) -> Result<RuntimeAdapterResult, DispatchError> {
+        let plan =
+            plan_capability(request.descriptor, request.runtime_policy).map_err(|error| {
+                release_adapter_reservation(
+                    request.governor,
+                    request
+                        .resource_reservation
+                        .as_ref()
+                        .map(|reservation| reservation.id),
+                );
+                dispatch_error_for_runtime(request.descriptor.runtime, planner_error_kind(&error))
+            })?;
+        self.invocation_services
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &request.scope,
+                mounts: request.mounts.as_ref(),
+            })
+            .map_err(|error| {
+                release_adapter_reservation(
+                    request.governor,
+                    request
+                        .resource_reservation
+                        .as_ref()
+                        .map(|reservation| reservation.id),
+                );
+                dispatch_error_for_runtime(request.descriptor.runtime, error.kind())
+            })?;
+
+        self.inner.dispatch_json(request).await
+    }
+}
+
 #[derive(Clone)]
 struct ScriptRuntimeAdapter {
     executor: Arc<dyn ScriptExecutor>,
@@ -2047,23 +2171,17 @@ where
 #[derive(Clone)]
 struct FirstPartyRuntimeAdapter {
     registry: Arc<FirstPartyCapabilityRegistry>,
-    filesystem: Arc<dyn RootFilesystem>,
-    runtime_http_egress: SharedRuntimeHttpEgress,
-    process_port: Arc<dyn RuntimeProcessPort>,
+    invocation_services: Arc<dyn InvocationServicesResolver>,
 }
 
 impl FirstPartyRuntimeAdapter {
     pub(crate) fn from_registry(
         registry: Arc<FirstPartyCapabilityRegistry>,
-        filesystem: Arc<dyn RootFilesystem>,
-        runtime_http_egress: SharedRuntimeHttpEgress,
-        process_port: Arc<dyn RuntimeProcessPort>,
+        invocation_services: Arc<dyn InvocationServicesResolver>,
     ) -> Self {
         Self {
             registry,
-            filesystem,
-            runtime_http_egress,
-            process_port,
+            invocation_services,
         }
     }
 }
@@ -2093,6 +2211,29 @@ where
             });
         };
 
+        let plan =
+            plan_capability(request.descriptor, request.runtime_policy).map_err(|error| {
+                if let Some(reservation) = &request.resource_reservation {
+                    release_first_party_reservation(request.governor, reservation.id);
+                }
+                DispatchError::FirstParty {
+                    kind: planner_error_kind(&error),
+                }
+            })?;
+        let services = self
+            .invocation_services
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &request.scope,
+                mounts: request.mounts.as_ref(),
+            })
+            .map_err(|error| {
+                if let Some(reservation) = &request.resource_reservation {
+                    release_first_party_reservation(request.governor, reservation.id);
+                }
+                DispatchError::FirstParty { kind: error.kind() }
+            })?;
+
         let reservation = match request.resource_reservation {
             Some(reservation) => reservation,
             None => request
@@ -2108,11 +2249,7 @@ where
             scope: request.scope.clone(),
             estimate: request.estimate,
             mounts: request.mounts,
-            services: InvocationServices {
-                filesystem: Arc::clone(&self.filesystem),
-                runtime_http_egress: runtime_http_egress(&self.runtime_http_egress),
-                process: Arc::clone(&self.process_port),
-            },
+            services,
             input: request.input,
         }))
         .catch_unwind()
@@ -2516,6 +2653,22 @@ where
     let _ = governor.release(reservation_id);
 }
 
+fn release_adapter_reservation<G>(governor: &G, reservation_id: Option<ResourceReservationId>)
+where
+    G: ResourceGovernor + ?Sized,
+{
+    let Some(reservation_id) = reservation_id else {
+        return;
+    };
+    if let Err(error) = governor.release(reservation_id) {
+        tracing::warn!(
+            reservation_id = %reservation_id,
+            error = %error,
+            "failed to release prepared resource reservation after runtime policy rejection"
+        );
+    }
+}
+
 fn preserved_wasm_error_usage(error: &WasmError) -> Option<ResourceUsage> {
     if let WasmError::ExecutionFailed { usage, .. } = error
         && has_accountable_effects(usage)
@@ -2534,6 +2687,32 @@ fn has_accountable_effects(usage: &ResourceUsage) -> bool {
         || usage.output_bytes > 0
         || usage.network_egress_bytes > 0
         || usage.process_count > 0
+}
+
+fn dispatch_error_for_runtime(
+    runtime: RuntimeKind,
+    kind: RuntimeDispatchErrorKind,
+) -> DispatchError {
+    match runtime {
+        RuntimeKind::Mcp => DispatchError::Mcp { kind },
+        RuntimeKind::Script => DispatchError::Script { kind },
+        RuntimeKind::Wasm => DispatchError::Wasm { kind },
+        RuntimeKind::FirstParty | RuntimeKind::System => DispatchError::FirstParty { kind },
+    }
+}
+
+fn planner_error_kind(error: &PlannerError) -> RuntimeDispatchErrorKind {
+    match error {
+        PlannerError::ProcessEffectsRequiredButProcessBackendIsNone { .. } => {
+            RuntimeDispatchErrorKind::UnsupportedRunner
+        }
+        PlannerError::NetworkRequiredButNetworkModeIsDeny { .. } => {
+            RuntimeDispatchErrorKind::NetworkDenied
+        }
+        PlannerError::SecretAccessRequiredButSecretModeIsDeny { .. } => {
+            RuntimeDispatchErrorKind::SecretDenied
+        }
+    }
 }
 
 fn script_error_kind(error: &ScriptError) -> RuntimeDispatchErrorKind {
@@ -2617,20 +2796,26 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use ironclaw_authorization::GrantAuthorizer;
-    use ironclaw_extensions::ExtensionRegistry;
+    use ironclaw_extensions::{
+        ExtensionManifest, ExtensionPackage, ExtensionRegistry, ManifestSource,
+    };
     use ironclaw_filesystem::LocalFilesystem;
     use ironclaw_host_api::{
-        CapabilityId, InvocationId, NetworkMethod, NetworkPolicy, NetworkScheme,
-        NetworkTargetPattern, ResourceScope, RuntimeCredentialInjection, RuntimeCredentialSource,
-        RuntimeCredentialTarget, RuntimeHttpEgressRequest, RuntimeKind, SecretHandle, TenantId,
-        UserId,
+        CapabilityDescriptor, CapabilityId, EffectKind, HostPortCatalog, InvocationId,
+        NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, PermissionMode,
+        ResourceEstimate, ResourceReceipt, ResourceScope, RuntimeCredentialInjection,
+        RuntimeCredentialSource, RuntimeCredentialTarget, RuntimeHttpEgressRequest, RuntimeKind,
+        SecretHandle, TenantId, TrustClass, UserId, VirtualPath,
     };
     use ironclaw_network::{
         NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
     };
     use ironclaw_processes::{InMemoryProcessResultStore, InMemoryProcessStore, ProcessServices};
-    use ironclaw_resources::InMemoryResourceGovernor;
+    use ironclaw_resources::{
+        InMemoryResourceGovernor, ResourceAccount, ResourceGovernor, ResourceTally,
+    };
     use ironclaw_secrets::{InMemorySecretStore, SecretMaterial};
+    use serde_json::{Value, json};
 
     use super::*;
 
@@ -2710,6 +2895,369 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn service_guard_releases_reservation_on_planner_denial() {
+        let inner = Arc::new(RecordingRuntimeAdapter::default());
+        let adapter = ServiceResolvedRuntimeAdapter::new(
+            Arc::clone(&inner),
+            Arc::new(LocalInvocationServicesResolver::new(
+                Arc::new(LocalFilesystem::new()),
+                None,
+                Arc::new(LocalHostProcessPort::new()),
+                None,
+            )),
+        );
+        let filesystem = LocalFilesystem::new();
+        let governor = InMemoryResourceGovernor::new();
+        let scope = sample_scope();
+        let estimate = ResourceEstimate {
+            process_count: Some(1),
+            ..ResourceEstimate::default()
+        };
+        let reservation = governor
+            .reserve(scope.clone(), estimate.clone())
+            .expect("test reservation should be created");
+        let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
+        assert_eq!(governor.reserved_for(&tenant_account).process_count, 1);
+
+        let package = test_package(SCRIPT_MANIFEST, "test-script");
+        let descriptor = test_descriptor(RuntimeKind::Script, vec![EffectKind::ExecuteCode]);
+        let policy = policy_with(
+            FilesystemBackendKind::ScopedVirtual,
+            ProcessBackendKind::None,
+            NetworkMode::Deny,
+            SecretMode::Deny,
+        );
+
+        let result = adapter
+            .dispatch_json(RuntimeAdapterRequest {
+                package: &package,
+                descriptor: &descriptor,
+                filesystem: &filesystem,
+                governor: &governor,
+                runtime_policy: &policy,
+                capability_id: &descriptor.id,
+                scope,
+                estimate,
+                mounts: None,
+                resource_reservation: Some(reservation),
+                input: json!({}),
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::Script {
+                kind: RuntimeDispatchErrorKind::UnsupportedRunner
+            })
+        ));
+        assert_eq!(inner.call_count(), 0);
+        assert_eq!(
+            governor.reserved_for(&tenant_account),
+            ResourceTally::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn service_guard_rejects_resolution_before_wasm_dispatch() {
+        let inner = Arc::new(RecordingRuntimeAdapter::default());
+        let adapter = ServiceResolvedRuntimeAdapter::new(
+            Arc::clone(&inner),
+            Arc::new(LocalInvocationServicesResolver::new(
+                Arc::new(LocalFilesystem::new()),
+                None,
+                Arc::new(LocalHostProcessPort::new()),
+                None,
+            )),
+        );
+        let filesystem = LocalFilesystem::new();
+        let governor = InMemoryResourceGovernor::new();
+        let scope = sample_scope();
+        let estimate = ResourceEstimate::default();
+        let package = test_package(WASM_MANIFEST, "test-wasm");
+        let descriptor = test_descriptor(RuntimeKind::Wasm, vec![EffectKind::Network]);
+        let policy = policy_with(
+            FilesystemBackendKind::HostWorkspace,
+            ProcessBackendKind::LocalHost,
+            NetworkMode::DirectLogged,
+            SecretMode::ScrubbedEnv,
+        );
+
+        let result = adapter
+            .dispatch_json(RuntimeAdapterRequest {
+                package: &package,
+                descriptor: &descriptor,
+                filesystem: &filesystem,
+                governor: &governor,
+                runtime_policy: &policy,
+                capability_id: &descriptor.id,
+                scope,
+                estimate,
+                mounts: None,
+                resource_reservation: None,
+                input: json!({}),
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::NetworkDenied
+            })
+        ));
+        assert_eq!(inner.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn service_guard_releases_reservation_on_invocation_service_resolution_denial() {
+        let inner = Arc::new(RecordingRuntimeAdapter::default());
+        let adapter = ServiceResolvedRuntimeAdapter::new(
+            Arc::clone(&inner),
+            Arc::new(LocalInvocationServicesResolver::new(
+                Arc::new(LocalFilesystem::new()),
+                None,
+                Arc::new(LocalHostProcessPort::new()),
+                None,
+            )),
+        );
+        let filesystem = LocalFilesystem::new();
+        let governor = InMemoryResourceGovernor::new();
+        let scope = sample_scope();
+        let estimate = ResourceEstimate {
+            network_egress_bytes: Some(1),
+            ..ResourceEstimate::default()
+        };
+        let reservation = governor
+            .reserve(scope.clone(), estimate.clone())
+            .expect("test reservation should be created");
+        let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
+        assert_eq!(
+            governor.reserved_for(&tenant_account).network_egress_bytes,
+            1
+        );
+
+        let package = test_package(WASM_MANIFEST, "test-wasm");
+        let descriptor = test_descriptor(RuntimeKind::Wasm, vec![EffectKind::Network]);
+        let policy = policy_with(
+            FilesystemBackendKind::HostWorkspace,
+            ProcessBackendKind::LocalHost,
+            NetworkMode::DirectLogged,
+            SecretMode::ScrubbedEnv,
+        );
+
+        let result = adapter
+            .dispatch_json(RuntimeAdapterRequest {
+                package: &package,
+                descriptor: &descriptor,
+                filesystem: &filesystem,
+                governor: &governor,
+                runtime_policy: &policy,
+                capability_id: &descriptor.id,
+                scope,
+                estimate,
+                mounts: None,
+                resource_reservation: Some(reservation),
+                input: json!({}),
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::NetworkDenied
+            })
+        ));
+        assert_eq!(inner.call_count(), 0);
+        assert_eq!(
+            governor.reserved_for(&tenant_account),
+            ResourceTally::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn service_guard_rejects_required_secret_without_secret_store_before_dispatch() {
+        let inner = Arc::new(RecordingRuntimeAdapter::default());
+        let adapter = ServiceResolvedRuntimeAdapter::new(
+            Arc::clone(&inner),
+            Arc::new(LocalInvocationServicesResolver::new(
+                Arc::new(LocalFilesystem::new()),
+                None,
+                Arc::new(LocalHostProcessPort::new()),
+                None,
+            )),
+        );
+        let filesystem = LocalFilesystem::new();
+        let governor = InMemoryResourceGovernor::new();
+        let scope = sample_scope();
+        let estimate = ResourceEstimate::default();
+        let package = test_package(WASM_MANIFEST, "test-wasm");
+        let descriptor = test_descriptor(RuntimeKind::Wasm, vec![EffectKind::UseSecret]);
+        let policy = policy_with(
+            FilesystemBackendKind::HostWorkspace,
+            ProcessBackendKind::LocalHost,
+            NetworkMode::Deny,
+            SecretMode::ScrubbedEnv,
+        );
+
+        let result = adapter
+            .dispatch_json(RuntimeAdapterRequest {
+                package: &package,
+                descriptor: &descriptor,
+                filesystem: &filesystem,
+                governor: &governor,
+                runtime_policy: &policy,
+                capability_id: &descriptor.id,
+                scope,
+                estimate,
+                mounts: None,
+                resource_reservation: None,
+                input: json!({}),
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::SecretDenied
+            })
+        ));
+        assert_eq!(inner.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn first_party_adapter_releases_reservation_when_invocation_service_resolution_denies() {
+        let descriptor = test_descriptor(RuntimeKind::FirstParty, vec![EffectKind::Network]);
+        let registry = Arc::new(
+            FirstPartyCapabilityRegistry::new()
+                .with_handler(descriptor.id.clone(), Arc::new(PanicFirstPartyHandler)),
+        );
+        let adapter = FirstPartyRuntimeAdapter::from_registry(
+            registry,
+            Arc::new(LocalInvocationServicesResolver::new(
+                Arc::new(LocalFilesystem::new()),
+                None,
+                Arc::new(LocalHostProcessPort::new()),
+                None,
+            )),
+        );
+        let filesystem = LocalFilesystem::new();
+        let governor = InMemoryResourceGovernor::new();
+        let scope = sample_scope();
+        let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
+        let estimate = ResourceEstimate {
+            network_egress_bytes: Some(1),
+            ..ResourceEstimate::default()
+        };
+        let reservation = governor
+            .reserve(scope.clone(), estimate.clone())
+            .expect("test reservation should be created");
+        assert_eq!(
+            governor.reserved_for(&tenant_account).network_egress_bytes,
+            1
+        );
+        let package = test_package(WASM_MANIFEST, "test-wasm");
+        let policy = policy_with(
+            FilesystemBackendKind::HostWorkspace,
+            ProcessBackendKind::LocalHost,
+            NetworkMode::DirectLogged,
+            SecretMode::ScrubbedEnv,
+        );
+
+        let result = adapter
+            .dispatch_json(RuntimeAdapterRequest {
+                package: &package,
+                descriptor: &descriptor,
+                filesystem: &filesystem,
+                governor: &governor,
+                runtime_policy: &policy,
+                capability_id: &descriptor.id,
+                scope,
+                estimate,
+                mounts: None,
+                resource_reservation: Some(reservation),
+                input: json!({}),
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::FirstParty {
+                kind: RuntimeDispatchErrorKind::NetworkDenied
+            })
+        ));
+        assert_eq!(
+            governor.reserved_for(&tenant_account),
+            ResourceTally::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn first_party_adapter_releases_reservation_when_planner_denies() {
+        let descriptor = test_descriptor(RuntimeKind::FirstParty, vec![EffectKind::Network]);
+        let registry = Arc::new(
+            FirstPartyCapabilityRegistry::new()
+                .with_handler(descriptor.id.clone(), Arc::new(PanicFirstPartyHandler)),
+        );
+        let adapter = FirstPartyRuntimeAdapter::from_registry(
+            registry,
+            Arc::new(LocalInvocationServicesResolver::new(
+                Arc::new(LocalFilesystem::new()),
+                None,
+                Arc::new(LocalHostProcessPort::new()),
+                None,
+            )),
+        );
+        let filesystem = LocalFilesystem::new();
+        let governor = InMemoryResourceGovernor::new();
+        let scope = sample_scope();
+        let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
+        let estimate = ResourceEstimate {
+            network_egress_bytes: Some(1),
+            ..ResourceEstimate::default()
+        };
+        let reservation = governor
+            .reserve(scope.clone(), estimate.clone())
+            .expect("test reservation should be created");
+        assert_eq!(
+            governor.reserved_for(&tenant_account).network_egress_bytes,
+            1
+        );
+        let package = test_package(WASM_MANIFEST, "test-wasm");
+        let policy = policy_with(
+            FilesystemBackendKind::HostWorkspace,
+            ProcessBackendKind::LocalHost,
+            NetworkMode::Deny,
+            SecretMode::ScrubbedEnv,
+        );
+
+        let result = adapter
+            .dispatch_json(RuntimeAdapterRequest {
+                package: &package,
+                descriptor: &descriptor,
+                filesystem: &filesystem,
+                governor: &governor,
+                runtime_policy: &policy,
+                capability_id: &descriptor.id,
+                scope,
+                estimate,
+                mounts: None,
+                resource_reservation: Some(reservation),
+                input: json!({}),
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::FirstParty {
+                kind: RuntimeDispatchErrorKind::NetworkDenied
+            })
+        ));
+        assert_eq!(
+            governor.reserved_for(&tenant_account),
+            ResourceTally::default()
+        );
+    }
+
     fn test_services() -> HostRuntimeServices<
         LocalFilesystem,
         InMemoryResourceGovernor,
@@ -2741,6 +3289,108 @@ mod tests {
             .as_ref()
             .expect("runtime HTTP egress should be configured")
             .clone()
+    }
+
+    fn test_package(manifest: &str, extension_id: &str) -> ExtensionPackage {
+        let manifest = ExtensionManifest::parse(
+            manifest,
+            ManifestSource::HostBundled,
+            &HostPortCatalog::empty(),
+        )
+        .expect("test manifest should parse");
+        ExtensionPackage::from_manifest(
+            manifest,
+            VirtualPath::new(format!("/system/extensions/{extension_id}")).unwrap(),
+        )
+        .expect("test package should build")
+    }
+
+    fn test_descriptor(runtime: RuntimeKind, effects: Vec<EffectKind>) -> CapabilityDescriptor {
+        CapabilityDescriptor {
+            id: CapabilityId::new("test.capability").unwrap(),
+            provider: ironclaw_host_api::ExtensionId::new("test").unwrap(),
+            runtime,
+            trust_ceiling: TrustClass::UserTrusted,
+            description: "test capability".to_string(),
+            parameters_schema: serde_json::Value::Null,
+            effects,
+            default_permission: PermissionMode::Allow,
+            resource_profile: None,
+        }
+    }
+
+    fn policy_with(
+        filesystem_backend: FilesystemBackendKind,
+        process_backend: ProcessBackendKind,
+        network_mode: NetworkMode,
+        secret_mode: SecretMode,
+    ) -> EffectiveRuntimePolicy {
+        EffectiveRuntimePolicy {
+            deployment: DeploymentMode::LocalSingleUser,
+            requested_profile: RuntimeProfile::LocalDev,
+            resolved_profile: RuntimeProfile::LocalDev,
+            filesystem_backend,
+            process_backend,
+            network_mode,
+            secret_mode,
+            approval_policy: ironclaw_host_api::runtime_policy::ApprovalPolicy::AskDestructive,
+            audit_mode: ironclaw_host_api::runtime_policy::AuditMode::LocalMinimal,
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingRuntimeAdapter {
+        calls: Mutex<usize>,
+    }
+
+    impl RecordingRuntimeAdapter {
+        fn call_count(&self) -> usize {
+            *self.calls.lock().unwrap()
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingRuntimeAdapter {
+        async fn dispatch_json(
+            &self,
+            request: RuntimeAdapterRequest<'_, LocalFilesystem, InMemoryResourceGovernor>,
+        ) -> Result<RuntimeAdapterResult, DispatchError> {
+            *self.calls.lock().unwrap() += 1;
+            let usage = ResourceUsage::default();
+            let reservation = match request.resource_reservation {
+                Some(reservation) => reservation,
+                None => request
+                    .governor
+                    .reserve(request.scope, request.estimate)
+                    .map_err(|_| DispatchError::Wasm {
+                        kind: RuntimeDispatchErrorKind::Resource,
+                    })?,
+            };
+            let receipt: ResourceReceipt = request
+                .governor
+                .reconcile(reservation.id, usage.clone())
+                .map_err(|_| DispatchError::Wasm {
+                    kind: RuntimeDispatchErrorKind::Resource,
+                })?;
+            Ok(RuntimeAdapterResult {
+                output: Value::Null,
+                usage,
+                receipt,
+                output_bytes: 0,
+            })
+        }
+    }
+
+    struct PanicFirstPartyHandler;
+
+    #[async_trait]
+    impl crate::FirstPartyCapabilityHandler for PanicFirstPartyHandler {
+        async fn dispatch(
+            &self,
+            _request: crate::FirstPartyCapabilityRequest,
+        ) -> Result<crate::FirstPartyCapabilityResult, crate::FirstPartyCapabilityError> {
+            panic!("service-resolution denial should happen before handler dispatch")
+        }
     }
 
     fn request_without_credentials(
@@ -2822,6 +3472,52 @@ mod tests {
             max_egress_bytes: Some(1),
         }
     }
+
+    const SCRIPT_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "test-script"
+name = "Test Script"
+version = "0.1.0"
+description = "Script test extension"
+trust = "untrusted"
+
+[runtime]
+kind = "script"
+runner = "sandboxed_process"
+command = "sh"
+args = ["-c", "cat"]
+
+[[capabilities]]
+id = "test-script.run"
+description = "Run script"
+effects = ["execute_code"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/test-script/run.input.v1.json"
+output_schema_ref = "schemas/test-script/run.output.v1.json"
+prompt_doc_ref = "prompts/test-script/run.md"
+"#;
+
+    const WASM_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "test-wasm"
+name = "Test Wasm"
+version = "0.1.0"
+description = "WASM test extension"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "test.wasm"
+
+[[capabilities]]
+id = "test-wasm.run"
+description = "Run WASM"
+effects = ["network"]
+default_permission = "allow"
+visibility = "model"
+input_schema_ref = "schemas/test-wasm/run.input.v1.json"
+output_schema_ref = "schemas/test-wasm/run.output.v1.json"
+prompt_doc_ref = "prompts/test-wasm/run.md"
+"#;
 
     #[derive(Clone)]
     struct RecordingNetwork {
