@@ -55,14 +55,13 @@ const SHARD_COUNT: usize = 16;
 /// caller's counter lives in exactly one shard; cross-shard eviction
 /// is independent.
 ///
-/// Stored as a `NonZeroUsize` const so the runtime constructor doesn't
-/// have to `.expect()` on a value the compiler can prove is non-zero.
+/// Stored as a `NonZeroUsize` const so the runtime constructor can avoid
+/// runtime extraction from a value the compiler can prove is non-zero.
 const RATE_LIMIT_PER_SHARD_CAPACITY: NonZeroUsize = match NonZeroUsize::new(512) {
     Some(value) => value,
     // SAFETY: 512 is a non-zero compile-time constant; the match arm
-    // is unreachable. Written as `unreachable!()` rather than
-    // `unwrap()` so the rule against `.expect()` / `.unwrap()` in
-    // production code is satisfied without a runtime panic site.
+    // is unreachable. Written with an explicit match so production code avoids
+    // runtime value extraction from a value known to be non-zero.
     None => unreachable!(),
 };
 

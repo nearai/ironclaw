@@ -219,14 +219,14 @@ fn origin_is_localhost(origin: &str) -> bool {
     let host = if let Some(rest) = stripped.strip_prefix('[') {
         // `[::1]:3000` → `::1`; `[::1]` → `::1`.
         match rest.find(']') {
-            Some(end) => &rest[..end],
-            None => return false, // malformed
+            Some(end) => &rest[..end], // safety: find returns a UTF-8 character boundary.
+            None => return false,      // malformed
         }
     } else if let Some(idx) = stripped.rfind(':') {
         // `127.0.0.1:3000` → `127.0.0.1`. Take a slice that excludes
         // the port. The colon-only check below catches the no-port
         // case for IPv6 literals already.
-        &stripped[..idx]
+        &stripped[..idx] // safety: rfind returns a UTF-8 character boundary.
     } else {
         stripped
     };

@@ -25,9 +25,9 @@ use ironclaw_host_runtime::{
     GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID,
     LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome,
     RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
-    SHELL_CAPABILITY_ID, SurfaceKind, TIME_CAPABILITY_ID, VisibleCapabilityAccess,
-    VisibleCapabilityRequest, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
-    builtin_first_party_package,
+    SHELL_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
+    TenantSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpResponse, NetworkHttpTransport,
@@ -237,6 +237,32 @@ async fn builtin_shell_returns_stderr_and_nonzero_exit_without_dispatch_failure(
     assert_eq!(output["success"], json!(false));
     assert_eq!(output["sandboxed"], json!(false));
     assert_eq!(output["output"], json!("shell-error"));
+}
+
+#[tokio::test]
+async fn builtin_shell_uses_configured_tenant_sandbox_process_port() {
+    let local_process = Arc::new(RecordingProcessPort::default());
+    let sandbox_transport = Arc::new(RecordingSandboxTransport::default());
+    let sandbox_process = Arc::new(TenantSandboxProcessPort::new(sandbox_transport.clone()));
+    let runtime = runtime_with_local_and_sandbox_process_ports(
+        Arc::clone(&local_process),
+        Arc::clone(&sandbox_process),
+        tenant_sandbox_process_policy(),
+    );
+
+    let output = invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "echo in sandbox"}),
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["sandboxed"], json!(true));
+    assert_eq!(output["output"], json!("process port: echo in sandbox"));
+    assert!(local_process.requests.lock().unwrap().is_empty());
+    assert_eq!(sandbox_transport.requests.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -1008,6 +1034,25 @@ async fn builtin_read_file_rejects_scoped_virtual_filesystem_plan_before_handler
     std::fs::write(temp.path().join("README.md"), "must not be read\n").unwrap();
     let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
     let runtime = runtime_with_filesystem_and_policy(filesystem, network_denied_policy());
+
+    let error = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/README.md"}),
+        execution_context_with_mounts([READ_FILE_CAPABILITY_ID], mounts),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Authorization);
+}
+
+#[tokio::test]
+async fn builtin_read_file_rejects_tenant_workspace_before_filesystem_access() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("README.md"), "must not be read\n").unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem_and_policy(filesystem, hosted_dev_policy());
 
     let error = invoke_with_context(
         &runtime,
@@ -2014,6 +2059,31 @@ where
     .host_runtime_for_local_testing()
 }
 
+fn runtime_with_local_and_sandbox_process_ports<L>(
+    local_process: Arc<L>,
+    sandbox_process: Arc<TenantSandboxProcessPort>,
+    policy: EffectiveRuntimePolicy,
+) -> impl HostRuntime
+where
+    L: RuntimeProcessPort + 'static,
+{
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_process_port(local_process)
+    .with_tenant_sandbox_process_port(sandbox_process)
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
+    .with_runtime_policy(policy)
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
 fn runtime_with_policy(policy: EffectiveRuntimePolicy) -> impl HostRuntime {
     HostRuntimeServices::new(
         Arc::new(registry()),
@@ -2040,6 +2110,13 @@ fn local_dev_policy() -> EffectiveRuntimePolicy {
         secret_mode: SecretMode::ScrubbedEnv,
         approval_policy: ApprovalPolicy::AskDestructive,
         audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn tenant_sandbox_process_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        process_backend: ProcessBackendKind::TenantSandbox,
+        ..local_dev_policy()
     }
 }
 
@@ -2192,6 +2269,27 @@ impl RuntimeProcessPort for RecordingProcessPort {
             output: format!("process port: {}", request.command),
             exit_code: 0,
             sandboxed: true,
+            duration: Duration::from_millis(7),
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingSandboxTransport {
+    requests: std::sync::Mutex<Vec<CommandExecutionRequest>>,
+}
+
+#[async_trait]
+impl SandboxCommandTransport for RecordingSandboxTransport {
+    async fn run_command(
+        &self,
+        request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        self.requests.lock().unwrap().push(request.clone());
+        Ok(CommandExecutionOutput {
+            output: format!("process port: {}", request.command),
+            exit_code: 0,
+            sandboxed: false,
             duration: Duration::from_millis(7),
         })
     }

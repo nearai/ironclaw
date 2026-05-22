@@ -448,10 +448,9 @@ fn extract_bearer_token(request: &Request) -> Option<String> {
         && let Ok(text) = value.to_str()
         // `text.get(..7)` returns `None` when 7 is past the end OR
         // lands inside a multi-byte UTF-8 sequence; both cases mean
-        // the value cannot be `Bearer <token>`. Using `text[..7]` here
-        // would panic on a value whose first 7 bytes split a
-        // multi-byte character (forbidden by the project's UTF-8
-        // string safety rule on user-supplied data).
+        // the value cannot be `Bearer <token>`. A direct byte slice
+        // would panic on a value whose first 7 bytes split a multi-byte
+        // character, which is forbidden for user-supplied data.
         && let Some(prefix) = text.get(..7)
         && prefix.eq_ignore_ascii_case("Bearer ")
     {
@@ -577,7 +576,7 @@ fn panic_handler(
     };
     let safe_detail = if detail.len() > 200 {
         let end = detail.floor_char_boundary(200);
-        format!("{}…", &detail[..end])
+        format!("{}…", &detail[..end]) // safety: end was clamped to a UTF-8 character boundary.
     } else {
         detail
     };
