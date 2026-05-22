@@ -36,6 +36,7 @@ subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync"] }
 tracing = "0.1"
+url = "2"
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

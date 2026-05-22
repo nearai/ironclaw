@@ -22,6 +22,7 @@
 //! tokens.
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -33,6 +34,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, TokenData, Validation, decode, decode
 use parking_lot::RwLock;
 use serde::Deserialize;
 use thiserror::Error;
+use url::{Host, Url};
 
 /// Configuration for [`OidcAuthenticator`].
 #[derive(Debug, Clone)]
@@ -125,6 +127,11 @@ pub enum OidcAuthenticatorError {
          which are reachable only by the host process"
     )]
     InsecureJwksUrl { url: String },
+    #[error(
+        "JWKS URL `{url}` is malformed or not a usable https/http URL — refusing to \
+         construct an OIDC authenticator with an unparseable JWKS endpoint"
+    )]
+    MalformedJwksUrl { url: String },
 }
 
 /// JWKS document shape from the issuer's `.well-known/jwks.json`.
@@ -472,28 +479,90 @@ fn lookup_jwk(keys: &[Jwk], kid: Option<&str>) -> Option<Jwk> {
 }
 
 /// Reject JWKS URLs that aren't HTTPS, with a narrow loopback
-/// exception for local-dev / contract tests. Accepts both
-/// `https://example.com/...` and bare loopback like
-/// `http://localhost:3000/jwks` because only the host process itself
-/// can intercept loopback traffic.
+/// exception for local-dev / contract tests.
+///
+/// The guard is a real URL parser, not a string-prefix check, because
+/// JWKS-URL trust is a security boundary: if it accepts an
+/// attacker-controlled non-loopback plaintext endpoint, the OIDC
+/// authenticator can be coerced into trusting forged signing keys.
+/// Past attempts to substring-match a loopback prefix accepted
+/// shapes like `http://127.evil.com/jwks`,
+/// `http://127.0.0.1.evil.com/jwks`, and userinfo-disguised hosts
+/// like `http://127.0.0.1@evil.com/jwks`.
+///
+/// Rules:
+///
+/// - The URL must parse with [`url::Url`] and have scheme `https` or
+///   `http` — no `file:`, `ftp:`, `data:`, etc.
+/// - No `userinfo` component (`user:pass@host`). `Url::host_str()`
+///   would return the post-`@` host, but the authority looks like a
+///   loopback host to a hand-rolled parser. Refuse rather than try
+///   to disentangle.
+/// - `https`: always accepted.
+/// - `http`: accepted only if the host parses as an [`IpAddr`] whose
+///   `is_loopback()` is true (covers 127.0.0.0/8 IPv4 and `::1`
+///   IPv6), or equals the literal string `localhost`. Anything
+///   else (including `127.evil.com`, `127.0.0.1.evil.com`,
+///   `localhost.evil.com`) is rejected.
 fn require_secure_jwks_url(url: &str) -> Result<(), OidcAuthenticatorError> {
-    if let Some(rest) = url.strip_prefix("https://")
-        && !rest.is_empty()
-    {
-        return Ok(());
-    }
-    if let Some(rest) = url.strip_prefix("http://") {
-        // host portion = everything up to the next `/`, `?`, or `#`
-        let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-        // strip port for the localhost check
-        let host_only = host.split(':').next().unwrap_or(host);
-        if matches!(host_only, "localhost" | "127.0.0.1" | "::1") || host_only.starts_with("127.") {
-            return Ok(());
-        }
-    }
-    Err(OidcAuthenticatorError::InsecureJwksUrl {
+    let parsed = Url::parse(url).map_err(|_| OidcAuthenticatorError::MalformedJwksUrl {
         url: url.to_string(),
-    })
+    })?;
+
+    // Block authority shapes that smuggle an attacker host past a
+    // loopback-prefix check. `Url::username()` returns `""` when
+    // absent; `Url::password()` returns `None`. Reject both.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(OidcAuthenticatorError::InsecureJwksUrl {
+            url: url.to_string(),
+        });
+    }
+
+    match parsed.scheme() {
+        "https" => {
+            // `host` is `None` for opaque/relative forms; treat that
+            // as malformed so we never hand reqwest a JWKS URL we
+            // cannot reason about.
+            if parsed.host().is_none() {
+                return Err(OidcAuthenticatorError::MalformedJwksUrl {
+                    url: url.to_string(),
+                });
+            }
+            Ok(())
+        }
+        "http" => match parsed.host() {
+            None => Err(OidcAuthenticatorError::MalformedJwksUrl {
+                url: url.to_string(),
+            }),
+            // `Host::Domain("localhost")` is accepted; anything else
+            // domain-shaped (including `127.evil.com`,
+            // `127.0.0.1.evil.com`, `localhost.evil.com`) gets
+            // rejected because a DNS name resolves to whatever the
+            // attacker controls, not to loopback.
+            Some(Host::Domain("localhost")) => Ok(()),
+            Some(Host::Domain(_)) => Err(OidcAuthenticatorError::InsecureJwksUrl {
+                url: url.to_string(),
+            }),
+            // `Host::Ipv4` / `Host::Ipv6` give the parsed IP
+            // directly; `is_loopback()` covers `127.0.0.0/8` and
+            // `::1`.
+            Some(Host::Ipv4(addr)) => check_loopback(IpAddr::V4(addr), url),
+            Some(Host::Ipv6(addr)) => check_loopback(IpAddr::V6(addr), url),
+        },
+        _ => Err(OidcAuthenticatorError::MalformedJwksUrl {
+            url: url.to_string(),
+        }),
+    }
+}
+
+fn check_loopback(addr: IpAddr, original: &str) -> Result<(), OidcAuthenticatorError> {
+    if addr.is_loopback() {
+        Ok(())
+    } else {
+        Err(OidcAuthenticatorError::InsecureJwksUrl {
+            url: original.to_string(),
+        })
+    }
 }
 
 fn build_decoding_key(jwk: &Jwk, algorithm: Algorithm) -> Option<DecodingKey> {
@@ -643,23 +712,19 @@ mod tests {
 
     #[test]
     fn require_secure_jwks_url_accepts_loopback_http() {
-        // Local-dev / contract tests run JWKS over loopback HTTP.
+        // Local-dev / contract tests run JWKS over loopback HTTP. All
+        // of these must parse cleanly with `url::Url` and pass the
+        // `IpAddr::is_loopback()` check (or be the literal
+        // `localhost`).
         for url in [
             "http://localhost/jwks",
             "http://localhost:3000/jwks",
             "http://127.0.0.1:3000/jwks",
-            "http://127.42.0.1/jwks",
-            "http://[::1]:3000/jwks", // bracketed IPv6 loopback — strip_prefix's host portion includes `[` so the check below should match `::1`
+            "http://127.0.0.1/jwks",
+            "http://127.42.0.1/jwks", // 127.0.0.0/8 — still loopback per RFC 6890
+            "http://[::1]/jwks",
+            "http://[::1]:3000/jwks",
         ] {
-            // bracketed IPv6 fails the simple `host:port` split — accept
-            // the canonical-loopback shapes the implementation handles.
-            if url.contains("[::1]") {
-                // Intentionally documented as a limitation: bracketed
-                // IPv6 loopback would require a fuller URL parser. The
-                // production path uses `https://` for non-loopback so
-                // we accept the gap.
-                continue;
-            }
             assert!(
                 require_secure_jwks_url(url).is_ok(),
                 "loopback URL `{url}` should be accepted",
@@ -673,15 +738,88 @@ mod tests {
             "http://issuer.example/jwks",
             "http://192.168.1.10/jwks",
             "http://attacker.test/jwks",
-            "http://",
-            "",
+            "http://10.0.0.1/jwks",
         ] {
             assert!(
                 matches!(
                     require_secure_jwks_url(url),
                     Err(OidcAuthenticatorError::InsecureJwksUrl { .. })
                 ),
-                "non-https non-loopback URL `{url}` must be rejected",
+                "non-https non-loopback URL `{url}` must be rejected, got: {:?}",
+                require_secure_jwks_url(url),
+            );
+        }
+    }
+
+    // Regression for the JWKS loopback bypass — the previous
+    // string-prefix check accepted any host whose ASCII prefix was
+    // `127.`, so a DNS name like `127.evil.com` (which resolves to
+    // an attacker-controlled IP) slipped through as "loopback".
+    // The fix parses with `url::Url` and requires the host to
+    // either equal `localhost` or parse as an `IpAddr` whose
+    // `is_loopback()` is true; a DNS name cannot satisfy either
+    // branch.
+    #[test]
+    fn require_secure_jwks_url_rejects_loopback_prefix_dns_bypass() {
+        for url in [
+            "http://127.evil.com/jwks",
+            "http://127.0.0.1.evil.com/jwks",
+            "http://127.0.0.1.attacker.example/jwks",
+            "http://localhost.evil.com/jwks",
+        ] {
+            assert!(
+                matches!(
+                    require_secure_jwks_url(url),
+                    Err(OidcAuthenticatorError::InsecureJwksUrl { .. })
+                ),
+                "DNS-shaped loopback-prefix host `{url}` must be rejected, got: {:?}",
+                require_secure_jwks_url(url),
+            );
+        }
+    }
+
+    // Regression for the userinfo bypass — `http://127.0.0.1@evil.com`
+    // looks like a loopback host to a substring matcher but the
+    // real authority is `evil.com`. The fix refuses any URL that
+    // carries a userinfo (username or password) component, on
+    // either scheme, because a JWKS URL legitimately never needs
+    // basic-auth credentials.
+    #[test]
+    fn require_secure_jwks_url_rejects_userinfo_authority() {
+        for url in [
+            "http://127.0.0.1@evil.com/jwks",
+            "http://localhost@evil.com/jwks",
+            "http://user:pass@127.0.0.1/jwks",
+            "https://user@issuer.example/jwks",
+            "https://user:pass@issuer.example/jwks",
+        ] {
+            assert!(
+                matches!(
+                    require_secure_jwks_url(url),
+                    Err(OidcAuthenticatorError::InsecureJwksUrl { .. })
+                ),
+                "userinfo-bearing URL `{url}` must be rejected, got: {:?}",
+                require_secure_jwks_url(url),
+            );
+        }
+    }
+
+    // Malformed inputs (empty string, unparseable, non-http(s)
+    // schemes) must be refused outright rather than silently
+    // bypassing the guard.
+    #[test]
+    fn require_secure_jwks_url_rejects_malformed_or_non_http_scheme() {
+        for url in [
+            "",
+            "not a url",
+            "http://",
+            "ftp://issuer.example/jwks",
+            "file:///etc/jwks.json",
+            "data:application/json,{}",
+        ] {
+            assert!(
+                require_secure_jwks_url(url).is_err(),
+                "malformed/unsupported URL `{url}` must be rejected, got Ok",
             );
         }
     }
