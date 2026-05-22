@@ -25,7 +25,7 @@ pub struct SubagentGoal {
 
 impl SubagentGoal {
     fn byte_len(&self) -> usize {
-        self.task.len() + self.handoff.as_deref().map_or(0, str::len)
+        serde_json::to_vec(self).map_or(usize::MAX, |bytes| bytes.len())
     }
 }
 
@@ -261,7 +261,7 @@ impl BoundedSubagentGoalStore {
             .ok_or(SubagentGoalStoreError::NotFound { run_id })
     }
 
-    fn delete(&self, run_id: TurnRunId) {
+    fn delete_inner(&self, run_id: TurnRunId) {
         let mut inner = lock(&self.inner);
         inner.goals.remove(&run_id);
         inner.insertion_order.retain(|queued| *queued != run_id);
@@ -293,7 +293,7 @@ impl SubagentGoalStore for BoundedSubagentGoalStore {
     }
 
     async fn delete_goal(&self, run_id: TurnRunId) -> Result<(), SubagentGoalStoreError> {
-        self.delete(run_id);
+        self.delete_inner(run_id);
         Ok(())
     }
 }
@@ -354,6 +354,25 @@ mod tests {
             handoff: None,
         };
 
+        assert!(matches!(
+            store.put_goal(run_id, large).await,
+            Err(SubagentGoalStoreError::PayloadTooLarge { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn put_rejects_payload_when_json_overhead_exceeds_limit() {
+        let store = BoundedSubagentGoalStore::new();
+        let run_id = TurnRunId::new();
+        let large = SubagentGoal {
+            task: "x".repeat(MAX_GOAL_BYTES - 8),
+            handoff: None,
+        };
+
+        assert!(
+            large.task.len() <= MAX_GOAL_BYTES,
+            "raw string payload stays below the limit"
+        );
         assert!(matches!(
             store.put_goal(run_id, large).await,
             Err(SubagentGoalStoreError::PayloadTooLarge { .. })
@@ -463,6 +482,13 @@ mod tests {
     #[tokio::test]
     async fn db_backed_goal_store_satisfies_subagent_goal_contract() {
         let store = DbBackedSubagentGoalStore::new(scoped_goal_filesystem());
+        assert_goal_store_contract(&store).await;
+    }
+
+    #[cfg(feature = "filesystem-goal-store")]
+    #[tokio::test]
+    async fn filesystem_goal_store_satisfies_subagent_goal_contract() {
+        let store = FilesystemSubagentGoalStore::new(scoped_goal_filesystem());
         assert_goal_store_contract(&store).await;
     }
 

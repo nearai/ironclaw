@@ -165,6 +165,10 @@ fn profile_resolution_error_to_turn_error(error: RunProfileResolutionError) -> T
     TurnError::AdmissionRejected(AdmissionRejection::new(reason))
 }
 
+fn fresh_turn_run_id() -> TurnRunId {
+    TurnRunId::new()
+}
+
 fn same_scope_envelope(candidate: &TurnScope, scope: &TurnScope) -> bool {
     candidate.tenant_id == scope.tenant_id
         && candidate.agent_id == scope.agent_id
@@ -455,7 +459,7 @@ impl TurnStateStore for InMemoryTurnStateStore {
         }
 
         let turn_id = crate::TurnId::new();
-        let run_id = request.requested_run_id.unwrap_or_default();
+        let run_id = request.requested_run_id.unwrap_or_else(fresh_turn_run_id);
         if inner.records.contains_key(&run_id) {
             let response = Err(TurnError::Conflict {
                 reason: "requested_run_id already bound".to_string(),
@@ -783,7 +787,13 @@ impl TurnStateStore for InMemoryTurnStateStore {
                 .records
                 .get(&root_run_id)
                 .is_some_and(|record| record.status.is_terminal())
+            && !inner.terminal_runs.contains(&root_run_id)
         {
+            if inner.terminal_runs.len() >= inner.limits.max_terminal_records {
+                inner.records.remove(&root_run_id);
+                inner.admission_reservations.remove(&root_run_id);
+                return Ok(());
+            }
             inner.terminal_runs.push_back(root_run_id);
             inner.prune_terminal_records();
         }

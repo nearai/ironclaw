@@ -24,10 +24,10 @@ use ironclaw_turns::{
     TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory, TurnEventKind,
     TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
     TurnEventProjectionService, TurnEventProjectionSource, TurnEventSink,
-    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
-    TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLockVersion, TurnRunId,
-    TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
-    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind,
+    TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent,
+    TurnLockVersion, TurnRunId, TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier,
+    TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     events::EventCursor,
     run_profile::{CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot},
     runner::{
@@ -334,6 +334,13 @@ async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
     );
     assert_eq!(
         store.children_of(&child_scope, parent).await.unwrap(),
+        Vec::new()
+    );
+    assert_eq!(
+        store
+            .children_of(&scope("thread-parent"), TurnRunId::new())
+            .await
+            .unwrap(),
         Vec::new()
     );
     assert!(
@@ -2295,6 +2302,119 @@ async fn terminal_root_with_tree_reservation_survives_terminal_pruning() {
 }
 
 #[tokio::test]
+async fn terminal_root_release_does_not_duplicate_pruning_queue() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            max_terminal_records: 1,
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let parent_scope = scope("thread-tree-root-release");
+    let parent_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-tree-root-release",
+                "idem-tree-root-release",
+            ))
+            .await
+            .unwrap(),
+    );
+
+    store
+        .reserve_tree_descendants(&parent_scope, parent_run_id, 1, 3)
+        .await
+        .unwrap();
+    complete_queued_run(&store, parent_run_id, "thread-tree-root-release").await;
+    store
+        .release_tree_descendants(&parent_scope, parent_run_id, 1)
+        .await
+        .unwrap();
+
+    assert!(
+        store
+            .get_run_record(&parent_scope, parent_run_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "release must not enqueue the same terminal run twice and prune it immediately"
+    );
+}
+
+#[tokio::test]
+async fn releasing_old_reserved_terminal_root_keeps_newer_terminal_record() {
+    let store = Arc::new(InMemoryTurnStateStore::with_limits(
+        InMemoryTurnStateStoreLimits {
+            max_terminal_records: 1,
+            ..InMemoryTurnStateStoreLimits::default()
+        },
+    ));
+    let coordinator = DefaultTurnCoordinator::new(store.clone());
+    let parent_scope = scope("thread-tree-root-release-after-churn");
+    let parent_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-tree-root-release-after-churn",
+                "idem-tree-root-release-after-churn",
+            ))
+            .await
+            .unwrap(),
+    );
+
+    store
+        .reserve_tree_descendants(&parent_scope, parent_run_id, 1, 3)
+        .await
+        .unwrap();
+    complete_queued_run(
+        &store,
+        parent_run_id,
+        "thread-tree-root-release-after-churn",
+    )
+    .await;
+
+    let newer_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-newer-terminal",
+                "idem-newer-terminal",
+            ))
+            .await
+            .unwrap(),
+    );
+    complete_queued_run(&store, newer_run_id, "thread-newer-terminal").await;
+    assert!(
+        store
+            .get_run_record(&parent_scope, parent_run_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "reservation should keep the old terminal root through churn"
+    );
+
+    store
+        .release_tree_descendants(&parent_scope, parent_run_id, 1)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store
+            .get_run_record(&parent_scope, parent_run_id)
+            .await
+            .unwrap(),
+        None,
+        "old terminal root should be pruned when its reservation clears"
+    );
+    assert!(
+        store
+            .get_run_record(&scope("thread-newer-terminal"), newer_run_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "newer retained terminal record should not be evicted by old-root release"
+    );
+}
+
+#[tokio::test]
 async fn actor_user_capacity_uses_submitting_actor_not_thread_scope() {
     let limits = StaticTurnAdmissionLimitProvider::default()
         .with_total_limit(TurnAdmissionAxisKind::ActorUser, 1);
@@ -3098,6 +3218,33 @@ async fn submit_turn_idempotency_replays_same_admission_rejection() {
         ))
     );
     assert!(store.events().is_empty());
+}
+
+#[test]
+fn capacity_exceeded_idempotency_replay_preserves_resource_and_cap() {
+    let scope = scope("thread-capacity-replay");
+    let key = IdempotencyKey::new("idem-capacity-replay").unwrap();
+    let record = TurnIdempotencyRecord {
+        scope,
+        operation: TurnIdempotencyOperationKind::Submit,
+        key,
+        turn_id: None,
+        run_id: None,
+        outcome: TurnIdempotencyOutcomeKind::CapacityExceeded,
+        replay: TurnIdempotencyReplay::Error(TurnIdempotencyErrorReplay::from_error(
+            &TurnError::capacity_exceeded("spawn_tree_descendants", 3),
+        )),
+        created_at: Utc::now(),
+        expires_at: None,
+    };
+
+    assert_eq!(
+        record.replay_submit(),
+        Some(Err(TurnError::CapacityExceeded {
+            resource: "spawn_tree_descendants",
+            cap: 3,
+        }))
+    );
 }
 
 #[tokio::test]

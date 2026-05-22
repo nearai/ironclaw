@@ -2,10 +2,11 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use ironclaw_turns::{
-    LoopFailureKind,
+    LoopFailureKind, LoopResultRef,
     run_profile::{
         CapabilityBatchInvocation, CapabilityCallCandidate, CapabilityFailureKind,
-        CapabilityOutcome, LoopDriverNoteKind, LoopProgressEvent, VisibleCapabilitySurface,
+        CapabilityOutcome, CapabilityResultMessage, LoopDriverNoteKind, LoopProgressEvent,
+        VisibleCapabilitySurface,
     },
 };
 
@@ -337,14 +338,8 @@ impl CapabilityStage {
                 safe_summary,
                 ..
             } => {
-                let result = ironclaw_turns::run_profile::CapabilityResultMessage {
-                    result_ref,
-                    safe_summary,
-                    terminate_hint: false,
-                };
-                append_capability_result_ref(ctx.host, &call, &result).await?;
-                push_completed_result(&mut state, result);
-                Ok(BatchStep::Continue(Box::new(state)))
+                self.handle_spawned_child_run(ctx, state, call, result_ref, safe_summary)
+                    .await
             }
             CapabilityOutcome::SpawnedProcess(handle) => {
                 self.fail_unsupported_process_wait(ctx, state, &call, &handle.process_ref)
@@ -384,6 +379,27 @@ impl CapabilityStage {
                     .await
             }
         }
+    }
+
+    async fn handle_spawned_child_run(
+        &self,
+        ctx: StageContext<'_>,
+        mut state: LoopExecutionState,
+        call: CapabilityCallCandidate,
+        result_ref: LoopResultRef,
+        safe_summary: String,
+    ) -> Result<BatchStep, AgentLoopExecutorError> {
+        let safe_summary = sanitized_strategy_summary(safe_summary)?
+            .as_str()
+            .to_string();
+        let result = CapabilityResultMessage {
+            result_ref,
+            safe_summary,
+            terminate_hint: false,
+        };
+        append_capability_result_ref(ctx.host, &call, &result).await?;
+        push_completed_result(&mut state, result);
+        Ok(BatchStep::Continue(Box::new(state)))
     }
 
     async fn handle_capability_error(

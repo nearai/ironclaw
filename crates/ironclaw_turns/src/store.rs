@@ -35,18 +35,28 @@ pub trait TurnStateStore: Send + Sync {
 
     async fn get_run_state(&self, request: GetRunStateRequest) -> Result<TurnRunState, TurnError>;
 
+    /// List child runs only when the parent is visible in the supplied scope.
+    ///
+    /// Implementations must not leak whether a run exists in another tenant,
+    /// agent, project, or thread scope; missing and unauthorized parents should
+    /// both produce an empty child list.
     async fn children_of(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
     ) -> Result<Vec<TurnRunRecord>, TurnError>;
 
+    /// Return a run record only when it belongs to the supplied exact scope.
     async fn get_run_record(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
     ) -> Result<Option<TurnRunRecord>, TurnError>;
 
+    /// Reserve descendant capacity for a root run after validating root scope.
+    ///
+    /// Missing roots must return not found and cross-scope roots must return
+    /// unauthorized rather than mutating reservation state.
     async fn reserve_tree_descendants(
         &self,
         scope: &TurnScope,
@@ -55,6 +65,7 @@ pub trait TurnStateStore: Send + Sync {
         cap: u32,
     ) -> Result<SpawnTreeReservation, TurnError>;
 
+    /// Release descendant capacity for a root run after validating root scope.
     async fn release_tree_descendants(
         &self,
         scope: &TurnScope,
@@ -260,13 +271,25 @@ pub enum TurnIdempotencyReplay {
 pub struct TurnIdempotencyErrorReplay {
     pub category: TurnErrorCategory,
     pub adapter_status_code: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_resource: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_cap: Option<u64>,
 }
 
 impl TurnIdempotencyErrorReplay {
     pub fn from_error(error: &TurnError) -> Self {
+        let (capacity_resource, capacity_cap) = match error {
+            TurnError::CapacityExceeded { resource, cap } => {
+                (Some((*resource).to_string()), Some(*cap))
+            }
+            _ => (None, None),
+        };
         Self {
             category: error.category(),
             adapter_status_code: error.adapter_status_code(),
+            capacity_resource,
+            capacity_cap,
         }
     }
 
@@ -284,8 +307,8 @@ impl TurnIdempotencyErrorReplay {
                 reason: "replayed conflict".to_string(),
             },
             TurnErrorCategory::CapacityExceeded => TurnError::CapacityExceeded {
-                resource: "replayed",
-                cap: 0,
+                resource: replayed_capacity_resource(self.capacity_resource.as_deref()),
+                cap: self.capacity_cap.unwrap_or_default(),
             },
             TurnErrorCategory::ThreadBusy => TurnError::Conflict {
                 reason: "replayed malformed thread-busy idempotency record".to_string(),
@@ -294,6 +317,13 @@ impl TurnIdempotencyErrorReplay {
                 reason: "replayed malformed admission idempotency record".to_string(),
             },
         }
+    }
+}
+
+fn replayed_capacity_resource(resource: Option<&str>) -> &'static str {
+    match resource {
+        Some("spawn_tree_descendants") => "spawn_tree_descendants",
+        _ => "replayed",
     }
 }
 
