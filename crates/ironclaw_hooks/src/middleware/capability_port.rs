@@ -187,38 +187,145 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
         &self,
         request: CapabilityBatchInvocation,
     ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-        // Each invocation runs its own hook pre-flight. Hooks can deny one
-        // call in a batch without affecting others — the inner port still
-        // executes the non-denied calls.
+        // Two-phase batch dispatch that preserves the inner port's batch
+        // semantics when hooks are active:
+        //
+        //   Phase 1 — preflight: walk invocations in order, run each through
+        //   `BeforeCapability` hook dispatch, and translate restrictive
+        //   decisions (deny / pause / fail-closed) into outcome slots
+        //   immediately. Entries the hooks allow are queued for the inner
+        //   port. If a hook-translated outcome is itself a suspension and
+        //   `stop_on_first_suspension` is set, preflight stops there and the
+        //   remaining invocations are dropped — mirroring the previous
+        //   sequential semantics.
+        //
+        //   Phase 2 — inner batch: forward all queued (hook-allowed)
+        //   invocations to the inner port as a SINGLE `invoke_capability_batch`
+        //   call, then splice its outcomes back into their original index
+        //   positions. The inner port may stop early on its own suspensions;
+        //   any queued entry without a corresponding inner outcome is treated
+        //   the same as a hook-suspension stop (dropped, no observer).
+        //
+        //   AfterCapability observers fire per resolved entry in the merged
+        //   outcome vec, in original index order, matching the per-entry
+        //   semantics established in PR #3573 (serrrfirat P2 #3).
         let CapabilityBatchInvocation {
             invocations,
             stop_on_first_suspension,
         } = request;
-        let mut outcomes = Vec::with_capacity(invocations.len());
-        let mut stopped_on_suspension = false;
+
+        // Phase 1: preflight hooks for each invocation in order.
+        enum Slot {
+            /// Hook produced a final outcome — no inner call needed.
+            Resolved {
+                outcome: CapabilityOutcome,
+                provider: Option<ironclaw_host_api::ExtensionId>,
+            },
+            /// Hooks allowed; the inner port will produce the outcome.
+            Pending {
+                provider: Option<ironclaw_host_api::ExtensionId>,
+            },
+        }
+
+        let mut slots: Vec<Slot> = Vec::with_capacity(invocations.len());
+        let mut pending: Vec<CapabilityInvocation> = Vec::new();
+        let mut stopped_in_preflight = false;
         for invocation in invocations {
-            if stopped_on_suspension {
-                break;
-            }
             let provider = self
                 .provider_resolver
                 .provider_for(&invocation.capability_id.to_string())
                 .await;
             let dispatch = self.run_dispatch(&invocation, provider.clone()).await;
-            // Capture the inner result (Ok or Err) before dispatching
-            // AfterCapability observers — propagating an error with `?`
-            // here would skip observers for failed batch entries, which
-            // is inconsistent with the single-invocation path and hides
-            // failures from audit/telemetry (serrrfirat P2 #3, PR #3573).
-            let invocation_result: Result<CapabilityOutcome, AgentLoopHostError> =
-                match self.decision_to_outcome(&dispatch).await {
-                    Some(translated) => Ok(translated),
-                    None => self.inner.invoke_capability(invocation).await,
-                };
-            // Fire AfterCapability observers per batch entry, mirroring the
-            // single-invocation path. The provider is resolved per-invocation
-            // so the dispatcher can enforce `OwnCapabilities` scope on
-            // Installed observers (serrrfirat finding #3).
+            match self.decision_to_outcome(&dispatch).await {
+                Some(translated) => {
+                    let is_suspension = translated.is_suspension();
+                    slots.push(Slot::Resolved {
+                        outcome: translated,
+                        provider,
+                    });
+                    if is_suspension && stop_on_first_suspension {
+                        stopped_in_preflight = true;
+                        break;
+                    }
+                }
+                None => {
+                    slots.push(Slot::Pending {
+                        provider: provider.clone(),
+                    });
+                    pending.push(invocation);
+                }
+            }
+        }
+
+        // Phase 2: forward the surviving (hook-allowed) entries to the inner
+        // port as a SINGLE batched call. Empty batches skip the inner call so
+        // we don't perturb implementations that special-case empty input.
+        let inner_result: Result<CapabilityBatchOutcome, AgentLoopHostError> = if pending.is_empty()
+        {
+            Ok(CapabilityBatchOutcome {
+                outcomes: Vec::new(),
+                stopped_on_suspension: false,
+            })
+        } else {
+            self.inner
+                .invoke_capability_batch(CapabilityBatchInvocation {
+                    invocations: pending,
+                    stop_on_first_suspension,
+                })
+                .await
+        };
+
+        // If the inner port errored, we still owe per-entry AfterCapability
+        // observers for every slot we already produced an outcome for (Phase 1
+        // resolved slots). Pending slots have no outcome to observe against;
+        // matching the single-invocation path, we fire one observer per
+        // pending slot so failed batch entries remain visible to telemetry
+        // (serrrfirat P2 #3 on PR #3573).
+        let inner_outcome = match inner_result {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                for slot in slots {
+                    let provider = match slot {
+                        Slot::Resolved { provider, .. } => provider,
+                        Slot::Pending { provider } => provider,
+                    };
+                    let _ = self
+                        .dispatcher
+                        .dispatch_observer_at_with_provider(
+                            crate::registry::HookPointSpec::AfterCapability,
+                            self.tenant_id.clone(),
+                            provider,
+                        )
+                        .await;
+                }
+                return Err(err);
+            }
+        };
+        let CapabilityBatchOutcome {
+            outcomes: mut inner_outcomes,
+            stopped_on_suspension: inner_stopped,
+        } = inner_outcome;
+        // We pop from the front by reversing so we can take in original order.
+        inner_outcomes.reverse();
+
+        // Merge: walk slots in order, splicing inner outcomes into pending
+        // slots. Dispatch AfterCapability observer per merged entry.
+        let mut outcomes = Vec::with_capacity(slots.len());
+        let mut stopped_on_suspension = stopped_in_preflight;
+        for slot in slots {
+            let (outcome, provider) = match slot {
+                Slot::Resolved { outcome, provider } => (outcome, provider),
+                Slot::Pending { provider } => match inner_outcomes.pop() {
+                    Some(inner) => (inner, provider),
+                    None => {
+                        // Inner port stopped early (suspension) and consumed
+                        // fewer outcomes than we queued. Remaining pending
+                        // slots have no outcome — drop them, matching the
+                        // pre-refactor sequential break-out semantics.
+                        break;
+                    }
+                },
+            };
             let _ = self
                 .dispatcher
                 .dispatch_observer_at_with_provider(
@@ -227,11 +334,16 @@ impl LoopCapabilityPort for HookedLoopCapabilityPort {
                     provider,
                 )
                 .await;
-            let outcome = invocation_result?;
             if outcome.is_suspension() && stop_on_first_suspension {
                 stopped_on_suspension = true;
             }
             outcomes.push(outcome);
+            if stopped_on_suspension {
+                break;
+            }
+        }
+        if inner_stopped {
+            stopped_on_suspension = true;
         }
         Ok(CapabilityBatchOutcome {
             outcomes,
@@ -346,17 +458,26 @@ mod tests {
 
     struct AlwaysCompletedPort {
         calls: Mutex<Vec<CapabilityId>>,
+        /// Number of times `invoke_capability_batch` was called on the inner
+        /// port. Distinct from `calls.len()`, which counts the per-entry
+        /// `invoke_capability` invocations the batch impl makes underneath.
+        batch_calls: Mutex<Vec<Vec<CapabilityId>>>,
     }
 
     impl AlwaysCompletedPort {
         fn new() -> Self {
             Self {
                 calls: Mutex::new(Vec::new()),
+                batch_calls: Mutex::new(Vec::new()),
             }
         }
 
         fn calls(&self) -> Vec<CapabilityId> {
             self.calls.lock().expect("not poisoned").clone()
+        }
+
+        fn batch_calls(&self) -> Vec<Vec<CapabilityId>> {
+            self.batch_calls.lock().expect("not poisoned").clone()
         }
     }
 
@@ -399,6 +520,13 @@ mod tests {
             &self,
             request: CapabilityBatchInvocation,
         ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
+            self.batch_calls.lock().expect("not poisoned").push(
+                request
+                    .invocations
+                    .iter()
+                    .map(|i| i.capability_id.clone())
+                    .collect(),
+            );
             let mut outcomes = Vec::with_capacity(request.invocations.len());
             for invocation in request.invocations {
                 outcomes.push(self.invoke_capability(invocation).await?);
@@ -706,7 +834,14 @@ mod tests {
                 &self,
                 _request: CapabilityBatchInvocation,
             ) -> Result<CapabilityBatchOutcome, AgentLoopHostError> {
-                unreachable!()
+                // After the batched-dispatch refactor, the wrapper forwards
+                // hook-allowed invocations as a single batched call. Surface
+                // the same Unavailable error here so the observer-on-error
+                // contract from PR #3573 still has coverage.
+                Err(AgentLoopHostError::new(
+                    ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable,
+                    "inner port failed",
+                ))
             }
         }
 
@@ -785,6 +920,198 @@ mod tests {
         for entry in &outcome.outcomes {
             assert!(matches!(entry, CapabilityOutcome::Completed(_)));
         }
+    }
+
+    // ── Batched-dispatch regression coverage ───────────────────────────────
+    //
+    // The middleware previously degraded `invoke_capability_batch` into N
+    // sequential `invoke_capability` calls whenever any hook was registered,
+    // wiping out the O(1)-batch property that the inner port relies on for
+    // bulk-dispatch performance. The tests below pin the restored behavior
+    // (PR #3573 deferred refactor).
+
+    /// When NO hook denies, the wrapper must call the inner port's
+    /// `invoke_capability_batch` exactly once, with every invocation in a
+    /// single payload — not N times via `invoke_capability`.
+    #[tokio::test]
+    async fn batch_invocation_remains_batched_when_no_hooks_deny() {
+        struct AllowingHook;
+        #[async_trait]
+        impl RestrictedBeforeCapabilityHook for AllowingHook {
+            async fn evaluate(
+                &self,
+                _ctx: &BeforeCapabilityHookContext,
+                sink: &mut dyn RestrictedGateSink,
+            ) {
+                sink.pass();
+            }
+        }
+
+        let inner = Arc::new(AlwaysCompletedPort::new());
+        let (dispatcher, _) = dispatcher_with_restricted_hook("allowing", Box::new(AllowingHook));
+        let wrapped = HookedLoopCapabilityPort::new(inner.clone(), dispatcher, tenant());
+
+        let batch = CapabilityBatchInvocation {
+            invocations: vec![
+                invocation("cap.alpha"),
+                invocation("cap.beta"),
+                invocation("cap.gamma"),
+            ],
+            stop_on_first_suspension: false,
+        };
+        let outcome = wrapped.invoke_capability_batch(batch).await.expect("ok");
+        assert_eq!(outcome.outcomes.len(), 3);
+        // The critical perf invariant: ONE batched call, not three sequential.
+        let batch_calls = inner.batch_calls();
+        assert_eq!(
+            batch_calls.len(),
+            1,
+            "inner port must see exactly one batched call when hooks allow all entries; \
+             saw {} batched calls (sequential degradation)",
+            batch_calls.len()
+        );
+        assert_eq!(
+            batch_calls[0].len(),
+            3,
+            "all three entries batched together"
+        );
+    }
+
+    /// Partial denial: a hook denies some entries; the surviving entries
+    /// must still be forwarded as a SINGLE batched call to the inner port,
+    /// and the merged outcomes must be in original index order.
+    #[tokio::test]
+    async fn batch_invocation_filters_denied_entries_and_preserves_index_mapping() {
+        /// Denies only the capability whose name matches `target`.
+        struct SelectiveDenyHook {
+            target: &'static str,
+        }
+        #[async_trait]
+        impl RestrictedBeforeCapabilityHook for SelectiveDenyHook {
+            async fn evaluate(
+                &self,
+                ctx: &BeforeCapabilityHookContext,
+                sink: &mut dyn RestrictedGateSink,
+            ) {
+                if ctx.capability_name == self.target {
+                    sink.deny("selective deny");
+                } else {
+                    sink.pass();
+                }
+            }
+        }
+
+        let inner = Arc::new(AlwaysCompletedPort::new());
+        let (dispatcher, _) = dispatcher_with_restricted_hook(
+            "selective",
+            Box::new(SelectiveDenyHook { target: "cap.beta" }),
+        );
+        let wrapped = HookedLoopCapabilityPort::new(inner.clone(), dispatcher, tenant());
+
+        let batch = CapabilityBatchInvocation {
+            invocations: vec![
+                invocation("cap.alpha"),
+                invocation("cap.beta"),
+                invocation("cap.gamma"),
+            ],
+            stop_on_first_suspension: false,
+        };
+        let outcome = wrapped.invoke_capability_batch(batch).await.expect("ok");
+        assert_eq!(outcome.outcomes.len(), 3);
+        // Index 0 and 2 forwarded to inner; index 1 short-circuited to Denied.
+        assert!(matches!(
+            outcome.outcomes[0],
+            CapabilityOutcome::Completed(_)
+        ));
+        assert!(matches!(outcome.outcomes[1], CapabilityOutcome::Denied(_)));
+        assert!(matches!(
+            outcome.outcomes[2],
+            CapabilityOutcome::Completed(_)
+        ));
+
+        let batch_calls = inner.batch_calls();
+        assert_eq!(
+            batch_calls.len(),
+            1,
+            "remaining entries must be forwarded in a single batched call"
+        );
+        assert_eq!(
+            batch_calls[0].len(),
+            2,
+            "only the two non-denied entries reach the inner port"
+        );
+        // Order must match the original (allowed) order: alpha then gamma.
+        assert_eq!(batch_calls[0][0].as_str(), "cap.alpha");
+        assert_eq!(batch_calls[0][1].as_str(), "cap.gamma");
+    }
+
+    /// Even though the inner port is called only ONCE, `AfterCapability`
+    /// observers must fire per-entry against the merged outcome vec — the
+    /// per-entry telemetry contract from PR #3573 (serrrfirat finding #3)
+    /// is independent of the inner-port call topology.
+    #[tokio::test]
+    async fn batch_invocation_dispatches_after_capability_observer_per_entry() {
+        use crate::points::ObserverHookContext;
+        use crate::sink::{ObserverHook, ObserverSink};
+
+        struct CountingObserver {
+            seen: Arc<Mutex<u32>>,
+        }
+        #[async_trait]
+        impl ObserverHook for CountingObserver {
+            async fn observe(&self, _ctx: &ObserverHookContext, _sink: &mut dyn ObserverSink) {
+                *self.seen.lock().expect("not poisoned") += 1;
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(0u32));
+        let observer_id = HookId::for_builtin("test::after_cap_per_entry", HookVersion::ONE);
+        let mut registry = HookRegistry::new();
+        registry
+            .insert(HookBinding {
+                hook_id: observer_id,
+                hook_version: HookVersion::ONE,
+                trust_class: HookTrustClass::Builtin,
+                phase: HookPhase::Telemetry,
+                priority: HookPriority::DEFAULT,
+                point: HookPointSpec::AfterCapability,
+                owning_extension: None,
+                scope: HookBindingScope::Global,
+                poisoned: false,
+            })
+            .expect("ok");
+        let mut dispatcher = HookDispatcher::new(registry);
+        dispatcher.install_observer_impl(
+            observer_id,
+            crate::dispatch::ObserverHookImpl::Any(Box::new(CountingObserver {
+                seen: seen.clone(),
+            })),
+        );
+
+        let inner = Arc::new(AlwaysCompletedPort::new());
+        let wrapped = HookedLoopCapabilityPort::new(inner.clone(), Arc::new(dispatcher), tenant());
+
+        let batch = CapabilityBatchInvocation {
+            invocations: vec![
+                invocation("cap.alpha"),
+                invocation("cap.beta"),
+                invocation("cap.gamma"),
+            ],
+            stop_on_first_suspension: false,
+        };
+        let outcome = wrapped.invoke_capability_batch(batch).await.expect("ok");
+        assert_eq!(outcome.outcomes.len(), 3);
+        assert_eq!(
+            inner.batch_calls().len(),
+            1,
+            "inner port called exactly once (batched)"
+        );
+        assert_eq!(
+            *seen.lock().expect("not poisoned"),
+            3,
+            "AfterCapability observer must fire per merged entry (3 entries) \
+             even though the inner port was batched into a single call"
+        );
     }
 
     // ── C3 regression: provider resolver populates hook context ────────────
