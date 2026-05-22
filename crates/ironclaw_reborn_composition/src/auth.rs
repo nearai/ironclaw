@@ -53,12 +53,14 @@ impl RebornAuthContinuationDispatcher for RebornProductWorkflowAuthContinuationD
         &self,
         event: AuthContinuationEvent,
     ) -> Result<(), AuthProductError> {
+        let flow_id = event.flow_id;
         self.dispatcher
             .dispatch(event)
             .await
             .map(|_| ())
             .map_err(|error| {
-                tracing::warn!(
+                tracing::debug!(
+                    %flow_id,
                     error = %error,
                     "product auth continuation dispatch through product workflow failed"
                 );

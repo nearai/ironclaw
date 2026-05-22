@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef};
 use ironclaw_turns::{
-    GateRef, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnRequest, SourceBindingRef, TurnActor,
-    TurnCoordinator, TurnRunId, TurnScope,
+    GateRef, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnRequest,
+    SourceBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnScope, TurnStatus,
 };
 use uuid::Uuid;
 
@@ -51,6 +51,8 @@ impl ProductAuthContinuationDispatcher {
         let run_id = parse_turn_run_id(turn_run_ref.as_str())?;
         let gate_resolution_ref = parse_gate_ref(gate_ref.as_str())?;
         let binding_id = format!("{}|{}|{}", event.flow_id, run_id, gate_ref.as_str());
+        self.assert_run_blocked_on_auth_gate(&scope, run_id, &gate_resolution_ref)
+            .await?;
 
         self.turn_coordinator
             .resume_turn(ResumeTurnRequest {
@@ -66,6 +68,32 @@ impl ProductAuthContinuationDispatcher {
             .map_err(|error| ProductWorkflowError::TurnSubmissionFailed { error })?;
 
         Ok(AuthContinuationDispatchOutcome::TurnGateResumed { run_id })
+    }
+
+    async fn assert_run_blocked_on_auth_gate(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        expected_gate_ref: &GateRef,
+    ) -> Result<(), ProductWorkflowError> {
+        let state = self
+            .turn_coordinator
+            .get_run_state(GetRunStateRequest {
+                scope: scope.clone(),
+                run_id,
+            })
+            .await
+            .map_err(|error| ProductWorkflowError::TurnSubmissionFailed { error })?;
+
+        if state.status == TurnStatus::BlockedAuth
+            && state.gate_ref.as_ref() == Some(expected_gate_ref)
+        {
+            return Ok(());
+        }
+
+        Err(ProductWorkflowError::TurnResumeRejected {
+            reason: "auth continuation does not match a blocked auth gate".to_string(),
+        })
     }
 }
 
@@ -164,21 +192,41 @@ mod tests {
         AgentId, InvocationId, ProjectId, ResourceScope, TenantId, ThreadId, UserId,
     };
     use ironclaw_turns::{
-        CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest, ResumeTurnRequest,
-        ResumeTurnResponse, SubmitTurnRequest, SubmitTurnResponse, TurnCoordinator, TurnError,
-        TurnRunId, TurnRunState, TurnStatus,
+        AcceptedMessageRef, CancelRunRequest, CancelRunResponse, EventCursor, GetRunStateRequest,
+        ReplyTargetBindingRef, ResumeTurnRequest, ResumeTurnResponse, RunProfileId,
+        RunProfileVersion, SourceBindingRef, SubmitTurnRequest, SubmitTurnResponse,
+        TurnCoordinator, TurnError, TurnId, TurnRunId, TurnRunState, TurnStatus,
     };
 
     use super::*;
 
-    #[derive(Default)]
     struct RecordingTurnCoordinator {
         resumes: Mutex<Vec<ResumeTurnRequest>>,
+        state: Mutex<Option<TurnRunState>>,
+        resume_error: Mutex<Option<TurnError>>,
+    }
+
+    impl Default for RecordingTurnCoordinator {
+        fn default() -> Self {
+            Self {
+                resumes: Mutex::new(Vec::new()),
+                state: Mutex::new(None),
+                resume_error: Mutex::new(None),
+            }
+        }
     }
 
     impl RecordingTurnCoordinator {
         fn resumes(&self) -> Vec<ResumeTurnRequest> {
             self.resumes.lock().expect("resume lock").clone()
+        }
+
+        fn set_state(&self, state: TurnRunState) {
+            *self.state.lock().expect("state lock") = Some(state);
+        }
+
+        fn fail_resume_with(&self, error: TurnError) {
+            *self.resume_error.lock().expect("resume error lock") = Some(error);
         }
     }
 
@@ -195,6 +243,9 @@ mod tests {
             &self,
             request: ResumeTurnRequest,
         ) -> Result<ResumeTurnResponse, TurnError> {
+            if let Some(error) = self.resume_error.lock().expect("resume error lock").take() {
+                return Err(error);
+            }
             let run_id = request.run_id;
             self.resumes.lock().expect("resume lock").push(request);
             Ok(ResumeTurnResponse {
@@ -215,7 +266,11 @@ mod tests {
             &self,
             _request: GetRunStateRequest,
         ) -> Result<TurnRunState, TurnError> {
-            panic!("get_run_state is not used by auth continuation tests");
+            self.state
+                .lock()
+                .expect("state lock")
+                .clone()
+                .ok_or(TurnError::ScopeNotFound)
         }
     }
 
@@ -240,11 +295,42 @@ mod tests {
         }
     }
 
+    fn run_state(run_id: TurnRunId, status: TurnStatus, gate_ref: Option<&str>) -> TurnRunState {
+        TurnRunState {
+            scope: TurnScope::new(
+                TenantId::new("tenant-auth").unwrap(),
+                Some(AgentId::new("agent-auth").unwrap()),
+                Some(ProjectId::new("project-auth").unwrap()),
+                ThreadId::new("thread-auth").unwrap(),
+            ),
+            actor: Some(TurnActor::new(UserId::new("alice").unwrap())),
+            turn_id: TurnId::new(),
+            run_id,
+            status,
+            accepted_message_ref: AcceptedMessageRef::new("message-auth").unwrap(),
+            source_binding_ref: SourceBindingRef::new("source-auth").unwrap(),
+            reply_target_binding_ref: ReplyTargetBindingRef::new("reply-auth").unwrap(),
+            resolved_run_profile_id: RunProfileId::default_profile(),
+            resolved_run_profile_version: RunProfileVersion::new(1),
+            resolved_model_route: None,
+            received_at: Utc::now(),
+            checkpoint_id: None,
+            gate_ref: gate_ref.map(|value| GateRef::new(value).unwrap()),
+            failure: None,
+            event_cursor: EventCursor::default(),
+        }
+    }
+
     #[tokio::test]
     async fn turn_gate_continuation_resumes_through_turn_coordinator() {
         let coordinator = Arc::new(RecordingTurnCoordinator::default());
         let dispatcher = ProductAuthContinuationDispatcher::new(coordinator.clone());
         let run_id = TurnRunId::new();
+        coordinator.set_state(run_state(
+            run_id,
+            TurnStatus::BlockedAuth,
+            Some("gate:auth"),
+        ));
         let event = scoped_event(AuthContinuationRef::TurnGateResume {
             turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
             gate_ref: AuthGateRef::new("gate:auth").unwrap(),
@@ -268,6 +354,83 @@ mod tests {
                 .as_str()
                 .starts_with("auth-continuation:")
         );
+    }
+
+    #[tokio::test]
+    async fn turn_gate_continuation_rejects_non_auth_gate() {
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let dispatcher = ProductAuthContinuationDispatcher::new(coordinator.clone());
+        let run_id = TurnRunId::new();
+        coordinator.set_state(run_state(
+            run_id,
+            TurnStatus::BlockedApproval,
+            Some("gate:auth"),
+        ));
+        let event = scoped_event(AuthContinuationRef::TurnGateResume {
+            turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
+            gate_ref: AuthGateRef::new("gate:auth").unwrap(),
+        });
+
+        let err = dispatcher
+            .dispatch(event)
+            .await
+            .expect_err("non-auth gates must not resume through auth continuation");
+
+        assert!(matches!(
+            err,
+            ProductWorkflowError::TurnResumeRejected { .. }
+        ));
+        assert!(coordinator.resumes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn turn_gate_continuation_maps_resume_failure_to_turn_submission_failed() {
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let dispatcher = ProductAuthContinuationDispatcher::new(coordinator.clone());
+        let run_id = TurnRunId::new();
+        coordinator.set_state(run_state(
+            run_id,
+            TurnStatus::BlockedAuth,
+            Some("gate:auth"),
+        ));
+        coordinator.fail_resume_with(TurnError::Unavailable {
+            reason: "coordinator offline".to_string(),
+        });
+        let event = scoped_event(AuthContinuationRef::TurnGateResume {
+            turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
+            gate_ref: AuthGateRef::new("gate:auth").unwrap(),
+        });
+
+        let err = dispatcher
+            .dispatch(event)
+            .await
+            .expect_err("resume failure should be preserved");
+
+        assert!(matches!(
+            err,
+            ProductWorkflowError::TurnSubmissionFailed { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn turn_gate_continuation_rejects_invalid_turn_run_ref() {
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let dispatcher = ProductAuthContinuationDispatcher::new(coordinator.clone());
+        let event = scoped_event(AuthContinuationRef::TurnGateResume {
+            turn_run_ref: TurnRunRef::new("not-a-uuid").unwrap(),
+            gate_ref: AuthGateRef::new("gate:auth").unwrap(),
+        });
+
+        let err = dispatcher
+            .dispatch(event)
+            .await
+            .expect_err("invalid run ref should reject before resume");
+
+        assert!(matches!(
+            err,
+            ProductWorkflowError::TurnSubmissionRejected { .. }
+        ));
+        assert!(coordinator.resumes().is_empty());
     }
 
     #[tokio::test]
