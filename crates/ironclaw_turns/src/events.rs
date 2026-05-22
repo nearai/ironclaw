@@ -99,10 +99,21 @@ pub trait TurnEventSink: Send + Sync {
 
 #[async_trait]
 pub trait TurnCommittedEventObserver: Send + Sync {
+    /// Returns true when this observer must process a committed state.
+    ///
+    /// Observer errors are treated as required side-effect failures by most
+    /// coordinator and runner transitions. Callers that have already committed
+    /// a lease batch may log observer failures and return the committed state
+    /// so the runner does not lose track of persisted ownership.
     fn observes_state(&self, _state: &TurnRunState) -> bool {
         true
     }
 
+    /// Returns true when this observer must process a committed event.
+    ///
+    /// Event observers run before best-effort event sinks. Errors are
+    /// propagated to the coordinator caller because the observer represents an
+    /// internal consistency side effect rather than external notification.
     fn observes_event(&self, _event: &TurnLifecycleEvent) -> bool {
         true
     }

@@ -15,8 +15,8 @@ use ironclaw_loop_support::{
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 use ironclaw_turns::{
     AgentLoopDriverError, CheckpointStateStore, DefaultTurnCoordinator, LoopCheckpointStore,
-    RunProfileResolver, TurnCommittedEventObserver, TurnEventProjectionSource, TurnEventSink,
-    TurnRunWakeNotifier, TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateStore,
+    RunProfileResolver, TurnCommittedEventObserver, TurnEventSink, TurnRunWakeNotifier,
+    TurnSpawnTreePort, TurnSpawnTreeStateStore, TurnStateStore,
     loop_exit::LoopExitEvidencePort,
     run_profile::{
         AgentLoopHostError, InstructionSafetyContext, LoopCapabilityPort, LoopHostMilestoneSink,
@@ -58,7 +58,7 @@ pub struct DefaultPlannedRuntimeConfig {
 
 pub struct DefaultPlannedRuntimeParts<T, G>
 where
-    T: TurnSpawnTreeStateStore + TurnEventProjectionSource + TurnRunTransitionPort + Send + Sync + 'static,
+    T: TurnSpawnTreeStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     pub turn_state: Arc<T>,
@@ -108,7 +108,7 @@ impl<T> RuntimeSubagentGoalStore for T where
 
 pub struct RebornRuntimeLoopComposition<T, S, G>
 where
-    T: TurnStateStore + TurnEventProjectionSource + TurnRunTransitionPort + Send + Sync + 'static,
+    T: TurnStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     S: SessionThreadService + ?Sized + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
@@ -239,7 +239,7 @@ pub fn build_product_live_planned_runtime<T, G>(
     ProductLiveRuntimeBuildError,
 >
 where
-    T: TurnSpawnTreeStateStore + TurnEventProjectionSource + TurnRunTransitionPort + Send + Sync + 'static,
+    T: TurnSpawnTreeStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     if parts.model_route_resolver.is_none() {
@@ -304,7 +304,7 @@ pub fn build_default_planned_runtime<T, G>(
     DefaultPlannedRuntimeBuildError,
 >
 where
-    T: TurnSpawnTreeStateStore + TurnEventProjectionSource + TurnRunTransitionPort + Send + Sync + 'static,
+    T: TurnSpawnTreeStateStore + TurnRunTransitionPort + Send + Sync + 'static,
     G: HostManagedModelGateway + ?Sized + Send + Sync + 'static,
 {
     let mut registry = DriverRegistry::new();

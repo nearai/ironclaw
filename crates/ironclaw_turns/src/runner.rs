@@ -206,28 +206,28 @@ impl EventPublishingTurnRunTransitionPort {
         } else {
             None
         };
-        let event = TurnLifecycleEvent {
-            cursor: state.event_cursor,
-            scope: state.scope.clone(),
-            occurred_at: Some(Utc::now()),
-            owner_user_id: state.actor.as_ref().map(|actor| actor.user_id.clone()),
-            run_id: state.run_id,
-            status: state.status,
-            kind,
-            blocked_gate,
-            sanitized_reason,
-        };
         let required_observer = self
             .required_observer
             .as_ref()
-            .filter(|observer| observer.observes_event(&event));
+            .filter(|observer| observer.observes_state(state));
         if let Some(observer) = required_observer {
-            observer.observe_committed_event(event.clone()).await?;
+            observer.observe_committed_state(state.clone()).await?;
         }
-        if let Some(sink) = self.sink.as_ref()
-            && let Err(error) = sink.publish(event).await
-        {
-            tracing::debug!(error = %error, "turn transition event sink publish failed");
+        if let Some(sink) = self.sink.as_ref() {
+            let event = TurnLifecycleEvent {
+                cursor: state.event_cursor,
+                scope: state.scope.clone(),
+                occurred_at: Some(Utc::now()),
+                owner_user_id: state.actor.as_ref().map(|actor| actor.user_id.clone()),
+                run_id: state.run_id,
+                status: state.status,
+                kind,
+                blocked_gate,
+                sanitized_reason,
+            };
+            if let Err(error) = sink.publish(event).await {
+                tracing::debug!(error = %error, "turn transition event sink publish failed");
+            }
         }
         Ok(())
     }
@@ -265,9 +265,16 @@ impl TurnRunTransitionPort for EventPublishingTurnRunTransitionPort {
         request: ClaimRunRequest,
     ) -> Result<Option<ClaimedTurnRun>, TurnError> {
         let claimed = self.inner.claim_next_run(request).await?;
-        if let Some(claimed) = &claimed {
-            self.publish_state_event(&claimed.state, TurnEventKind::RunnerClaimed, None)
-                .await?;
+        if let Some(claimed) = &claimed
+            && let Err(error) = self
+                .publish_state_event(&claimed.state, TurnEventKind::RunnerClaimed, None)
+                .await
+        {
+            tracing::debug!(
+                error = %error,
+                run_id = %claimed.state.run_id,
+                "turn transition observer failed after committed claim"
+            );
         }
         Ok(claimed)
     }
@@ -282,12 +289,20 @@ impl TurnRunTransitionPort for EventPublishingTurnRunTransitionPort {
     ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
         let response = self.inner.recover_expired_leases(request).await?;
         for state in &response.recovered {
-            self.publish_state_event(
-                state,
-                TurnEventKind::RecoveryRequired,
-                Some("lease_expired".to_string()),
-            )
-            .await?;
+            if let Err(error) = self
+                .publish_state_event(
+                    state,
+                    TurnEventKind::RecoveryRequired,
+                    Some("lease_expired".to_string()),
+                )
+                .await
+            {
+                tracing::debug!(
+                    error = %error,
+                    run_id = %state.run_id,
+                    "turn transition observer failed after committed recovery"
+                );
+            }
         }
         Ok(response)
     }

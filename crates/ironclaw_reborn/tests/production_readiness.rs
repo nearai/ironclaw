@@ -7,8 +7,9 @@ use ironclaw_reborn::{
         RebornActiveRunIdentity, RebornComponentReadiness, RebornComponentRequirement,
         RebornConfiguredRunProfile, RebornLoopComponentGraphReadiness,
         RebornLoopProductionComponent, RebornLoopProductionInputs, RebornLoopProductionIssueKind,
-        RebornLoopProductionStatus, RebornLoopReadinessMode, text_only_driver_requirements,
-        tool_capable_driver_requirements, validate_reborn_loop_production_readiness,
+        RebornLoopProductionStatus, RebornLoopReadinessMode, subagent_driver_requirements,
+        text_only_driver_requirements, tool_capable_driver_requirements,
+        validate_reborn_loop_production_readiness,
     },
 };
 use ironclaw_turns::{
@@ -231,6 +232,14 @@ fn production_readiness_rejects_tool_profile_without_surface_service() {
         RebornLoopProductionComponent::CapabilityPort,
         RebornLoopProductionIssueKind::Missing
     ));
+}
+
+#[test]
+fn subagent_driver_requirements_match_tool_capable_surface() {
+    assert_eq!(
+        subagent_driver_requirements(),
+        tool_capable_driver_requirements()
+    );
 }
 
 #[test]
