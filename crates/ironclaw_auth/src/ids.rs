@@ -83,6 +83,55 @@ macro_rules! validated_string {
     };
 }
 
+macro_rules! digest_string {
+    ($name:ident, $label:literal) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        #[serde(try_from = "String", into = "String")]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Result<Self, AuthProductError> {
+                let value = validate_public_text(value, $label, 64)?;
+                if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return Err(AuthProductError::invalid_request(format!(
+                        "{label} must be a 64-character hex digest",
+                        label = $label
+                    )));
+                }
+                Ok(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+
+            pub fn into_string(self) -> String {
+                self.0
+            }
+        }
+
+        impl TryFrom<String> for $name {
+            type Error = AuthProductError;
+
+            fn try_from(value: String) -> Result<Self, Self::Error> {
+                Self::new(value)
+            }
+        }
+
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                value.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str(&self.0)
+            }
+        }
+    };
+}
+
 /// HTTPS authorization URL emitted to product surfaces for OAuth redirects.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -160,6 +209,6 @@ validated_string!(LifecyclePackageRef, "lifecycle package ref", 256);
 validated_string!(TurnRunRef, "turn run ref", 256);
 validated_string!(AuthGateRef, "auth gate ref", 256);
 validated_string!(AuthSessionId, "auth session id", 256);
-validated_string!(OpaqueStateHash, "opaque state hash", 256);
-validated_string!(PkceVerifierHash, "pkce verifier hash", 256);
-validated_string!(AuthorizationCodeHash, "authorization code hash", 256);
+digest_string!(OpaqueStateHash, "opaque state hash");
+digest_string!(PkceVerifierHash, "pkce verifier hash");
+digest_string!(AuthorizationCodeHash, "authorization code hash");

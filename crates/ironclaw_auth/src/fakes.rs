@@ -492,6 +492,8 @@ impl SecretCleanupService for InMemoryAuthProductServices {
             {
                 match request.action {
                     Deactivate => {
+                        account.status = CredentialAccountStatus::Missing;
+                        account.updated_at = Utc::now();
                         report.retained_accounts.push(account.id);
                     }
                     SecretCleanupAction::Uninstall => {
