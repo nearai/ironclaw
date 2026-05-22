@@ -1,12 +1,70 @@
-use super::*;
+struct TestManager {
+    inner: EventStreamManager,
+    update_source: Arc<InMemoryProjectionUpdateSource>,
+}
+
+impl std::ops::Deref for TestManager {
+    type Target = EventStreamManager;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+fn manager(scope: ProjectionScope) -> TestManager {
+    manager_with_source(scope, Arc::new(InMemoryProjectionUpdateSource::new(8)))
+}
+
+fn manager_with_source(
+    scope: ProjectionScope,
+    update_source: Arc<InMemoryProjectionUpdateSource>,
+) -> TestManager {
+    TestManager {
+        inner: EventStreamManager::new(
+            Arc::new(FakeProjectionService::new(scope)),
+            Arc::new(AllowAllProjectionAccessPolicy),
+            Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+            Arc::clone(&update_source),
+            Arc::new(NoExposureProjectionRedactionValidator),
+            Arc::new(InMemoryOutboundStateStore::default()),
+        ),
+        update_source,
+    }
+}
+
+async fn assert_second_subscription_denied_by_admission(
+    limits: ProjectionStreamLimits,
+    first: ProjectionScope,
+    second: ProjectionScope,
+) {
+    let manager = EventStreamManager::new(
+        Arc::new(FakeProjectionService::new(first.clone())),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::new(limits)),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let _first = manager
+        .subscribe(subscribe_request_for_stream_user(first, None))
+        .await
+        .expect("first subscription admitted");
+    let error = manager
+        .subscribe(subscribe_request_for_stream_user(second, None))
+        .await
+        .expect_err("second subscription rejected by targeted admission limit");
+
+    assert!(matches!(error, ProjectionStreamError::AdmissionDenied));
+}
 
 #[derive(Default)]
-pub(crate) struct DenyingAccessPolicy {
+struct DenyingAccessPolicy {
     calls: Mutex<usize>,
 }
 
 impl DenyingAccessPolicy {
-    pub(crate) fn calls(&self) -> usize {
+    fn calls(&self) -> usize {
         *self.calls.lock().unwrap()
     }
 }
@@ -23,12 +81,12 @@ impl ProjectionAccessPolicy for DenyingAccessPolicy {
 }
 
 #[derive(Default)]
-pub(crate) struct CountingUpdateSource {
+struct CountingUpdateSource {
     calls: Mutex<usize>,
 }
 
 impl CountingUpdateSource {
-    pub(crate) fn calls(&self) -> usize {
+    fn calls(&self) -> usize {
         *self.calls.lock().unwrap()
     }
 }
@@ -49,17 +107,17 @@ impl ProjectionUpdateSource for CountingUpdateSource {
     }
 }
 
-pub(crate) struct PointerUpdateSource {
+struct PointerUpdateSource {
     sender: tokio::sync::broadcast::Sender<Arc<ProductProjectionEnvelope>>,
 }
 
 impl PointerUpdateSource {
-    pub(crate) fn new(capacity: usize) -> Self {
+    fn new(capacity: usize) -> Self {
         let (sender, _) = tokio::sync::broadcast::channel(capacity.max(1));
         Self { sender }
     }
 
-    pub(crate) fn publish_shared(
+    fn publish_shared(
         &self,
         envelope: Arc<ProductProjectionEnvelope>,
     ) -> Result<usize, ProjectionStreamError> {
@@ -82,7 +140,7 @@ impl ProjectionUpdateSource for PointerUpdateSource {
     }
 }
 
-pub(crate) struct FailingUpdateSource;
+struct FailingUpdateSource;
 
 #[async_trait]
 impl ProjectionUpdateSource for FailingUpdateSource {
@@ -97,20 +155,20 @@ impl ProjectionUpdateSource for FailingUpdateSource {
     }
 }
 
-pub(crate) struct FakeProjectionService {
+struct FakeProjectionService {
     scope: ProjectionScope,
     calls: Mutex<Vec<&'static str>>,
 }
 
 impl FakeProjectionService {
-    pub(crate) fn new(scope: ProjectionScope) -> Self {
+    fn new(scope: ProjectionScope) -> Self {
         Self {
             scope,
             calls: Mutex::new(Vec::new()),
         }
     }
 
-    pub(crate) fn calls(&self) -> Vec<&'static str> {
+    fn calls(&self) -> Vec<&'static str> {
         self.calls.lock().unwrap().clone()
     }
 }
@@ -141,12 +199,12 @@ impl EventProjectionService for FakeProjectionService {
     }
 }
 
-pub(crate) struct ScopeMismatchProjectionService {
+struct ScopeMismatchProjectionService {
     scope: ProjectionScope,
 }
 
 impl ScopeMismatchProjectionService {
-    pub(crate) fn new(scope: ProjectionScope) -> Self {
+    fn new(scope: ProjectionScope) -> Self {
         Self { scope }
     }
 }
@@ -168,7 +226,7 @@ impl EventProjectionService for ScopeMismatchProjectionService {
     }
 }
 
-pub(crate) struct PayloadThreadMismatchProjectionService;
+struct PayloadThreadMismatchProjectionService;
 
 #[async_trait]
 impl EventProjectionService for PayloadThreadMismatchProjectionService {
@@ -187,8 +245,8 @@ impl EventProjectionService for PayloadThreadMismatchProjectionService {
     }
 }
 
-pub(crate) struct FailingUpdatesProjectionService {
-    pub(crate) error: ProjectionError,
+struct FailingUpdatesProjectionService {
+    error: ProjectionError,
 }
 
 #[async_trait]
@@ -204,12 +262,25 @@ impl EventProjectionService for FailingUpdatesProjectionService {
         &self,
         _request: ProjectionRequest,
     ) -> Result<ProjectionReplay, ProjectionError> {
-        Err(clone_projection_error(&self.error))
+        let error = match &self.error {
+            ProjectionError::InvalidRequest { reason } => {
+                ProjectionError::InvalidRequest { reason }
+            }
+            ProjectionError::RebaseRequired {
+                requested,
+                earliest,
+            } => ProjectionError::RebaseRequired {
+                requested: requested.clone(),
+                earliest: earliest.clone(),
+            },
+            ProjectionError::Source { operation } => ProjectionError::Source { operation },
+        };
+        Err(error)
     }
 }
 
-pub(crate) struct FailingSnapshotProjectionService {
-    pub(crate) error: ProjectionError,
+struct FailingSnapshotProjectionService {
+    error: ProjectionError,
 }
 
 #[async_trait]
@@ -218,7 +289,19 @@ impl EventProjectionService for FailingSnapshotProjectionService {
         &self,
         _request: ProjectionRequest,
     ) -> Result<ProjectionSnapshot, ProjectionError> {
-        Err(clone_projection_error(&self.error))
+        Err(match &self.error {
+            ProjectionError::InvalidRequest { reason } => {
+                ProjectionError::InvalidRequest { reason }
+            }
+            ProjectionError::RebaseRequired {
+                requested,
+                earliest,
+            } => ProjectionError::RebaseRequired {
+                requested: requested.clone(),
+                earliest: earliest.clone(),
+            },
+            ProjectionError::Source { operation } => ProjectionError::Source { operation },
+        })
     }
 
     async fn updates(
@@ -229,14 +312,14 @@ impl EventProjectionService for FailingSnapshotProjectionService {
     }
 }
 
-pub(crate) struct TruncatedProjectionService {
+struct TruncatedProjectionService {
     scope: ProjectionScope,
     truncate_snapshot: bool,
     truncate_replay: bool,
 }
 
 impl TruncatedProjectionService {
-    pub(crate) fn snapshot(scope: ProjectionScope) -> Self {
+    fn snapshot(scope: ProjectionScope) -> Self {
         Self {
             scope,
             truncate_snapshot: true,
@@ -244,7 +327,7 @@ impl TruncatedProjectionService {
         }
     }
 
-    pub(crate) fn replay(scope: ProjectionScope) -> Self {
+    fn replay(scope: ProjectionScope) -> Self {
         Self {
             scope,
             truncate_snapshot: false,
@@ -274,13 +357,13 @@ impl EventProjectionService for TruncatedProjectionService {
     }
 }
 
-pub(crate) struct SnapshotPublishingProjectionService {
+struct SnapshotPublishingProjectionService {
     scope: ProjectionScope,
     source: Arc<InMemoryProjectionUpdateSource>,
 }
 
 impl SnapshotPublishingProjectionService {
-    pub(crate) fn new(scope: ProjectionScope, source: Arc<InMemoryProjectionUpdateSource>) -> Self {
+    fn new(scope: ProjectionScope, source: Arc<InMemoryProjectionUpdateSource>) -> Self {
         Self { scope, source }
     }
 }
@@ -309,12 +392,12 @@ impl EventProjectionService for SnapshotPublishingProjectionService {
     }
 }
 
-pub(crate) struct StaticSnapshotProjectionService {
+struct StaticSnapshotProjectionService {
     snapshot: ProjectionSnapshot,
 }
 
 impl StaticSnapshotProjectionService {
-    pub(crate) fn new(snapshot: ProjectionSnapshot) -> Self {
+    fn new(snapshot: ProjectionSnapshot) -> Self {
         Self { snapshot }
     }
 }
@@ -336,12 +419,12 @@ impl EventProjectionService for StaticSnapshotProjectionService {
     }
 }
 
-pub(crate) struct ChangingSnapshotProjectionService {
+struct ChangingSnapshotProjectionService {
     calls: Mutex<usize>,
 }
 
 impl ChangingSnapshotProjectionService {
-    pub(crate) fn new() -> Self {
+    fn new() -> Self {
         Self {
             calls: Mutex::new(0),
         }
@@ -371,7 +454,7 @@ impl EventProjectionService for ChangingSnapshotProjectionService {
     }
 }
 
-pub(crate) struct RejectLiveUpdateRedactionValidator;
+struct RejectLiveUpdateRedactionValidator;
 
 impl ProjectionRedactionValidator for RejectLiveUpdateRedactionValidator {
     fn validate(&self, envelope: &ProductProjectionEnvelope) -> Result<(), ProjectionStreamError> {
@@ -382,7 +465,7 @@ impl ProjectionRedactionValidator for RejectLiveUpdateRedactionValidator {
     }
 }
 
-pub(crate) struct RejectSnapshotRedactionValidator;
+struct RejectSnapshotRedactionValidator;
 
 impl ProjectionRedactionValidator for RejectSnapshotRedactionValidator {
     fn validate(&self, envelope: &ProductProjectionEnvelope) -> Result<(), ProjectionStreamError> {
@@ -393,7 +476,7 @@ impl ProjectionRedactionValidator for RejectSnapshotRedactionValidator {
     }
 }
 
-pub(crate) struct SourceFailingLiveUpdateValidator;
+struct SourceFailingLiveUpdateValidator;
 
 impl ProjectionRedactionValidator for SourceFailingLiveUpdateValidator {
     fn validate(&self, envelope: &ProductProjectionEnvelope) -> Result<(), ProjectionStreamError> {
@@ -404,7 +487,7 @@ impl ProjectionRedactionValidator for SourceFailingLiveUpdateValidator {
     }
 }
 
-pub(crate) struct RejectTruncatedSnapshotValidator;
+struct RejectTruncatedSnapshotValidator;
 
 impl ProjectionRedactionValidator for RejectTruncatedSnapshotValidator {
     fn validate(&self, envelope: &ProductProjectionEnvelope) -> Result<(), ProjectionStreamError> {
@@ -418,12 +501,12 @@ impl ProjectionRedactionValidator for RejectTruncatedSnapshotValidator {
 }
 
 #[derive(Default)]
-pub(crate) struct CountingRedactionValidator {
+struct CountingRedactionValidator {
     calls: Mutex<usize>,
 }
 
 impl CountingRedactionValidator {
-    pub(crate) fn calls(&self) -> usize {
+    fn calls(&self) -> usize {
         *self.calls.lock().unwrap()
     }
 }
@@ -436,14 +519,14 @@ impl ProjectionRedactionValidator for CountingRedactionValidator {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum FailingOutboundKind {
+enum FailingOutboundKind {
     AccessDenied,
     InvalidRequest,
     Backend,
 }
 
-pub(crate) struct FailingOutboundStore {
-    pub(crate) kind: FailingOutboundKind,
+struct FailingOutboundStore {
+    kind: FailingOutboundKind,
 }
 
 impl FailingOutboundStore {

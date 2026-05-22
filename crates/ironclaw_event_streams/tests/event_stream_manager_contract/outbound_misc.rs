@@ -1,4 +1,4 @@
-use super::support::*;
+use super::*;
 
 #[tokio::test]
 async fn push_candidates_are_separate_from_subscriptions_and_policy_gated() {

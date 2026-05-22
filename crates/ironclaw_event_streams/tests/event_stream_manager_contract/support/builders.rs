@@ -1,9 +1,4 @@
-use super::*;
-
-pub(crate) fn assert_same_error_kind(
-    actual: ProjectionStreamError,
-    expected: ProjectionStreamError,
-) {
+fn assert_same_error_kind(actual: ProjectionStreamError, expected: ProjectionStreamError) {
     match (actual, expected) {
         (ProjectionStreamError::AccessDenied, ProjectionStreamError::AccessDenied)
         | (ProjectionStreamError::AdmissionDenied, ProjectionStreamError::AdmissionDenied)
@@ -18,54 +13,7 @@ pub(crate) fn assert_same_error_kind(
     }
 }
 
-pub(crate) fn projection_snapshot_error_cases(
-    scope: &ProjectionScope,
-) -> [(ProjectionError, ProjectionStreamError); 3] {
-    [
-        (
-            ProjectionError::InvalidRequest {
-                reason: "bad snapshot request",
-            },
-            ProjectionStreamError::InvalidRequest {
-                reason: "bad snapshot request",
-            },
-        ),
-        (
-            ProjectionError::Source {
-                operation: "projection backend failed",
-            },
-            ProjectionStreamError::Source,
-        ),
-        (
-            ProjectionError::RebaseRequired {
-                requested: Box::new(ProjectionCursor::for_scope(
-                    scope.clone(),
-                    EventCursor::new(1),
-                )),
-                earliest: Box::new(ProjectionCursor::origin_for_scope(scope.clone())),
-            },
-            ProjectionStreamError::InvalidRequest {
-                reason: "projection rebase required outside subscribe flow",
-            },
-        ),
-    ]
-}
-
-pub(crate) fn clone_projection_error(error: &ProjectionError) -> ProjectionError {
-    match error {
-        ProjectionError::InvalidRequest { reason } => ProjectionError::InvalidRequest { reason },
-        ProjectionError::RebaseRequired {
-            requested,
-            earliest,
-        } => ProjectionError::RebaseRequired {
-            requested: requested.clone(),
-            earliest: earliest.clone(),
-        },
-        ProjectionError::Source { operation } => ProjectionError::Source { operation },
-    }
-}
-
-pub(crate) fn expect_thread_update(item: ProjectionStreamItem) -> ProjectionReplay {
+fn expect_thread_update(item: ProjectionStreamItem) -> ProjectionReplay {
     match item {
         ProjectionStreamItem::Update(envelope) => match envelope.as_ref() {
             ProductProjectionEnvelope::ThreadUpdates(replay) => replay.clone(),
@@ -75,7 +23,7 @@ pub(crate) fn expect_thread_update(item: ProjectionStreamItem) -> ProjectionRepl
     }
 }
 
-pub(crate) fn subscribe_request(
+fn subscribe_request(
     scope: ProjectionScope,
     after_cursor: Option<ProjectionCursor>,
 ) -> ProjectionSubscribeRequest {
@@ -92,7 +40,7 @@ pub(crate) fn subscribe_request(
     }
 }
 
-pub(crate) fn subscribe_request_for_stream_user(
+fn subscribe_request_for_stream_user(
     scope: ProjectionScope,
     after_cursor: Option<ProjectionCursor>,
 ) -> ProjectionSubscribeRequest {
@@ -109,7 +57,7 @@ pub(crate) fn subscribe_request_for_stream_user(
     }
 }
 
-pub(crate) fn fetch_request(scope: ProjectionScope) -> ProjectionFetchRequest {
+fn fetch_request(scope: ProjectionScope) -> ProjectionFetchRequest {
     ProjectionFetchRequest {
         actor: actor("user-a"),
         target: ProjectionTarget::Thread {
@@ -121,10 +69,7 @@ pub(crate) fn fetch_request(scope: ProjectionScope) -> ProjectionFetchRequest {
     }
 }
 
-pub(crate) fn push_request(
-    scope: &TurnScope,
-    kind: OutboundPushKind,
-) -> PushCandidatesForUpdateRequest {
+fn push_request(scope: &TurnScope, kind: OutboundPushKind) -> PushCandidatesForUpdateRequest {
     let projection_scope = ProjectionScope {
         stream: EventStreamKey::new(
             scope.tenant_id.clone(),
@@ -153,7 +98,7 @@ pub(crate) fn push_request(
     }
 }
 
-pub(crate) fn snapshot(scope: &ProjectionScope, cursor: u64) -> ProjectionSnapshot {
+fn snapshot(scope: &ProjectionScope, cursor: u64) -> ProjectionSnapshot {
     ProjectionSnapshot {
         timeline: ThreadTimeline {
             entries: vec![timeline_entry(
@@ -168,11 +113,7 @@ pub(crate) fn snapshot(scope: &ProjectionScope, cursor: u64) -> ProjectionSnapsh
     }
 }
 
-pub(crate) fn snapshot_for_thread(
-    scope: &ProjectionScope,
-    cursor: u64,
-    thread: &str,
-) -> ProjectionSnapshot {
+fn snapshot_for_thread(scope: &ProjectionScope, cursor: u64, thread: &str) -> ProjectionSnapshot {
     let mut snapshot = snapshot(scope, cursor);
     let thread_id = Some(ThreadId::new(thread).unwrap());
     for entry in &mut snapshot.timeline.entries {
@@ -184,7 +125,7 @@ pub(crate) fn snapshot_for_thread(
     snapshot
 }
 
-pub(crate) fn replay(scope: &ProjectionScope, cursor: u64, next: u64) -> ProjectionReplay {
+fn replay(scope: &ProjectionScope, cursor: u64, next: u64) -> ProjectionReplay {
     ProjectionReplay {
         updates: vec![timeline_entry(
             scope,
@@ -197,7 +138,7 @@ pub(crate) fn replay(scope: &ProjectionScope, cursor: u64, next: u64) -> Project
     }
 }
 
-pub(crate) fn replay_with_error_kind(
+fn replay_with_error_kind(
     scope: &ProjectionScope,
     cursor: u64,
     next: u64,
@@ -213,7 +154,7 @@ pub(crate) fn replay_with_error_kind(
     replay
 }
 
-pub(crate) fn replay_for_thread(
+fn replay_for_thread(
     scope: &ProjectionScope,
     cursor: u64,
     next: u64,
@@ -230,11 +171,7 @@ pub(crate) fn replay_for_thread(
     replay
 }
 
-pub(crate) fn timeline_entry(
-    scope: &ProjectionScope,
-    cursor: u64,
-    kind: TimelineEntryKind,
-) -> TimelineEntry {
+fn timeline_entry(scope: &ProjectionScope, cursor: u64, kind: TimelineEntryKind) -> TimelineEntry {
     TimelineEntry {
         cursor: EventCursor::new(cursor),
         event_id: ironclaw_events::RuntimeEventId::new(),
@@ -251,7 +188,7 @@ pub(crate) fn timeline_entry(
     }
 }
 
-pub(crate) fn run_status(scope: &ProjectionScope, cursor: u64) -> RunStatusProjection {
+fn run_status(scope: &ProjectionScope, cursor: u64) -> RunStatusProjection {
     RunStatusProjection {
         invocation_id: InvocationId::new(),
         capability_id: CapabilityId::new("script.echo").unwrap(),
@@ -266,11 +203,11 @@ pub(crate) fn run_status(scope: &ProjectionScope, cursor: u64) -> RunStatusProje
     }
 }
 
-pub(crate) fn projection_scope(thread: &str) -> ProjectionScope {
+fn projection_scope(thread: &str) -> ProjectionScope {
     projection_scope_for("tenant-a", "user-a", thread)
 }
 
-pub(crate) fn projection_scope_for(tenant: &str, user: &str, thread: &str) -> ProjectionScope {
+fn projection_scope_for(tenant: &str, user: &str, thread: &str) -> ProjectionScope {
     let thread_id = ThreadId::new(thread).unwrap();
     ProjectionScope {
         stream: EventStreamKey::new(
@@ -287,7 +224,7 @@ pub(crate) fn projection_scope_for(tenant: &str, user: &str, thread: &str) -> Pr
     }
 }
 
-pub(crate) fn turn_scope(thread: &str) -> TurnScope {
+fn turn_scope(thread: &str) -> TurnScope {
     TurnScope::new(
         TenantId::new("tenant-a").unwrap(),
         None,
@@ -296,10 +233,10 @@ pub(crate) fn turn_scope(thread: &str) -> TurnScope {
     )
 }
 
-pub(crate) fn actor(user: &str) -> TurnActor {
+fn actor(user: &str) -> TurnActor {
     TurnActor::new(UserId::new(user).unwrap())
 }
 
-pub(crate) fn reply_target(value: &str) -> ReplyTargetBindingRef {
+fn reply_target(value: &str) -> ReplyTargetBindingRef {
     ReplyTargetBindingRef::new(value).unwrap()
 }

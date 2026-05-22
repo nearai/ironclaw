@@ -1,4 +1,4 @@
-use super::support::*;
+use super::*;
 
 #[tokio::test]
 async fn stream_admission_denial_is_structured_and_product_safe() {
@@ -180,6 +180,66 @@ async fn subscribe_error_after_admission_releases_permit() {
         .subscribe(subscribe_request(scope, None))
         .await
         .expect("admission permit was released after source failure");
+}
+
+#[tokio::test]
+async fn subscribe_without_cursor_maps_projection_snapshot_errors_and_releases_admission() {
+    let scope = projection_scope("thread-a");
+
+    for (projection_error, expected) in [
+        (
+            ProjectionError::InvalidRequest {
+                reason: "bad snapshot request",
+            },
+            ProjectionStreamError::InvalidRequest {
+                reason: "bad snapshot request",
+            },
+        ),
+        (
+            ProjectionError::Source {
+                operation: "projection snapshot failed",
+            },
+            ProjectionStreamError::Source,
+        ),
+    ] {
+        let admission = Arc::new(InMemoryProjectionStreamAdmissionPolicy::new(
+            ProjectionStreamLimits {
+                per_tenant: 1,
+                per_actor: 1,
+                per_scope: 1,
+                global: 1,
+            },
+        ));
+        let failing_manager = EventStreamManager::new(
+            Arc::new(FailingSnapshotProjectionService {
+                error: projection_error,
+            }),
+            Arc::new(AllowAllProjectionAccessPolicy),
+            Arc::clone(&admission),
+            Arc::new(InMemoryProjectionUpdateSource::new(8)),
+            Arc::new(NoExposureProjectionRedactionValidator),
+            Arc::new(InMemoryOutboundStateStore::default()),
+        );
+
+        let actual = failing_manager
+            .subscribe(subscribe_request(scope.clone(), None))
+            .await
+            .expect_err("initial snapshot error is mapped");
+        assert_same_error_kind(actual, expected);
+
+        let healthy_manager = EventStreamManager::new(
+            Arc::new(FakeProjectionService::new(scope.clone())),
+            Arc::new(AllowAllProjectionAccessPolicy),
+            Arc::clone(&admission),
+            Arc::new(InMemoryProjectionUpdateSource::new(8)),
+            Arc::new(NoExposureProjectionRedactionValidator),
+            Arc::new(InMemoryOutboundStateStore::default()),
+        );
+        let _subscription = healthy_manager
+            .subscribe(subscribe_request(scope.clone(), None))
+            .await
+            .expect("admission permit was released after snapshot failure");
+    }
 }
 
 #[tokio::test]

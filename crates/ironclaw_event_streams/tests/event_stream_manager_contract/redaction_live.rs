@@ -1,4 +1,4 @@
-use super::support::*;
+use super::*;
 
 #[tokio::test]
 async fn no_exposure_validator_rejects_sentinel_payloads() {
@@ -335,7 +335,7 @@ async fn live_forwarding_advances_cursor_and_reports_latest_reconnect_cursor() {
 async fn subscription_ignores_live_updates_from_other_scope() {
     let scope = projection_scope("thread-a");
     let foreign_scope = projection_scope("thread-b");
-    let source = Arc::new(InMemoryProjectionUpdateSource::new(1));
+    let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
     let manager = manager_with_source(scope.clone(), Arc::clone(&source));
     let mut subscription = manager
         .subscribe(subscribe_request(scope.clone(), None))
@@ -345,10 +345,14 @@ async fn subscription_ignores_live_updates_from_other_scope() {
         subscription.next().await,
         Some(ProjectionStreamItem::Snapshot(_))
     ));
-    let _foreign_subscription = manager
+    let mut foreign_subscription = manager
         .subscribe(subscribe_request(foreign_scope.clone(), None))
         .await
-        .expect("foreign subscription registers separate live source ring");
+        .expect("foreign subscription registers source scope");
+    assert!(matches!(
+        foreign_subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
 
     source
         .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
@@ -359,20 +363,64 @@ async fn subscription_ignores_live_updates_from_other_scope() {
         .expect("publish foreign update");
     source
         .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
-            &foreign_scope,
-            12,
-            12,
-        )))
-        .expect("publish second foreign update");
-    source
-        .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
-            &scope, 13, 13,
+            &scope, 12, 12,
         )))
         .expect("publish matching update");
 
     let replay = expect_thread_update(subscription.next().await.expect("matching update"));
     assert_eq!(replay.next_cursor.scope, scope);
-    assert_eq!(replay.next_cursor.runtime, EventCursor::new(13));
+    assert_eq!(replay.next_cursor.runtime, EventCursor::new(12));
+}
+
+#[tokio::test]
+async fn unrelated_scope_live_burst_does_not_lag_subscription() {
+    let noisy_scope = projection_scope("thread-a");
+    let quiet_scope = projection_scope("thread-b");
+    let source = Arc::new(InMemoryProjectionUpdateSource::new(1));
+    let noisy_manager = manager_with_source(noisy_scope.clone(), Arc::clone(&source));
+    let quiet_manager = manager_with_source(quiet_scope.clone(), Arc::clone(&source));
+    let mut noisy_subscription = noisy_manager
+        .subscribe(subscribe_request(noisy_scope.clone(), None))
+        .await
+        .expect("noisy subscription");
+    assert!(matches!(
+        noisy_subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+    let mut quiet_subscription = quiet_manager
+        .subscribe(subscribe_request(quiet_scope.clone(), None))
+        .await
+        .expect("quiet subscription");
+    assert!(matches!(
+        quiet_subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+
+    for cursor in 11..14 {
+        source
+            .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
+                &noisy_scope,
+                cursor,
+                cursor,
+            )))
+            .expect("publish noisy update");
+    }
+    source
+        .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
+            &quiet_scope,
+            20,
+            20,
+        )))
+        .expect("publish quiet update");
+
+    let replay = expect_thread_update(
+        timeout(Duration::from_secs(1), quiet_subscription.next())
+            .await
+            .expect("quiet subscription is not lagged by noisy scope")
+            .expect("quiet live update"),
+    );
+    assert_eq!(replay.next_cursor.scope, quiet_scope);
+    assert_eq!(replay.next_cursor.runtime, EventCursor::new(20));
 }
 
 #[tokio::test]
