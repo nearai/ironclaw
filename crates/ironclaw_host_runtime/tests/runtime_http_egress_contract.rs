@@ -304,6 +304,88 @@ fn host_http_egress_reuses_staged_secret_for_multiple_targets_in_one_request() {
 }
 
 #[test]
+fn host_http_egress_rejects_invalid_path_placeholder_before_transport() {
+    for (placeholder, url) in [
+        ("", "https://api.example.test/v1/__credential__/run"),
+        (
+            "bad/placeholder",
+            "https://api.example.test/v1/__credential__/run",
+        ),
+        (
+            "bad?placeholder",
+            "https://api.example.test/v1/__credential__/run",
+        ),
+        (
+            "bad#placeholder",
+            "https://api.example.test/v1/__credential__/run",
+        ),
+        (
+            "__missing__",
+            "https://api.example.test/v1/__credential__/run",
+        ),
+    ] {
+        let network = RecordingNetwork::ok(NetworkHttpResponse {
+            status: 200,
+            headers: vec![],
+            body: br#"{"ok":true}"#.to_vec(),
+            usage: NetworkUsage {
+                request_bytes: 5,
+                response_bytes: 11,
+                resolved_ip: None,
+            },
+        });
+        let network_recorder = network.requests.clone();
+        let scope = sample_scope();
+        let capability_id = sample_capability_id();
+        let handle = SecretHandle::new("api-token").unwrap();
+        let services = test_obligation_services();
+        stage_policy_sync(&services, &scope, &capability_id, sample_policy());
+        stage_secret_sync(
+            &services,
+            &scope,
+            &capability_id,
+            &handle,
+            "sk-staged-secret",
+        );
+        let service = services.host_http_egress(network);
+
+        let error = service
+            .execute(RuntimeHttpEgressRequest {
+                runtime: RuntimeKind::Script,
+                scope: scope.clone(),
+                capability_id: capability_id.clone(),
+                method: NetworkMethod::Post,
+                url: url.to_string(),
+                headers: vec![],
+                body: b"hello".to_vec(),
+                network_policy: sample_policy(),
+                credential_injections: vec![RuntimeCredentialInjection {
+                    handle: handle.clone(),
+                    source: RuntimeCredentialSource::StagedObligation {
+                        capability_id: capability_id.clone(),
+                    },
+                    target: RuntimeCredentialTarget::PathPlaceholder {
+                        placeholder: placeholder.to_string(),
+                    },
+                    required: true,
+                }],
+                response_body_limit: Some(4096),
+                timeout_ms: None,
+            })
+            .expect_err("invalid path placeholder must fail before network dispatch");
+
+        assert!(matches!(
+            error,
+            ironclaw_host_api::RuntimeHttpEgressError::Credential { .. }
+        ));
+        assert!(
+            network_recorder.lock().unwrap().is_empty(),
+            "case {placeholder:?} must not dispatch to the network"
+        );
+    }
+}
+
+#[test]
 fn host_http_egress_fails_closed_when_required_staged_secret_is_missing() {
     let network = RecordingNetwork::ok(NetworkHttpResponse {
         status: 200,

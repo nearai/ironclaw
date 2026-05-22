@@ -151,6 +151,13 @@ impl RuntimeCredentialTarget {
                     "must not be empty or contain NUL/control characters",
                 )?;
             }
+            Self::PathPlaceholder { placeholder } => {
+                validate_runtime_credential_fragment_non_empty_no_control(
+                    "path_placeholder",
+                    placeholder,
+                    "must not be empty or contain NUL/control characters",
+                )?;
+            }
         }
         Ok(())
     }

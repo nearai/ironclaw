@@ -18,8 +18,8 @@ use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, NetworkMethod, NetworkPolicy, ResourceEstimate, ResourceReservation,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialInjection,
-    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
-    RuntimeKind,
+    RuntimeCredentialSource, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
+    RuntimeHttpEgressResponse, RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -394,7 +394,7 @@ where
 
         let response_body_limit =
             effective_mcp_response_body_limit(plan.response_body_limit, request.max_output_bytes);
-        let credential_injections = method.credential_injections(plan.credential_injections);
+        let credential_injections = method.credential_injections(plan.credential_injections)?;
         let response = self
             .http
             .request(McpHostHttpRequest {
@@ -435,6 +435,36 @@ where
             response: parse_mcp_response(&response, id)?,
             usage,
         })
+    }
+
+    fn preflight_tools_call_credentials(
+        &self,
+        request: &McpClientRequest,
+        params: Value,
+    ) -> Result<(), String> {
+        let url = request.url.as_deref().ok_or_else(request_denied)?;
+        let body =
+            encode_json_rpc_request(Some(0), McpJsonRpcMethod::ToolsCall.as_str(), Some(params))?;
+        let headers = vec![
+            ("Content-Type".to_string(), "application/json".to_string()),
+            (
+                "Accept".to_string(),
+                "application/json, text/event-stream".to_string(),
+            ),
+        ];
+        let plan = self.planner.plan(McpHostHttpEgressPlanRequest {
+            provider: &request.provider,
+            capability_id: &request.capability_id,
+            scope: &request.scope,
+            transport: &request.transport,
+            method: NetworkMethod::Post,
+            url,
+            headers: &headers,
+            body: &body,
+        });
+        McpJsonRpcMethod::ToolsCall
+            .credential_injections(plan.credential_injections)
+            .map(|_| ())
     }
 
     fn current_session_id(
@@ -497,6 +527,13 @@ where
         let _session_cleanup =
             McpHostHttpSessionCleanup::new(Arc::clone(&self.state), session_key.clone());
 
+        let tool_name = mcp_tool_name(&request.provider, &request.capability_id);
+        let tool_call_params = serde_json::json!({
+            "name": tool_name,
+            "arguments": request.input.clone(),
+        });
+        self.preflight_tools_call_credentials(&request, tool_call_params.clone())?;
+
         let mut usage = ResourceUsage::default();
         let initialize = self.send_json_rpc(
             &request,
@@ -522,16 +559,12 @@ where
             return Err(response_error());
         }
 
-        let tool_name = mcp_tool_name(&request.provider, &request.capability_id);
         let call = self.send_json_rpc(
             &request,
             &session_key,
             Some(self.next_request_id()),
             McpJsonRpcMethod::ToolsCall,
-            Some(serde_json::json!({
-                "name": tool_name,
-                "arguments": request.input,
-            })),
+            Some(tool_call_params),
         )?;
         accumulate_usage(&mut usage, call.usage);
         if call.response.error {
@@ -587,10 +620,17 @@ impl McpJsonRpcMethod {
     fn credential_injections(
         self,
         credential_injections: Vec<RuntimeCredentialInjection>,
-    ) -> Vec<RuntimeCredentialInjection> {
+    ) -> Result<Vec<RuntimeCredentialInjection>, String> {
         match self {
-            Self::ToolsCall => credential_injections,
-            Self::Initialize | Self::InitializedNotification => Vec::new(),
+            Self::ToolsCall => {
+                if credential_injections.iter().any(|injection| {
+                    matches!(injection.source, RuntimeCredentialSource::SecretStoreLease)
+                }) {
+                    return Err(request_denied());
+                }
+                Ok(credential_injections)
+            }
+            Self::Initialize | Self::InitializedNotification => Ok(Vec::new()),
         }
     }
 }
