@@ -19,13 +19,17 @@ use axum::Json;
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use futures::SinkExt;
 use futures::stream::Stream;
 use ironclaw_product_workflow::{
-    ProjectionCursor, RebornCancelRunResponse, RebornCreateThreadResponse,
-    RebornResolveGateResponse, RebornServicesApi, RebornServicesError, RebornServicesErrorCode,
-    RebornServicesErrorKind, RebornStreamEventsRequest, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
-    WebUiCreateThreadRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    ExtensionName, ProjectionCursor, RebornCancelRunResponse, RebornCreateThreadResponse,
+    RebornListThreadsResponse, RebornResolveGateResponse, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
+    RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
+    RebornTimelineResponse, WebUiAuthenticatedCaller, WebUiCancelRunRequest,
+    WebUiCreateThreadRequest, WebUiInboundValidationCode, WebUiInboundValidationError,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest,
 };
 use serde::{Deserialize, Serialize};
 
@@ -357,4 +361,272 @@ pub struct ResolveGatePath {
     pub thread_id: String,
     pub run_id: String,
     pub gate_ref: String,
+}
+
+/// `GET /api/webchat/v2/threads`
+///
+/// Lists threads scoped to the authenticated caller. Pagination is
+/// opaque: the response carries an optional `next_cursor` the browser
+/// echoes back as `?cursor=...` on the next page request.
+pub async fn list_threads(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Query(query): Query<ListThreadsQuery>,
+) -> Result<Json<RebornListThreadsResponse>, WebUiV2HttpError> {
+    let request = WebUiListThreadsRequest {
+        limit: query.limit,
+        cursor: query.cursor,
+    };
+    let response = state.services().list_threads(caller, request).await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ListThreadsQuery {
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub cursor: Option<String>,
+}
+
+/// `POST /api/webchat/v2/extensions/{extension_name}/setup`
+///
+/// Skeleton route — the v2 native extension lifecycle is not wired
+/// yet, so the underlying facade returns
+/// `RebornSetupExtensionStatus::NotImplemented`. The route exists so
+/// the v2 entrypoint inventory is complete and so future onboarding
+/// port work has a stable surface to fill in.
+///
+/// The path segment is validated against
+/// [`ExtensionName`] at the handler/facade boundary; a
+/// malformed identifier returns `400 invalid_argument` before the
+/// facade is called. The typed value is threaded through the facade
+/// argument so internal request/response state never carries a raw
+/// `String` extension name (see `.claude/rules/types.md`).
+pub async fn setup_extension(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(SetupExtensionPath { extension_name }): Path<SetupExtensionPath>,
+    Json(body): Json<WebUiSetupExtensionRequest>,
+) -> Result<Json<RebornSetupExtensionResponse>, WebUiV2HttpError> {
+    let extension_name = ExtensionName::new(&extension_name).map_err(|_| {
+        RebornServicesError::from(WebUiInboundValidationError::new(
+            "extension_name",
+            WebUiInboundValidationCode::InvalidId,
+        ))
+    })?;
+    let response = state
+        .services()
+        .setup_extension(caller, extension_name, body)
+        .await?;
+    Ok(Json(response))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetupExtensionPath {
+    pub extension_name: String,
+}
+
+/// `GET /api/webchat/v2/threads/{thread_id}/ws`
+///
+/// WebSocket transport variant of [`stream_events`]. The handler
+/// accepts the WS upgrade, drains the same `RebornServicesApi::
+/// stream_events` facade as the SSE handler, and writes each event as
+/// a JSON text frame. Same lifetime + per-caller concurrency caps as
+/// SSE.
+///
+/// Same-origin enforcement is the responsibility of host composition's
+/// origin-check middleware — the descriptor declares
+/// `WebSocketOriginPolicy::SameOriginRequired` so a future override
+/// to a host-allowlist is one descriptor change away. This handler
+/// trusts the composition layer to have already rejected
+/// disallowed-origin upgrades.
+pub async fn stream_events_ws(
+    State(state): State<WebUiV2State>,
+    Extension(caller): Extension<WebUiAuthenticatedCaller>,
+    Path(thread_id): Path<String>,
+    upgrade: axum::extract::ws::WebSocketUpgrade,
+) -> Result<axum::response::Response, WebUiV2HttpError> {
+    let slot = state
+        .sse_capacity()
+        .try_acquire(&caller.tenant_id, &caller.user_id)
+        .ok_or_else(sse_concurrency_exhausted)?;
+    let services = state.services().clone();
+    Ok(upgrade.on_upgrade(move |socket| ws_drain_loop(services, caller, thread_id, slot, socket)))
+}
+
+async fn ws_drain_loop(
+    services: std::sync::Arc<dyn RebornServicesApi>,
+    caller: WebUiAuthenticatedCaller,
+    thread_id: String,
+    slot: SseSlot,
+    mut socket: axum::extract::ws::WebSocket,
+) {
+    // Mirror the SSE generator: own the slot guard, bound stream
+    // lifetime, drain stream_events on the same poll cadence, emit
+    // each envelope as a JSON text frame.
+    //
+    // Two failure modes the loop must observe:
+    //
+    // 1. **Peer close / socket error.** The browser may close an
+    //    idle tab without trading a close frame; the OS surfaces
+    //    that as either a `Close` message or a socket-error on the
+    //    next read. The loop watches `socket.recv()` on every
+    //    `.await` so a dropped tab exits immediately instead of
+    //    pinning the per-caller `SseSlot` for up to `SSE_MAX_LIFETIME`.
+    // 2. **TCP backpressure on send.** A slow / hostile reader can
+    //    leave bytes queued indefinitely. Each `socket.send().await`
+    //    runs under `ws_send_with_timeout` so the per-caller slot
+    //    is released within the lifetime budget regardless.
+    let _slot_guard = slot;
+    let started_at = tokio::time::Instant::now();
+    let mut after_cursor: Option<ProjectionCursor> = None;
+    loop {
+        let remaining = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+        if remaining.is_zero() {
+            let _ =
+                ws_send_with_timeout(&mut socket, None, std::time::Duration::from_millis(0)).await;
+            return;
+        }
+        let request = RebornStreamEventsRequest {
+            thread_id: thread_id.clone(),
+            after_cursor: after_cursor.clone(),
+        };
+        let facade_call = services.stream_events(caller.clone(), request);
+        let outcome = tokio::select! {
+            biased;
+            // Peer close / socket error wins over the facade poll —
+            // if the browser already dropped the connection we want
+            // to free the slot immediately, not wait for stream_events
+            // to return.
+            incoming = socket.recv() => {
+                match incoming {
+                    None | Some(Err(_)) => return,
+                    Some(Ok(axum::extract::ws::Message::Close(_))) => return,
+                    // Ignore other inbound frames (Ping/Pong are
+                    // handled internally by axum; Text/Binary from
+                    // the browser are not part of this contract).
+                    Some(Ok(_)) => continue,
+                }
+            }
+            facade = tokio::time::timeout(remaining, facade_call) => facade,
+        };
+        match outcome {
+            Err(_elapsed) => {
+                let _ = socket.close().await;
+                return;
+            }
+            Ok(Ok(response)) => {
+                if let Some(latest) = response.events.last() {
+                    after_cursor = Some(latest.projection_cursor.clone());
+                }
+                for envelope in response.events {
+                    match serde_json::to_string(&envelope) {
+                        Ok(text) => {
+                            let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                            if send_budget.is_zero() {
+                                let _ = socket.close().await;
+                                return;
+                            }
+                            if ws_send_with_timeout(
+                                &mut socket,
+                                Some(axum::extract::ws::Message::Text(text.into())),
+                                send_budget,
+                            )
+                            .await
+                            .is_err()
+                            {
+                                // Peer hung up, TCP backpressure
+                                // exceeded budget, or socket otherwise
+                                // unwritable. Drop the task and
+                                // release the slot.
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                target = "ironclaw_webui_v2::ws",
+                                error = %error,
+                                "failed to serialize ProductOutboundEnvelope for WS",
+                            );
+                        }
+                    }
+                }
+                let sleep_for =
+                    SSE_POLL_INTERVAL.min(SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed()));
+                if sleep_for.is_zero() {
+                    let _ = socket.close().await;
+                    return;
+                }
+                // Race the poll-interval sleep against socket close
+                // for the same reason as the facade call above: if
+                // the peer drops during the idle window, free the
+                // slot immediately.
+                tokio::select! {
+                    biased;
+                    incoming = socket.recv() => match incoming {
+                        None | Some(Err(_)) => return,
+                        Some(Ok(axum::extract::ws::Message::Close(_))) => return,
+                        Some(Ok(_)) => {}
+                    },
+                    _ = tokio::time::sleep(sleep_for) => {}
+                }
+            }
+            Ok(Err(error)) => {
+                tracing::debug!(
+                    target = "ironclaw_webui_v2::ws",
+                    error = ?error,
+                    "facade rejected WS drain; closing stream",
+                );
+                let payload = SseErrorPayload {
+                    error: error.code,
+                    kind: error.kind,
+                    retryable: error.retryable,
+                };
+                if let Ok(text) = serde_json::to_string(&payload) {
+                    let send_budget = SSE_MAX_LIFETIME.saturating_sub(started_at.elapsed());
+                    let _ = ws_send_with_timeout(
+                        &mut socket,
+                        Some(axum::extract::ws::Message::Text(text.into())),
+                        send_budget,
+                    )
+                    .await;
+                }
+                let _ = socket.close().await;
+                return;
+            }
+        }
+    }
+}
+
+/// Send a WS frame (or close, when `frame` is `None`) bounded by
+/// `budget`. Returns `Err(())` on timeout, peer hangup, or close
+/// error so callers can release the per-caller `SseSlot` instead of
+/// hanging indefinitely on a stalled socket.
+async fn ws_send_with_timeout(
+    socket: &mut axum::extract::ws::WebSocket,
+    frame: Option<axum::extract::ws::Message>,
+    budget: std::time::Duration,
+) -> Result<(), ()> {
+    if budget.is_zero() {
+        let _ = socket.close().await;
+        return Err(());
+    }
+    let send_future = async {
+        match frame {
+            Some(message) => socket.send(message).await.map_err(|_| ()),
+            None => socket.close().await.map_err(|_| ()),
+        }
+    };
+    match tokio::time::timeout(budget, send_future).await {
+        Ok(result) => result,
+        Err(_elapsed) => {
+            tracing::debug!(
+                target = "ironclaw_webui_v2::ws",
+                budget_ms = budget.as_millis() as u64,
+                "WS send exceeded lifetime budget; releasing slot",
+            );
+            Err(())
+        }
+    }
 }

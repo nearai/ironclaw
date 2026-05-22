@@ -14,7 +14,8 @@ use ironclaw_product_workflow::{
     RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
     RebornStreamEventsRequest, RebornSubmitTurnResponse, RebornTimelineRequest,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
-    WebUiInboundValidationCode, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiInboundValidationCode, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest,
 };
 use ironclaw_threads::{
     AcceptInboundMessageRequest, AcceptedInboundMessage, AcceptedInboundMessageReplay,
@@ -2700,4 +2701,47 @@ fn facade_source_avoids_forbidden_runtime_dependencies() {
     }
 
     let _ = Utc::now();
+}
+
+// Regression for the missing-error-path-test review (Medium): the
+// new `list_threads` facade path must fail closed until a backend
+// override for `list_threads_for_scope` is wired. The default
+// `SessionThreadService` impl returns `Backend(...)`, and the
+// facade is supposed to translate that into a retryable
+// `service_unavailable` (HTTP 503) — never an empty thread list
+// that pretends the caller owns nothing. This test pins the wire
+// contract so a future regression that quietly returns Ok([]) on a
+// missing backend would break the test, not silently mislead
+// callers.
+#[tokio::test]
+async fn list_threads_unimplemented_backend_returns_service_unavailable() {
+    let services = RebornServices::new(
+        Arc::new(InMemorySessionThreadService::default()),
+        Arc::new(FakeTurnCoordinator::default()),
+    );
+
+    let error = services
+        .list_threads(caller(), WebUiListThreadsRequest::default())
+        .await
+        .expect_err(
+            "list_threads must fail closed when the SessionThreadService backend \
+             does not implement list_threads_for_scope",
+        );
+    assert_eq!(error.code, RebornServicesErrorCode::Unavailable);
+    assert_eq!(error.status_code, 503);
+    assert!(
+        error.retryable,
+        "Backend errors are retryable so the browser can re-poll once a v2-aware \
+         backend overrides list_threads_for_scope",
+    );
+
+    // Confirm the wire shape is the snake_case enum the WebUi handler maps
+    // to its `error` field; matching on the variant alone would still pass
+    // if someone changed `#[serde(rename_all = ...)]` to PascalCase.
+    let json = serde_json::to_value(&error).expect("serialize");
+    assert_eq!(
+        json["code"], "unavailable",
+        "wire code must be snake_case `unavailable`; got: {json}"
+    );
+    assert_eq!(json["retryable"], true);
 }

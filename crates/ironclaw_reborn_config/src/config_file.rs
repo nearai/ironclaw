@@ -69,6 +69,11 @@ pub struct RebornConfigFile {
     /// becomes live when the planned driver lands. Operators are free
     /// to populate `mission` ahead of time.
     pub llm: Option<std::collections::BTreeMap<String, LlmSlotSelection>>,
+    /// WebChat v2 HTTP gateway settings. Consumed by
+    /// `ironclaw_reborn_webui_ingress` when the standalone CLI's
+    /// `serve` subcommand is invoked. Optional — sparse configs
+    /// fall back to compiled defaults documented on each field.
+    pub webui: Option<WebuiSection>,
     /// Cost-based budgets. Composition seeds defaults on first reservation
     /// for each user/project; per-account overrides happen through the
     /// `budget_set` tool or CLI at runtime. Setting any limit to `0` means
@@ -132,6 +137,70 @@ pub struct HarnessSection {
 pub struct RunnerSection {
     pub heartbeat_interval_secs: Option<u64>,
     pub poll_interval_ms: Option<u64>,
+}
+
+/// WebChat v2 HTTP gateway configuration.
+///
+/// Composition reads this section when wiring the `serve` subcommand.
+/// Stringly typed by design — the `ironclaw_reborn_config` crate stays
+/// free of workspace deps, so concrete validation (origin parsing,
+/// listen-address resolution) lives in the consuming ingress crate.
+///
+/// Secrets are env-only: `env_token_var` is the **NAME** of an
+/// environment variable, never a token value. The `secrets_guard`
+/// inline-secret check fires at parse time if an operator pastes a
+/// token-shaped string into either field documented as a name.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebuiSection {
+    /// IP address the WebChat v2 listener binds. Default `127.0.0.1`
+    /// (loopback only — operators MUST opt in to `0.0.0.0` or a
+    /// specific interface to expose the gateway).
+    pub listen_host: Option<String>,
+    /// TCP port the listener binds. Default `3000`. `0` is rejected
+    /// at composition time (`ironclaw-reborn serve` accepts `0` only
+    /// via an explicit `--port 0` CLI flag, intended for tests).
+    pub listen_port: Option<u16>,
+    /// Name of the environment variable holding the host-installation
+    /// bearer token (used by the env-bearer authenticator). Default
+    /// `IRONCLAW_REBORN_WEBUI_TOKEN`. The token VALUE never appears in
+    /// this config file — `secrets_guard` rejects inline secrets.
+    pub env_token_var: Option<String>,
+    /// Name of the environment variable holding the `UserId` that an
+    /// env-bearer-authenticated caller maps to. Default
+    /// `IRONCLAW_REBORN_WEBUI_USER_ID`. Stringly typed; composition
+    /// resolves to a real `UserId` and rejects malformed values.
+    pub env_user_id_var: Option<String>,
+    /// CORS allow-origin list (e.g.
+    /// `["http://localhost:3000", "https://app.example.com"]`).
+    /// Default empty — composition then fails-closed on every
+    /// cross-origin preflight, never echoing an attacker-supplied
+    /// `Origin` header. Operators MUST opt in to whichever origins
+    /// the host installation actually serves.
+    pub allowed_origins: Option<Vec<String>>,
+    /// Override the default Content-Security-Policy header. Default
+    /// `None` → composition applies its locked-down default
+    /// (`default-src 'self'; object-src 'none'; frame-ancestors 'none';
+    /// base-uri 'self'`). Operators serving a real SPA may need to
+    /// override.
+    pub csp_header_override: Option<String>,
+    /// Maximum per-request body bytes for paths that do NOT match a
+    /// declared v2 descriptor (i.e. the 404 fallback path). v2 routes
+    /// are individually capped from their `BodyLimitPolicy`
+    /// descriptor and are strictly tighter than this outer fallback.
+    /// Default `14 * 1024 * 1024` (14 MiB). `0` is rejected.
+    pub max_body_bytes_fallback: Option<u64>,
+    /// Canonical host this listener is reachable on (e.g.
+    /// `"app.example.com"` or `"127.0.0.1:3000"`). When set, the WS
+    /// same-origin middleware compares the request `Origin` against
+    /// this operator-trusted value instead of trusting the
+    /// client-supplied `Host` header. Critical when running behind a
+    /// reverse proxy that may forward an attacker-controlled Host —
+    /// without `canonical_host`, a forged Host + matching Origin
+    /// would pass `SameOriginRequired`. Format: `host` or
+    /// `host:port`; composition does not parse further. Default
+    /// `None` (fall back to Host-header compare + allowlist).
+    pub canonical_host: Option<String>,
 }
 
 /// `[budget]` section. All limits in USD. **0 = unlimited.**
@@ -343,6 +412,30 @@ impl RebornConfigFile {
                 if let Some(model) = &selection.model {
                     check(llm_slot_field_label(slot, "model"), model)?;
                 }
+            }
+        }
+        if let Some(webui) = &self.webui {
+            if let Some(host) = &webui.listen_host {
+                check(Cow::Borrowed("webui.listen_host"), host)?;
+            }
+            if let Some(env_token_var) = &webui.env_token_var {
+                // Secrets guard: rejects token-shaped values pasted
+                // here instead of an env-var name.
+                check(Cow::Borrowed("webui.env_token_var"), env_token_var)?;
+            }
+            if let Some(env_user_id_var) = &webui.env_user_id_var {
+                check(Cow::Borrowed("webui.env_user_id_var"), env_user_id_var)?;
+            }
+            if let Some(allowed_origins) = &webui.allowed_origins {
+                for origin in allowed_origins {
+                    check(Cow::Borrowed("webui.allowed_origins"), origin)?;
+                }
+            }
+            if let Some(csp) = &webui.csp_header_override {
+                check(Cow::Borrowed("webui.csp_header_override"), csp)?;
+            }
+            if let Some(host) = &webui.canonical_host {
+                check(Cow::Borrowed("webui.canonical_host"), host)?;
             }
         }
         if let Some(budget) = &self.budget {
