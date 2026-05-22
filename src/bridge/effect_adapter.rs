@@ -804,14 +804,28 @@ impl EffectBridgeAdapter {
                 if let Some(criteria) = params.get("success_criteria").and_then(|v| v.as_str()) {
                     guardrail_updates.success_criteria = Some(criteria.to_string());
                 }
+                // Mission outcome notifications must route back to the
+                // user-facing conversation thread (v1 `conversations.id` /
+                // chat URL parameter), NOT to the v2 ephemeral engine thread
+                // that is currently executing this `mission_create` call.
+                // Those are different UUIDs, and `add_conversation_message`
+                // has a FK on `conversations(id)` — using the engine thread
+                // would FK-fail and silently fall back to the assistant
+                // conversation, which is the original user-visible bug.
+                // When no originating chat thread exists (cron/system/
+                // learning missions), pass `None` so the downstream skips
+                // the doomed FK-failing write and goes straight to the
+                // assistant-conversation fallback in `handle_mission_notification`.
+                let parent_for_routing = context.source_conversation_thread_id;
                 match mgr
-                    .create_mission(
+                    .create_mission_with_parent(
                         target_project,
                         &context.user_id,
                         name,
                         goal,
                         cadence,
                         notify_channels,
+                        parent_for_routing,
                     )
                     .await
                 {
@@ -3175,6 +3189,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: call_id.map(str::to_string),
             source_channel: None,
+            source_conversation_thread_id: None,
             user_timezone: None,
             thread_goal: Some("test goal".to_string()),
             available_actions_snapshot: None,
@@ -5024,6 +5039,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
             source_channel: Some("gateway".to_string()),
+            source_conversation_thread_id: None,
             user_timezone: None,
             thread_goal: Some(
                 "Summarize the product feedback for me right now. Do it immediately.".to_string(),
@@ -5049,6 +5065,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
             source_channel: Some("gateway".to_string()),
+            source_conversation_thread_id: None,
             user_timezone: None,
             thread_goal: Some(
                 "Create a daily routine to summarize product feedback and run it now.".to_string(),
@@ -5074,6 +5091,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
             source_channel: Some("gateway".to_string()),
+            source_conversation_thread_id: None,
             user_timezone: None,
             thread_goal: Some("Summarize every product feedback item right now.".to_string()),
             available_actions_snapshot: None,
@@ -5097,6 +5115,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
             source_channel: Some("gateway".to_string()),
+            source_conversation_thread_id: None,
             user_timezone: None,
             thread_goal: Some("Set up the product feedback summary right now.".to_string()),
             available_actions_snapshot: None,
@@ -5123,6 +5142,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
             source_channel: Some("gateway".to_string()),
+            source_conversation_thread_id: None,
             user_timezone: None,
             thread_goal: Some("Set up monitoring now.".to_string()),
             available_actions_snapshot: None,
@@ -5147,6 +5167,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
             source_channel: None,
+            source_conversation_thread_id: None,
             user_timezone: None,
             thread_goal: Some("Summarize feedback immediately.".to_string()),
             available_actions_snapshot: None,
@@ -5375,6 +5396,7 @@ mod tests {
                 step_id: ironclaw_engine::StepId::new(),
                 current_call_id: None,
                 source_channel: Some("gateway".to_string()),
+                source_conversation_thread_id: None,
                 user_timezone: None,
                 thread_goal: Some(goal.to_string()),
                 available_actions_snapshot: None,
@@ -5660,6 +5682,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
             source_channel: None,
+            source_conversation_thread_id: None,
             user_timezone: None,
             thread_goal: None,
             available_actions_snapshot: None,
@@ -5764,6 +5787,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: Some("call_install".to_string()),
             source_channel: None,
+            source_conversation_thread_id: None,
             user_timezone: None,
             thread_goal: None,
             available_actions_snapshot: None,
@@ -6376,6 +6400,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
             source_channel: None,
+            source_conversation_thread_id: None,
             user_timezone: None,
             thread_goal: None,
             available_actions_snapshot: None,

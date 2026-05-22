@@ -1,6 +1,11 @@
 function isCurrentThread(threadId) {
   if (!threadId) return false;
-  if (!currentThreadId) return true;
+  // Reject when no thread is selected. The previous `return true` fallback
+  // let any thread-tagged SSE event render in whatever view happened to be
+  // active during the race between SSE connect and thread selection — a
+  // cron-fired mission completing while the user was on a fresh "no thread"
+  // page would bleed into the next conversation the user opened.
+  if (!currentThreadId) return false;
   return threadId === currentThreadId;
 }
 

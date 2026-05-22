@@ -309,16 +309,32 @@ impl ConversationManager {
                 // The orchestrator reads `source_channel` on the very first
                 // step to populate `ThreadExecutionContext.source_channel`,
                 // which `mission_create` consults to default `notify_channels`.
-                let base_channel = channel_name
-                    .split(':')
-                    .next()
-                    .unwrap_or(&channel_name)
-                    .to_string();
+                // The bridge router scopes the v2 conversation by encoding the
+                // user-facing conversation thread ID into `channel_name` as
+                // `<channel>:<thread>` (see `handle_with_engine_inner` in
+                // `src/bridge/router.rs`). Split it back apart so the spawned
+                // thread carries `source_channel` (for `notify_channels`
+                // defaulting) AND `source_conversation_thread_id` (so
+                // mission outcome routing can find the chat thread the user
+                // fired the mission from). When the channel name has no `:`
+                // suffix (non-chat dispatch paths), source_conversation
+                // remains absent.
+                let (base_channel, source_conversation_thread_id) =
+                    match channel_name.split_once(':') {
+                        Some((base, scope)) => (base.to_string(), Some(scope.to_string())),
+                        None => (channel_name.clone(), None),
+                    };
                 let mut initial_metadata = serde_json::Map::new();
                 initial_metadata.insert(
                     "source_channel".into(),
                     serde_json::Value::String(base_channel),
                 );
+                if let Some(scope) = source_conversation_thread_id {
+                    initial_metadata.insert(
+                        "source_conversation_thread_id".into(),
+                        serde_json::Value::String(scope),
+                    );
+                }
                 if let Some(tz) = user_timezone {
                     initial_metadata.insert(
                         "user_timezone".into(),
@@ -917,6 +933,74 @@ mod tests {
         // Wait for thread to complete
         let outcome = tm.join_thread(tid).await.unwrap();
         assert!(matches!(outcome, ThreadOutcome::Completed { .. }));
+    }
+
+    /// Regression: when the bridge router scopes the v2 conversation by
+    /// encoding the user-facing chat thread ID into `channel_name` as
+    /// `<channel>:<thread>`, the spawned engine thread MUST carry
+    /// `source_conversation_thread_id` metadata. Otherwise mission_create
+    /// can't map back to the chat thread that fired it and outcome
+    /// notifications get routed to the user's assistant conversation.
+    #[tokio::test]
+    async fn handle_message_spawns_thread_with_source_conversation_metadata() {
+        // Use a parallel setup so we can inspect the store directly.
+        let store: Arc<dyn Store> = Arc::new(MockStore::new());
+        let tm = Arc::new(ThreadManager::new(
+            Arc::new(MockLlm(Mutex::new(vec![LlmOutput {
+                response: LlmResponse::Text("ok".into()),
+                usage: TokenUsage::default(),
+            }]))),
+            Arc::new(MockEffects),
+            Arc::clone(&store),
+            Arc::new(CapabilityRegistry::new()),
+            Arc::new(LeaseManager::new()),
+            Arc::new(PolicyEngine::new()),
+        ));
+        let cm = ConversationManager::new(Arc::clone(&tm), Arc::clone(&store));
+
+        // The bridge router's channel_key shape: "<channel>:<scope_uuid>".
+        let scope_uuid = uuid::Uuid::new_v4();
+        let channel_key = format!("gateway:{scope_uuid}");
+        let conv_id = cm
+            .get_or_create_conversation(&channel_key, "user1")
+            .await
+            .unwrap();
+        let project = ProjectId::new();
+
+        let tid = cm
+            .handle_user_message(
+                conv_id,
+                "do the thing",
+                project,
+                "user1",
+                ThreadConfig::default(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        // The spawned thread's metadata must include the scope so the
+        // executor's ThreadExecutionContext picks it up downstream.
+        let thread = store
+            .load_thread(tid)
+            .await
+            .expect("load_thread should succeed")
+            .expect("spawned thread should exist");
+        let recorded = thread
+            .metadata
+            .get("source_conversation_thread_id")
+            .and_then(|v| v.as_str())
+            .expect("source_conversation_thread_id must be stored on the thread");
+        assert_eq!(recorded, scope_uuid.to_string());
+
+        // And source_channel must remain the base (un-scoped) channel name —
+        // mission_create relies on it for `notify_channels` defaulting.
+        let base = thread
+            .metadata
+            .get("source_channel")
+            .and_then(|v| v.as_str())
+            .expect("source_channel must be stored on the thread");
+        assert_eq!(base, "gateway");
     }
 
     #[tokio::test]

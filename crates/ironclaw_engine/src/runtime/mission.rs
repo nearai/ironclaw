@@ -92,6 +92,12 @@ pub struct MissionNotification {
     pub mission_id: MissionId,
     pub mission_name: String,
     pub thread_id: ThreadId,
+    /// The conversation thread that originally created the mission.
+    /// Bridge routing prefers this over `thread_id` when delivering the
+    /// outcome to channels / SSE / conversation history, so the user
+    /// sees the result in the chat where they fired the mission.
+    /// `None` for missions with no originating chat conversation.
+    pub parent_thread_id: Option<ThreadId>,
     pub user_id: String,
     /// Channels to notify (from `Mission.notify_channels`).
     pub notify_channels: Vec<String>,
@@ -427,6 +433,34 @@ impl MissionManager {
         cadence: MissionCadence,
         notify_channels: Vec<String>,
     ) -> Result<MissionId, EngineError> {
+        self.create_mission_with_parent(
+            project_id,
+            user_id,
+            name,
+            goal,
+            cadence,
+            notify_channels,
+            None,
+        )
+        .await
+    }
+
+    /// Variant of `create_mission` that captures the conversation thread that
+    /// originated the mission. The parent thread is later used to route
+    /// mission-outcome notifications back to the conversation where the user
+    /// fired the mission, instead of into the mission's internal execution
+    /// thread (which the user has no way to navigate to).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_mission_with_parent(
+        &self,
+        project_id: ProjectId,
+        user_id: impl Into<String>,
+        name: impl Into<String>,
+        goal: impl Into<String>,
+        cadence: MissionCadence,
+        notify_channels: Vec<String>,
+        parent_thread_id: Option<ThreadId>,
+    ) -> Result<MissionId, EngineError> {
         let mut mission = Mission::new(project_id, user_id, name, goal, cadence);
         if let MissionCadence::Cron {
             ref expression,
@@ -438,6 +472,7 @@ impl MissionManager {
             mission.next_fire_at = Some(next_cron_fire_required(expression, timezone.as_ref())?);
         }
         mission.notify_channels = notify_channels;
+        mission.parent_thread_id = parent_thread_id;
         let id = mission.id;
         self.store.save_mission(&mission).await?;
         self.active.write().await.push(id);
@@ -2723,6 +2758,7 @@ async fn process_mission_outcome_and_notify(
             mission_id,
             mission_name: mission.name.clone(),
             thread_id,
+            parent_thread_id: mission.parent_thread_id,
             user_id: mission.user_id.clone(),
             notify_channels: mission.notify_channels.clone(),
             notify_user: mission.notify_user.clone(),
@@ -2993,6 +3029,7 @@ async fn dispatch_protected_write(
         step_id: StepId::new(),
         current_call_id: None,
         source_channel: None,
+        source_conversation_thread_id: None,
         user_timezone: None,
         thread_goal: None,
         available_actions_snapshot: None,
@@ -3915,6 +3952,49 @@ mod tests {
     }
 
     // ── Tests ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_mission_with_parent_persists_parent_thread_id() {
+        let store = Arc::new(TestStore::new());
+        let mgr = make_mission_manager(Arc::clone(&store) as Arc<dyn Store>);
+        let project_id = ProjectId::new();
+        let parent = ThreadId::new();
+
+        let id = mgr
+            .create_mission_with_parent(
+                project_id,
+                "test-user",
+                "test mission",
+                "do the thing",
+                MissionCadence::Manual,
+                Vec::new(),
+                Some(parent),
+            )
+            .await
+            .unwrap();
+
+        let mission = mgr.get_mission(id).await.unwrap().unwrap();
+        assert_eq!(
+            mission.parent_thread_id,
+            Some(parent),
+            "parent thread id should round-trip through create_mission_with_parent"
+        );
+
+        // The legacy create_mission entry point stays parent-agnostic.
+        let plain_id = mgr
+            .create_mission(
+                project_id,
+                "test-user",
+                "plain mission",
+                "do the other thing",
+                MissionCadence::Manual,
+                Vec::new(),
+            )
+            .await
+            .unwrap();
+        let plain = mgr.get_mission(plain_id).await.unwrap().unwrap();
+        assert_eq!(plain.parent_thread_id, None);
+    }
 
     #[tokio::test]
     async fn create_mission_persists() {

@@ -644,6 +644,7 @@ mod tests {
             step_id: ironclaw_engine::StepId::new(),
             current_call_id: None,
             source_channel: None,
+            source_conversation_thread_id: None,
             user_timezone: None,
             thread_goal: None,
             available_actions_snapshot: None,

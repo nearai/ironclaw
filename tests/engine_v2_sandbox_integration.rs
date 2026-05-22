@@ -90,6 +90,7 @@ fn make_context(project_id: ProjectId) -> ThreadExecutionContext {
         step_id: StepId::new(),
         current_call_id: Some("call_test_1".into()),
         source_channel: None,
+        source_conversation_thread_id: None,
         user_timezone: None,
         thread_goal: None,
         available_actions_snapshot: None,

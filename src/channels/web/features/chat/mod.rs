@@ -98,6 +98,72 @@ pub(crate) async fn chat_send_handler(
         ));
     }
 
+    // Reject a `thread_id` that names another user's conversation row.
+    // Without this check, the v1 conversation UUID flows through the
+    // engine v2 metadata (`source_conversation_thread_id`) into
+    // `Mission.parent_thread_id`, and the bridge mission-notification
+    // sink (`bridge::router::handle_mission_notification`) eventually
+    // writes mission output to `conversation_messages` keyed by that
+    // UUID — the DB FK is satisfied but ownership is not, which is the
+    // IDOR vector. We allow a UUID that has no DB row yet because the
+    // FK would fail harmlessly; the strict rejection only fires when a
+    // row exists and is owned by someone else.
+    if let Some(raw_thread_id) = req.thread_id.as_deref() {
+        let parsed = Uuid::parse_str(raw_thread_id).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Invalid thread_id (expected UUID)".to_string(),
+            )
+        })?;
+        if let Some(store) = state.store.as_ref() {
+            match store
+                .conversation_belongs_to_user(parsed, &user.user_id)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    // `false` covers both "no row exists yet" and "row
+                    // belongs to another user". Disambiguate so a
+                    // brand-new thread_id (e.g. just minted by
+                    // `/api/chat/thread/new` whose row commit is racing
+                    // this send) still goes through, but a known
+                    // victim's UUID is rejected with 404.
+                    let row_exists = store
+                        .get_conversation_metadata(parsed)
+                        .await
+                        .map_err(|e| {
+                            tracing::error!(
+                                thread_id = %parsed,
+                                user_id = %user.user_id,
+                                error = %e,
+                                "chat_send: failed to inspect conversation metadata",
+                            );
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                "Database error".to_string(),
+                            )
+                        })?
+                        .is_some();
+                    if row_exists {
+                        return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(
+                        thread_id = %parsed,
+                        user_id = %user.user_id,
+                        %error,
+                        "chat_send: failed to verify conversation ownership",
+                    );
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Database error".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
     let mut msg = web_incoming_message(
         "gateway",
         &user.user_id,
@@ -1997,6 +2063,161 @@ mod tests {
         .await
         .expect_err("31st call must be rate-limited");
         assert_eq!(err.0, StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    /// IDOR regression: a chat send tagged with another user's conversation
+    /// UUID must be rejected at the entry. Without this gate the UUID flows
+    /// through engine-v2 metadata into `Mission.parent_thread_id`, and the
+    /// mission notification sink at `bridge::router::handle_mission_notification`
+    /// would later write the mission's output into the victim's
+    /// `conversation_messages` row (the v1 FK is satisfied, ownership is not).
+    /// Per `.claude/rules/testing.md` ("Test Through the Caller"), this drives
+    /// the handler against a real DB so a future refactor that drops one of
+    /// the two predicate inputs (`conversation_belongs_to_user`,
+    /// `get_conversation_metadata`) silently can't pass.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_chat_send_rejects_thread_id_owned_by_another_user() {
+        let (db, _tmp) = crate::testing::test_db().await;
+
+        // Victim creates a conversation row.
+        let victim_thread = uuid::Uuid::new_v4();
+        db.ensure_conversation(victim_thread, "gateway", "victim", None, Some("gateway"))
+            .await
+            .expect("seed victim conversation");
+
+        // Attacker also has a conversation of their own so we can confirm the
+        // allow-path still works in the same test fixture.
+        let attacker_thread = uuid::Uuid::new_v4();
+        db.ensure_conversation(
+            attacker_thread,
+            "gateway",
+            "attacker",
+            None,
+            Some("gateway"),
+        )
+        .await
+        .expect("seed attacker conversation");
+
+        let state = test_gateway_state_with_dependencies(None, Some(Arc::clone(&db)), None, None);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::channels::IncomingMessage>(8);
+        *state.msg_tx.write().await = Some(tx);
+
+        // Attack: target the victim's conversation UUID while authenticated
+        // as "attacker". Must be rejected.
+        let req = crate::channels::web::types::SendMessageRequest {
+            thread_id: Some(victim_thread.to_string()),
+            content: "pretend this is mine".to_string(),
+            images: Vec::new(),
+            attachments: Vec::new(),
+            timezone: None,
+        };
+        let err = chat_send_handler(
+            axum::extract::State(Arc::clone(&state)),
+            crate::channels::web::auth::AuthenticatedUser(UserIdentity {
+                user_id: "attacker".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            axum::http::HeaderMap::new(),
+            axum::Json(req),
+        )
+        .await
+        .expect_err("send tagged with victim's thread_id must be rejected");
+        assert_eq!(
+            err.0,
+            StatusCode::NOT_FOUND,
+            "cross-user thread_id must return 404, not silently route or 200",
+        );
+
+        // The handler must NOT have enqueued the message — if a future
+        // regression flips the check into a warn-and-continue, this catches it.
+        assert!(
+            rx.try_recv().is_err(),
+            "rejected send must NOT enqueue a message onto msg_tx",
+        );
+
+        // Allow-path: attacker targets their own conversation. Must succeed.
+        let req = crate::channels::web::types::SendMessageRequest {
+            thread_id: Some(attacker_thread.to_string()),
+            content: "my own thread".to_string(),
+            images: Vec::new(),
+            attachments: Vec::new(),
+            timezone: None,
+        };
+        let (status, _) = chat_send_handler(
+            axum::extract::State(Arc::clone(&state)),
+            crate::channels::web::auth::AuthenticatedUser(UserIdentity {
+                user_id: "attacker".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            axum::http::HeaderMap::new(),
+            axum::Json(req),
+        )
+        .await
+        .expect("send to own conversation must succeed");
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let queued = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .expect("accepted send must enqueue promptly")
+            .expect("msg_tx must receive the queued send");
+        assert_eq!(queued.user_id, "attacker");
+        assert_eq!(
+            queued.thread_id.as_ref().map(|t| t.as_str()),
+            Some(attacker_thread.to_string().as_str()),
+        );
+
+        // Brand-new UUID with no DB row: must be allowed through. The web UI
+        // creates a thread server-side via `/api/chat/thread/new` before
+        // sending, but a missing v1 row (deleted, racing commit, non-gateway
+        // channel) must not be conflated with an ownership violation.
+        let fresh = uuid::Uuid::new_v4();
+        let req = crate::channels::web::types::SendMessageRequest {
+            thread_id: Some(fresh.to_string()),
+            content: "brand new thread".to_string(),
+            images: Vec::new(),
+            attachments: Vec::new(),
+            timezone: None,
+        };
+        let (status, _) = chat_send_handler(
+            axum::extract::State(Arc::clone(&state)),
+            crate::channels::web::auth::AuthenticatedUser(UserIdentity {
+                user_id: "attacker".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            axum::http::HeaderMap::new(),
+            axum::Json(req),
+        )
+        .await
+        .expect("brand-new thread_id must be allowed");
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .expect("brand-new thread enqueue must arrive");
+
+        // Malformed UUID: 400.
+        let req = crate::channels::web::types::SendMessageRequest {
+            thread_id: Some("not-a-uuid".to_string()),
+            content: "garbage".to_string(),
+            images: Vec::new(),
+            attachments: Vec::new(),
+            timezone: None,
+        };
+        let err = chat_send_handler(
+            axum::extract::State(Arc::clone(&state)),
+            crate::channels::web::auth::AuthenticatedUser(UserIdentity {
+                user_id: "attacker".to_string(),
+                role: "member".to_string(),
+                workspace_read_scopes: Vec::new(),
+            }),
+            axum::http::HeaderMap::new(),
+            axum::Json(req),
+        )
+        .await
+        .expect_err("malformed thread_id must be rejected");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
     }
 
     // The three WS handler tests below use `tower::ServiceExt::oneshot`,

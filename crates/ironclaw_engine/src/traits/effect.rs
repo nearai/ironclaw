@@ -30,6 +30,14 @@ pub struct ThreadExecutionContext {
     /// The channel this thread's conversation originated from (e.g. "gateway", "repl").
     /// Used by mission_create to default `notify_channels` to the current channel.
     pub source_channel: Option<String>,
+    /// The originating user-facing conversation thread ID (i.e. the v1
+    /// `conversations.id` / chat URL parameter). Distinct from `thread_id`
+    /// above, which is the ephemeral v2 engine thread for the current turn.
+    /// Used by `mission_create` to record where the user fired the mission so
+    /// outcome notifications route back to that chat thread instead of into
+    /// the user's assistant conversation. `None` for non-chat dispatch paths
+    /// (cron, learning missions, repl, etc.).
+    pub source_conversation_thread_id: Option<ThreadId>,
     /// Validated IANA timezone of the user (e.g. "America/New_York").
     /// Used by mission_create to default cron timezone, and exposed to CodeAct scripts.
     pub user_timezone: Option<ValidTimezone>,

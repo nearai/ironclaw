@@ -2864,6 +2864,7 @@ mod tests {
             step_id: StepId::new(),
             current_call_id: None,
             source_channel: None,
+            source_conversation_thread_id: None,
             user_timezone: None,
             thread_goal: Some(thread.goal.clone()),
             available_actions_snapshot: None,

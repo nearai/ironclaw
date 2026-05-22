@@ -156,6 +156,15 @@ pub struct Mission {
     // ── Progress tracking ──
     /// History of threads spawned by this mission.
     pub thread_history: Vec<ThreadId>,
+    /// The conversation thread that originally created this mission.
+    ///
+    /// When set, mission outcome notifications are routed back to this
+    /// thread so the user sees results in the chat where they fired the
+    /// mission, not in the mission's internal execution thread. `None`
+    /// for missions that have no originating chat conversation
+    /// (learning missions, routine API imports, system-spawned missions).
+    #[serde(default)]
+    pub parent_thread_id: Option<ThreadId>,
     /// Optional criteria for declaring the mission complete.
     pub success_criteria: Option<String>,
 
@@ -270,6 +279,7 @@ impl Mission {
             current_focus: None,
             approach_history: Vec::new(),
             thread_history: Vec::new(),
+            parent_thread_id: None,
             success_criteria: None,
             notify_channels: Vec::new(),
             notify_user: None,
