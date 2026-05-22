@@ -23,15 +23,26 @@ default = ["root-llm-provider"]
 # can still boot the runtime substrate but will surface an "LLM gateway
 # not wired" error on the first `send_user_message`.
 root-llm-provider = ["ironclaw_reborn_composition/root-llm-provider"]
+# Compile in the WebChat v2 beta HTTP gateway subcommand
+# (`ironclaw-reborn serve`). Off by default so a default binary build
+# does not link the auth/HTTP middleware stack at all — production
+# binaries that genuinely expose v2 over HTTP must opt in. Pulls in
+# `webui-v2-beta` on the composition crate plus the ingress crate
+# that owns the serve loop.
+webui-v2-beta = [
+    "ironclaw_reborn_composition/webui-v2-beta",
+    "dep:ironclaw_reborn_webui_ingress",
+    "dep:secrecy",
+]
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4.5.0"
-ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0", features = ["webui-v2-beta"] }
+ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", version = "0.1.0" }
 ironclaw_reborn_config = { path = "../ironclaw_reborn_config", version = "0.1.0" }
-ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", version = "0.1.0" }
-secrecy = "0.10"
+ironclaw_reborn_webui_ingress = { path = "../ironclaw_reborn_webui_ingress", version = "0.1.0", optional = true }
+secrecy = { version = "0.10", optional = true }
 serde_json = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "io-std", "sync", "time"] }

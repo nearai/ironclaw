@@ -466,12 +466,18 @@ async fn ws_drain_loop(
     // lifetime, drain stream_events on the same poll cadence, emit
     // each envelope as a JSON text frame.
     //
-    // Send-side timeout: every `socket.send().await` is bounded by
-    // the remaining lifetime budget. Without this, a TCP-backpressuring
-    // client could pin the task (and its `SseSlot`) past
-    // `SSE_MAX_LIFETIME`, consuming one of the caller's shared
-    // concurrency slots until the kernel eventually drops the
-    // half-broken connection.
+    // Two failure modes the loop must observe:
+    //
+    // 1. **Peer close / socket error.** The browser may close an
+    //    idle tab without trading a close frame; the OS surfaces
+    //    that as either a `Close` message or a socket-error on the
+    //    next read. The loop watches `socket.recv()` on every
+    //    `.await` so a dropped tab exits immediately instead of
+    //    pinning the per-caller `SseSlot` for up to `SSE_MAX_LIFETIME`.
+    // 2. **TCP backpressure on send.** A slow / hostile reader can
+    //    leave bytes queued indefinitely. Each `socket.send().await`
+    //    runs under `ws_send_with_timeout` so the per-caller slot
+    //    is released within the lifetime budget regardless.
     let _slot_guard = slot;
     let started_at = tokio::time::Instant::now();
     let mut after_cursor: Option<ProjectionCursor> = None;
@@ -486,8 +492,26 @@ async fn ws_drain_loop(
             thread_id: thread_id.clone(),
             after_cursor: after_cursor.clone(),
         };
-        match tokio::time::timeout(remaining, services.stream_events(caller.clone(), request)).await
-        {
+        let facade_call = services.stream_events(caller.clone(), request);
+        let outcome = tokio::select! {
+            biased;
+            // Peer close / socket error wins over the facade poll —
+            // if the browser already dropped the connection we want
+            // to free the slot immediately, not wait for stream_events
+            // to return.
+            incoming = socket.recv() => {
+                match incoming {
+                    None | Some(Err(_)) => return,
+                    Some(Ok(axum::extract::ws::Message::Close(_))) => return,
+                    // Ignore other inbound frames (Ping/Pong are
+                    // handled internally by axum; Text/Binary from
+                    // the browser are not part of this contract).
+                    Some(Ok(_)) => continue,
+                }
+            }
+            facade = tokio::time::timeout(remaining, facade_call) => facade,
+        };
+        match outcome {
             Err(_elapsed) => {
                 let _ = socket.close().await;
                 return;
@@ -534,7 +558,19 @@ async fn ws_drain_loop(
                     let _ = socket.close().await;
                     return;
                 }
-                tokio::time::sleep(sleep_for).await;
+                // Race the poll-interval sleep against socket close
+                // for the same reason as the facade call above: if
+                // the peer drops during the idle window, free the
+                // slot immediately.
+                tokio::select! {
+                    biased;
+                    incoming = socket.recv() => match incoming {
+                        None | Some(Err(_)) => return,
+                        Some(Ok(axum::extract::ws::Message::Close(_))) => return,
+                        Some(Ok(_)) => {}
+                    },
+                    _ = tokio::time::sleep(sleep_for) => {}
+                }
             }
             Ok(Err(error)) => {
                 tracing::debug!(

@@ -171,6 +171,16 @@ struct JwksCache {
     /// also fail. Prevents request convoys behind a slow / unavailable
     /// JWKS endpoint.
     last_failure_at: Option<Instant>,
+    /// Timestamp of the last *forced* (out-of-band) refresh that was
+    /// triggered by an unknown-kid lookup. Tracked separately from
+    /// `fetched_at` because TTL-driven refreshes happen on a slow
+    /// cadence and shouldn't gate kid-rotation handling. Inside
+    /// `JWKS_FORCED_REFRESH_MIN_INTERVAL`, an additional unknown-kid
+    /// miss short-circuits without hitting the network — otherwise
+    /// any caller with rotating fake `kid` values could DoS upstream
+    /// (and us) before the per-caller rate limit kicks in. See
+    /// `force_refresh_jwks` for the gate.
+    last_forced_refresh_at: Option<Instant>,
 }
 
 /// How long to back off after a JWKS fetch failure before allowing
@@ -178,6 +188,17 @@ struct JwksCache {
 /// return the stale keys (stale-while-revalidate); fresh cache hits
 /// are unaffected.
 const JWKS_FAILURE_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Minimum gap between successive *forced* JWKS refreshes (the ones
+/// triggered by a token claiming a `kid` not in the current cache).
+/// Without this, an unauthenticated caller streaming syntactically
+/// valid JWTs whose `kid` values rotate every request can force one
+/// upstream JWKS fetch per request — DoSing both this gateway and
+/// the issuer before bearer auth even succeeds and before the
+/// per-caller rate limiter has a caller key to attribute against.
+/// Tokens that miss inside this window still 401 (the cached keys
+/// don't match), but no network traffic is generated.
+const JWKS_FORCED_REFRESH_MIN_INTERVAL: Duration = Duration::from_secs(60);
 
 /// OIDC ID-token authenticator. Cheap to clone — the JWKS cache is
 /// `Arc`-shared.
@@ -309,22 +330,60 @@ impl OidcAuthenticator {
     /// normal signal that the issuer has rotated keys mid-TTL. Without
     /// this path, newly-signed tokens 401 for the full cache window.
     ///
-    /// Single-flight: if another caller refreshed while this caller
-    /// was waiting on `refresh_lock`, return that caller's result
-    /// without re-fetching. We detect "someone else refreshed" by
-    /// comparing the `fetched_at` timestamp before and after taking
-    /// the lock — a change means a concurrent refresh succeeded.
-    /// Unlike `jwks()`, we cannot short-circuit on a fresh
-    /// `try_cached_keys` here because the whole point of the call is
-    /// that the fresh cache lacked the token's kid.
+    /// Two short-circuits guard against DoS / convoy patterns:
+    ///
+    /// 1. **Forced-refresh backoff** — if another forced refresh ran
+    ///    within `JWKS_FORCED_REFRESH_MIN_INTERVAL`, return the
+    ///    currently-cached keys without touching the network. Without
+    ///    this, an unauthenticated caller streaming JWTs with rotating
+    ///    `kid` values would force one upstream fetch per request,
+    ///    DoSing the gateway and the issuer before bearer auth ever
+    ///    succeeds (and before the per-caller rate limiter has a
+    ///    caller key to attribute against).
+    /// 2. **Single-flight** — if another caller refreshed while this
+    ///    caller was waiting on `refresh_lock`, return that caller's
+    ///    result without re-fetching. We detect "someone else
+    ///    refreshed" by comparing the `fetched_at` timestamp before
+    ///    and after taking the lock.
+    ///
+    /// A miss inside the backoff window still 401s the request
+    /// (`decode_token` calls `lookup_jwk` again and finds nothing) —
+    /// the security property of "unknown kid → reject" is preserved;
+    /// only the upstream-fetch side effect is suppressed.
     async fn force_refresh_jwks(&self) -> Result<Vec<Jwk>, OidcAuthenticatorError> {
-        let before_fetched_at = self.cache.read().fetched_at;
-        let _guard = self.refresh_lock.lock().await;
-        let after_fetched_at = self.cache.read().fetched_at;
-        if before_fetched_at != after_fetched_at {
+        let (before_fetched_at, before_forced_at) = {
+            let guard = self.cache.read();
+            (guard.fetched_at, guard.last_forced_refresh_at)
+        };
+        // Backoff short-circuit: if a previous forced refresh ran
+        // within the min interval, return the current cache without
+        // queueing another fetch.
+        if let Some(last_forced) = before_forced_at
+            && last_forced.elapsed() < JWKS_FORCED_REFRESH_MIN_INTERVAL
+        {
+            tracing::debug!(
+                target = "ironclaw::reborn::webui_ingress::oidc",
+                "forced JWKS refresh suppressed (within {}s backoff window)",
+                JWKS_FORCED_REFRESH_MIN_INTERVAL.as_secs(),
+            );
             return Ok(self.cache.read().keys.clone());
         }
-        self.refresh_jwks_locked().await
+        let _guard = self.refresh_lock.lock().await;
+        // Re-check after acquiring the lock: another caller may have
+        // run a forced refresh while we were blocked.
+        let (after_fetched_at, after_forced_at) = {
+            let guard = self.cache.read();
+            (guard.fetched_at, guard.last_forced_refresh_at)
+        };
+        if before_fetched_at != after_fetched_at || before_forced_at != after_forced_at {
+            return Ok(self.cache.read().keys.clone());
+        }
+        let result = self.refresh_jwks_locked().await;
+        // Stamp the forced-refresh timestamp regardless of outcome —
+        // a failed fetch should still cool the backoff so we don't
+        // hammer a flaky upstream on every unknown-kid request.
+        self.cache.write().last_forced_refresh_at = Some(Instant::now());
+        result
     }
 
     /// Caller MUST hold `refresh_lock`. Performs the network fetch and

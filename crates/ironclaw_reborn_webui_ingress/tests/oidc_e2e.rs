@@ -355,3 +355,61 @@ async fn oidc_jwks_failure_backoff_avoids_convoy_against_slow_upstream() {
 
     server.abort();
 }
+
+// Regression for the unknown-kid DoS review (Medium): every
+// syntactically valid JWT with an unknown `kid` triggers the
+// kid-miss force-refresh path inside `decode_token`. Without a
+// minimum-interval backoff on that path, an unauthenticated caller
+// can stream forged JWTs with rotating `kid` values and force one
+// upstream JWKS fetch per request — DoSing both this gateway and
+// the issuer before bearer auth ever succeeds (and before the
+// per-caller rate limiter has a caller key to attribute against).
+// The backoff bounds upstream fetches to at most one per
+// `JWKS_FORCED_REFRESH_MIN_INTERVAL` regardless of how many unknown
+// kids the attacker spins through.
+#[tokio::test]
+async fn oidc_unknown_kid_storm_does_not_force_unbounded_jwks_refresh() {
+    let key = generate_test_key();
+    let state = JwksState::new(vec![jwk_for(&key.public, TEST_KID)]);
+    let (jwks_url, server) = spawn_jwks_server(state.clone()).await;
+    let auth = build_authenticator(jwks_url);
+
+    // Warm the cache so the first request doesn't count against the
+    // unknown-kid budget.
+    let known = sign_token(&key.private_pem, TEST_KID, TEST_ISSUER, TEST_AUDIENCE, 600);
+    auth.authenticate(&known)
+        .await
+        .expect("warm-cache token accepted");
+    let fetch_after_warm = state.fetch_count();
+
+    // Stream 25 forged JWTs each claiming a fresh unknown `kid`.
+    // Each one would (without backoff) trigger one extra upstream
+    // fetch. With backoff, at most one extra fetch is permitted.
+    // We sign with a DIFFERENT key so the lookup fails even after
+    // the first forced refresh — the upstream JWKS only ever
+    // contains the rotated key, not the attacker's.
+    let attacker_key = generate_test_key();
+    for n in 0..25 {
+        let kid = format!("attacker-kid-{n}");
+        let bad_token = sign_token(
+            &attacker_key.private_pem,
+            &kid,
+            TEST_ISSUER,
+            TEST_AUDIENCE,
+            600,
+        );
+        // Each token must be REJECTED — security property preserved.
+        assert!(
+            auth.authenticate(&bad_token).await.is_none(),
+            "JWT with unknown kid `{kid}` must be rejected",
+        );
+    }
+    let extra_fetches = state.fetch_count() - fetch_after_warm;
+    assert!(
+        extra_fetches <= 1,
+        "unknown-kid storm must NOT force >1 upstream JWKS fetch within the backoff window; \
+         saw {extra_fetches} extra fetches",
+    );
+
+    server.abort();
+}

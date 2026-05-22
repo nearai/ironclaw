@@ -36,6 +36,10 @@ fn help_mentions_reborn_commands() {
     assert!(stdout.contains("profile"), "stdout: {stdout}");
     assert!(stdout.contains("repl"), "stdout: {stdout}");
     assert!(stdout.contains("run"), "stdout: {stdout}");
+    // `serve` is gated behind the `webui-v2-beta` Cargo feature so a
+    // default binary build does not link the beta HTTP/auth gateway.
+    // The dedicated `serve_*` tests below also `#[cfg]` themselves.
+    #[cfg(feature = "webui-v2-beta")]
     assert!(stdout.contains("serve"), "stdout: {stdout}");
     assert!(stdout.contains("skills"), "stdout: {stdout}");
 }
@@ -487,6 +491,7 @@ fn completion_generates_bash_script_without_reborn_home() {
     assert!(stdout.contains("COMPREPLY"), "stdout: {stdout}");
 }
 
+#[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_help_mentions_host_and_port() {
     let output = Command::new(reborn_bin())
@@ -506,6 +511,7 @@ fn serve_help_mentions_host_and_port() {
     assert!(stdout.contains("--port"), "stdout: {stdout}");
 }
 
+#[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_fails_closed_when_env_bearer_token_var_is_unset() {
     // The standalone CLI's env-bearer authenticator reads the token
@@ -540,6 +546,7 @@ fn serve_fails_closed_when_env_bearer_token_var_is_unset() {
     );
 }
 
+#[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_fails_closed_when_env_user_id_var_is_unset() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -567,6 +574,7 @@ fn serve_fails_closed_when_env_user_id_var_is_unset() {
     );
 }
 
+#[cfg(feature = "webui-v2-beta")]
 #[test]
 fn serve_rejects_malformed_host_before_webui_handoff() {
     let temp = tempfile::tempdir().expect("tempdir");

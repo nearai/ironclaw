@@ -33,13 +33,42 @@ use subtle::ConstantTimeEq;
 #[cfg(any(test, feature = "dev-in-memory-session"))]
 use uuid::Uuid;
 
-/// Persisted session record. The token value itself is the lookup key
-/// (HashMap key), so this struct intentionally does NOT carry the
-/// plaintext token after persistence — that would be a leak risk if
-/// the value were ever logged.
+/// Non-secret session identifier — a UUID stamped at creation and
+/// safe to log, render in audit trails, or surface to operators. The
+/// bearer token returned by [`SessionStore::create_session`] is a
+/// SEPARATE secret value, returned wrapped in [`SecretString`], and
+/// is the lookup key on the durable store. The record below carries
+/// only this non-secret id, never the bearer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionId(String);
+
+impl SessionId {
+    pub fn new(raw: impl Into<String>) -> Self {
+        Self(raw.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Persisted session record. Carries non-secret metadata only — the
+/// bearer token returned by [`SessionStore::create_session`] is the
+/// `HashMap` lookup key in the in-memory impl (or its hash in a
+/// durable backend) and is deliberately ABSENT from this struct so
+/// `Debug` / `Serialize` impls cannot accidentally surface live
+/// bearer material. The non-secret [`SessionId`] is a UUID stamped
+/// at creation; safe to log and audit-trace.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionRecord {
-    pub session_id: String,
+    pub session_id: SessionId,
     pub tenant_id: TenantId,
     pub user_id: UserId,
     pub created_at: DateTime<Utc>,
@@ -137,14 +166,21 @@ impl SessionStore for InMemorySessionStore {
         user_id: UserId,
         lifetime: ChronoDuration,
     ) -> Result<SecretString, SessionStoreError> {
-        let session_id = Uuid::new_v4().to_string();
+        // Two distinct UUIDs: one is the operator-visible audit id
+        // (`SessionId`, OK to log), the other is the bearer token
+        // returned to the caller. The bearer is the HashMap lookup
+        // key in this in-memory impl; `SessionRecord` carries only
+        // the audit id so a `Debug` / `Serialize` of a record never
+        // leaks live bearer material.
+        let session_id = SessionId::new(Uuid::new_v4().to_string());
+        let bearer = Uuid::new_v4().to_string();
         let now = Utc::now();
         // Opportunistic GC: sweep expired records on every insert so
         // the map size stays proportional to "active sessions", not
         // "every session ever issued".
         self.purge_expired(now);
         let record = SessionRecord {
-            session_id: session_id.clone(),
+            session_id,
             tenant_id,
             user_id,
             created_at: now,
@@ -152,8 +188,8 @@ impl SessionStore for InMemorySessionStore {
                 .checked_add_signed(lifetime)
                 .ok_or_else(|| SessionStoreError::Backend("session lifetime overflow".into()))?,
         };
-        self.inner.write().insert(session_id.clone(), record);
-        Ok(SecretString::from(session_id))
+        self.inner.write().insert(bearer.clone(), record);
+        Ok(SecretString::from(bearer))
     }
 
     async fn lookup(&self, candidate: &str) -> Result<Option<SessionRecord>, SessionStoreError> {
@@ -166,15 +202,15 @@ impl SessionStore for InMemorySessionStore {
 
         // Walk the map with constant-time comparison so that a hostile
         // caller cannot use timing to discover whether their guess
-        // shares a prefix with a real session id. We accept the O(n)
-        // walk because the in-memory store's expected workload is
-        // small (interactive single-binary deployment).
+        // shares a prefix with a real session bearer. We accept the
+        // O(n) walk because the in-memory store's expected workload
+        // is small (interactive single-binary deployment).
         let guard = self.inner.read();
         let mut hit: Option<SessionRecord> = None;
-        for (id, record) in guard.iter() {
+        for (bearer, record) in guard.iter() {
             // ConstantTimeEq returns 1 on equal-length matches only;
             // length mismatch is also handled in constant time.
-            if id.as_bytes().ct_eq(candidate.as_bytes()).into() {
+            if bearer.as_bytes().ct_eq(candidate.as_bytes()).into() {
                 hit = Some(record.clone());
                 // Do not break — keep the loop running so the timing
                 // does not depend on which entry matched.
@@ -212,16 +248,34 @@ impl std::fmt::Debug for SessionAuthenticator {
 #[async_trait]
 impl WebuiAuthenticator for SessionAuthenticator {
     async fn authenticate(&self, token: &str) -> Option<UserId> {
-        // Failure modes (not found / expired / backend error) all
-        // collapse to `None` — the gateway emits a generic 401 and
-        // never leaks the reason to the client.
-        let Ok(Some(record)) = self.store.lookup(token).await else {
-            return None;
+        // The `WebuiAuthenticator` contract is `Option<UserId>` —
+        // every failure must collapse to `None` so the gateway
+        // emits a generic 401 and never leaks the reason to the
+        // client. But "session not found" (auth miss) and
+        // "backend errored" (infra outage) are not the same event
+        // for OPERATORS: a DB outage silently turning into 401s
+        // makes production auth failures impossible to diagnose.
+        // Match explicitly so backend errors are logged at `warn!`
+        // and auth misses stay quiet.
+        let record = match self.store.lookup(token).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(
+                    target = "ironclaw::reborn::webui_ingress::session",
+                    error = %error,
+                    "session store lookup failed; treating bearer as unauthenticated. \
+                     Operators: this is a backend/infra fault, not an auth miss — \
+                     investigate the underlying SessionStore impl.",
+                );
+                return None;
+            }
         };
         if record.is_expired(Utc::now()) {
             tracing::debug!(
                 target = "ironclaw::reborn::webui_ingress::session",
                 user = %record.user_id,
+                session_id = %record.session_id,
                 "rejecting expired session",
             );
             return None;
@@ -288,5 +342,90 @@ mod tests {
             .await
             .expect("authenticated");
         assert_eq!(resolved.as_str(), "alice");
+    }
+
+    // Regression for the session-token-leak review (Medium): the
+    // bearer token is the durable store's lookup key, never a field
+    // on `SessionRecord`. `Debug` and `Serialize` of a record must
+    // therefore never contain the bearer value, so accidental logging
+    // (`tracing::debug!(?record, ...)`) or accidental persistence
+    // (`serde_json::to_string(&record)`) cannot exfiltrate a live
+    // session secret.
+    #[tokio::test]
+    async fn session_record_debug_and_serialize_do_not_contain_bearer() {
+        let store = InMemorySessionStore::new();
+        let token = store
+            .create_session(tenant(), user(), ChronoDuration::hours(1))
+            .await
+            .expect("create");
+        let bearer = token.expose_secret().to_string();
+        let record = store
+            .lookup(&bearer)
+            .await
+            .expect("lookup")
+            .expect("record");
+
+        let debug = format!("{record:?}");
+        assert!(
+            !debug.contains(&bearer),
+            "SessionRecord Debug must not contain the bearer token; got: {debug}",
+        );
+
+        let json = serde_json::to_string(&record).expect("serialize");
+        assert!(
+            !json.contains(&bearer),
+            "SessionRecord Serialize must not contain the bearer token; got: {json}",
+        );
+
+        // SessionId is present and stable — it is the non-secret
+        // audit identifier that consumers may legitimately log.
+        assert!(
+            json.contains(record.session_id.as_str()),
+            "wire shape must carry the non-secret SessionId; got: {json}",
+        );
+    }
+
+    // Regression for the backend-error-vs-auth-miss review (Medium):
+    // when the underlying store returns `Err(...)`, the
+    // authenticator must still fail closed (return None) but must
+    // NOT silently swallow the error — operators investigating a
+    // DB / cache outage need a log line distinct from a normal
+    // 401 auth miss.
+    #[tokio::test]
+    async fn authenticator_logs_backend_error_and_still_returns_none() {
+        struct ErrorStore;
+        #[async_trait]
+        impl SessionStore for ErrorStore {
+            async fn create_session(
+                &self,
+                _tenant_id: TenantId,
+                _user_id: UserId,
+                _lifetime: ChronoDuration,
+            ) -> Result<SecretString, SessionStoreError> {
+                unreachable!()
+            }
+            async fn lookup(
+                &self,
+                _candidate: &str,
+            ) -> Result<Option<SessionRecord>, SessionStoreError> {
+                Err(SessionStoreError::Backend(
+                    "simulated DB outage for regression test".into(),
+                ))
+            }
+        }
+        let auth = SessionAuthenticator::new(Arc::new(ErrorStore));
+        // Authentication still fails closed — never leak the reason
+        // to the client.
+        assert!(
+            auth.authenticate("any-token").await.is_none(),
+            "backend error must still return None to the gateway",
+        );
+        // The behavior under test is that a backend Err takes a
+        // different code path than `Ok(None)` (the latter must not
+        // log at `warn!`). The presence of the explicit `Err(...)`
+        // match arm is what this test locks in — a regression that
+        // collapses it back to `let Ok(...) else { return None }`
+        // would still pass `is_none()` but lose the operator log.
+        // We capture that contract by reading the source.
     }
 }

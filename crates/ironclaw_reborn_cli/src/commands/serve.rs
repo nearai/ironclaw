@@ -47,7 +47,10 @@ pub(crate) struct ServeCommand {
 impl ServeCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
         // Build the runtime config from the operator's TOML.
-        let runtime_input = crate::runtime::build_runtime_input(context.boot_config())?;
+        let runtime_input = crate::runtime::build_runtime_input(
+            context.boot_config(),
+            crate::runtime::RuntimeInputCaller::Serve,
+        )?;
         let boot_config = context.boot_config();
         let config_file =
             ironclaw_reborn_config::RebornConfigFile::load(&boot_config.home().config_file_path())
@@ -132,10 +135,28 @@ impl ServeCommand {
             IpAddr::from_str(DEFAULT_SERVE_HOST)
                 .expect("DEFAULT_SERVE_HOST is a crate-local literal that parses as IpAddr") // safety: crate-local const known to be valid
         };
-        let port: u16 = self
-            .port
-            .or_else(|| webui_section.and_then(|s| s.listen_port))
-            .unwrap_or(DEFAULT_SERVE_PORT);
+        // `port = 0` would tell the OS to pick a free port — useful
+        // when invoked from a test harness with `--port 0`, but in a
+        // config file it produces a running server whose real bound
+        // port is never reported back to the operator (the banner
+        // prints `:0`). Allow `--port 0` from the CLI flag, reject
+        // `0` from `[webui].listen_port`.
+        let port: u16 = if let Some(value) = self.port {
+            value
+        } else if let Some(value) = webui_section.and_then(|s| s.listen_port) {
+            if value == 0 {
+                anyhow::bail!(
+                    "[webui].listen_port = 0 from config is not supported: the OS would pick \
+                     an ephemeral port and the startup banner cannot report it. Set a fixed \
+                     port in config, or pass `--port 0` on the CLI when you genuinely want \
+                     an ephemeral port (the banner output is still :0 in that case — the \
+                     bound address is only useful when consumed through a test harness)."
+                );
+            }
+            value
+        } else {
+            DEFAULT_SERVE_PORT
+        };
         let listen_addr = SocketAddr::new(host, port);
 
         // CORS allow-origin list. Empty = fail-closed on every
@@ -213,10 +234,45 @@ impl ServeCommand {
             .build()
             .context("failed to build tokio runtime for `serve`")?;
 
+        // No production `ProjectionStream` port is wired into the
+        // Reborn runtime in this slice. Without one,
+        // `RebornServices::stream_events` returns `Unavailable` for
+        // every poll, so `/events` (SSE) and `/ws` would advertise
+        // streaming routes that only emit 503 Unavailable.
+        //
+        // Per #3580 review feedback, fail serve startup by default so
+        // the binary cannot advertise streaming routes that cannot
+        // deliver projections. The
+        // `IRONCLAW_REBORN_ALLOW_NO_PROJECTION_STREAM` env opt-in is
+        // reserved for tests and for installations that genuinely
+        // only care about the non-streaming v2 routes (create-thread,
+        // send-message, get-timeline, cancel-run, resolve-gate,
+        // setup-extension, list-threads); it surfaces a startup
+        // warning so the trade-off is visible in logs.
+        let allow_no_stream = env::var("IRONCLAW_REBORN_ALLOW_NO_PROJECTION_STREAM")
+            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes"));
+        if !allow_no_stream {
+            anyhow::bail!(
+                "Reborn `serve` cannot start: no `ProjectionStream` is wired into the WebUI \
+                 bundle, so /events (SSE) and /ws would advertise streaming routes that only \
+                 emit 503 Unavailable. The v2 streaming surface requires a real projection \
+                 stream port — wire one through `build_webui_services(&runtime, Some(stream))` \
+                 once the host installation exposes it, then re-run `ironclaw-reborn serve`. \
+                 To start anyway for non-streaming routes only, set \
+                 IRONCLAW_REBORN_ALLOW_NO_PROJECTION_STREAM=1."
+            );
+        }
+
         rt.block_on(async move {
             let runtime = build_reborn_runtime(runtime_input)
                 .await
                 .context("failed to assemble Reborn runtime for `serve`")?;
+            tracing::warn!(
+                target = "ironclaw::reborn::cli::serve",
+                "IRONCLAW_REBORN_ALLOW_NO_PROJECTION_STREAM is set; /events and /ws will \
+                 return 503 Unavailable until a real ProjectionStream is wired into \
+                 build_webui_services",
+            );
             let bundle: RebornWebuiBundle = build_webui_services(&runtime, None)?;
 
             print_serve_banner(

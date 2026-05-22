@@ -1430,3 +1430,74 @@ async fn stream_events_ws_emits_projection_frames_and_redacted_error() {
         "second WS poll must advance after_cursor to the last emitted projection cursor",
     );
 }
+
+// Regression for the WS-idle-close review (Medium): the WS drain
+// loop must observe socket close immediately. Without this, an
+// idle peer (closed tab, dropped network) leaves the loop polling
+// the facade at the 1Hz cadence — its per-caller `SseSlot` stays
+// reserved until `SSE_MAX_LIFETIME` (5 min). With the recv-aware
+// select, a peer close releases the slot within one poll cycle.
+//
+// The test pins the budget at 1 stream per caller, opens a WS,
+// closes the browser side, and asserts a subsequent WS upgrade from
+// the same caller succeeds within ~2s (well under the 5-minute
+// lifetime). If the loop didn't observe the close, the second
+// upgrade would 429 for minutes.
+#[tokio::test]
+async fn stream_events_ws_releases_slot_on_peer_close() {
+    use futures::SinkExt;
+
+    let services: Arc<dyn RebornServicesApi> = Arc::new(StubServices::default());
+    let router = webui_v2_router(WebUiV2State::with_sse_concurrency_limit(services, 1))
+        .layer(axum::Extension(caller()));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("local_addr");
+    let serve_handle = tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+
+    let url = format!("ws://{addr}/api/webchat/v2/threads/thread-x/ws");
+
+    // Open WS #1, send a Close frame, drop the client.
+    let (mut ws_one, response) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio_tungstenite::connect_async(url.clone()),
+    )
+    .await
+    .expect("ws connect within 5s")
+    .expect("ws upgrade");
+    assert_eq!(response.status().as_u16(), 101);
+    let _ = ws_one
+        .send(tokio_tungstenite::tungstenite::Message::Close(None))
+        .await;
+    drop(ws_one);
+
+    // Wait briefly for the server-side WS task to observe the close
+    // and release the slot. With the recv-aware select the slot
+    // returns within one poll cycle; without it, it would be pinned
+    // for SSE_MAX_LIFETIME.
+    let recovered = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            match tokio_tungstenite::connect_async(url.clone()).await {
+                Ok(pair) => return pair,
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            }
+        }
+    })
+    .await
+    .expect(
+        "second WS upgrade must succeed within 3s after peer close \
+         — the slot should have been released by the recv-aware select",
+    );
+    assert_eq!(
+        recovered.1.status().as_u16(),
+        101,
+        "second WS upgrade must complete once the slot has been released",
+    );
+    let mut ws_two = recovered.0;
+    let _ = ws_two.close(None).await;
+    serve_handle.abort();
+}
