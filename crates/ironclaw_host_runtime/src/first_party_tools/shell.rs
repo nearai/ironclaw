@@ -22,7 +22,7 @@ pub const SHELL_CAPABILITY_ID: &str = "builtin.shell";
 const DEFAULT_SHELL_WALL_CLOCK_MS: u64 = 120_000;
 const MAX_SHELL_WALL_CLOCK_MS: u64 = 120_000;
 const MAX_SHELL_TIMEOUT_SECS: u64 = MAX_SHELL_WALL_CLOCK_MS / 1000;
-const DEFAULT_SHELL_OUTPUT_BYTES: u64 = 64 * 1024;
+const DEFAULT_SHELL_OUTPUT_BYTES: u64 = crate::process_port::COMMAND_MAX_OUTPUT_SIZE as u64;
 
 pub(super) fn manifest() -> Result<CapabilityManifest, ExtensionError> {
     first_party_capability_manifest(
@@ -74,6 +74,7 @@ pub(super) async fn dispatch(
     }
     shell_core::validate_command(&parsed.command, false).map_err(shell_error)?;
     let output = request
+        .services
         .process
         .run_command(CommandExecutionRequest {
             scope: request.scope.clone(),

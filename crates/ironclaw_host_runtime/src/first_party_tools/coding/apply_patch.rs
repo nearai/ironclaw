@@ -47,6 +47,7 @@ pub(super) async fn apply_patch(
         .lock_edit(&scope, resolved.virtual_path.as_str())
         .await;
     let stat = request
+        .services
         .filesystem
         .stat(&resolved.virtual_path)
         .await
@@ -62,6 +63,7 @@ pub(super) async fn apply_patch(
         ));
     }
     let bytes = request
+        .services
         .filesystem
         .read_file(&resolved.virtual_path)
         .await
@@ -86,6 +88,7 @@ pub(super) async fn apply_patch(
         replace_content(&content, old_string, new_string, replace_all, match_count)?;
     let output = encode_text(&new_content, encoding, line_ending);
     request
+        .services
         .filesystem
         .write_file(&resolved.virtual_path, &output)
         .await

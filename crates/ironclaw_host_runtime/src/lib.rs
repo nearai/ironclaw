@@ -49,6 +49,7 @@ mod capability_catalog;
 mod extension_contracts;
 mod first_party;
 mod first_party_tools;
+mod invocation_services;
 pub mod memory_context;
 mod obligations;
 mod planner;
@@ -78,6 +79,7 @@ pub use first_party_tools::{
     TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_package,
 };
+pub use invocation_services::InvocationServices;
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, ProcessObligationLifecycleStore,
 };

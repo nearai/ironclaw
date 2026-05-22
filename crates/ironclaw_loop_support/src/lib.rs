@@ -21,6 +21,7 @@ mod filesystem_skill_bundle_source;
 pub mod identity_context;
 mod input_port;
 mod input_queue;
+mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
 
@@ -52,6 +53,7 @@ pub use identity_context::{
 };
 pub use input_port::HostQueueLoopInputPort;
 pub use input_queue::{HostInputBatch, HostInputEnvelope, HostInputQueue, HostInputQueueError};
+pub use skill_bundle_context_source::SkillBundleContextSource;
 pub use skill_bundle_source::{
     SkillBundleDescriptor, SkillBundleId, SkillBundleProvenance, SkillBundleSource,
     SkillBundleSourceError, SkillFilePath, SkillSourceKind, sort_skill_bundle_descriptors,
@@ -85,6 +87,7 @@ use ironclaw_turns::{
         LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort, LoopSafeSummary,
         LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, PromptMode, UpdateAssistantDraft,
         VisibleCapabilityRequest, VisibleCapabilitySurface, sanitize_model_visible_text,
+        sort_instruction_snippets_for_prompt,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -1144,8 +1147,9 @@ where
         let Some(source) = self.skill_context_source.as_deref() else {
             return Ok(HashMap::new());
         };
-        let snippets =
+        let mut snippets =
             skill_context::build_skill_instruction_snippets(source, &self.run_context).await?;
+        sort_instruction_snippets_for_prompt(&mut snippets);
         let mut messages = HashMap::with_capacity(snippets.len());
         for (ordinal, snippet) in snippets.into_iter().enumerate() {
             let content_ref = skill_context::snippet_model_message_ref(

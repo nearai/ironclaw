@@ -22,7 +22,8 @@ use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, UserId};
 use ironclaw_product_workflow::{
     ExtensionName, RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornSetupExtensionResponse,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornSetupExtensionResponse,
     RebornSetupExtensionStatus, RebornStreamEventsRequest, RebornStreamEventsResponse,
     RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest,
@@ -147,6 +148,7 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornGetRunStateResponse, RebornServicesError> {
         Err(RebornServicesError {
             code: RebornServicesErrorCode::Internal,
+            kind: RebornServicesErrorKind::Internal,
             status_code: 500,
             retryable: false,
             field: None,
@@ -174,6 +176,7 @@ impl RebornServicesApi for StubServices {
     ) -> Result<RebornResolveGateResponse, RebornServicesError> {
         Err(RebornServicesError {
             code: RebornServicesErrorCode::Internal,
+            kind: RebornServicesErrorKind::Internal,
             status_code: 500,
             retryable: false,
             field: None,

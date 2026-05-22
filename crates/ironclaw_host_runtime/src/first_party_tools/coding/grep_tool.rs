@@ -40,6 +40,7 @@ pub(super) async fn grep(
         ));
     }
     let root_stat = request
+        .services
         .filesystem
         .stat(&resolved.virtual_path)
         .await
@@ -217,6 +218,7 @@ async fn walk_files(
     let mut visited = 0usize;
     while let Some(dir) = stack.pop() {
         let entries = request
+            .services
             .filesystem
             .list_dir(&dir)
             .await
@@ -244,7 +246,7 @@ async fn walk_files(
                         continue;
                     }
                     // silent-ok: grep directory search skips entries that disappear or fail stat.
-                    let Ok(stat) = request.filesystem.stat(&entry.path).await else {
+                    let Ok(stat) = request.services.filesystem.stat(&entry.path).await else {
                         tracing::debug!(
                             path = entry.path.as_str(),
                             "skipping grep file after stat failed"
@@ -315,7 +317,7 @@ async fn visit_file(
         return Ok(false);
     }
     walk_result.bytes_scanned = next_total;
-    let bytes = match request.filesystem.read_file(path).await {
+    let bytes = match request.services.filesystem.read_file(path).await {
         Ok(bytes) => bytes,
         Err(_error) if skip_read_errors => {
             // silent-ok: grep directory search skips files that disappear or fail read.

@@ -4446,6 +4446,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_host_runtime",
@@ -4608,6 +4609,25 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "ironclaw_product_workflow_storage"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "deadpool-postgres",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "ironclaw_product_adapters",
+ "ironclaw_product_workflow",
+ "libsql",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-postgres",
+ "tracing",
 ]
 
 [[package]]

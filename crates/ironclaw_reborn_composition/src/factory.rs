@@ -145,14 +145,14 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     });
 
     let mut services = HostRuntimeServices::new(
-        Arc::new(local_dev_extension_registry()?),
+        Arc::new(builtin_extension_registry()?),
         Arc::new(filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,
     )
-    .with_first_party_capabilities(Arc::new(local_dev_first_party_handlers()?))
+    .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
     .with_trust_policy(Arc::new(local_dev_first_party_trust_policy()?))
     .with_run_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
@@ -176,7 +176,9 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     })
 }
 
-fn local_dev_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
+fn builtin_extension_registry() -> Result<ExtensionRegistry, RebornBuildError> {
+    // Shared by local-dev and production composition so host-owned first-party
+    // capabilities expose the same built-in package contract in both profiles.
     let mut registry = ExtensionRegistry::new();
     registry
         .insert(
@@ -190,7 +192,7 @@ fn local_dev_extension_registry() -> Result<ExtensionRegistry, RebornBuildError>
     Ok(registry)
 }
 
-fn local_dev_first_party_handlers() -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
+fn builtin_first_party_registry() -> Result<FirstPartyCapabilityRegistry, RebornBuildError> {
     builtin_first_party_handlers().map_err(|error| RebornBuildError::InvalidConfig {
         reason: format!("built-in first-party handlers are invalid: {error}"),
     })
@@ -387,7 +389,7 @@ async fn build_libsql_production(
     };
 
     let services = HostRuntimeServices::new(
-        Arc::new(ExtensionRegistry::new()),
+        Arc::new(builtin_extension_registry()?),
         Arc::clone(&filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
@@ -396,8 +398,12 @@ async fn build_libsql_production(
     )
     .with_trust_policy(production_wiring.trust_policy)
     .with_runtime_policy(production_wiring.runtime_policy)
+    .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
     .with_capability_leases(leases)
     .with_secret_store(secret_store)
+    .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
+        ironclaw_network::ReqwestNetworkTransport::default(),
+    ))?
     .with_filesystem_resource_governor(Arc::clone(&scoped_filesystem))
     .with_reborn_event_store_config(profile.to_event_store_profile(), event_store)
     .await?
@@ -451,7 +457,7 @@ async fn build_postgres_production(
     let event_store = ironclaw_reborn_event_store::RebornEventStoreConfig::Postgres { url };
 
     let services = HostRuntimeServices::new(
-        Arc::new(ExtensionRegistry::new()),
+        Arc::new(builtin_extension_registry()?),
         Arc::clone(&filesystem),
         Arc::new(InMemoryResourceGovernor::new()),
         Arc::new(GrantAuthorizer::new()),
@@ -460,8 +466,12 @@ async fn build_postgres_production(
     )
     .with_trust_policy(production_wiring.trust_policy)
     .with_runtime_policy(production_wiring.runtime_policy)
+    .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
     .with_capability_leases(leases)
     .with_secret_store(secret_store)
+    .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
+        ironclaw_network::ReqwestNetworkTransport::default(),
+    ))?
     .with_filesystem_resource_governor(Arc::clone(&scoped_filesystem))
     .with_reborn_event_store_config(profile.to_event_store_profile(), event_store)
     .await?
