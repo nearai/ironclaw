@@ -372,6 +372,7 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
     async fn webui_event_stream_resumes_after_serialized_projection_cursor() {
         let tenant_id = TenantId::new("webui-events-tenant").unwrap();
         let user_id = UserId::new("webui-events-user").unwrap();
