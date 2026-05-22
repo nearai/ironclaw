@@ -36,6 +36,16 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 /// hold dozens of keys; reaching 8192 indicates either pathological hook
 /// density or an active attack on counter state.
 pub const MAX_HISTORY_KEYS: usize = 8_192;
+
+/// Maximum number of samples retained per `(hook, capability, tenant[, field])`
+/// key in either sliding-window history. Without this cap, an installed hook
+/// could declare a very large window on a hot capability and force the
+/// evaluator to retain every invocation in the window, exhausting memory.
+/// Once this cap is reached for a key, oldest samples are dropped to make
+/// room for the new one — the predicate continues to evaluate against the
+/// most-recent `MAX_SAMPLES_PER_KEY` samples in the window, which is the
+/// conservative bound for a rate/value cap.
+pub const MAX_SAMPLES_PER_KEY: usize = 4_096;
 use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -185,6 +195,14 @@ impl PredicateEvaluator {
                                 break;
                             }
                         }
+                        // Per-key sample cap: drop the oldest sample to make
+                        // room. This bounds memory under attacker-triggered
+                        // hot capabilities; the predicate still evaluates
+                        // against the most recent `MAX_SAMPLES_PER_KEY`
+                        // samples in the window.
+                        while entries.len() >= MAX_SAMPLES_PER_KEY {
+                            entries.pop_front();
+                        }
                         entries.push_back(now);
                         let count = entries.len() as u32;
                         if count > *max {
@@ -251,6 +269,9 @@ impl PredicateEvaluator {
                             } else {
                                 break;
                             }
+                        }
+                        while entries.len() >= MAX_SAMPLES_PER_KEY {
+                            entries.pop_front();
                         }
                         entries.push_back((now, value));
                         let sum: Decimal = entries.iter().map(|(_, v)| *v).sum();

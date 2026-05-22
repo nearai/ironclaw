@@ -287,6 +287,26 @@ impl HookRegistry {
             .any(|b| b.hook_id == hook_id && b.poisoned)
     }
 
+    /// Iterator over all currently-poisoned hook ids. Used by the dispatcher
+    /// to snapshot the poison set under a single lock acquisition (see
+    /// `HookDispatcher::ordered_bindings_with_poison_snapshot`) so hot
+    /// dispatch paths can perform O(1) `HashSet` membership checks instead
+    /// of O(H) per-binding scans.
+    pub fn poisoned_ids(&self) -> impl Iterator<Item = HookId> + '_ {
+        let mut seen: std::collections::HashSet<HookId> = std::collections::HashSet::new();
+        self.by_point
+            .values()
+            .flat_map(|bindings| bindings.iter())
+            .filter(|b| b.poisoned)
+            .filter_map(move |b| {
+                if seen.insert(b.hook_id) {
+                    Some(b.hook_id)
+                } else {
+                    None
+                }
+            })
+    }
+
     /// Total number of bindings, poisoned or not.
     pub fn len(&self) -> usize {
         self.by_point.values().map(Vec::len).sum()

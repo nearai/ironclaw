@@ -228,6 +228,14 @@ fn truncate_string(s: String) -> String {
 }
 
 /// Navigate `value` using a `foo.bar[0].baz`-style path.
+///
+/// Returns `None` for any malformed segment — in particular, a segment
+/// containing a malformed indexer such as `amount[foo]` or `amount[`
+/// fails the whole resolution rather than silently falling back to the
+/// parent field. Failing closed on malformed paths prevents a typo in a
+/// manifest from quietly evaluating a `NumericSum` predicate against the
+/// wrong field (which would otherwise allow calls that should fail
+/// closed as unresolved).
 fn resolve_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     if path.is_empty() {
         return Some(value);
@@ -238,7 +246,9 @@ fn resolve_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serd
             return None;
         }
         // Split a segment like `items[0][1]` into key=`items`, indices=[0,1].
-        let (key, rest) = split_indexer(segment);
+        // `split_indexer` returns `None` on malformed bracket syntax; we
+        // propagate that as a path-resolution failure.
+        let (key, rest) = split_indexer(segment)?;
         if !key.is_empty() {
             current = current.as_object()?.get(key)?;
         } else if rest.is_empty() {
@@ -254,33 +264,31 @@ fn resolve_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serd
     Some(current)
 }
 
-/// Split `items[0][1]` into ("items", [0, 1]). For a segment like `[0]`,
-/// returns ("", [0]).
-fn split_indexer(segment: &str) -> (&str, Vec<usize>) {
+/// Split `items[0][1]` into `Some(("items", [0, 1]))`. For a segment like
+/// `[0]`, returns `Some(("", [0]))`. Returns `None` on any malformed
+/// bracket syntax — non-numeric index, missing close-bracket, trailing
+/// garbage. Callers must treat a `None` here as a path-resolution failure
+/// (fail-closed for predicates), not as the parent field.
+fn split_indexer(segment: &str) -> Option<(&str, Vec<usize>)> {
     let bracket = match segment.find('[') {
         Some(i) => i,
-        None => return (segment, Vec::new()),
+        None => return Some((segment, Vec::new())),
     };
     let key = &segment[..bracket];
     let mut rest = &segment[bracket..];
     let mut indices = Vec::new();
     while let Some(stripped) = rest.strip_prefix('[') {
-        let close = match stripped.find(']') {
-            Some(i) => i,
-            None => return (key, Vec::new()), // malformed; treat as no-match
-        };
+        let close = stripped.find(']')?;
         let idx_str = &stripped[..close];
-        let Ok(idx) = idx_str.parse::<usize>() else {
-            return (key, Vec::new());
-        };
+        let idx = idx_str.parse::<usize>().ok()?;
         indices.push(idx);
         rest = &stripped[close + 1..];
     }
     if !rest.is_empty() {
         // Trailing garbage after the last `]` — malformed.
-        return (key, Vec::new());
+        return None;
     }
-    (key, indices)
+    Some((key, indices))
 }
 
 fn value_to_decimal(value: &serde_json::Value) -> Option<Decimal> {
@@ -351,6 +359,22 @@ mod tests {
     fn extract_non_numeric_value_is_none() {
         let args = SanitizedArguments::from_json(serde_json::json!({"a": "not-a-number"}));
         assert_eq!(args.extract_numeric("a"), None);
+    }
+
+    /// Malformed bracket syntax must fail closed (`None`), not silently
+    /// fall back to the parent field. Without this guarantee, a typo'd
+    /// `NumericSum` predicate field path would evaluate against the wrong
+    /// value and allow calls that should have been rejected as
+    /// unresolved/malformed input.
+    #[test]
+    fn malformed_indexer_returns_none_not_parent_value() {
+        let args = SanitizedArguments::from_json(serde_json::json!({"amount": 42}));
+        // Non-numeric index — must NOT resolve to the parent `amount`.
+        assert_eq!(args.extract_numeric("amount[foo]"), None);
+        // Unterminated bracket.
+        assert_eq!(args.extract_numeric("amount["), None);
+        // Trailing garbage after the closing bracket.
+        assert_eq!(args.extract_numeric("amount[0]xyz"), None);
     }
 
     #[test]

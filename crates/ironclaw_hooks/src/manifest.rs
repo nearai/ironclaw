@@ -24,7 +24,22 @@ use serde::{Deserialize, Serialize};
 use crate::evaluator::validate_window;
 use crate::identity::HookLocalId;
 use crate::ordering::{HookPhase, HookPriority};
-use crate::predicate::{HookPredicateSpec, ValueOrRateBound};
+use crate::predicate::{CapabilityPredicate, HookPredicateSpec, ValueOrRateBound};
+
+/// Maximum nesting depth of a `CapabilityPredicate::All`/`Any` tree. Bounds
+/// stack/CPU exposure when a registry-supplied manifest is walked at hook
+/// evaluation time.
+pub const MAX_PREDICATE_DEPTH: usize = 8;
+/// Maximum total node count in a `CapabilityPredicate` tree.
+pub const MAX_PREDICATE_NODES: usize = 64;
+/// Maximum length, in bytes, of an individual string field
+/// (`NameEquals.name`, `NameStartsWith.prefix`) inside a predicate.
+pub const MAX_PREDICATE_STRING_BYTES: usize = 256;
+/// Maximum length, in bytes, of a manifest-supplied audit `reason` string.
+/// Enforced at install time so a hostile manifest cannot smuggle large
+/// payloads through the audit-reason channel even before runtime
+/// truncation in [`crate::telemetry::sanitize_audit_reason`].
+pub const MAX_MANIFEST_REASON_BYTES: usize = 512;
 
 /// A single hook declaration in an extension manifest. Use [`Self::validate`]
 /// at install time to surface format violations as structured errors.
@@ -35,6 +50,7 @@ use crate::predicate::{HookPredicateSpec, ValueOrRateBound};
 /// [`Self::new`] constructor + the `with_*` builder methods; struct
 /// literals from outside the crate will not compile.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct HookManifestEntry {
     pub id: HookLocalId,
@@ -133,7 +149,7 @@ pub enum HookManifestScope {
 
 /// Hook body — either declarative predicate or programmatic WASM.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HookManifestBody {
     /// Declarative predicate evaluated by the host. No WASM invoked at hook
     /// time.
@@ -151,6 +167,7 @@ pub enum HookManifestBody {
 /// Per-hook execution budget for WASM hooks. Defaults match the dispatcher's
 /// per-hook timeout.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WasmBudget {
     #[serde(default = "default_fuel")]
     pub fuel: u64,
@@ -236,13 +253,47 @@ impl HookManifestEntry {
         // surface unparseable windows at install time rather than letting
         // them fail closed at every evaluation.
         if let HookManifestBody::Predicate { spec } = &self.body {
-            let window = match spec {
-                HookPredicateSpec::RateOrValueCap { bound, .. } => match bound {
-                    ValueOrRateBound::InvocationCount { window, .. } => Some(window.as_str()),
-                    ValueOrRateBound::NumericSum { window, .. } => Some(window.as_str()),
-                },
-                _ => None,
+            let (when, reason_strs, window) = match spec {
+                HookPredicateSpec::DenyCapability { when, reason } => {
+                    (Some(when), vec![reason.as_str()], None)
+                }
+                HookPredicateSpec::PauseApproval { when, reason } => {
+                    (Some(when), vec![reason.as_str()], None)
+                }
+                HookPredicateSpec::RateOrValueCap {
+                    when,
+                    bound,
+                    on_exceeded,
+                } => {
+                    let window = match bound {
+                        ValueOrRateBound::InvocationCount { window, .. } => Some(window.as_str()),
+                        ValueOrRateBound::NumericSum { window, .. } => Some(window.as_str()),
+                    };
+                    let reasons: Vec<&str> = match on_exceeded {
+                        crate::predicate::OnExceededAction::Deny { reason }
+                        | crate::predicate::OnExceededAction::DenyWithCode { reason, .. }
+                        | crate::predicate::OnExceededAction::PauseApproval { reason }
+                        | crate::predicate::OnExceededAction::PauseApprovalWithCode {
+                            reason,
+                            ..
+                        } => vec![reason.as_str()],
+                    };
+                    (Some(when), reasons, window)
+                }
             };
+            if let Some(when) = when {
+                validate_predicate_tree(&self.id.0, when)?;
+            }
+            for reason in reason_strs {
+                if reason.len() > MAX_MANIFEST_REASON_BYTES {
+                    return Err(HookManifestValidationError(format!(
+                        "hook `{}` reason exceeds {} bytes (got {})",
+                        self.id.0,
+                        MAX_MANIFEST_REASON_BYTES,
+                        reason.len()
+                    )));
+                }
+            }
             if let Some(window) = window {
                 validate_window(window).map_err(|msg| {
                     HookManifestValidationError(format!(
@@ -254,6 +305,66 @@ impl HookManifestEntry {
         }
         Ok(())
     }
+}
+
+/// Recursively validate a `CapabilityPredicate` tree against the manifest
+/// safety bounds: maximum depth, total node count, and per-string byte
+/// length. Bounds enforced here prevent a hostile registry-supplied manifest
+/// from installing a predicate tree that recursively walks deeply or carries
+/// multi-megabyte string fields at every match check.
+fn validate_predicate_tree(
+    hook_id: &str,
+    predicate: &CapabilityPredicate,
+) -> Result<(), HookManifestValidationError> {
+    let mut node_count = 0usize;
+    validate_predicate_inner(hook_id, predicate, 0, &mut node_count)
+}
+
+fn validate_predicate_inner(
+    hook_id: &str,
+    predicate: &CapabilityPredicate,
+    depth: usize,
+    node_count: &mut usize,
+) -> Result<(), HookManifestValidationError> {
+    if depth > MAX_PREDICATE_DEPTH {
+        return Err(HookManifestValidationError(format!(
+            "hook `{hook_id}` predicate tree exceeds max depth {MAX_PREDICATE_DEPTH}"
+        )));
+    }
+    *node_count += 1;
+    if *node_count > MAX_PREDICATE_NODES {
+        return Err(HookManifestValidationError(format!(
+            "hook `{hook_id}` predicate tree exceeds max node count {MAX_PREDICATE_NODES}"
+        )));
+    }
+    match predicate {
+        CapabilityPredicate::Always => Ok(()),
+        CapabilityPredicate::NameEquals { name } => check_string(hook_id, "name", name),
+        CapabilityPredicate::NameStartsWith { prefix } => check_string(hook_id, "prefix", prefix),
+        CapabilityPredicate::All { predicates } | CapabilityPredicate::Any { predicates } => {
+            if predicates.len() > MAX_PREDICATE_NODES {
+                return Err(HookManifestValidationError(format!(
+                    "hook `{hook_id}` predicate has fanout {} exceeding max {}",
+                    predicates.len(),
+                    MAX_PREDICATE_NODES
+                )));
+            }
+            for child in predicates {
+                validate_predicate_inner(hook_id, child, depth + 1, node_count)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn check_string(hook_id: &str, field: &str, s: &str) -> Result<(), HookManifestValidationError> {
+    if s.len() > MAX_PREDICATE_STRING_BYTES {
+        return Err(HookManifestValidationError(format!(
+            "hook `{hook_id}` predicate string `{field}` exceeds {MAX_PREDICATE_STRING_BYTES} bytes (got {})",
+            s.len()
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -422,6 +533,149 @@ mod tests {
         let toml_text = toml::to_string(&entry).expect("ser");
         let back: HookManifestEntry = toml::from_str(&toml_text).expect("de");
         assert_eq!(entry, back);
+    }
+
+    /// Unknown manifest fields must fail loud at parse time, not silently
+    /// drop. A hostile or buggy extension that adds `trust_class = "trusted"`
+    /// (a field that *does not exist* on the manifest — trust is determined
+    /// by hook origin, never claimed) should be rejected by serde rather
+    /// than silently accepted as an Installed hook.
+    /// A predicate tree nested beyond `MAX_PREDICATE_DEPTH` must be rejected
+    /// at install time — otherwise a hostile manifest could install a deep
+    /// `All`/`Any` tree and force a recursive walk on every capability
+    /// invocation.
+    #[test]
+    fn rejects_predicate_tree_exceeding_max_depth() {
+        let mut node = CapabilityPredicate::Always;
+        // Wrap deeply, well past MAX_PREDICATE_DEPTH (8).
+        for _ in 0..(MAX_PREDICATE_DEPTH + 2) {
+            node = CapabilityPredicate::All {
+                predicates: vec![node],
+            };
+        }
+        let entry = HookManifestEntry::new(
+            HookLocalId("deep".to_string()),
+            HookManifestKind::BeforeCapability,
+            HookManifestBody::Predicate {
+                spec: HookPredicateSpec::DenyCapability {
+                    when: node,
+                    reason: "x".to_string(),
+                },
+            },
+        );
+        let err = entry.validate().expect_err("must reject deep tree");
+        assert!(
+            err.0.contains("depth") || err.0.contains("nodes"),
+            "unexpected msg: {}",
+            err.0
+        );
+    }
+
+    #[test]
+    fn rejects_predicate_tree_exceeding_max_nodes() {
+        let many: Vec<CapabilityPredicate> = (0..(MAX_PREDICATE_NODES + 8))
+            .map(|i| CapabilityPredicate::NameEquals {
+                name: format!("c{i}"),
+            })
+            .collect();
+        let entry = HookManifestEntry::new(
+            HookLocalId("fanout".to_string()),
+            HookManifestKind::BeforeCapability,
+            HookManifestBody::Predicate {
+                spec: HookPredicateSpec::DenyCapability {
+                    when: CapabilityPredicate::Any { predicates: many },
+                    reason: "x".to_string(),
+                },
+            },
+        );
+        let err = entry.validate().expect_err("must reject huge fanout");
+        assert!(
+            err.0.contains("fanout") || err.0.contains("nodes"),
+            "{}",
+            err.0
+        );
+    }
+
+    #[test]
+    fn rejects_predicate_string_exceeding_max_bytes() {
+        let entry = HookManifestEntry::new(
+            HookLocalId("huge-name".to_string()),
+            HookManifestKind::BeforeCapability,
+            HookManifestBody::Predicate {
+                spec: HookPredicateSpec::DenyCapability {
+                    when: CapabilityPredicate::NameEquals {
+                        name: "a".repeat(MAX_PREDICATE_STRING_BYTES + 1),
+                    },
+                    reason: "x".to_string(),
+                },
+            },
+        );
+        let err = entry.validate().expect_err("must reject huge string");
+        assert!(err.0.contains("exceeds"), "{}", err.0);
+    }
+
+    #[test]
+    fn rejects_manifest_reason_exceeding_max_bytes() {
+        let entry = HookManifestEntry::new(
+            HookLocalId("verbose".to_string()),
+            HookManifestKind::BeforeCapability,
+            HookManifestBody::Predicate {
+                spec: HookPredicateSpec::DenyCapability {
+                    when: CapabilityPredicate::Always,
+                    reason: "x".repeat(MAX_MANIFEST_REASON_BYTES + 1),
+                },
+            },
+        );
+        let err = entry.validate().expect_err("must reject huge reason");
+        assert!(err.0.contains("reason"), "{}", err.0);
+    }
+
+    #[test]
+    fn rejects_unknown_top_level_field() {
+        let toml_text = r#"
+id = "h"
+kind = "before_capability"
+trust_class = "trusted"
+[body]
+mode = "predicate"
+[body.spec]
+type = "deny_capability"
+reason = "no"
+[body.spec.when]
+type = "always"
+"#;
+        let err = toml::from_str::<HookManifestEntry>(toml_text)
+            .expect_err("unknown field `trust_class` must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("trust_class") || msg.contains("unknown field"),
+            "error message should mention the offending field: {msg}"
+        );
+    }
+
+    /// Unknown nested body fields must also fail loud — the manifest's nested
+    /// DTOs (`HookManifestBody`, `WasmBudget`) carry `deny_unknown_fields`
+    /// so typos in WASM budget tuning don't get silently ignored.
+    #[test]
+    fn rejects_unknown_wasm_budget_field() {
+        let toml_text = r#"
+id = "h"
+kind = "after_capability"
+[body]
+mode = "wasm"
+export = "go"
+[body.budget]
+fuel = 1000
+memory_mb = 1
+wall_ms = 10
+gas = 999
+"#;
+        let err = toml::from_str::<HookManifestEntry>(toml_text)
+            .expect_err("unknown field `gas` must be rejected");
+        assert!(
+            err.to_string().contains("gas") || err.to_string().contains("unknown field"),
+            "error: {err}"
+        );
     }
 
     #[test]

@@ -20,6 +20,35 @@ pub fn hook_id_string(hook_id: HookId) -> String {
     hook_id.to_hex()
 }
 
+/// Maximum length, in bytes, of a free-form `audit_reason` after sanitization.
+/// Reasons longer than this are truncated and a `…` ellipsis is appended.
+/// Bounds memory/network amplification across the milestone/SSE/audit path
+/// against a hostile manifest emitting a multi-megabyte `reason` field.
+pub const MAX_AUDIT_REASON_BYTES: usize = 512;
+
+/// Sanitize a manifest- or hook-supplied free-form audit reason before it
+/// crosses the milestone/SSE/audit boundary. Strips ASCII/Unicode control
+/// characters (other than space) and caps the length at
+/// [`MAX_AUDIT_REASON_BYTES`]. Control-character stripping prevents log
+/// injection (CR/LF, ANSI escapes) downstream of the dispatcher; length cap
+/// prevents memory/network DoS.
+pub fn sanitize_audit_reason(reason: Option<String>) -> Option<String> {
+    let raw = reason?;
+    let mut out = String::with_capacity(raw.len().min(MAX_AUDIT_REASON_BYTES));
+    for ch in raw.chars() {
+        if ch == ' ' || !ch.is_control() {
+            // Stop appending if we'd exceed the cap; leave room for the
+            // ellipsis below.
+            if out.len() + ch.len_utf8() > MAX_AUDIT_REASON_BYTES {
+                out.push('…');
+                break;
+            }
+            out.push(ch);
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
 /// Stable string label for a [`HookTrustClass`].
 pub fn trust_class_label(class: HookTrustClass) -> &'static str {
     match class {
@@ -138,6 +167,49 @@ mod tests {
     fn allow_decision_summary() {
         let allow = BeforeCapabilityHookDecision::allow();
         assert_eq!(gate_decision_summary(&allow), HookDecisionSummary::Allow);
+    }
+
+    #[test]
+    fn sanitize_audit_reason_truncates_oversized_input() {
+        let huge = "x".repeat(MAX_AUDIT_REASON_BYTES * 4);
+        let out = sanitize_audit_reason(Some(huge)).expect("non-empty");
+        // Output must fit within the cap (plus the trailing ellipsis, which
+        // is itself bounded by `MAX_AUDIT_REASON_BYTES`).
+        assert!(
+            out.len() <= MAX_AUDIT_REASON_BYTES + '…'.len_utf8(),
+            "len={}",
+            out.len()
+        );
+        assert!(out.ends_with('…'));
+    }
+
+    #[test]
+    fn sanitize_audit_reason_strips_control_chars() {
+        let raw = "ok\r\n\x1b[31mred\x1b[0m\ttab".to_string();
+        let out = sanitize_audit_reason(Some(raw)).expect("non-empty");
+        // No CR/LF/ESC/TAB should survive; the ANSI body letters do.
+        assert!(!out.contains('\r'));
+        assert!(!out.contains('\n'));
+        assert!(!out.contains('\x1b'));
+        assert!(!out.contains('\t'));
+        assert!(out.contains("red"));
+    }
+
+    #[test]
+    fn sanitize_audit_reason_preserves_normal_text() {
+        let raw = "polymarket daily cap exceeded".to_string();
+        assert_eq!(
+            sanitize_audit_reason(Some(raw.clone())),
+            Some(raw),
+            "normal text passes through unchanged"
+        );
+    }
+
+    #[test]
+    fn sanitize_audit_reason_returns_none_for_empty_or_only_control() {
+        assert_eq!(sanitize_audit_reason(None), None);
+        assert_eq!(sanitize_audit_reason(Some(String::new())), None);
+        assert_eq!(sanitize_audit_reason(Some("\r\n\t".to_string())), None);
     }
 
     #[test]

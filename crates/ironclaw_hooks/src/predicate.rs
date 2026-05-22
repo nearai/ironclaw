@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 /// A complete declarative hook specification, suitable for serialization in
 /// an extension manifest's `[[hooks]]` section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HookPredicateSpec {
     /// Deny a capability invocation when the predicate matches.
     DenyCapability {
@@ -36,7 +36,7 @@ pub enum HookPredicateSpec {
 
 /// A predicate over the capability invocation context.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CapabilityPredicate {
     NameEquals {
         name: String,
@@ -58,7 +58,7 @@ pub enum CapabilityPredicate {
 /// A numeric or rate bound expressed in human-readable form. The evaluator
 /// canonicalizes window strings (e.g., "24h", "10m") at evaluation time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ValueOrRateBound {
     /// Maximum N matching invocations in `window`.
     InvocationCount { max: u32, window: String },
@@ -95,7 +95,7 @@ pub enum ValueOrRateBound {
 /// See [`crate::kinds::gate::GateDecisionView`] for the closed-vocabulary
 /// projection the dispatcher emits.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "decision", rename_all = "snake_case")]
+#[serde(tag = "decision", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OnExceededAction {
     /// Deny with a free-form `reason` (audit-only). Model-visible label
     /// collapses to the static `hook_predicate_denied` — see the type-

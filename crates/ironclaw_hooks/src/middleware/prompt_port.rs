@@ -188,9 +188,28 @@ impl LoopPromptPort for HookedLoopPromptPort {
             }
         }
         let wrapped_was_nonempty = !wrapped.is_empty();
-        bundle
-            .messages
-            .extend(wrapped.into_iter().map(|w| w.message));
+        // Honor `PatchOrdinalHint`. `NearTop` patches are inserted after the
+        // identity messages (so safety/policy snippets that depend on early
+        // placement land near the top of the non-identity region). `Last`
+        // patches are appended at the end. Insertion order among same-hint
+        // messages is preserved.
+        use crate::kinds::mutator::PatchOrdinalHint;
+        let identity_count = bundle.identity_message_count as usize;
+        // Insertion point clamps to the current bundle length in case the
+        // inner port produced fewer messages than the recorded identity
+        // count (defense-in-depth; should not happen).
+        let mut near_top_insert_at = identity_count.min(bundle.messages.len());
+        for w in wrapped {
+            match w.ordinal_hint {
+                PatchOrdinalHint::NearTop => {
+                    bundle.messages.insert(near_top_insert_at, w.message);
+                    near_top_insert_at = near_top_insert_at.saturating_add(1);
+                }
+                PatchOrdinalHint::Last => {
+                    bundle.messages.push(w.message);
+                }
+            }
+        }
         // Re-issue the prompt bundle authority grant so it covers the
         // post-hook messages. The inner port issued a grant for the
         // pre-hook bundle; without this refresh the downstream model
@@ -240,6 +259,12 @@ fn role_for_trust_class(trust_class: crate::trust::HookTrustClass) -> &'static s
 struct WrappedHookMessage {
     message: LoopModelMessage,
     safe_content: String,
+    /// Position hint from the source `HookPatch`. The middleware honors
+    /// `NearTop` by inserting the wrapped message just after the bundle's
+    /// identity messages (so safety/policy snippets that need early
+    /// placement get it). `Last` messages are appended at the end. See
+    /// the threading in `LoopPromptPort::build_prompt_bundle` below.
+    ordinal_hint: crate::kinds::mutator::PatchOrdinalHint,
 }
 
 /// Convert hook patches into envelope-wrapped model messages, enforcing
@@ -262,15 +287,17 @@ fn wrap_patches_to_messages(
     let mut ordinal: usize = 0;
 
     for patch in patches {
-        let (wrapped_string, trust_class) = match patch.view() {
+        let (wrapped_string, trust_class, ordinal_hint) = match patch.view() {
             HookPatchView::AddSnippet {
                 body: SnippetBodyView::Enveloped { wrapped },
                 trust_class,
+                ordinal_hint,
                 ..
-            } => (wrapped.to_string(), trust_class),
+            } => (wrapped.to_string(), trust_class, ordinal_hint),
             HookPatchView::AddSnippet {
                 body: SnippetBodyView::Trusted { text },
                 trust_class,
+                ordinal_hint,
                 ..
             } => {
                 // Trusted-tier hook content still flows through the envelope
@@ -288,7 +315,7 @@ fn wrap_patches_to_messages(
                         "trusted hook snippet rejected by prompt envelope",
                     )
                 })?;
-                (envelope.into_string(), trust_class)
+                (envelope.into_string(), trust_class, ordinal_hint)
             }
             HookPatchView::AddMilestoneMetadata { .. } => continue,
         };
@@ -313,6 +340,7 @@ fn wrap_patches_to_messages(
                 content_ref,
             },
             safe_content: wrapped_string,
+            ordinal_hint,
         });
     }
 

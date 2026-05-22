@@ -6,7 +6,7 @@
 //! wires it into `LoopCapabilityPort` / `LoopPromptPort` / etc. lives in
 //! `ironclaw_reborn::loop_driver_host` and lands in a follow-up slice.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -196,9 +196,27 @@ impl HookDispatcher {
     /// itself remains private to enforce the dispatcher-as-authority model;
     /// this hatch only exists so other crates' tests (e.g. the registrar's)
     /// can assert on binding shape after install.
+    ///
+    /// **Gated behind `cfg(test)` or the `test-support` feature.** Exposing
+    /// the inner `&Mutex<HookRegistry>` in production would let any holder of
+    /// an `Arc<HookDispatcher>` lock it and call mutators such as
+    /// `HookRegistry::poison`, bypassing the builder's post-`build_arc`
+    /// immutability guarantee and the registrar's grant/cap path. Production
+    /// callers needing read-only inspection should use
+    /// [`Self::active_bindings_snapshot`] instead.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn registry_for_test(&self) -> &Mutex<HookRegistry> {
         &self.registry
+    }
+
+    /// Read-only snapshot of currently-active (not poisoned) bindings at a
+    /// given point. Safe to expose in production: callers receive an owned
+    /// `Vec<HookBinding>` rather than a handle to the registry mutex, so
+    /// they cannot mutate dispatcher state.
+    pub fn active_bindings_snapshot(&self, point: HookPointSpec) -> Vec<HookBinding> {
+        let registry = self.registry.lock().expect("hooks registry mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
+        registry.active_at(point).cloned().collect()
     }
 
     /// Insert a new binding into the dispatcher's registry. Used by the
@@ -546,7 +564,8 @@ impl HookDispatcher {
         &self,
         ctx: &BeforeCapabilityHookContext,
     ) -> BeforeCapabilityDispatchOutcome {
-        let ordered = self.ordered_bindings(HookPointSpec::BeforeCapability);
+        let (ordered, mut poisoned) =
+            self.ordered_bindings_with_poison_snapshot(HookPointSpec::BeforeCapability);
         let mut composed = BeforeCapabilityHookDecision::allow();
         let observer_facts = Vec::new();
         let mut failures = Vec::new();
@@ -556,11 +575,11 @@ impl HookDispatcher {
             if short_circuited && !matches!(key.phase, crate::ordering::HookPhase::Telemetry) {
                 continue;
             }
-            // Re-check poison status: an earlier hook in this same dispatch
-            // may have poisoned this slot. The snapshot is taken once at the
-            // top of the loop, so without this check a binding poisoned mid-
-            // dispatch would still be invoked.
-            if self.is_poisoned(binding.hook_id) {
+            // O(1) poison check against the per-dispatch snapshot. Mid-
+            // dispatch poisoning (a hook poisoned by `poison_with_failure`
+            // below) inserts into this local set, so the next iteration
+            // observes it without re-locking the registry.
+            if poisoned.contains(&binding.hook_id) {
                 continue;
             }
             // Scope filtering (audit finding C3). The binding's manifest-
@@ -588,6 +607,7 @@ impl HookDispatcher {
                     &mut failures,
                 )
                 .await;
+                poisoned.insert(binding.hook_id);
                 if !short_circuited {
                     composed = BeforeCapabilityHookDecision::deny(SanitizedReason::from_static(
                         "hook binding missing implementation",
@@ -620,6 +640,7 @@ impl HookDispatcher {
                 }
                 Err(failure) => {
                     self.emit_failure(&failure).await;
+                    poisoned.insert(failure.hook_id);
                     let restrictive = match failure.disposition {
                         FailureDisposition::FailClosed => {
                             Some(BeforeCapabilityHookDecision::deny(failure.reason.clone()))
@@ -660,12 +681,13 @@ impl HookDispatcher {
         &self,
         ctx: &BeforePromptHookContext,
     ) -> BeforePromptDispatchOutcome {
-        let ordered = self.ordered_bindings(HookPointSpec::BeforePrompt);
+        let (ordered, mut poisoned) =
+            self.ordered_bindings_with_poison_snapshot(HookPointSpec::BeforePrompt);
         let mut patches = Vec::new();
         let mut failures = Vec::new();
 
         for (_key, binding) in ordered {
-            if self.is_poisoned(binding.hook_id) {
+            if poisoned.contains(&binding.hook_id) {
                 continue;
             }
             let Some(hook) = self.before_prompt.get(&binding.hook_id) else {
@@ -678,6 +700,7 @@ impl HookDispatcher {
                     &mut failures,
                 )
                 .await;
+                poisoned.insert(binding.hook_id);
                 continue;
             };
             self.emit_dispatched(&binding).await;
@@ -693,6 +716,7 @@ impl HookDispatcher {
                 }
                 Err(failure) => {
                     self.emit_failure(&failure).await;
+                    poisoned.insert(failure.hook_id);
                     failures.push(failure);
                 }
             }
@@ -728,7 +752,7 @@ impl HookDispatcher {
         tenant: ironclaw_host_api::TenantId,
         provider: Option<ironclaw_host_api::ExtensionId>,
     ) -> ObserverDispatchOutcome {
-        let ordered = self.ordered_bindings(point);
+        let (ordered, mut poisoned) = self.ordered_bindings_with_poison_snapshot(point);
         let mut facts = Vec::new();
         let mut failures = Vec::new();
         let ctx = ObserverHookContext {
@@ -759,7 +783,7 @@ impl HookDispatcher {
         };
 
         for (_key, binding) in ordered {
-            if self.is_poisoned(binding.hook_id) {
+            if poisoned.contains(&binding.hook_id) {
                 continue;
             }
             // Scope filtering (serrrfirat finding #3). `OwnCapabilities` is
@@ -785,6 +809,7 @@ impl HookDispatcher {
                     &mut failures,
                 )
                 .await;
+                poisoned.insert(binding.hook_id);
                 continue;
             };
             self.emit_dispatched(&binding).await;
@@ -796,6 +821,7 @@ impl HookDispatcher {
                 }
                 Err(failure) => {
                     self.emit_failure(&failure).await;
+                    poisoned.insert(failure.hook_id);
                     failures.push(failure);
                 }
             }
@@ -804,24 +830,35 @@ impl HookDispatcher {
         ObserverDispatchOutcome { facts, failures }
     }
 
-    /// Returns true if the registry currently has `hook_id` poisoned. Used by
-    /// the dispatch loops to skip bindings poisoned earlier in the same
-    /// dispatch (the snapshot taken at the top of the loop wouldn't otherwise
-    /// reflect mid-dispatch poisoning).
-    fn is_poisoned(&self, hook_id: HookId) -> bool {
-        match self.registry.lock() {
-            Ok(registry) => registry.is_poisoned(hook_id),
-            Err(poisoned) => {
-                // Registry mutex was poisoned by an external panic; we can't
-                // safely use stale state, so treat every hook as poisoned.
-                // The dispatch loop will skip it and downstream telemetry
-                // surfaces the registry-mutex breakage separately.
-                let _ = poisoned;
-                true
-            }
-        }
+    /// As [`Self::ordered_bindings`], but also returns an O(1)-lookup
+    /// `HashSet<HookId>` snapshotting the currently-poisoned bindings. The
+    /// dispatch loops use this set instead of repeatedly calling
+    /// [`Self::is_poisoned`] (which re-locks the registry and walks every
+    /// binding) — restoring O(H) dispatch behaviour instead of O(H^2).
+    ///
+    /// Mid-dispatch poisoning is handled by the caller: when
+    /// `poison_with_failure` is called inside the loop, the loop also adds
+    /// the hook id to a local copy of this set so subsequent iterations
+    /// observe the mid-dispatch poison without a fresh lock.
+    fn ordered_bindings_with_poison_snapshot(
+        &self,
+        point: HookPointSpec,
+    ) -> (Vec<(HookOrderKey, HookBinding)>, HashSet<HookId>) {
+        let registry = self.registry.lock().expect("hooks registry mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
+        let mut out: Vec<_> = registry
+            .active_at(point)
+            .cloned()
+            .map(|b| (HookOrderKey::new(b.phase, b.priority, b.hook_id), b))
+            .collect();
+        out.sort_by_key(|(k, _)| *k);
+        // Walk *all* registry slots once to capture the poison set; this is
+        // O(total bindings) under a single lock, then dispatch becomes O(H)
+        // HashSet probes.
+        let poisoned: HashSet<HookId> = registry.poisoned_ids().collect();
+        (out, poisoned)
     }
 
+    #[cfg(test)]
     fn ordered_bindings(&self, point: HookPointSpec) -> Vec<(HookOrderKey, HookBinding)> {
         let registry = self.registry.lock().expect("hooks registry mutex poisoned"); // safety: mutex poison means another thread panicked; failing closed here is correct
         let mut out: Vec<_> = registry
@@ -1057,7 +1094,7 @@ impl HookDispatcher {
         self.emit_milestone(LoopHostMilestoneKind::HookDecisionEmitted {
             hook_id: telemetry::hook_id_string(binding.hook_id),
             decision,
-            audit_reason,
+            audit_reason: telemetry::sanitize_audit_reason(audit_reason),
         })
         .await;
     }
