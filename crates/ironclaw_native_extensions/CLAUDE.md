@@ -28,4 +28,8 @@ structs; the raw provider response and the OAuth access token are never echoed
 into handler output.
 
 The Google subdir's calendar package lives in `src/google/calendar/`
-(`manifest.rs` declares descriptors, `handlers.rs` implements them).
+(`manifest.rs` declares descriptors, `handlers.rs` implements them). The Gmail
+package lives in `src/google/gmail/` and follows the same `manifest.rs` /
+`handlers.rs` split. Both packages share the credential resolver, network
+policy, OAuth provider, and `scopes` defined directly under `src/google/`;
+sibling capability packages MUST NOT import from each other.

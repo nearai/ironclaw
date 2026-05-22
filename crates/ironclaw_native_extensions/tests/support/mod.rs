@@ -22,6 +22,8 @@ use ironclaw_native_extensions::google::calendar::manifest::capability_id;
 use ironclaw_native_extensions::google::credential::{
     GOOGLE_CREDENTIAL_NAME, GoogleCredentialResolver,
 };
+use ironclaw_native_extensions::google::gmail::handlers::GmailHandlerDeps;
+use ironclaw_native_extensions::google::gmail::manifest::capability_id as gmail_capability_id;
 use ironclaw_native_extensions::google::oauth_provider::GoogleProvider;
 use ironclaw_oauth::{OAuthProvider, TokenPersister, TokenSet};
 use ironclaw_secrets::InMemorySecretStore;
@@ -149,6 +151,32 @@ pub async fn seed_token(
         .expect("token persists");
 }
 
+/// Persist a Google OAuth token whose access token is already (near) expired,
+/// so [`GoogleCredentialResolver::resolve`] reports `refresh_required = true`.
+///
+/// `expires_in_secs` is the lifetime fed to `TokenSet::from_expires_in`; pass a
+/// small/zero value so the expiry falls inside the resolver's refresh buffer.
+pub async fn seed_expiring_token(
+    secrets: &Arc<InMemorySecretStore>,
+    scope: &ResourceScope,
+    granted_scopes: &[&str],
+    expires_in_secs: u64,
+) {
+    TokenPersister::new(secrets.clone())
+        .persist(
+            scope,
+            GOOGLE_CREDENTIAL_NAME,
+            &TokenSet::from_expires_in(
+                "ada-access-token",
+                Some("ada-refresh-token".to_string()),
+                Some(expires_in_secs),
+                granted_scopes.iter().map(|s| s.to_string()).collect(),
+            ),
+        )
+        .await
+        .expect("token persists");
+}
+
 /// Build [`CalendarHandlerDeps`] over a secret store.
 ///
 /// Handlers no longer own an HTTP transport; the fake egress is injected per
@@ -199,6 +227,59 @@ pub fn calendar_request_without_egress(
 /// `ExtensionId` for the Google Calendar package.
 pub fn calendar_extension_id() -> ExtensionId {
     ExtensionId::new("google-calendar").expect("extension id")
+}
+
+/// `ExtensionId` for the Gmail package.
+pub fn gmail_extension_id() -> ExtensionId {
+    ExtensionId::new("gmail").expect("extension id")
+}
+
+/// Build [`GmailHandlerDeps`] over a secret store.
+///
+/// Handlers no longer own an HTTP transport; the fake egress is injected per
+/// request via [`gmail_request`].
+pub fn build_gmail_deps(
+    secrets: Arc<InMemorySecretStore>,
+    required_scopes: &[&str],
+) -> GmailHandlerDeps {
+    let resolver = Arc::new(GoogleCredentialResolver::new(secrets));
+    GmailHandlerDeps::new(
+        resolver,
+        test_provider(),
+        required_scopes.iter().map(|s| s.to_string()).collect(),
+    )
+}
+
+/// Build a `FirstPartyCapabilityRequest` for a Gmail capability short name,
+/// carrying the supplied fake [`RuntimeHttpEgress`].
+pub fn gmail_request(
+    short_name: &str,
+    scope: ResourceScope,
+    input: Value,
+    egress: FakeEgress,
+) -> FirstPartyCapabilityRequest {
+    FirstPartyCapabilityRequest::for_test(
+        CapabilityId::new(gmail_capability_id(short_name)).expect("capability id"),
+        scope,
+        input,
+        Some(egress.into_dyn()),
+    )
+}
+
+/// Build a Gmail `FirstPartyCapabilityRequest` with no `runtime_http_egress`
+/// wired — used to assert handlers fail closed when the host egress is
+/// unavailable.
+pub fn gmail_request_without_egress(
+    short_name: &str,
+    scope: ResourceScope,
+    input: Value,
+) -> FirstPartyCapabilityRequest {
+    FirstPartyCapabilityRequest::for_test(
+        CapabilityId::new(gmail_capability_id(short_name)).expect("capability id"),
+        scope,
+        input,
+        None,
+    )
 }
 
 /// Empty JSON object.

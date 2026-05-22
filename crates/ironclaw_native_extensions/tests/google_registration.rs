@@ -37,12 +37,15 @@ fn google_provider_registers_in_broker_mode_with_baked_client_id() {
     );
     assert!(provider.direct_client_secret().is_none());
     assert_eq!(output.network_policies.len(), 1);
-    // The Google Calendar package and its nine capability handlers register
-    // alongside the provider once Google is enabled.
-    assert_eq!(output.packages.len(), 1);
+    // The Google Calendar package (nine capabilities) and the Gmail package
+    // (six capabilities) register alongside the provider once Google is
+    // enabled — two packages and fifteen capability handlers in total.
+    assert_eq!(output.packages.len(), 2);
     assert_eq!(output.packages[0].id.as_str(), "google-calendar");
     assert_eq!(output.packages[0].capabilities.len(), 9);
-    assert_eq!(output.handlers.len(), 9);
+    assert_eq!(output.packages[1].id.as_str(), "gmail");
+    assert_eq!(output.packages[1].capabilities.len(), 6);
+    assert_eq!(output.handlers.len(), 15);
 
     let url = provider.build_authorize_url(
         "state",

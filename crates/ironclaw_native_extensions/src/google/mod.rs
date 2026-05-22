@@ -1,6 +1,7 @@
 pub mod calendar;
 pub mod client;
 pub mod credential;
+pub mod gmail;
 pub mod network;
 pub mod oauth_provider;
 
@@ -28,11 +29,14 @@ pub fn register(
         output
             .network_policies
             .push(network::google_api_network_policy());
-        // Calendar handlers issue HTTP through the per-invocation host
-        // `runtime_http_egress` (HostHttpEgressService), not a transport built
-        // here, so no standalone HTTP client is constructed at registration.
+        // Calendar and Gmail handlers issue HTTP through the per-invocation
+        // host `runtime_http_egress` (HostHttpEgressService), not a transport
+        // built here, so no standalone HTTP client is constructed at
+        // registration. Both packages share the one credential resolver and
+        // Google `OAuthProvider` — they resolve the same `google_oauth_token`.
         let oauth_provider: Arc<dyn ironclaw_oauth::OAuthProvider> = provider.clone();
-        calendar::register_calendar(resolver, oauth_provider, output)?;
+        calendar::register_calendar(resolver.clone(), oauth_provider.clone(), output)?;
+        gmail::register_gmail(resolver, oauth_provider, output)?;
         output.oauth_providers.push(provider);
     }
     Ok(())

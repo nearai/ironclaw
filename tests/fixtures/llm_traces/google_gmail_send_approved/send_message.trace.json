@@ -1,0 +1,33 @@
+{
+  "trace_id": "google_gmail_send_approved.send_message",
+  "description": "Recorded approved-write trace for the gmail.send_message capability. Captured request/response pair after the descriptor-level approval gate granted the write; used as a replay snapshot for the Phase 6 Gmail package. No live LLM session required.",
+  "capability_id": "gmail.send_message",
+  "approval": {
+    "decision": "granted",
+    "permission_mode": "Ask"
+  },
+  "request": {
+    "method": "POST",
+    "url": "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+    "headers": {
+      "authorization": "Bearer <redacted>",
+      "content-type": "application/json"
+    },
+    "body": {
+      "raw": "<base64url RFC822 message>"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": "msg-sent-700",
+      "threadId": "thr-sent-700",
+      "labelIds": ["SENT"]
+    }
+  },
+  "handler_output": {
+    "id": "msg-sent-700",
+    "thread_id": "thr-sent-700",
+    "label_ids": ["SENT"]
+  }
+}
