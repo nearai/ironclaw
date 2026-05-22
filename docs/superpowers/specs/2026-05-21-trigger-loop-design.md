@@ -176,6 +176,22 @@ created_at         DateTime
 `ApprovalBlocked` distinguishes "a tool inside the loop needed a human" (§7)
 from a genuine loop failure; `TimedOut` distinguishes a stuck run.
 
+**`last_status` semantics — sync vs async (H5).** `last_status = Ok` at step 4
+of the poller loop means "successfully submitted to the turn queue" — a
+synchronous outcome. `last_status = Error` means submission failed. The
+post-run variants (`ApprovalBlocked`, `TimedOut`) require a turn-lifecycle
+feedback path: `ironclaw_triggers` subscribes to an `AgentLoopDriver`
+completion event (or equivalent Reborn observer interface) and updates
+`last_status` asynchronously when the run ends. If no such observer is
+available in V1, `ApprovalBlocked` and `TimedOut` move to fast-follow;
+`trigger_list` shows `Ok` for submitted-but-blocked runs until the feedback
+path is wired. Implementation must confirm whether Reborn exposes a
+turn-lifecycle observer interface and, if so, wire it (H5).
+
+**Required index.** `TriggerRepository` migrations must include a composite
+index on `(tenant_id, enabled, state, next_run_at)` covering the poller query.
+Without it the query is a full table scan that scales O(n) with trigger count.
+
 `TriggerSourceKind` is a domain enum with only a `Schedule` variant in V1;
 webhook / regex / system-event variants are added later without reshaping the
 record. This is the trigger crate's own taxonomy — it is **not** the wire
@@ -195,17 +211,35 @@ for a long-lived Reborn background worker. Loop:
 
 1. Tick every `poll_interval` (config, default ~30s).
 2. Query `TriggerRepository` for `enabled && state == Scheduled &&
-   next_run_at <= now`, scoped per tenant.
+   next_run_at <= now`, system-wide across all tenants — tenant isolation is
+   enforced by the captured scope on each `TriggerRecord`, not by query-level
+   scoping. Apply `max_fires_per_tick` (config, default 50) as a LIMIT so a
+   thundering-herd of co-scheduled triggers does not overflow a single tick;
+   excess triggers fire on subsequent ticks.
 3. For each due trigger, compute the **scheduled fire slot** — the canonical
    timestamp the trigger was due for (the cron/interval slot, not wall-clock
-   now). Then:
+   now). Before submitting: check active turn-run count on threads belonging to
+   this trigger (threads whose `conversation_id` in the synthetic
+   `ExternalConversationRef` matches `trigger_id`). If the count exceeds
+   `max_concurrent_fires_per_trigger` (config, default 3), skip this trigger for
+   the current tick — this is a lightweight V1 back-pressure substitute for the
+   deferred `skip-if-running` guard and prevents unbounded thread accumulation
+   for short-interval / long-running trigger combinations. Then:
    a. Materialize `prompt` into the transcript/content store → `content_ref`.
+      During a crash-retry or dual-poller scenario the same prompt is
+      materialized twice; this is safe provided the content store is
+      content-addressed (same bytes → same ref). Implementation must confirm
+      content-store semantics; prefer content-addressed storage.
    b. Build the synthetic `InboundTurnRequest` (§5.4) with a deterministic
       `external_event_id` derived from `(trigger_id, scheduled_fire_slot)`.
    c. Call `handle_inbound_turn_with_trusted_scope(req, agent_id, project_id)`.
 4. On submit success: set `last_run_at`, `last_fired_slot = scheduled_slot`,
-   `last_status = Ok`, recompute `next_run_at`. For `Once`, set
-   `state = Completed`.
+   `last_status = Ok` (= "submitted to turn queue"), recompute `next_run_at =
+   next_slot_after(now)` — advancing from **now**, not from
+   `last_fired_slot`. This means missed slots are skipped rather than
+   back-filled: if the system was down and multiple cron slots were overdue,
+   V1 fires once (the most-recently-overdue slot) and resumes from the next
+   future slot. For `Once`, set `state = Completed`.
 5. On submit failure: set `last_status = Error`; leave `next_run_at` so the
    next tick retries. Errors are surfaced via `trigger_list`, never silently
    swallowed (`.claude/rules/error-handling.md`).
@@ -311,10 +345,12 @@ proving the trigger loop itself works.
 - **Unattended approvals.** A triggered turn runs with no human present.
   Approvals are exact-invocation leases with no auto-approve (`approvals.md`).
   A tool call inside the loop that requires approval **fails closed** — there
-  is no human to grant it. The run records `last_status = ApprovalBlocked`.
-  V1 recommends triggered runs use a run profile whose tool ceiling avoids
-  approval-gated tools. A failed-closed approval inside a triggered run is
-  acceptable V1 behavior, not a bug.
+  is no human to grant it. When the turn-lifecycle feedback path is wired (H5),
+  the run updates `last_status = ApprovalBlocked`; before that path exists,
+  the blocked status is visible in the thread's turn history but not reflected
+  in `TriggerRecord.last_status`. V1 recommends triggered runs use a run
+  profile whose tool ceiling avoids approval-gated tools. A failed-closed
+  approval inside a triggered run is acceptable V1 behavior, not a bug.
 - **Create-time scope capture is a deliberate security decision (M4).** A
   trigger captures `tenant/user/agent/project` at `trigger_create` time and
   runs with that scope on every fire. If the creator's agent/project access is
