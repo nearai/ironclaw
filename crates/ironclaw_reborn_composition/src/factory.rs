@@ -237,7 +237,7 @@ fn local_dev_skill_mount_view() -> Result<MountView, RebornBuildError> {
     };
     MountView::new(vec![
         grant("/skills", "/projects/skills")?,
-        grant("/tenant-shared", "/projects/tenant-shared")?,
+        grant("/tenant-shared/skills", "/projects/tenant-shared/skills")?,
         grant("/system/skills", "/projects/system/skills")?,
     ])
     .map_err(|error| RebornBuildError::InvalidConfig {
