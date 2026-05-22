@@ -17,22 +17,6 @@ where
     S: SessionThreadService + ?Sized,
     G: HostManagedModelGateway + ?Sized,
 {
-    thread_service: Arc<S>,
-    thread_scope: ThreadScope,
-    host_gateway: Arc<G>,
-    max_messages: usize,
-    skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
-    identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
-    instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
-    capabilities: Option<Arc<dyn LoopCapabilityPort>>,
-    prompt_authority: LoopPromptBundleAuthority,
-}
-
-pub(super) struct ThreadResolvingLoopModelGatewayConfig<S, G>
-where
-    S: SessionThreadService + ?Sized,
-    G: HostManagedModelGateway + ?Sized,
-{
     pub(super) thread_service: Arc<S>,
     pub(super) thread_scope: ThreadScope,
     pub(super) host_gateway: Arc<G>,
@@ -42,26 +26,6 @@ where
     pub(super) instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
     pub(super) capabilities: Option<Arc<dyn LoopCapabilityPort>>,
     pub(super) prompt_authority: LoopPromptBundleAuthority,
-}
-
-impl<S, G> ThreadResolvingLoopModelGateway<S, G>
-where
-    S: SessionThreadService + ?Sized,
-    G: HostManagedModelGateway + ?Sized,
-{
-    pub(super) fn new(config: ThreadResolvingLoopModelGatewayConfig<S, G>) -> Self {
-        Self {
-            thread_service: config.thread_service,
-            thread_scope: config.thread_scope,
-            host_gateway: config.host_gateway,
-            max_messages: config.max_messages,
-            skill_context_source: config.skill_context_source,
-            identity_context_source: config.identity_context_source,
-            instruction_materialization_store: config.instruction_materialization_store,
-            capabilities: config.capabilities,
-            prompt_authority: config.prompt_authority,
-        }
-    }
 }
 
 #[async_trait]

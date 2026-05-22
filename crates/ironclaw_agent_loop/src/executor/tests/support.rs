@@ -211,6 +211,40 @@ impl InputDrainStrategy for FixedDrainStrategy {
     }
 }
 
+pub(super) struct RetryPolicyDeniedRecoveryStrategy;
+
+#[async_trait]
+impl RecoveryStrategy for RetryPolicyDeniedRecoveryStrategy {
+    async fn on_capability_error(
+        &self,
+        state: &LoopExecutionState,
+        err: &CapabilityErrorSummary,
+    ) -> RecoveryOutcome {
+        if err.class == CapabilityErrorClass::PolicyDenied {
+            return RecoveryOutcome::Retry {
+                recovery: state.recovery_state.clone(),
+                scope: RetryScope::Call,
+                alter: None,
+            };
+        }
+        RecoveryOutcome::Abort {
+            recovery: state.recovery_state.clone(),
+            failure_kind: LoopFailureKind::CapabilityProtocolError,
+        }
+    }
+
+    async fn on_model_error(
+        &self,
+        state: &LoopExecutionState,
+        _err: &ModelErrorSummary,
+    ) -> RecoveryOutcome {
+        RecoveryOutcome::Abort {
+            recovery: state.recovery_state.clone(),
+            failure_kind: LoopFailureKind::DriverBug,
+        }
+    }
+}
+
 impl ironclaw_turns::run_profile::LoopRunInfoPort for MockHost {
     fn run_context(&self) -> &LoopRunContext {
         &self.context
@@ -478,6 +512,27 @@ pub(super) fn calls_response() -> LoopModelResponse {
     }
 }
 
+pub(super) fn two_calls_response() -> LoopModelResponse {
+    LoopModelResponse {
+        chunks: Vec::new(),
+        output: ParentLoopOutput::CapabilityCalls(vec![
+            CapabilityCallCandidate {
+                surface_version: surface_version(),
+                capability_id: capability_id(),
+                input_ref: CapabilityInputRef::new("input:first").expect("valid"), // safety: test-only fixture
+                provider_replay: None,
+            },
+            CapabilityCallCandidate {
+                surface_version: surface_version(),
+                capability_id: capability_id(),
+                input_ref: CapabilityInputRef::new("input:second").expect("valid"), // safety: test-only fixture
+                provider_replay: None,
+            },
+        ]),
+        effective_model_profile_id: ModelProfileId::new("model").expect("valid"), // safety: test-only fixture
+    }
+}
+
 pub(super) fn provider_calls_response() -> LoopModelResponse {
     LoopModelResponse {
         chunks: Vec::new(),
@@ -628,6 +683,17 @@ pub(super) fn family_with_drain(drain_steering: bool, drain_followup: bool) -> L
     LoopFamily::new(id, version, Arc::new(planner))
 }
 
+pub(super) fn family_with_retry_policy_denied_recovery() -> LoopFamily {
+    let planner = DefaultPlanner::compose_default()
+        .with_recovery(Arc::new(RetryPolicyDeniedRecoveryStrategy));
+    let id = LoopFamilyId::new("executor-retry-policy-denied-test").expect("valid test family id"); // safety: test-only fixture
+    let version = ComponentIdentity::from_static(
+        "executor-retry-policy-denied-test",
+        ComponentDigest([3; 32]),
+    );
+    LoopFamily::new(id, version, Arc::new(planner))
+}
+
 pub(super) fn checkpoint_kind_from_host(kind: LoopCheckpointKind) -> CheckpointKind {
     match kind {
         LoopCheckpointKind::BeforeModel => CheckpointKind::BeforeModel,
@@ -638,14 +704,24 @@ pub(super) fn checkpoint_kind_from_host(kind: LoopCheckpointKind) -> CheckpointK
 }
 
 pub(super) fn final_staged_state(host: &MockHost) -> LoopExecutionState {
+    final_staged_state_for_kind(host, LoopCheckpointKind::Final)
+}
+
+pub(super) fn final_staged_state_for_kind(
+    host: &MockHost,
+    kind: LoopCheckpointKind,
+) -> LoopExecutionState {
     let staged_payloads = host.staged_payloads();
     let final_payload = staged_payloads
         .iter()
         .rev()
-        .find(|request| request.kind == LoopCheckpointKind::Final)
-        .expect("final checkpoint payload");
-    LoopExecutionState::from_checkpoint_payload(&final_payload.payload, CheckpointKind::Final)
-        .expect("checkpoint payload")
+        .find(|request| request.kind == kind)
+        .expect("checkpoint payload"); // safety: test-only assertion
+    LoopExecutionState::from_checkpoint_payload(
+        &final_payload.payload,
+        checkpoint_kind_from_host(kind),
+    )
+    .expect("checkpoint payload") // safety: test-only assertion
 }
 
 pub(super) fn test_run_context() -> LoopRunContext {

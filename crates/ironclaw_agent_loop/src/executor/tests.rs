@@ -24,7 +24,9 @@ use ironclaw_turns::{
 
 use crate::default_planner::DefaultPlanner;
 use crate::family::{ComponentDigest, ComponentIdentity, LoopFamily, LoopFamilyId};
-use crate::strategies::{CapabilityStrategy, InputDrainStrategy};
+use crate::strategies::{
+    CapabilityStrategy, InputDrainStrategy, RecoveryOutcome, RecoveryStrategy, RetryScope,
+};
 
 use super::*;
 
@@ -224,6 +226,68 @@ async fn gate_blocks_with_before_block_checkpoint() {
         })
         .expect("batch completed progress event");
     assert_eq!(completed, (0, 0, 1, 0));
+}
+
+#[tokio::test]
+async fn parallel_batch_records_completed_results_before_blocking_on_suspension() {
+    let completed_ref = LoopResultRef::new("result:parallel-completed").expect("valid"); // safety: test-only fixture
+    let host = MockHost::new(vec![two_calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![
+                CapabilityOutcome::ApprovalRequired {
+                    gate_ref: LoopGateRef::new("gate:approval").expect("valid"), // safety: test-only fixture
+                    safe_summary: "approval required".to_string(),
+                },
+                CapabilityOutcome::Completed(CapabilityResultMessage {
+                    result_ref: completed_ref.clone(),
+                    safe_summary: "parallel call completed".to_string(),
+                    terminate_hint: false,
+                }),
+            ],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect("execute"); // safety: test-only assertion
+
+    assert!(matches!(exit, LoopExit::Blocked(_))); // safety: test-only assertion
+    let appended = host.appended_result_refs();
+    assert_eq!(appended.len(), 1); // safety: test-only assertion
+    assert_eq!(appended[0].result_ref, completed_ref); // safety: test-only assertion
+    let before_block_refs =
+        final_staged_state_for_kind(&host, LoopCheckpointKind::BeforeBlock).result_refs;
+    assert!(before_block_refs == vec![completed_ref]); // safety: test-only assertion
+}
+
+#[tokio::test]
+async fn non_empty_capability_batch_rejects_empty_outcomes() {
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: Vec::new(),
+            stopped_on_suspension: true,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .expect_err("empty outcomes violate the host contract");
+
+    if !matches!(
+        error,
+        AgentLoopExecutorError::PlannerContract {
+            detail: "capability batch outcome count does not match invocations"
+        }
+    ) {
+        panic!("expected planner contract error, got {error:?}");
+    }
 }
 
 #[tokio::test]
@@ -457,6 +521,39 @@ async fn retry_uses_single_call_invocation() {
 
     assert!(matches!(exit, LoopExit::Completed(_)));
     assert_eq!(final_staged_state(&host).recovery_state, Default::default());
+}
+
+#[tokio::test]
+async fn policy_denied_capability_error_honors_retry_recovery() {
+    let host = MockHost::new(vec![calls_response()])
+        .with_batch_outcomes(vec![ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::Denied(
+                ironclaw_turns::run_profile::CapabilityDenied {
+                    reason_kind:
+                        ironclaw_turns::run_profile::CapabilityDeniedReasonKind::EmptySurface,
+                    safe_summary: "provider call denied".to_string(),
+                },
+            )],
+            stopped_on_suspension: false,
+        }])
+        .with_single_outcomes(vec![CapabilityOutcome::Completed(
+            CapabilityResultMessage {
+                result_ref: LoopResultRef::new("result:policy-retry").expect("valid"), // safety: test-only fixture
+                safe_summary: "policy retry completed".to_string(),
+                terminate_hint: true,
+            },
+        )]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let exit = executor
+        .execute_family(&family_with_retry_policy_denied_recovery(), &host, state)
+        .await
+        .expect("execute"); // safety: test-only assertion
+
+    assert!(matches!(exit, LoopExit::Completed(_))); // safety: test-only assertion
+    assert_eq!(host.single_invocations().len(), 1); // safety: test-only assertion
+    assert_eq!(final_staged_state(&host).recovery_state, Default::default()); // safety: test-only assertion
 }
 
 #[tokio::test]

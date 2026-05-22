@@ -1,13 +1,16 @@
+use super::port_adapters::HostManagedLoopCheckpointPort;
 use super::*;
 
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
 use ironclaw_turns::{
     InMemoryCheckpointStateStore, InMemoryLoopCheckpointStore, InMemoryRunProfileResolver,
-    RunProfileResolver, TurnCheckpointId, TurnId, TurnRunId, TurnScope,
+    LoopCheckpointStateRef, LoopCheckpointStore, PutLoopCheckpointRequest, RunProfileResolver,
+    TurnCheckpointId, TurnId, TurnRunId, TurnScope,
     run_profile::{
         AgentLoopHostErrorKind, CheckpointSchemaId, InMemoryLoopHostMilestoneSink,
-        LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointRequest, LoopRunContext,
-        RunProfileResolutionRequest, StageCheckpointPayloadRequest,
+        LoadCheckpointPayloadRequest, LoopCheckpointKind, LoopCheckpointPort,
+        LoopCheckpointRequest, LoopRunContext, RunProfileResolutionRequest,
+        StageCheckpointPayloadRequest,
     },
 };
 

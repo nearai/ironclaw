@@ -1087,44 +1087,20 @@ fn lease_secret_for_injection<S>(
 where
     S: SecretStore,
 {
-    BlockingSecretMaterialResolver { secrets }.lease_once(request, injection)
-}
-
-struct BlockingSecretMaterialResolver<'a, S> {
-    secrets: &'a S,
-}
-
-impl<S> BlockingSecretMaterialResolver<'_, S>
-where
-    S: SecretStore,
-{
-    fn lease_once(
-        &self,
-        request: &RuntimeHttpEgressRequest,
-        injection: &RuntimeCredentialInjection,
-    ) -> Result<Option<SecretMaterial>, RuntimeHttpEgressError> {
-        block_on_secret_store(async {
-            let metadata = self
-                .secrets
-                .metadata(&request.scope, &injection.handle)
-                .await?;
-            if metadata.is_none() {
-                return Ok(None);
-            }
-            let lease = self
-                .secrets
-                .lease_once(&request.scope, &injection.handle)
-                .await?;
-            self.secrets
-                .consume(&request.scope, lease.id)
-                .await
-                .map(Some)
-        })?
-        .map_or_else(
-            || missing_runtime_credential(injection.required),
-            |material| Ok(Some(material)),
-        )
-    }
+    block_on_secret_store(async {
+        let metadata = secrets.metadata(&request.scope, &injection.handle).await?;
+        if metadata.is_none() {
+            return Ok(None);
+        }
+        let lease = secrets
+            .lease_once(&request.scope, &injection.handle)
+            .await?;
+        secrets.consume(&request.scope, lease.id).await.map(Some)
+    })?
+    .map_or_else(
+        || missing_runtime_credential(injection.required),
+        |material| Ok(Some(material)),
+    )
 }
 
 fn block_on_secret_store<T>(
