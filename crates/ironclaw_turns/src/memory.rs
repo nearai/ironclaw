@@ -1221,6 +1221,15 @@ impl Inner {
                     to: TurnStatus::Queued,
                 });
             }
+            if request
+                .expected_status
+                .is_some_and(|expected| record.status != expected)
+            {
+                return Err(TurnError::InvalidTransition {
+                    from: record.status,
+                    to: TurnStatus::Queued,
+                });
+            }
             if record.actor != request.actor {
                 return Err(TurnError::Unauthorized);
             }

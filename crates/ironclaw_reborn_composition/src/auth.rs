@@ -35,12 +35,12 @@ impl RebornAuthContinuationDispatcher for NoopAuthContinuationDispatcher {
     }
 }
 
-pub struct RebornProductWorkflowAuthContinuationDispatcher {
+pub(crate) struct RebornProductWorkflowAuthContinuationDispatcher {
     dispatcher: ProductAuthContinuationDispatcher,
 }
 
 impl RebornProductWorkflowAuthContinuationDispatcher {
-    pub fn new(turn_coordinator: Arc<dyn TurnCoordinator>) -> Self {
+    pub(crate) fn new(turn_coordinator: Arc<dyn TurnCoordinator>) -> Self {
         Self {
             dispatcher: ProductAuthContinuationDispatcher::new(turn_coordinator),
         }

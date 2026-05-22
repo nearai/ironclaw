@@ -941,6 +941,7 @@ impl RebornBinaryE2EHarness {
                 actor,
                 run_id,
                 gate_resolution_ref: gate_ref,
+                expected_status: None,
                 source_binding_ref: SourceBindingRef::new("src:resume")?,
                 reply_target_binding_ref: ReplyTargetBindingRef::new("reply:resume")?,
                 idempotency_key: IdempotencyKey::new(idempotency_key.into())?,

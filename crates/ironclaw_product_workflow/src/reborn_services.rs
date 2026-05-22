@@ -568,6 +568,7 @@ impl RebornServicesApi for RebornServices {
                         actor,
                         run_id,
                         gate_resolution_ref: gate_ref,
+                        expected_status: None,
                         source_binding_ref: bounded_ref::<SourceBindingRef>(
                             "webui-gate-src",
                             &binding_id,

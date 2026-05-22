@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use ironclaw_auth::{AuthContinuationEvent, AuthContinuationRef};
 use ironclaw_turns::{
-    GateRef, GetRunStateRequest, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnRequest,
-    SourceBindingRef, TurnActor, TurnCoordinator, TurnRunId, TurnScope, TurnStatus,
+    GateRef, IdempotencyKey, ReplyTargetBindingRef, ResumeTurnRequest, SourceBindingRef, TurnActor,
+    TurnCoordinator, TurnError, TurnRunId, TurnScope, TurnStatus,
 };
 use uuid::Uuid;
 
@@ -51,8 +51,6 @@ impl ProductAuthContinuationDispatcher {
         let run_id = parse_turn_run_id(turn_run_ref.as_str())?;
         let gate_resolution_ref = parse_gate_ref(gate_ref.as_str())?;
         let binding_id = format!("{}|{}|{}", event.flow_id, run_id, gate_ref.as_str());
-        self.assert_run_blocked_on_auth_gate(&scope, run_id, &gate_resolution_ref)
-            .await?;
 
         self.turn_coordinator
             .resume_turn(ResumeTurnRequest {
@@ -60,40 +58,26 @@ impl ProductAuthContinuationDispatcher {
                 actor,
                 run_id,
                 gate_resolution_ref,
+                expected_status: Some(TurnStatus::BlockedAuth),
                 source_binding_ref: bounded_ref("auth-continuation-src", &binding_id)?,
                 reply_target_binding_ref: bounded_ref("auth-continuation-reply", &binding_id)?,
                 idempotency_key: idempotency_key_for_flow(event.flow_id.to_string())?,
             })
             .await
-            .map_err(|error| ProductWorkflowError::TurnSubmissionFailed { error })?;
+            .map_err(map_auth_resume_error)?;
 
         Ok(AuthContinuationDispatchOutcome::TurnGateResumed { run_id })
     }
+}
 
-    async fn assert_run_blocked_on_auth_gate(
-        &self,
-        scope: &TurnScope,
-        run_id: TurnRunId,
-        expected_gate_ref: &GateRef,
-    ) -> Result<(), ProductWorkflowError> {
-        let state = self
-            .turn_coordinator
-            .get_run_state(GetRunStateRequest {
-                scope: scope.clone(),
-                run_id,
-            })
-            .await
-            .map_err(|error| ProductWorkflowError::TurnSubmissionFailed { error })?;
-
-        if state.status == TurnStatus::BlockedAuth
-            && state.gate_ref.as_ref() == Some(expected_gate_ref)
-        {
-            return Ok(());
+fn map_auth_resume_error(error: TurnError) -> ProductWorkflowError {
+    match error {
+        TurnError::InvalidTransition { .. } | TurnError::InvalidRequest { .. } => {
+            ProductWorkflowError::TurnResumeRejected {
+                reason: "auth continuation does not match a blocked auth gate".to_string(),
+            }
         }
-
-        Err(ProductWorkflowError::TurnResumeRejected {
-            reason: "auth continuation does not match a blocked auth gate".to_string(),
-        })
+        error => ProductWorkflowError::TurnSubmissionFailed { error },
     }
 }
 
@@ -243,6 +227,35 @@ mod tests {
             &self,
             request: ResumeTurnRequest,
         ) -> Result<ResumeTurnResponse, TurnError> {
+            let state = self
+                .state
+                .lock()
+                .expect("state lock")
+                .clone()
+                .ok_or(TurnError::ScopeNotFound)?;
+            if request
+                .expected_status
+                .is_some_and(|expected| state.status != expected)
+            {
+                return Err(TurnError::InvalidTransition {
+                    from: state.status,
+                    to: TurnStatus::Queued,
+                });
+            }
+            if !matches!(
+                state.status,
+                TurnStatus::BlockedApproval | TurnStatus::BlockedAuth | TurnStatus::BlockedResource
+            ) {
+                return Err(TurnError::InvalidTransition {
+                    from: state.status,
+                    to: TurnStatus::Queued,
+                });
+            }
+            if state.gate_ref.as_ref() != Some(&request.gate_resolution_ref) {
+                return Err(TurnError::InvalidRequest {
+                    reason: "gate resolution reference mismatch".to_string(),
+                });
+            }
             if let Some(error) = self.resume_error.lock().expect("resume error lock").take() {
                 return Err(error);
             }
@@ -346,6 +359,7 @@ mod tests {
         assert_eq!(resumes.len(), 1);
         assert_eq!(resumes[0].run_id, run_id);
         assert_eq!(resumes[0].gate_resolution_ref.as_str(), "gate:auth");
+        assert_eq!(resumes[0].expected_status, Some(TurnStatus::BlockedAuth));
         assert_eq!(resumes[0].actor.user_id.as_str(), "alice");
         assert_eq!(resumes[0].scope.thread_id.as_str(), "thread-auth");
         assert!(
@@ -375,6 +389,33 @@ mod tests {
             .dispatch(event)
             .await
             .expect_err("non-auth gates must not resume through auth continuation");
+
+        assert!(matches!(
+            err,
+            ProductWorkflowError::TurnResumeRejected { .. }
+        ));
+        assert!(coordinator.resumes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn turn_gate_continuation_rejects_mismatched_auth_gate_ref() {
+        let coordinator = Arc::new(RecordingTurnCoordinator::default());
+        let dispatcher = ProductAuthContinuationDispatcher::new(coordinator.clone());
+        let run_id = TurnRunId::new();
+        coordinator.set_state(run_state(
+            run_id,
+            TurnStatus::BlockedAuth,
+            Some("gate:other-auth"),
+        ));
+        let event = scoped_event(AuthContinuationRef::TurnGateResume {
+            turn_run_ref: TurnRunRef::new(run_id.to_string()).unwrap(),
+            gate_ref: AuthGateRef::new("gate:auth").unwrap(),
+        });
+
+        let err = dispatcher
+            .dispatch(event)
+            .await
+            .expect_err("stale auth gate callbacks must not resume a different gate");
 
         assert!(matches!(
             err,
