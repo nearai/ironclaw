@@ -139,6 +139,18 @@ async fn credential_account_update_status_updates_owner_record_and_rejects_missi
         .expect("lookup")
         .expect("owner account");
     assert_eq!(still_owner.status, CredentialAccountStatus::RefreshFailed);
+
+    let revoked = services
+        .update_status(&owner, account.id, CredentialAccountStatus::Revoked)
+        .await
+        .expect("terminal revoke");
+    assert_eq!(revoked.status, CredentialAccountStatus::Revoked);
+
+    let reactivated = services
+        .update_status(&owner, account.id, CredentialAccountStatus::Configured)
+        .await
+        .expect_err("revoked accounts cannot be reactivated by status update");
+    assert_eq!(reactivated.code(), AuthErrorCode::InvalidRequest);
 }
 
 #[tokio::test]

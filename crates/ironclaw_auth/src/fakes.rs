@@ -254,6 +254,7 @@ impl CredentialAccountService for InMemoryAuthProductServices {
         if !scope_matches(scope, &account.scope) {
             return Err(AuthProductError::CrossScopeDenied);
         }
+        validate_credential_status_transition(account.status, status)?;
         account.status = status;
         account.updated_at = now;
         Ok(account.clone())
@@ -693,6 +694,37 @@ fn validate_new_credential_account(request: &NewCredentialAccount) -> Result<(),
         ));
     }
     Ok(())
+}
+
+fn validate_credential_status_transition(
+    current: CredentialAccountStatus,
+    next: CredentialAccountStatus,
+) -> Result<(), AuthProductError> {
+    if current == next || credential_status_transition_allowed(current, next) {
+        return Ok(());
+    }
+    Err(AuthProductError::invalid_request(
+        "credential account status transition is not allowed",
+    ))
+}
+
+fn credential_status_transition_allowed(
+    current: CredentialAccountStatus,
+    next: CredentialAccountStatus,
+) -> bool {
+    use CredentialAccountStatus::{
+        Configured, Expired, Inactive, Missing, PendingSetup, RefreshFailed, Revoked,
+    };
+
+    match current {
+        PendingSetup => matches!(next, Configured | Missing | Expired | Inactive | Revoked),
+        Configured => matches!(next, RefreshFailed | Missing | Expired | Inactive | Revoked),
+        RefreshFailed => matches!(next, Configured | Missing | Expired | Inactive | Revoked),
+        Missing => matches!(next, PendingSetup | Configured | Inactive | Revoked),
+        Expired => matches!(next, PendingSetup | Configured | Inactive | Revoked),
+        Inactive => matches!(next, PendingSetup | Configured | Revoked),
+        Revoked => false,
+    }
 }
 
 fn generated_secret_handle(prefix: &str) -> Result<SecretHandle, AuthProductError> {
