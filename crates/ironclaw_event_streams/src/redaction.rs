@@ -1,5 +1,6 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
+    hash::Hash,
     sync::{Arc, Mutex, Weak},
 };
 
@@ -50,9 +51,56 @@ const MAX_VALIDATION_CACHE_ENTRIES: usize = 1024;
 
 #[derive(Clone, Default)]
 pub(crate) struct ProjectionValidationCache {
-    allowed: Arc<Mutex<HashSet<ProjectionValidationCacheKey>>>,
+    allowed: Arc<Mutex<BoundedValidationSet<ProjectionValidationCacheKey>>>,
     live_allowed:
         Arc<Mutex<HashMap<ProjectionValidationLiveCacheKey, Weak<ProductProjectionEnvelope>>>>,
+}
+
+#[derive(Clone)]
+struct BoundedValidationSet<K> {
+    entries: HashSet<K>,
+    order: VecDeque<K>,
+    max_entries: usize,
+}
+
+impl<K> Default for BoundedValidationSet<K> {
+    fn default() -> Self {
+        Self {
+            entries: HashSet::new(),
+            order: VecDeque::new(),
+            max_entries: MAX_VALIDATION_CACHE_ENTRIES,
+        }
+    }
+}
+
+impl<K> BoundedValidationSet<K>
+where
+    K: Clone + Eq + Hash,
+{
+    fn touch(&mut self, key: &K) -> bool {
+        if !self.entries.contains(key) {
+            return false;
+        }
+        if let Some(position) = self.order.iter().position(|cached| cached == key)
+            && let Some(cached) = self.order.remove(position)
+        {
+            self.order.push_back(cached);
+        }
+        true
+    }
+
+    fn insert(&mut self, key: K) {
+        if !self.entries.insert(key.clone()) {
+            return;
+        }
+        self.order.push_back(key);
+        while self.entries.len() > self.max_entries {
+            let Some(evicted) = self.order.pop_front() else {
+                break;
+            };
+            self.entries.remove(&evicted);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -91,7 +139,7 @@ impl ProjectionValidationCache {
             .allowed
             .lock()
             .map_err(|_| ProjectionStreamError::Source)?
-            .contains(&key)
+            .touch(&key)
         {
             return Ok(());
         }
@@ -101,9 +149,6 @@ impl ProjectionValidationCache {
             .allowed
             .lock()
             .map_err(|_| ProjectionStreamError::Source)?;
-        if allowed.len() >= MAX_VALIDATION_CACHE_ENTRIES {
-            allowed.clear();
-        }
         allowed.insert(key);
         Ok(())
     }
@@ -137,8 +182,11 @@ impl ProjectionValidationCache {
             .map_err(|_| ProjectionStreamError::Source)?;
         if live_allowed.len() >= MAX_VALIDATION_CACHE_ENTRIES {
             live_allowed.retain(|_, cached| cached.strong_count() > 0);
-            if live_allowed.len() >= MAX_VALIDATION_CACHE_ENTRIES {
-                live_allowed.clear();
+            while live_allowed.len() >= MAX_VALIDATION_CACHE_ENTRIES {
+                let Some(key) = live_allowed.keys().next().cloned() else {
+                    break;
+                };
+                live_allowed.remove(&key);
             }
         }
         live_allowed.insert(key, Arc::downgrade(envelope));
@@ -178,5 +226,29 @@ fn envelope_kind(envelope: &ProductProjectionEnvelope) -> ProjectionEnvelopeKind
         ProductProjectionEnvelope::ThreadUpdates(_) => ProjectionEnvelopeKind::ThreadUpdates,
         ProductProjectionEnvelope::DeliveryStatus(_) => ProjectionEnvelopeKind::DeliveryStatus,
         ProductProjectionEnvelope::Debug(_) => ProjectionEnvelopeKind::Debug,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BoundedValidationSet;
+
+    #[test]
+    fn bounded_validation_set_evicts_oldest_without_clearing_everything() {
+        let mut cache = BoundedValidationSet {
+            entries: Default::default(),
+            order: Default::default(),
+            max_entries: 3,
+        };
+        cache.insert(1);
+        cache.insert(2);
+        cache.insert(3);
+        assert!(cache.touch(&1));
+        cache.insert(4);
+
+        assert!(cache.entries.contains(&1));
+        assert!(!cache.entries.contains(&2));
+        assert!(cache.entries.contains(&3));
+        assert!(cache.entries.contains(&4));
     }
 }
