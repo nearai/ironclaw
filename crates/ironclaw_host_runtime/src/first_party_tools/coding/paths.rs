@@ -106,7 +106,7 @@ pub(super) async fn stat_optional(
     request: &FirstPartyCapabilityRequest,
     path: &VirtualPath,
 ) -> Result<Option<FileStat>, FirstPartyCapabilityError> {
-    match request.filesystem.stat(path).await {
+    match request.services.filesystem.stat(path).await {
         Ok(stat) => Ok(Some(stat)),
         Err(FilesystemError::NotFound { .. }) => Ok(None),
         Err(error) => Err(filesystem_error(error)),
@@ -121,6 +121,7 @@ pub(super) async fn create_parent_dir(
         return Ok(());
     };
     request
+        .services
         .filesystem
         .create_dir_all(&parent)
         .await

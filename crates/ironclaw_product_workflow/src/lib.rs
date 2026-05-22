@@ -33,6 +33,7 @@ mod fakes;
 mod in_memory_ledger;
 mod inbound_turn;
 mod ledger;
+mod policy;
 mod reborn_services;
 mod webui_inbound;
 mod workflow;
@@ -51,10 +52,19 @@ pub use conversation_binding::{
 };
 pub use error::ProductWorkflowError;
 #[cfg(any(test, feature = "test-support"))]
-pub use fakes::{FakeConversationBindingService, FakeIdempotencyLedger, FakeInboundTurnService};
+pub use fakes::{
+    FakeBeforeInboundPolicy, FakeConversationBindingService, FakeIdempotencyLedger,
+    FakeInboundTurnService,
+};
 pub use in_memory_ledger::InMemoryIdempotencyLedger;
-pub use inbound_turn::{DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService};
+pub use inbound_turn::{
+    DefaultInboundTurnService, InboundTurnOutcome, InboundTurnService, InboundUserMessageDispatch,
+};
 pub use ledger::{IdempotencyDecision, IdempotencyLedger};
+pub use policy::{
+    BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
+    NoopBeforeInboundPolicy,
+};
 // Projection types that route handlers need to thread through SSE
 // (parse the resume cursor, emit each envelope as JSON). Re-exported so
 // `ironclaw_webui_v2` consumes them via the facade crate and does not need
@@ -64,9 +74,9 @@ pub use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
 pub use reborn_services::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
     RebornGetRunStateResponse, RebornResolveGateResponse, RebornResumeGateResponse, RebornServices,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornStreamEventsRequest,
-    RebornStreamEventsResponse, RebornSubmitTurnResponse, RebornTimelineRequest,
-    RebornTimelineResponse,
+    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
+    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
+    RebornTimelineRequest, RebornTimelineResponse,
 };
 pub use webui_inbound::{
     WebUiAuthenticatedCaller, WebUiCancelReason, WebUiCancelRunRequest, WebUiCreateThreadRequest,

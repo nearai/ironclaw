@@ -240,7 +240,7 @@ impl InstructionBundleBuilder {
         }
 
         let mut instruction_snippets = request.context_bundle.instruction_snippets;
-        instruction_snippets.sort_by(compare_instruction_snippets);
+        sort_instruction_snippets_for_prompt(&mut instruction_snippets);
         let mut skill_ordinal = 0usize;
         for snippet in instruction_snippets {
             if snippet.snippet_ref.starts_with("skill:") {
@@ -642,6 +642,14 @@ impl SyntheticMessageRefRegistry {
         }
         Ok(content_ref)
     }
+}
+
+/// Sorts instruction snippets in the same order used for prompt construction.
+///
+/// Skill snippet model refs include their prompt ordinal, so any resolver that
+/// recreates those refs must use this ordering before assigning ordinals.
+pub fn sort_instruction_snippets_for_prompt(snippets: &mut [LoopContextSnippet]) {
+    snippets.sort_by(compare_instruction_snippets);
 }
 
 fn compare_instruction_snippets(

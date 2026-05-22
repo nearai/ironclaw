@@ -91,10 +91,14 @@ pub use session::{SessionConfig, SessionManager, create_session_manager};
 pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};
 pub use token_refreshing::TokenRefreshingProvider;
 
-use std::{path::Path, sync::Arc};
+#[cfg(feature = "registry-provider-factory")]
+use std::path::Path;
+use std::sync::Arc;
 
 use rig::client::CompletionClient;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::ExposeSecret;
+#[cfg(feature = "registry-provider-factory")]
+use secrecy::SecretString;
 
 // LlmConfig, NearAiConfig, RegistryProviderConfig, and LlmError are
 // re-exported via `pub use` above from config and error submodules.

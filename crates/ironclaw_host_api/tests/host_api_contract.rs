@@ -155,6 +155,27 @@ fn dispatch_errors_preserve_typed_failure_kind() {
 }
 
 #[test]
+fn runtime_credential_injection_rejects_missing_source() {
+    let missing_source = json!({
+        "handle": "api-token",
+        "target": {
+            "type": "header",
+            "name": "authorization",
+            "prefix": "Bearer "
+        },
+        "required": true
+    });
+
+    let error = serde_json::from_value::<RuntimeCredentialInjection>(missing_source)
+        .expect_err("credential injection source is authority-bearing and must be explicit");
+
+    assert!(
+        error.to_string().contains("missing field `source`"),
+        "unexpected deserialization error: {error}"
+    );
+}
+
+#[test]
 fn dispatch_failure_kind_display_preserves_stable_literals() {
     assert_eq!(
         DispatchFailureKind::UnknownCapability.as_str(),

@@ -35,6 +35,7 @@ pub(super) async fn read_file(
     let limit = optional_usize(&request.input, "limit")?;
     let has_explicit_range = offset > 0 || limit.is_some();
     let stat = request
+        .services
         .filesystem
         .stat(&resolved.virtual_path)
         .await
@@ -51,6 +52,7 @@ pub(super) async fn read_file(
     }
 
     let bytes = request
+        .services
         .filesystem
         .read_file(&resolved.virtual_path)
         .await
@@ -118,6 +120,7 @@ pub(super) async fn write_file(
     }
     create_parent_dir(request, &resolved.virtual_path).await?;
     request
+        .services
         .filesystem
         .write_file(&resolved.virtual_path, content.as_bytes())
         .await
@@ -171,6 +174,7 @@ async fn collect_list_entries(
     let mut visited = 0usize;
     while let Some((dir, depth)) = stack.pop() {
         let entries = request
+            .services
             .filesystem
             .list_dir(&dir)
             .await
@@ -192,7 +196,7 @@ async fn collect_list_entries(
                 format!("{relative}/")
             } else {
                 // silent-ok: list_dir is best-effort for entries that disappear or fail stat.
-                let Ok(stat) = request.filesystem.stat(&entry.path).await else {
+                let Ok(stat) = request.services.filesystem.stat(&entry.path).await else {
                     tracing::debug!(
                         path = entry.path.as_str(),
                         "skipping list_dir entry after stat failed"
@@ -274,6 +278,7 @@ pub(super) async fn apply_patch(
         .lock_edit(&scope, resolved.virtual_path.as_str())
         .await;
     let stat = request
+        .services
         .filesystem
         .stat(&resolved.virtual_path)
         .await
@@ -289,6 +294,7 @@ pub(super) async fn apply_patch(
         ));
     }
     let bytes = request
+        .services
         .filesystem
         .read_file(&resolved.virtual_path)
         .await
@@ -313,6 +319,7 @@ pub(super) async fn apply_patch(
         replace_content(&content, old_string, new_string, replace_all, match_count)?;
     let output = encode_text(&new_content, encoding, line_ending);
     request
+        .services
         .filesystem
         .write_file(&resolved.virtual_path, &output)
         .await
