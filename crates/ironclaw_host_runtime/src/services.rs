@@ -1980,6 +1980,9 @@ struct ServiceResolvedRuntimeAdapter<T> {
     invocation_services: Arc<dyn InvocationServicesResolver>,
 }
 
+// arch-exempt: large_file, runtime adapter composition is still centralized
+// in HostRuntimeServices until the Reborn architecture decomposition tracked
+// by nearai/ironclaw#3231 splits runtime wiring into focused modules.
 impl<T> ServiceResolvedRuntimeAdapter<T> {
     fn new(inner: Arc<T>, invocation_services: Arc<dyn InvocationServicesResolver>) -> Self {
         Self {

@@ -591,6 +591,26 @@ async fn builtin_http_runtime_policy_denial_stops_before_egress() {
 }
 
 #[tokio::test]
+async fn builtin_http_rejects_hosted_allowlist_network_plan_before_egress() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        br#"{"ok":true}"#.to_vec(),
+    ));
+    let runtime = runtime_with_http_egress_and_policy(Arc::clone(&egress), hosted_dev_policy());
+
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/v1/items"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Network);
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
 async fn builtin_http_defaults_json_body_content_type() {
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(b"ok".to_vec()));
     let runtime = runtime_with_http_egress(Arc::clone(&egress));
@@ -980,6 +1000,25 @@ async fn builtin_http_runs_blocking_egress_off_tokio_worker() {
     }
 
     invocation.await.unwrap();
+}
+
+#[tokio::test]
+async fn builtin_read_file_rejects_scoped_virtual_filesystem_plan_before_handler_access() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("README.md"), "must not be read\n").unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem_and_policy(filesystem, network_denied_policy());
+
+    let error = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/README.md"}),
+        execution_context_with_mounts([READ_FILE_CAPABILITY_ID], mounts),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Authorization);
 }
 
 #[tokio::test]
@@ -1920,6 +1959,16 @@ fn runtime_with_filesystem<F>(filesystem: F) -> impl HostRuntime
 where
     F: RootFilesystem + 'static,
 {
+    runtime_with_filesystem_and_policy(filesystem, local_dev_policy())
+}
+
+fn runtime_with_filesystem_and_policy<F>(
+    filesystem: F,
+    policy: EffectiveRuntimePolicy,
+) -> impl HostRuntime
+where
+    F: RootFilesystem + 'static,
+{
     HostRuntimeServices::new(
         Arc::new(registry()),
         Arc::new(filesystem),
@@ -1930,6 +1979,7 @@ where
     )
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
+    .with_runtime_policy(policy)
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }

@@ -13,7 +13,7 @@ use std::{fmt, sync::Arc};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     MountView, ResourceScope, RuntimeDispatchErrorKind, RuntimeHttpEgress,
-    runtime_policy::{FilesystemBackendKind, NetworkMode, ProcessBackendKind},
+    runtime_policy::{FilesystemBackendKind, NetworkMode, ProcessBackendKind, SecretMode},
 };
 use ironclaw_secrets::SecretStore;
 use thiserror::Error;
@@ -82,6 +82,8 @@ pub enum InvocationServicesError {
     UnsupportedProcessBackend { backend: ProcessBackendKind },
     #[error("network mode {mode:?} is not supported by this invocation services resolver")]
     UnsupportedNetworkMode { mode: NetworkMode },
+    #[error("secret mode {mode:?} is not supported by this invocation services resolver")]
+    UnsupportedSecretMode { mode: SecretMode },
     #[error("capability requires secret access but no secret store is configured")]
     SecretAccessRequired,
 }
@@ -92,6 +94,7 @@ impl InvocationServicesError {
             Self::UnsupportedFilesystemBackend { .. } => RuntimeDispatchErrorKind::FilesystemDenied,
             Self::UnsupportedProcessBackend { .. } => RuntimeDispatchErrorKind::UnsupportedRunner,
             Self::UnsupportedNetworkMode { .. } => RuntimeDispatchErrorKind::NetworkDenied,
+            Self::UnsupportedSecretMode { .. } => RuntimeDispatchErrorKind::SecretDenied,
             Self::SecretAccessRequired => RuntimeDispatchErrorKind::SecretDenied,
         }
     }
@@ -158,6 +161,16 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
                 mode: plan.network_mode,
             });
         }
+        if plan.requires_secret
+            && !matches!(
+                plan.secret_mode,
+                SecretMode::ScrubbedEnv | SecretMode::InheritedEnv
+            )
+        {
+            return Err(InvocationServicesError::UnsupportedSecretMode {
+                mode: plan.secret_mode,
+            });
+        }
         if plan.requires_secret && self.secret_store.is_none() {
             return Err(InvocationServicesError::SecretAccessRequired);
         }
@@ -168,10 +181,11 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
                 .then(|| self.runtime_http_egress.clone())
                 .flatten(),
             process: Arc::clone(&self.process),
-            secret_store: plan
-                .requires_secret
-                .then(|| self.secret_store.clone())
-                .flatten(),
+            secret_store: if plan.requires_secret {
+                self.secret_store.clone()
+            } else {
+                None
+            },
         })
     }
 }
@@ -523,6 +537,40 @@ mod tests {
         assert!(matches!(
             error,
             InvocationServicesError::SecretAccessRequired
+        ));
+    }
+
+    #[test]
+    fn local_resolver_rejects_brokered_required_secret_even_with_secret_store() {
+        let resolver = LocalInvocationServicesResolver::new(
+            Arc::new(LocalFilesystem::new()),
+            None,
+            Arc::new(NoopProcessPort),
+            Some(Arc::new(InMemorySecretStore::new())),
+        );
+        let mut plan = plan(
+            ProcessBackendKind::None,
+            false,
+            false,
+            NetworkMode::Deny,
+            true,
+        );
+        plan.secret_mode = SecretMode::BrokeredHandles;
+
+        let error = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::SecretDenied);
+        assert!(matches!(
+            error,
+            InvocationServicesError::UnsupportedSecretMode {
+                mode: SecretMode::BrokeredHandles
+            }
         ));
     }
 
