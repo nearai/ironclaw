@@ -571,6 +571,8 @@ fn validate_push_scope_matches_projection(
                 && request.scope.project_id == request.projection_scope.read_scope.project_id
                 && Some(&request.scope.thread_id)
                     == request.projection_scope.read_scope.thread_id.as_ref()
+                && request.projection_scope.read_scope.mission_id.is_none()
+                && request.projection_scope.read_scope.process_id.is_none()
                 && thread_id == &request.scope.thread_id =>
         {
             Ok(())

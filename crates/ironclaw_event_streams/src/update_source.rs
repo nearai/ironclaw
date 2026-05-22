@@ -54,11 +54,31 @@ impl InMemoryProjectionUpdateSource {
         envelope: Arc<ProductProjectionEnvelope>,
     ) -> Result<usize, ProjectionStreamError> {
         let key = live_update_key_for_envelope(envelope.as_ref())?;
-        let senders = self.senders.lock();
-        let sender = senders.get(&key).ok_or(ProjectionStreamError::Source)?;
-        sender
-            .send(envelope)
-            .map_err(|_| ProjectionStreamError::Source)
+        let sender = {
+            let mut senders = self.senders.lock();
+            prune_inactive_senders(&mut senders);
+            senders
+                .get(&key)
+                .cloned()
+                .ok_or(ProjectionStreamError::Source)?
+        };
+        match sender.send(envelope) {
+            Ok(count) => Ok(count),
+            Err(_) => {
+                self.remove_inactive_sender(&key);
+                Err(ProjectionStreamError::Source)
+            }
+        }
+    }
+
+    fn remove_inactive_sender(&self, key: &ScopeAdmissionKey) {
+        let mut senders = self.senders.lock();
+        if senders
+            .get(key)
+            .is_some_and(|sender| sender.receiver_count() == 0)
+        {
+            senders.remove(key);
+        }
     }
 }
 
@@ -70,6 +90,7 @@ impl ProjectionUpdateSource for InMemoryProjectionUpdateSource {
     ) -> Result<broadcast::Receiver<Arc<ProductProjectionEnvelope>>, ProjectionStreamError> {
         let key = scope_key(&request.scope, &request.target);
         let mut senders = self.senders.lock();
+        prune_inactive_senders(&mut senders);
         let sender = senders.entry(key).or_insert_with(|| {
             let (sender, _) = broadcast::channel(self.capacity);
             sender
@@ -99,4 +120,10 @@ fn live_update_key_for_envelope(
         | ProductProjectionEnvelope::Debug(_) => ProjectionTarget::Thread { thread_id },
     };
     Ok(scope_key(scope, &target))
+}
+
+fn prune_inactive_senders(
+    senders: &mut HashMap<ScopeAdmissionKey, broadcast::Sender<Arc<ProductProjectionEnvelope>>>,
+) {
+    senders.retain(|_, sender| sender.receiver_count() > 0);
 }

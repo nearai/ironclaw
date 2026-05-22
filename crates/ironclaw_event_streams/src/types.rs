@@ -179,6 +179,7 @@ pub struct DebugProjectionPayload {
 pub struct ProjectionSubscription {
     receiver: mpsc::Receiver<ProjectionStreamItem>,
     terminal_receiver: mpsc::Receiver<ProjectionStreamItem>,
+    pending_terminal: Option<ProjectionStreamItem>,
     terminated: bool,
     observed_cursor: Option<ProjectionCursor>,
     admission: Option<ProjectionStreamAdmissionPermit>,
@@ -206,6 +207,7 @@ impl ProjectionSubscription {
         Self {
             receiver,
             terminal_receiver,
+            pending_terminal: None,
             terminated: false,
             observed_cursor: None,
             admission: Some(admission),
@@ -216,58 +218,62 @@ impl ProjectionSubscription {
         if self.terminated {
             return None;
         }
-
-        match self.receiver.try_recv() {
-            Ok(item) => return self.observe_item(Some(item)),
-            Err(mpsc::error::TryRecvError::Empty) => {}
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                return self.observe_terminal_or_close();
-            }
+        if let Some(item) = self.pending_terminal.take() {
+            return self.observe_terminal_item(item);
         }
-
-        if let Some(item) = self.try_terminal_item() {
-            return Some(item);
+        match self.terminal_receiver.try_recv() {
+            Ok(item) => return self.observe_terminal_item(item),
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {}
         }
 
         tokio::select! {
             biased;
-            item = self.receiver.recv() => {
-                if item.is_some() {
-                    self.observe_item(item)
+            item = self.receiver.recv() => self.observe_item_or_terminal_on_close(item),
+            terminal = self.terminal_receiver.recv() => {
+                if let Some(item) = terminal {
+                    self.observe_terminal_item(item)
                 } else {
-                    self.observe_terminal_or_close()
+                    let item = self.receiver.recv().await;
+                    self.observe_item(item)
                 }
-            },
-            terminal = self.terminal_receiver.recv() => self.observe_terminal_item(terminal),
+            }
         }
     }
 
-    fn observe_terminal_or_close(&mut self) -> Option<ProjectionStreamItem> {
-        if let Some(item) = self.try_terminal_item() {
-            return Some(item);
+    fn observe_item_or_terminal_on_close(
+        &mut self,
+        item: Option<ProjectionStreamItem>,
+    ) -> Option<ProjectionStreamItem> {
+        if item.is_some() {
+            return self.observe_item(item);
         }
-        self.observe_item(None)
-    }
-
-    fn try_terminal_item(&mut self) -> Option<ProjectionStreamItem> {
         match self.terminal_receiver.try_recv() {
-            Ok(item) => self.observe_terminal_item(Some(item)),
-            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => None,
+            Ok(item) => self.observe_terminal_item(item),
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                self.observe_item(None)
+            }
         }
     }
 
     fn observe_terminal_item(
         &mut self,
-        item: Option<ProjectionStreamItem>,
+        item: ProjectionStreamItem,
     ) -> Option<ProjectionStreamItem> {
-        let item = item?;
-        self.terminated = true;
-        self.receiver.close();
-        self.release_admission();
-        Some(with_observed_terminal_cursor(
-            item,
-            self.observed_cursor.as_ref(),
-        ))
+        match self.receiver.try_recv() {
+            Ok(buffered) => {
+                self.pending_terminal = Some(item);
+                self.observe_item(Some(buffered))
+            }
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                self.terminated = true;
+                self.receiver.close();
+                self.release_admission();
+                Some(with_observed_terminal_cursor(
+                    item,
+                    self.observed_cursor.as_ref(),
+                ))
+            }
+        }
     }
 
     fn observe_item(&mut self, item: Option<ProjectionStreamItem>) -> Option<ProjectionStreamItem> {
@@ -277,6 +283,7 @@ impl ProjectionSubscription {
             }
             if matches!(item, ProjectionStreamItem::Lagged { .. }) {
                 self.terminated = true;
+                self.pending_terminal = None;
                 self.receiver.close();
                 self.release_admission();
             }
