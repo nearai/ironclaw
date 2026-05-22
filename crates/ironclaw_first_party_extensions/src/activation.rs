@@ -11,9 +11,10 @@ use ironclaw_loop_support::{
 };
 use ironclaw_skills::{
     LoadedSkill, SkillSource, extract_skill_mentions, parse_skill_md, prefilter_skills,
+    skill_token_cost,
 };
 use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
-use ironclaw_turns::{TurnRunId, TurnScope};
+use ironclaw_turns::{AcceptedMessageRef, TurnScope};
 use thiserror::Error;
 
 /// Maximum number of first-party skills selected for one turn by default.
@@ -142,42 +143,47 @@ where
     pub fn record_user_message(
         &self,
         scope: TurnScope,
-        run_id: TurnRunId,
+        accepted_message_ref: AcceptedMessageRef,
         message: impl Into<String>,
     ) -> Result<(), SkillActivationSelectionError> {
         self.messages_by_run
             .lock()
             .map_err(|_| SkillActivationSelectionError::Internal)?
             .insert(
-                SkillActivationMessageKey::new(scope, run_id),
+                SkillActivationMessageKey::new(scope, accepted_message_ref),
                 message.into(),
             );
         Ok(())
     }
 
-    pub fn clear_run_message(
+    pub fn clear_accepted_message(
         &self,
         scope: &TurnScope,
-        run_id: TurnRunId,
+        accepted_message_ref: &AcceptedMessageRef,
     ) -> Result<(), SkillActivationSelectionError> {
         self.messages_by_run
             .lock()
             .map_err(|_| SkillActivationSelectionError::Internal)?
-            .remove(&SkillActivationMessageKey::new(scope.clone(), run_id));
+            .remove(&SkillActivationMessageKey::new(
+                scope.clone(),
+                accepted_message_ref.clone(),
+            ));
         Ok(())
     }
 
-    fn message_for_run(
+    fn take_message_for_run(
         &self,
         scope: &TurnScope,
-        run_id: TurnRunId,
+        accepted_message_ref: &AcceptedMessageRef,
     ) -> Result<Option<String>, SkillActivationSelectionError> {
         Ok(self
             .messages_by_run
             .lock()
             .map_err(|_| SkillActivationSelectionError::Internal)?
-            .get(&SkillActivationMessageKey::new(scope.clone(), run_id))
-            .cloned())
+            .remove(&SkillActivationMessageKey::new(
+                scope.clone(),
+                accepted_message_ref.clone(),
+            )))
     }
 
     async fn selected_candidates(
@@ -232,12 +238,15 @@ where
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SkillActivationMessageKey {
     scope: TurnScope,
-    run_id: TurnRunId,
+    accepted_message_ref: AcceptedMessageRef,
 }
 
 impl SkillActivationMessageKey {
-    fn new(scope: TurnScope, run_id: TurnRunId) -> Self {
-        Self { scope, run_id }
+    fn new(scope: TurnScope, accepted_message_ref: AcceptedMessageRef) -> Self {
+        Self {
+            scope,
+            accepted_message_ref,
+        }
     }
 }
 
@@ -250,8 +259,11 @@ where
         &self,
         run_context: &LoopRunContext,
     ) -> Result<Vec<HostSkillContextCandidate>, HostSkillContextBuildError> {
+        let Some(accepted_message_ref) = run_context.accepted_message_ref.as_ref() else {
+            return Ok(Vec::new());
+        };
         let Some(message) = self
-            .message_for_run(&run_context.scope, run_context.run_id)
+            .take_message_for_run(&run_context.scope, accepted_message_ref)
             .map_err(SkillActivationSelectionError::into_context_error)?
         else {
             return Ok(Vec::new());
@@ -599,17 +611,6 @@ fn reserve_skill_budget(
     Ok(())
 }
 
-fn skill_token_cost(skill: &LoadedSkill) -> usize {
-    let declared_tokens = skill.manifest.activation.max_context_tokens;
-    let approx_tokens = (skill.prompt_content.len() as f64 * 0.25) as usize;
-    let raw_cost = if approx_tokens > declared_tokens * 2 {
-        approx_tokens
-    } else {
-        declared_tokens
-    };
-    raw_cost.max(1)
-}
-
 fn descriptor_context_ordering_key(descriptor: &SkillBundleDescriptor) -> String {
     let (source_kind, name, path) = descriptor.ordering_key();
     format!("{}:{}:{}", source_kind.as_str(), name, path)
@@ -705,9 +706,17 @@ mod tests {
             TurnRunId::new(),
             resolved,
         )
+        .with_accepted_message_ref(AcceptedMessageRef::new("msg:run-a").unwrap())
         .with_actor(TurnActor::new(
             ironclaw_host_api::UserId::new("user-a").unwrap(),
         ))
+    }
+
+    fn accepted_message_ref(context: &LoopRunContext) -> AcceptedMessageRef {
+        context
+            .accepted_message_ref
+            .clone()
+            .expect("run context accepted message ref")
     }
 
     #[tokio::test]
@@ -726,7 +735,11 @@ mod tests {
             SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
         let context = run_context().await;
         selectable
-            .record_user_message(context.scope.clone(), context.run_id, "hello there")
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "hello there",
+            )
             .expect("record message");
 
         let selected = selectable
@@ -767,7 +780,7 @@ mod tests {
         selectable
             .record_user_message(
                 context.scope.clone(),
-                context.run_id,
+                accepted_message_ref(&context),
                 "please review this PR",
             )
             .expect("record message");
@@ -788,6 +801,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selector_keeps_recorded_messages_isolated_by_accepted_message_ref() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "code-review",
+            &skill_md(
+                "code-review",
+                "Review code",
+                &["review"],
+                "CODE_REVIEW_SENTINEL",
+            ),
+        )]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let first_context = run_context().await;
+        let second_context = LoopRunContext::new(
+            first_context.scope.clone(),
+            first_context.turn_id,
+            TurnRunId::new(),
+            first_context.resolved_run_profile.clone(),
+        )
+        .with_accepted_message_ref(AcceptedMessageRef::new("msg:run-b").unwrap())
+        .with_actor(first_context.actor().expect("actor").clone());
+
+        selectable
+            .record_user_message(
+                first_context.scope.clone(),
+                accepted_message_ref(&first_context),
+                "please review this PR",
+            )
+            .expect("record first message");
+        selectable
+            .record_user_message(
+                second_context.scope.clone(),
+                accepted_message_ref(&second_context),
+                "hello there",
+            )
+            .expect("record second message");
+
+        let first_selected = selectable
+            .load_skill_context_candidates(&first_context)
+            .await
+            .expect("first selection succeeds");
+        assert_eq!(first_selected.len(), 1);
+
+        let first_selected_after_clear = selectable
+            .load_skill_context_candidates(&first_context)
+            .await
+            .expect("first selection after clear succeeds");
+        assert!(first_selected_after_clear.is_empty());
+
+        let second_selected = selectable
+            .load_skill_context_candidates(&second_context)
+            .await
+            .expect("second selection succeeds");
+        assert!(
+            second_selected.is_empty(),
+            "clearing one run must not remove another run's recorded message"
+        );
+    }
+
+    #[tokio::test]
     async fn selector_force_activates_dollar_skill_mention() {
         let source = Arc::new(StaticSkillBundleSource::new(vec![(
             SkillSourceKind::User,
@@ -800,8 +874,34 @@ mod tests {
         selectable
             .record_user_message(
                 context.scope.clone(),
-                context.run_id,
+                accepted_message_ref(&context),
                 "$code-review this PR",
+            )
+            .expect("record message");
+
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+
+        assert_eq!(selected.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn selector_force_activates_bracketed_dollar_skill_mention() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "code-review",
+            &skill_md("code-review", "Review code", &[], "CODE_REVIEW_SENTINEL"),
+        )]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "[$code-review](/skills/code-review/SKILL.md) this PR",
             )
             .expect("record message");
 
@@ -838,7 +938,7 @@ mod tests {
         selectable
             .record_user_message(
                 context.scope.clone(),
-                context.run_id,
+                accepted_message_ref(&context),
                 "/code-review this PR",
             )
             .expect("record message");
@@ -887,7 +987,7 @@ mod tests {
         selectable
             .record_user_message(
                 context.scope.clone(),
-                context.run_id,
+                accepted_message_ref(&context),
                 "review release deploy plan",
             )
             .expect("record message");
@@ -939,7 +1039,11 @@ mod tests {
         );
         let context = run_context().await;
         selectable
-            .record_user_message(context.scope.clone(), context.run_id, "shared")
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "shared",
+            )
             .expect("record message");
 
         let selected = selectable
@@ -952,7 +1056,7 @@ mod tests {
         selectable
             .record_user_message(
                 context.scope.clone(),
-                context.run_id,
+                accepted_message_ref(&context),
                 "/alpha-helper /beta-helper",
             )
             .expect("record message");

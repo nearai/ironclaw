@@ -49,7 +49,7 @@ impl FilesystemSkillBundleRoot {
         Self::new(
             SkillSourceKind::User,
             root,
-            Some(SkillTrust::Installed),
+            Some(SkillTrust::Trusted),
             Some(SkillVisibility::Visible),
         )
     }
@@ -436,7 +436,7 @@ mod tests {
             ]
         );
         assert_eq!(descriptors[0].trust(), Some(&SkillTrust::Trusted));
-        assert_eq!(descriptors[1].trust(), Some(&SkillTrust::Installed));
+        assert_eq!(descriptors[1].trust(), Some(&SkillTrust::Trusted));
         assert_eq!(descriptors[0].visibility(), Some(&SkillVisibility::Visible));
     }
 

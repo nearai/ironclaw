@@ -273,22 +273,46 @@ impl RebornRuntime {
         ))
         .map_err(|reason| RebornRuntimeError::InvalidArgument { reason })?;
 
-        let response = self
+        if let Some(skill_activation_source) = &self.skill_activation_source {
+            skill_activation_source
+                .record_user_message(scope.clone(), accepted_message_ref.clone(), text)
+                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
+        }
+
+        let response = match self
             .turn_coordinator
             .submit_turn(SubmitTurnRequest {
                 scope: scope.clone(),
                 actor: TurnActor::new(self.actor_user_id.clone()),
-                accepted_message_ref,
+                accepted_message_ref: accepted_message_ref.clone(),
                 source_binding_ref: self.source_binding_ref.clone(),
                 reply_target_binding_ref: self.reply_target_binding_ref.clone(),
                 requested_run_profile: None,
                 idempotency_key,
                 received_at: Utc::now(),
             })
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                if let Some(skill_activation_source) = &self.skill_activation_source {
+                    skill_activation_source
+                        .clear_accepted_message(&scope, &accepted_message_ref)
+                        .map_err(|clear_error| {
+                            RebornRuntimeError::TurnSubmission(clear_error.to_string())
+                        })?;
+                }
+                return Err(error.into());
+            }
+        };
 
         let SubmitTurnResponse::Accepted { run_id, .. } = response;
         if cancellation.is_cancelled() {
+            if let Some(skill_activation_source) = &self.skill_activation_source {
+                skill_activation_source
+                    .clear_accepted_message(&scope, &accepted_message_ref)
+                    .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
+            }
             self.cancel_run(
                 &scope,
                 run_id,
@@ -297,11 +321,6 @@ impl RebornRuntime {
             )
             .await?;
             return Err(RebornRuntimeError::OperationCancelled);
-        }
-        if let Some(skill_activation_source) = &self.skill_activation_source {
-            skill_activation_source
-                .record_user_message(scope.clone(), run_id, text)
-                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
         }
         self.wake_sender.wake();
 
@@ -323,12 +342,9 @@ impl RebornRuntime {
         .await;
 
         if let Some(skill_activation_source) = &self.skill_activation_source {
-            let clear_result = skill_activation_source
-                .clear_run_message(&scope, run_id)
-                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()));
-            if reply.is_ok() {
-                clear_result?;
-            }
+            skill_activation_source
+                .clear_accepted_message(&scope, &accepted_message_ref)
+                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
         }
 
         reply

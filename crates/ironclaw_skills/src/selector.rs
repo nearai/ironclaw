@@ -66,7 +66,7 @@ enum TrySelectOutcome {
 /// is implausibly low relative to the prompt content. Enforces a
 /// minimum of 1 token so a `max_context_tokens: 0` declaration can't
 /// bypass budgeting.
-fn skill_token_cost(skill: &LoadedSkill) -> usize {
+pub fn skill_token_cost(skill: &LoadedSkill) -> usize {
     let declared_tokens = skill.manifest.activation.max_context_tokens;
     // Rough token estimate: ~0.25 tokens per byte (~4 bytes per token for English prose)
     let approx_tokens = (skill.prompt_content.len() as f64 * 0.25) as usize;
@@ -374,7 +374,8 @@ pub fn extract_skill_mentions<'a>(
                 || bytes[i - 1] == b'\n'
                 || bytes[i - 1] == b'\t'
                 || bytes[i - 1] == b'"'
-                || bytes[i - 1] == b'(';
+                || bytes[i - 1] == b'('
+                || bytes[i - 1] == b'[';
 
             if is_boundary {
                 // Extract the name using the same character class accepted by
@@ -836,6 +837,15 @@ mod tests {
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].manifest.name, "github");
         assert_eq!(rewritten, "fetch issues from github skill");
+    }
+
+    #[test]
+    fn test_extract_bracketed_slash_mention() {
+        let skills = vec![make_skill("github", &["github"], &[], &[])];
+        let (matched, rewritten) = extract_skill_mentions("fetch issues from [/github]", &skills);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].manifest.name, "github");
+        assert_eq!(rewritten, "fetch issues from [github skill]");
     }
 
     #[test]

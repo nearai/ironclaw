@@ -363,9 +363,12 @@ mod tests {
         }));
         assert!(entries.iter().any(|entry| {
             entry.name == "user-helper"
-                && entry.trust == SkillTrustLevel::Installed
+                && entry.trust == SkillTrustLevel::Trusted
                 && entry.visibility == SkillVisibility::Visible
-                && entry.prompt_content.is_none()
+                && entry
+                    .prompt_content
+                    .as_deref()
+                    .is_some_and(|content| content.contains("USER_HELPER_PROMPT_SENTINEL"))
         }));
         assert!(!entries.iter().any(|entry| entry.name == "workspace-helper"));
     }
@@ -392,7 +395,7 @@ mod tests {
 
         assert_eq!(descriptors.len(), 1);
         assert_eq!(descriptors[0].id().name(), "user-helper");
-        assert_eq!(descriptors[0].trust(), Some(&SkillTrust::Installed));
+        assert_eq!(descriptors[0].trust(), Some(&SkillTrust::Trusted));
         assert_eq!(descriptors[0].visibility(), Some(&SkillVisibility::Visible));
     }
 }
