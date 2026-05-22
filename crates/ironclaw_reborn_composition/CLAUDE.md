@@ -10,6 +10,10 @@
 - Product auth composition must use `ironclaw_auth` trait-shaped ports. Do not
   wire product auth through V1 OAuth routes, V1 pending maps, V1
   `ExtensionManager`, V1 secret stores, or route-local raw HTTP clients.
+- OAuth callback routes should only parse/validate HTTP input and call
+  `RebornProductAuthServices::handle_oauth_callback`; the handler must exchange
+  provider material through `AuthProviderClient`, complete the flow through
+  `AuthFlowManager`, and emit typed continuations.
 - Blocked run-state approval/auth gate rendering and resume belongs to #3094;
   keep this crate's #3811 auth seam reusable by that layer without implementing
   a second gate-resolution path.

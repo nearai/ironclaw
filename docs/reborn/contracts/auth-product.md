@@ -1,7 +1,7 @@
 # Reborn Product Auth Contract
 
 - **Status:** contract and composition seam
-- **Issue:** #3289 / #3810 / #3811
+- **Issue:** #3289 / #3810 / #3811 / #3812
 - **Crate:** `crates/ironclaw_auth`
 - **Composition:** `ironclaw_reborn_composition::RebornProductAuthServices`
 
@@ -15,9 +15,10 @@ providers, extensions, MCP servers, WASM tools/channels, and future identity
 login flows.
 
 This slice is contract-first. It defines Reborn-native vocabulary and fake
-services, and #3811 adds a Reborn composition seam. It does not migrate
-production OAuth routes, extension setup routes, CLI/setup flows, durable
-secret storage, or runtime credential injection.
+services, #3811 adds a Reborn composition seam, and #3812 adds callback
+completion handling for host-mounted Reborn OAuth callback routes. It does not
+migrate production extension setup routes, CLI/setup flows, durable secret
+storage, or runtime credential injection.
 
 Behavior may remain compatible with legacy UX. Code paths must not mingle V1
 components with Reborn components: V1 route handlers, pending maps, extension
@@ -44,6 +45,14 @@ respective Reborn substrate contracts.
 auth ports above. WebUI/setup/extension surfaces should call this bundle once
 routes are migrated instead of reconstructing auth-flow stores, credential
 stores, provider clients, or cleanup services locally.
+
+Host-owned OAuth callback routes should parse and validate their HTTP input,
+derive hashes for opaque state/code/verifier values, then call
+`RebornProductAuthServices::handle_oauth_callback`. The handler performs
+provider exchange through `AuthProviderClient`, completes the auth flow through
+`AuthFlowManager`, and dispatches an `AuthContinuationEvent` to the injected
+continuation dispatcher. Callback route code must not activate extensions,
+resume turns, replay prompts, or dispatch runtime work directly.
 
 The blocked-run interaction loop is separate: #3094 owns listing/rendering
 approval/auth gates from blocked run-state and routing user decisions back into
@@ -213,7 +222,7 @@ strings.
 | Product behavior | V1 evidence path | Reborn owner | First-slice status |
 | --- | --- | --- | --- |
 | Extension/provider OAuth start | `src/extensions/manager.rs`, `src/auth/mod.rs` | `AuthFlowManager`, `CredentialSetupService`, `AuthProviderClient` | Contracted; production migration deferred |
-| Hosted OAuth callback | `src/channels/web/features/oauth/mod.rs` | `AuthFlowManager`, continuation sink | Contracted; Reborn-native callback route deferred |
+| Hosted OAuth callback | `src/channels/web/features/oauth/mod.rs` | `RebornProductAuthServices::handle_oauth_callback`, continuation dispatcher | Reborn handler seam ready; HTTP route mounting deferred |
 | Local OAuth callback | `src/extensions/manager.rs`, `src/auth/oauth.rs` | `AuthFlowManager`, `AuthProviderClient` | Inventory only |
 | Manual token entry from chat | `src/agent/agent_loop.rs`, `src/agent/thread_ops.rs` | `AuthInteractionService` secure submit | Contracted; route migration deferred |
 | Engine/gate auth credential submit | `src/bridge/router.rs` | `AuthInteractionService`, `CredentialSetupService`, typed continuation | Contracted; migration deferred |
