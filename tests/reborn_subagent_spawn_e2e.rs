@@ -385,6 +385,118 @@ async fn background_spawn_surfaces_child_approval_without_blocking_parent() {
 }
 
 #[tokio::test]
+async fn background_child_approval_surfaces_while_parent_is_still_running() {
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![spawn_call(
+                "spawn_concurrent_background_child_approval",
+                serde_json::json!({
+                    "flavor_id": "general",
+                    "task": "approval while parent runs",
+                    "mode": "background",
+                }),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::DelayedResponseForRequest {
+            request_contains: "parent keeps running while child waits".to_string(),
+            response: HostManagedModelResponse::assistant_reply("parent eventually finished"),
+            delay: Duration::from_secs(2),
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ProviderToolCallsForRequest {
+            request_contains: "approval while parent runs".to_string(),
+            calls: vec![subagent_allowed_tool_call("concurrent_child_approval_tool")],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ResponseForRequest {
+            request_contains: "approval while parent runs".to_string(),
+            response: HostManagedModelResponse::assistant_reply(
+                "concurrent background child approved output",
+            ),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = tokio::time::timeout(
+        WaitConfig::default().timeout,
+        RebornBinaryE2EHarness::with_harness_blocked_evidence_unscoped_worker(
+            "room-subagent-concurrent-background-child-approval",
+            model_gateway,
+            RecordingTestCapabilityPort::spawn_auth_then_approval_then_allowed_tool_with_spawn_subagent(),
+        ),
+    )
+    .await
+    .expect("spawn harness timed out")
+    .expect("spawn harness");
+    harness.start_workers(2);
+
+    let submitted = harness
+        .submit_text(
+            "event-subagent-concurrent-background-child-approval",
+            "parent keeps running while child waits",
+        )
+        .await
+        .expect("submit root turn");
+    let child = await_single_child(&harness, &submitted).await;
+    assert_child_thread_invariants(&submitted, &child);
+    harness
+        .wait_for_status_in_scope(
+            child.scope.clone(),
+            child.run_id,
+            TurnStatus::BlockedApproval,
+        )
+        .await
+        .expect("background child approval surfaces");
+    assert_eq!(
+        harness
+            .run_state(submitted.run_id)
+            .await
+            .expect("parent run state")
+            .status,
+        TurnStatus::Running,
+        "background child approval must surface while the parent turn is still running"
+    );
+
+    harness
+        .resume_blocked_turn_in_scope(child.scope.clone(), submitted.actor.clone(), child.run_id)
+        .await
+        .expect("resume background child approval");
+    harness
+        .wait_for_status_in_scope(child.scope.clone(), child.run_id, TurnStatus::Completed)
+        .await
+        .expect("background child completes after approval");
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .await
+        .expect("parent completes after its long-running model call");
+    harness
+        .assert_final_reply("parent eventually finished")
+        .await
+        .expect("parent final reply");
+
+    let child_history = harness
+        .history_for_thread_in_scope(
+            child_thread_scope(&submitted, &child),
+            child.scope.thread_id.clone(),
+        )
+        .await
+        .expect("child history");
+    assert!(
+        child_history.iter().any(|message| {
+            message.content.as_deref() == Some("concurrent background child approved output")
+        }),
+        "approved background child writes its final reply while parent is independently running"
+    );
+    assert_eq!(
+        harness.capability_invocations().len(),
+        2,
+        "spawn auth plus the child approval gate should reach the inner capability port"
+    );
+    harness.assert_model_exhausted();
+    harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn parallel_blocking_spawn_resumes_once_after_last_child() {
     let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
         RebornModelReplayStep::ProviderToolCalls {

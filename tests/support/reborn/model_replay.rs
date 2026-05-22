@@ -52,12 +52,28 @@ pub enum RebornModelReplayStep {
         response: HostManagedModelResponse,
         expected_tool_results: Vec<ExpectedToolResult>,
     },
+    ResponseForRequest {
+        request_contains: String,
+        response: HostManagedModelResponse,
+        expected_tool_results: Vec<ExpectedToolResult>,
+    },
     DelayedResponse {
         response: HostManagedModelResponse,
         delay: Duration,
         expected_tool_results: Vec<ExpectedToolResult>,
     },
+    DelayedResponseForRequest {
+        request_contains: String,
+        response: HostManagedModelResponse,
+        delay: Duration,
+        expected_tool_results: Vec<ExpectedToolResult>,
+    },
     ProviderToolCalls {
+        calls: Vec<RebornScriptedProviderToolCall>,
+        expected_tool_results: Vec<ExpectedToolResult>,
+    },
+    ProviderToolCallsForRequest {
+        request_contains: String,
         calls: Vec<RebornScriptedProviderToolCall>,
         expected_tool_results: Vec<ExpectedToolResult>,
     },
@@ -95,6 +111,7 @@ struct ReplayState {
 #[derive(Debug, Clone)]
 struct ReplayStep {
     output: ReplayOutput,
+    request_contains: Option<String>,
     expected_tool_results: Vec<ExpectedToolResult>,
 }
 
@@ -130,6 +147,7 @@ impl RebornTraceReplayModelGateway {
                 .into_iter()
                 .map(|response| ReplayStep {
                     output: ReplayOutput::Response(response),
+                    request_contains: None,
                     expected_tool_results: Vec::new(),
                 })
                 .collect(),
@@ -147,6 +165,16 @@ impl RebornTraceReplayModelGateway {
                         expected_tool_results,
                     } => ReplayStep {
                         output: ReplayOutput::Response(response),
+                        request_contains: None,
+                        expected_tool_results,
+                    },
+                    RebornModelReplayStep::ResponseForRequest {
+                        request_contains,
+                        response,
+                        expected_tool_results,
+                    } => ReplayStep {
+                        output: ReplayOutput::Response(response),
+                        request_contains: Some(request_contains),
                         expected_tool_results,
                     },
                     RebornModelReplayStep::AssertProviderToolsThenResponse {
@@ -158,6 +186,7 @@ impl RebornTraceReplayModelGateway {
                             capability_ids,
                             response,
                         },
+                        request_contains: None,
                         expected_tool_results,
                     },
                     RebornModelReplayStep::DelayedResponse {
@@ -166,6 +195,17 @@ impl RebornTraceReplayModelGateway {
                         expected_tool_results,
                     } => ReplayStep {
                         output: ReplayOutput::DelayedResponse { response, delay },
+                        request_contains: None,
+                        expected_tool_results,
+                    },
+                    RebornModelReplayStep::DelayedResponseForRequest {
+                        request_contains,
+                        response,
+                        delay,
+                        expected_tool_results,
+                    } => ReplayStep {
+                        output: ReplayOutput::DelayedResponse { response, delay },
+                        request_contains: Some(request_contains),
                         expected_tool_results,
                     },
                     RebornModelReplayStep::ProviderToolCalls {
@@ -173,6 +213,16 @@ impl RebornTraceReplayModelGateway {
                         expected_tool_results,
                     } => ReplayStep {
                         output: ReplayOutput::ProviderToolCalls(calls),
+                        request_contains: None,
+                        expected_tool_results,
+                    },
+                    RebornModelReplayStep::ProviderToolCallsForRequest {
+                        request_contains,
+                        calls,
+                        expected_tool_results,
+                    } => ReplayStep {
+                        output: ReplayOutput::ProviderToolCalls(calls),
+                        request_contains: Some(request_contains),
                         expected_tool_results,
                     },
                 })
@@ -273,16 +323,30 @@ impl RebornTraceReplayModelGateway {
                 "trace replay lock poisoned",
             )
         })?;
-        let Some(step) = state.steps.front().cloned() else {
+        let Some(position) = state
+            .steps
+            .iter()
+            .position(|step| step.matches_request(&request))
+        else {
             return Err(HostManagedModelError::safe(
                 HostManagedModelErrorKind::Unavailable,
-                "trace replay exhausted",
+                format!(
+                    "trace replay has no matching step for request messages: {}",
+                    request_message_summary(&request)
+                ),
             ));
         };
+        let step = state
+            .steps
+            .get(position)
+            .expect("matched replay step position")
+            .clone();
         validate_expected_tool_results(&request, &step.expected_tool_results)?;
         state.requests.push(request);
-        state.steps.pop_front();
-        Ok(step)
+        Ok(state
+            .steps
+            .remove(position)
+            .expect("matched replay step remains"))
     }
 }
 
@@ -318,6 +382,30 @@ async fn provider_tool_definitions(
     capabilities
         .tool_definitions()
         .map_err(capability_host_error)
+}
+
+impl ReplayStep {
+    fn matches_request(&self, request: &HostManagedModelRequest) -> bool {
+        let Some(needle) = &self.request_contains else {
+            return true;
+        };
+        request
+            .messages
+            .iter()
+            .any(|message| message.content.contains(needle))
+    }
+}
+
+fn request_message_summary(request: &HostManagedModelRequest) -> String {
+    request
+        .messages
+        .iter()
+        .map(|message| {
+            let snippet = message.content.chars().take(80).collect::<String>();
+            format!("{:?}:{snippet}", message.role)
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 async fn provider_tool_calls_response(
@@ -374,6 +462,7 @@ fn capability_host_error(error: AgentLoopHostError) -> HostManagedModelError {
 fn replay_step(step: TraceStep) -> Result<ReplayStep, RebornTraceReplayError> {
     Ok(ReplayStep {
         output: ReplayOutput::Response(response_from_trace(step.response)?),
+        request_contains: None,
         expected_tool_results: step.expected_tool_results,
     })
 }

@@ -151,7 +151,7 @@ pub struct RebornBinaryE2EHarness {
     milestone_sink: Arc<ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink>,
     worker: Arc<TurnRunnerWorker>,
     cancel: CancellationToken,
-    worker_task: Option<JoinHandle<()>>,
+    worker_tasks: Vec<JoinHandle<()>>,
     _turn_root: Arc<tempfile::TempDir>,
     _wake_sender: TurnRunnerWakeSender,
 }
@@ -912,26 +912,32 @@ impl RebornBinaryE2EHarness {
             milestone_sink,
             worker: composition.worker,
             cancel: CancellationToken::new(),
-            worker_task: None,
+            worker_tasks: Vec::new(),
             _turn_root: turn_root,
             _wake_sender: composition.wake_sender,
         }
     }
 
     pub fn start(&mut self) {
-        if self.worker_task.is_some() {
+        self.start_workers(1);
+    }
+
+    pub fn start_workers(&mut self, count: usize) {
+        if !self.worker_tasks.is_empty() {
             return;
         }
-        let worker = Arc::clone(&self.worker);
-        let cancel = self.cancel.clone();
-        self.worker_task = Some(tokio::spawn(async move {
-            worker.run(cancel).await;
-        }));
+        for _ in 0..count.max(1) {
+            let worker = Arc::clone(&self.worker);
+            let cancel = self.cancel.clone();
+            self.worker_tasks.push(tokio::spawn(async move {
+                worker.run(cancel).await;
+            }));
+        }
     }
 
     pub async fn shutdown(&mut self) {
         self.cancel.cancel();
-        if let Some(task) = self.worker_task.take() {
+        for task in self.worker_tasks.drain(..) {
             let _ = task.await;
         }
     }
