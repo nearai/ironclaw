@@ -9,6 +9,11 @@
 ## 1. Purpose
 
 `ironclaw_extensions` owns extension package metadata, manifest validation, filesystem discovery, and capability declaration registration.
+It also owns generic extension installation state: manifests, installations,
+activation state, health snapshots, and opaque credential bindings. Domain
+crates such as `ironclaw_product_adapter_registry` project their own host API
+sections from that generic state rather than owning a second installation
+store.
 
 It answers:
 

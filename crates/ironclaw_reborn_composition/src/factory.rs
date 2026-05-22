@@ -1,11 +1,16 @@
-use std::sync::Arc;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
-use ironclaw_filesystem::LocalFilesystem;
+use ironclaw_filesystem::{LocalFilesystem, ScopedFilesystem};
 #[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
-use ironclaw_host_api::{EffectKind, PackageId};
+use ironclaw_host_api::{
+    EffectKind, MountAlias, MountGrant, MountPermissions, MountView, PackageId, VirtualPath,
+};
 use ironclaw_host_runtime::{
     CapabilitySurfaceVersion, FirstPartyCapabilityRegistry, HostRuntimeServices,
     builtin_first_party_handlers, builtin_first_party_package,
@@ -63,6 +68,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// swap in the filesystem-backed `FilesystemBudgetGateStore`.
     #[allow(dead_code)]
     pub(crate) budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore>,
+    pub(crate) skill_filesystem: Arc<ScopedFilesystem<LocalFilesystem>>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -138,6 +144,9 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     std::fs::create_dir_all(&workspace_root).map_err(|_| RebornBuildError::InvalidConfig {
         reason: "local-dev workspace root could not be initialized".to_string(),
     })?;
+    let root = canonicalize_local_dev_path(&root, "storage root")?;
+    let workspace_root = canonicalize_local_dev_path(&workspace_root, "workspace root")?;
+    validate_local_dev_workspace_skill_isolation(&root, &workspace_root)?;
     let mut filesystem = LocalFilesystem::new();
     let projects_root = ironclaw_host_api::VirtualPath::new("/projects").map_err(|error| {
         RebornBuildError::InvalidConfig {
@@ -156,6 +165,12 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         workspace_virtual_root,
         ironclaw_host_api::HostPath::from_path_buf(workspace_root),
     )?;
+
+    let filesystem = Arc::new(filesystem);
+    let skill_filesystem = Arc::new(ScopedFilesystem::with_fixed_view(
+        Arc::clone(&filesystem),
+        local_dev_skill_mount_view()?,
+    ));
 
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
@@ -177,11 +192,12 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         budget_event_sink,
         in_memory_budget_event_sink,
         budget_gate_store,
+        skill_filesystem,
     });
 
     let mut services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
-        Arc::new(filesystem),
+        filesystem,
         resource_governor,
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
@@ -189,6 +205,10 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     )
     .with_first_party_capabilities(Arc::new(builtin_first_party_registry()?))
     .with_trust_policy(Arc::new(local_dev_first_party_trust_policy()?))
+    .with_secret_store(Arc::new(ironclaw_secrets::InMemorySecretStore::new()))
+    .try_with_host_http_egress(ironclaw_network::PolicyNetworkHttpEgress::new(
+        ironclaw_network::ReqwestNetworkTransport::default(),
+    ))?
     .with_run_state(Arc::clone(&run_state))
     .with_approval_requests(Arc::clone(&approval_requests))
     .with_turn_state(Arc::clone(&turn_state));
@@ -208,6 +228,61 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
         turn_coordinator: Some(turn_coordinator),
         readiness: readiness_for(input.profile, true, true),
         local_runtime: Some(local_runtime),
+    })
+}
+
+fn canonicalize_local_dev_path(path: &Path, label: &str) -> Result<PathBuf, RebornBuildError> {
+    std::fs::canonicalize(path).map_err(|_| RebornBuildError::InvalidConfig {
+        reason: format!("local-dev {label} could not be resolved"),
+    })
+}
+
+fn validate_local_dev_workspace_skill_isolation(
+    storage_root: &Path,
+    workspace_root: &Path,
+) -> Result<(), RebornBuildError> {
+    for (label, skill_root) in [
+        ("/skills", storage_root.join("skills")),
+        (
+            "/tenant-shared/skills",
+            storage_root.join("tenant-shared/skills"),
+        ),
+        ("/system/skills", storage_root.join("system/skills")),
+    ] {
+        if paths_overlap(workspace_root, &skill_root) {
+            return Err(RebornBuildError::InvalidConfig {
+                reason: format!(
+                    "local-dev workspace root must not overlap default skill root {label}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    left == right || left.starts_with(right) || right.starts_with(left)
+}
+
+fn local_dev_skill_mount_view() -> Result<MountView, RebornBuildError> {
+    let grant = |alias: &str, target: &str| -> Result<MountGrant, RebornBuildError> {
+        Ok(MountGrant::new(
+            MountAlias::new(alias).map_err(|error| RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            })?,
+            VirtualPath::new(target).map_err(|error| RebornBuildError::InvalidConfig {
+                reason: error.to_string(),
+            })?,
+            MountPermissions::read_only(),
+        ))
+    };
+    MountView::new(vec![
+        grant("/skills", "/projects/skills")?,
+        grant("/tenant-shared/skills", "/projects/tenant-shared/skills")?,
+        grant("/system/skills", "/projects/system/skills")?,
+    ])
+    .map_err(|error| RebornBuildError::InvalidConfig {
+        reason: error.to_string(),
     })
 }
 

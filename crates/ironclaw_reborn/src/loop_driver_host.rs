@@ -1266,7 +1266,8 @@ where
             claimed.state.turn_id,
             claimed.state.run_id,
             claimed.resolved_run_profile.clone(),
-        );
+        )
+        .with_accepted_message_ref(claimed.state.accepted_message_ref.clone());
         if let Some(actor) = claimed.state.actor.clone() {
             loop_run_context = loop_run_context.with_actor(actor);
         }

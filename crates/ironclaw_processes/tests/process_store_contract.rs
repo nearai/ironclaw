@@ -711,19 +711,24 @@ async fn resource_managed_store_denies_before_process_record_creation() {
         .set_limit(
             ResourceAccount::tenant(scope.tenant_id.clone()),
             ResourceLimits {
-                max_process_count: Some(0),
+                max_process_count: Some(1),
                 ..ResourceLimits::default()
             },
         )
         .unwrap();
     let store = ResourceManagedProcessStore::new(InMemoryProcessStore::new(), governor.clone());
 
+    let exceeding_estimate = ResourceEstimate {
+        process_count: Some(2),
+        concurrency_slots: Some(1),
+        ..ResourceEstimate::default()
+    };
     let err = store
         .start(process_start_with_estimate(
             process_id,
             invocation_id,
             scope.clone(),
-            process_estimate(),
+            exceeding_estimate,
         ))
         .await
         .unwrap_err();

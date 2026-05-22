@@ -630,7 +630,7 @@ impl LoopCapabilityPortFactory for ProductLiveHostRuntimeCapabilityFactory {
                 model_policy_guard: Arc::new(NoOpPolicyGuard),
                 model_budget_accountant: Arc::new(NoOpBudgetAccountant),
                 safety_context: test_safety_context(),
-                milestone_sink: None,
+                milestone_sink: Arc::new(InMemoryLoopHostMilestoneSink::default()),
             },
         )
         .map_err(adapter_error)?;

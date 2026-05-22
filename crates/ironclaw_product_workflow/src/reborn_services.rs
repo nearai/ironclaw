@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use chrono::Utc;
+use ironclaw_common::ExtensionName;
 use ironclaw_host_api::{AgentId, ThreadId};
 use ironclaw_product_adapters::{
     ProductAdapterError, ProductWorkflowRejectionKind, ProjectionStream,
@@ -28,7 +29,8 @@ use uuid::Uuid;
 use crate::{
     WebUiAuthenticatedCaller, WebUiCancelRunRequest, WebUiCreateThreadRequest, WebUiGateResolution,
     WebUiInboundCommand, WebUiInboundValidationCode, WebUiInboundValidationError,
-    WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiListThreadsRequest, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiSetupExtensionRequest,
 };
 
 mod error;
@@ -37,10 +39,16 @@ mod types;
 pub use error::{RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind};
 pub use types::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornResolveGateResponse, RebornResumeGateResponse,
+    RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
+    RebornResumeGateResponse, RebornSetupExtensionResponse, RebornSetupExtensionStatus,
     RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
     RebornTimelineRequest, RebornTimelineResponse,
 };
+
+type SkillActivationRecorder =
+    dyn Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError> + Send + Sync;
+type SkillActivationClearer =
+    dyn Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError> + Send + Sync;
 
 /// Stable WebUI-facing facade surface for beta Reborn routes.
 #[async_trait]
@@ -86,6 +94,39 @@ pub trait RebornServicesApi: Send + Sync {
         caller: WebUiAuthenticatedCaller,
         request: RebornGetRunStateRequest,
     ) -> Result<RebornGetRunStateResponse, RebornServicesError>;
+
+    /// List the caller-scoped threads. Pagination is opaque: callers
+    /// echo back the `next_cursor` from a prior response to retrieve
+    /// the next page; the cursor encoding is implementation-defined.
+    ///
+    /// Returns an empty list + `next_cursor: None` when no threads
+    /// exist for the caller's scope.
+    async fn list_threads(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiListThreadsRequest,
+    ) -> Result<RebornListThreadsResponse, RebornServicesError>;
+
+    /// Run a step in a v2-native extension onboarding flow. Today the
+    /// facade returns
+    /// [`RebornSetupExtensionStatus::NotImplemented`](types::RebornSetupExtensionStatus::NotImplemented)
+    /// because the underlying extension lifecycle is still v1-only.
+    /// The route exists so the WebUI v2 entrypoint inventory is
+    /// complete and so future onboarding port work has a fixed surface
+    /// to fill in.
+    ///
+    /// `extension_name` is the validated, typed identifier from the
+    /// route path. Per `.claude/rules/types.md`, extension identifiers
+    /// must not flow internally as raw `String` — the handler/facade
+    /// boundary validates the path segment with
+    /// [`ironclaw_common::ExtensionName`] and threads the typed value
+    /// through this argument.
+    async fn setup_extension(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        extension_name: ExtensionName,
+        request: WebUiSetupExtensionRequest,
+    ) -> Result<RebornSetupExtensionResponse, RebornServicesError>;
 }
 
 /// Default facade implementation composed at the WebUI boundary.
@@ -94,6 +135,8 @@ pub struct RebornServices {
     thread_service: Arc<dyn SessionThreadService>,
     turn_coordinator: Arc<dyn TurnCoordinator>,
     event_stream: Option<Arc<dyn ProjectionStream>>,
+    skill_activation_recorder: Option<Arc<SkillActivationRecorder>>,
+    skill_activation_clearer: Option<Arc<SkillActivationClearer>>,
 }
 
 impl RebornServices {
@@ -105,12 +148,64 @@ impl RebornServices {
             thread_service,
             turn_coordinator,
             event_stream: None,
+            skill_activation_recorder: None,
+            skill_activation_clearer: None,
         }
     }
 
     pub fn with_event_stream(mut self, event_stream: Arc<dyn ProjectionStream>) -> Self {
         self.event_stream = Some(event_stream);
         self
+    }
+
+    pub fn with_skill_activation_recorder<F>(mut self, recorder: F) -> Self
+    where
+        F: Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.skill_activation_recorder = Some(Arc::new(recorder));
+        self
+    }
+
+    pub fn with_skill_activation_hooks<R, C>(mut self, recorder: R, clearer: C) -> Self
+    where
+        R: Fn(&TurnScope, &AcceptedMessageRef, &str) -> Result<(), RebornServicesError>
+            + Send
+            + Sync
+            + 'static,
+        C: Fn(&TurnScope, &AcceptedMessageRef) -> Result<(), RebornServicesError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.skill_activation_recorder = Some(Arc::new(recorder));
+        self.skill_activation_clearer = Some(Arc::new(clearer));
+        self
+    }
+
+    fn record_skill_activation_message(
+        &self,
+        scope: &TurnScope,
+        accepted_message_ref: &AcceptedMessageRef,
+        content: &str,
+    ) -> Result<(), RebornServicesError> {
+        if let Some(recorder) = &self.skill_activation_recorder {
+            recorder(scope, accepted_message_ref, content)?;
+        }
+        Ok(())
+    }
+
+    fn clear_skill_activation_message(
+        &self,
+        scope: &TurnScope,
+        accepted_message_ref: &AcceptedMessageRef,
+    ) -> Result<(), RebornServicesError> {
+        if let Some(clearer) = &self.skill_activation_clearer {
+            clearer(scope, accepted_message_ref)?;
+        }
+        Ok(())
     }
 }
 
@@ -254,7 +349,7 @@ impl RebornServicesApi for RebornServices {
                     source_binding_id: Some(source_binding_id.clone()),
                     reply_target_binding_id: Some(source_binding_id.clone()),
                     external_event_id: Some(external_event_id),
-                    content: MessageContent::text(content),
+                    content: MessageContent::text(content.clone()),
                 })
                 .await
                 .map_err(map_thread_error)?;
@@ -272,9 +367,8 @@ impl RebornServicesApi for RebornServices {
             bounded_ref::<SourceBindingRef>("webui-src", &handoff.source_binding_id)?;
         let reply_target_binding_ref =
             bounded_ref::<ReplyTargetBindingRef>("webui-reply", &handoff.reply_target_binding_id)?;
-
         let submit = SubmitTurnRequest {
-            scope,
+            scope: scope.clone(),
             actor,
             accepted_message_ref: accepted_message_ref.clone(),
             source_binding_ref,
@@ -284,6 +378,7 @@ impl RebornServicesApi for RebornServices {
             received_at: Utc::now(),
         };
 
+        self.record_skill_activation_message(&scope, &accepted_message_ref, &content)?;
         match self.turn_coordinator.submit_turn(submit).await {
             Ok(SubmitTurnResponse::Accepted {
                 turn_id,
@@ -316,6 +411,7 @@ impl RebornServicesApi for RebornServices {
                 })
             }
             Err(TurnError::ThreadBusy(busy)) => {
+                self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
                 mark_message_deferred_busy_or_replay(
                     &*self.thread_service,
                     &thread_scope,
@@ -332,7 +428,10 @@ impl RebornServicesApi for RebornServices {
                     event_cursor: busy.event_cursor,
                 })
             }
-            Err(error) => Err(map_turn_error(error)),
+            Err(error) => {
+                self.clear_skill_activation_message(&scope, &accepted_message_ref)?;
+                Err(map_turn_error(error))
+            }
         }
     }
 
@@ -540,6 +639,61 @@ impl RebornServicesApi for RebornServices {
             .await
             .map_err(map_turn_error)?;
         Ok(state.into())
+    }
+
+    async fn list_threads(
+        &self,
+        caller: WebUiAuthenticatedCaller,
+        request: WebUiListThreadsRequest,
+    ) -> Result<RebornListThreadsResponse, RebornServicesError> {
+        // Reuse the same scope-construction shape the other v2 facade
+        // methods use: fail-closed when the caller has no agent
+        // binding, owner-scope to the caller's user_id so the listing
+        // is per-caller.
+        let Some(agent_id) = caller.agent_id.clone() else {
+            return Err(RebornServicesError::from_status(
+                RebornServicesErrorCode::InvalidRequest,
+                400,
+                false,
+            ));
+        };
+        let scope = ThreadScope {
+            tenant_id: caller.tenant_id.clone(),
+            agent_id,
+            project_id: caller.project_id.clone(),
+            owner_user_id: Some(caller.user_id.clone()),
+            mission_id: None,
+        };
+        let response = self
+            .thread_service
+            .list_threads_for_scope(ironclaw_threads::ListThreadsForScopeRequest {
+                scope,
+                limit: request.limit,
+                cursor: request.cursor,
+            })
+            .await
+            .map_err(map_thread_error)?;
+        Ok(RebornListThreadsResponse {
+            threads: response.threads,
+            next_cursor: response.next_cursor,
+        })
+    }
+
+    async fn setup_extension(
+        &self,
+        _caller: WebUiAuthenticatedCaller,
+        extension_name: ExtensionName,
+        _request: WebUiSetupExtensionRequest,
+    ) -> Result<RebornSetupExtensionResponse, RebornServicesError> {
+        // Skeleton: v2 native onboarding lifecycle is intentionally
+        // not wired to v1's onboarding controller. Returns a clear
+        // status so v2 callers know the route exists but the
+        // underlying flow is not yet ported.
+        Ok(RebornSetupExtensionResponse {
+            extension_name,
+            status: RebornSetupExtensionStatus::NotImplemented,
+            payload: None,
+        })
     }
 }
 

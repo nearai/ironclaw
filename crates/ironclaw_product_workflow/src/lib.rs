@@ -65,22 +65,32 @@ pub use policy::{
     BeforeInboundPolicy, BeforeInboundPolicyOutcome, BeforeInboundPolicyRequest,
     NoopBeforeInboundPolicy,
 };
-// Projection types that route handlers need to thread through SSE
-// (parse the resume cursor, emit each envelope as JSON). Re-exported so
-// `ironclaw_webui_v2` consumes them via the facade crate and does not need
+// Projection/event types that route handlers need to thread through SSE
+// (parse the resume cursor, render browser-safe event payloads). Re-exported
+// so `ironclaw_webui_v2` consumes them via the facade crate and does not need
 // a direct dependency on `ironclaw_product_adapters` — the single-facade
 // boundary is enforced by `ironclaw_architecture`.
-pub use ironclaw_product_adapters::{ProductOutboundEnvelope, ProjectionCursor};
+pub use ironclaw_product_adapters::{
+    AuthPromptView, FinalReplyView, GatePromptView, ProductOutboundEnvelope,
+    ProductOutboundPayload, ProductProjectionItem, ProductProjectionState, ProgressKind,
+    ProgressUpdateView, ProjectionCursor,
+};
+// Re-exported so the WebUI v2 handler crate can validate the
+// `extension_name` path segment at the handler/facade boundary
+// without pulling `ironclaw_common` into its forbidden-imports set.
+pub use ironclaw_common::ExtensionName;
 pub use reborn_services::{
     RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
-    RebornGetRunStateResponse, RebornResolveGateResponse, RebornResumeGateResponse, RebornServices,
-    RebornServicesApi, RebornServicesError, RebornServicesErrorCode, RebornServicesErrorKind,
-    RebornStreamEventsRequest, RebornStreamEventsResponse, RebornSubmitTurnResponse,
-    RebornTimelineRequest, RebornTimelineResponse,
+    RebornGetRunStateResponse, RebornListThreadsResponse, RebornResolveGateResponse,
+    RebornResumeGateResponse, RebornServices, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind, RebornSetupExtensionResponse,
+    RebornSetupExtensionStatus, RebornStreamEventsRequest, RebornStreamEventsResponse,
+    RebornSubmitTurnResponse, RebornTimelineRequest, RebornTimelineResponse,
 };
 pub use webui_inbound::{
     WebUiAuthenticatedCaller, WebUiCancelReason, WebUiCancelRunRequest, WebUiCreateThreadRequest,
     WebUiGateResolution, WebUiInboundCommand, WebUiInboundValidationCode,
-    WebUiInboundValidationError, WebUiResolveGateRequest, WebUiSendMessageRequest,
+    WebUiInboundValidationError, WebUiListThreadsRequest, WebUiResolveGateRequest,
+    WebUiSendMessageRequest, WebUiSetupExtensionRequest,
 };
 pub use workflow::DefaultProductWorkflow;

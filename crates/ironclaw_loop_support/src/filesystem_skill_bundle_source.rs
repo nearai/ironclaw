@@ -308,7 +308,9 @@ where
             .ok_or(SkillBundleSourceError::BundleNotFound)?;
         let scope = resource_scope_for_run(run_context);
         let skill_md_path = bundle_scoped_path(root.root(), bundle_id, &SkillFilePath::skill_md())?;
-        if !self.validated_manifests.lock().contains(&skill_md_path) {
+        if path.as_str() != SkillFilePath::skill_md().as_str()
+            && !self.validated_manifests.lock().contains(&skill_md_path)
+        {
             // Re-validates manifests before uncached reads for security defense-in-depth.
             self.validate_bundle_manifest(&scope, &skill_md_path, bundle_id)
                 .await
@@ -421,7 +423,10 @@ fn is_skippable_manifest_error(error: &SkillBundleSourceError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironclaw_filesystem::{CasExpectation, Entry, InMemoryBackend, RootFilesystem};
+    use ironclaw_filesystem::{
+        BackendCapabilities, CasExpectation, DirEntry, Entry, FileStat, InMemoryBackend,
+        RecordVersion, RootFilesystem,
+    };
     use ironclaw_host_api::{
         AgentId, MountAlias, MountGrant, MountPermissions, MountView, ProjectId, TenantId,
         ThreadId, UserId, VirtualPath,
@@ -488,6 +493,55 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    struct GrowingReadBackend {
+        inner: InMemoryBackend,
+        growing_path: VirtualPath,
+    }
+
+    impl GrowingReadBackend {
+        fn new(growing_path: VirtualPath) -> Self {
+            Self {
+                inner: InMemoryBackend::default(),
+                growing_path,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RootFilesystem for GrowingReadBackend {
+        fn capabilities(&self) -> BackendCapabilities {
+            self.inner.capabilities()
+        }
+
+        async fn put(
+            &self,
+            path: &VirtualPath,
+            entry: Entry,
+            cas: CasExpectation,
+        ) -> Result<RecordVersion, FilesystemError> {
+            self.inner.put(path, entry, cas).await
+        }
+
+        async fn list_dir(&self, path: &VirtualPath) -> Result<Vec<DirEntry>, FilesystemError> {
+            self.inner.list_dir(path).await
+        }
+
+        async fn stat(&self, path: &VirtualPath) -> Result<FileStat, FilesystemError> {
+            self.inner.stat(path).await
+        }
+
+        async fn read_file_bounded(
+            &self,
+            path: &VirtualPath,
+            max_bytes: usize,
+        ) -> Result<Option<Vec<u8>>, FilesystemError> {
+            if path == &self.growing_path {
+                return Ok(None);
+            }
+            self.inner.read_file_bounded(path, max_bytes).await
+        }
     }
 
     #[tokio::test]
@@ -916,6 +970,54 @@ mod tests {
             "too large",
         )
         .await;
+
+        let error = source
+            .read_skill_bundle_file(
+                &run_context().await,
+                &SkillBundleId::new(SkillSourceKind::User, "local-review").unwrap(),
+                &SkillFilePath::new("references/large.md").unwrap(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error, SkillBundleSourceError::ContentTooLarge);
+    }
+
+    #[tokio::test]
+    async fn filesystem_source_returns_content_too_large_when_file_grows_between_stat_and_read() {
+        let growing_path = VirtualPath::new(
+            "/tenants/tenant-a/users/user-a/skills/local-review/references/large.md",
+        )
+        .unwrap();
+        let root = Arc::new(GrowingReadBackend::new(growing_path.clone()));
+        root.put(
+            &VirtualPath::new("/tenants/tenant-a/users/user-a/skills/local-review/SKILL.md")
+                .unwrap(),
+            Entry::bytes(skill_md("local-review", "Local review").into_bytes()),
+            CasExpectation::Any,
+        )
+        .await
+        .unwrap();
+        root.put(
+            &growing_path,
+            Entry::bytes(b"small before read".to_vec()),
+            CasExpectation::Any,
+        )
+        .await
+        .unwrap();
+        let view = MountView::new(vec![MountGrant::new(
+            MountAlias::new("/skills").unwrap(),
+            VirtualPath::new("/tenants/tenant-a/users/user-a/skills").unwrap(),
+            MountPermissions::read_write_list_delete(),
+        )])
+        .unwrap();
+        let filesystem = Arc::new(ScopedFilesystem::with_fixed_view(Arc::clone(&root), view));
+        let source = FilesystemSkillBundleSource::new(
+            filesystem,
+            vec![FilesystemSkillBundleRoot::user(
+                ScopedPath::new("/skills").unwrap(),
+            )],
+        )
+        .unwrap();
 
         let error = source
             .read_skill_bundle_file(

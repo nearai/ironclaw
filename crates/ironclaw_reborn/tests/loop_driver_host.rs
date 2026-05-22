@@ -3610,6 +3610,7 @@ async fn text_only_host_prompt_bundle_includes_surface_metadata_and_still_stream
         host_runtime_visible_request(&fixture, ["demo"]),
         Arc::new(InMemoryCapabilityIo::default()),
         Arc::new(InMemoryCapabilityIo::default()),
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -3678,8 +3679,8 @@ async fn text_only_host_routes_capability_invocation_through_host_runtime() {
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io.clone(),
-    )
-    .with_milestone_sink(fixture.milestone_sink.clone());
+        fixture.milestone_sink.clone(),
+    );
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
@@ -3737,6 +3738,7 @@ async fn text_only_host_profiled_capabilities_filter_surface_and_invocation() {
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io,
+        fixture.milestone_sink.clone(),
     );
     let resolver = Arc::new(StaticCapabilitySurfaceProfileResolver::new(
         CapabilityAllowSet::allowlist([allowed_id.clone()]),
@@ -3803,6 +3805,7 @@ async fn default_strategy_filter_all_loses_to_host_profile_filter() {
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io,
+        fixture.milestone_sink.clone(),
     );
 
     // The profile resolver only allows tool_a — this is the host-level filter.
@@ -3888,6 +3891,7 @@ async fn text_only_host_uses_fresh_execution_context_per_capability_invocation()
         visible_request.clone(),
         io.clone(),
         io,
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -3975,6 +3979,7 @@ async fn text_only_host_rejects_outside_surface_capability_before_host_runtime()
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io,
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -4040,6 +4045,7 @@ async fn text_only_host_sanitizes_runtime_failure_message_before_driver_output()
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io,
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -4140,6 +4146,7 @@ async fn text_only_host_maps_runtime_suspension_and_process_outcomes() {
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io,
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -4221,6 +4228,7 @@ async fn text_only_host_maps_explicit_unknown_runtime_outcome_to_failure() {
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io,
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -4287,6 +4295,7 @@ async fn text_only_host_preserves_host_runtime_error_kind_and_summary() {
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io,
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -4364,6 +4373,7 @@ async fn text_only_host_batch_stops_on_first_suspension_before_later_invocations
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io,
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -4431,6 +4441,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_failed_outcome_retry() {
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io.clone(),
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -4482,6 +4493,7 @@ async fn text_only_host_prompt_accepts_refetched_surface_version() {
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io,
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -4549,6 +4561,7 @@ async fn text_only_host_waits_for_concurrent_duplicate_invocation_result() {
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io,
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -4622,6 +4635,7 @@ async fn text_only_host_bounds_completed_dispatch_records() {
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io,
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -4680,6 +4694,7 @@ async fn text_only_host_rejects_mismatched_capability_authority_context() {
         visible_request,
         io.clone(),
         io,
+        fixture.milestone_sink.clone(),
     );
 
     let error = fixture
@@ -4732,6 +4747,7 @@ async fn text_only_host_does_not_reinvoke_runtime_after_result_write_failure_ret
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io.clone(),
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -4795,6 +4811,7 @@ async fn text_only_host_rejects_runtime_outcome_for_different_capability() {
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io.clone(),
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -4852,6 +4869,7 @@ async fn text_only_host_rejects_previous_surface_after_refetch() {
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io,
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -4958,8 +4976,8 @@ async fn text_only_host_e2e_invokes_script_capability_through_real_host_runtime(
         host_runtime_visible_request_with_dispatch_grant(&fixture, e2e_script_capability_id()),
         io.clone(),
         io.clone(),
-    )
-    .with_milestone_sink(fixture.milestone_sink.clone());
+        fixture.milestone_sink.clone(),
+    );
     let host = fixture
         .factory()
         .build_text_only_host_with_capabilities(
@@ -5017,6 +5035,7 @@ async fn text_only_host_denies_capability_without_provider_trust_before_host_run
         host_runtime_visible_request(&fixture, []),
         io.clone(),
         io,
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -5074,6 +5093,7 @@ async fn text_only_host_allows_retry_after_missing_capability_input_is_staged() 
         host_runtime_visible_request(&fixture, ["demo"]),
         io.clone(),
         io.clone(),
+        fixture.milestone_sink.clone(),
     );
     let host = fixture
         .factory()
@@ -5383,8 +5403,8 @@ impl LoopCapabilityPortFactory for TestHostRuntimeCapabilityFactory {
             self.visible_request.clone(),
             self.io.clone(),
             self.io.clone(),
-        )
-        .with_milestone_sink(self.milestone_sink.clone());
+            self.milestone_sink.clone(),
+        );
         Ok(Arc::new(port))
     }
 }
@@ -5726,6 +5746,7 @@ impl ScriptBackend for E2eEchoScriptBackend {
 }
 
 const E2E_SCRIPT_MANIFEST: &str = r#"
+schema_version = "reborn.extension_manifest.v2"
 id = "script"
 name = "Script Echo"
 version = "0.1.0"
@@ -5743,7 +5764,9 @@ id = "script.echo"
 description = "Echo text through Reborn adapter e2e"
 effects = ["dispatch_capability"]
 default_permission = "allow"
-parameters_schema = { type = "object" }
+visibility = "host_internal"
+input_schema_ref = "schemas/script/echo.input.v1.json"
+output_schema_ref = "schemas/script/echo.output.v1.json"
 "#;
 
 /// Test-only evidence port that bypasses all durable evidence checks.
@@ -5863,8 +5886,8 @@ impl HostFactory for CapabilityHostFactory {
             self.visible_request.clone(),
             self.io.clone(),
             self.io.clone(),
-        )
-        .with_milestone_sink(self.milestone_sink.clone());
+            self.milestone_sink.clone(),
+        );
         RebornLoopDriverHostFactory::new(
             self.thread_service.clone(),
             self.thread_scope.clone(),
