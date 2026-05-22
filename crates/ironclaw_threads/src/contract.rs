@@ -199,6 +199,15 @@ pub struct AppendToolResultReferenceRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateToolResultReferenceRequest {
+    pub scope: ThreadScope,
+    pub thread_id: ThreadId,
+    pub turn_run_id: String,
+    pub result_ref: String,
+    pub safe_summary: ToolResultSafeSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateAssistantDraftRequest {
     pub scope: ThreadScope,
     pub thread_id: ThreadId,

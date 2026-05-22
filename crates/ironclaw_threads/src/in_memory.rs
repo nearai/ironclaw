@@ -17,6 +17,7 @@ use crate::{
     ReplayAcceptedInboundMessageRequest, SessionThreadError, SessionThreadRecord,
     SessionThreadService, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
     ThreadMessageRecord, ThreadScope, ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -334,6 +335,36 @@ impl SessionThreadService for InMemorySessionThreadService {
         thread.next_sequence += 1;
         thread.messages.push(message.clone());
         Ok(message)
+    }
+
+    async fn update_tool_result_reference(
+        &self,
+        request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let mut state = self.state.lock().await;
+        let thread = get_thread_mut(&mut state, &request.scope, &request.thread_id)?;
+        let message = thread
+            .messages
+            .iter_mut()
+            .find(|message| {
+                message.kind == MessageKind::ToolResultReference
+                    && message.status == MessageStatus::Finalized
+                    && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
+                    && message.tool_result_ref.as_deref() == Some(request.result_ref.as_str())
+            })
+            .ok_or_else(|| {
+                SessionThreadError::Backend(format!(
+                    "tool result reference {} was not found in thread {}",
+                    request.result_ref, request.thread_id
+                ))
+            })?;
+        let envelope = ToolResultReferenceEnvelope::new(request.result_ref, request.safe_summary)
+            .map_err(SessionThreadError::Serialization)?;
+        message.content = Some(
+            serde_json::to_string(&envelope)
+                .map_err(|error| SessionThreadError::Serialization(error.to_string()))?,
+        );
+        Ok(message.clone())
     }
 
     async fn update_assistant_draft(

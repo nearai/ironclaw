@@ -326,6 +326,55 @@ impl SubagentGoalStore for InMemoryBoundedSubagentGoalStore {
     }
 }
 
+#[async_trait]
+impl ironclaw_loop_support::SubagentSpawnGoalStore for BoundedSubagentGoalStore {
+    async fn put_goal(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+        goal: ironclaw_loop_support::SubagentGoalRecord,
+    ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+        self.put(
+            scope,
+            run_id,
+            SubagentGoal {
+                task: goal.task,
+                handoff: goal.handoff,
+            },
+        )
+        .map_err(map_goal_error)
+    }
+
+    async fn delete_goal(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Result<(), ironclaw_turns::run_profile::AgentLoopHostError> {
+        self.delete_inner(scope, run_id);
+        Ok(())
+    }
+}
+
+fn map_goal_error(
+    error: SubagentGoalStoreError,
+) -> ironclaw_turns::run_profile::AgentLoopHostError {
+    let kind = match error {
+        SubagentGoalStoreError::NotFound { .. } => {
+            ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation
+        }
+        SubagentGoalStoreError::PayloadTooLarge { .. } => {
+            ironclaw_turns::run_profile::AgentLoopHostErrorKind::BudgetExceeded
+        }
+        SubagentGoalStoreError::DuplicateKey { .. } => {
+            ironclaw_turns::run_profile::AgentLoopHostErrorKind::InvalidInvocation
+        }
+        SubagentGoalStoreError::Backend { .. } => {
+            ironclaw_turns::run_profile::AgentLoopHostErrorKind::Unavailable
+        }
+    };
+    ironclaw_turns::run_profile::AgentLoopHostError::new(kind, error.to_string())
+}
+
 fn lock(inner: &Mutex<GoalStoreInner>) -> MutexGuard<'_, GoalStoreInner> {
     match inner.lock() {
         Ok(guard) => guard,

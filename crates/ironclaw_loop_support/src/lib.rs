@@ -27,6 +27,8 @@ mod input_queue;
 mod skill_bundle_context_source;
 mod skill_bundle_source;
 mod skill_context;
+mod subagent_prompt_port;
+mod subagent_spawn_port;
 mod turn_event_publisher;
 
 pub use budget_accountant::{
@@ -69,6 +71,20 @@ pub use skill_bundle_source::{
 pub use skill_context::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     build_skill_run_snapshot,
+};
+pub use subagent_prompt_port::{
+    DEFAULT_SUBAGENT_GOAL_MAX_BYTES, SubagentLoopPromptPort, SubagentPromptComposer,
+    SubagentPromptGoal, SubagentPromptLimits, SubagentPromptMaterial, SubagentPromptMaterialSource,
+    materialize_direction_message, materialize_goal_framing_message, materialize_goal_message,
+    subagent_run_id_from_context,
+};
+pub use subagent_spawn_port::{
+    AwaitedChildSetRecord, DEFAULT_MAX_SPAWN_PER_TURN, DEFAULT_MAX_SUBAGENT_DEPTH,
+    DEFAULT_MAX_TREE_DESCENDANTS, DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID,
+    InMemorySubagentGateResolutionStore, JsonSpawnSubagentInputCodec, SpawnSubagentArgs,
+    SpawnSubagentInputCodec, SpawnSubagentMode, SubagentFlavorPolicy, SubagentFlavorPolicyResolver,
+    SubagentGateResolutionStore, SubagentGoalRecord, SubagentSpawnCapabilityPort,
+    SubagentSpawnDeps, SubagentSpawnGoalStore, SubagentSpawnLimits, SubagentThreadMetadata,
 };
 pub use turn_event_publisher::EventPublishingTurnRunTransitionPort;
 

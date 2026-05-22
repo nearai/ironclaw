@@ -685,7 +685,7 @@ fn default_prompt_mode() -> PromptMode {
     PromptMode::TextOnly
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoopContextBundle {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub identity_messages: Vec<LoopContextMessage>,
@@ -1342,6 +1342,7 @@ pub enum CapabilityOutcome {
     SpawnedProcess(ProcessHandleSummary),
     AwaitDependentRun {
         gate_ref: LoopGateRef,
+        result_ref: LoopResultRef,
         safe_summary: String,
     },
     SpawnedChildRun {

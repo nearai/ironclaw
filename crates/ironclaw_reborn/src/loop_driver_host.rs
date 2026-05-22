@@ -21,13 +21,15 @@ use ironclaw_loop_support::{
     EmptyLoopCapabilityPort, HostIdentityContextSource, HostInputQueue, HostManagedModelGateway,
     HostQueueLoopInputPort, HostSkillContextSource, LoopCapabilityInputResolver,
     RunCancellationFactory, RunCancellationObservationKind, RunStateLoopCancellationPort,
-    ThreadBackedLoopContextPort, ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
+    SubagentLoopPromptPort, SubagentPromptComposer, ThreadBackedLoopContextPort,
+    ThreadBackedLoopTranscriptPort, TurnStateRunCancellationFactory,
 };
 use ironclaw_threads::{SessionThreadService, ThreadScope};
 
 use crate::driver_registry::{DriverRequirements, LoopDriverRegistryKey, RequirementLevel};
 use crate::hook_gate_refs::HookGateInvocationScopePort;
 use crate::model_routes::{ModelRouteError, ModelRouteResolver, ModelSlot};
+use crate::planned_driver_factory::SUBAGENT_PLANNED_PROFILE_ID;
 use crate::text_loop_driver::{TEXT_ONLY_DRIVER_ID, TEXT_ONLY_DRIVER_VERSION};
 
 mod config;
@@ -802,6 +804,7 @@ where
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
     input_queue: Option<Arc<dyn HostInputQueue>>,
     profiled_capabilities: Option<ProfiledCapabilityHostRuntime>,
+    subagent_prompt_composer: Option<SubagentPromptComposer>,
     driver_requirements: HashMap<LoopDriverRegistryKey, DriverRequirements>,
 }
 
@@ -861,6 +864,7 @@ where
             identity_context_source: None,
             input_queue: None,
             profiled_capabilities: None,
+            subagent_prompt_composer: None,
             driver_requirements: HashMap::new(),
         }
     }
@@ -1079,6 +1083,11 @@ where
             capability_factory,
             surface_resolver,
         });
+        self
+    }
+
+    pub fn with_subagent_prompt_composer(mut self, composer: SubagentPromptComposer) -> Self {
+        self.subagent_prompt_composer = Some(composer);
         self
     }
 
@@ -1302,6 +1311,19 @@ where
                 .with_materialization_sink(sink)
                 .with_bundle_authority(prompt_authority.clone(), run_context.clone()),
             );
+        }
+        if run_context.resolved_run_profile.profile_id.as_str() == SUBAGENT_PLANNED_PROFILE_ID {
+            let Some(composer) = self.subagent_prompt_composer.clone() else {
+                return Err(RebornLoopDriverHostError::InvalidRequest {
+                    reason: "subagent prompt composer is required for subagent run profile"
+                        .to_string(),
+                });
+            };
+            prompt = Arc::new(SubagentLoopPromptPort::new(
+                prompt,
+                run_context.clone(),
+                composer,
+            ));
         }
         let input: Arc<dyn LoopInputPort> = match self.input_queue.as_ref() {
             Some(queue) => Arc::new(HostQueueLoopInputPort::new(

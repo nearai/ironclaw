@@ -44,7 +44,7 @@ use ironclaw_host_api::{
 use ironclaw_loop_support::{
     CapabilityAllowSet, CapabilityResolveError, CapabilitySurfaceProfileResolver,
     FilesystemSkillBundleSource, HostIdentityContextBuildError, HostIdentityContextCandidate,
-    HostIdentityContextSource, HostSkillContextSource,
+    HostIdentityContextSource, HostSkillContextSource, JsonSpawnSubagentInputCodec,
 };
 use ironclaw_product_adapters::ProjectionStream;
 use ironclaw_reborn::loop_exit_applier::ThreadCheckpointLoopExitEvidencePort;
@@ -54,6 +54,10 @@ use ironclaw_reborn::milestone_events::{
 use ironclaw_reborn::runtime::{
     DefaultPlannedRuntimeBuildError, DefaultPlannedRuntimeConfig, DefaultPlannedRuntimeParts,
     build_default_planned_runtime,
+};
+use ironclaw_reborn::subagent::{
+    flavors::StaticSubagentFlavorPolicyResolver,
+    gate_resolution::BoundedSubagentGateResolutionStore, goal_store::BoundedSubagentGoalStore,
 };
 use ironclaw_reborn::turn_runner::{TurnRunnerWakeSender, TurnRunnerWorkerConfig};
 use ironclaw_threads::{
@@ -817,11 +821,14 @@ pub async fn build_reborn_runtime(
     )
     .ok_or(RebornRuntimeError::HostRuntimeUnavailable)?;
     let capability_factory = local_dev_capabilities.capability_factory;
+    let capability_input_resolver = local_dev_capabilities.capability_input_resolver;
+    let capability_result_writer = local_dev_capabilities.capability_result_writer;
     let model_gateway = local_dev_capabilities.model_gateway;
 
     let composition = build_default_planned_runtime(DefaultPlannedRuntimeParts {
         turn_state: Arc::clone(&turn_state_store),
         thread_service: Arc::clone(&thread_service),
+        thread_service_dyn: Arc::clone(&thread_service),
         thread_scope: thread_scope.clone(),
         model_gateway,
         checkpoint_state_store: Arc::clone(&checkpoint_state_store)
@@ -831,6 +838,13 @@ pub async fn build_reborn_runtime(
         milestone_sink,
         capability_factory,
         capability_surface_resolver: Arc::new(AllowAllCapabilitySurfaceResolver),
+        capability_result_writer,
+        subagent_goal_store: Arc::new(BoundedSubagentGoalStore::new()),
+        subagent_gate_store: Arc::new(BoundedSubagentGateResolutionStore::new()),
+        subagent_flavor_resolver: Arc::new(StaticSubagentFlavorPolicyResolver),
+        subagent_spawn_input_codec: Arc::new(JsonSpawnSubagentInputCodec::new(
+            capability_input_resolver,
+        )),
         loop_exit_evidence,
         config: DefaultPlannedRuntimeConfig {
             worker: TurnRunnerWorkerConfig {

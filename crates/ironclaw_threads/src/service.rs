@@ -8,7 +8,7 @@ use crate::{
     ListThreadsForScopeResponse, LoadContextMessagesRequest, LoadContextWindowRequest,
     MessageContent, RedactMessageRequest, ReplayAcceptedInboundMessageRequest, SessionThreadError,
     SessionThreadRecord, SummaryArtifact, ThreadHistory, ThreadHistoryRequest, ThreadMessageId,
-    ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
+    ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 
 /// Canonical Reborn session thread and transcript boundary.
@@ -53,6 +53,11 @@ pub trait SessionThreadService: Send + Sync {
     async fn append_tool_result_reference(
         &self,
         request: AppendToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError>;
+
+    async fn update_tool_result_reference(
+        &self,
+        request: UpdateToolResultReferenceRequest,
     ) -> Result<ThreadMessageRecord, SessionThreadError>;
 
     async fn update_assistant_draft(

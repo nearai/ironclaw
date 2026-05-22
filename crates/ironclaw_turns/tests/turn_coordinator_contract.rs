@@ -166,8 +166,10 @@ fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
     );
 
     let gate_ref = LoopGateRef::new("gate:dependent-run").unwrap();
+    let result_ref = LoopResultRef::new("result:dependent-run").unwrap();
     let awaiting = CapabilityOutcome::AwaitDependentRun {
         gate_ref: gate_ref.clone(),
+        result_ref: result_ref.clone(),
         safe_summary: "waiting on child".to_string(),
     };
     let awaiting_json = serde_json::to_value(&awaiting).unwrap();
@@ -176,6 +178,7 @@ fn subagent_capability_outcomes_round_trip_with_suspension_semantics() {
         serde_json::json!({
             "await_dependent_run": {
                 "gate_ref": gate_ref,
+                "result_ref": result_ref,
                 "safe_summary": "waiting on child"
             }
         })

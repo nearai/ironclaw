@@ -55,7 +55,7 @@ use crate::{
     ProviderToolCallReferenceEnvelope, RedactMessageRequest, ReplayAcceptedInboundMessageRequest,
     SessionThreadError, SessionThreadRecord, SessionThreadService, SummaryArtifact, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageId, ThreadMessageRecord, ThreadScope,
-    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest,
+    ToolResultReferenceEnvelope, UpdateAssistantDraftRequest, UpdateToolResultReferenceRequest,
 };
 
 /// Bound on the CAS retry loop. Mirrors the run-state / authorization
@@ -834,6 +834,44 @@ where
             ))),
             Err(PutError::Other(error)) => Err(error),
         }
+    }
+
+    async fn update_tool_result_reference(
+        &self,
+        request: UpdateToolResultReferenceRequest,
+    ) -> Result<ThreadMessageRecord, SessionThreadError> {
+        let envelope =
+            ToolResultReferenceEnvelope::new(request.result_ref.clone(), request.safe_summary)
+                .map_err(SessionThreadError::Serialization)?;
+        let content = serde_json::to_string(&envelope)
+            .map_err(|error| SessionThreadError::Serialization(error.to_string()))?;
+        let existing = self
+            .list_thread_messages(&request.scope, &request.thread_id)
+            .await?;
+        let message = existing
+            .into_iter()
+            .find(|message| {
+                message.kind == MessageKind::ToolResultReference
+                    && message.status == MessageStatus::Finalized
+                    && message.turn_run_id.as_deref() == Some(request.turn_run_id.as_str())
+                    && message.tool_result_ref.as_deref() == Some(request.result_ref.as_str())
+            })
+            .ok_or_else(|| {
+                SessionThreadError::Backend(format!(
+                    "tool result reference {} was not found in thread {}",
+                    request.result_ref, request.thread_id
+                ))
+            })?;
+        self.apply_message_update(
+            &request.scope,
+            &request.thread_id,
+            message.message_id,
+            |message| {
+                message.content = Some(content.clone());
+                Ok(())
+            },
+        )
+        .await
     }
 
     async fn update_assistant_draft(

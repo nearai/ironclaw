@@ -44,6 +44,8 @@ use crate::{
 
 pub(super) struct LocalDevCapabilityWiring {
     pub(super) capability_factory: Arc<dyn LoopCapabilityPortFactory>,
+    pub(super) capability_input_resolver: Arc<dyn LoopCapabilityInputResolver>,
+    pub(super) capability_result_writer: Arc<dyn LoopCapabilityResultWriter>,
     pub(super) model_gateway: Arc<dyn HostManagedModelGateway>,
     pub(super) display_previews: Arc<CapabilityDisplayPreviewStore>,
 }
@@ -68,8 +70,8 @@ pub(super) fn capability_wiring(
             runtime,
             user_id,
             workspace_mounts,
-            capability_input_resolver,
-            capability_result_writer,
+            Arc::clone(&capability_input_resolver),
+            Arc::clone(&capability_result_writer),
             milestone_sink,
         ));
     let model_gateway: Arc<dyn HostManagedModelGateway> = Arc::new(
@@ -78,6 +80,8 @@ pub(super) fn capability_wiring(
 
     Some(LocalDevCapabilityWiring {
         capability_factory,
+        capability_input_resolver,
+        capability_result_writer,
         model_gateway,
         display_previews,
     })
@@ -256,6 +260,13 @@ impl StagedValueStore {
             }
         }
     }
+
+    fn remove(&mut self, reference: &str) {
+        if let Some(previous) = self.values.remove(reference) {
+            self.total_bytes = self.total_bytes.saturating_sub(previous.bytes);
+            self.oldest_refs.retain(|candidate| candidate != reference);
+        }
+    }
 }
 
 fn staged_value_bytes(value: &serde_json::Value) -> Result<usize, AgentLoopHostError> {
@@ -347,6 +358,50 @@ impl LoopCapabilityResultWriter for LocalDevCapabilityIo {
                 output_bytes,
             });
         Ok(result_ref)
+    }
+
+    async fn update_capability_result(
+        &self,
+        run_context: &LoopRunContext,
+        result_ref: &LoopResultRef,
+        output: serde_json::Value,
+    ) -> Result<(), AgentLoopHostError> {
+        ensure_local_dev_ref_scope("result", result_ref.as_str(), run_context)?;
+        let bytes = staged_value_bytes(&output)?;
+        let mut results = self.results.lock().map_err(|_| capability_io_error())?;
+        let previous_bytes = results
+            .values
+            .get(result_ref.as_str())
+            .map(|previous| previous.bytes)
+            .unwrap_or(0);
+        let next_total = results
+            .total_bytes
+            .saturating_sub(previous_bytes)
+            .saturating_add(bytes);
+        if next_total > LOCAL_DEV_CAPABILITY_IO_MAX_STAGED_BYTES
+            || (previous_bytes == 0
+                && results.values.len() >= LOCAL_DEV_CAPABILITY_IO_MAX_STAGED_REFS)
+        {
+            return Err(AgentLoopHostError::new(
+                AgentLoopHostErrorKind::BudgetExceeded,
+                "local-dev capability result exceeds staging budget",
+            ));
+        }
+        results.insert_measured(result_ref.as_str().to_string(), output, bytes);
+        Ok(())
+    }
+
+    async fn delete_capability_result(
+        &self,
+        run_context: &LoopRunContext,
+        result_ref: &LoopResultRef,
+    ) -> Result<(), AgentLoopHostError> {
+        ensure_local_dev_ref_scope("result", result_ref.as_str(), run_context)?;
+        self.results
+            .lock()
+            .map_err(|_| capability_io_error())?
+            .remove(result_ref.as_str());
+        Ok(())
     }
 }
 

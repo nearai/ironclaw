@@ -27,6 +27,7 @@ pub use contract::{
     MessageContent, MessageKind, MessageStatus, RedactMessageRequest,
     ReplayAcceptedInboundMessageRequest, SessionThreadRecord, SummaryArtifact, ThreadHistory,
     ThreadHistoryRequest, ThreadMessageRecord, ThreadScope, UpdateAssistantDraftRequest,
+    UpdateToolResultReferenceRequest,
 };
 pub use error::SessionThreadError;
 pub use identifiers::ThreadMessageId;
