@@ -1,12 +1,18 @@
 # ironclaw_reborn_composition guardrails
 
 - Own only top-level Reborn composition for production/app startup.
-- Expose facade-shaped handles only: `HostRuntime`, `TurnCoordinator`, WebUI `RebornServicesApi`, readiness.
+- Expose facade-shaped handles only: `HostRuntime`, `TurnCoordinator`, product-auth `RebornProductAuthServices`, WebUI `RebornServicesApi`, readiness.
 - Keep lower substrate handles private to factories and owning crates.
 - Do not depend on the root `ironclaw` crate or `src/` modules.
 - Do not add legacy bridge modes here until an accepted migration contract exists.
 - Do not route live v1/product traffic here; callers must opt in through explicit Reborn adapters.
 - Production and migration-dry-run profiles must fail closed on local-only or missing required handles.
+- Product auth composition must use `ironclaw_auth` trait-shaped ports. Do not
+  wire product auth through V1 OAuth routes, V1 pending maps, V1
+  `ExtensionManager`, V1 secret stores, or route-local raw HTTP clients.
+- Blocked run-state approval/auth gate rendering and resume belongs to #3094;
+  keep this crate's #3811 auth seam reusable by that layer without implementing
+  a second gate-resolution path.
 
 ## WebUI v2 native surface (`webui-v2-beta` feature)
 

@@ -1,8 +1,9 @@
 # Reborn Product Auth Contract
 
-**Status:** first-slice contract draft
-**Issue:** #3289 / #3810
-**Crate:** `crates/ironclaw_auth`
+- **Status:** contract and composition seam
+- **Issue:** #3289 / #3810 / #3811
+- **Crate:** `crates/ironclaw_auth`
+- **Composition:** `ironclaw_reborn_composition::RebornProductAuthServices`
 
 ---
 
@@ -14,8 +15,9 @@ providers, extensions, MCP servers, WASM tools/channels, and future identity
 login flows.
 
 This slice is contract-first. It defines Reborn-native vocabulary and fake
-services, but does not migrate production OAuth routes, extension setup routes,
-CLI/setup flows, durable secret storage, or runtime credential injection.
+services, and #3811 adds a Reborn composition seam. It does not migrate
+production OAuth routes, extension setup routes, CLI/setup flows, durable
+secret storage, or runtime credential injection.
 
 Behavior may remain compatible with legacy UX. Code paths must not mingle V1
 components with Reborn components: V1 route handlers, pending maps, extension
@@ -37,6 +39,17 @@ manager authority, and V1 secret stores are inventory evidence only.
 Low-level encrypted storage, leases, host-mediated HTTP credential injection,
 approval interaction UI, and no-exposure enforcement remain owned by their
 respective Reborn substrate contracts.
+
+`RebornProductAuthServices` is the single composition bundle for the product
+auth ports above. WebUI/setup/extension surfaces should call this bundle once
+routes are migrated instead of reconstructing auth-flow stores, credential
+stores, provider clients, or cleanup services locally.
+
+The blocked-run interaction loop is separate: #3094 owns listing/rendering
+approval/auth gates from blocked run-state and routing user decisions back into
+the trusted resume path. That issue should consume the auth-flow boundary here
+for auth gates; it must not create a second credential-account or OAuth-flow
+model.
 
 ---
 
@@ -173,6 +186,11 @@ metadata.
 
 Future production implementations must route provider HTTP through Reborn
 network/egress policy and return sanitized errors.
+
+The composition root may expose an in-memory product-auth bundle only for
+local-dev/testing. Production profiles must receive durable Reborn-native auth
+services explicitly; they must not fall back to V1 pending maps, V1 route
+state, or V1 secret stores as product authority.
 
 ---
 

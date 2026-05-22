@@ -4,8 +4,8 @@
 //!
 //! Two entry points:
 //!
-//! - [`build_reborn_services`] — substrate-only facades (host runtime,
-//!   turn coordinator). Useful when an outer harness wires the loop
+//! - [`build_reborn_services`] — substrate/product facades (host runtime,
+//!   turn coordinator, product auth). Useful when an outer harness wires the loop
 //!   drivers / turn-runner itself (e.g. v1 `AppBuilder`).
 //! - [`build_reborn_runtime`] — full runtime assembly: substrate + loop
 //!   driver registry + LLM model gateway (under `root-llm-provider`) +
@@ -18,6 +18,7 @@
 //! import `TurnCoordinator`, `SessionThreadService`, `HostManagedModel
 //! Gateway`, etc.
 
+mod auth;
 mod error;
 mod factory;
 mod input;
@@ -43,6 +44,7 @@ mod webui_ws_origin;
 
 use ironclaw_runtime_policy::{EffectiveRuntimePolicy as ResolvedRuntimePolicy, ResolveError};
 
+pub use auth::RebornProductAuthServices;
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
 pub use input::RebornBuildInput;

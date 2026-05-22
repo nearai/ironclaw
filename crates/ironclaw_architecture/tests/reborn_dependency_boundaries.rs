@@ -1152,10 +1152,16 @@ fn reborn_product_auth_contract_stays_reborn_native() {
 
     let mut violations = Vec::new();
     collect_forbidden_uses(&auth_src, &root, &forbidden, &mut violations);
+    collect_forbidden_reborn_auth_file_uses(
+        &root.join("crates/ironclaw_reborn_composition/src/auth.rs"),
+        &root,
+        &forbidden,
+        &mut violations,
+    );
 
     assert!(
         violations.is_empty(),
-        "Reborn product auth can be behavior-compatible with v1, but implementation code paths must not mingle with v1 routes, v1 extension/secrets managers, raw provider transport, or raw secret records:\n{}",
+        "Reborn product auth can be behavior-compatible with v1, but implementation and composition code paths must not mingle with v1 routes, v1 extension/secrets managers, raw provider transport, or raw secret records:\n{}",
         violations.join("\n")
     );
 }
@@ -2249,6 +2255,26 @@ fn collect_forbidden_uses(
                     ));
                 }
             }
+        }
+    }
+}
+
+fn collect_forbidden_reborn_auth_file_uses(
+    path: &std::path::Path,
+    root: &std::path::Path,
+    forbidden: &[ForbiddenUse],
+    violations: &mut Vec<String>,
+) {
+    let contents = std::fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", path.display()));
+    for rule in forbidden {
+        if contents.contains(rule.pattern) {
+            violations.push(format!(
+                "{} contains forbidden product-auth implementation pattern `{}`: {}",
+                path.strip_prefix(root).unwrap_or(path).display(),
+                rule.pattern,
+                rule.reason
+            ));
         }
     }
 }

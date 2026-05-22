@@ -57,6 +57,7 @@ postgres = [
 async-trait = "0.1"
 chrono = "0.4"
 deadpool-postgres = { version = "0.14", optional = true }
+ironclaw_auth = { path = "../ironclaw_auth" }
 ironclaw_authorization = { path = "../ironclaw_authorization" }
 ironclaw_event_projections = { path = "../ironclaw_event_projections" }
 ironclaw_event_streams = { path = "../ironclaw_event_streams" }

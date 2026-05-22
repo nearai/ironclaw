@@ -4760,6 +4760,7 @@ dependencies = [
  "deadpool-postgres",
  "http 1.4.0",
  "http-body-util",
+ "ironclaw_auth",
  "ironclaw_authorization",
  "ironclaw_event_projections",
  "ironclaw_event_streams",

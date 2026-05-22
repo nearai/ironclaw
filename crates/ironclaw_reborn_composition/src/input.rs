@@ -5,7 +5,7 @@ use ironclaw_host_api::runtime_policy::EffectiveRuntimePolicy;
 use ironclaw_host_runtime::SchedulerTurnRunWakeNotifier;
 use ironclaw_trust::HostTrustPolicy;
 
-use crate::RebornCompositionProfile;
+use crate::{RebornCompositionProfile, RebornProductAuthServices};
 
 pub struct RebornBuildInput {
     pub(crate) profile: RebornCompositionProfile,
@@ -17,6 +17,7 @@ pub struct RebornBuildInput {
     pub(crate) required_runtime_backends: Vec<ironclaw_host_api::RuntimeKind>,
     pub(crate) require_runtime_http_egress: bool,
     pub(crate) require_wasm_credentials: bool,
+    pub(crate) product_auth_services: Option<Arc<RebornProductAuthServices>>,
 }
 
 pub(crate) enum RebornStorageInput {
@@ -162,6 +163,16 @@ impl RebornBuildInput {
         self
     }
 
+    /// Inject a Reborn-native product-auth composition bundle.
+    ///
+    /// Production callers should provide durable implementations here once the
+    /// auth-flow and credential-account storage substrate is available. The
+    /// composition root never falls back to V1 route state or V1 secret stores.
+    pub fn with_product_auth_services(mut self, services: Arc<RebornProductAuthServices>) -> Self {
+        self.product_auth_services = Some(services);
+        self
+    }
+
     fn new(
         profile: RebornCompositionProfile,
         owner_id: impl Into<String>,
@@ -177,6 +188,7 @@ impl RebornBuildInput {
             required_runtime_backends: Vec::new(),
             require_runtime_http_egress: false,
             require_wasm_credentials: false,
+            product_auth_services: None,
         }
     }
 }
