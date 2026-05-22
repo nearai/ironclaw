@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use ironclaw_loop_support::{SkillBundleId, SkillBundleSource};
 use ironclaw_turns::run_profile::LoopRunContext;
-use ironclaw_turns::{TurnRunId, TurnScope};
+use ironclaw_turns::{AcceptedMessageRef, TurnRunId, TurnScope};
 use thiserror::Error;
 
-use super::{
+use crate::activation::CapturedSkillActivationPlan;
+use crate::{
     SelectableSkillContextSource, SkillActivationPlan, SkillActivationRequest,
     SkillActivationSelection, SkillActivationSelectionError, SkillBundleAsset,
     SkillBundleAssetReadError, SkillBundleAssetReader,
@@ -33,30 +34,25 @@ where
         Self { selector }
     }
 
-    pub fn capture_next_activation_plan(
+    pub fn record_user_message_for_execution(
         &self,
         scope: TurnScope,
+        accepted_message_ref: AcceptedMessageRef,
+        message: impl Into<String>,
     ) -> Result<(), SkillActivationSelectionError> {
-        self.selector.capture_next_activation_plan(scope)
+        self.selector
+            .record_user_message_for_execution(scope, accepted_message_ref, message)
     }
 
-    pub fn cancel_next_activation_plan_capture(
-        &self,
-        scope: &TurnScope,
-    ) -> Result<(), SkillActivationSelectionError> {
-        self.selector.cancel_next_activation_plan_capture(scope)
-    }
-
-    pub fn clear_scope(&self, scope: &TurnScope) -> Result<(), SkillActivationSelectionError> {
-        self.selector.clear_scope(scope)
-    }
-
-    pub fn take_activation_plan_for_run(
+    pub fn take_execution_plan_for_run(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-    ) -> Result<Option<super::SkillActivationPlan>, SkillActivationSelectionError> {
-        self.selector.take_activation_plan_for_run(scope, run_id)
+    ) -> Result<Option<SkillExecutionPlan<S>>, SkillActivationSelectionError> {
+        Ok(self
+            .selector
+            .take_activation_plan_for_run(scope, run_id)?
+            .map(|captured| self.execution_plan_from_captured(captured)))
     }
 
     pub async fn prepare(
@@ -75,7 +71,9 @@ where
         );
         let activated_bundles = activation_plan.activated_bundles().to_vec();
         Ok(SkillExecutionPlan {
+            activation_plan: activation_plan.clone(),
             selection: activation_plan.selection,
+            run_context: run_context.clone(),
             activated_bundles,
             asset_reader,
         })
@@ -96,6 +94,24 @@ where
             .read_file_for_activation(run_context, activation, path)
             .await
     }
+
+    fn execution_plan_from_captured(
+        &self,
+        captured: CapturedSkillActivationPlan,
+    ) -> SkillExecutionPlan<S> {
+        let asset_reader = SkillBundleAssetReader::new(
+            self.selector.bundle_source(),
+            captured.plan.activated_bundles().iter().cloned(),
+        );
+        let activated_bundles = captured.plan.activated_bundles().to_vec();
+        SkillExecutionPlan {
+            activation_plan: captured.plan.clone(),
+            selection: captured.plan.selection,
+            run_context: captured.run_context,
+            activated_bundles,
+            asset_reader,
+        }
+    }
 }
 
 /// Prepared skill execution inputs for a Reborn loop run.
@@ -104,7 +120,9 @@ pub struct SkillExecutionPlan<S>
 where
     S: SkillBundleSource + ?Sized,
 {
+    activation_plan: SkillActivationPlan,
     pub selection: SkillActivationSelection,
+    run_context: LoopRunContext,
     activated_bundles: Vec<SkillBundleId>,
     asset_reader: SkillBundleAssetReader<S>,
 }
@@ -113,6 +131,14 @@ impl<S> SkillExecutionPlan<S>
 where
     S: SkillBundleSource + ?Sized,
 {
+    pub fn activation_plan(&self) -> &SkillActivationPlan {
+        &self.activation_plan
+    }
+
+    pub fn run_context(&self) -> &LoopRunContext {
+        &self.run_context
+    }
+
     pub fn activated_bundles(&self) -> &[SkillBundleId] {
         &self.activated_bundles
     }

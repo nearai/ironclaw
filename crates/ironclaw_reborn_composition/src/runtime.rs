@@ -55,9 +55,9 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     AcceptedMessageRef, CancelRunRequest, CancelRunResponse, GetRunStateRequest, IdempotencyKey,
     ReplyTargetBindingRef, RunProfileResolutionRequest, SanitizedCancelReason, SourceBindingRef,
-    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnId,
-    TurnRunId, TurnScope, TurnStatus,
-    run_profile::{InMemoryLoopHostMilestoneSink, LoopRunContext, PromptMode, ResolvedRunProfile},
+    SubmitTurnRequest, SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnRunId,
+    TurnScope, TurnStatus,
+    run_profile::{InMemoryLoopHostMilestoneSink, LoopRunContext, PromptMode},
 };
 
 use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
@@ -164,7 +164,6 @@ pub struct RebornRuntime {
     source_binding_ref: SourceBindingRef,
     reply_target_binding_ref: ReplyTargetBindingRef,
     default_run_profile_id: String,
-    default_resolved_run_profile: ResolvedRunProfile,
     wake_sender: TurnRunnerWakeSender,
     send_locks: Mutex<HashMap<ConversationId, Arc<Mutex<()>>>>,
     skill_activation_source: Option<Arc<LocalDevSelectableSkillContextSource>>,
@@ -253,6 +252,17 @@ impl RebornRuntime {
         text: &str,
         cancellation: CancellationToken,
     ) -> Result<AssistantReply, RebornRuntimeError> {
+        self.send_user_message_internal(conversation, text, cancellation, false)
+            .await
+    }
+
+    async fn send_user_message_internal(
+        &self,
+        conversation: &ConversationId,
+        text: &str,
+        cancellation: CancellationToken,
+        capture_skill_execution_plan: bool,
+    ) -> Result<AssistantReply, RebornRuntimeError> {
         let send_lock = self.send_lock_for(conversation).await;
         let _send_guard = send_lock.lock().await;
         if self.worker_handle.is_finished() {
@@ -289,7 +299,19 @@ impl RebornRuntime {
         ))
         .map_err(|reason| RebornRuntimeError::InvalidArgument { reason })?;
 
-        if let Some(skill_activation_source) = &self.skill_activation_source {
+        if capture_skill_execution_plan {
+            let adapter = self
+                .skill_execution_adapter
+                .as_ref()
+                .ok_or(RebornRuntimeError::SkillExecutionUnavailable)?;
+            adapter
+                .record_user_message_for_execution(
+                    scope.clone(),
+                    accepted_message_ref.clone(),
+                    text,
+                )
+                .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
+        } else if let Some(skill_activation_source) = &self.skill_activation_source {
             skill_activation_source
                 .record_user_message(scope.clone(), accepted_message_ref.clone(), text)
                 .map_err(|error| RebornRuntimeError::TurnSubmission(error.to_string()))?;
@@ -378,23 +400,10 @@ impl RebornRuntime {
             .as_ref()
             .ok_or(RebornRuntimeError::SkillExecutionUnavailable)?;
         let scope = self.turn_scope_for(&conversation.0);
-        adapter
-            .capture_next_activation_plan(scope.clone())
-            .map_err(|error| RebornRuntimeError::SkillExecution(error.to_string()))?;
-        let reply = match self.send_user_message(conversation, text).await {
-            Ok(reply) => reply,
-            Err(error) => {
-                let _ = adapter.clear_scope(&scope);
-                return Err(error);
-            }
-        };
-        let plan = match self.skill_execution_plan_for_run(&scope, reply.run_id) {
-            Ok(plan) => plan,
-            Err(error) => {
-                let _ = adapter.clear_scope(&scope);
-                return Err(error);
-            }
-        };
+        let reply = self
+            .send_user_message_internal(conversation, text, CancellationToken::new(), true)
+            .await?;
+        let plan = self.skill_execution_plan_for_run(adapter, &scope, reply.run_id)?;
         Ok(RebornSkillExecutionResult { plan, reply })
     }
 
@@ -407,14 +416,18 @@ impl RebornRuntime {
         activation: &RebornSkillActivation,
         path: impl AsRef<str>,
     ) -> Result<RebornSkillAsset, RebornRuntimeError> {
+        if plan.run_context().thread_id != conversation.0 {
+            return Err(RebornRuntimeError::SkillExecution(
+                "skill execution plan does not belong to this conversation".to_string(),
+            ));
+        }
         let adapter = self
             .skill_execution_adapter
             .as_ref()
             .ok_or(RebornRuntimeError::SkillExecutionUnavailable)?;
-        let run_context = self.skill_execution_run_context(conversation);
         adapter
             .read_file_for_activation(
-                &run_context,
+                plan.run_context(),
                 plan.first_party_plan(),
                 &activation.to_first_party_request(),
                 path,
@@ -449,29 +462,17 @@ impl RebornRuntime {
 
     fn skill_execution_plan_for_run(
         &self,
+        adapter: &SkillExecutionAdapter<FilesystemSkillBundleSource<LocalFilesystem>>,
         scope: &TurnScope,
         run_id: TurnRunId,
     ) -> Result<RebornSkillExecutionPlan, RebornRuntimeError> {
-        let adapter = self
-            .skill_execution_adapter
-            .as_ref()
-            .ok_or(RebornRuntimeError::SkillExecutionUnavailable)?;
         adapter
-            .take_activation_plan_for_run(scope, run_id)
+            .take_execution_plan_for_run(scope, run_id)
             .map_err(|error| RebornRuntimeError::SkillExecution(error.to_string()))?
-            .map(RebornSkillExecutionPlan::from)
+            .map(RebornSkillExecutionPlan::from_first_party)
             .ok_or_else(|| {
                 RebornRuntimeError::SkillExecution("skill activation plan unavailable".to_string())
             })
-    }
-
-    fn skill_execution_run_context(&self, conversation: &ConversationId) -> LoopRunContext {
-        LoopRunContext::new(
-            self.turn_scope_for(&conversation.0),
-            TurnId::new(),
-            TurnRunId::new(),
-            self.default_resolved_run_profile.clone(),
-        )
     }
 
     async fn send_lock_for(&self, conversation: &ConversationId) -> Arc<Mutex<()>> {
@@ -808,7 +809,6 @@ pub async fn build_reborn_runtime(
         source_binding_ref: validated_identity.source_binding_ref,
         reply_target_binding_ref: validated_identity.reply_target_binding_ref,
         default_run_profile_id,
-        default_resolved_run_profile,
         wake_sender,
         send_locks: Mutex::new(HashMap::new()),
         skill_activation_source,
@@ -1049,7 +1049,7 @@ mod tests {
     use crate::runtime_input::{PollSettings, RebornRuntimeIdentity, RebornRuntimeInput};
     use crate::webui::build_webui_services;
 
-    use super::build_reborn_runtime;
+    use super::{RebornSkillSourceKind, build_reborn_runtime};
 
     fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
         EffectiveRuntimePolicy {
@@ -1789,6 +1789,109 @@ mod tests {
         assert!(combined_skill_context.contains("USER_HELPER_PROMPT_SENTINEL"));
         assert!(!combined_skill_context.contains("tenant shared helper description"));
         assert!(!combined_skill_context.contains("TENANT_SHARED_PROMPT_SENTINEL"));
+
+        runtime.shutdown().await.expect("runtime shutdown");
+    }
+
+    #[tokio::test]
+    async fn execute_skill_message_returns_plan_and_reads_active_bundle_assets() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let storage_root = root.path().join("local-dev");
+        std::fs::create_dir_all(storage_root.join("skills/asset-helper/references"))
+            .expect("asset skill references dir");
+        std::fs::write(
+            storage_root.join("skills/asset-helper/SKILL.md"),
+            skill_md(
+                "asset-helper",
+                "asset helper description",
+                "ASSET_HELPER_PROMPT_SENTINEL",
+            ),
+        )
+        .expect("write asset helper skill");
+        std::fs::write(
+            storage_root.join("skills/asset-helper/references/policy.md"),
+            "asset helper policy",
+        )
+        .expect("write asset helper policy");
+        let requests = Arc::new(StdMutex::new(Vec::new()));
+        let gateway = Arc::new(RecordingGateway {
+            reply: "asset helper ok".to_string(),
+            requests: Arc::clone(&requests),
+        });
+        let input = RebornRuntimeInput::from_services(
+            RebornBuildInput::local_dev("runtime-skill-exec-owner", storage_root)
+                .with_runtime_policy(local_dev_runtime_policy()),
+        )
+        .with_identity(RebornRuntimeIdentity {
+            tenant_id: "runtime-skill-exec-tenant".to_string(),
+            agent_id: "runtime-skill-exec-agent".to_string(),
+            source_binding_id: "runtime-skill-exec-source".to_string(),
+            reply_target_binding_id: "runtime-skill-exec-reply".to_string(),
+        })
+        .with_poll_settings(PollSettings {
+            interval: Duration::from_millis(10),
+            max_total: Duration::from_secs(3),
+        })
+        .with_model_gateway_override(gateway);
+
+        let runtime = build_reborn_runtime(input).await.expect("runtime builds");
+        let conversation = runtime.new_conversation().await.expect("conversation");
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            runtime.execute_skill_message(&conversation, "$asset-helper use policy"),
+        )
+        .await
+        .expect("skill execution should finish")
+        .expect("skill execution should succeed");
+
+        assert_eq!(result.reply.status, TurnStatus::Completed);
+        assert_eq!(result.reply.text.as_deref(), Some("asset helper ok"));
+        assert_eq!(result.plan.activations().len(), 1);
+        assert_eq!(result.plan.activations()[0].name, "asset-helper");
+        assert_eq!(
+            result.plan.activations()[0].source,
+            Some(RebornSkillSourceKind::User)
+        );
+        assert_eq!(result.plan.active_bundles().len(), 1);
+        assert_eq!(result.plan.active_bundles()[0].skill_name, "asset-helper");
+        assert_eq!(
+            result.plan.run_context().run_id,
+            result.reply.run_id,
+            "post-activation asset reads must reuse the real activation run context"
+        );
+        let asset = runtime
+            .read_skill_execution_asset(
+                &conversation,
+                &result.plan,
+                &result.plan.activations()[0],
+                "references/policy.md",
+            )
+            .await
+            .expect("active bundle asset read succeeds");
+
+        assert_eq!(asset.skill_name, "asset-helper");
+        assert_eq!(asset.path, "references/policy.md");
+        assert_eq!(asset.into_utf8().unwrap(), "asset helper policy");
+
+        let other_conversation = runtime
+            .new_conversation()
+            .await
+            .expect("other conversation");
+        let error = runtime
+            .read_skill_execution_asset(
+                &other_conversation,
+                &result.plan,
+                &result.plan.activations()[0],
+                "references/policy.md",
+            )
+            .await
+            .expect_err("plan should be bound to its activation conversation");
+        assert!(
+            error
+                .to_string()
+                .contains("skill execution plan does not belong to this conversation"),
+            "unexpected error: {error}"
+        );
 
         runtime.shutdown().await.expect("runtime shutdown");
     }

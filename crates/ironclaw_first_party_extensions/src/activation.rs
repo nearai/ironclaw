@@ -112,6 +112,12 @@ impl SkillActivationPlan {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CapturedSkillActivationPlan {
+    pub plan: SkillActivationPlan,
+    pub run_context: LoopRunContext,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SkillActivationSelectionError {
     #[error("ambiguous skill activation for '{name}': {sources:?}")]
@@ -162,10 +168,9 @@ where
 {
     bundle_source: Arc<S>,
     config: SkillActivationSelectorConfig,
-    messages_by_run: Mutex<HashMap<SkillActivationMessageKey, String>>,
+    messages_by_run: Mutex<HashMap<SkillActivationMessageKey, SkillActivationMessage>>,
     activation_cache: Mutex<HashMap<ActivationCandidateCacheKey, CachedActivationCandidate>>,
-    plan_capture_counts_by_scope: Mutex<HashMap<TurnScope, usize>>,
-    plans_by_run: Mutex<HashMap<(TurnScope, TurnRunId), SkillActivationPlan>>,
+    plans_by_run: Mutex<HashMap<(TurnScope, TurnRunId), CapturedSkillActivationPlan>>,
 }
 
 impl<S> SelectableSkillContextSource<S>
@@ -178,7 +183,6 @@ where
             config,
             messages_by_run: Mutex::new(HashMap::new()),
             activation_cache: Mutex::new(HashMap::new()),
-            plan_capture_counts_by_scope: Mutex::new(HashMap::new()),
             plans_by_run: Mutex::new(HashMap::new()),
         }
     }
@@ -189,29 +193,35 @@ where
         accepted_message_ref: AcceptedMessageRef,
         message: impl Into<String>,
     ) -> Result<(), SkillActivationSelectionError> {
+        self.record_message(scope, accepted_message_ref, message, false)
+    }
+
+    pub(crate) fn record_user_message_for_execution(
+        &self,
+        scope: TurnScope,
+        accepted_message_ref: AcceptedMessageRef,
+        message: impl Into<String>,
+    ) -> Result<(), SkillActivationSelectionError> {
+        self.record_message(scope, accepted_message_ref, message, true)
+    }
+
+    fn record_message(
+        &self,
+        scope: TurnScope,
+        accepted_message_ref: AcceptedMessageRef,
+        message: impl Into<String>,
+        capture_plan: bool,
+    ) -> Result<(), SkillActivationSelectionError> {
         self.messages_by_run
             .lock()
             .map_err(|_| SkillActivationSelectionError::Internal)?
             .insert(
                 SkillActivationMessageKey::new(scope, accepted_message_ref),
-                message.into(),
+                SkillActivationMessage {
+                    text: message.into(),
+                    capture_plan,
+                },
             );
-        Ok(())
-    }
-
-    pub fn clear_scope(&self, scope: &TurnScope) -> Result<(), SkillActivationSelectionError> {
-        self.messages_by_run
-            .lock()
-            .map_err(|_| SkillActivationSelectionError::Internal)?
-            .retain(|key, _| &key.scope != scope);
-        self.plan_capture_counts_by_scope
-            .lock()
-            .map_err(|_| SkillActivationSelectionError::Internal)?
-            .remove(scope);
-        self.plans_by_run
-            .lock()
-            .map_err(|_| SkillActivationSelectionError::Internal)?
-            .retain(|(plan_scope, _), _| plan_scope != scope);
         Ok(())
     }
 
@@ -219,35 +229,11 @@ where
         Arc::clone(&self.bundle_source)
     }
 
-    pub fn capture_next_activation_plan(
-        &self,
-        scope: TurnScope,
-    ) -> Result<(), SkillActivationSelectionError> {
-        let mut counts = self
-            .plan_capture_counts_by_scope
-            .lock()
-            .map_err(|_| SkillActivationSelectionError::Internal)?;
-        *counts.entry(scope).or_default() += 1;
-        Ok(())
-    }
-
-    pub fn cancel_next_activation_plan_capture(
-        &self,
-        scope: &TurnScope,
-    ) -> Result<(), SkillActivationSelectionError> {
-        let mut counts = self
-            .plan_capture_counts_by_scope
-            .lock()
-            .map_err(|_| SkillActivationSelectionError::Internal)?;
-        decrement_capture_count(&mut counts, scope);
-        Ok(())
-    }
-
-    pub fn take_activation_plan_for_run(
+    pub(crate) fn take_activation_plan_for_run(
         &self,
         scope: &TurnScope,
         run_id: TurnRunId,
-    ) -> Result<Option<SkillActivationPlan>, SkillActivationSelectionError> {
+    ) -> Result<Option<CapturedSkillActivationPlan>, SkillActivationSelectionError> {
         Ok(self
             .plans_by_run
             .lock()
@@ -282,7 +268,7 @@ where
         &self,
         scope: &TurnScope,
         accepted_message_ref: &AcceptedMessageRef,
-    ) -> Result<Option<String>, SkillActivationSelectionError> {
+    ) -> Result<Option<SkillActivationMessage>, SkillActivationSelectionError> {
         Ok(self
             .messages_by_run
             .lock()
@@ -297,17 +283,21 @@ where
         &self,
         run_context: &LoopRunContext,
         message: &str,
+        capture_plan: bool,
     ) -> Result<Vec<HostSkillContextCandidate>, SkillActivationSelectionError> {
         let (plan, candidates) = self
             .resolve_activation_plan_with_candidates(run_context, message)
             .await?;
-        if self.should_capture_plan(&run_context.scope)? {
+        if capture_plan {
             self.plans_by_run
                 .lock()
                 .map_err(|_| SkillActivationSelectionError::Internal)?
                 .insert(
                     (run_context.scope.clone(), run_context.run_id),
-                    plan.clone(),
+                    CapturedSkillActivationPlan {
+                        plan: plan.clone(),
+                        run_context: run_context.clone(),
+                    },
                 );
         }
         if plan.selection.activations.is_empty() {
@@ -364,17 +354,6 @@ where
         let selection = select_skill_activations(message, &candidates, &self.config)?;
         let plan = activation_plan_for_candidates(selection);
         Ok((plan, candidates))
-    }
-
-    fn should_capture_plan(
-        &self,
-        scope: &TurnScope,
-    ) -> Result<bool, SkillActivationSelectionError> {
-        let mut counts = self
-            .plan_capture_counts_by_scope
-            .lock()
-            .map_err(|_| SkillActivationSelectionError::Internal)?;
-        Ok(decrement_capture_count(&mut counts, scope))
     }
 
     async fn load_activation_candidates(
@@ -458,21 +437,6 @@ where
     }
 }
 
-fn decrement_capture_count(counts: &mut HashMap<TurnScope, usize>, scope: &TurnScope) -> bool {
-    let Some(count) = counts.get_mut(scope) else {
-        return false;
-    };
-    if *count == 0 {
-        counts.remove(scope);
-        return false;
-    }
-    *count -= 1;
-    if *count == 0 {
-        counts.remove(scope);
-    }
-    true
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SkillActivationMessageKey {
     scope: TurnScope,
@@ -486,6 +450,12 @@ impl SkillActivationMessageKey {
             accepted_message_ref,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SkillActivationMessage {
+    text: String,
+    capture_plan: bool,
 }
 
 #[async_trait]
@@ -506,7 +476,7 @@ where
         else {
             return Ok(Vec::new());
         };
-        self.selected_candidates(run_context, &message)
+        self.selected_candidates(run_context, &message.text, message.capture_plan)
             .await
             .map_err(SkillActivationSelectionError::into_context_error)
     }
@@ -1352,7 +1322,7 @@ mod tests {
             .expect("record message");
 
         let error = selectable
-            .selected_candidates(&context, "/code-review this PR")
+            .selected_candidates(&context, "/code-review this PR", false)
             .await
             .expect_err("ambiguous activation should fail");
 
@@ -1469,7 +1439,7 @@ mod tests {
             )
             .expect("record message");
         let error = selectable
-            .selected_candidates(&context, "/alpha-helper /beta-helper")
+            .selected_candidates(&context, "/alpha-helper /beta-helper", false)
             .await
             .expect_err("explicit activation should honor active skill limit");
         assert_eq!(error, SkillActivationSelectionError::ContextBudgetExceeded);
@@ -1633,7 +1603,7 @@ mod tests {
         let context = run_context().await;
 
         let error = selectable
-            .selected_candidates(&context, "review")
+            .selected_candidates(&context, "review", false)
             .await
             .expect_err("list error should fail closed");
         assert_eq!(error, SkillActivationSelectionError::SourceUnavailable);
@@ -1649,7 +1619,7 @@ mod tests {
         let context = run_context().await;
 
         let error = selectable
-            .selected_candidates(&context, "review")
+            .selected_candidates(&context, "review", false)
             .await
             .expect_err("internal error should fail closed");
         assert_eq!(error, SkillActivationSelectionError::Internal);
@@ -1673,7 +1643,7 @@ mod tests {
         let context = run_context().await;
 
         let error = selectable
-            .selected_candidates(&context, "bad helper")
+            .selected_candidates(&context, "bad helper", false)
             .await
             .expect_err("invalid skill md should fail closed");
         assert_eq!(error, SkillActivationSelectionError::ParseFailed);
@@ -1694,7 +1664,7 @@ mod tests {
         let context = run_context().await;
 
         let error = selectable
-            .selected_candidates(&context, "review")
+            .selected_candidates(&context, "review", false)
             .await
             .expect_err("missing trust should fail closed");
         assert_eq!(error, SkillActivationSelectionError::TrustDataMissing);
@@ -1715,7 +1685,7 @@ mod tests {
         let context = run_context().await;
 
         let error = selectable
-            .selected_candidates(&context, "review")
+            .selected_candidates(&context, "review", false)
             .await
             .expect_err("missing visibility should fail closed");
         assert_eq!(error, SkillActivationSelectionError::VisibilityDataMissing);

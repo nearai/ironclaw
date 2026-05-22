@@ -1,9 +1,10 @@
 use ironclaw_first_party_extensions::{
     SkillActivationMode as FirstPartySkillActivationMode, SkillActivationPlan,
     SkillActivationRequest as FirstPartySkillActivationRequest,
-    SkillBundleAsset as FirstPartySkillBundleAsset, SkillBundleAssetReadError,
+    SkillBundleAsset as FirstPartySkillBundleAsset, SkillBundleAssetReadError, SkillExecutionPlan,
 };
-use ironclaw_loop_support::{SkillBundleId, SkillSourceKind};
+use ironclaw_loop_support::{SkillBundleId, SkillBundleSource, SkillSourceKind};
+use ironclaw_turns::run_profile::LoopRunContext;
 
 use super::{AssistantReply, RebornRuntimeError};
 
@@ -14,6 +15,7 @@ pub struct RebornSkillExecutionPlan {
     feedback: Vec<String>,
     active_bundles: Vec<RebornSkillBundle>,
     first_party_plan: SkillActivationPlan,
+    run_context: LoopRunContext,
 }
 
 impl RebornSkillExecutionPlan {
@@ -35,6 +37,10 @@ impl RebornSkillExecutionPlan {
 
     pub(super) fn first_party_plan(&self) -> &SkillActivationPlan {
         &self.first_party_plan
+    }
+
+    pub(super) fn run_context(&self) -> &LoopRunContext {
+        &self.run_context
     }
 }
 
@@ -134,25 +140,30 @@ impl RebornSkillAsset {
     }
 }
 
-impl From<SkillActivationPlan> for RebornSkillExecutionPlan {
-    fn from(value: SkillActivationPlan) -> Self {
-        let active_bundles = value
+impl RebornSkillExecutionPlan {
+    pub(super) fn from_first_party<S>(value: SkillExecutionPlan<S>) -> Self
+    where
+        S: SkillBundleSource + ?Sized,
+    {
+        let first_party_plan = value.activation_plan().clone();
+        let active_bundles = first_party_plan
             .activated_bundles()
             .iter()
             .map(RebornSkillBundle::from)
             .collect();
         Self {
-            activations: value
+            activations: first_party_plan
                 .selection
                 .activations
                 .iter()
                 .cloned()
                 .map(RebornSkillActivation::from)
                 .collect(),
-            rewritten_message: value.selection.rewritten_message.clone(),
-            feedback: value.selection.feedback.clone(),
+            rewritten_message: first_party_plan.selection.rewritten_message.clone(),
+            feedback: first_party_plan.selection.feedback.clone(),
             active_bundles,
-            first_party_plan: value,
+            first_party_plan,
+            run_context: value.run_context().clone(),
         }
     }
 }
