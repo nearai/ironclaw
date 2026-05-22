@@ -157,3 +157,178 @@ impl SkillBundleAssetReadError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use async_trait::async_trait;
+    use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId};
+    use ironclaw_loop_support::{SkillFilePath, SkillSourceKind};
+    use ironclaw_turns::{
+        TurnId, TurnRunId, TurnScope,
+        run_profile::{
+            InMemoryRunProfileResolver, LoopRunContext, RunProfileResolutionRequest,
+            RunProfileResolver,
+        },
+    };
+
+    use super::*;
+
+    struct StaticSkillBundleSource {
+        files: HashMap<(SkillSourceKind, String, String), Vec<u8>>,
+        errors: HashMap<(SkillSourceKind, String, String), SkillBundleSourceError>,
+    }
+
+    impl StaticSkillBundleSource {
+        fn new() -> Self {
+            Self {
+                files: HashMap::new(),
+                errors: HashMap::new(),
+            }
+        }
+
+        fn with_file(mut self, bundle_id: &SkillBundleId, path: &str, bytes: &[u8]) -> Self {
+            self.files.insert(
+                (
+                    bundle_id.source_kind(),
+                    bundle_id.name().to_string(),
+                    path.to_string(),
+                ),
+                bytes.to_vec(),
+            );
+            self
+        }
+
+        fn with_error(
+            mut self,
+            bundle_id: &SkillBundleId,
+            path: &str,
+            error: SkillBundleSourceError,
+        ) -> Self {
+            self.errors.insert(
+                (
+                    bundle_id.source_kind(),
+                    bundle_id.name().to_string(),
+                    path.to_string(),
+                ),
+                error,
+            );
+            self
+        }
+    }
+
+    #[async_trait]
+    impl SkillBundleSource for StaticSkillBundleSource {
+        async fn list_skill_bundles(
+            &self,
+            _run_context: &LoopRunContext,
+        ) -> Result<Vec<ironclaw_loop_support::SkillBundleDescriptor>, SkillBundleSourceError>
+        {
+            Ok(Vec::new())
+        }
+
+        async fn read_skill_bundle_file(
+            &self,
+            _run_context: &LoopRunContext,
+            bundle_id: &SkillBundleId,
+            path: &SkillFilePath,
+        ) -> Result<Vec<u8>, SkillBundleSourceError> {
+            let key = (
+                bundle_id.source_kind(),
+                bundle_id.name().to_string(),
+                path.as_str().to_string(),
+            );
+            if let Some(error) = self.errors.get(&key) {
+                return Err(error.clone());
+            }
+            self.files
+                .get(&key)
+                .cloned()
+                .ok_or(SkillBundleSourceError::FileNotFound)
+        }
+    }
+
+    async fn run_context() -> LoopRunContext {
+        let resolved = InMemoryRunProfileResolver::default()
+            .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
+            .await
+            .expect("resolve run profile");
+        LoopRunContext::new(
+            TurnScope::new(
+                TenantId::new("tenant-a").unwrap(),
+                Some(AgentId::new("agent-a").unwrap()),
+                Some(ProjectId::new("project-a").unwrap()),
+                ThreadId::new("thread-a").unwrap(),
+            ),
+            TurnId::new(),
+            TurnRunId::new(),
+            resolved,
+        )
+    }
+
+    #[tokio::test]
+    async fn read_file_rejects_inactive_bundle_before_source_read() {
+        let active = SkillBundleId::new(SkillSourceKind::User, "active-helper").unwrap();
+        let inactive = SkillBundleId::new(SkillSourceKind::User, "inactive-helper").unwrap();
+        let source = Arc::new(StaticSkillBundleSource::new().with_file(
+            &inactive,
+            "references/policy.md",
+            b"should not be exposed",
+        ));
+        let reader = SkillBundleAssetReader::new(source, vec![active.clone()]);
+        let active_bundles = reader.active_bundles().cloned().collect::<Vec<_>>();
+
+        assert_eq!(active_bundles, vec![active]);
+        let error = reader
+            .read_file(&run_context().await, &inactive, "references/policy.md")
+            .await
+            .expect_err("inactive bundle should be rejected");
+
+        assert_eq!(
+            error,
+            SkillBundleAssetReadError::InactiveSkill {
+                bundle_id: inactive
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_maps_active_bundle_source_errors() {
+        let active = SkillBundleId::new(SkillSourceKind::User, "active-helper").unwrap();
+        let source = Arc::new(
+            StaticSkillBundleSource::new()
+                .with_error(
+                    &active,
+                    "references/denied.md",
+                    SkillBundleSourceError::PermissionDenied,
+                )
+                .with_error(
+                    &active,
+                    "references/large.md",
+                    SkillBundleSourceError::ContentTooLarge,
+                ),
+        );
+        let reader = SkillBundleAssetReader::new(source, vec![active.clone()]);
+        let context = run_context().await;
+
+        for (path, expected) in [
+            ("references/missing.md", SkillBundleAssetReadError::NotFound),
+            (
+                "references/denied.md",
+                SkillBundleAssetReadError::PermissionDenied,
+            ),
+            (
+                "references/large.md",
+                SkillBundleAssetReadError::ContentTooLarge,
+            ),
+        ] {
+            let error = reader
+                .read_file(&context, &active, path)
+                .await
+                .expect_err("active bundle source error should be mapped");
+
+            assert_eq!(error, expected);
+        }
+    }
+}

@@ -25,6 +25,7 @@ pub const DEFAULT_MAX_ACTIVE_SKILLS: usize = 4;
 pub const DEFAULT_MAX_SKILL_CONTEXT_TOKENS: usize = 4000;
 
 const MAX_CONCURRENT_SKILL_ACTIVATION_LOADS: usize = 16;
+const MAX_ACTIVATION_CACHE_ENTRIES: usize = 1024;
 
 /// Typed request produced by first-party skill activation selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -381,13 +382,13 @@ where
         run_context: &LoopRunContext,
         descriptors: &[SkillBundleDescriptor],
     ) -> Result<Vec<ActivationCandidate>, SkillActivationSelectionError> {
-        let visible_descriptors = descriptors
-            .iter()
-            .filter(|descriptor| descriptor.visibility() == Some(&SkillVisibility::Visible))
-            .cloned()
-            .collect::<Vec<_>>();
-        stream::iter(visible_descriptors)
-            .map(|descriptor| async move {
+        stream::iter(0..descriptors.len())
+            .map(|index| async move {
+                let descriptor = &descriptors[index];
+                if descriptor.visibility() != Some(&SkillVisibility::Visible) {
+                    return Ok(None);
+                }
+                let descriptor = descriptor.clone();
                 let skill_md = self
                     .bundle_source
                     .read_skill_bundle_file(
@@ -398,8 +399,10 @@ where
                     .await
                     .map_err(skill_bundle_source_error_to_selection_error)?;
                 self.activation_candidate_from_skill_md(&descriptor, skill_md)
+                    .map(Some)
             })
             .buffered(MAX_CONCURRENT_SKILL_ACTIVATION_LOADS)
+            .try_filter_map(|candidate| async move { Ok(candidate) })
             .try_collect()
             .await
     }
@@ -410,6 +413,8 @@ where
         skill_md: Vec<u8>,
     ) -> Result<ActivationCandidate, SkillActivationSelectionError> {
         let cache_key = ActivationCandidateCacheKey::new(descriptor, &skill_md);
+        let skill_md =
+            String::from_utf8(skill_md).map_err(|_| SkillActivationSelectionError::ParseFailed)?;
         if let Some(cached) = self
             .activation_cache
             .lock()
@@ -420,23 +425,31 @@ where
             return Ok(ActivationCandidate {
                 descriptor: descriptor.clone(),
                 loaded: cached.loaded,
-                skill_md: cached.skill_md,
+                skill_md,
             });
         }
 
-        let skill_md =
-            String::from_utf8(skill_md).map_err(|_| SkillActivationSelectionError::ParseFailed)?;
         let loaded = loaded_skill_from_candidate(descriptor, &skill_md)?;
-        self.activation_cache
+        let mut cache = self
+            .activation_cache
             .lock()
-            .map_err(|_| SkillActivationSelectionError::Internal)?
-            .insert(
-                cache_key,
-                CachedActivationCandidate {
-                    loaded: loaded.clone(),
-                    skill_md: skill_md.clone(),
-                },
-            );
+            .map_err(|_| SkillActivationSelectionError::Internal)?;
+        if let Some(cached) = cache.get(&cache_key).cloned() {
+            return Ok(ActivationCandidate {
+                descriptor: descriptor.clone(),
+                loaded: cached.loaded,
+                skill_md,
+            });
+        }
+        if cache.len() >= MAX_ACTIVATION_CACHE_ENTRIES {
+            cache.clear();
+        }
+        cache.insert(
+            cache_key,
+            CachedActivationCandidate {
+                loaded: loaded.clone(),
+            },
+        );
         Ok(ActivationCandidate {
             descriptor: descriptor.clone(),
             loaded,
@@ -449,6 +462,10 @@ fn decrement_capture_count(counts: &mut HashMap<TurnScope, usize>, scope: &TurnS
     let Some(count) = counts.get_mut(scope) else {
         return false;
     };
+    if *count == 0 {
+        counts.remove(scope);
+        return false;
+    }
     *count -= 1;
     if *count == 0 {
         counts.remove(scope);
@@ -504,7 +521,6 @@ struct ActivationCandidate {
 #[derive(Debug, Clone)]
 struct CachedActivationCandidate {
     loaded: LoadedSkill,
-    skill_md: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1023,6 +1039,10 @@ mod tests {
     }
 
     async fn run_context() -> LoopRunContext {
+        run_context_for("thread-a", "msg:run-a").await
+    }
+
+    async fn run_context_for(thread_id: &str, accepted_message: &str) -> LoopRunContext {
         let resolved = InMemoryRunProfileResolver::default()
             .resolve_run_profile(RunProfileResolutionRequest::interactive_default())
             .await
@@ -1032,13 +1052,13 @@ mod tests {
                 TenantId::new("tenant-a").unwrap(),
                 Some(AgentId::new("agent-a").unwrap()),
                 Some(ProjectId::new("project-a").unwrap()),
-                ironclaw_host_api::ThreadId::new("thread-a").unwrap(),
+                ironclaw_host_api::ThreadId::new(thread_id).unwrap(),
             ),
             TurnId::new(),
             TurnRunId::new(),
             resolved,
         )
-        .with_accepted_message_ref(AcceptedMessageRef::new("msg:run-a").unwrap())
+        .with_accepted_message_ref(AcceptedMessageRef::new(accepted_message).unwrap())
         .with_actor(TurnActor::new(
             ironclaw_host_api::UserId::new("user-a").unwrap(),
         ))
@@ -1190,6 +1210,62 @@ mod tests {
         assert!(
             second_selected.is_empty(),
             "clearing one run must not remove another run's recorded message"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_accepted_message_removes_only_requested_message() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "code-review",
+            &skill_md(
+                "code-review",
+                "Review code",
+                &["review"],
+                "CODE_REVIEW_SENTINEL",
+            ),
+        )]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let first_context = run_context().await;
+        let second_context = run_context_for("thread-a", "msg:run-b").await;
+
+        selectable
+            .record_user_message(
+                first_context.scope.clone(),
+                accepted_message_ref(&first_context),
+                "please review this PR",
+            )
+            .expect("record first message");
+        selectable
+            .record_user_message(
+                second_context.scope.clone(),
+                accepted_message_ref(&second_context),
+                "please review this PR",
+            )
+            .expect("record second message");
+
+        selectable
+            .clear_accepted_message(&first_context.scope, &accepted_message_ref(&first_context))
+            .expect("clear first message");
+
+        let first_selected = selectable
+            .load_skill_context_candidates(&first_context)
+            .await
+            .expect("first selection succeeds");
+        assert!(
+            first_selected.is_empty(),
+            "cleared message should not activate skills"
+        );
+
+        let second_selected = selectable
+            .load_skill_context_candidates(&second_context)
+            .await
+            .expect("second selection succeeds");
+        assert_eq!(
+            second_selected.len(),
+            1,
+            "clearing one accepted message must not remove another message"
         );
     }
 
@@ -1518,6 +1594,35 @@ mod tests {
         );
     }
 
+    #[test]
+    fn activation_cache_is_bounded_under_skill_churn() {
+        let source = Arc::new(StaticSkillBundleSource::new(Vec::new()));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+
+        for index in 0..=MAX_ACTIVATION_CACHE_ENTRIES {
+            let name = format!("skill-{index}");
+            let descriptor = SkillBundleDescriptor::new(
+                SkillBundleId::new(SkillSourceKind::User, &name).unwrap(),
+                Some(SkillTrust::Trusted),
+                Some(SkillVisibility::Visible),
+            );
+            selectable
+                .activation_candidate_from_skill_md(
+                    &descriptor,
+                    skill_md(&name, "Review code", &["review"], "CODE_REVIEW_SENTINEL")
+                        .into_bytes(),
+                )
+                .expect("skill parses");
+        }
+
+        let cache_len = selectable.activation_cache.lock().unwrap().len();
+        assert!(
+            cache_len <= MAX_ACTIVATION_CACHE_ENTRIES,
+            "activation cache must stay bounded"
+        );
+    }
+
     #[tokio::test]
     async fn selector_reports_source_unavailable_on_bundle_list_error() {
         let source = Arc::new(ErroringListSkillBundleSource::new(
@@ -1614,6 +1719,200 @@ mod tests {
             .await
             .expect_err("missing visibility should fail closed");
         assert_eq!(error, SkillActivationSelectionError::VisibilityDataMissing);
+    }
+
+    #[tokio::test]
+    async fn plan_capture_lifecycle_captures_cancels_and_consumes_once() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "code-review",
+            &skill_md(
+                "code-review",
+                "Review code",
+                &["review"],
+                "CODE_REVIEW_SENTINEL",
+            ),
+        )]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let context = run_context().await;
+
+        selectable
+            .capture_next_activation_plan(context.scope.clone())
+            .expect("capture next plan");
+        selectable
+            .record_user_message(
+                context.scope.clone(),
+                accepted_message_ref(&context),
+                "please review this",
+            )
+            .expect("record message");
+        let selected = selectable
+            .load_skill_context_candidates(&context)
+            .await
+            .expect("selection succeeds");
+        assert_eq!(selected.len(), 1);
+        let plan = selectable
+            .take_activation_plan_for_run(&context.scope, context.run_id)
+            .expect("take captured plan")
+            .expect("plan should be captured");
+        assert_eq!(plan.selection.activations.len(), 1);
+        assert!(
+            selectable
+                .take_activation_plan_for_run(&context.scope, context.run_id)
+                .expect("take is repeatable")
+                .is_none(),
+            "captured plans are single-consumer"
+        );
+
+        let cancelled = run_context_for("thread-a", "msg:cancelled").await;
+        selectable
+            .capture_next_activation_plan(cancelled.scope.clone())
+            .expect("capture before cancel");
+        selectable
+            .cancel_next_activation_plan_capture(&cancelled.scope)
+            .expect("cancel capture");
+        selectable
+            .cancel_next_activation_plan_capture(&cancelled.scope)
+            .expect("extra cancel must not underflow");
+        selectable
+            .record_user_message(
+                cancelled.scope.clone(),
+                accepted_message_ref(&cancelled),
+                "please review this",
+            )
+            .expect("record cancelled message");
+        let selected = selectable
+            .load_skill_context_candidates(&cancelled)
+            .await
+            .expect("cancelled selection succeeds");
+        assert_eq!(selected.len(), 1);
+        assert!(
+            selectable
+                .take_activation_plan_for_run(&cancelled.scope, cancelled.run_id)
+                .expect("take after cancel")
+                .is_none(),
+            "cancelled capture should not store a plan"
+        );
+
+        let partially_cancelled = run_context_for("thread-a", "msg:partial-cancel").await;
+        selectable
+            .capture_next_activation_plan(partially_cancelled.scope.clone())
+            .expect("first capture");
+        selectable
+            .capture_next_activation_plan(partially_cancelled.scope.clone())
+            .expect("second capture");
+        selectable
+            .cancel_next_activation_plan_capture(&partially_cancelled.scope)
+            .expect("cancel one capture");
+        selectable
+            .record_user_message(
+                partially_cancelled.scope.clone(),
+                accepted_message_ref(&partially_cancelled),
+                "please review this",
+            )
+            .expect("record partially cancelled message");
+        selectable
+            .load_skill_context_candidates(&partially_cancelled)
+            .await
+            .expect("partial cancel selection succeeds");
+        assert!(
+            selectable
+                .take_activation_plan_for_run(
+                    &partially_cancelled.scope,
+                    partially_cancelled.run_id
+                )
+                .expect("take partial-cancel plan")
+                .is_some(),
+            "one remaining capture should store the next plan"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_scope_removes_messages_pending_captures_and_captured_plans() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![(
+            SkillSourceKind::User,
+            "code-review",
+            &skill_md(
+                "code-review",
+                "Review code",
+                &["review"],
+                "CODE_REVIEW_SENTINEL",
+            ),
+        )]));
+        let selectable =
+            SelectableSkillContextSource::new(source, SkillActivationSelectorConfig::default());
+        let captured_a = run_context_for("thread-a", "msg:a-captured").await;
+        let pending_a = run_context_for("thread-a", "msg:a-pending").await;
+        let captured_b = run_context_for("thread-b", "msg:b-captured").await;
+
+        selectable
+            .capture_next_activation_plan(captured_a.scope.clone())
+            .expect("capture scope a");
+        selectable
+            .record_user_message(
+                captured_a.scope.clone(),
+                accepted_message_ref(&captured_a),
+                "please review this",
+            )
+            .expect("record captured scope a message");
+        selectable
+            .load_skill_context_candidates(&captured_a)
+            .await
+            .expect("scope a selection succeeds");
+
+        selectable
+            .capture_next_activation_plan(pending_a.scope.clone())
+            .expect("capture pending scope a");
+        selectable
+            .record_user_message(
+                pending_a.scope.clone(),
+                accepted_message_ref(&pending_a),
+                "please review this",
+            )
+            .expect("record pending scope a message");
+
+        selectable
+            .capture_next_activation_plan(captured_b.scope.clone())
+            .expect("capture scope b");
+        selectable
+            .record_user_message(
+                captured_b.scope.clone(),
+                accepted_message_ref(&captured_b),
+                "please review this",
+            )
+            .expect("record captured scope b message");
+        selectable
+            .load_skill_context_candidates(&captured_b)
+            .await
+            .expect("scope b selection succeeds");
+
+        selectable
+            .clear_scope(&captured_a.scope)
+            .expect("clear scope a");
+
+        assert!(
+            selectable
+                .take_activation_plan_for_run(&captured_a.scope, captured_a.run_id)
+                .expect("take cleared scope a plan")
+                .is_none(),
+            "clear_scope removes captured plans for that scope"
+        );
+        assert!(
+            selectable
+                .load_skill_context_candidates(&pending_a)
+                .await
+                .expect("pending scope a selection after clear succeeds")
+                .is_empty(),
+            "clear_scope removes recorded messages and pending captures"
+        );
+        assert!(
+            selectable
+                .take_activation_plan_for_run(&captured_b.scope, captured_b.run_id)
+                .expect("take scope b plan")
+                .is_some(),
+            "clear_scope must not remove another scope's plan"
+        );
     }
 
     #[test]

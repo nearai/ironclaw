@@ -6,7 +6,7 @@ use ironclaw_host_api::runtime_policy::{
 };
 use ironclaw_reborn_composition::{
     PollSettings, RebornBuildInput, RebornRuntimeError, RebornRuntimeIdentity, RebornRuntimeInput,
-    TurnRunnerSettings, build_reborn_runtime,
+    RebornSkillSourceKind, TurnRunnerSettings, build_reborn_runtime,
 };
 use ironclaw_turns::TurnStatus;
 use tokio_util::sync::CancellationToken;
@@ -131,6 +131,79 @@ async fn send_user_message_with_cancellation_cancels_submitted_run() {
     assert!(matches!(error, RebornRuntimeError::OperationCancelled));
 
     runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn skill_execution_adapter_prepares_filesystem_bundles_end_to_end() {
+    let root = tempfile::tempdir().unwrap();
+    let storage_root = root.path().join("local-dev");
+    std::fs::create_dir_all(storage_root.join("skills/code-review/references")).unwrap();
+    std::fs::write(
+        storage_root.join("skills/code-review/SKILL.md"),
+        skill_md(
+            "code-review",
+            "review",
+            "Use filesystem-backed review guidance.",
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        storage_root.join("skills/code-review/references/policy.md"),
+        "filesystem policy",
+    )
+    .unwrap();
+    let input = RebornRuntimeInput::from_services(
+        RebornBuildInput::local_dev("runtime-skill-execution-owner", storage_root)
+            .with_runtime_policy(local_dev_runtime_policy()),
+    )
+    .with_identity(RebornRuntimeIdentity {
+        tenant_id: "runtime-skill-execution-tenant".to_string(),
+        agent_id: "runtime-skill-execution-agent".to_string(),
+        source_binding_id: "runtime-skill-execution-source".to_string(),
+        reply_target_binding_id: "runtime-skill-execution-reply".to_string(),
+    })
+    .with_poll_settings(PollSettings {
+        interval: Duration::from_millis(10),
+        max_total: Duration::from_secs(3),
+    });
+
+    let runtime = build_reborn_runtime(input).await.unwrap();
+    let conversation = runtime.new_conversation().await.unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        runtime.execute_skill_message(&conversation, "please review this"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(result.plan.activations().len(), 1);
+    assert_eq!(result.plan.activations()[0].name, "code-review");
+    assert_eq!(result.plan.active_bundles().len(), 1);
+    assert_eq!(
+        result.plan.active_bundles()[0].source,
+        RebornSkillSourceKind::User
+    );
+    assert_eq!(result.plan.active_bundles()[0].skill_name, "code-review");
+
+    let asset = runtime
+        .read_skill_execution_asset(
+            &conversation,
+            &result.plan,
+            &result.plan.activations()[0],
+            "references/policy.md",
+        )
+        .await
+        .unwrap();
+    assert_eq!(asset.into_utf8().unwrap(), "filesystem policy");
+
+    runtime.shutdown().await.unwrap();
+}
+
+fn skill_md(name: &str, keyword: &str, prompt: &str) -> String {
+    format!(
+        "---\nname: {name}\ndescription: {name} description\nactivation:\n  keywords: [\"{keyword}\"]\n---\n\n{prompt}"
+    )
 }
 
 fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
