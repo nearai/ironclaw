@@ -34,6 +34,28 @@ pub enum HookPredicateSpec {
     },
 }
 
+impl HookPredicateSpec {
+    /// True when evaluating this spec requires the capability input
+    /// (`ctx.arguments`) to be resolved. Used by the dispatch middleware to
+    /// skip eager input resolution when no active predicate would read it
+    /// — large or expensive inputs (e.g. file blobs) are never materialized
+    /// for purely structural / rate-limited specs.
+    ///
+    /// Today only `RateOrValueCap` with `ValueOrRateBound::NumericSum`
+    /// reads the input; other variants gate on capability name / count /
+    /// time only. The match is exhaustive (no wildcard) so adding a new
+    /// input-reading bound or spec variant in the future forces a
+    /// compile error here.
+    pub fn needs_input(&self) -> bool {
+        match self {
+            HookPredicateSpec::DenyCapability { .. } | HookPredicateSpec::PauseApproval { .. } => {
+                false
+            }
+            HookPredicateSpec::RateOrValueCap { bound, .. } => bound.needs_input(),
+        }
+    }
+}
+
 /// A predicate over the capability invocation context.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -69,6 +91,19 @@ pub enum ValueOrRateBound {
         field: String,
         window: String,
     },
+}
+
+impl ValueOrRateBound {
+    /// True when this bound's evaluation reads a value extracted from the
+    /// capability input. `InvocationCount` is purely a counter and never
+    /// needs the input; `NumericSum` sums a field path inside the input
+    /// and does.
+    pub fn needs_input(&self) -> bool {
+        match self {
+            ValueOrRateBound::InvocationCount { .. } => false,
+            ValueOrRateBound::NumericSum { .. } => true,
+        }
+    }
 }
 
 /// What to do when the bound is exceeded.

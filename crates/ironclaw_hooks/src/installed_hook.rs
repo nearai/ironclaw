@@ -41,6 +41,14 @@ impl PredicateBackedBeforeCapabilityHook {
 
 #[async_trait]
 impl RestrictedBeforeCapabilityHook for PredicateBackedBeforeCapabilityHook {
+    fn needs_input(&self) -> bool {
+        // Predicate-backed hooks read inputs only when their spec does
+        // (currently `NumericSum`). Delegating here lets the dispatch
+        // middleware skip eager input resolution when every active
+        // predicate-backed hook is purely structural / rate-limited.
+        self.spec.needs_input()
+    }
+
     async fn evaluate(&self, ctx: &BeforeCapabilityHookContext, sink: &mut dyn RestrictedGateSink) {
         // Sinks take `&'static str` reasons to keep adversarial format!-built
         // strings out of the seam. Predicate reasons come from the manifest

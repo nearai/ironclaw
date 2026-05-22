@@ -31,6 +31,27 @@ use ironclaw_turns::run_profile::CapabilityInvocation;
 #[async_trait]
 pub trait CapabilityInputResolver: Send + Sync {
     async fn resolve(&self, invocation: &CapabilityInvocation) -> Option<serde_json::Value>;
+
+    /// Cheap streaming size probe consulted by the middleware before
+    /// [`Self::resolve`] when a hook would actually read the input.
+    /// Implementations backed by a workspace blob or other handle-shaped
+    /// source should report the underlying byte length here without
+    /// materializing the value; sources that already hold the value
+    /// in memory may return `None`.
+    ///
+    /// When the returned size exceeds the middleware's
+    /// `MAX_PREDICATE_INPUT_BYTES` cap, the middleware fails closed
+    /// (treats the input as unresolved) and skips [`Self::resolve`]
+    /// entirely — protecting hosts from fatal blob materialization for
+    /// inputs that predicates were not going to read anyway, and
+    /// bounding the cost when predicates do need to inspect them.
+    ///
+    /// Default returns `None` (unknown). The middleware applies a
+    /// post-materialization byte check as a defense-in-depth backstop
+    /// when the size hint is unavailable.
+    async fn size_hint(&self, _invocation: &CapabilityInvocation) -> Option<u64> {
+        None
+    }
 }
 
 /// Default resolver that never resolves arguments. Used when middleware

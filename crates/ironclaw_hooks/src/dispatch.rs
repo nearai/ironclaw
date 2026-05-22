@@ -53,6 +53,18 @@ pub(crate) enum BeforeCapabilityHookImpl {
     Restricted(Box<dyn RestrictedBeforeCapabilityHook>),
 }
 
+impl BeforeCapabilityHookImpl {
+    /// Delegates to the inner hook's `needs_input()`. Used by the
+    /// dispatch middleware to skip eager capability-input resolution when
+    /// no active hook will consult the arguments.
+    pub(crate) fn needs_input(&self) -> bool {
+        match self {
+            BeforeCapabilityHookImpl::Privileged(h) => h.needs_input(),
+            BeforeCapabilityHookImpl::Restricted(h) => h.needs_input(),
+        }
+    }
+}
+
 /// Tier-tagged trait object for a `before_prompt` mutator hook. Same trust
 /// rationale as [`BeforeCapabilityHookImpl`] — sealed to this crate.
 pub(crate) enum BeforePromptHookImpl {
@@ -208,6 +220,44 @@ impl HookDispatcher {
     #[doc(hidden)]
     pub fn registry_for_test(&self) -> &Mutex<HookRegistry> {
         &self.registry
+    }
+
+    /// Returns `true` when at least one active (non-poisoned)
+    /// `BeforeCapability` hook would read the capability input
+    /// (`ctx.arguments`) during dispatch, given the resolved `provider`
+    /// for the invocation.
+    ///
+    /// Used by the dispatch middleware as a lazy-resolution probe:
+    /// expensive input materialization is skipped entirely when this
+    /// returns `false`, which is the common case for purely rate-limited
+    /// or name-matched specs (review of PR #3573).
+    ///
+    /// Scope filtering matches the rule the dispatcher itself applies in
+    /// [`Self::dispatch_before_capability`]: a binding whose scope
+    /// rejects the current provider is inert for the invocation and is
+    /// not counted toward the input-needed decision. Bindings with no
+    /// installed impl are also skipped — they would short-circuit as a
+    /// dispatch-time protocol violation and never reach `evaluate`.
+    pub fn before_capability_needs_input(
+        &self,
+        provider: Option<&ironclaw_host_api::ExtensionId>,
+    ) -> bool {
+        let bindings = self.active_bindings_snapshot(HookPointSpec::BeforeCapability);
+        for binding in bindings {
+            if !binding
+                .scope
+                .permits(binding.owning_extension.as_ref(), provider)
+            {
+                continue;
+            }
+            let Some(impl_) = self.before_capability.get(&binding.hook_id) else {
+                continue;
+            };
+            if impl_.needs_input() {
+                return true;
+            }
+        }
+        false
     }
 
     /// Read-only snapshot of currently-active (not poisoned) bindings at a
