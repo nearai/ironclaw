@@ -4482,6 +4482,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ironclaw_native_extensions"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ironclaw_extensions",
+ "ironclaw_host_api",
+ "ironclaw_host_runtime",
+ "ironclaw_network",
+ "ironclaw_oauth",
+ "ironclaw_secrets",
+ "secrecy",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "ironclaw_network"
 version = "0.1.0"
 dependencies = [

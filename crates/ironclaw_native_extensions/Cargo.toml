@@ -1,0 +1,24 @@
+[package]
+name = "ironclaw_native_extensions"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+ironclaw_extensions = { path = "../ironclaw_extensions" }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_host_runtime = { path = "../ironclaw_host_runtime" }
+ironclaw_network = { path = "../ironclaw_network" }
+ironclaw_oauth = { path = "../ironclaw_oauth" }
+ironclaw_secrets = { path = "../ironclaw_secrets" }
+secrecy = "0.10"
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt"] }
+url = "2"
+
+[features]
+default = ["google"]
+google = []

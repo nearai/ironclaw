@@ -638,6 +638,15 @@ impl SecretStore for MemorySecretStore {
             }))
     }
 
+    async fn delete(
+        &self,
+        _scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<(), SecretStoreError> {
+        self.values.lock().unwrap().remove(handle.as_str());
+        Ok(())
+    }
+
     async fn lease_once(
         &self,
         scope: &ResourceScope,

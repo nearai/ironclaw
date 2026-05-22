@@ -278,6 +278,21 @@ where
             .map_err(fs_to_secret_store_error)
     }
 
+    async fn delete_secret(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<(), SecretStoreError> {
+        if self.read_secret(scope, handle).await?.is_none() {
+            return Ok(());
+        }
+        let path = secret_path(scope, handle)?;
+        self.filesystem
+            .delete(scope, &path)
+            .await
+            .map_err(fs_to_secret_store_error)
+    }
+
     async fn write_lease(&self, lease: &StoredLease) -> Result<(), SecretStoreError> {
         let path = lease_path(&lease.scope, lease.lease_id)?;
         let body = serialize_secret(lease)?;
@@ -364,6 +379,14 @@ where
                 scope: stored.scope,
                 handle: stored.handle,
             }))
+    }
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<(), SecretStoreError> {
+        self.delete_secret(scope, handle).await
     }
 
     async fn lease_once(

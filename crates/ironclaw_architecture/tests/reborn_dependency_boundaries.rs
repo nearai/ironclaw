@@ -93,6 +93,35 @@ fn reborn_crate_dependency_boundaries_hold() {
 }
 
 #[test]
+fn reborn_native_extension_provider_boundaries_hold() {
+    let metadata = cargo_metadata();
+    let packages = metadata["packages"]
+        .as_array()
+        .expect("cargo metadata must include packages");
+    let dependencies = packages
+        .iter()
+        .filter_map(package_dependencies)
+        .collect::<HashMap<_, _>>();
+
+    for (crate_name, deps) in &dependencies {
+        if crate_name == "ironclaw_native_extensions" || crate_name == "ironclaw_reborn_composition"
+        {
+            continue;
+        }
+        assert!(
+            !deps
+                .iter()
+                .any(|dependency| dependency == "ironclaw_native_extensions"),
+            "{crate_name} must not depend on ironclaw_native_extensions; composition is the only allowed consumer"
+        );
+    }
+
+    let root = workspace_root();
+    let native_src = root.join("crates/ironclaw_native_extensions/src");
+    assert_provider_isolation(&native_src, "google", &["notion", "slack", "composio"]);
+}
+
+#[test]
 fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     let metadata = cargo_metadata();
     let packages = metadata["packages"]
@@ -1708,6 +1737,54 @@ fn boundary_rules() -> Vec<BoundaryRule> {
             forbidden: vec!["ironclaw_oauth"],
         },
         BoundaryRule {
+            crate_name: "ironclaw_native_extensions",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_agent_loop",
+                "ironclaw_approvals",
+                "ironclaw_architecture",
+                "ironclaw_authorization",
+                "ironclaw_common",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_event_projections",
+                "ironclaw_events",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_product_adapters",
+                "ironclaw_product_workflow",
+                "ironclaw_product_workflow_storage",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_composition",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_skills",
+                "ironclaw_telegram_v2_adapter",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+                "ironclaw_wasm_sandbox_core",
+                "ironclaw_webui_v2",
+            ],
+        },
+        BoundaryRule {
             crate_name: "ironclaw_oauth",
             forbidden: vec![
                 "ironclaw",
@@ -1960,6 +2037,43 @@ fn assert_no_normal_workspace_deps<'a>(
             !actual.iter().any(|dependency| dependency == forbidden),
             "{crate_name} must not have a normal dependency on {forbidden}; actual normal ironclaw deps: {actual:?}"
         );
+    }
+}
+
+fn assert_provider_isolation(src_root: &std::path::Path, provider: &str, siblings: &[&str]) {
+    let provider_dir = src_root.join(provider);
+    if !provider_dir.exists() {
+        return;
+    }
+    let mut stack = vec![provider_dir];
+    while let Some(path) = stack.pop() {
+        let entries = std::fs::read_dir(&path)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+        for entry in entries {
+            let path = entry.expect("dir entry must be readable").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+            for sibling in siblings {
+                for pattern in [
+                    format!("crate::{sibling}::"),
+                    format!("super::{sibling}::"),
+                    format!("ironclaw_native_extensions::{sibling}::"),
+                ] {
+                    assert!(
+                        !source.contains(&pattern),
+                        "{} must not import sibling provider module via `{pattern}`",
+                        path.display()
+                    );
+                }
+            }
+        }
     }
 }
 

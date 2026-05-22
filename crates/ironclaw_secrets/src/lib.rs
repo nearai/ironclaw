@@ -1004,6 +1004,13 @@ pub trait SecretStore: Send + Sync {
         handle: &SecretHandle,
     ) -> Result<Option<SecretMetadata>, SecretStoreError>;
 
+    /// Deletes a secret if present. Missing secrets are treated as already deleted.
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<(), SecretStoreError>;
+
     /// Creates a one-shot lease for later secret consumption.
     async fn lease_once(
         &self,
@@ -1181,6 +1188,18 @@ where
             Err(SecretError::NotFound(_)) => Ok(None),
             Err(error) => Err(map_legacy_secret_error(error)),
         }
+    }
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<(), SecretStoreError> {
+        self.inner
+            .delete(&scoped_legacy_user_id(scope), handle.as_str())
+            .await
+            .map(|_| ())
+            .map_err(map_legacy_secret_error)
     }
 
     async fn lease_once(
@@ -1388,6 +1407,14 @@ impl SecretStore for InMemorySecretStore {
         handle: &SecretHandle,
     ) -> Result<Option<SecretMetadata>, SecretStoreError> {
         self.inner.metadata(scope, handle).await
+    }
+
+    async fn delete(
+        &self,
+        scope: &ResourceScope,
+        handle: &SecretHandle,
+    ) -> Result<(), SecretStoreError> {
+        self.inner.delete(scope, handle).await
     }
 
     async fn lease_once(
