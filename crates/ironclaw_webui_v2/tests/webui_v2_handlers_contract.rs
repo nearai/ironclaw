@@ -865,16 +865,14 @@ where
     buf
 }
 
-// Regression for the "SSE projection payload shape is untested" review
-// (Medium). Pins the *wire* contract the browser sees, not just the
-// handler being called: each envelope must emit a `projection` event
-// with the JSON-serialized projection cursor as the SSE `id` and the
-// JSON-serialized envelope as `data`. Also asserts that the next poll
-// carries the *latest* cursor in `after_cursor`, so a future refactor
-// that loses cursor advancement (e.g. dropping the loop's bookkeeping)
-// breaks loudly.
+// Pins the *wire* contract the browser sees, not just the handler being
+// called: each envelope must emit a typed WebChat v2 event with the
+// JSON-serialized projection cursor as the SSE `id` and the redacted
+// browser frame as `data`. Also asserts that the next poll carries the
+// *latest* cursor in `after_cursor`, so a future refactor that loses
+// cursor advancement breaks loudly.
 #[tokio::test]
-async fn stream_events_emits_projection_events_with_cursor_ids() {
+async fn stream_events_emits_typed_browser_events_with_cursor_ids() {
     let services = Arc::new(StubServices::default());
 
     let envelope_a = make_projection_envelope("cursor:a", "hello");
@@ -942,22 +940,31 @@ async fn stream_events_emits_projection_events_with_cursor_ids() {
     let cursor_b_json =
         serde_json::to_string(envelope_b.projection_cursor()).expect("cursor-b json");
 
-    assert_eq!(events[0].event.as_deref(), Some("projection"));
+    assert_eq!(events[0].event.as_deref(), Some("final_reply"));
     assert_eq!(events[0].id.as_deref(), Some(cursor_a_json.as_str()));
-    let envelope_a_json: Value =
-        serde_json::from_str(events[0].data.as_deref().expect("data")).expect("envelope a json");
-    let expected_a: Value = serde_json::to_value(&envelope_a).expect("envelope a to value");
-    assert_eq!(
-        envelope_a_json, expected_a,
-        "envelope wire shape must match"
+    let event_a_json: Value =
+        serde_json::from_str(events[0].data.as_deref().expect("data")).expect("event a json");
+    assert_eq!(event_a_json["cursor"], "cursor:a");
+    assert_eq!(event_a_json["type"], "final_reply");
+    assert_eq!(event_a_json["reply"]["text"], "hello");
+    assert!(event_a_json["reply"]["turn_run_id"].is_string());
+    assert!(event_a_json["reply"]["generated_at"].is_string());
+    assert!(
+        event_a_json.get("target").is_none(),
+        "browser event frame must not expose adapter target metadata"
+    );
+    assert!(
+        event_a_json.get("delivery_attempt_id").is_none(),
+        "browser event frame must not expose delivery metadata"
     );
 
-    assert_eq!(events[1].event.as_deref(), Some("projection"));
+    assert_eq!(events[1].event.as_deref(), Some("final_reply"));
     assert_eq!(events[1].id.as_deref(), Some(cursor_b_json.as_str()));
-    let envelope_b_json: Value =
-        serde_json::from_str(events[1].data.as_deref().expect("data")).expect("envelope b json");
-    let expected_b: Value = serde_json::to_value(&envelope_b).expect("envelope b to value");
-    assert_eq!(envelope_b_json, expected_b);
+    let event_b_json: Value =
+        serde_json::from_str(events[1].data.as_deref().expect("data")).expect("event b json");
+    assert_eq!(event_b_json["cursor"], "cursor:b");
+    assert_eq!(event_b_json["type"], "final_reply");
+    assert_eq!(event_b_json["reply"]["text"], "world");
 
     let calls = services.stream_events_calls.lock().expect("lock").clone();
     assert!(
