@@ -113,6 +113,11 @@ mod tests {
 
         assert!(loaded.skills().is_none());
         assert!(loaded.skill_context_source().is_none());
+        assert!(
+            loaded
+                .skill_execution_adapter(SkillActivationSelectorConfig::default())
+                .is_none()
+        );
     }
 
     #[test]
@@ -121,5 +126,10 @@ mod tests {
 
         assert!(loaded.skills().is_some());
         assert!(loaded.skill_context_source().is_some());
+        assert!(
+            loaded
+                .skill_execution_adapter(SkillActivationSelectorConfig::default())
+                .is_some()
+        );
     }
 }

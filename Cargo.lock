@@ -4311,6 +4311,7 @@ name = "ironclaw_first_party_extensions"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "ironclaw_filesystem",
  "ironclaw_host_api",
  "ironclaw_loop_support",

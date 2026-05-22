@@ -97,14 +97,18 @@ where
         activation: &SkillActivationRequest,
         path: impl AsRef<str>,
     ) -> Result<SkillBundleAsset, SkillBundleAssetReadError> {
-        let source =
-            activation
-                .source
-                .ok_or_else(|| SkillBundleAssetReadError::UnresolvedActivation {
-                    name: activation.name.clone(),
+        let bundle_id = match &activation.bundle_id {
+            Some(bundle_id) => bundle_id.clone(),
+            None => {
+                let source = activation.source.ok_or_else(|| {
+                    SkillBundleAssetReadError::UnresolvedActivation {
+                        name: activation.name.clone(),
+                    }
                 })?;
-        let bundle_id = SkillBundleId::new(source, &activation.name)
-            .map_err(SkillBundleAssetReadError::from_source)?;
+                SkillBundleId::new(source, &activation.name)
+                    .map_err(SkillBundleAssetReadError::from_source)?
+            }
+        };
         self.read_file(run_context, &bundle_id, path).await
     }
 }

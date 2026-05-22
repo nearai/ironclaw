@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use ironclaw_loop_support::{SkillBundleId, SkillBundleSource};
 use ironclaw_turns::run_profile::LoopRunContext;
+use ironclaw_turns::{TurnRunId, TurnScope};
 use thiserror::Error;
 
 use super::{
@@ -14,7 +15,7 @@ use super::{
 /// This adapter performs deterministic activation selection and grants
 /// bundle-relative asset reads for selected skills only. It intentionally does
 /// not execute scripts; future script support should go through
-/// `ironclaw_process`.
+/// `ironclaw_processes`.
 #[derive(Debug)]
 pub struct SkillExecutionAdapter<S>
 where
@@ -33,6 +34,22 @@ where
 
     pub fn selector(&self) -> &Arc<SelectableSkillContextSource<S>> {
         &self.selector
+    }
+
+    pub fn capture_next_activation_plan(&self, scope: TurnScope) {
+        self.selector.capture_next_activation_plan(scope);
+    }
+
+    pub fn cancel_next_activation_plan_capture(&self, scope: &TurnScope) {
+        self.selector.cancel_next_activation_plan_capture(scope);
+    }
+
+    pub fn take_activation_plan_for_run(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Option<super::SkillActivationPlan> {
+        self.selector.take_activation_plan_for_run(scope, run_id)
     }
 
     pub async fn prepare(
@@ -114,6 +131,7 @@ mod tests {
     struct StaticSkillBundleSource {
         descriptors: Vec<SkillBundleDescriptor>,
         files: HashMap<(SkillSourceKind, String, String), Vec<u8>>,
+        errors: HashMap<(SkillSourceKind, String, String), SkillBundleSourceError>,
     }
 
     struct StaticSkillSpec<'a> {
@@ -147,7 +165,23 @@ mod tests {
                     );
                 }
             }
-            Self { descriptors, files }
+            Self {
+                descriptors,
+                files,
+                errors: HashMap::new(),
+            }
+        }
+
+        fn with_error(
+            mut self,
+            source: SkillSourceKind,
+            name: &str,
+            path: &str,
+            error: SkillBundleSourceError,
+        ) -> Self {
+            self.errors
+                .insert((source, name.to_string(), path.to_string()), error);
+            self
         }
     }
 
@@ -166,6 +200,13 @@ mod tests {
             bundle_id: &SkillBundleId,
             path: &SkillFilePath,
         ) -> Result<Vec<u8>, SkillBundleSourceError> {
+            if let Some(error) = self.errors.get(&(
+                bundle_id.source_kind(),
+                bundle_id.name().to_string(),
+                path.as_str().to_string(),
+            )) {
+                return Err(error.clone());
+            }
             self.files
                 .get(&(
                     bundle_id.source_kind(),
@@ -245,6 +286,7 @@ mod tests {
         let inactive = SkillActivationRequest {
             name: "docs".to_string(),
             source: Some(SkillSourceKind::User),
+            bundle_id: Some(SkillBundleId::new(SkillSourceKind::User, "docs").unwrap()),
             mode: SkillActivationMode::ExplicitMention,
         };
         let error = plan
@@ -281,5 +323,149 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error, SkillBundleAssetReadError::InvalidPath);
+    }
+
+    #[tokio::test]
+    async fn asset_reader_rejects_unresolved_activation() {
+        let source = Arc::new(StaticSkillBundleSource::new(vec![StaticSkillSpec {
+            source: SkillSourceKind::User,
+            name: "code-review",
+            skill_md: &skill_md("code-review", "review", "Review code."),
+            extra_files: vec![("references/policy.md", "review policy")],
+        }]));
+        let selector = Arc::new(SelectableSkillContextSource::new(
+            source,
+            SkillActivationSelectorConfig::default(),
+        ));
+        let adapter = SkillExecutionAdapter::new(selector);
+        let context = run_context().await;
+        let plan = adapter.prepare(&context, "$code-review").await.unwrap();
+        let unresolved = SkillActivationRequest {
+            name: "code-review".to_string(),
+            source: None,
+            bundle_id: None,
+            mode: SkillActivationMode::ExplicitMention,
+        };
+
+        let error = plan
+            .asset_reader()
+            .read_file_for_activation(&context, &unresolved, "references/policy.md")
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            SkillBundleAssetReadError::UnresolvedActivation {
+                name: "code-review".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn asset_reader_maps_active_bundle_source_errors() {
+        let source = Arc::new(
+            StaticSkillBundleSource::new(vec![StaticSkillSpec {
+                source: SkillSourceKind::User,
+                name: "code-review",
+                skill_md: &skill_md("code-review", "review", "Review code."),
+                extra_files: vec![("references/policy.md", "review policy")],
+            }])
+            .with_error(
+                SkillSourceKind::User,
+                "code-review",
+                "references/denied.md",
+                SkillBundleSourceError::PermissionDenied,
+            )
+            .with_error(
+                SkillSourceKind::User,
+                "code-review",
+                "references/large.md",
+                SkillBundleSourceError::ContentTooLarge,
+            ),
+        );
+        let selector = Arc::new(SelectableSkillContextSource::new(
+            source,
+            SkillActivationSelectorConfig::default(),
+        ));
+        let adapter = SkillExecutionAdapter::new(selector);
+        let context = run_context().await;
+        let plan = adapter.prepare(&context, "$code-review").await.unwrap();
+
+        for (path, expected) in [
+            ("references/missing.md", SkillBundleAssetReadError::NotFound),
+            (
+                "references/denied.md",
+                SkillBundleAssetReadError::PermissionDenied,
+            ),
+            (
+                "references/large.md",
+                SkillBundleAssetReadError::ContentTooLarge,
+            ),
+        ] {
+            let error = plan
+                .asset_reader()
+                .read_file_for_activation(&context, &plan.selection.activations[0], path)
+                .await
+                .unwrap_err();
+
+            assert_eq!(error, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn asset_reader_uses_bundle_id_when_manifest_name_differs() {
+        let bundle_id = SkillBundleId::new(SkillSourceKind::User, "bundle-directory").unwrap();
+        let source = Arc::new(StaticSkillBundleSource {
+            descriptors: vec![SkillBundleDescriptor::new(
+                bundle_id.clone(),
+                Some(SkillTrust::Trusted),
+                Some(SkillVisibility::Visible),
+            )],
+            files: HashMap::from([
+                (
+                    (
+                        SkillSourceKind::User,
+                        "bundle-directory".to_string(),
+                        "SKILL.md".to_string(),
+                    ),
+                    skill_md("manifest-name", "manifest", "Review code.")
+                        .as_bytes()
+                        .to_vec(),
+                ),
+                (
+                    (
+                        SkillSourceKind::User,
+                        "bundle-directory".to_string(),
+                        "references/policy.md".to_string(),
+                    ),
+                    b"bundle policy".to_vec(),
+                ),
+            ]),
+            errors: HashMap::new(),
+        });
+        let selector = Arc::new(SelectableSkillContextSource::new(
+            source,
+            SkillActivationSelectorConfig::default(),
+        ));
+        let adapter = SkillExecutionAdapter::new(selector);
+        let context = run_context().await;
+        let plan = adapter.prepare(&context, "$manifest-name").await.unwrap();
+
+        assert_eq!(plan.selection.activations[0].name, "manifest-name");
+        assert_eq!(
+            plan.selection.activations[0].bundle_id.as_ref(),
+            Some(&bundle_id)
+        );
+        let asset = plan
+            .asset_reader()
+            .read_file_for_activation(
+                &context,
+                &plan.selection.activations[0],
+                "references/policy.md",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(asset.into_utf8().unwrap(), "bundle policy");
     }
 }

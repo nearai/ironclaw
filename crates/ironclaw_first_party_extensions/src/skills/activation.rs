@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
+use futures::future::try_join_all;
 use ironclaw_loop_support::{
     HostSkillContextBuildError, HostSkillContextCandidate, HostSkillContextSource,
     SkillBundleDescriptor, SkillBundleId, SkillBundleSource, SkillBundleSourceError,
@@ -11,8 +12,8 @@ use ironclaw_loop_support::{
 use ironclaw_skills::{
     LoadedSkill, SkillSource, extract_skill_mentions, parse_skill_md, prefilter_skills,
 };
-use ironclaw_turns::TurnScope;
 use ironclaw_turns::run_profile::{LoopRunContext, SkillVisibility};
+use ironclaw_turns::{TurnRunId, TurnScope};
 use thiserror::Error;
 
 /// Maximum number of first-party skills selected for one turn by default.
@@ -26,18 +27,20 @@ pub const DEFAULT_MAX_SKILL_CONTEXT_TOKENS: usize = 4000;
 pub struct SkillActivationRequest {
     pub name: String,
     pub source: Option<SkillSourceKind>,
+    pub bundle_id: Option<SkillBundleId>,
     pub mode: SkillActivationMode,
 }
 
 impl SkillActivationRequest {
     fn resolved(
         name: impl Into<String>,
-        source: SkillSourceKind,
+        bundle_id: SkillBundleId,
         mode: SkillActivationMode,
     ) -> Self {
         Self {
             name: name.into(),
-            source: Some(source),
+            source: Some(bundle_id.source_kind()),
+            bundle_id: Some(bundle_id),
             mode,
         }
     }
@@ -144,6 +147,8 @@ where
     bundle_source: Arc<S>,
     config: SkillActivationSelectorConfig,
     messages_by_scope: Mutex<HashMap<TurnScope, String>>,
+    plan_capture_counts_by_scope: Mutex<HashMap<TurnScope, usize>>,
+    plans_by_run: Mutex<HashMap<(TurnScope, TurnRunId), SkillActivationPlan>>,
 }
 
 impl<S> SelectableSkillContextSource<S>
@@ -155,25 +160,47 @@ where
             bundle_source,
             config,
             messages_by_scope: Mutex::new(HashMap::new()),
+            plan_capture_counts_by_scope: Mutex::new(HashMap::new()),
+            plans_by_run: Mutex::new(HashMap::new()),
         }
     }
 
     pub fn record_user_message(&self, scope: TurnScope, message: impl Into<String>) {
-        self.messages_by_scope
-            .lock()
-            .expect("skill activation message lock poisoned")
+        lock_or_recover(&self.messages_by_scope, "skill activation message")
             .insert(scope, message.into());
     }
 
     pub fn clear_scope(&self, scope: &TurnScope) {
-        self.messages_by_scope
-            .lock()
-            .expect("skill activation message lock poisoned")
-            .remove(scope);
+        lock_or_recover(&self.messages_by_scope, "skill activation message").remove(scope);
+        lock_or_recover(
+            &self.plan_capture_counts_by_scope,
+            "skill activation plan capture",
+        )
+        .remove(scope);
+        lock_or_recover(&self.plans_by_run, "skill activation plans")
+            .retain(|(plan_scope, _), _| plan_scope != scope);
     }
 
     pub fn bundle_source(&self) -> Arc<S> {
         Arc::clone(&self.bundle_source)
+    }
+
+    pub fn capture_next_activation_plan(&self, scope: TurnScope) {
+        let mut counts = self.lock_capture_counts();
+        *counts.entry(scope).or_default() += 1;
+    }
+
+    pub fn cancel_next_activation_plan_capture(&self, scope: &TurnScope) {
+        decrement_capture_count(&mut self.lock_capture_counts(), scope);
+    }
+
+    pub fn take_activation_plan_for_run(
+        &self,
+        scope: &TurnScope,
+        run_id: TurnRunId,
+    ) -> Option<SkillActivationPlan> {
+        lock_or_recover(&self.plans_by_run, "skill activation plans")
+            .remove(&(scope.clone(), run_id))
     }
 
     pub async fn select_activation_plan(
@@ -181,13 +208,68 @@ where
         run_context: &LoopRunContext,
         message: &str,
     ) -> Result<SkillActivationPlan, SkillActivationSelectionError> {
+        self.resolve_activation_plan(run_context, message).await
+    }
+
+    fn message_for_scope(&self, scope: &TurnScope) -> Option<String> {
+        lock_or_recover(&self.messages_by_scope, "skill activation message")
+            .get(scope)
+            .cloned()
+    }
+
+    async fn selected_candidates(
+        &self,
+        run_context: &LoopRunContext,
+        message: &str,
+    ) -> Result<Vec<HostSkillContextCandidate>, SkillActivationSelectionError> {
+        let (plan, candidates) = self
+            .resolve_activation_plan_with_candidates(run_context, message)
+            .await?;
+        if self.should_capture_plan(&run_context.scope) {
+            lock_or_recover(&self.plans_by_run, "skill activation plans").insert(
+                (run_context.scope.clone(), run_context.run_id),
+                plan.clone(),
+            );
+        }
+        if plan.selection.activations.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut selected = Vec::new();
+        for candidate in candidates {
+            if plan.activated_bundles.contains(candidate.descriptor.id()) {
+                selected.push(candidate.into_context_candidate());
+            }
+        }
+        Ok(selected)
+    }
+
+    async fn resolve_activation_plan(
+        &self,
+        run_context: &LoopRunContext,
+        message: &str,
+    ) -> Result<SkillActivationPlan, SkillActivationSelectionError> {
+        self.resolve_activation_plan_with_candidates(run_context, message)
+            .await
+            .map(|(plan, _)| plan)
+    }
+
+    async fn resolve_activation_plan_with_candidates(
+        &self,
+        run_context: &LoopRunContext,
+        message: &str,
+    ) -> Result<(SkillActivationPlan, Vec<ActivationCandidate>), SkillActivationSelectionError>
+    {
         if message.trim().is_empty() {
-            return Ok(SkillActivationPlan::new(
-                SkillActivationSelection {
-                    activations: Vec::new(),
-                    rewritten_message: message.to_string(),
-                    feedback: Vec::new(),
-                },
+            return Ok((
+                SkillActivationPlan::new(
+                    SkillActivationSelection {
+                        activations: Vec::new(),
+                        rewritten_message: message.to_string(),
+                        feedback: Vec::new(),
+                    },
+                    Vec::new(),
+                ),
                 Vec::new(),
             ));
         }
@@ -204,50 +286,38 @@ where
             load_activation_candidates(self.bundle_source.as_ref(), run_context, &descriptors)
                 .await?;
         let selection = select_skill_activations(message, &candidates, &self.config)?;
-        Ok(activation_plan_for_candidates(selection, &candidates))
-    }
-
-    fn message_for_scope(&self, scope: &TurnScope) -> Option<String> {
-        self.messages_by_scope
-            .lock()
-            .expect("skill activation message lock poisoned")
-            .get(scope)
-            .cloned()
-    }
-
-    async fn selected_candidates(
-        &self,
-        run_context: &LoopRunContext,
-        message: &str,
-    ) -> Result<Vec<HostSkillContextCandidate>, SkillActivationSelectionError> {
-        if message.trim().is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut descriptors = self
-            .bundle_source
-            .list_skill_bundles(run_context)
-            .await
-            .map_err(skill_bundle_source_error_to_selection_error)?;
-        sort_skill_bundle_descriptors(&mut descriptors);
-        validate_descriptor_policy_metadata(&descriptors)?;
-
-        let candidates =
-            load_activation_candidates(self.bundle_source.as_ref(), run_context, &descriptors)
-                .await?;
-        let selection = select_skill_activations(message, &candidates, &self.config)?;
         let plan = activation_plan_for_candidates(selection, &candidates);
-        if plan.selection.activations.is_empty() {
-            return Ok(Vec::new());
-        }
+        Ok((plan, candidates))
+    }
 
-        let mut selected = Vec::new();
-        for candidate in candidates {
-            if plan.activated_bundles.contains(candidate.descriptor.id()) {
-                selected.push(candidate.into_context_candidate());
-            }
-        }
-        Ok(selected)
+    fn should_capture_plan(&self, scope: &TurnScope) -> bool {
+        let mut counts = self.lock_capture_counts();
+        decrement_capture_count(&mut counts, scope)
+    }
+
+    fn lock_capture_counts(&self) -> MutexGuard<'_, HashMap<TurnScope, usize>> {
+        lock_or_recover(
+            &self.plan_capture_counts_by_scope,
+            "skill activation plan capture",
+        )
+    }
+}
+
+fn decrement_capture_count(counts: &mut HashMap<TurnScope, usize>, scope: &TurnScope) -> bool {
+    let Some(count) = counts.get_mut(scope) else {
+        return false;
+    };
+    *count -= 1;
+    if *count == 0 {
+        counts.remove(scope);
+    }
+    true
+}
+
+fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, _label: &str) -> MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
@@ -288,30 +358,12 @@ impl ActivationCandidate {
 
 fn activation_plan_for_candidates(
     selection: SkillActivationSelection,
-    candidates: &[ActivationCandidate],
+    _candidates: &[ActivationCandidate],
 ) -> SkillActivationPlan {
-    let selected_ids: HashSet<(SkillSourceKind, String)> = selection
+    let activated_bundles = selection
         .activations
         .iter()
-        .filter_map(|activation| {
-            activation
-                .source
-                .map(|source| (source, activation.name.clone()))
-        })
-        .collect();
-    let activated_bundles = candidates
-        .iter()
-        .filter_map(|candidate| {
-            let key = (
-                candidate.descriptor.id().source_kind(),
-                candidate.loaded.manifest.name.clone(),
-            );
-            if selected_ids.contains(&key) {
-                Some(candidate.descriptor.id().clone())
-            } else {
-                None
-            }
-        })
+        .filter_map(|activation| activation.bundle_id.clone())
         .collect();
 
     SkillActivationPlan::new(selection, activated_bundles)
@@ -325,25 +377,30 @@ async fn load_activation_candidates<S>(
 where
     S: SkillBundleSource + ?Sized,
 {
-    let mut candidates = Vec::new();
-    for descriptor in descriptors {
-        if descriptor.visibility() != Some(&SkillVisibility::Visible) {
-            continue;
-        }
-        let skill_md = source
-            .read_skill_bundle_file(run_context, descriptor.id(), descriptor.skill_md_path())
-            .await
-            .map_err(skill_bundle_source_error_to_selection_error)?;
-        let skill_md =
-            String::from_utf8(skill_md).map_err(|_| SkillActivationSelectionError::ParseFailed)?;
-        let loaded = loaded_skill_from_candidate(descriptor, &skill_md)?;
-        candidates.push(ActivationCandidate {
-            descriptor: descriptor.clone(),
-            loaded,
-            skill_md,
-        });
-    }
-    Ok(candidates)
+    try_join_all(
+        descriptors
+            .iter()
+            .filter(|descriptor| descriptor.visibility() == Some(&SkillVisibility::Visible))
+            .map(|descriptor| async move {
+                let skill_md = source
+                    .read_skill_bundle_file(
+                        run_context,
+                        descriptor.id(),
+                        descriptor.skill_md_path(),
+                    )
+                    .await
+                    .map_err(skill_bundle_source_error_to_selection_error)?;
+                let skill_md = String::from_utf8(skill_md)
+                    .map_err(|_| SkillActivationSelectionError::ParseFailed)?;
+                let loaded = loaded_skill_from_candidate(descriptor, &skill_md)?;
+                Ok::<_, SkillActivationSelectionError>(ActivationCandidate {
+                    descriptor: descriptor.clone(),
+                    loaded,
+                    skill_md,
+                })
+            }),
+    )
+    .await
 }
 
 fn loaded_skill_from_candidate(
@@ -402,7 +459,7 @@ fn select_skill_activations(
         if selected_keys.insert(key) {
             activations.push(SkillActivationRequest::resolved(
                 candidate.loaded.manifest.name.clone(),
-                candidate.descriptor.id().source_kind(),
+                candidate.descriptor.id().clone(),
                 SkillActivationMode::ExplicitMention,
             ));
             feedback.push(format!(
@@ -430,7 +487,7 @@ fn select_skill_activations(
         if selected_keys.insert(key) {
             activations.push(SkillActivationRequest::resolved(
                 candidate.loaded.manifest.name.clone(),
-                candidate.descriptor.id().source_kind(),
+                candidate.descriptor.id().clone(),
                 SkillActivationMode::ActivationCriteria,
             ));
         }
