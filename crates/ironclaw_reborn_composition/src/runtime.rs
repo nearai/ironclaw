@@ -646,13 +646,16 @@ pub async fn build_reborn_runtime(
     let event_log: Arc<dyn DurableEventLog> = Arc::new(InMemoryDurableEventLog::new());
     let projection_services = build_reborn_projection_services(
         Arc::clone(&event_log),
-        TurnActor::new(actor_user_id.clone()),
         validated_identity.reply_target_binding_ref.clone(),
     );
-    let milestone_scope = DurableLoopHostMilestoneScope::from_thread_scope_with_owner_user(
-        &thread_scope,
-        actor_user_id.clone(),
-    );
+    let milestone_thread_scope = ThreadScope {
+        owner_user_id: Some(actor_user_id.clone()),
+        ..thread_scope.clone()
+    };
+    let milestone_scope = DurableLoopHostMilestoneScope::from_thread_scope(&milestone_thread_scope)
+        .map_err(|error| RebornRuntimeError::InvalidArgument {
+            reason: error.to_string(),
+        })?;
     let milestone_sink: Arc<dyn LoopHostMilestoneSink> = Arc::new(
         DurableLoopHostMilestoneSink::new(event_log, milestone_scope),
     );

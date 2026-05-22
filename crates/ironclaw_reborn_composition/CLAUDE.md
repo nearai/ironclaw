@@ -22,7 +22,7 @@ middleware with v1's `src/channels/web/`.
 |---|---|
 | `RebornWebuiBundle` (in [`src/webui.rs`](src/webui.rs)) | `{ api: Arc<dyn RebornServicesApi>, readiness }` — the v2 facade plus readiness snapshot |
 | `build_webui_services(runtime, event_stream)` | Compose a `RebornWebuiBundle` from an already-built `RebornRuntime`; reuses the runtime's thread service / turn coordinator and attaches the runtime-owned `EventStreamManager` projection stream unless a caller supplies a custom stream |
-| `RebornProjectionServices` (in `src/projection.rs`) | Runtime-owned projection/event-stream composition; owns the single local-dev `EventStreamManager` and exposes WebUI as one `ProjectionStream` consumer |
+| `RebornProjectionServices` (in `src/projection.rs`) | Runtime-owned projection/event-stream composition; owns the single local-dev `EventStreamManager` and creates product-specific `ProjectionStream` adapters over it |
 | `WebuiAuthenticator` trait | Host-supplied bearer-token verifier; returns `Option<UserId>` |
 | `WebuiServeConfig { tenant_id, authenticator, max_body_bytes, allowed_origins, csp_header }` | Required config for `webui_v2_app`; no defaults that silently disable security |
 | `webui_v2_app(bundle, config) -> Router` | Build the fully-composed axum `Router`. This is the seam between this product/API crate and host-owned HTTP ingress: tests drive it via `tower::ServiceExt::oneshot`; the `ironclaw-reborn serve` subcommand (follow-up PR) hands it to `axum::serve` from a host-owned listener |
@@ -183,9 +183,14 @@ axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
 - `src/runtime.rs::tests::local_dev_runtime_webui_bundle_reuses_thread_and_turn_facades`
   — regression guard that the WebUI bundle reuses the runtime turn/thread
   facades.
-- `src/projection.rs::tests::webui_event_stream_drains_event_stream_manager_projection`
-  — regression guard that the WebUI projection stream drains a real
-  `EventStreamManager` snapshot into product outbound envelopes.
+- `src/projection.rs::tests::webui_event_stream_drains_run_status_projection_from_event_stream_manager`
+  — regression guard that the WebUI projection stream drains the current
+  run-status projection slice from a real `EventStreamManager` snapshot
+  into product outbound envelopes.
+- `src/projection.rs::tests::webui_event_stream_uses_request_actor_for_projection_scope`
+  — regression guard that the WebUI projection adapter uses the facade
+  request actor when selecting the runtime event stream, rather than a
+  hidden runtime owner actor.
 - `tests/webui_v2_serve.rs` — caller-level tests driving the composed
   `Router` through `tower::ServiceExt::oneshot`: bearer happy path,
   missing/invalid bearer 401, SSE `?token=`, timeline rejects `?token=`,

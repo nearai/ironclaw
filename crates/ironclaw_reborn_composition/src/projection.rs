@@ -29,19 +29,21 @@ const WEBUI_PROJECTION_INSTALLATION_ID: &str = "webui_v2.local";
 
 #[derive(Clone)]
 pub(crate) struct RebornProjectionServices {
-    _event_stream_manager: Arc<EventStreamManager>,
-    webui_event_stream: Arc<dyn ProjectionStream>,
+    event_stream_manager: Arc<EventStreamManager>,
+    webui_reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
 impl RebornProjectionServices {
     pub(crate) fn webui_event_stream(&self) -> Arc<dyn ProjectionStream> {
-        self.webui_event_stream.clone()
+        Arc::new(WebuiRunStatusProjectionStream {
+            manager: Arc::clone(&self.event_stream_manager),
+            reply_target_binding_ref: self.webui_reply_target_binding_ref.clone(),
+        })
     }
 }
 
 pub(crate) fn build_reborn_projection_services(
     event_log: Arc<dyn DurableEventLog>,
-    runtime_actor: TurnActor,
     webui_reply_target_binding_ref: ReplyTargetBindingRef,
 ) -> RebornProjectionServices {
     let projection: Arc<dyn EventProjectionService> =
@@ -54,30 +56,29 @@ pub(crate) fn build_reborn_projection_services(
         Arc::new(NoExposureProjectionRedactionValidator),
         Arc::new(InMemoryOutboundStateStore::default()),
     ));
-    let webui_event_stream = Arc::new(WebuiEventProjectionStream {
-        manager: event_stream_manager.clone(),
-        runtime_actor,
-        reply_target_binding_ref: webui_reply_target_binding_ref,
-    });
     RebornProjectionServices {
-        _event_stream_manager: event_stream_manager,
-        webui_event_stream,
+        event_stream_manager,
+        webui_reply_target_binding_ref,
     }
 }
 
-struct WebuiEventProjectionStream {
+/// WebUI bridge over the shared EventStreamManager.
+///
+/// This intentionally exposes the current run-status slice of the product
+/// thread projection. Timeline content stays behind the WebUI timeline facade
+/// until the browser event schema grows a first-class timeline-entry mapper.
+struct WebuiRunStatusProjectionStream {
     manager: Arc<EventStreamManager>,
-    runtime_actor: TurnActor,
     reply_target_binding_ref: ReplyTargetBindingRef,
 }
 
 #[async_trait]
-impl ProjectionStream for WebuiEventProjectionStream {
+impl ProjectionStream for WebuiRunStatusProjectionStream {
     async fn drain(
         &self,
         request: ProjectionSubscriptionRequest,
     ) -> Result<Vec<ProductOutboundEnvelope>, ProductAdapterError> {
-        let projection_scope = runtime_projection_scope(&self.runtime_actor, &request.scope);
+        let projection_scope = runtime_projection_scope(&request.actor, &request.scope);
         let after_cursor = request
             .after_cursor
             .map(|cursor| parse_event_projection_cursor(cursor.as_str()))
@@ -85,7 +86,7 @@ impl ProjectionStream for WebuiEventProjectionStream {
         let mut subscription = self
             .manager
             .subscribe(ProjectionSubscribeRequest {
-                actor: self.runtime_actor.clone(),
+                actor: request.actor.clone(),
                 scope: projection_scope,
                 view: ProjectionViewClass::ProductThread,
                 target: ProjectionTarget::Thread {
@@ -203,17 +204,17 @@ fn snapshot_state(
     scope: &TurnScope,
     snapshot: ProjectionSnapshot,
 ) -> Result<Option<ProductProjectionState>, ProductAdapterError> {
-    projection_state(scope, snapshot.runs)
+    run_status_projection_state(scope, snapshot.runs)
 }
 
 fn replay_state(
     scope: &TurnScope,
     replay: &ProjectionReplay,
 ) -> Result<Option<ProductProjectionState>, ProductAdapterError> {
-    projection_state(scope, replay.runs.clone())
+    run_status_projection_state(scope, replay.runs.clone())
 }
 
-fn projection_state(
+fn run_status_projection_state(
     scope: &TurnScope,
     runs: Vec<RunStatusProjection>,
 ) -> Result<Option<ProductProjectionState>, ProductAdapterError> {
@@ -320,7 +321,7 @@ mod tests {
     use ironclaw_product_adapters::ProductOutboundPayload;
 
     #[tokio::test]
-    async fn webui_event_stream_drains_event_stream_manager_projection() {
+    async fn webui_event_stream_drains_run_status_projection_from_event_stream_manager() {
         let tenant_id = TenantId::new("webui-events-tenant").unwrap();
         let user_id = UserId::new("webui-events-user").unwrap();
         let agent_id = AgentId::new("webui-events-agent").unwrap();
@@ -347,7 +348,6 @@ mod tests {
         let actor = TurnActor::new(user_id);
         let services = build_reborn_projection_services(
             event_log,
-            actor.clone(),
             ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
         );
         let events = services
@@ -369,5 +369,50 @@ mod tests {
             state.items[0],
             ProductProjectionItem::RunStatus { ref status, .. } if status == "running"
         ));
+    }
+
+    #[tokio::test]
+    async fn webui_event_stream_uses_request_actor_for_projection_scope() {
+        let tenant_id = TenantId::new("webui-events-tenant").unwrap();
+        let owner_user_id = UserId::new("webui-events-owner").unwrap();
+        let other_user_id = UserId::new("webui-events-other").unwrap();
+        let agent_id = AgentId::new("webui-events-agent").unwrap();
+        let thread_id = ThreadId::new("webui-events-thread").unwrap();
+        let event_log = Arc::new(InMemoryDurableEventLog::new());
+        event_log
+            .append(RuntimeEvent::model_started(
+                ResourceScope {
+                    tenant_id: tenant_id.clone(),
+                    user_id: owner_user_id,
+                    agent_id: Some(agent_id.clone()),
+                    project_id: None,
+                    mission_id: None,
+                    thread_id: Some(thread_id.clone()),
+                    invocation_id: InvocationId::new(),
+                },
+                CapabilityId::new("loop.model").unwrap(),
+            ))
+            .await
+            .unwrap();
+
+        let event_log: Arc<dyn DurableEventLog> = event_log;
+        let services = build_reborn_projection_services(
+            event_log,
+            ReplyTargetBindingRef::new("webui-events-reply").unwrap(),
+        );
+        let events = services
+            .webui_event_stream()
+            .drain(ProjectionSubscriptionRequest {
+                actor: TurnActor::new(other_user_id),
+                scope: TurnScope::new(tenant_id, Some(agent_id), None, thread_id),
+                after_cursor: None,
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            events.is_empty(),
+            "projection stream must not read another user's event stream through a hidden runtime actor"
+        );
     }
 }
