@@ -5,8 +5,8 @@ mod support;
 
 use ironclaw_product_adapters::{
     DeliveryStatus, ExternalConversationRef, FakeProtocolHttpEgress, FinalReplyView,
-    ProductAdapter, ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget,
-    ProductRenderOutcome, ProjectionCursor,
+    ProductAdapter, ProductAdapterError, ProductOutboundEnvelope, ProductOutboundPayload,
+    ProductOutboundTarget, ProductRenderOutcome, ProjectionCursor,
 };
 use ironclaw_turns::{ReplyTargetBindingRef, TurnRunId};
 use reborn_support::{
@@ -29,6 +29,18 @@ async fn reborn_outbound_reply_target_scope_isolation_parity() {
 
     let envelope_a = outbound_envelope(&adapter_a, target_a.clone(), "alpha reply");
     let envelope_b = outbound_envelope(&adapter_b, target_b.clone(), "beta reply");
+    let misrouted_envelope_b =
+        outbound_envelope(&adapter_b, target_b.clone(), "misrouted beta reply");
+
+    let mismatch = adapter_a
+        .render_outbound(misrouted_envelope_b, &egress, &sink_a)
+        .await
+        .expect_err("adapter alpha must reject beta installation outbound");
+    assert_invalid_installation_id(mismatch);
+    assert!(
+        sink_a.statuses().is_empty(),
+        "misrouted beta outbound must not record delivery in alpha sink"
+    );
 
     let outcome_a = adapter_a
         .render_outbound(envelope_a, &egress, &sink_a)
@@ -83,4 +95,13 @@ fn assert_delivered_only_to(
         ),
         "{label} delivery should target only matching reply binding; statuses={statuses:?}"
     );
+}
+
+fn assert_invalid_installation_id(error: ProductAdapterError) {
+    match error {
+        ProductAdapterError::InvalidIdentifier { kind, .. } => {
+            assert_eq!(kind, "envelope.installation_id");
+        }
+        other => panic!("expected InvalidIdentifier, got: {other:?}"),
+    }
 }
