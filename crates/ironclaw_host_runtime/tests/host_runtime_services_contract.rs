@@ -3606,6 +3606,69 @@ async fn host_runtime_services_routes_wasm_http_through_per_invocation_policy_ha
 }
 
 #[tokio::test]
+async fn host_runtime_services_routes_github_wasm_read_through_runtime_http_egress() {
+    let parsed_manifest = parse_manifest(GITHUB_WASM_READ_MANIFEST);
+    let component = tool_component(GITHUB_ISSUES_READ_TOOL_WAT);
+    let filesystem = Arc::new(
+        filesystem_with_wasm_component(
+            parsed_manifest.id.as_str(),
+            "wasm/github-issues-read.wasm",
+            &component,
+        )
+        .await,
+    );
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let policy = github_issues_policy();
+    let authorizer: Arc<dyn TrustAwareCapabilityDispatchAuthorizer> =
+        Arc::new(ObligatingAuthorizer::new(vec![
+            Obligation::ApplyNetworkPolicy {
+                policy: policy.clone(),
+            },
+        ]));
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_response_body(
+        br#"[{"number":3806,"state":"open","title":"GitHub WASM read proof"}]"#.to_vec(),
+    ));
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(GITHUB_WASM_READ_MANIFEST)),
+        filesystem,
+        governor,
+        authorizer,
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_runtime_http_egress(Arc::clone(&egress))
+    .try_with_wasm_runtime(WitToolRuntimeConfig::for_testing(), WitToolHost::deny_all())
+    .unwrap();
+    let capability_id = CapabilityId::new("github.search_issues").unwrap();
+    let scope = sample_scope(InvocationId::new());
+
+    let outcome = services
+        .host_runtime_for_local_testing()
+        .invoke_capability(wasm_runtime_request_for_scope(
+            capability_id.clone(),
+            scope.clone(),
+            json!({"state": "open", "per_page": 1}),
+        ))
+        .await
+        .unwrap();
+
+    assert_completed_outcome(outcome, &capability_id);
+    let requests = egress.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].runtime, RuntimeKind::Wasm);
+    assert_eq!(requests[0].scope, scope);
+    assert_eq!(requests[0].capability_id, capability_id);
+    assert_eq!(requests[0].network_policy, policy);
+    assert_eq!(requests[0].method, NetworkMethod::Get);
+    assert_eq!(
+        requests[0].url,
+        "https://api.github.com/repos/nearai/ironclaw/issues?state=open&per_page=1"
+    );
+    assert_eq!(requests[0].body, Vec::<u8>::new());
+    assert!(requests[0].credential_injections.is_empty());
+}
+
+#[tokio::test]
 async fn host_runtime_services_routes_cached_wasm_http_through_per_invocation_policy_handoff() {
     let parsed_manifest = parse_manifest(WASM_HTTP_SUCCESS_MANIFEST);
     let component = tool_component(HTTP_TOOL_WAT);
@@ -5367,9 +5430,17 @@ impl WasmRuntimeCredentialProvider for SecretStoreLeaseCredentials {
 #[derive(Debug, Clone, Default)]
 struct RecordingRuntimeHttpEgress {
     requests: Arc<std::sync::Mutex<Vec<RuntimeHttpEgressRequest>>>,
+    response_body: Vec<u8>,
 }
 
 impl RecordingRuntimeHttpEgress {
+    fn with_response_body(response_body: impl Into<Vec<u8>>) -> Self {
+        Self {
+            response_body: response_body.into(),
+            ..Self::default()
+        }
+    }
+
     fn requests(&self) -> Vec<RuntimeHttpEgressRequest> {
         self.requests.lock().unwrap().clone()
     }
@@ -5381,12 +5452,14 @@ impl RuntimeHttpEgress for RecordingRuntimeHttpEgress {
         request: RuntimeHttpEgressRequest,
     ) -> Result<RuntimeHttpEgressResponse, RuntimeHttpEgressError> {
         self.requests.lock().unwrap().push(request.clone());
+        let response_body = self.response_body.clone();
+        let response_bytes = response_body.len() as u64;
         Ok(RuntimeHttpEgressResponse {
             status: 200,
             headers: Vec::new(),
-            body: Vec::new(),
+            body: response_body,
             request_bytes: request.body.len() as u64,
-            response_bytes: 0,
+            response_bytes,
             redaction_applied: false,
         })
     }
@@ -6534,6 +6607,18 @@ fn wasm_http_policy() -> NetworkPolicy {
     }
 }
 
+fn github_issues_policy() -> NetworkPolicy {
+    NetworkPolicy {
+        allowed_targets: vec![NetworkTargetPattern {
+            scheme: Some(NetworkScheme::Https),
+            host_pattern: "api.github.com".to_string(),
+            port: None,
+        }],
+        deny_private_ip_ranges: true,
+        max_egress_bytes: Some(10_000),
+    }
+}
+
 fn tool_component(wat_src: &str) -> Vec<u8> {
     let mut module = wat::parse_str(wat_src).unwrap();
     let mut resolve = Resolve::default();
@@ -6698,6 +6783,25 @@ default_permission = "allow"
 parameters_schema = { type = "object" }
 "#;
 
+const GITHUB_WASM_READ_MANIFEST: &str = r#"
+id = "github"
+name = "GitHub v2"
+version = "0.1.0"
+description = "GitHub read-only integration"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "wasm/github-issues-read.wasm"
+
+[[capabilities]]
+id = "github.search_issues"
+description = "Search GitHub issues"
+effects = ["dispatch_capability", "network"]
+default_permission = "allow"
+parameters_schema = { type = "object" }
+"#;
+
 const WASM_GUEST_ERROR_MANIFEST: &str = r#"
 id = "wasm-accounting"
 name = "WASM Accounting Guest Error"
@@ -6803,6 +6907,93 @@ const HTTP_TOOL_WAT: &str = r#"
     i32.const 1
     i32.const 256
     i32.const 5
+    i32.const 0
+    i32.const 0
+    i32.const 512
+    call $http_request
+
+    i32.const 48
+    i32.const 1
+    i32.store
+    i32.const 52
+    i32.const 3072
+    i32.store
+    i32.const 56
+    i32.const 1
+    i32.store
+    i32.const 60
+    i32.const 0
+    i32.store
+    i32.const 48)
+  (func $post (param i32))
+  (func $realloc (param $old i32) (param $old_align i32) (param $new_size i32) (param $new_align i32) (result i32)
+    (local $ret i32)
+    global.get $heap
+    local.set $ret
+    global.get $heap
+    local.get $new_size
+    i32.add
+    global.set $heap
+    local.get $ret)
+  (func $_initialize)
+  (export "near:agent/tool@0.3.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.3.0#execute" (func $post))
+  (export "near:agent/tool@0.3.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.3.0#schema" (func $post))
+  (export "near:agent/tool@0.3.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.3.0#description" (func $post))
+  (export "cabi_realloc" (func $realloc))
+  (export "_initialize" (func $_initialize))
+)
+"#;
+
+const GITHUB_ISSUES_READ_TOOL_WAT: &str = r#"
+(module
+  (type (;0;) (func (param i32 i32 i32)))
+  (type (;1;) (func (result i64)))
+  (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+  (type (;3;) (func (param i32 i32 i32 i32 i32)))
+  (type (;4;) (func (param i32 i32) (result i32)))
+  (import "near:agent/host@0.3.0" "log" (func $log (type 0)))
+  (import "near:agent/host@0.3.0" "now-millis" (func $now (type 1)))
+  (import "near:agent/host@0.3.0" "workspace-read" (func $workspace_read (type 0)))
+  (import "near:agent/host@0.3.0" "http-request" (func $http_request (type 2)))
+  (import "near:agent/host@0.3.0" "tool-invoke" (func $tool_invoke (type 3)))
+  (import "near:agent/host@0.3.0" "secret-exists" (func $secret_exists (type 4)))
+  (memory (export "memory") 1)
+  (global $heap (mut i32) (i32.const 4096))
+  (data (i32.const 128) "GET")
+  (data (i32.const 160) "https://api.github.com/repos/nearai/ironclaw/issues?state=open&per_page=1")
+  (data (i32.const 256) "{}")
+  (data (i32.const 1024) "{\22type\22:\22object\22}")
+  (data (i32.const 2048) "GitHub issue search")
+  (data (i32.const 3072) "1")
+  (func $schema (result i32)
+    i32.const 16
+    i32.const 1024
+    i32.store
+    i32.const 20
+    i32.const 17
+    i32.store
+    i32.const 16)
+  (func $description (result i32)
+    i32.const 32
+    i32.const 2048
+    i32.store
+    i32.const 36
+    i32.const 19
+    i32.store
+    i32.const 32)
+  (func $execute (param i32 i32 i32 i32 i32) (result i32)
+    i32.const 128
+    i32.const 3
+    i32.const 160
+    i32.const 73
+    i32.const 256
+    i32.const 2
+    i32.const 0
+    i32.const 0
+    i32.const 0
     i32.const 0
     i32.const 0
     i32.const 512
