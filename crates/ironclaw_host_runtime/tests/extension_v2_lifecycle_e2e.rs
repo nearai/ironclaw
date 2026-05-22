@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    path::Path,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use ironclaw_dispatcher::{
@@ -6,13 +9,13 @@ use ironclaw_dispatcher::{
     RuntimeAdapterResult, RuntimeDispatchErrorKind, RuntimeDispatcher,
 };
 use ironclaw_extensions::{
-    ExtensionError, ExtensionLifecycleService, ExtensionRegistry, ManifestV2Error,
+    ExtensionError, ExtensionLifecycleService, ExtensionRegistry, ExtensionRuntime, ManifestV2Error,
 };
 use ironclaw_filesystem::LocalFilesystem;
 use ironclaw_host_api::{
-    CapabilityId, ExtensionId, HostPath, MountView, ReservationStatus, ResourceEstimate,
-    ResourceReservationId, ResourceScope, ResourceUsage, RuntimeKind, TenantId, UserId,
-    VirtualPath,
+    CapabilityId, EffectKind, ExtensionId, HostPath, MountView, PermissionMode, ReservationStatus,
+    ResourceEstimate, ResourceReservationId, ResourceScope, ResourceUsage, RuntimeKind, TenantId,
+    UserId, VirtualPath,
 };
 use ironclaw_host_runtime::{
     discover_extensions_with_default_host_api_contracts, publish_hot_capability_catalog,
@@ -125,6 +128,89 @@ async fn extension_v2_lifecycle_discovers_installs_publishes_and_dispatches_host
     assert_eq!(requests[0].mounts, None);
     assert_eq!(requests[0].resource_reservation_id, Some(reservation_id));
     assert_eq!(requests[0].input, json!({"message":"hello"}));
+}
+
+#[tokio::test]
+async fn github_v2_package_discovers_and_publishes_read_only_hot_catalog() {
+    let (_storage, fs) = mounted_github_package_fs();
+    let registry = discover_extensions_with_default_host_api_contracts(
+        &fs,
+        &VirtualPath::new("/system/extensions").unwrap(),
+    )
+    .await
+    .unwrap();
+    let extension_id = ExtensionId::new("github").unwrap();
+    let package = registry.get_extension(&extension_id).unwrap();
+
+    assert!(matches!(
+        &package.manifest.runtime,
+        ExtensionRuntime::Wasm { module } if module.as_str() == "wasm/github_tool.wasm"
+    ));
+    assert_eq!(
+        package
+            .capabilities
+            .iter()
+            .map(|capability| capability.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["github.search_issues", "github.get_issue"]
+    );
+    for capability in &package.manifest.capabilities {
+        assert_eq!(
+            capability.effects,
+            vec![EffectKind::Network, EffectKind::UseSecret]
+        );
+        assert_eq!(capability.default_permission, PermissionMode::Ask);
+        assert_eq!(
+            capability
+                .required_host_ports
+                .iter()
+                .map(|port| port.as_str())
+                .collect::<Vec<_>>(),
+            vec!["host.runtime.http_egress"]
+        );
+    }
+
+    let hot_catalog = publish_hot_capability_catalog(&fs, &registry)
+        .await
+        .unwrap();
+    assert_eq!(hot_catalog.capabilities.len(), 2);
+
+    let search = hot_catalog
+        .get(&CapabilityId::new("github.search_issues").unwrap())
+        .unwrap();
+    assert_eq!(search.descriptor.provider, extension_id);
+    assert_eq!(search.descriptor.runtime, RuntimeKind::Wasm);
+    assert_eq!(
+        search.descriptor.parameters_schema["properties"]["query"]["type"],
+        json!("string")
+    );
+    assert_eq!(
+        search.output_schema["properties"]["items"]["type"],
+        json!("array")
+    );
+    assert!(search
+        .prompt_doc
+        .as_deref()
+        .is_some_and(|doc| doc.contains("github.search_issues")
+            && doc.contains("github_token")));
+
+    let get_issue = hot_catalog
+        .get(&CapabilityId::new("github.get_issue").unwrap())
+        .unwrap();
+    assert_eq!(
+        get_issue.descriptor.parameters_schema["required"],
+        json!(["owner", "repo", "issue_number"])
+    );
+    assert_eq!(
+        get_issue.output_schema["required"],
+        json!(["number", "title", "state", "html_url"])
+    );
+    assert!(
+        get_issue
+            .prompt_doc
+            .as_deref()
+            .is_some_and(|doc| doc.contains("github.get_issue") && doc.contains("read-only"))
+    );
 }
 
 #[tokio::test]
@@ -283,6 +369,41 @@ fn mounted_extension_fs(id: &str, manifest: &str) -> (tempfile::TempDir, LocalFi
     )
     .unwrap();
     (storage, fs)
+}
+
+fn mounted_github_package_fs() -> (tempfile::TempDir, LocalFilesystem) {
+    let storage = tempdir().unwrap();
+    let source_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("tools-src/github-reborn");
+    let package_root = storage.path().join("github");
+
+    for relative in [
+        "manifest.toml",
+        "schemas/github/search_issues.input.v1.json",
+        "schemas/github/search_issues.output.v1.json",
+        "schemas/github/get_issue.input.v1.json",
+        "schemas/github/get_issue.output.v1.json",
+        "prompts/github/search_issues.md",
+        "prompts/github/get_issue.md",
+    ] {
+        copy_package_file(&source_root, &package_root, relative);
+    }
+
+    let mut fs = LocalFilesystem::new();
+    fs.mount_local(
+        VirtualPath::new("/system/extensions").unwrap(),
+        HostPath::from_path_buf(storage.path().to_path_buf()),
+    )
+    .unwrap();
+    (storage, fs)
+}
+
+fn copy_package_file(source_root: &Path, package_root: &Path, relative: &str) {
+    let source = source_root.join(relative);
+    let destination = package_root.join(relative);
+    std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+    std::fs::copy(source, destination).unwrap();
 }
 
 fn sample_scope() -> ResourceScope {
