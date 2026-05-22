@@ -90,6 +90,17 @@ impl ProductWorkflow for DefaultProductWorkflow {
         &self,
         envelope: ProductInboundEnvelope,
     ) -> Result<ProductInboundAck, ProductAdapterError> {
+        if matches!(
+            envelope.payload(),
+            ProductInboundPayload::SubscriptionRequest(_)
+        ) {
+            return Err(ProductAdapterError::MalformedInboundPayload {
+                reason: RedactedString::new(
+                    "subscription_request must be resolved through resolve_projection_subscription",
+                ),
+            });
+        }
+
         let source_binding_key =
             SourceBindingKey::new(envelope.source_binding_key()).map_err(|reason| {
                 ProductAdapterError::from(ProductWorkflowError::BindingResolutionFailed { reason })
