@@ -37,13 +37,32 @@ const GATES_FILE_NAME: &str = "budget-gates.json";
 /// [`ScopedFilesystem`](ironclaw_filesystem::ScopedFilesystem). All gates
 /// persist into one tenant/user-scoped snapshot file; per-tenant separation
 /// is structural via the caller's
-/// [`MountView`](ironclaw_host_api::MountView).
+/// [`MountView`](ironclaw_host_api::MountView) plus the
+/// [`ResourceScope`] supplied at store construction.
+///
+/// Cross-tenant isolation (review feedback High #1): every operation
+/// routes through the [`ResourceScope`] passed to [`Self::new`]. Without
+/// this, a single shared store would write every tenant's gates into one
+/// global snapshot (because [`ResourceScope::system`] resolves to
+/// `/tenants/__SYSTEM__/...`); a `list_pending` call would then expose
+/// gates across tenants. Production composition wires one store per
+/// tenant scope so the `ScopedFilesystem` mount view rewrites the
+/// alias to that tenant's path.
 #[derive(Clone)]
 pub struct FilesystemBudgetGateStore<F>
 where
     F: RootFilesystem,
 {
     filesystem: Arc<ScopedFilesystem<F>>,
+    scope: ResourceScope,
+    /// Terminal gates older than this are dropped from the snapshot on
+    /// every mutation. Bounds the snapshot size so `list_pending` /
+    /// `open` / `resolve` stay roughly O(active pending) instead of
+    /// O(total gates ever opened) (review feedback Medium #7).
+    /// `None` retains every terminal gate forever (legacy behavior for
+    /// tests that want to inspect resolved gates without time
+    /// constraints).
+    terminal_retention: Option<chrono::Duration>,
     worker: AsyncStorageWorkerCell,
 }
 
@@ -52,7 +71,10 @@ where
     F: RootFilesystem,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("FilesystemBudgetGateStore").finish()
+        f.debug_struct("FilesystemBudgetGateStore")
+            .field("tenant", &self.scope.tenant_id)
+            .field("user", &self.scope.user_id)
+            .finish()
     }
 }
 
@@ -60,11 +82,40 @@ impl<F> FilesystemBudgetGateStore<F>
 where
     F: RootFilesystem + 'static,
 {
-    pub fn new(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+    /// Construct a tenant-scoped store. Every operation routes through
+    /// `scope` so the `ScopedFilesystem` mount view writes the snapshot
+    /// under that tenant's `/resources/budget-gates.json` path. Two
+    /// stores constructed with different `scope.tenant_id` see entirely
+    /// separate snapshots — cross-tenant access requires constructing a
+    /// fresh store with the target scope.
+    pub fn new(filesystem: Arc<ScopedFilesystem<F>>, scope: ResourceScope) -> Self {
         Self {
             filesystem,
+            scope,
+            // Default: 30-day retention for terminal gates. Production
+            // can tune via `with_terminal_retention`; tests that need
+            // to read older terminal gates set it to `None` or a
+            // larger window.
+            terminal_retention: Some(chrono::Duration::days(30)),
             worker: new_storage_worker_cell(),
         }
+    }
+
+    /// Back-compat factory: wires the store to `ResourceScope::system`.
+    /// **Avoid in production** — every tenant lands in the system
+    /// `/tenants/__SYSTEM__/...` directory and `list_pending` returns
+    /// gates across all callers. Useful only for single-tenant
+    /// local-dev runtimes that have no tenant-isolation requirements.
+    pub fn system_scoped(filesystem: Arc<ScopedFilesystem<F>>) -> Self {
+        Self::new(filesystem, ResourceScope::system())
+    }
+
+    /// Override the retention window for terminal gates. Set to `None`
+    /// to retain every terminal gate forever (legacy behavior used by
+    /// audit-replay tests). Operators tune this via composition.
+    pub fn with_terminal_retention(mut self, retention: Option<chrono::Duration>) -> Self {
+        self.terminal_retention = retention;
+        self
     }
 
     fn with_snapshot<T, U>(&self, update: U) -> Result<T, BudgetGateError>
@@ -73,16 +124,28 @@ where
         U: FnOnce(&mut BudgetGateSnapshot) -> Result<T, BudgetGateError> + Send + 'static,
     {
         let filesystem = Arc::clone(&self.filesystem);
+        let scope = self.scope.clone();
+        let retention = self.terminal_retention;
         let worker_cell = self.worker.clone();
         run_async_on_storage_worker(&worker_cell, move || async move {
             let path = snapshot_path()?;
             let record_lock = filesystem_record_lock(&path);
             let _guard = record_lock.lock().await;
-            // System scope: budget approval gates are process-global like
-            // the governor snapshot — tenant separation is provided by the
-            // ScopedFilesystem MountView.
-            let scope = ResourceScope::system();
-            update_filesystem_snapshot(filesystem.as_ref(), &scope, &path, update).await
+            // Tenant/user separation is structural via the
+            // `ScopedFilesystem` mount view — `/resources` resolves to
+            // `/tenants/<scope.tenant>/users/<scope.user>/resources`.
+            // The outer caller's `update` runs first, then we apply
+            // retention pruning so the result of the user's update is
+            // never re-pruned (`get` should return what was just
+            // written).
+            let wrapped = move |snapshot: &mut BudgetGateSnapshot| -> Result<T, BudgetGateError> {
+                let value = update(snapshot)?;
+                if let Some(retention) = retention {
+                    prune_terminal_gates(snapshot, Utc::now() - retention);
+                }
+                Ok(value)
+            };
+            update_filesystem_snapshot(filesystem.as_ref(), &scope, &path, wrapped).await
         })
     }
 }
@@ -197,6 +260,19 @@ where
                 .collect())
         })
     }
+}
+
+/// Drop terminal-status gates whose resolution timestamp is older than
+/// `cutoff`. Pending gates are never pruned. Bounds the snapshot size
+/// so hot path operations stay O(active pending) (review feedback
+/// Medium #7).
+fn prune_terminal_gates(snapshot: &mut BudgetGateSnapshot, cutoff: DateTime<Utc>) {
+    snapshot.gates.retain(|_, gate| match &gate.status {
+        BudgetGateStatus::Pending => true,
+        BudgetGateStatus::Approved { at, .. }
+        | BudgetGateStatus::Cancelled { at, .. }
+        | BudgetGateStatus::Expired { at } => *at >= cutoff,
+    });
 }
 
 fn snapshot_path() -> Result<ScopedPath, BudgetGateError> {
@@ -460,11 +536,23 @@ mod tests {
         }
     }
 
+    fn scope_for(tenant: &str, user: &str) -> ResourceScope {
+        ResourceScope {
+            tenant_id: TenantId::new(tenant).unwrap(),
+            user_id: UserId::new(user).unwrap(),
+            agent_id: None,
+            project_id: None,
+            mission_id: None,
+            thread_id: None,
+            invocation_id: ironclaw_host_api::InvocationId::new(),
+        }
+    }
+
     #[test]
     fn open_and_get_round_trips_through_filesystem() {
         let backend = Arc::new(InMemoryBackend::new());
         let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
-        let store = FilesystemBudgetGateStore::new(scoped);
+        let store = FilesystemBudgetGateStore::new(scoped, scope_for("tenant-fs", "alice"));
         let gate = sample_gate();
         let id = gate.id;
         store.open(gate.clone()).unwrap();
@@ -481,14 +569,15 @@ mod tests {
         let backend = Arc::new(InMemoryBackend::new());
         let gate = sample_gate();
         let id = gate.id;
+        let scope = scope_for("tenant-fs", "alice");
         {
             let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
-            let store = FilesystemBudgetGateStore::new(scoped);
+            let store = FilesystemBudgetGateStore::new(scoped, scope.clone());
             store.open(gate).unwrap();
         }
         // Restart: fresh store, same backing filesystem.
         let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
-        let store = FilesystemBudgetGateStore::new(scoped);
+        let store = FilesystemBudgetGateStore::new(scoped, scope);
         let reloaded = store.get(id).unwrap().unwrap();
         assert_eq!(reloaded.id, id);
         assert!(matches!(reloaded.status, BudgetGateStatus::Pending));
@@ -500,8 +589,9 @@ mod tests {
     #[test]
     fn resolve_updates_gate_status_after_reload() {
         let backend = Arc::new(InMemoryBackend::new());
+        let scope = scope_for("tenant-fs", "alice");
         let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
-        let store = FilesystemBudgetGateStore::new(scoped);
+        let store = FilesystemBudgetGateStore::new(scoped, scope.clone());
         let gate = sample_gate();
         let id = gate.id;
         store.open(gate).unwrap();
@@ -521,7 +611,7 @@ mod tests {
 
         // Fresh handle still sees the terminal status.
         let scoped2 = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
-        let store2 = FilesystemBudgetGateStore::new(scoped2);
+        let store2 = FilesystemBudgetGateStore::new(scoped2, scope);
         let reloaded = store2.get(id).unwrap().unwrap();
         assert!(matches!(
             reloaded.status,
@@ -533,8 +623,9 @@ mod tests {
     #[test]
     fn expire_pending_older_than_persists_terminal_state() {
         let backend = Arc::new(InMemoryBackend::new());
+        let scope = scope_for("tenant-fs", "alice");
         let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
-        let store = FilesystemBudgetGateStore::new(scoped);
+        let store = FilesystemBudgetGateStore::new(scoped, scope.clone());
         let mut gate = sample_gate();
         gate.expires_at = Utc::now() - chrono::Duration::hours(1);
         let id = gate.id;
@@ -545,8 +636,100 @@ mod tests {
 
         // Fresh handle: the expiry persisted.
         let scoped2 = scoped_resources_fs(Arc::clone(&backend), "tenant-fs", "alice");
-        let store2 = FilesystemBudgetGateStore::new(scoped2);
+        let store2 = FilesystemBudgetGateStore::new(scoped2, scope);
         let reloaded = store2.get(id).unwrap().unwrap();
         assert!(matches!(reloaded.status, BudgetGateStatus::Expired { .. }));
+    }
+
+    /// Regression for review feedback Medium #7: terminal gates older
+    /// than the retention window are pruned on the next mutation so
+    /// the snapshot doesn't grow unbounded over the lifetime of a
+    /// long-running deployment.
+    #[test]
+    fn terminal_gates_older_than_retention_are_pruned_on_next_write() {
+        let backend = Arc::new(InMemoryBackend::new());
+        let scope = scope_for("tenant-retention", "alice");
+        let scoped = scoped_resources_fs(Arc::clone(&backend), "tenant-retention", "alice");
+        // 7-day retention window for this test.
+        let store = FilesystemBudgetGateStore::new(scoped, scope)
+            .with_terminal_retention(Some(chrono::Duration::days(7)));
+
+        // Open + cancel one gate.
+        let stale = sample_gate();
+        let stale_id = stale.id;
+        store.open(stale).unwrap();
+        let old_at = Utc::now() - chrono::Duration::days(30);
+        // Force the cancellation timestamp into the past — production
+        // would never do this; the test simulates a gate cancelled
+        // 30 days ago.
+        store
+            .resolve(
+                stale_id,
+                BudgetGateOutcome::Cancel {
+                    by: UserId::new("alice").unwrap(),
+                },
+                old_at,
+            )
+            .unwrap();
+
+        // After the resolve write, the gate's `at` is 30 days ago,
+        // beyond the 7-day retention window. The next mutation should
+        // prune it. Open a fresh gate to trigger that mutation.
+        let fresh = sample_gate();
+        let fresh_id = fresh.id;
+        store.open(fresh).unwrap();
+
+        // The stale gate is gone; the fresh one is present.
+        assert!(
+            store.get(stale_id).unwrap().is_none(),
+            "terminal gate older than the retention window must be pruned"
+        );
+        assert!(
+            store.get(fresh_id).unwrap().is_some(),
+            "fresh gate must survive pruning"
+        );
+    }
+
+    /// Regression for review feedback High #1: two stores constructed
+    /// with different tenant scopes must NOT see each other's gates.
+    /// Without per-tenant scoping, `list_pending` on one store would
+    /// surface gates from another tenant.
+    #[test]
+    fn list_pending_does_not_leak_across_tenants() {
+        let backend = Arc::new(InMemoryBackend::new());
+
+        // Tenant A: scoped filesystem AND scope both target tenant-a.
+        let scoped_a = scoped_resources_fs(Arc::clone(&backend), "tenant-a", "alice");
+        let store_a = FilesystemBudgetGateStore::new(scoped_a, scope_for("tenant-a", "alice"));
+        let gate_a = sample_gate();
+        let id_a = gate_a.id;
+        store_a.open(gate_a).unwrap();
+
+        // Tenant B: separate scoped filesystem AND scope.
+        let scoped_b = scoped_resources_fs(Arc::clone(&backend), "tenant-b", "bob");
+        let store_b = FilesystemBudgetGateStore::new(scoped_b, scope_for("tenant-b", "bob"));
+        let gate_b = sample_gate();
+        let id_b = gate_b.id;
+        store_b.open(gate_b).unwrap();
+
+        // Each store sees only its own gate.
+        let pending_a = store_a.list_pending().unwrap();
+        assert_eq!(pending_a.len(), 1, "store_a must see only its own gate");
+        assert_eq!(pending_a[0].id, id_a);
+
+        let pending_b = store_b.list_pending().unwrap();
+        assert_eq!(pending_b.len(), 1, "store_b must see only its own gate");
+        assert_eq!(pending_b[0].id, id_b);
+
+        // get() for the other tenant's gate ID returns None — the path
+        // resolves to that tenant's snapshot which doesn't contain it.
+        assert!(
+            store_a.get(id_b).unwrap().is_none(),
+            "store_a must NOT see gates opened in tenant-b's scope"
+        );
+        assert!(
+            store_b.get(id_a).unwrap().is_none(),
+            "store_b must NOT see gates opened in tenant-a's scope"
+        );
     }
 }

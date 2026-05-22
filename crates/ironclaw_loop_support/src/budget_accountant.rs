@@ -171,6 +171,14 @@ pub struct GovernorBackedAccountant {
     governor: Arc<dyn ResourceGovernor>,
     cost_table: Arc<dyn ModelCostTable>,
     overestimate_factor: Decimal,
+    /// Cost to charge when the cost table has no entry for a model.
+    /// Defaults to a conservative non-zero estimate (~GPT-4o pricing,
+    /// `input=$0.000003 / token`, `output=$0.000012 / token`,
+    /// `max_output=8 KiB`) so a misconfigured route or new paid model
+    /// never silently reconciles to zero USD (review feedback:
+    /// Medium #5). Callers that genuinely want zero-cost (Ollama, free
+    /// tier) wire a `ZeroCostTable` instead.
+    default_cost: ModelCost,
     /// Tracks in-flight reservations per run so `post_model_call` can
     /// reconcile/release the matching reservation without the caller
     /// threading state through the loop port. Stores the original estimate
@@ -224,11 +232,30 @@ impl GovernorBackedAccountant {
             seeded: Arc::new(DashSet::new()),
             gate_store: None,
             gate_expires_after: chrono::Duration::hours(24),
+            default_cost: ModelCost {
+                // ~GPT-4o pricing as the safe non-zero default. Matches
+                // `ironclaw_llm::costs::default_cost` so a model profile
+                // missing from the table is treated as a paid call, not
+                // a free one.
+                input_per_token: Decimal::from_f64(0.0000025).unwrap_or(Decimal::ZERO),
+                output_per_token: Decimal::from_f64(0.00001).unwrap_or(Decimal::ZERO),
+                max_output_tokens: 0,
+            },
         }
     }
 
     pub fn with_overestimate_factor(mut self, factor: Decimal) -> Self {
         self.overestimate_factor = factor;
+        self
+    }
+
+    /// Override the per-token cost charged when the cost table has no
+    /// entry for a model. Composition callers wiring a known-zero-cost
+    /// table (Ollama, free tier) explicitly set this to
+    /// `ModelCost::default()` or a `ZeroCostTable` instead of letting
+    /// the conservative GPT-4o-priced fallback fire.
+    pub fn with_default_cost(mut self, cost: ModelCost) -> Self {
+        self.default_cost = cost;
         self
     }
 
@@ -346,11 +373,13 @@ impl GovernorBackedAccountant {
             .model_preference
             .as_ref()
             .unwrap_or(&context.resolved_run_profile.model_profile_id);
-        let cost = self.cost_table.cost_for(model_id).unwrap_or(ModelCost {
-            input_per_token: Decimal::ZERO,
-            output_per_token: Decimal::ZERO,
-            max_output_tokens: 0,
-        });
+        // Fail-safe non-zero default — see `default_cost` field comment.
+        // A missing entry is treated as a paid call so misconfigured
+        // routes can't silently bypass daily caps.
+        let cost = self
+            .cost_table
+            .cost_for(model_id)
+            .unwrap_or(self.default_cost);
         // Rough token estimate: 4 chars/token is the conservative standard.
         // Production reconciliation in `post_model_call` uses actual usage,
         // so this is purely for the upfront hold.
@@ -493,23 +522,38 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
     ///
     /// `HostManagedLoopModelPort`'s RAII guard calls this when the
     /// model future is dropped mid-await — before `post_model_call`
-    /// could run. We remove the in-flight entry and call
-    /// `governor.release` synchronously. Errors are logged (this path
-    /// has no caller to return an error to) but the reservation id is
-    /// dropped either way, so a subsequent re-attempt on the same
-    /// `TurnRunId` can take a fresh reservation.
+    /// could run, or while `post_model_call` is still awaiting.
+    ///
+    /// Idempotency / failure handling:
+    ///
+    /// - We **peek** the in-flight entry first, attempt the governor
+    ///   release, and only remove the entry on success. On a transient
+    ///   storage error the entry stays in `in_flight` with a warning
+    ///   logged, so a later retry / cleanup hook still has the
+    ///   reservation id needed to close the hold (review feedback:
+    ///   Medium #4).
+    /// - This method is safe to call after a successful
+    ///   `post_model_call`. `post_model_call` removes the entry on
+    ///   success, so a follow-up `release_in_flight` short-circuits
+    ///   on the `is_none` branch (review feedback: Medium #3 — the
+    ///   RAII guard stays armed across `post_model_call`'s await).
     fn release_in_flight(&self, context: &LoopRunContext) {
-        let Some((_, entry)) = self.in_flight.remove(&context.run_id) else {
+        let Some(entry) = self.in_flight.get(&context.run_id).map(|e| e.clone()) else {
             return;
         };
-        if let Err(error) = self.governor.release(entry.id) {
-            tracing::warn!(
-                ?error,
-                run_id = ?context.run_id,
-                reservation_id = ?entry.id,
-                "cancellation-safe release of in-flight budget reservation failed; \
-                 the period rollover will clear the hold"
-            );
+        match self.governor.release(entry.id) {
+            Ok(_) => {
+                self.in_flight.remove(&context.run_id);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    ?error,
+                    run_id = ?context.run_id,
+                    reservation_id = ?entry.id,
+                    "cancellation-safe release of in-flight budget reservation failed; \
+                     entry retained for a future retry / cleanup hook"
+                );
+            }
         }
     }
 
@@ -539,6 +583,7 @@ impl LoopModelBudgetAccountant for GovernorBackedAccountant {
                     &entry.estimate,
                     self.cost_table.as_ref(),
                     &response.effective_model_profile_id,
+                    &self.default_cost,
                 );
                 self.governor.reconcile(reservation_id, usage).map(|_| ())
             }
@@ -572,6 +617,7 @@ fn usage_for_response(
     estimate: &ResourceEstimate,
     cost_table: &dyn ModelCostTable,
     effective_model: &ModelProfileId,
+    default_cost: &ModelCost,
 ) -> ResourceUsage {
     // Prefer provider-reported usage when the gateway threaded real numbers
     // through `LoopModelResponse::usage`. Compute actual USD from the cost
@@ -582,17 +628,20 @@ fn usage_for_response(
     // estimate. That is conservative (the estimate carries the
     // overestimate factor) but matches the security invariant the cascade
     // depends on — daily caps still deplete, just by an upper bound.
+    //
+    // When the cost table has no entry for the effective model we use
+    // the accountant's `default_cost` rather than zero, so a
+    // misconfigured route or new paid model never silently reconciles to
+    // zero USD (review feedback: Medium #5).
     let output_bytes = response
         .chunks
         .iter()
         .map(|chunk| chunk.safe_text_delta.len() as u64)
         .sum();
     if let Some(usage) = response.usage {
-        let cost = cost_table.cost_for(effective_model).unwrap_or(ModelCost {
-            input_per_token: Decimal::ZERO,
-            output_per_token: Decimal::ZERO,
-            max_output_tokens: 0,
-        });
+        let cost = cost_table
+            .cost_for(effective_model)
+            .unwrap_or(*default_cost);
         let actual_usd = Decimal::from(usage.input_tokens) * cost.input_per_token
             + Decimal::from(usage.output_tokens) * cost.output_per_token;
         return ResourceUsage {

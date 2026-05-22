@@ -293,20 +293,28 @@ where
             .await
             .map(sanitize_model_response);
 
-        // Post-call accounting fires on BOTH success and failure. Disarm
-        // the cancellation guard before awaiting `post_model_call` — that
-        // call now owns the in-flight release, so the guard's Drop would
-        // double-release if we left it armed.
-        release_guard.disarm();
+        // Post-call accounting fires on BOTH success and failure. The
+        // RAII guard stays armed across this await — if the future is
+        // cancelled mid-`post_model_call`, the Drop path calls
+        // `release_in_flight` to clean up. `release_in_flight` is
+        // idempotent against a successful post-call (the in-flight
+        // entry is already gone), so disarming after success isn't
+        // strictly required — but we still disarm on the happy path so
+        // the Drop log doesn't fire on every successful run.
         let outcome = match &gateway_result {
             Ok(response) => ModelCallOutcome::Success(response),
             Err(error) => ModelCallOutcome::Failure(error),
         };
-        if let Err(post_error) = self
+        let post_result = self
             .accountant
             .post_model_call(&self.context, &request, outcome)
-            .await
-        {
+            .await;
+        // Disarm only AFTER post_model_call returns. If we're past this
+        // line the in-flight entry is either reconciled, released, or
+        // retained on a storage error — in any of those cases the
+        // guard's Drop call would be a no-op against the same entry.
+        release_guard.disarm();
+        if let Err(post_error) = post_result {
             let host_error = post_error.into_host_error();
             if let Err(milestone_error) = self.milestones.model_failed(host_error.kind).await {
                 tracing::debug!(

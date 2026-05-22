@@ -738,13 +738,45 @@ pub async fn build_reborn_runtime(
     // the local-dev governor. When neither an LLM policy nor a test
     // override supplies a cost table we deliberately skip the accountant
     // — there's no spend to track and the cascade would never fire.
+    //
+    // The accountant is wired with a seeding policy derived from
+    // `BudgetDefaults::compiled_defaults().with_env()` so a fresh user /
+    // project account picks up the default daily cap on the first model
+    // call. Without this seeding step the local-dev governor starts
+    // empty and `reserve_with_outcome_in_state` skips accounts that
+    // have no configured limit — model calls would record usage but
+    // never enforce a cap (review feedback: High #2).
     let model_budget_accountant: Option<
         Arc<dyn ironclaw_turns::run_profile::LoopModelBudgetAccountant>,
     > = match resolved_cost_table {
         Some(cost_table) => {
+            let defaults = ironclaw_reborn_config::BudgetDefaults::compiled_defaults()
+                .with_env()
+                .map_err(|error| RebornRuntimeError::InvalidArgument {
+                    reason: format!("budget defaults env-override invalid: {error}"),
+                })?;
+            let user_daily_usd =
+                rust_decimal::Decimal::from_f64_retain(defaults.user_daily_usd).unwrap_or_default();
+            let project_daily_usd =
+                rust_decimal::Decimal::from_f64_retain(defaults.project_daily_usd)
+                    .unwrap_or_default();
+            let overestimate_factor =
+                rust_decimal::Decimal::from_f64_retain(defaults.overestimate_factor)
+                    .unwrap_or(rust_decimal::Decimal::ONE);
+            let seeding_policy = ironclaw_loop_support::BudgetSeedingPolicy::new(
+                user_daily_usd,
+                project_daily_usd,
+                ironclaw_resources::BudgetPeriod::Rolling24h,
+                ironclaw_resources::BudgetThresholds {
+                    warn_at: defaults.warn_at,
+                    pause_at: defaults.pause_at,
+                },
+            );
             let governor = Arc::clone(&local_runtime.resource_governor);
             let accountant =
                 ironclaw_loop_support::GovernorBackedAccountant::new(governor, cost_table)
+                    .with_overestimate_factor(overestimate_factor)
+                    .with_seeding_policy(seeding_policy)
                     .with_gate_store(Arc::clone(&local_runtime.budget_gate_store));
             Some(Arc::new(accountant))
         }

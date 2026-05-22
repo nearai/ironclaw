@@ -93,6 +93,7 @@ axum = { version = "0.8", optional = true }
 tower = { version = "0.5", optional = true }
 tower-http = { version = "0.6", optional = true, features = ["cors", "set-header", "limit", "catch-panic"] }
 lru = { version = "0.16", optional = true }
+rust_decimal = { version = "1", features = ["serde", "serde-with-str"] }
 secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

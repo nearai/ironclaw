@@ -2012,6 +2012,21 @@ fn check_thresholds_all_interventions(
     let mut absorb = |intervention: ThresholdIntervention| match intervention {
         ThresholdIntervention::Warning(warning) => warnings.push(warning),
         ThresholdIntervention::Approval(needed) => {
+            // Record a warning-shaped record for the paused dimension
+            // even though the approval is the terminal action — if
+            // another dimension hard-denies later in this pass, the
+            // cascade returns `Deny { warnings, denial }` and the
+            // pause signal would otherwise be lost (review feedback:
+            // Medium #6). The warning carries the same dimension /
+            // utilization / limit shape so downstream audit / SSE
+            // consumers see every crossed threshold.
+            warnings.push(BudgetWarning {
+                account: needed.account.clone(),
+                dimension: needed.dimension,
+                utilization: needed.utilization,
+                limit: needed.limit.clone(),
+                period_end: needed.period_end,
+            });
             if approval.is_none() {
                 approval = Some(needed);
             }

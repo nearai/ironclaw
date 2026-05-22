@@ -70,6 +70,11 @@ fn local_dev_runtime_policy() -> EffectiveRuntimePolicy {
 
 /// Test cost table that maps the default interactive profile to a fixed
 /// per-token price. Used by every test so spend assertions are exact.
+///
+/// `max_output_tokens = 20` keeps the reservation estimate tiny enough
+/// to fit under the seeded $5/user default cap installed by composition
+/// (review feedback High #2). Tests that want to exceed that cap raise
+/// the user limit explicitly before sending.
 fn interactive_cost_table(
     input_per_token: Decimal,
     output_per_token: Decimal,
@@ -80,7 +85,7 @@ fn interactive_cost_table(
         ModelCost {
             input_per_token,
             output_per_token,
-            max_output_tokens: 0,
+            max_output_tokens: 20,
         },
     );
     Arc::new(table)
@@ -319,6 +324,24 @@ async fn c1_provider_tokens_reconcile_to_actual_usd() {
     ))
     .await
     .expect("runtime builds");
+    // Raise the user cap above the seeded $5 default so the
+    // pre-call estimate (≈$5.50 at these prices) doesn't pause.
+    let governor = runtime.budget_resource_governor().expect("governor");
+    let user_account = ResourceAccount::user(
+        TenantId::new("c1-tenant").unwrap(),
+        ironclaw_host_api::UserId::new("c1-owner").unwrap(),
+    );
+    governor
+        .set_limit(
+            user_account,
+            ResourceLimits {
+                max_usd: Some(dec!(1_000.00)),
+                period: BudgetPeriod::Rolling24h,
+                thresholds: BudgetThresholds::DISABLED,
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
 
     let conversation = runtime.new_conversation().await.expect("conversation");
     let _ = tokio::time::timeout(
@@ -347,13 +370,13 @@ async fn c1_provider_tokens_reconcile_to_actual_usd() {
 }
 
 /// C2: unknown model profile in the cost table → accountant uses the
-/// table's `cost_for` returning `None` → reconcile records zero spend
-/// for that turn (the policy-driven `default_cost` fallback ships in
-/// `LlmModelProfilePolicy::build_cost_table` and is exercised by the
-/// `root-llm-provider` path; here we cover the bare-`StaticModelCostTable`
-/// shape that returns None).
+/// table's `cost_for` returning `None` → the accountant's `default_cost`
+/// fallback fires (conservative ~GPT-4o pricing) so the ledger records
+/// *non-zero* spend. This is the fail-closed shape from review feedback
+/// Medium #5: a paid model missing from the cost table must NOT silently
+/// reconcile to zero.
 #[tokio::test]
-async fn c2_unknown_model_in_cost_table_reconciles_to_zero() {
+async fn c2_unknown_model_in_cost_table_uses_default_cost_fallback() {
     let root = tempfile::tempdir().unwrap();
     let gateway = Arc::new(BudgetTestGateway::with_constant("ok", 10, 10));
     // Empty cost table — no entry for "interactive_model".
@@ -381,16 +404,19 @@ async fn c2_unknown_model_in_cost_table_reconciles_to_zero() {
         TenantId::new("c2-tenant").unwrap(),
         ironclaw_host_api::UserId::new("c2-owner").unwrap(),
     );
-    let snapshot = governor.account_snapshot(&user_account).expect("snapshot");
-    // No limit was set; without a limit there's no account snapshot.
-    // The accountant still tracks reserved_for; assert at the
-    // tally level instead — zero spend means the cascade never
-    // touched the user ledger.
-    let _ = snapshot;
     let usage = governor
         .usage_for(&user_account)
         .expect("usage_for read succeeds");
-    assert_eq!(usage.usd, Decimal::ZERO);
+    // 10 input × ~$0.0000025 + 10 output × ~$0.00001 ≈ $0.000125 — what
+    // matters is that this is strictly greater than zero. Silently
+    // recording zero for an unknown paid model is the bug we're fixing.
+    assert!(
+        usage.usd > Decimal::ZERO,
+        "unknown model must NOT silently reconcile to zero USD (got {})",
+        usage.usd,
+    );
+    assert_eq!(usage.input_tokens, 10);
+    assert_eq!(usage.output_tokens, 10);
 
     runtime.shutdown().await.expect("shutdown");
 }
@@ -440,15 +466,18 @@ async fn c3_zero_cost_model_records_zero_spend() {
 }
 
 /// D3: seeding policy installs the default user limit on the first
-/// model call against a fresh account; subsequent calls reuse the same
-/// limit. Covers the accountant's first-touch seed path end-to-end.
+/// model call against a fresh account. The local-dev composition wires
+/// `BudgetSeedingPolicy::new(user_daily=$5, project_daily=$2)` from
+/// `BudgetDefaults::compiled_defaults()`, so the first model call
+/// against a fresh user installs that $5/day cap.
 ///
-/// The seeding policy itself is wired by `GovernorBackedAccountant::with_seeding_policy`,
-/// not by the current local-dev composition, so this test asserts the
-/// no-seed default: a fresh user has no limit, the first reservation
-/// succeeds, and the ledger records the spend without a cap.
+/// This test sends one tiny call that fits well under $5, then asserts
+/// the user account ended up with the seeded $5 limit (the proof of
+/// "seeding fired"). It guards against regressions in the
+/// composition-level `with_seeding_policy` wiring (review feedback:
+/// High #2).
 #[tokio::test]
-async fn d3_fresh_user_without_limits_runs_without_denial() {
+async fn d3_seeding_policy_installs_default_cap_on_first_touch() {
     let root = tempfile::tempdir().unwrap();
     let gateway = Arc::new(BudgetTestGateway::with_constant("ok", 5, 5));
     let cost_table = interactive_cost_table(dec!(0.01), dec!(0.02));
@@ -470,15 +499,28 @@ async fn d3_fresh_user_without_limits_runs_without_denial() {
     .expect("send finishes")
     .expect("send succeeds");
     assert_eq!(reply.status, TurnStatus::Completed);
-    // 5 × $0.01 + 5 × $0.02 = $0.15 — recorded against the no-limit
-    // user account.
+    // Seeding policy fired: user account now has the compiled default $5 cap.
     let governor = runtime.budget_resource_governor().expect("governor");
-    let user_account = ResourceAccount::user(
+    let user_account_seed_check = ResourceAccount::user(
         TenantId::new("d3-tenant").unwrap(),
         ironclaw_host_api::UserId::new("d3-owner").unwrap(),
     );
+    let seeded_snapshot = governor
+        .account_snapshot(&user_account_seed_check)
+        .expect("snapshot read")
+        .expect("user account exists after first call");
+    let seeded_limits = seeded_snapshot
+        .limits
+        .expect("seeding policy installed a default limit");
+    assert_eq!(
+        seeded_limits.max_usd,
+        Some(dec!(5.00)),
+        "first-touch seeding must install the compiled-default $5 user cap"
+    );
+    // 5 × $0.01 + 5 × $0.02 = $0.15 — recorded against the seeded
+    // user account.
     let usage = governor
-        .usage_for(&user_account)
+        .usage_for(&user_account_seed_check)
         .expect("usage_for read succeeds");
     assert_eq!(usage.usd, dec!(0.15));
 
@@ -601,6 +643,23 @@ async fn budget_test_gateway_scripted_replies_drive_per_turn_costs() {
     ))
     .await
     .expect("runtime builds");
+    // Raise the user cap above the seeded $5 default.
+    let governor = runtime.budget_resource_governor().expect("governor");
+    let user_account = ResourceAccount::user(
+        TenantId::new("scripted-tenant").unwrap(),
+        ironclaw_host_api::UserId::new("scripted-owner").unwrap(),
+    );
+    governor
+        .set_limit(
+            user_account,
+            ResourceLimits {
+                max_usd: Some(dec!(1_000.00)),
+                period: BudgetPeriod::Rolling24h,
+                thresholds: BudgetThresholds::DISABLED,
+                ..ResourceLimits::default()
+            },
+        )
+        .unwrap();
 
     let conversation = runtime.new_conversation().await.expect("conversation");
     for prompt in ["first", "second"] {
