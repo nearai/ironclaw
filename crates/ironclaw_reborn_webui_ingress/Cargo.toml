@@ -1,0 +1,52 @@
+[package]
+name = "ironclaw_reborn_webui_ingress"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+description = "Host-owned listener binding + serve loop for the Reborn WebChat v2 HTTP gateway"
+authors = ["NEAR AI <support@near.ai>"]
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+publish = false
+
+[features]
+default = []
+# Compile in `InMemorySessionStore` as a public crate item. Off by
+# default so a production deployment cannot accidentally wire the
+# process-local store as a `SessionStore` impl — `SessionAuthenticator`
+# would happily accept it, but sessions would vanish on every restart
+# and the O(n) constant-time lookup would scale poorly under real
+# user load. Local dev and tests opt in by enabling this feature.
+dev-in-memory-session = []
+
+[dependencies]
+async-trait = "0.1"
+axum = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+ironclaw_host_api = { path = "../ironclaw_host_api" }
+ironclaw_reborn_composition = { path = "../ironclaw_reborn_composition", features = ["webui-v2-beta"] }
+jsonwebtoken = "9"
+parking_lot = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "signal", "sync"] }
+tracing = "0.1"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+axum = { version = "0.8", features = ["macros"] }
+http = "1"
+# Generate test RSA keypairs at test time so the OIDC e2e test can
+# mint real signed JWTs without relying on a checked-in private key.
+rsa = { version = "0.9", features = ["sha2"] }
+rand = "0.8"
+base64 = "0.22"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "time"] }

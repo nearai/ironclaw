@@ -143,6 +143,27 @@ impl ProductAdapter for RebornTestProductAdapter {
         _egress: &dyn ProtocolHttpEgress,
         delivery_sink: &dyn OutboundDeliverySink,
     ) -> Result<ProductRenderOutcome, ProductAdapterError> {
+        if envelope.adapter_id != self.adapter_id {
+            return Err(ProductAdapterError::InvalidIdentifier {
+                kind: "envelope.adapter_id",
+                reason: format!(
+                    "envelope adapter_id `{}` does not match this adapter `{}`",
+                    envelope.adapter_id.as_str(),
+                    self.adapter_id.as_str(),
+                ),
+            });
+        }
+        if envelope.installation_id != self.installation_id {
+            return Err(ProductAdapterError::InvalidIdentifier {
+                kind: "envelope.installation_id",
+                reason: format!(
+                    "envelope installation_id `{}` does not match this installation `{}`",
+                    envelope.installation_id.as_str(),
+                    self.installation_id.as_str(),
+                ),
+            });
+        }
+
         delivery_sink
             .record(DeliveryStatus::Delivered {
                 attempt_id: envelope.delivery_attempt_id,
