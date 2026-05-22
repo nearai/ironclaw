@@ -84,7 +84,7 @@ impl BudgetTestGateway {
     pub fn push(&self, reply: ScriptedReply) {
         self.replies
             .lock()
-            .expect("budget test gateway script lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(reply);
     }
 
@@ -92,7 +92,7 @@ impl BudgetTestGateway {
     pub fn call_count(&self) -> usize {
         self.calls
             .lock()
-            .expect("budget test gateway call log lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
     }
 
@@ -100,7 +100,7 @@ impl BudgetTestGateway {
         let mut script = self
             .replies
             .lock()
-            .expect("budget test gateway script lock poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if script.is_empty() {
             return self
                 .fallback
@@ -119,7 +119,7 @@ impl HostManagedModelGateway for BudgetTestGateway {
     ) -> Result<HostManagedModelResponse, HostManagedModelError> {
         self.calls
             .lock()
-            .expect("budget test gateway call log lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(request);
         Ok(self.next_reply().into_response())
     }
@@ -134,7 +134,7 @@ impl HostManagedModelGateway for BudgetTestGateway {
         // extend this with a separate scripted-tool-call queue.
         self.calls
             .lock()
-            .expect("budget test gateway call log lock poisoned")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(request);
         Ok(self.next_reply().into_response())
     }
