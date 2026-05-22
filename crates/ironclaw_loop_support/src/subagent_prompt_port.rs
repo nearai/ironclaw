@@ -254,12 +254,20 @@ fn loop_safe_summary_text(value: impl Into<String>) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     if safe.len() > 500 {
-        safe.truncate(500);
-        while !safe.is_char_boundary(safe.len()) {
-            safe.pop();
-        }
+        truncate_to_char_boundary(&mut safe, 500);
     }
     safe
+}
+
+fn truncate_to_char_boundary(value: &mut String, max_bytes: usize) {
+    if value.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
 }
 
 pub fn subagent_run_id_from_context(run_context: &LoopRunContext) -> TurnRunId {
@@ -268,10 +276,9 @@ pub fn subagent_run_id_from_context(run_context: &LoopRunContext) -> TurnRunId {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use ironclaw_host_api::CapabilityId;
     use ironclaw_turns::run_profile::{LoopInlineMessageRole, LoopModelCapabilityView};
+    use std::collections::BTreeSet;
 
     use super::*;
 
@@ -355,5 +362,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["demo.read"]
         );
+    }
+
+    #[test]
+    fn summary_text_strips_special_characters_and_truncates_on_utf8_boundary() {
+        let raw = format!("hello {{world}} <bad/path> {}", "é".repeat(300));
+
+        let safe = loop_safe_summary_text(raw);
+
+        assert!(safe.len() <= 500);
+        assert!(safe.is_char_boundary(safe.len()));
+        assert!(!safe.contains('{'));
+        assert!(!safe.contains('}'));
+        assert!(!safe.contains('<'));
+        assert!(!safe.contains('/'));
     }
 }

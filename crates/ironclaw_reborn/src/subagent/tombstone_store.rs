@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use async_trait::async_trait;
 use ironclaw_turns::TurnRunId;
 
 use crate::subagent::spawn_result::SubagentResultTombstone;
+
+const MAX_TOMBSTONE_RECORDS: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TombstoneStoreError {
@@ -26,7 +28,13 @@ pub trait SubagentResultTombstoneStore: Send + Sync {
 
 #[derive(Default)]
 pub struct BoundedSubagentResultTombstoneStore {
-    inner: std::sync::Mutex<HashMap<TurnRunId, SubagentResultTombstone>>,
+    inner: std::sync::Mutex<TombstoneInner>,
+}
+
+#[derive(Default)]
+struct TombstoneInner {
+    by_child: HashMap<TurnRunId, SubagentResultTombstone>,
+    insertion_order: VecDeque<TurnRunId>,
 }
 
 impl BoundedSubagentResultTombstoneStore {
@@ -47,7 +55,17 @@ impl SubagentResultTombstoneStore for BoundedSubagentResultTombstoneStore {
             .map_err(|_| TombstoneStoreError::Backend {
                 reason: "subagent tombstone store mutex poisoned".to_string(),
             })?;
-        inner.insert(tombstone.child_run_id, tombstone);
+        let child_run_id = tombstone.child_run_id;
+        if !inner.by_child.contains_key(&child_run_id) {
+            inner.insertion_order.push_back(child_run_id);
+        }
+        inner.by_child.insert(child_run_id, tombstone);
+        while inner.by_child.len() > MAX_TOMBSTONE_RECORDS {
+            let Some(oldest) = inner.insertion_order.pop_front() else {
+                break;
+            };
+            inner.by_child.remove(&oldest);
+        }
         Ok(())
     }
 
@@ -61,7 +79,7 @@ impl SubagentResultTombstoneStore for BoundedSubagentResultTombstoneStore {
             .map_err(|_| TombstoneStoreError::Backend {
                 reason: "subagent tombstone store mutex poisoned".to_string(),
             })?;
-        Ok(inner.get(&child_run_id).cloned())
+        Ok(inner.by_child.get(&child_run_id).cloned())
     }
 }
 
@@ -90,5 +108,29 @@ mod tests {
             store.read_tombstone(child_run_id).await.unwrap(),
             Some(tombstone)
         );
+    }
+
+    #[tokio::test]
+    async fn tombstone_store_evicts_oldest_record_at_capacity() {
+        let store = BoundedSubagentResultTombstoneStore::new();
+        let first_child = TurnRunId::new();
+        store.write_tombstone(tombstone(first_child)).await.unwrap();
+
+        for _ in 1..=MAX_TOMBSTONE_RECORDS {
+            store
+                .write_tombstone(tombstone(TurnRunId::new()))
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(store.read_tombstone(first_child).await.unwrap(), None);
+    }
+
+    fn tombstone(child_run_id: TurnRunId) -> SubagentResultTombstone {
+        SubagentResultTombstone {
+            child_run_id,
+            terminal_status: TurnStatus::Cancelled,
+            disposition: SubagentResultDisposition::DiscardedByParentCancel,
+        }
     }
 }

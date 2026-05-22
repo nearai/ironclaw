@@ -13,12 +13,9 @@ use ironclaw_threads::{
 use ironclaw_turns::{
     CancelRunRequest, CancelRunResponse, GateRef, GetRunStateRequest, IdempotencyKey,
     ResumeTurnPrecondition, ResumeTurnRequest, ResumeTurnResponse, SubmitTurnRequest,
-    SubmitTurnResponse, TurnActor,
-    TurnCoordinator, TurnError, TurnEventKind, TurnLifecycleEvent, TurnRunId, TurnRunRecord,
-    TurnRunState, TurnStateStore, TurnStatus,
-    run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, LoopRunContext, sanitize_model_visible_text,
-    },
+    SubmitTurnResponse, TurnActor, TurnCoordinator, TurnError, TurnEventKind, TurnLifecycleEvent,
+    TurnRunId, TurnRunRecord, TurnRunState, TurnStateStore, TurnStatus,
+    run_profile::{AgentLoopHostError, LoopRunContext, sanitize_model_visible_text},
     runner::{
         ApplyValidatedLoopExitRequest, BlockRunRequest, CancelRunCompletionRequest,
         ClaimRunRequest, ClaimedTurnRun, CompleteRunRequest, FailRunRequest, HeartbeatRequest,
@@ -76,14 +73,34 @@ where
             .record_child_terminal(event.run_id, terminal_event_from_lifecycle(event))
             .map_err(map_host_error)?;
         self.recover_missing_gate_record(event).await?;
-        let ready = self
+        while let Some(state) = self
             .gate_store
-            .undelivered_terminal_states()
-            .map_err(map_host_error)?;
-        for state in ready {
-            let terminal_event = state.terminal_event.ok_or_else(|| TurnError::Unavailable {
-                reason: "subagent gate replay selected state without terminal metadata".to_string(),
-            })?;
+            .claim_next_terminal_state_for_child(event.run_id)
+            .map_err(map_host_error)?
+        {
+            if let Err(error) = self.handle_claimed_terminal_state(state).await {
+                let (gate_ref, error) = error;
+                let _ = self.gate_store.release_terminal_claim(&gate_ref);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_claimed_terminal_state(
+        &self,
+        state: crate::subagent::gate_resolution::AwaitedChildState,
+    ) -> Result<(), (GateRef, TurnError)> {
+        let terminal_event = state.terminal_event.ok_or_else(|| {
+            (
+                state.record.gate_ref.clone(),
+                TurnError::Unavailable {
+                    reason: "subagent gate replay selected state without terminal metadata"
+                        .to_string(),
+                },
+            )
+        })?;
+        let result = async {
             match state.record.mode {
                 SpawnSubagentMode::Blocking => {
                     self.write_terminal_result(&state.record, &terminal_event)
@@ -107,8 +124,10 @@ where
                 .delete_awaited_child(&state.record.gate_ref)
                 .await
                 .map_err(map_host_error)?;
+            Ok(())
         }
-        Ok(())
+        .await;
+        result.map_err(|error| (state.record.gate_ref, error))
     }
 
     async fn is_subagent_child(&self, event: &TurnLifecycleEvent) -> Result<bool, TurnError> {
@@ -291,7 +310,6 @@ where
             .await
         {
             Ok(()) => {}
-            Err(error) if is_missing_staged_result_error(&error) => {}
             Err(error) => return Err(map_host_error(error)),
         }
         self.update_parent_result_reference(record, event, result_ref, safe_summary)
@@ -568,13 +586,6 @@ fn map_host_error(error: AgentLoopHostError) -> TurnError {
     }
 }
 
-fn is_missing_staged_result_error(error: &AgentLoopHostError) -> bool {
-    error.kind == AgentLoopHostErrorKind::InvalidInvocation
-        && error
-            .safe_summary
-            .contains("capability result ref was not staged for this loop run")
-}
-
 fn is_subagent_terminal_status(status: TurnStatus) -> bool {
     status.is_terminal() || status == TurnStatus::RecoveryRequired
 }
@@ -584,6 +595,10 @@ fn background_completion_payload(
     record: &ironclaw_loop_support::AwaitedChildSetRecord,
     child_output: &ChildTerminalOutput,
 ) -> serde_json::Value {
+    let final_text = child_output
+        .final_text
+        .as_deref()
+        .map(|text| sanitize_tool_result_summary(text.to_string()));
     serde_json::json!({
         "child_run_id": record.child_run_id,
         "child_thread_id": record.child_thread_id,
@@ -591,7 +606,7 @@ fn background_completion_payload(
         "mode": mode_label(record.mode),
         "status": status_label(event.status),
         "output_available": event.status == TurnStatus::Completed,
-        "final_text": child_output.final_text.clone(),
+        "final_text": final_text,
         "failure_summary": child_output.failure_summary.clone(),
         "terminal_event": {
             "kind": event_kind_label(&event.kind),
@@ -613,10 +628,12 @@ fn parent_result_summary(
 ) -> Result<ToolResultSafeSummary, TurnError> {
     let mut summary = match child_output.final_text.as_deref() {
         Some(final_text) if !final_text.trim().is_empty() => {
+            let final_text = sanitize_tool_result_summary(final_text.to_string());
             format!("Subagent completed with answer {}", final_text)
         }
         _ => match child_output.failure_summary.as_deref() {
             Some(failure) if !failure.trim().is_empty() => {
+                let failure = sanitize_tool_result_summary(failure.to_string());
                 format!(
                     "Subagent finished with status {} and failure {}",
                     status_label(event.status),
@@ -646,16 +663,24 @@ fn sanitize_tool_result_summary(value: String) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     if safe.len() > 512 {
-        safe.truncate(512);
-        while !safe.is_char_boundary(safe.len()) {
-            safe.pop();
-        }
+        truncate_to_char_boundary(&mut safe, 512);
     }
     if ToolResultSafeSummary::new(safe.clone()).is_ok() {
         safe
     } else {
         "Subagent result available".to_string()
     }
+}
+
+fn truncate_to_char_boundary(value: &mut String, max_bytes: usize) {
+    if value.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value.truncate(end);
 }
 
 fn terminal_event_from_lifecycle(event: &TurnLifecycleEvent) -> AwaitedChildTerminalEvent {
@@ -855,7 +880,6 @@ mod tests {
     struct RecordingResultWriter {
         result_ref: LoopResultRef,
         writes: Mutex<Vec<serde_json::Value>>,
-        fail_missing_on_update: bool,
     }
 
     impl RecordingResultWriter {
@@ -863,15 +887,6 @@ mod tests {
             Self {
                 result_ref,
                 writes: Mutex::new(Vec::new()),
-                fail_missing_on_update: false,
-            }
-        }
-
-        fn missing_on_update(result_ref: LoopResultRef) -> Self {
-            Self {
-                result_ref,
-                writes: Mutex::new(Vec::new()),
-                fail_missing_on_update: true,
             }
         }
 
@@ -899,12 +914,6 @@ mod tests {
             output: serde_json::Value,
         ) -> Result<(), AgentLoopHostError> {
             assert_eq!(result_ref, &self.result_ref);
-            if self.fail_missing_on_update {
-                return Err(AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::InvalidInvocation,
-                    "capability result ref was not staged for this loop run",
-                ));
-            }
             self.writes.lock().unwrap().push(output);
             Ok(())
         }
@@ -1272,7 +1281,7 @@ mod tests {
             .await
             .unwrap();
 
-        let result_writer = Arc::new(RecordingResultWriter::missing_on_update(result_ref));
+        let result_writer = Arc::new(RecordingResultWriter::new(result_ref));
         let observer = SubagentCompletionObserver::new(
             Arc::clone(&gate_store),
             goal_store,
@@ -1297,7 +1306,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result_writer.writes().is_empty());
+        assert_eq!(result_writer.writes().len(), 1);
         let history = thread_service
             .list_thread_history(ThreadHistoryRequest {
                 scope: parent_thread_scope,
@@ -1457,5 +1466,41 @@ mod tests {
                 .unwrap()
                 .contains("recovery_required")
         );
+    }
+
+    #[test]
+    fn tool_result_summary_sanitizes_and_truncates_on_utf8_boundary() {
+        let raw = format!("answer {{with}} <markers> {}", "é".repeat(300));
+
+        let safe = sanitize_tool_result_summary(raw);
+
+        assert!(safe.len() <= 512);
+        assert!(safe.is_char_boundary(safe.len()));
+        assert!(!safe.contains('{'));
+        assert!(!safe.contains('}'));
+        assert!(!safe.contains('<'));
+        assert!(!safe.contains('>'));
+    }
+
+    #[test]
+    fn parent_result_summary_sanitizes_child_text_before_formatting() {
+        let summary = parent_result_summary(
+            &AwaitedChildTerminalEvent {
+                status: TurnStatus::Completed,
+                kind: TurnEventKind::Completed,
+                cursor: EventCursor(10),
+                sanitized_reason: None,
+                owner_user_id: None,
+            },
+            &ChildTerminalOutput {
+                final_text: Some(format!("{} {{secret}}", "é".repeat(300))),
+                failure_summary: None,
+            },
+        )
+        .unwrap();
+
+        assert!(summary.as_str().len() <= 512);
+        assert!(!summary.as_str().contains('{'));
+        assert!(!summary.as_str().contains('}'));
     }
 }

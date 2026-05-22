@@ -33,13 +33,16 @@ pub enum SubagentToolId {
 }
 
 impl SubagentToolId {
+    /// Capability id string registered in the host runtime first-party
+    /// registry. Must remain a valid `CapabilityId`
+    /// (`<extension>.<capability>` form).
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Message => "message",
-            Self::ReadFile => "read_file",
-            Self::ListFiles => "list_files",
-            Self::Search => "search",
-            Self::WebSearch => "web_search",
+            Self::Message => "builtin.message",
+            Self::ReadFile => "builtin.read_file",
+            Self::ListFiles => "builtin.list_dir",
+            Self::Search => "builtin.grep",
+            Self::WebSearch => "builtin.http",
         }
     }
 }
