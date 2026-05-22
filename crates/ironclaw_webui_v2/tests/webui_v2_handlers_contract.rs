@@ -19,7 +19,8 @@ use http_body_util::BodyExt;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, UserId};
 use ironclaw_product_adapters::{
     AdapterInstallationId, ExternalConversationRef, FinalReplyView, ProductAdapterId,
-    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProjectionCursor,
+    ProductOutboundEnvelope, ProductOutboundPayload, ProductOutboundTarget, ProductProjectionItem,
+    ProductProjectionState, ProgressKind, ProgressUpdateView, ProjectionCursor,
 };
 use ironclaw_product_workflow::{
     ExtensionName, RebornCancelRunResponse, RebornCreateThreadResponse, RebornGetRunStateRequest,
@@ -997,6 +998,47 @@ async fn stream_events_releases_slot_when_facade_drain_stalls_past_max_lifetime(
 /// tests only care that whatever the facade hands back becomes a
 /// well-formed SSE event.
 fn make_projection_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope {
+    make_outbound_envelope(
+        cursor,
+        ProductOutboundPayload::FinalReply(FinalReplyView {
+            turn_run_id: TurnRunId::new(),
+            text: text.into(),
+            generated_at: chrono::Utc::now(),
+        }),
+    )
+}
+
+fn make_tool_progress_envelope(cursor: &str) -> ProductOutboundEnvelope {
+    make_outbound_envelope(
+        cursor,
+        ProductOutboundPayload::Progress(ProgressUpdateView {
+            turn_run_id: TurnRunId::new(),
+            kind: ProgressKind::ToolRunning,
+            generated_at: chrono::Utc::now(),
+        }),
+    )
+}
+
+fn make_projection_update_envelope(cursor: &str) -> ProductOutboundEnvelope {
+    make_outbound_envelope(
+        cursor,
+        ProductOutboundPayload::ProjectionUpdate {
+            state: ProductProjectionState::new(
+                "thread-x",
+                vec![ProductProjectionItem::Text {
+                    id: "message-1".to_string(),
+                    body: "projection body".to_string(),
+                }],
+            )
+            .expect("projection state"),
+        },
+    )
+}
+
+fn make_outbound_envelope(
+    cursor: &str,
+    payload: ProductOutboundPayload,
+) -> ProductOutboundEnvelope {
     ProductOutboundEnvelope::new(
         ProductAdapterId::new("webui_v2").expect("adapter id"), // safety: literal valid id
         AdapterInstallationId::new("install:alpha").expect("install id"), // safety: literal valid id
@@ -1006,11 +1048,7 @@ fn make_projection_envelope(cursor: &str, text: &str) -> ProductOutboundEnvelope
             None,
         ),
         ProjectionCursor::new(cursor).expect("cursor"), // safety: test-supplied
-        ProductOutboundPayload::FinalReply(FinalReplyView {
-            turn_run_id: TurnRunId::new(),
-            text: text.into(),
-            generated_at: chrono::Utc::now(),
-        }),
+        payload,
     )
 }
 
@@ -1097,10 +1135,11 @@ async fn stream_events_emits_typed_browser_events_with_cursor_ids() {
     let services = Arc::new(StubServices::default());
 
     let envelope_a = make_projection_envelope("cursor:a", "hello");
-    let envelope_b = make_projection_envelope("cursor:b", "world");
+    let envelope_b = make_tool_progress_envelope("cursor:b");
+    let envelope_c = make_projection_update_envelope("cursor:c");
 
     services.enqueue_stream_events(Ok(RebornStreamEventsResponse {
-        events: vec![envelope_a.clone(), envelope_b.clone()],
+        events: vec![envelope_a.clone(), envelope_b.clone(), envelope_c.clone()],
     }));
     // Second drain is empty: lets the test observe `after_cursor`
     // advancement on the follow-up call without producing more events.
@@ -1129,7 +1168,7 @@ async fn stream_events_emits_typed_browser_events_with_cursor_ids() {
     let mut bytes = Vec::<u8>::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let have_events = bytes.windows(2).filter(|w| *w == b"\n\n").count() >= 2;
+        let have_events = bytes.windows(2).filter(|w| *w == b"\n\n").count() >= 3;
         let saw_second_call = services.stream_events_calls.lock().expect("lock").len() >= 2;
         if have_events && saw_second_call {
             break;
@@ -1151,8 +1190,8 @@ async fn stream_events_emits_typed_browser_events_with_cursor_ids() {
 
     let events = parse_sse_events(&bytes);
     assert!(
-        events.len() >= 2,
-        "expected at least two SSE events, got: {events:?}; raw: {}",
+        events.len() >= 3,
+        "expected at least three SSE events, got: {events:?}; raw: {}",
         String::from_utf8_lossy(&bytes)
     );
 
@@ -1160,6 +1199,8 @@ async fn stream_events_emits_typed_browser_events_with_cursor_ids() {
         serde_json::to_string(envelope_a.projection_cursor()).expect("cursor-a json");
     let cursor_b_json =
         serde_json::to_string(envelope_b.projection_cursor()).expect("cursor-b json");
+    let cursor_c_json =
+        serde_json::to_string(envelope_c.projection_cursor()).expect("cursor-c json");
 
     assert_eq!(events[0].event.as_deref(), Some("final_reply"));
     assert_eq!(events[0].id.as_deref(), Some(cursor_a_json.as_str()));
@@ -1179,13 +1220,27 @@ async fn stream_events_emits_typed_browser_events_with_cursor_ids() {
         "browser event frame must not expose delivery metadata"
     );
 
-    assert_eq!(events[1].event.as_deref(), Some("final_reply"));
+    assert_eq!(events[1].event.as_deref(), Some("capability_progress"));
     assert_eq!(events[1].id.as_deref(), Some(cursor_b_json.as_str()));
     let event_b_json: Value =
         serde_json::from_str(events[1].data.as_deref().expect("data")).expect("event b json");
     assert_eq!(event_b_json["cursor"], "cursor:b");
-    assert_eq!(event_b_json["type"], "final_reply");
-    assert_eq!(event_b_json["reply"]["text"], "world");
+    assert_eq!(event_b_json["type"], "capability_progress");
+    assert_eq!(event_b_json["progress"]["kind"], "tool_running");
+
+    assert_eq!(events[2].event.as_deref(), Some("projection_update"));
+    assert_eq!(events[2].id.as_deref(), Some(cursor_c_json.as_str()));
+    let event_c_json: Value =
+        serde_json::from_str(events[2].data.as_deref().expect("data")).expect("event c json");
+    assert_eq!(event_c_json["cursor"], "cursor:c");
+    assert_eq!(event_c_json["type"], "projection_update");
+    assert_eq!(event_c_json["state"]["thread_id"], "thread-x");
+    assert_eq!(
+        event_c_json["state"]["items"][0]["text"]["body"],
+        "projection body"
+    );
+    assert_no_adapter_metadata(&event_b_json);
+    assert_no_adapter_metadata(&event_c_json);
 
     let calls = services.stream_events_calls.lock().expect("lock").clone();
     assert!(
@@ -1195,8 +1250,19 @@ async fn stream_events_emits_typed_browser_events_with_cursor_ids() {
     );
     assert_eq!(
         calls[1].after_cursor.as_ref(),
-        Some(envelope_b.projection_cursor()),
+        Some(envelope_c.projection_cursor()),
         "second poll must advance after_cursor to the last emitted cursor"
+    );
+}
+
+fn assert_no_adapter_metadata(json: &Value) {
+    assert!(
+        json.get("target").is_none(),
+        "browser event frame must not expose adapter target metadata"
+    );
+    assert!(
+        json.get("delivery_attempt_id").is_none(),
+        "browser event frame must not expose delivery metadata"
     );
 }
 
