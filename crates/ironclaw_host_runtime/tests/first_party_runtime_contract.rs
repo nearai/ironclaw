@@ -693,9 +693,12 @@ impl FirstPartyCapabilityHandler for HttpFirstPartyHandler {
         &self,
         request: FirstPartyCapabilityRequest,
     ) -> Result<FirstPartyCapabilityResult, FirstPartyCapabilityError> {
-        let egress = request.runtime_http_egress.ok_or_else(|| {
-            FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::NetworkDenied)
-        })?;
+        let egress = request
+            .services
+            .runtime_http_egress
+            .as_ref()
+            .ok_or_else(|| FirstPartyCapabilityError::new(RuntimeDispatchErrorKind::NetworkDenied))?
+            .clone();
         let url = request
             .input
             .get("url")
