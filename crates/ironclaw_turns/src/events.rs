@@ -73,11 +73,12 @@ pub struct TurnLifecycleEvent {
 impl TurnLifecycleEvent {
     /// Return the transport-facing lifecycle event view.
     ///
-    /// Internal projection consumers may need gate metadata to materialize
-    /// read models, but public lifecycle snapshots must not expose resolution
-    /// refs that can later be used to act on a gate.
+    /// Internal projection consumers may need gate and owner metadata to
+    /// materialize read models, but public lifecycle snapshots must not expose
+    /// resolution refs or owner identity.
     pub fn into_public_projection_entry(mut self) -> Self {
         self.blocked_gate = None;
+        self.owner_user_id = None;
         self
     }
 }
@@ -391,12 +392,13 @@ mod tests {
     }
 
     #[test]
-    fn public_projection_entry_strips_blocked_gate_metadata() {
+    fn public_projection_entry_strips_internal_projection_metadata() {
         let event = blocked_event(1, scope("thread-a"));
 
         let public = event.into_public_projection_entry();
 
         assert_eq!(public.blocked_gate, None);
+        assert_eq!(public.owner_user_id, None);
         assert_eq!(
             public.sanitized_reason.as_deref(),
             Some("approval_required")
@@ -422,7 +424,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn projection_service_strips_blocked_gate_metadata_from_snapshot() {
+    async fn projection_service_strips_internal_projection_metadata_from_snapshot() {
         let scope = scope("thread-a");
         let source = MemoryProjectionSource {
             events: vec![blocked_event(1, scope.clone())],
@@ -440,5 +442,6 @@ mod tests {
 
         assert_eq!(snapshot.entries.len(), 1);
         assert_eq!(snapshot.entries[0].blocked_gate, None);
+        assert_eq!(snapshot.entries[0].owner_user_id, None);
     }
 }

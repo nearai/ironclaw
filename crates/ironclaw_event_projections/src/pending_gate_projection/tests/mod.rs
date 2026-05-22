@@ -2,7 +2,7 @@ mod support;
 
 use std::sync::Arc;
 
-use ironclaw_turns::{TurnBlockedGateKind, TurnEventKind, TurnRunId, TurnStatus};
+use ironclaw_turns::{GateRef, TurnBlockedGateKind, TurnEventKind, TurnRunId, TurnStatus};
 
 use super::*;
 use support::*;
@@ -31,7 +31,7 @@ async fn blocked_event_upserts_pending_gate_row() {
     assert_eq!(row.key.run_id, run_id);
     assert_eq!(row.source_cursor, TurnEventCursor(1));
     assert_eq!(row.gate_kind, PendingGateKind::Approval);
-    assert_eq!(row.gate_ref, "gate:approval-a");
+    assert_eq!(row.gate_ref.as_str(), "gate:approval-a");
     assert_eq!(
         cursor_store
             .load_pending_gate_cursor(PENDING_GATE_PROJECTION_CONSUMER_ID, &scope)
@@ -212,7 +212,7 @@ async fn auth_and_resource_blocked_events_upsert_expected_gate_kinds() {
         let rows = sink.rows();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].gate_kind, projected_kind);
-        assert_eq!(rows[0].gate_ref, gate_ref);
+        assert_eq!(rows[0].gate_ref.as_str(), gate_ref);
     }
 }
 
@@ -382,6 +382,119 @@ async fn replay_advances_cursor_once_per_page_after_successful_projection() {
     projection.replay_scope(&source, &scope, 100).await.unwrap();
 
     assert_eq!(cursor_store.advances(), vec![TurnEventCursor(2)]);
+}
+
+#[tokio::test]
+async fn replay_skips_legacy_events_missing_projection_metadata_and_advances_cursor() {
+    let sink = Arc::new(MemorySink::default());
+    let cursor_store = Arc::new(MemoryCursorStore::default());
+    let projection = projection(sink.clone(), cursor_store.clone());
+    let scope = scope("thread-a");
+    let legacy_run = TurnRunId::new();
+    let blocked_run = TurnRunId::new();
+    let mut legacy_terminal = lifecycle_event(
+        1,
+        scope.clone(),
+        legacy_run,
+        TurnStatus::Completed,
+        TurnEventKind::Completed,
+    );
+    legacy_terminal.owner_user_id = None;
+    let source = MemoryTurnEventSource::new(vec![
+        legacy_terminal,
+        blocked_event(2, scope.clone(), blocked_run),
+    ]);
+
+    let replay = projection.replay_scope(&source, &scope, 100).await.unwrap();
+
+    assert_eq!(replay.processed, 2);
+    assert_eq!(replay.next_cursor, TurnEventCursor(2));
+    assert_eq!(
+        cursor_store
+            .load_pending_gate_cursor(PENDING_GATE_PROJECTION_CONSUMER_ID, &scope)
+            .await
+            .unwrap(),
+        TurnEventCursor(2)
+    );
+    let rows = sink.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].key.run_id, blocked_run);
+}
+
+#[tokio::test]
+async fn custom_consumer_id_uses_isolated_replay_cursor() {
+    let sink = Arc::new(MemorySink::default());
+    let cursor_store = Arc::new(MemoryCursorStore::default());
+    let scope = scope("thread-a");
+    let run_one = TurnRunId::new();
+    let run_two = TurnRunId::new();
+    let source = MemoryTurnEventSource::new(vec![
+        blocked_event(1, scope.clone(), run_one),
+        blocked_event(2, scope.clone(), run_two),
+    ]);
+    cursor_store.set("pending_gate_projection.test.a", &scope, TurnEventCursor(1));
+    let projection_a = PendingGateProjection::with_consumer_id(
+        "pending_gate_projection.test.a",
+        sink.clone(),
+        cursor_store.clone(),
+    );
+    let projection_b = PendingGateProjection::with_consumer_id(
+        "pending_gate_projection.test.b",
+        sink,
+        cursor_store.clone(),
+    );
+
+    let replay_a = projection_a
+        .replay_scope(&source, &scope, 100)
+        .await
+        .unwrap();
+    let replay_b = projection_b
+        .replay_scope(&source, &scope, 100)
+        .await
+        .unwrap();
+
+    assert_eq!(replay_a.processed, 1);
+    assert_eq!(replay_b.processed, 2);
+    assert_eq!(
+        cursor_store
+            .load_pending_gate_cursor("pending_gate_projection.test.a", &scope)
+            .await
+            .unwrap(),
+        TurnEventCursor(2)
+    );
+    assert_eq!(
+        cursor_store
+            .load_pending_gate_cursor("pending_gate_projection.test.b", &scope)
+            .await
+            .unwrap(),
+        TurnEventCursor(2)
+    );
+    assert_eq!(
+        cursor_store
+            .load_pending_gate_cursor(PENDING_GATE_PROJECTION_CONSUMER_ID, &scope)
+            .await
+            .unwrap(),
+        TurnEventCursor::default()
+    );
+}
+
+#[test]
+fn pending_gate_row_keeps_gate_ref_strongly_typed() {
+    let scope = scope("thread-a");
+    let run_id = TurnRunId::new();
+    let gate_ref = GateRef::new("gate:typed-a").expect("gate ref");
+    let event = blocked_event_with(
+        1,
+        scope,
+        run_id,
+        TurnStatus::BlockedApproval,
+        TurnBlockedGateKind::Approval,
+        gate_ref.as_str(),
+    );
+
+    let row = row_from_blocked_event(&event, TurnBlockedGateKind::Approval).unwrap();
+
+    assert_eq!(row.gate_ref, gate_ref);
 }
 
 #[tokio::test]

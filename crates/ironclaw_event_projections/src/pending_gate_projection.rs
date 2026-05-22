@@ -3,7 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use ironclaw_host_api::{AgentId, ProjectId, TenantId, ThreadId, Timestamp, UserId};
 use ironclaw_turns::{
-    EventCursor as TurnEventCursor, MAX_TURN_EVENT_PROJECTION_LIMIT, TurnBlockedGateKind,
+    EventCursor as TurnEventCursor, GateRef, MAX_TURN_EVENT_PROJECTION_LIMIT, TurnBlockedGateKind,
     TurnEventKind, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent, TurnRunId,
     TurnScope,
 };
@@ -68,7 +68,7 @@ pub struct PendingGateProjectionRow {
     /// removed with a newer terminal/resume event.
     pub source_cursor: TurnEventCursor,
     pub gate_kind: PendingGateKind,
-    pub gate_ref: String,
+    pub gate_ref: GateRef,
     pub blocked_at: Timestamp,
 }
 
@@ -202,7 +202,7 @@ impl PendingGateProjection {
         let mut next_cursor = after;
         for event in page.entries {
             next_cursor = event.cursor;
-            self.project_event(event, false).await?;
+            self.project_replay_event(event).await?;
             processed += 1;
         }
         if processed > 0 {
@@ -251,6 +251,18 @@ impl PendingGateProjection {
         }
         Ok(())
     }
+
+    async fn project_replay_event(&self, event: TurnLifecycleEvent) -> Result<(), ProjectionError> {
+        match self.project_event(event.clone(), false).await {
+            Ok(()) => Ok(()),
+            Err(ProjectionError::InvalidRequest { reason })
+                if is_replayable_legacy_metadata_gap(&event, reason) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
 }
 
 #[async_trait]
@@ -289,7 +301,7 @@ fn row_from_blocked_event(
         key: key_from_lifecycle_event(event)?,
         source_cursor: event.cursor,
         gate_kind: gate_kind.into(),
-        gate_ref: blocked_gate.gate_ref.as_str().to_string(),
+        gate_ref: blocked_gate.gate_ref.clone(),
         blocked_at,
     })
 }
@@ -312,6 +324,30 @@ fn key_from_lifecycle_event(
         thread_id: event.scope.thread_id.clone(),
         run_id: event.run_id,
     })
+}
+
+fn is_replayable_legacy_metadata_gap(event: &TurnLifecycleEvent, reason: &'static str) -> bool {
+    let missing_metadata = matches!(
+        reason,
+        "blocked turn event missing gate metadata"
+            | "blocked turn event missing timestamp"
+            | "turn event missing owner metadata"
+    );
+    if !missing_metadata {
+        return false;
+    }
+
+    // Replay can encounter events retained from before pending-gate metadata
+    // existed. Those historical events could not have produced a resolvable
+    // pending-gate row, so skip them and let the replay cursor advance.
+    matches!(
+        event.kind,
+        TurnEventKind::Blocked
+            | TurnEventKind::Completed
+            | TurnEventKind::Failed
+            | TurnEventKind::Cancelled
+            | TurnEventKind::Resumed
+    )
 }
 
 #[cfg(test)]
