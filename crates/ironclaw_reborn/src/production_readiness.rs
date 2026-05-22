@@ -104,6 +104,9 @@ pub enum RebornLoopProductionComponent {
     TurnStateStore,
     SubagentGoalStore,
     SubagentCompletionObserver,
+    SubagentResultTombstoneStore,
+    SubagentAutonomousContinuationBudget,
+    SubagentRestartReconciler,
     WakeNotifier,
     ProgressEvents,
 }
@@ -356,6 +359,9 @@ pub struct RebornLoopComponentGraphReadiness {
     pub turn_state_store: RebornComponentReadiness,
     pub subagent_goal_store: RebornComponentReadiness,
     pub subagent_completion_observer: RebornComponentReadiness,
+    pub subagent_result_tombstone_store: RebornComponentReadiness,
+    pub subagent_autonomous_continuation_budget: RebornComponentReadiness,
+    pub subagent_restart_reconciler: RebornComponentReadiness,
     pub wake_notifier: RebornComponentReadiness,
     pub progress_events: RebornComponentReadiness,
 }
@@ -375,6 +381,13 @@ impl RebornLoopComponentGraphReadiness {
             turn_state_store: RebornComponentReadiness::production_verified(required),
             subagent_goal_store: RebornComponentReadiness::production_verified(required),
             subagent_completion_observer: RebornComponentReadiness::production_verified(required),
+            subagent_result_tombstone_store: RebornComponentReadiness::production_verified(
+                required,
+            ),
+            subagent_autonomous_continuation_budget: RebornComponentReadiness::production_verified(
+                required,
+            ),
+            subagent_restart_reconciler: RebornComponentReadiness::production_verified(required),
             wake_notifier: RebornComponentReadiness::production_verified(required),
             progress_events: RebornComponentReadiness::production_verified(required),
         }
@@ -436,6 +449,18 @@ impl RebornLoopComponentGraphReadiness {
             (
                 RebornLoopProductionComponent::SubagentCompletionObserver,
                 self.subagent_completion_observer,
+            ),
+            (
+                RebornLoopProductionComponent::SubagentResultTombstoneStore,
+                self.subagent_result_tombstone_store,
+            ),
+            (
+                RebornLoopProductionComponent::SubagentAutonomousContinuationBudget,
+                self.subagent_autonomous_continuation_budget,
+            ),
+            (
+                RebornLoopProductionComponent::SubagentRestartReconciler,
+                self.subagent_restart_reconciler,
             ),
             (
                 RebornLoopProductionComponent::WakeNotifier,
@@ -732,6 +757,13 @@ fn component_subject(component: RebornLoopProductionComponent) -> &'static str {
         RebornLoopProductionComponent::TurnStateStore => "turn_state_store",
         RebornLoopProductionComponent::SubagentGoalStore => "subagent_goal_store",
         RebornLoopProductionComponent::SubagentCompletionObserver => "subagent_completion_observer",
+        RebornLoopProductionComponent::SubagentResultTombstoneStore => {
+            "subagent_result_tombstone_store"
+        }
+        RebornLoopProductionComponent::SubagentAutonomousContinuationBudget => {
+            "subagent_autonomous_continuation_budget"
+        }
+        RebornLoopProductionComponent::SubagentRestartReconciler => "subagent_restart_reconciler",
         RebornLoopProductionComponent::WakeNotifier => "wake_notifier",
         RebornLoopProductionComponent::ProgressEvents => "progress_events",
     }
