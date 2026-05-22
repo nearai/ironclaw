@@ -43,7 +43,7 @@ use ironclaw_loop_support::FilesystemCheckpointStateStore;
 use ironclaw_processes::ProcessServices;
 use ironclaw_product_workflow::ProductAuthTurnGateResumeDispatcher;
 use ironclaw_resources::InMemoryResourceGovernor;
-#[cfg(feature = "libsql")]
+#[cfg(any(feature = "libsql", feature = "postgres"))]
 use ironclaw_resources::{FilesystemResourceGovernorStore, PersistentResourceGovernor};
 #[cfg(feature = "libsql")]
 use ironclaw_run_state::{FilesystemApprovalRequestStore, FilesystemRunStateStore};
@@ -1324,6 +1324,166 @@ fn planned_run_profile_resolver() -> Result<Arc<InMemoryRunProfileResolver>, Reb
             },
         )?,
     ))
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+type FilesystemProductionHostRuntimeServices<F> = HostRuntimeServices<
+    F,
+    PersistentResourceGovernor<FilesystemResourceGovernorStore<F>>,
+    ironclaw_processes::FilesystemProcessStore<F>,
+    ironclaw_processes::FilesystemProcessResultStore<F>,
+>;
+
+#[cfg(feature = "libsql")]
+pub(crate) async fn build_libsql_production_host_runtime_services<TPolicy, TWake>(
+    config: crate::LibSqlProductionSubstrateConfig<TPolicy, TWake>,
+) -> Result<crate::LibSqlProductionHostRuntimeServices, crate::RebornCompositionError>
+where
+    TPolicy: ironclaw_trust::TrustPolicy + 'static,
+    TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
+{
+    let filesystem = Arc::new(LibSqlRootFilesystem::new(Arc::clone(&config.database)));
+    filesystem.run_migrations().await?;
+    build_filesystem_production_host_runtime_services(
+        filesystem,
+        config.event_store,
+        config.secret_master_key,
+        config.trust_policy,
+        config.runtime_policy,
+        config.turn_run_wake_notifier,
+        config.surface_version,
+    )
+    .await
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) async fn build_postgres_production_host_runtime_services<TPolicy, TWake>(
+    config: crate::PostgresProductionSubstrateConfig<TPolicy, TWake>,
+) -> Result<crate::PostgresProductionHostRuntimeServices, crate::RebornCompositionError>
+where
+    TPolicy: ironclaw_trust::TrustPolicy + 'static,
+    TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
+{
+    let filesystem = Arc::new(ironclaw_filesystem::PostgresRootFilesystem::new(
+        config.pool,
+    ));
+    filesystem.run_migrations().await?;
+    build_filesystem_production_host_runtime_services(
+        filesystem,
+        config.event_store,
+        config.secret_master_key,
+        config.trust_policy,
+        config.runtime_policy,
+        config.turn_run_wake_notifier,
+        config.surface_version,
+    )
+    .await
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn build_filesystem_production_host_runtime_services<F, TPolicy, TWake>(
+    filesystem: Arc<F>,
+    event_store: ironclaw_reborn_event_store::RebornEventStoreConfig,
+    secret_master_key: Option<ironclaw_secrets::SecretMaterial>,
+    trust_policy: Arc<TPolicy>,
+    runtime_policy: crate::RebornProductionRuntimePolicy,
+    turn_run_wake_notifier: Arc<TWake>,
+    surface_version: CapabilitySurfaceVersion,
+) -> Result<FilesystemProductionHostRuntimeServices<F>, crate::RebornCompositionError>
+where
+    F: RootFilesystem + 'static,
+    TPolicy: ironclaw_trust::TrustPolicy + 'static,
+    TWake: ironclaw_turns::TurnRunWakeNotifier + 'static,
+{
+    let scoped_filesystem = crate::wrap_scoped(Arc::clone(&filesystem));
+    let process_services = ProcessServices::filesystem(Arc::clone(&scoped_filesystem));
+    let secret_store =
+        build_filesystem_secret_store(Arc::clone(&scoped_filesystem), secret_master_key).await?;
+    let resource_store = FilesystemResourceGovernorStore::new(Arc::clone(&scoped_filesystem));
+    let governor = Arc::new(PersistentResourceGovernor::new(resource_store));
+    let capability_leases = Arc::new(FilesystemCapabilityLeaseStore::new(Arc::clone(
+        &scoped_filesystem,
+    )));
+    let (runtime_policy, process_binding) = runtime_policy.into_parts();
+
+    let services = HostRuntimeServices::new(
+        Arc::new(ExtensionRegistry::new()),
+        filesystem,
+        governor,
+        Arc::new(GrantAuthorizer::new()),
+        process_services,
+        surface_version,
+    )
+    .with_trust_policy(trust_policy)
+    .with_runtime_policy(runtime_policy)
+    .with_capability_leases(capability_leases)
+    .with_secret_store(Arc::clone(&secret_store))
+    .with_turn_run_wake_notifier(turn_run_wake_notifier)
+    .with_filesystem_run_state(Arc::clone(&scoped_filesystem))
+    .with_filesystem_turn_state_store(Arc::clone(&scoped_filesystem))
+    .with_run_profile_resolver(Arc::new(
+        ironclaw_reborn::planned_driver_factory::default_planned_run_profile_resolver()?,
+    ))
+    .with_reborn_event_store_config(
+        ironclaw_reborn_event_store::RebornProfile::Production,
+        event_store,
+    )
+    .await?;
+    let services = apply_production_runtime_process_binding(services, process_binding);
+
+    // safety: `with_secret_store` is called unconditionally above on the same
+    // builder chain, so `try_with_host_http_egress` can only return a
+    // `Missing(SecretStore)` wiring report if the host-runtime builder API
+    // regresses; treat that as infallible here.
+    let services = services
+        .try_with_host_http_egress_with_body_store(
+            ironclaw_network::PolicyNetworkHttpEgress::new(
+                ironclaw_network::ReqwestNetworkTransport::default(),
+            ),
+            Arc::clone(&scoped_filesystem),
+        )
+        .expect("secret_store wired above guarantees host HTTP egress is buildable"); // safety: see comment above
+
+    Ok(services)
+}
+
+/// Build the per-process [`ironclaw_secrets::SecretStore`] over the shared
+/// [`ScopedFilesystem`].
+///
+/// Backend selection is now a property of the underlying
+/// [`RootFilesystem`] (libSQL/Postgres/in-memory), not of the secret store
+/// itself. Master-key correctness remains a lazy per-tenant decrypt check; the
+/// old startup sentinel/`verify_can_decrypt_existing_secrets` path was removed
+/// in PR #3679, not by this composition refactor.
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn build_filesystem_secret_store<F>(
+    scoped_filesystem: Arc<ScopedFilesystem<F>>,
+    master_key: Option<ironclaw_secrets::SecretMaterial>,
+) -> Result<Arc<FilesystemSecretStore<F>>, crate::RebornCompositionError>
+where
+    F: RootFilesystem + 'static,
+{
+    let master_key = resolve_composition_secret_master_key(master_key).await?;
+    let crypto = Arc::new(ironclaw_secrets::SecretsCrypto::new(master_key)?);
+    Ok(Arc::new(FilesystemSecretStore::new(
+        scoped_filesystem,
+        crypto,
+    )))
+}
+
+#[cfg(any(feature = "libsql", feature = "postgres"))]
+async fn resolve_composition_secret_master_key(
+    explicit: Option<ironclaw_secrets::SecretMaterial>,
+) -> Result<ironclaw_secrets::SecretMaterial, crate::RebornCompositionError> {
+    if let Some(master_key) = explicit {
+        Ok(master_key)
+    } else if let Some(master_key) =
+        ironclaw_secrets::keychain::resolve_master_key_material().await?
+    {
+        Ok(master_key)
+    } else {
+        Err(crate::RebornCompositionError::MissingSecretMasterKey)
+    }
 }
 
 #[cfg(any(feature = "libsql", feature = "postgres"))]

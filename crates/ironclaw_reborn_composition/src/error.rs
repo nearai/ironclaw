@@ -49,3 +49,44 @@ impl From<ironclaw_host_runtime::ProductionWiringReport> for RebornBuildError {
         Self::ProductionWiring { report }
     }
 }
+
+impl From<crate::RebornCompositionError> for RebornBuildError {
+    fn from(error: crate::RebornCompositionError) -> Self {
+        match error {
+            crate::RebornCompositionError::MissingSecretMasterKey => Self::MissingSecretMasterKey,
+            crate::RebornCompositionError::Mount(error) => Self::Mount(error),
+            crate::RebornCompositionError::Filesystem(error) => Self::Filesystem(error),
+            crate::RebornCompositionError::Resource(error) => Self::Resource(error),
+            crate::RebornCompositionError::RunState(error) => Self::RunState(error),
+            crate::RebornCompositionError::CapabilityLease(error) => Self::CapabilityLease(error),
+            crate::RebornCompositionError::Secret(error) => Self::Secret(error),
+            crate::RebornCompositionError::EventStore(error) => Self::EventStore(error),
+            crate::RebornCompositionError::Turn(error) => Self::Turn(error),
+            crate::RebornCompositionError::RunProfile(error) => Self::PlannedRunProfileResolver {
+                reason: error.to_string(),
+            },
+            error @ crate::RebornCompositionError::MissingTenantSandboxProcessPort => {
+                Self::InvalidConfig {
+                    reason: error.to_string(),
+                }
+            }
+            error @ crate::RebornCompositionError::UnexpectedTenantSandboxProcessPort { .. } => {
+                Self::InvalidConfig {
+                    reason: error.to_string(),
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RebornBuildError;
+
+    #[test]
+    fn composition_missing_secret_master_key_stays_typed_for_facade_errors() {
+        let error = RebornBuildError::from(crate::RebornCompositionError::MissingSecretMasterKey);
+
+        assert!(matches!(error, RebornBuildError::MissingSecretMasterKey));
+    }
+}
