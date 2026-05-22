@@ -124,6 +124,7 @@ pub type HarnessWaitConfig = WaitConfig;
 const TEST_CAPABILITY_ID: &str = "test.echo";
 const TEST_CAPABILITY_SURFACE_VERSION: &str = "trace_replay_v1";
 const SPAWN_SUBAGENT_TOOL_NAME: &str = "spawn_subagent";
+const SUBAGENT_ALLOWED_TEST_TOOL_NAME: &str = "test_read_file";
 
 type HarnessResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 type HarnessCapabilityParts = (
@@ -1013,6 +1014,27 @@ impl RebornBinaryE2EHarness {
             .gate_ref
             .ok_or("blocked run missing gate ref")?;
         self.resume_with_gate(run_id, blocked).await
+    }
+
+    pub async fn resume_blocked_turn_in_scope(
+        &self,
+        scope: TurnScope,
+        actor: TurnActor,
+        run_id: TurnRunId,
+    ) -> HarnessResult<()> {
+        let blocked = self
+            .run_state_in_scope(scope.clone(), run_id)
+            .await?
+            .gate_ref
+            .ok_or("blocked run missing gate ref")?;
+        self.resume_with_gate_as(
+            scope,
+            actor,
+            run_id,
+            blocked,
+            format!("resume-{run_id}"),
+        )
+        .await
     }
 
     pub async fn resume_with_gate(
@@ -2010,6 +2032,7 @@ fn host_runtime_harness_error(error: impl std::fmt::Display) -> AgentLoopHostErr
 pub struct RecordingTestCapabilityPort {
     mode: CapabilityMode,
     expose_spawn_subagent: bool,
+    use_subagent_allowed_tool: bool,
     invocations: Arc<Mutex<Vec<CapabilityInvocation>>>,
     next_result: Arc<AtomicUsize>,
     approval_calls: Arc<AtomicUsize>,
@@ -2019,28 +2042,63 @@ pub struct RecordingTestCapabilityPort {
 enum CapabilityMode {
     Echo,
     ApprovalThenEcho,
+    SpawnAuthThenApprovalThenEcho,
 }
 
 impl RecordingTestCapabilityPort {
     pub fn echo() -> Self {
-        Self::new(CapabilityMode::Echo, false)
+        Self::new(CapabilityMode::Echo, false, false)
     }
 
     pub fn echo_with_spawn_subagent() -> Self {
-        Self::new(CapabilityMode::Echo, true)
+        Self::new(CapabilityMode::Echo, true, false)
     }
 
     pub fn approval_then_echo() -> Self {
-        Self::new(CapabilityMode::ApprovalThenEcho, false)
+        Self::new(CapabilityMode::ApprovalThenEcho, false, false)
     }
 
-    fn new(mode: CapabilityMode, expose_spawn_subagent: bool) -> Self {
+    pub fn approval_then_echo_with_spawn_subagent() -> Self {
+        Self::new(CapabilityMode::ApprovalThenEcho, true, false)
+    }
+
+    pub fn spawn_auth_then_approval_then_echo_with_spawn_subagent() -> Self {
+        Self::new(CapabilityMode::SpawnAuthThenApprovalThenEcho, true, false)
+    }
+
+    pub fn spawn_auth_then_approval_then_allowed_tool_with_spawn_subagent() -> Self {
+        Self::new(CapabilityMode::SpawnAuthThenApprovalThenEcho, true, true)
+    }
+
+    fn new(
+        mode: CapabilityMode,
+        expose_spawn_subagent: bool,
+        use_subagent_allowed_tool: bool,
+    ) -> Self {
         Self {
             mode,
             expose_spawn_subagent,
+            use_subagent_allowed_tool,
             invocations: Arc::new(Mutex::new(Vec::new())),
             next_result: Arc::new(AtomicUsize::new(1)),
             approval_calls: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn primary_capability_id(&self) -> CapabilityId {
+        let id = if self.use_subagent_allowed_tool {
+            READ_FILE_CAPABILITY_ID
+        } else {
+            TEST_CAPABILITY_ID
+        };
+        CapabilityId::new(id).expect("valid capability id")
+    }
+
+    fn primary_tool_name(&self) -> &'static str {
+        if self.use_subagent_allowed_tool {
+            SUBAGENT_ALLOWED_TEST_TOOL_NAME
+        } else {
+            "test_echo"
         }
     }
 
@@ -2053,8 +2111,7 @@ impl RecordingTestCapabilityPort {
     }
 
     fn capability_allowlist(&self) -> Vec<CapabilityId> {
-        let mut allowlist =
-            vec![CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id")];
+        let mut allowlist = vec![self.primary_capability_id()];
         if self.expose_spawn_subagent {
             allowlist.push(
                 CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID)
@@ -2079,8 +2136,8 @@ impl RecordingTestCapabilityPort {
 impl LoopCapabilityPort for RecordingTestCapabilityPort {
     fn tool_definitions(&self) -> Result<Vec<ProviderToolDefinition>, AgentLoopHostError> {
         let mut definitions = vec![ProviderToolDefinition {
-            capability_id: CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id"),
-            name: "test_echo".to_string(),
+            capability_id: self.primary_capability_id(),
+            name: self.primary_tool_name().to_string(),
             description: "Echo a test payload".to_string(),
             parameters: json!({
                 "type": "object",
@@ -2118,7 +2175,7 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
         let capability_id = if self.expose_spawn_subagent && call.name == SPAWN_SUBAGENT_TOOL_NAME {
             CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).expect("valid capability id")
         } else {
-            CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id")
+            self.primary_capability_id()
         };
         Ok(CapabilityCallCandidate {
             surface_version: CapabilitySurfaceVersion::new(TEST_CAPABILITY_SURFACE_VERSION)
@@ -2146,10 +2203,10 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
         _request: VisibleCapabilityRequest,
     ) -> Result<VisibleCapabilitySurface, AgentLoopHostError> {
         let mut descriptors = vec![CapabilityDescriptorView {
-            capability_id: CapabilityId::new(TEST_CAPABILITY_ID).expect("valid capability id"),
+            capability_id: self.primary_capability_id(),
             provider: Some(ExtensionId::new("test").expect("valid provider")),
             runtime: RuntimeKind::FirstParty,
-            safe_name: "test_echo".to_string(),
+            safe_name: self.primary_tool_name().to_string(),
             safe_description: "Echo a test payload".to_string(),
             concurrency_hint: ConcurrencyHint::SafeForParallel,
             parameters_schema: json!({"type": "object"}),
@@ -2185,6 +2242,18 @@ impl LoopCapabilityPort for RecordingTestCapabilityPort {
                 gate_ref: LoopGateRef::new("gate:test-approval").expect("valid gate ref"),
                 safe_summary: "test approval required".to_string(),
             });
+        }
+        if matches!(self.mode, CapabilityMode::SpawnAuthThenApprovalThenEcho) {
+            match self.approval_calls.fetch_add(1, Ordering::SeqCst) {
+                0 => return Ok(self.completed_result()),
+                1 => {
+                    return Ok(CapabilityOutcome::ApprovalRequired {
+                        gate_ref: LoopGateRef::new("gate:test-approval").expect("valid gate ref"),
+                        safe_summary: "test approval required".to_string(),
+                    });
+                }
+                _ => {}
+            }
         }
         Ok(self.completed_result())
     }

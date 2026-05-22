@@ -6,6 +6,7 @@ mod support;
 use std::time::Duration;
 
 use ironclaw_host_api::CapabilityId;
+use ironclaw_host_runtime::READ_FILE_CAPABILITY_ID;
 use ironclaw_loop_support::{
     DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID, HostManagedModelMessageRole, HostManagedModelResponse,
 };
@@ -160,6 +161,224 @@ async fn blocking_spawn_parks_parent_then_resumes_with_child_result() {
             ),
         "parent resume request includes the child completion tool result: {:#?}",
         harness.model_requests()[2].messages
+    );
+    harness.assert_model_exhausted();
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn blocking_spawn_waits_while_child_is_blocked_on_approval_then_resumes() {
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![spawn_call(
+                "spawn_blocking_child_approval",
+                serde_json::json!({
+                    "flavor_id": "general",
+                    "task": "call an approval-gated tool",
+                    "mode": "blocking",
+                }),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![subagent_allowed_tool_call("child_approval_tool")],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply("child approved output"),
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply("parent saw approved child"),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = tokio::time::timeout(
+        WaitConfig::default().timeout,
+        RebornBinaryE2EHarness::with_harness_blocked_evidence_unscoped_worker(
+            "room-subagent-child-approval",
+            model_gateway,
+            RecordingTestCapabilityPort::spawn_auth_then_approval_then_allowed_tool_with_spawn_subagent(),
+        ),
+    )
+    .await
+    .expect("spawn harness timed out")
+    .expect("spawn harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-subagent-child-approval",
+            "spawn a child that needs approval",
+        )
+        .await
+        .expect("submit root turn");
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::BlockedDependentRun)
+        .await
+        .expect("parent blocks on approval-gated child");
+
+    let child = await_single_child(&harness, &submitted).await;
+    assert_child_thread_invariants(&submitted, &child);
+    harness
+        .wait_for_status_in_scope(
+            child.scope.clone(),
+            child.run_id,
+            TurnStatus::BlockedApproval,
+        )
+        .await
+        .expect("child blocks on approval");
+    assert_eq!(
+        harness
+            .run_state(submitted.run_id)
+            .await
+            .expect("parent run state")
+            .status,
+        TurnStatus::BlockedDependentRun,
+        "parent must remain parked while the child approval is pending"
+    );
+
+    harness
+        .resume_blocked_turn_in_scope(child.scope.clone(), submitted.actor.clone(), child.run_id)
+        .await
+        .expect("resume child approval");
+    harness
+        .wait_for_status_in_scope(child.scope.clone(), child.run_id, TurnStatus::Completed)
+        .await
+        .expect("child completes after approval");
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .await
+        .expect("parent resumes after approved child completion");
+    harness
+        .assert_final_reply("parent saw approved child")
+        .await
+        .expect("parent final reply");
+    assert!(
+        harness
+            .model_requests()
+            .last()
+            .expect("parent resume request")
+            .messages
+            .iter()
+            .any(
+                |message| message.role == HostManagedModelMessageRole::ToolResult
+                    && message.content.contains("child approved output")
+            ),
+        "parent resume request includes the approved child's final output"
+    );
+    assert_eq!(
+        harness.capability_invocations().len(),
+        2,
+        "spawn auth plus the child approval gate should reach the inner capability port"
+    );
+    harness.assert_model_exhausted();
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn background_spawn_surfaces_child_approval_without_blocking_parent() {
+    let model_gateway = RebornTraceReplayModelGateway::with_scripted_steps([
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![spawn_call(
+                "spawn_background_child_approval",
+                serde_json::json!({
+                    "flavor_id": "general",
+                    "task": "call an approval-gated tool in background",
+                    "mode": "background",
+                }),
+            )],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply(
+                "parent continued while child approval pending",
+            ),
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::ProviderToolCalls {
+            calls: vec![subagent_allowed_tool_call("background_child_approval_tool")],
+            expected_tool_results: Vec::new(),
+        },
+        RebornModelReplayStep::Response {
+            response: HostManagedModelResponse::assistant_reply("background child approved output"),
+            expected_tool_results: Vec::new(),
+        },
+    ]);
+    let mut harness = tokio::time::timeout(
+        WaitConfig::default().timeout,
+        RebornBinaryE2EHarness::with_harness_blocked_evidence_unscoped_worker(
+            "room-subagent-background-child-approval",
+            model_gateway,
+            RecordingTestCapabilityPort::spawn_auth_then_approval_then_allowed_tool_with_spawn_subagent(),
+        ),
+    )
+    .await
+    .expect("spawn harness timed out")
+    .expect("spawn harness");
+    harness.start();
+
+    let submitted = harness
+        .submit_text(
+            "event-subagent-background-child-approval",
+            "spawn a background child that needs approval",
+        )
+        .await
+        .expect("submit root turn");
+    harness
+        .wait_for_status(submitted.run_id, TurnStatus::Completed)
+        .await
+        .expect("background parent completes before child approval resolves");
+    harness
+        .assert_final_reply("parent continued while child approval pending")
+        .await
+        .expect("parent final reply");
+
+    let child = await_single_child(&harness, &submitted).await;
+    assert_child_thread_invariants(&submitted, &child);
+    harness
+        .wait_for_status_in_scope(
+            child.scope.clone(),
+            child.run_id,
+            TurnStatus::BlockedApproval,
+        )
+        .await
+        .expect("background child blocks on approval");
+    assert_eq!(
+        harness
+            .run_state(submitted.run_id)
+            .await
+            .expect("parent run state")
+            .status,
+        TurnStatus::Completed,
+        "background child approval must not reopen or block the completed parent"
+    );
+
+    harness
+        .resume_blocked_turn_in_scope(child.scope.clone(), submitted.actor.clone(), child.run_id)
+        .await
+        .expect("resume background child approval");
+    harness
+        .wait_for_status_in_scope(child.scope.clone(), child.run_id, TurnStatus::Completed)
+        .await
+        .expect("background child completes after approval");
+    let child_history = harness
+        .history_for_thread_in_scope(
+            child_thread_scope(&submitted, &child),
+            child.scope.thread_id.clone(),
+        )
+        .await
+        .expect("child history");
+    assert!(
+        child_history.iter().any(|message| {
+            message.content.as_deref() == Some("background child approved output")
+        }),
+        "approved background child writes its final reply"
+    );
+    assert_eq!(
+        harness.capability_invocations().len(),
+        2,
+        "spawn auth plus the child approval gate should reach the inner capability port"
     );
     harness.assert_model_exhausted();
     harness.shutdown().await;
@@ -370,6 +589,14 @@ fn spawn_call(
 
 fn spawn_capability_id() -> CapabilityId {
     CapabilityId::new(DEFAULT_SPAWN_SUBAGENT_CAPABILITY_ID).expect("valid capability id")
+}
+
+fn subagent_allowed_tool_call(call_id: impl Into<String>) -> RebornScriptedProviderToolCall {
+    RebornScriptedProviderToolCall::new(
+        CapabilityId::new(READ_FILE_CAPABILITY_ID).expect("valid capability id"),
+        call_id,
+        serde_json::json!({"message": "hi"}),
+    )
 }
 
 async fn await_single_child(
