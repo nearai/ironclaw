@@ -10,6 +10,7 @@ mod admission;
 mod checkpoint_state;
 mod coordinator;
 pub mod events;
+mod filesystem_checkpoint_state;
 mod filesystem_store;
 mod ids;
 pub mod loop_exit;
@@ -43,6 +44,7 @@ pub use events::{
     TurnEventProjectionError, TurnEventProjectionRequest, TurnEventProjectionService,
     TurnEventProjectionSnapshot, TurnEventProjectionSource, TurnEventSink, TurnLifecycleEvent,
 };
+pub use filesystem_checkpoint_state::FilesystemCheckpointStateStore;
 pub use filesystem_store::FilesystemTurnStateStore;
 pub use ids::{
     AcceptedMessageRef, GateRef, IdempotencyKey, LoopDiagnosticRef, LoopExitId, LoopGateRef,
