@@ -18,6 +18,7 @@
 //! import `TurnCoordinator`, `SessionThreadService`, `HostManagedModel
 //! Gateway`, etc.
 
+mod budget;
 mod error;
 mod factory;
 mod input;
@@ -44,6 +45,7 @@ mod webui_ws_origin;
 
 use ironclaw_runtime_policy::{EffectiveRuntimePolicy as ResolvedRuntimePolicy, ResolveError};
 
+pub use budget::build_default_budget_accountant;
 pub use error::RebornBuildError;
 pub use factory::{RebornServices, build_reborn_services};
 pub use input::RebornBuildInput;

@@ -63,6 +63,12 @@ pub(crate) struct RebornLocalRuntimeServices {
     /// `snapshot()` to tests without leaking the concrete type into the
     /// production `BudgetEventSink` boundary.
     pub(crate) in_memory_budget_event_sink: Arc<ironclaw_resources::InMemoryBudgetEventSink>,
+    /// Broadcast sink the projection layer (`src/bridge/budget_events.rs`)
+    /// subscribes to. Composition fans every BudgetEvent through this
+    /// alongside the in-memory sink so tests can still inspect history
+    /// while the binary spawns `spawn_budget_event_projection` against
+    /// this broadcast.
+    pub(crate) broadcast_budget_event_sink: Arc<ironclaw_resources::BroadcastBudgetEventSink>,
     /// Approval-gate store used to surface `BudgetApprovalRequired` to a
     /// user. Stays in-memory in local-dev; production composition will
     /// swap in the filesystem-backed `FilesystemBudgetGateStore`.
@@ -176,8 +182,15 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let turn_state = Arc::new(InMemoryTurnStateStore::default());
     let in_memory_budget_event_sink = Arc::new(ironclaw_resources::InMemoryBudgetEventSink::new());
+    let broadcast_budget_event_sink =
+        Arc::new(ironclaw_resources::BroadcastBudgetEventSink::default());
     let budget_event_sink: Arc<dyn ironclaw_resources::BudgetEventSink> =
-        Arc::clone(&in_memory_budget_event_sink) as Arc<dyn ironclaw_resources::BudgetEventSink>;
+        Arc::new(ironclaw_resources::CompositeBudgetEventSink::new(vec![
+            Arc::clone(&in_memory_budget_event_sink)
+                as Arc<dyn ironclaw_resources::BudgetEventSink>,
+            Arc::clone(&broadcast_budget_event_sink)
+                as Arc<dyn ironclaw_resources::BudgetEventSink>,
+        ]));
     let resource_governor =
         Arc::new(InMemoryResourceGovernor::new().with_event_sink(Arc::clone(&budget_event_sink)));
     let budget_gate_store: Arc<dyn ironclaw_resources::BudgetGateStore> =
@@ -191,6 +204,7 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
             as Arc<dyn ironclaw_resources::ResourceGovernor>,
         budget_event_sink,
         in_memory_budget_event_sink,
+        broadcast_budget_event_sink,
         budget_gate_store,
         skill_filesystem,
     });

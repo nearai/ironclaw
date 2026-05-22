@@ -120,6 +120,7 @@ ironclaw_common = { path = "crates/ironclaw_common", version = "0.4.1" }
 ironclaw_host_api = { path = "crates/ironclaw_host_api", version = "0.1.0" }
 ironclaw_loop_support = { path = "crates/ironclaw_loop_support", version = "0.1.0" }
 ironclaw_memory = { path = "crates/ironclaw_memory", version = "0.1.0" }
+ironclaw_resources = { path = "crates/ironclaw_resources", version = "0.1.0" }
 ironclaw_runtime_policy = { path = "crates/ironclaw_runtime_policy", version = "0.1.0" }
 ironclaw_turns = { path = "crates/ironclaw_turns", version = "0.1.0" }
 

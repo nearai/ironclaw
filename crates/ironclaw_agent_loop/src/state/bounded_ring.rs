@@ -38,7 +38,7 @@ impl<T: Clone + Eq + Hash, const N: usize> BoundedRing<T, N> {
         self.items.is_empty()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator {
         self.items.iter()
     }
 

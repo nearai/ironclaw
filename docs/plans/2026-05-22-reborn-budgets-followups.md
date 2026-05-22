@@ -1,10 +1,13 @@
 # Reborn cost-based budgets — follow-ups from #3841
 
 Status: drafted 2026-05-22, post-merge of the foundation PR (689cd7901).
-Implementation status: all nine items below landed in this branch on
-2026-05-22 ahead of merging back to `reborn-integration`. See the
-"Acceptance evidence" appendix at the bottom of this file for the regression
-tests added per item.
+
+Implementation status: items **A1, A2, B1, C1, C2, D1, E1, F1** landed
+in this branch on 2026-05-22 ahead of merging back to
+`reborn-integration`. Item **G1** (BackgroundKind scheduler call sites)
+is intentionally deferred until a Reborn scheduler exists. See the
+"Acceptance evidence" appendix at the bottom of this file for the
+regression tests added per item.
 
 The foundation PR shipped the implementation seams (ledger, accountant,
 gate, period rules, audit-sink contract, progress primitives, config
@@ -300,17 +303,18 @@ Every PR above must:
 Each item below ships with at least one regression test that locks the new
 contract in:
 
-| # | Test |
+| # | Test(s) |
 |---|------|
-| C2 | `ironclaw_loop_support::budget_accountant::tests::post_model_call_reconciles_provider_usage_when_response_threads_real_tokens` |
-| D1 | `ironclaw_resources::tests::limit_exceeded_carries_warnings_from_other_dimensions` |
+| C2 | `ironclaw_loop_support::budget_accountant::tests::post_model_call_reconciles_provider_usage_when_response_threads_real_tokens` + e2e `c1_provider_tokens_reconcile_to_actual_usd` |
+| D1 | `ironclaw_resources::tests::limit_exceeded_carries_warnings_from_other_dimensions` + e2e `d1_agent_deny_preserves_user_warn_event` |
 | C1 | `ironclaw_loop_support::budget_accountant::tests::release_in_flight_drains_orphan_reservation_on_cancellation` |
-| E1 | covered by removing the dead field + 14 pre-existing accountant tests; `clippy::dead_code` clean |
-| Cost table | `ironclaw_reborn::model_gateway::LlmModelProfilePolicy::build_cost_table` exercised by the live A1 wiring + workspace clippy |
-| B1 | `ironclaw_resources::filesystem_gate_store::tests::pending_gate_survives_restart_via_fresh_handle` |
-| A1 | `ironclaw_reborn_composition::factory` exposes `local_runtime.resource_governor`; `build_reborn_runtime` constructs `GovernorBackedAccountant` from `LlmModelProfilePolicy::build_cost_table()` |
-| A2 | `ironclaw_resources::tests::governor_emits_budget_events_through_event_sink` |
-| F1 | `ironclaw_agent_loop::state::signature::tests::capability_call_signature_collapses_calls_that_differ_only_by_request_id` + the `…_embedded_uuid` companion |
+| E1 | Covered by removing the dead field + 14 pre-existing accountant tests; `clippy::dead_code` clean. |
+| Cost table | `ironclaw_reborn::model_gateway::LlmModelProfilePolicy::build_cost_table` exercised by the A1 wiring + e2e `c2_unknown_model_in_cost_table_uses_default_cost_fallback`. |
+| B1 | `ironclaw_resources::filesystem_gate_store::tests::pending_gate_survives_restart_via_fresh_handle` + `list_pending_does_not_leak_across_tenants` + `terminal_gates_older_than_retention_are_pruned_on_next_write` (review feedback High #1 + Medium #7). |
+| A1 | `ironclaw_reborn_composition::factory` exposes `local_runtime.{resource_governor, budget_event_sink, budget_gate_store, broadcast_budget_event_sink}`; production-shape helper `build_default_budget_accountant` wires the seeding policy + overestimate factor + gate store; unit test `seeds_compiled_default_user_cap_on_first_touch` + e2e `d3_seeding_policy_installs_default_cap_on_first_touch`. |
+| A2 | `ironclaw_resources::tests::governor_emits_budget_events_through_event_sink` + composition e2e `broadcast_sink_publishes_events_to_subscribers` + bridge unit tests (`account_label_handles_every_cascade_level`, `sse_user_id_resolves_for_user_scoped_events`, `sse_user_id_is_none_for_tenant_scoped_events`, `budget_event_to_app_event_warn_carries_dimension_and_utilization`). The SSE projection ships under `src/bridge/budget_events.rs::spawn_budget_event_projection`; the binary spawns the task against `RebornRuntime::broadcast_budget_event_sink()` at startup. |
+| F1 | `ironclaw_agent_loop::state::signature::tests::capability_call_signature_collapses_calls_that_differ_only_by_request_id` + `…_embedded_uuid`; `strategies::stop::tests::default_stop_condition_strategy::four_consecutive_low_token_turns_trigger_no_progress` + `occasional_low_token_turn_does_not_trip_no_progress`. Executor now populates `LoopExecutionState.recent_output_token_counts` from `LoopModelResponse::usage` after every turn; the default stop strategy reads it for the diminishing-returns escape (`StopKind::NoProgressDetected`). |
+| 13 e2e | `crates/ironclaw_reborn_composition/tests/budget_e2e.rs` + `budget_approval_e2e.rs` cover F1, F2, F3, F4, F5, F6, C1, C2, C3, D1, D3, scripted multi-turn, broadcast subscription. F7 is covered by the unit-level cancellation test; D2 by the existing rolling-24h snapshot anchor test. B-series (background ticks) await G1's scheduler. |
 
 Two pre-existing test failures are deliberately not in this list: the
 legacy `ironclaw cli::completion::tests::test_run_generates_output`
@@ -318,6 +322,21 @@ debug-build stack overflow (passes with `RUST_MIN_STACK=16777216`, present
 on `main`), and the `parameters_schema` fixture parse error in
 `ironclaw_capabilities` / `ironclaw_reborn` / `ironclaw_processes`
 test data (present on `main`). Neither shares a code path with this work.
+
+### Review-feedback fixes layered on top
+
+The original review pass on PR #3899 flagged 2 High and 5 Medium
+findings; all were addressed before merge:
+
+| Severity | Finding | Fix |
+|---|---|---|
+| High #1 | `FilesystemBudgetGateStore` cross-tenant leakage (everyone wrote into `__SYSTEM__`) | `new(filesystem, ResourceScope)` — per-tenant scoping + `list_pending_does_not_leak_across_tenants` regression. |
+| High #2 | Accountant wired without default caps; production governor stays empty so `reserve_with_outcome_in_state` skips accounts without limits | Composition calls `BudgetSeedingPolicy::new(...)` from `BudgetDefaults::compiled_defaults().with_env()`; `d3` e2e asserts the seeded $5 user cap is installed on first model call. |
+| Med #3 | RAII guard disarmed before `post_model_call.await` — cancellation during that await orphaned the reservation | Disarm AFTER `post_model_call` returns; `release_in_flight` made idempotent (peek-release-then-remove). |
+| Med #4 | Failed release dropped the in-flight entry so transient storage errors lost the retry handle | Peek-release-then-remove; the entry stays on error with a warning log. |
+| Med #5 | Missing cost-table entries silently reconciled paid usage as $0.00 | New `default_cost` field (≈GPT-4o pricing) used by both `estimate_for` and `usage_for_response`; `ZeroCostTable` remains the explicit opt-out for free / Ollama. |
+| Med #6 | Paused dimension was dropped when a different dimension hard-denied | `absorb` closure pushes a `BudgetWarning` for the paused dimension AND stores it in the approval slot. |
+| Med #7 | Terminal gates grew the snapshot without bound | `with_terminal_retention` (default 30 days) prunes on every mutation; `terminal_gates_older_than_retention_are_pruned_on_next_write` regression. |
 
 ## What this plan does NOT cover
 

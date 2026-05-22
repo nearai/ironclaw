@@ -96,6 +96,17 @@ pub struct DefaultStopConditionStrategy {
     /// Min trailing run length of identical failure kinds to trigger
     /// `NoProgressDetected`.
     pub failure_run_threshold: usize,
+    /// Diminishing-returns: turns whose assistant output stays at or
+    /// below this many tokens count as "no progress" (#3841 follow-up
+    /// F1). Tune low for productive loops, higher for prompts that
+    /// expect brief acknowledgements.
+    pub min_delta_tokens: u32,
+    /// Diminishing-returns: number of consecutive trailing turns whose
+    /// output sat at or below `min_delta_tokens` required to trigger
+    /// `NoProgressDetected`. The current window is
+    /// `state.recent_output_token_counts` (capacity 8), so the
+    /// effective ceiling is 8.
+    pub noprogress_window: usize,
 }
 
 impl Default for DefaultStopConditionStrategy {
@@ -104,6 +115,10 @@ impl Default for DefaultStopConditionStrategy {
             repetition_window: 5,
             repetition_threshold: 3,
             failure_run_threshold: 3,
+            // Conservative defaults: a model that returns 4 tokens or
+            // fewer for 4 turns in a row is wedged.
+            min_delta_tokens: 4,
+            noprogress_window: 4,
         }
     }
 }
@@ -153,6 +168,30 @@ impl StopConditionStrategy for DefaultStopConditionStrategy {
                 stop: next,
                 kind: StopKind::NoProgressDetected,
             };
+        }
+
+        // (d) diminishing-returns escape (#3841 follow-up F1): the
+        // last `noprogress_window` turns all produced ≤
+        // `min_delta_tokens` of assistant output. Distinguishes a wedged
+        // loop from a productive one without relying on capability
+        // signatures (which a model that just stops emitting tool
+        // calls would not exercise).
+        if self.noprogress_window > 0
+            && state.recent_output_token_counts.len() >= self.noprogress_window
+        {
+            let window_below = state
+                .recent_output_token_counts
+                .iter()
+                .rev()
+                .take(self.noprogress_window)
+                .filter(|tokens| **tokens <= self.min_delta_tokens)
+                .count();
+            if window_below >= self.noprogress_window {
+                return StopOutcome::Stop {
+                    stop: next,
+                    kind: StopKind::NoProgressDetected,
+                };
+            }
         }
 
         StopOutcome::Continue { stop: next }
@@ -466,6 +505,52 @@ mod tests {
                     ..
                 }
             ));
+        }
+
+        /// F1 regression: four consecutive turns with output ≤
+        /// `min_delta_tokens` trip the diminishing-returns escape.
+        /// Different from the repetition / failure-run escapes — the
+        /// model isn't calling the same tool or failing, it's just
+        /// emitting nothing useful.
+        #[tokio::test]
+        async fn four_consecutive_low_token_turns_trigger_no_progress() {
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            for _ in 0..4 {
+                state.recent_output_token_counts.push(2);
+            }
+
+            let outcome = strategy
+                .should_stop_after_turn(&state, &after_batch())
+                .await;
+
+            assert!(matches!(
+                outcome,
+                StopOutcome::Stop {
+                    kind: StopKind::NoProgressDetected,
+                    ..
+                }
+            ));
+        }
+
+        /// A productive run interleaved with a few small turns must NOT
+        /// fire diminishing-returns — only sustained `noprogress_window`
+        /// consecutive low-token turns should.
+        #[tokio::test]
+        async fn occasional_low_token_turn_does_not_trip_no_progress() {
+            let strategy = DefaultStopConditionStrategy::default();
+            let mut state = LoopExecutionState::initial_for_run(&test_run_context());
+            // 2, 2, 100, 2, 2 — the productive middle turn resets the
+            // trailing consecutive-low count.
+            for tokens in [2, 2, 100, 2, 2] {
+                state.recent_output_token_counts.push(tokens);
+            }
+
+            let outcome = strategy
+                .should_stop_after_turn(&state, &after_batch())
+                .await;
+
+            assert!(matches!(outcome, StopOutcome::Continue { .. }));
         }
 
         #[tokio::test]

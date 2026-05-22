@@ -112,6 +112,80 @@ impl BudgetEventSink for InMemoryBudgetEventSink {
     }
 }
 
+/// Sink that publishes every event onto a `tokio::sync::broadcast`
+/// channel. Production composition wires this so downstream consumers
+/// (SSE projection, audit log, observability) subscribe via
+/// [`BroadcastBudgetEventSink::subscribe`] and project events without
+/// the governor knowing about them (review feedback #3841 A2).
+///
+/// `emit` is best-effort and non-blocking: when no receiver is active
+/// (or the broadcast buffer is full) the send returns an error which
+/// we discard. The governor's mutation path stays synchronous.
+#[derive(Debug, Clone)]
+pub struct BroadcastBudgetEventSink {
+    sender: tokio::sync::broadcast::Sender<BudgetEvent>,
+}
+
+impl BroadcastBudgetEventSink {
+    /// Construct a sink with the given broadcast capacity. A value of
+    /// 256 covers a comfortable burst of events without blocking; very
+    /// slow subscribers may miss events under sustained load, which
+    /// matches the audit/SSE "best-effort observability" shape.
+    pub fn new(capacity: usize) -> Self {
+        let (sender, _) = tokio::sync::broadcast::channel(capacity);
+        Self { sender }
+    }
+
+    /// Open a new subscriber. Each subscriber gets every event emitted
+    /// after the moment of subscription.
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<BudgetEvent> {
+        self.sender.subscribe()
+    }
+
+    /// Number of active subscribers — handy for tests asserting that
+    /// production composition wired through to the projection task.
+    pub fn subscriber_count(&self) -> usize {
+        self.sender.receiver_count()
+    }
+}
+
+impl Default for BroadcastBudgetEventSink {
+    fn default() -> Self {
+        Self::new(256)
+    }
+}
+
+impl BudgetEventSink for BroadcastBudgetEventSink {
+    fn emit(&self, event: BudgetEvent) {
+        // `send` returns Err only when there are no active receivers —
+        // a perfectly valid state (nobody is projecting yet). Drop
+        // silently.
+        let _ = self.sender.send(event);
+    }
+}
+
+/// Composite sink that fans out to every wrapped sink in order. Lets
+/// composition keep the `InMemoryBudgetEventSink` for tests while also
+/// publishing to a `BroadcastBudgetEventSink` for SSE projection.
+#[derive(Debug)]
+pub struct CompositeBudgetEventSink {
+    sinks: Vec<std::sync::Arc<dyn BudgetEventSink>>,
+}
+
+impl CompositeBudgetEventSink {
+    pub fn new(sinks: Vec<std::sync::Arc<dyn BudgetEventSink>>) -> Self {
+        Self { sinks }
+    }
+}
+
+impl BudgetEventSink for CompositeBudgetEventSink {
+    fn emit(&self, event: BudgetEvent) {
+        for sink in &self.sinks {
+            sink.emit(event.clone());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

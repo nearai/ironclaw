@@ -49,6 +49,13 @@ pub struct LoopExecutionState {
     // executor-observed (populated by executor; read-only to strategies)
     pub recent_call_signatures: BoundedRing<CapabilityCallSignature, 8>,
     pub recent_failure_kinds: BoundedRing<LoopFailureKind, 8>,
+    /// Rolling window of assistant-output token counts (from
+    /// `LoopModelResponse::usage.output_tokens`). The default stop
+    /// strategy uses this to detect diminishing-returns loops:
+    /// `noprogress_window` consecutive turns whose output stays at or
+    /// below `min_delta_tokens` → `StopKind::NoProgressDetected`
+    /// (#3841 follow-up F1).
+    pub recent_output_token_counts: BoundedRing<u32, 8>,
 
     // strategy slots — one per strategy that mutates state.
     pub context_state: ContextStrategyState,
@@ -78,6 +85,7 @@ impl LoopExecutionState {
             surface_version: None,
             recent_call_signatures: BoundedRing::new(),
             recent_failure_kinds: BoundedRing::new(),
+            recent_output_token_counts: BoundedRing::new(),
             context_state: ContextStrategyState::default(),
             capability_state: CapabilityStrategyState::default(),
             model_state: ModelStrategyState::default(),

@@ -331,6 +331,39 @@ pub enum AppEvent {
     #[serde(rename = "heartbeat")]
     Heartbeat,
 
+    // Reborn budget events — projected from `BudgetEvent` via the
+    // composition-layer broadcast sink (#3841 follow-up A2). Wire-stable
+    // snake_case names per `.claude/rules/types.md`. The producer is
+    // the projection task in `src/bridge/budget_events.rs`; this is the
+    // only path that emits these variants (gateway-events.md rule).
+    #[serde(rename = "budget_warn")]
+    BudgetWarn {
+        /// Sanitized account label: `tenant/user/...` joined with `/`.
+        account: String,
+        /// Dimension that crossed the warn threshold (`usd`,
+        /// `input_tokens`, etc.).
+        dimension: String,
+        /// `[0.0, 1.0+]` — `(usage + reserved + requested) / limit`.
+        utilization: f64,
+        /// When the current period naturally rolls over (`None` for
+        /// `PerInvocation`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        period_end_iso: Option<String>,
+    },
+    #[serde(rename = "budget_pause")]
+    BudgetPause {
+        gate_id: String,
+        account: String,
+        dimension: String,
+        utilization: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        period_end_iso: Option<String>,
+    },
+    #[serde(rename = "budget_denied")]
+    BudgetDenied { account: String, dimension: String },
+    #[serde(rename = "budget_limit_changed")]
+    BudgetLimitChanged { account: String },
+
     // Sandbox job streaming events (worker + Claude Code bridge)
     #[serde(rename = "job_message")]
     JobMessage {
@@ -710,6 +743,10 @@ impl AppEvent {
             Self::GateResolved { .. } => "gate_resolved",
             Self::Error { .. } => "error",
             Self::Heartbeat => "heartbeat",
+            Self::BudgetWarn { .. } => "budget_warn",
+            Self::BudgetPause { .. } => "budget_pause",
+            Self::BudgetDenied { .. } => "budget_denied",
+            Self::BudgetLimitChanged { .. } => "budget_limit_changed",
             Self::JobMessage { .. } => "job_message",
             Self::JobToolUse { .. } => "job_tool_use",
             Self::JobToolResult { .. } => "job_tool_result",

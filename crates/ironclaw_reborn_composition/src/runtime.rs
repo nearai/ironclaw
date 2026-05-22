@@ -210,6 +210,21 @@ impl RebornRuntime {
             .map(|rt| Arc::clone(&rt.in_memory_budget_event_sink))
     }
 
+    /// Broadcast sink the binary subscribes against to project budget
+    /// events onto the SSE stream. Production composition calls
+    /// `subscribe()` on this and hands the receiver to
+    /// `spawn_budget_event_projection` (see `src/bridge/budget_events.rs`).
+    /// Exposed unconditionally so the production binary path that
+    /// builds without `test-support` can still wire the projection.
+    pub fn broadcast_budget_event_sink(
+        &self,
+    ) -> Option<Arc<ironclaw_resources::BroadcastBudgetEventSink>> {
+        self.services
+            .local_runtime
+            .as_ref()
+            .map(|rt| Arc::clone(&rt.broadcast_budget_event_sink))
+    }
+
     /// Test-only handle on the budget approval-gate store. Tests resolve
     /// pending gates here (Approve / Cancel / let-expire) to drive the
     /// F3/F4/F5 approval-flow scenarios.
@@ -750,35 +765,17 @@ pub async fn build_reborn_runtime(
         Arc<dyn ironclaw_turns::run_profile::LoopModelBudgetAccountant>,
     > = match resolved_cost_table {
         Some(cost_table) => {
-            let defaults = ironclaw_reborn_config::BudgetDefaults::compiled_defaults()
-                .with_env()
-                .map_err(|error| RebornRuntimeError::InvalidArgument {
-                    reason: format!("budget defaults env-override invalid: {error}"),
-                })?;
-            let user_daily_usd =
-                rust_decimal::Decimal::from_f64_retain(defaults.user_daily_usd).unwrap_or_default();
-            let project_daily_usd =
-                rust_decimal::Decimal::from_f64_retain(defaults.project_daily_usd)
-                    .unwrap_or_default();
-            let overestimate_factor =
-                rust_decimal::Decimal::from_f64_retain(defaults.overestimate_factor)
-                    .unwrap_or(rust_decimal::Decimal::ONE);
-            let seeding_policy = ironclaw_loop_support::BudgetSeedingPolicy::new(
-                user_daily_usd,
-                project_daily_usd,
-                ironclaw_resources::BudgetPeriod::Rolling24h,
-                ironclaw_resources::BudgetThresholds {
-                    warn_at: defaults.warn_at,
-                    pause_at: defaults.pause_at,
-                },
-            );
-            let governor = Arc::clone(&local_runtime.resource_governor);
-            let accountant =
-                ironclaw_loop_support::GovernorBackedAccountant::new(governor, cost_table)
-                    .with_overestimate_factor(overestimate_factor)
-                    .with_seeding_policy(seeding_policy)
-                    .with_gate_store(Arc::clone(&local_runtime.budget_gate_store));
-            Some(Arc::new(accountant))
+            // Shared helper — same wiring shape used by any production
+            // loop composer that wants the accountant.
+            let accountant = crate::build_default_budget_accountant(
+                Arc::clone(&local_runtime.resource_governor),
+                cost_table,
+                Arc::clone(&local_runtime.budget_gate_store),
+            )
+            .map_err(|error| RebornRuntimeError::InvalidArgument {
+                reason: format!("budget defaults env-override invalid: {error}"),
+            })?;
+            Some(accountant)
         }
         None => None,
     };

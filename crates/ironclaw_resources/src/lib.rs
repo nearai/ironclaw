@@ -24,7 +24,10 @@ mod filesystem_store;
 mod gate;
 mod period;
 
-pub use event::{BudgetEvent, BudgetEventSink, InMemoryBudgetEventSink, NoOpBudgetEventSink};
+pub use event::{
+    BroadcastBudgetEventSink, BudgetEvent, BudgetEventSink, CompositeBudgetEventSink,
+    InMemoryBudgetEventSink, NoOpBudgetEventSink,
+};
 pub use filesystem_gate_store::FilesystemBudgetGateStore;
 pub use filesystem_store::FilesystemResourceGovernorStore;
 pub use gate::{

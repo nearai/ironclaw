@@ -625,6 +625,69 @@ async fn d1_agent_deny_preserves_user_warn_event() {
     runtime.shutdown().await.expect("shutdown");
 }
 
+/// A2 projection: the broadcast sink emits every BudgetEvent published
+/// by the governor. Subscribers (the production projection task in
+/// `src/bridge/budget_events.rs`) receive Warned / Reserved /
+/// Reconciled events without polling.
+#[tokio::test]
+async fn broadcast_sink_publishes_events_to_subscribers() {
+    let root = tempfile::tempdir().unwrap();
+    let gateway = Arc::new(BudgetTestGateway::with_constant("ok", 10, 5));
+    let cost_table = interactive_cost_table(dec!(0.001), dec!(0.002));
+    let runtime = build_reborn_runtime(build_input(
+        "a2",
+        root.path().to_path_buf(),
+        gateway.clone(),
+        cost_table,
+    ))
+    .await
+    .expect("runtime builds");
+
+    // Subscribe BEFORE the model call so we don't miss the events.
+    let broadcast = runtime
+        .broadcast_budget_event_sink()
+        .expect("broadcast sink");
+    let mut subscriber = broadcast.subscribe();
+    assert_eq!(
+        broadcast.subscriber_count(),
+        1,
+        "subscribe must register exactly one receiver"
+    );
+
+    let conversation = runtime.new_conversation().await.expect("conversation");
+    let _ = tokio::time::timeout(
+        Duration::from_secs(3),
+        runtime.send_user_message(&conversation, "ping"),
+    )
+    .await
+    .expect("send finishes")
+    .expect("send succeeds");
+
+    // Drain everything available with a small grace window for the
+    // governor's broadcast send to fan out.
+    let mut received = Vec::new();
+    while let Ok(Ok(event)) =
+        tokio::time::timeout(Duration::from_millis(200), subscriber.recv()).await
+    {
+        received.push(event);
+    }
+
+    assert!(
+        received
+            .iter()
+            .any(|e| matches!(e, ironclaw_resources::BudgetEvent::Reserved { .. })),
+        "broadcast must surface Reserved — got {received:?}"
+    );
+    assert!(
+        received
+            .iter()
+            .any(|e| matches!(e, ironclaw_resources::BudgetEvent::Reconciled { .. })),
+        "broadcast must surface Reconciled — got {received:?}"
+    );
+
+    runtime.shutdown().await.expect("shutdown");
+}
+
 /// Scripted multi-turn smoke: two messages, two replies with different
 /// token counts → ledger accumulates the sum. Exercises the script-queue
 /// path of `BudgetTestGateway::push`.

@@ -350,6 +350,15 @@ impl CanonicalAgentLoopExecutor {
                 }
                 ModelStep::Exit(exit) => return Ok(exit),
             };
+            // Feed provider-reported output token count into the
+            // rolling window so the stop strategy can detect
+            // diminishing-returns loops (#3841 follow-up F1). When the
+            // gateway didn't surface usage we push 0 — same as a
+            // zero-output turn, which is what diminishing-returns
+            // wants to detect anyway.
+            state
+                .recent_output_token_counts
+                .push(model_response.usage.map(|u| u.output_tokens).unwrap_or(0));
             match model_response.output {
                 ParentLoopOutput::AssistantReply(reply) => {
                     let reply_ref = host
