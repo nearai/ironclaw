@@ -29,8 +29,9 @@ use ironclaw_processes::{
     ProcessRecord, ProcessResultStore, ProcessStart, ProcessStatus, ProcessStore,
 };
 use ironclaw_run_state::{
-    ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
-    RunRecord, RunStart, RunStateApprovalStore, RunStateError, RunStateStore,
+    ApprovalRecord, ApprovalRequestStore, AuthRequiredPayload, InMemoryApprovalRequestStore,
+    InMemoryRunStateStore, OAuthFlowId, RunRecord, RunStart, RunStateApprovalStore, RunStateError,
+    RunStateStore,
 };
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
@@ -1014,6 +1015,29 @@ impl RunStateStore for FailingRecordsRunStateStore {
             .await
     }
 
+    async fn block_auth_required(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        payload: AuthRequiredPayload,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .block_auth_required(scope, invocation_id, payload)
+            .await
+    }
+
+    async fn claim_auth_resume(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        flow_id: OAuthFlowId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .claim_auth_resume(scope, invocation_id, flow_id, invocation_fingerprint)
+            .await
+    }
+
     async fn complete(
         &self,
         scope: &ResourceScope,
@@ -1144,6 +1168,29 @@ impl RunStateStore for FailingGetRunStateStore {
             .await
     }
 
+    async fn block_auth_required(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        payload: AuthRequiredPayload,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .block_auth_required(scope, invocation_id, payload)
+            .await
+    }
+
+    async fn claim_auth_resume(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        flow_id: OAuthFlowId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .claim_auth_resume(scope, invocation_id, flow_id, invocation_fingerprint)
+            .await
+    }
+
     async fn complete(
         &self,
         scope: &ResourceScope,
@@ -1229,6 +1276,29 @@ impl RunStateStore for RecordingCombinedRunStateApprovalStore {
         error_kind: String,
     ) -> Result<RunRecord, RunStateError> {
         self.runs.block_auth(scope, invocation_id, error_kind).await
+    }
+
+    async fn block_auth_required(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        payload: AuthRequiredPayload,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs
+            .block_auth_required(scope, invocation_id, payload)
+            .await
+    }
+
+    async fn claim_auth_resume(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        flow_id: OAuthFlowId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs
+            .claim_auth_resume(scope, invocation_id, flow_id, invocation_fingerprint)
+            .await
     }
 
     async fn complete(

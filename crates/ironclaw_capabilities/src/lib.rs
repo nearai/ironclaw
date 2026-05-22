@@ -25,6 +25,6 @@ pub use obligations::{
     CapabilityObligationOutcome, CapabilityObligationPhase, CapabilityObligationRequest,
 };
 pub use requests::{
-    CapabilityInvocationRequest, CapabilityInvocationResult, CapabilityResumeRequest,
-    CapabilitySpawnRequest, CapabilitySpawnResult,
+    CapabilityAuthResumeRequest, CapabilityInvocationRequest, CapabilityInvocationResult,
+    CapabilityResumeRequest, CapabilitySpawnRequest, CapabilitySpawnResult,
 };

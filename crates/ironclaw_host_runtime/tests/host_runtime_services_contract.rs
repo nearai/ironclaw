@@ -67,8 +67,9 @@ use ironclaw_resources::{
     ResourceAccount, ResourceError, ResourceGovernor, ResourceLimits, ResourceTally,
 };
 use ironclaw_run_state::{
-    ApprovalRecord, ApprovalRequestStore, InMemoryApprovalRequestStore, InMemoryRunStateStore,
-    RunRecord, RunStart, RunStateApprovalStore, RunStateError, RunStateStore, RunStatus,
+    ApprovalRecord, ApprovalRequestStore, AuthRequiredPayload, InMemoryApprovalRequestStore,
+    InMemoryRunStateStore, OAuthFlowId, RunRecord, RunStart, RunStateApprovalStore, RunStateError,
+    RunStateStore, RunStatus,
 };
 use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptExecutionRequest,
@@ -4776,6 +4777,29 @@ impl RunStateStore for InMemoryRecordingCombinedRunStateApprovalStore {
         error_kind: String,
     ) -> Result<RunRecord, RunStateError> {
         self.runs.block_auth(scope, invocation_id, error_kind).await
+    }
+
+    async fn block_auth_required(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        payload: AuthRequiredPayload,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs
+            .block_auth_required(scope, invocation_id, payload)
+            .await
+    }
+
+    async fn claim_auth_resume(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        flow_id: OAuthFlowId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs
+            .claim_auth_resume(scope, invocation_id, flow_id, invocation_fingerprint)
+            .await
     }
 
     async fn complete(

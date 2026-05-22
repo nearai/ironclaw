@@ -200,6 +200,8 @@ pub(crate) fn run_state_error_kind(error: &RunStateError) -> &'static str {
         RunStateError::UnknownApprovalRequest { .. } => "UnknownApprovalRequest",
         RunStateError::ApprovalRequestAlreadyExists { .. } => "ApprovalRequestAlreadyExists",
         RunStateError::ApprovalNotPending { .. } => "ApprovalNotPending",
+        RunStateError::InvalidStatus { .. } => "InvalidStatus",
+        RunStateError::AuthResumeClaimMismatch { .. } => "AuthResumeClaimMismatch",
         RunStateError::InvalidPath(_) => "InvalidPath",
         RunStateError::Filesystem(_) => "Filesystem",
         RunStateError::Serialization(_) => "Serialization",

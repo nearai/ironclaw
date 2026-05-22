@@ -312,6 +312,29 @@ impl RunStateStore for FailCompleteRunStateStore {
             .await
     }
 
+    async fn block_auth_required(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        payload: AuthRequiredPayload,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .block_auth_required(scope, invocation_id, payload)
+            .await
+    }
+
+    async fn claim_auth_resume(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        flow_id: OAuthFlowId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .claim_auth_resume(scope, invocation_id, flow_id, invocation_fingerprint)
+            .await
+    }
+
     async fn complete(
         &self,
         _scope: &ResourceScope,

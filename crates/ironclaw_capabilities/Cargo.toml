@@ -24,3 +24,4 @@ ironclaw_events = { path = "../ironclaw_events" }
 ironclaw_filesystem = { path = "../ironclaw_filesystem" }
 ironclaw_resources = { path = "../ironclaw_resources" }
 tokio = { version = "1", features = ["macros", "rt"] }
+uuid = { version = "1", features = ["v4", "serde"] }

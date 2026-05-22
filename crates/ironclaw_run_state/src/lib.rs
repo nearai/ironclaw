@@ -22,10 +22,11 @@ use ironclaw_filesystem::{
     RootFilesystem, ScopedFilesystem,
 };
 use ironclaw_host_api::{
-    AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, HostApiError, InvocationId,
-    MissionId, ProjectId, ResourceScope, ScopedPath, TenantId, ThreadId, UserId,
+    AgentId, ApprovalRequest, ApprovalRequestId, CapabilityId, HostApiError, InvocationFingerprint,
+    InvocationId, MissionId, ProjectId, ResourceScope, ScopedPath, TenantId, ThreadId, UserId,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 /// Current lifecycle state for one invocation.
@@ -48,6 +49,8 @@ pub struct RunRecord {
     pub status: RunStatus,
     pub approval_request_id: Option<ApprovalRequestId>,
     pub error_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_payload: Option<Value>,
 }
 
 /// Start metadata for a capability invocation.
@@ -56,6 +59,25 @@ pub struct RunStart {
     pub invocation_id: InvocationId,
     pub capability_id: CapabilityId,
     pub scope: ResourceScope,
+}
+
+pub type OAuthFlowId = uuid::Uuid;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthRequiredPayload {
+    pub provider_id: String,
+    pub credential_name: String,
+    pub missing_scopes: Vec<String>,
+    pub oauth_url: String,
+    pub flow_id: OAuthFlowId,
+    pub extension_id: ironclaw_host_api::ExtensionId,
+    pub invocation_fingerprint: InvocationFingerprint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthCallbackOutcome {
+    pub flow_id: OAuthFlowId,
+    pub success: bool,
 }
 
 /// Approval request lifecycle state.
@@ -142,6 +164,14 @@ pub enum RunStateError {
         request_id: ApprovalRequestId,
         status: ApprovalStatus,
     },
+    #[error("invocation {invocation_id} has status {actual:?}; expected {expected:?}")]
+    InvalidStatus {
+        invocation_id: InvocationId,
+        expected: RunStatus,
+        actual: RunStatus,
+    },
+    #[error("auth resume claim mismatch for invocation {invocation_id}")]
+    AuthResumeClaimMismatch { invocation_id: InvocationId },
     #[error("invalid storage path: {0}")]
     InvalidPath(String),
     #[error("filesystem error: {0}")]
@@ -180,6 +210,21 @@ pub trait RunStateStore: Send + Sync {
         scope: &ResourceScope,
         invocation_id: InvocationId,
         error_kind: String,
+    ) -> Result<RunRecord, RunStateError>;
+
+    async fn block_auth_required(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        payload: AuthRequiredPayload,
+    ) -> Result<RunRecord, RunStateError>;
+
+    async fn claim_auth_resume(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        flow_id: OAuthFlowId,
+        invocation_fingerprint: &InvocationFingerprint,
     ) -> Result<RunRecord, RunStateError>;
 
     /// Marks an invocation completed only within the matching scope.
@@ -321,6 +366,7 @@ impl RunStateStore for InMemoryRunStateStore {
             status: RunStatus::Running,
             approval_request_id: None,
             error_kind: None,
+            blocked_payload: None,
         };
         let key = RunStateKey::new(&record.scope, record.invocation_id);
         let mut records = self.records_guard();
@@ -343,6 +389,7 @@ impl RunStateStore for InMemoryRunStateStore {
             record.status = RunStatus::BlockedApproval;
             record.approval_request_id = Some(approval.id);
             record.error_kind = None;
+            record.blocked_payload = None;
         })
     }
 
@@ -356,7 +403,43 @@ impl RunStateStore for InMemoryRunStateStore {
             record.status = RunStatus::BlockedAuth;
             record.approval_request_id = None;
             record.error_kind = Some(error_kind);
+            record.blocked_payload = None;
         })
+    }
+
+    async fn block_auth_required(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        payload: AuthRequiredPayload,
+    ) -> Result<RunRecord, RunStateError> {
+        let payload = serde_json::to_value(payload)
+            .map_err(|error| RunStateError::Serialization(error.to_string()))?;
+        self.update(scope, invocation_id, |record| {
+            record.status = RunStatus::BlockedAuth;
+            record.approval_request_id = None;
+            record.error_kind = Some("AuthRequired".to_string());
+            record.blocked_payload = Some(payload.clone());
+        })
+    }
+
+    async fn claim_auth_resume(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        flow_id: OAuthFlowId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<RunRecord, RunStateError> {
+        let key = RunStateKey::new(scope, invocation_id);
+        let mut records = self.records_guard();
+        let record = records
+            .get_mut(&key)
+            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+        validate_auth_resume_claim(record, flow_id, invocation_fingerprint)?;
+        record.status = RunStatus::Running;
+        record.error_kind = None;
+        record.blocked_payload = None;
+        Ok(record.clone())
     }
 
     async fn complete(
@@ -368,6 +451,7 @@ impl RunStateStore for InMemoryRunStateStore {
             record.status = RunStatus::Completed;
             record.approval_request_id = None;
             record.error_kind = None;
+            record.blocked_payload = None;
         })
     }
 
@@ -381,6 +465,7 @@ impl RunStateStore for InMemoryRunStateStore {
             record.status = RunStatus::Failed;
             record.approval_request_id = None;
             record.error_kind = Some(error_kind);
+            record.blocked_payload = None;
         })
     }
 
@@ -650,6 +735,7 @@ where
             status: RunStatus::Running,
             approval_request_id: None,
             error_kind: None,
+            blocked_payload: None,
         };
         let entry = Self::record_entry(&record)?;
         match put_with_cas(
@@ -682,6 +768,7 @@ where
             record.status = RunStatus::BlockedApproval;
             record.approval_request_id = Some(approval.id);
             record.error_kind = None;
+            record.blocked_payload = None;
         })
         .await
     }
@@ -699,8 +786,69 @@ where
             record.status = RunStatus::BlockedAuth;
             record.approval_request_id = None;
             record.error_kind = Some(error_kind.clone());
+            record.blocked_payload = None;
         })
         .await
+    }
+
+    async fn block_auth_required(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        payload: AuthRequiredPayload,
+    ) -> Result<RunRecord, RunStateError> {
+        let payload = serde_json::to_value(payload)
+            .map_err(|error| RunStateError::Serialization(error.to_string()))?;
+        let path = run_record_path(scope, invocation_id)?;
+        let record_lock = filesystem_record_lock(&path);
+        let _guard = record_lock.lock().await;
+        self.apply_update(scope, invocation_id, |record| {
+            record.status = RunStatus::BlockedAuth;
+            record.approval_request_id = None;
+            record.error_kind = Some("AuthRequired".to_string());
+            record.blocked_payload = Some(payload.clone());
+        })
+        .await
+    }
+
+    async fn claim_auth_resume(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        flow_id: OAuthFlowId,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<RunRecord, RunStateError> {
+        let path = run_record_path(scope, invocation_id)?;
+        let record_lock = filesystem_record_lock(&path);
+        let _guard = record_lock.lock().await;
+        for _ in 0..FILESYSTEM_CAS_RETRIES {
+            let (mut record, version) = self
+                .read_versioned(scope, invocation_id)
+                .await?
+                .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+            validate_auth_resume_claim(&record, flow_id, invocation_fingerprint)?;
+            record.status = RunStatus::Running;
+            record.error_kind = None;
+            record.blocked_payload = None;
+            let entry = Self::record_entry(&record)?;
+            match put_with_cas(
+                self.filesystem.as_ref(),
+                scope,
+                &path,
+                entry,
+                CasExpectation::Version(version),
+            )
+            .await
+            {
+                Ok(()) => return Ok(record),
+                Err(PutError::VersionMismatch) => continue,
+                Err(PutError::Other(error)) => return Err(error),
+            }
+        }
+        Err(RunStateError::Backend(format!(
+            "filesystem CAS retries exhausted for path {}",
+            path.as_str()
+        )))
     }
 
     async fn complete(
@@ -715,6 +863,7 @@ where
             record.status = RunStatus::Completed;
             record.approval_request_id = None;
             record.error_kind = None;
+            record.blocked_payload = None;
         })
         .await
     }
@@ -732,6 +881,7 @@ where
             record.status = RunStatus::Failed;
             record.approval_request_id = None;
             record.error_kind = Some(error_kind.clone());
+            record.blocked_payload = None;
         })
         .await
     }
@@ -1151,6 +1301,33 @@ where
     T: for<'de> Deserialize<'de>,
 {
     serde_json::from_slice(bytes).map_err(|error| RunStateError::Deserialization(error.to_string()))
+}
+
+fn validate_auth_resume_claim(
+    record: &RunRecord,
+    flow_id: OAuthFlowId,
+    invocation_fingerprint: &InvocationFingerprint,
+) -> Result<(), RunStateError> {
+    if record.status != RunStatus::BlockedAuth {
+        return Err(RunStateError::InvalidStatus {
+            invocation_id: record.invocation_id,
+            expected: RunStatus::BlockedAuth,
+            actual: record.status,
+        });
+    }
+    let payload: AuthRequiredPayload = serde_json::from_value(
+        record
+            .blocked_payload
+            .clone()
+            .ok_or_else(|| RunStateError::Deserialization("BlockedAuth payload missing".into()))?,
+    )
+    .map_err(|error| RunStateError::Deserialization(error.to_string()))?;
+    if payload.flow_id != flow_id || &payload.invocation_fingerprint != invocation_fingerprint {
+        return Err(RunStateError::AuthResumeClaimMismatch {
+            invocation_id: record.invocation_id,
+        });
+    }
+    Ok(())
 }
 
 fn is_not_found(error: &FilesystemError) -> bool {

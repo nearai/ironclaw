@@ -2,6 +2,7 @@ use ironclaw_host_api::{
     ApprovalRequestId, CapabilityDispatchResult, CapabilityId, ExecutionContext, ResourceEstimate,
 };
 use ironclaw_processes::ProcessRecord;
+use ironclaw_run_state::OAuthCallbackOutcome;
 use ironclaw_trust::TrustDecision;
 use serde_json::Value;
 
@@ -18,6 +19,17 @@ pub struct CapabilityInvocationRequest {
 pub struct CapabilityResumeRequest {
     pub context: ExecutionContext,
     pub approval_request_id: ApprovalRequestId,
+    pub capability_id: CapabilityId,
+    pub estimate: ResourceEstimate,
+    pub input: Value,
+    pub trust_decision: TrustDecision,
+}
+
+/// Caller-facing auth-blocked capability resume request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapabilityAuthResumeRequest {
+    pub context: ExecutionContext,
+    pub outcome: OAuthCallbackOutcome,
     pub capability_id: CapabilityId,
     pub estimate: ResourceEstimate,
     pub input: Value,

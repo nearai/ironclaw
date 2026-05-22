@@ -1,5 +1,6 @@
 use ironclaw_host_api::HostApiError;
 use ironclaw_network::NetworkHttpError;
+use ironclaw_run_state::RunStateError;
 use ironclaw_secrets::SecretStoreError;
 use thiserror::Error;
 use url::Url;
@@ -30,6 +31,8 @@ pub enum OAuthError {
     InvalidTokenResponse { reason: String },
     #[error("OAuth secret store error: {0}")]
     SecretStore(#[from] SecretStoreError),
+    #[error("OAuth run-state error: {0}")]
+    RunState(#[from] RunStateError),
     #[error("OAuth host API error: {0}")]
     HostApi(#[from] HostApiError),
     #[error("OAuth serialization error: {0}")]

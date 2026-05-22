@@ -73,6 +73,12 @@ pub enum CapabilityInvocationError {
         capability: CapabilityId,
         status: RunStatus,
     },
+    #[error("capability {capability} auth resume flow mismatch")]
+    AuthResumeFlowMismatch { capability: CapabilityId },
+    #[error("capability {capability} auth resume fingerprint mismatch")]
+    AuthResumeFingerprintMismatch { capability: CapabilityId },
+    #[error("capability {capability} auth resume was denied")]
+    AuthResumeDenied { capability: CapabilityId },
     #[error("capability {capability} resume context mismatch: {kind:?}")]
     ResumeContextMismatch {
         capability: CapabilityId,

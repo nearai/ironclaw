@@ -4,6 +4,7 @@ use ironclaw_host_api::{
     NetworkMethod, NetworkPolicy, NetworkScheme, NetworkTargetPattern, ResourceScope,
 };
 use ironclaw_network::{NetworkHttpEgress, NetworkHttpRequest};
+use ironclaw_run_state::RunStateStore;
 use ironclaw_secrets::SecretStore;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Serialize;
@@ -91,6 +92,7 @@ struct OAuthRuntimeInner {
     egress: Arc<dyn NetworkHttpEgress>,
     tokens: TokenPersister,
     resume: Arc<OAuthResumeNotifier>,
+    run_state: Option<Arc<dyn RunStateStore>>,
     redirect_base_url: Url,
     allow_loopback_broker_for_tests: bool,
 }
@@ -102,6 +104,7 @@ pub struct OAuthRuntimeBuilder {
     egress: Arc<dyn NetworkHttpEgress>,
     secrets: Arc<dyn SecretStore>,
     resume: Arc<OAuthResumeNotifier>,
+    run_state: Option<Arc<dyn RunStateStore>>,
     redirect_base_url: Option<Url>,
     allow_loopback_broker_for_tests: bool,
 }
@@ -119,6 +122,7 @@ impl OAuthRuntimeBuilder {
             egress,
             secrets,
             resume: Arc::new(OAuthResumeNotifier::default()),
+            run_state: None,
             redirect_base_url: None,
             allow_loopback_broker_for_tests: false,
         }
@@ -136,6 +140,11 @@ impl OAuthRuntimeBuilder {
 
     pub fn resume(mut self, resume: Arc<OAuthResumeNotifier>) -> Self {
         self.resume = resume;
+        self
+    }
+
+    pub fn run_state(mut self, run_state: Arc<dyn RunStateStore>) -> Self {
+        self.run_state = Some(run_state);
         self
     }
 
@@ -185,6 +194,7 @@ impl OAuthRuntimeBuilder {
                     egress: self.egress,
                     tokens: TokenPersister::new(self.secrets),
                     resume: self.resume,
+                    run_state: self.run_state,
                     redirect_base_url,
                     allow_loopback_broker_for_tests: self.allow_loopback_broker_for_tests,
                 }),
@@ -325,9 +335,21 @@ impl OAuthFlow {
             .tokens
             .persist(&pending.scope, provider.credential_name(), &token_set)
             .await?;
-        self.inner
-            .resume
-            .notify(provider.credential_name(), pending.scope, pending.flow_id);
+        if let Some(run_state) = &self.inner.run_state {
+            self.inner
+                .resume
+                .notify_blocked_auth(
+                    run_state.as_ref(),
+                    provider.credential_name(),
+                    &pending.scope,
+                    pending.flow_id,
+                )
+                .await?;
+        } else {
+            self.inner
+                .resume
+                .notify(provider.credential_name(), pending.scope, pending.flow_id);
+        }
         Ok(())
     }
 

@@ -948,6 +948,8 @@ fn unavailable_from_run_state(error: RunStateError) -> HostRuntimeError {
         RunStateError::UnknownApprovalRequest { .. } => "approval request not found",
         RunStateError::ApprovalRequestAlreadyExists { .. } => "approval request already exists",
         RunStateError::ApprovalNotPending { .. } => "approval request not pending",
+        RunStateError::InvalidStatus { .. } => "run-state transition invalid",
+        RunStateError::AuthResumeClaimMismatch { .. } => "auth resume claim mismatch",
         RunStateError::InvalidPath(_) => "run-state storage path invalid",
         RunStateError::Filesystem(_) => "run-state filesystem unavailable",
         RunStateError::Serialization(_) => "run-state serialization failed",
@@ -1066,6 +1068,9 @@ fn sanitized_failure_message(error: &CapabilityInvocationError) -> Option<String
         | ResumeStoreMissing { .. }
         | ProcessManagerMissing { .. }
         | ResumeNotBlocked { .. }
+        | AuthResumeFlowMismatch { .. }
+        | AuthResumeFingerprintMismatch { .. }
+        | AuthResumeDenied { .. }
         | ResumeContextMismatch { .. }
         | Dispatch { .. } => Some(error.to_string()),
         InvocationFingerprint { .. } => Some("invocation fingerprint failed".to_string()),
@@ -1086,6 +1091,9 @@ pub(crate) fn failure_kind_from(error: &CapabilityInvocationError) -> RuntimeFai
         | CapabilityInvocationError::ApprovalNotApproved { .. }
         | CapabilityInvocationError::ApprovalLeaseMissing { .. }
         | CapabilityInvocationError::ResumeNotBlocked { .. }
+        | CapabilityInvocationError::AuthResumeFlowMismatch { .. }
+        | CapabilityInvocationError::AuthResumeFingerprintMismatch { .. }
+        | CapabilityInvocationError::AuthResumeDenied { .. }
         | CapabilityInvocationError::ResumeContextMismatch { .. } => {
             RuntimeFailureKind::Authorization
         }

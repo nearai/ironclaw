@@ -21,6 +21,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["sync"] }
 tokio-postgres = { version = "0.7", optional = true }
 tracing = "0.1"
+uuid = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = "3"

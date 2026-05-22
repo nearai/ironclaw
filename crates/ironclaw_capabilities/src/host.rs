@@ -6,8 +6,8 @@ use ironclaw_host_api::{
 };
 use ironclaw_processes::{ProcessManager, ProcessStart};
 use ironclaw_run_state::{
-    ApprovalRequestStore, ApprovalStatus, RunStart, RunStateApprovalStore, RunStateError,
-    RunStateStore, RunStatus,
+    ApprovalRequestStore, ApprovalStatus, AuthRequiredPayload, RunStart, RunStateApprovalStore,
+    RunStateError, RunStateStore, RunStatus,
 };
 use tracing::warn;
 
@@ -19,11 +19,11 @@ use crate::helpers::{
 };
 use crate::obligations::post_dispatch_obligations;
 use crate::{
-    CapabilityInvocationError, CapabilityInvocationRequest, CapabilityInvocationResult,
-    CapabilityObligationAbortRequest, CapabilityObligationCompletionRequest,
-    CapabilityObligationError, CapabilityObligationHandler, CapabilityObligationOutcome,
-    CapabilityObligationPhase, CapabilityObligationRequest, CapabilityResumeRequest,
-    CapabilitySpawnRequest, CapabilitySpawnResult,
+    CapabilityAuthResumeRequest, CapabilityInvocationError, CapabilityInvocationRequest,
+    CapabilityInvocationResult, CapabilityObligationAbortRequest,
+    CapabilityObligationCompletionRequest, CapabilityObligationError, CapabilityObligationHandler,
+    CapabilityObligationOutcome, CapabilityObligationPhase, CapabilityObligationRequest,
+    CapabilityResumeRequest, CapabilitySpawnRequest, CapabilitySpawnResult,
 };
 
 pub struct CapabilityHost<'a, D>
@@ -792,6 +792,262 @@ where
                 "capability lease consume failed after successful dispatch; lease left in claimed state",
             );
         }
+
+        complete_run_after_side_effect(
+            run_state,
+            &scope,
+            invocation_id,
+            &capability_id,
+            "dispatch",
+        )
+        .await;
+        Ok(CapabilityInvocationResult { dispatch })
+    }
+
+    pub async fn resume_auth_json(
+        &self,
+        request: CapabilityAuthResumeRequest,
+    ) -> Result<CapabilityInvocationResult, CapabilityInvocationError> {
+        let run_state =
+            self.run_state
+                .ok_or_else(|| CapabilityInvocationError::ResumeStoreMissing {
+                    capability: request.capability_id.clone(),
+                    store: "run_state",
+                })?;
+
+        let invocation_id = request.context.invocation_id;
+        let capability_id = request.capability_id.clone();
+        let scope = request.context.resource_scope.clone();
+        if request.context.validate().is_err() {
+            return Err(CapabilityInvocationError::AuthorizationDenied {
+                capability: request.capability_id,
+                reason: DenyReason::InternalInvariantViolation,
+            });
+        }
+
+        let invocation_fingerprint = invocation_fingerprint_for_kind(
+            CapabilityActionKind::Dispatch,
+            &scope,
+            &request.capability_id,
+            &request.estimate,
+            &request.input,
+        )
+        .map_err(|source| CapabilityInvocationError::InvocationFingerprint {
+            capability: request.capability_id.clone(),
+            source,
+        })?;
+
+        let run_record = run_state
+            .get(&scope, invocation_id)
+            .await?
+            .ok_or(RunStateError::UnknownInvocation { invocation_id })?;
+        if run_record.status != RunStatus::BlockedAuth {
+            return Err(CapabilityInvocationError::ResumeNotBlocked {
+                capability: request.capability_id,
+                status: run_record.status,
+            });
+        }
+        if run_record.capability_id != request.capability_id {
+            fail_run_if_configured(
+                Some(run_state),
+                &scope,
+                invocation_id,
+                "ResumeContextMismatch",
+            )
+            .await;
+            return Err(CapabilityInvocationError::ResumeContextMismatch {
+                capability: request.capability_id,
+                kind: crate::ResumeContextMismatchKind::CapabilityId,
+            });
+        }
+        let payload: AuthRequiredPayload =
+            serde_json::from_value(run_record.blocked_payload.ok_or_else(|| {
+                CapabilityInvocationError::RunState(Box::new(RunStateError::Deserialization(
+                    "BlockedAuth payload missing".to_string(),
+                )))
+            })?)
+            .map_err(|error| {
+                CapabilityInvocationError::RunState(Box::new(RunStateError::Deserialization(
+                    error.to_string(),
+                )))
+            })?;
+        if request.outcome.flow_id != payload.flow_id {
+            fail_run_if_configured(Some(run_state), &scope, invocation_id, "AuthFlowMismatch")
+                .await;
+            return Err(CapabilityInvocationError::AuthResumeFlowMismatch {
+                capability: request.capability_id,
+            });
+        }
+        if payload.invocation_fingerprint != invocation_fingerprint {
+            fail_run_if_configured(
+                Some(run_state),
+                &scope,
+                invocation_id,
+                "AuthResumeFingerprintMismatch",
+            )
+            .await;
+            return Err(CapabilityInvocationError::AuthResumeFingerprintMismatch {
+                capability: request.capability_id,
+            });
+        }
+        if !request.outcome.success {
+            fail_run_if_configured(Some(run_state), &scope, invocation_id, "AuthDenied").await;
+            return Err(CapabilityInvocationError::AuthResumeDenied {
+                capability: request.capability_id,
+            });
+        }
+
+        let Some(descriptor) = self.registry.get_capability(&request.capability_id) else {
+            fail_run_if_configured(Some(run_state), &scope, invocation_id, "UnknownCapability")
+                .await;
+            return Err(CapabilityInvocationError::UnknownCapability {
+                capability: request.capability_id,
+            });
+        };
+
+        let obligations = match self
+            .authorizer
+            .authorize_dispatch_with_trust(
+                &request.context,
+                descriptor,
+                &request.estimate,
+                &request.trust_decision,
+            )
+            .await
+        {
+            Decision::Allow {
+                obligations: allowed_obligations,
+            } => allowed_obligations.into_vec(),
+            Decision::Deny { reason } => {
+                fail_run_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    "AuthorizationDenied",
+                )
+                .await;
+                return Err(CapabilityInvocationError::AuthorizationDenied {
+                    capability: request.capability_id,
+                    reason,
+                });
+            }
+            Decision::RequireApproval { .. } => {
+                fail_run_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    "AuthorizationRequiresApproval",
+                )
+                .await;
+                return Err(CapabilityInvocationError::AuthorizationRequiresApproval {
+                    capability: request.capability_id,
+                });
+            }
+        };
+
+        match run_state
+            .claim_auth_resume(
+                &scope,
+                invocation_id,
+                request.outcome.flow_id,
+                &invocation_fingerprint,
+            )
+            .await
+        {
+            Ok(_) => {}
+            Err(RunStateError::InvalidStatus { actual, .. }) => {
+                return Err(CapabilityInvocationError::ResumeNotBlocked {
+                    capability: request.capability_id,
+                    status: actual,
+                });
+            }
+            Err(error) => return Err(CapabilityInvocationError::RunState(Box::new(error))),
+        }
+
+        let obligation_outcome = match self
+            .prepare_obligations(
+                CapabilityObligationPhase::Resume,
+                &request.context,
+                &request.capability_id,
+                &request.estimate,
+                obligations.clone(),
+            )
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                fail_run_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    obligation_invocation_error_kind(&error),
+                )
+                .await;
+                return Err(error);
+            }
+        };
+
+        let dispatch = match self
+            .dispatcher
+            .dispatch_json(CapabilityDispatchRequest {
+                capability_id: request.capability_id.clone(),
+                scope: scope.clone(),
+                estimate: request.estimate.clone(),
+                mounts: obligation_outcome.mounts.clone(),
+                resource_reservation: obligation_outcome.resource_reservation.clone(),
+                input: request.input,
+            })
+            .await
+        {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                self.abort_obligations(
+                    CapabilityObligationPhase::Resume,
+                    &request.context,
+                    &request.capability_id,
+                    &request.estimate,
+                    obligations.as_slice(),
+                    &obligation_outcome,
+                )
+                .await;
+                fail_run_if_configured(Some(run_state), &scope, invocation_id, "Dispatch").await;
+                return Err(CapabilityInvocationError::from(error));
+            }
+        };
+
+        let dispatch = match self
+            .complete_dispatch_obligations(
+                CapabilityObligationPhase::Resume,
+                &request.context,
+                &request.capability_id,
+                &request.estimate,
+                obligations.as_slice(),
+                &dispatch,
+            )
+            .await
+        {
+            Ok(dispatch) => dispatch,
+            Err(error) => {
+                let cleanup_outcome = CapabilityObligationOutcome::default();
+                self.abort_obligations(
+                    CapabilityObligationPhase::Resume,
+                    &request.context,
+                    &request.capability_id,
+                    &request.estimate,
+                    obligations.as_slice(),
+                    &cleanup_outcome,
+                )
+                .await;
+                fail_run_if_configured(
+                    Some(run_state),
+                    &scope,
+                    invocation_id,
+                    obligation_invocation_error_kind(&error),
+                )
+                .await;
+                return Err(error);
+            }
+        };
 
         complete_run_after_side_effect(
             run_state,

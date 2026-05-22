@@ -8,6 +8,7 @@ use ironclaw_capabilities::*;
 use ironclaw_host_api::*;
 use ironclaw_run_state::*;
 use serde_json::json;
+use uuid::Uuid;
 
 mod support;
 use support::*;
@@ -217,6 +218,250 @@ async fn capability_host_leaves_run_blocked_when_resume_is_attempted_before_appr
     assert_eq!(run.status, RunStatus::BlockedApproval);
     assert_eq!(run.approval_request_id, Some(approval_id));
     assert_eq!(run.error_kind, None);
+}
+
+#[tokio::test]
+async fn capability_host_resumes_blocked_auth_after_matching_oauth_callback() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let flow_id = Uuid::new_v4();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "auth complete"});
+    let fingerprint =
+        InvocationFingerprint::for_dispatch(&scope, &capability_id(), &estimate, &input).unwrap();
+    run_state
+        .start(RunStart {
+            invocation_id,
+            capability_id: capability_id(),
+            scope: scope.clone(),
+        })
+        .await
+        .unwrap();
+    run_state
+        .block_auth_required(&scope, invocation_id, auth_payload(flow_id, fingerprint))
+        .await
+        .unwrap();
+
+    let authorizer = GrantAuthorizer::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let result = host
+        .resume_auth_json(CapabilityAuthResumeRequest {
+            context,
+            outcome: OAuthCallbackOutcome {
+                flow_id,
+                success: true,
+            },
+            capability_id: capability_id(),
+            estimate: estimate.clone(),
+            input: input.clone(),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(result.dispatch.output, json!({"ok": true}));
+    assert!(dispatcher.has_request());
+    let request = dispatcher.take_request();
+    assert_eq!(request.capability_id, capability_id());
+    assert_eq!(request.input, input);
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Completed);
+    assert_eq!(run.blocked_payload, None);
+}
+
+#[tokio::test]
+async fn capability_host_rejects_blocked_auth_resume_with_mutated_input() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let flow_id = Uuid::new_v4();
+    let estimate = ResourceEstimate::default();
+    let original_input = json!({"message": "auth complete"});
+    let fingerprint =
+        InvocationFingerprint::for_dispatch(&scope, &capability_id(), &estimate, &original_input)
+            .unwrap();
+    run_state
+        .start(RunStart {
+            invocation_id,
+            capability_id: capability_id(),
+            scope: scope.clone(),
+        })
+        .await
+        .unwrap();
+    run_state
+        .block_auth_required(&scope, invocation_id, auth_payload(flow_id, fingerprint))
+        .await
+        .unwrap();
+
+    let authorizer = GrantAuthorizer::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let err = host
+        .resume_auth_json(CapabilityAuthResumeRequest {
+            context,
+            outcome: OAuthCallbackOutcome {
+                flow_id,
+                success: true,
+            },
+            capability_id: capability_id(),
+            estimate,
+            input: json!({"message": "mutated"}),
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthResumeFingerprintMismatch { .. }
+    ));
+    assert!(!dispatcher.has_request());
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(
+        run.error_kind.as_deref(),
+        Some("AuthResumeFingerprintMismatch")
+    );
+}
+
+#[tokio::test]
+async fn capability_host_claims_blocked_auth_before_dispatching_resume() {
+    let registry = Arc::new(registry_with_echo_capability());
+    let dispatcher = Arc::new(BlockingDispatcher::default());
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let authorizer = Arc::new(GrantAuthorizer::new());
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let flow_id = Uuid::new_v4();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "auth complete"});
+    let fingerprint =
+        InvocationFingerprint::for_dispatch(&scope, &capability_id(), &estimate, &input).unwrap();
+    run_state
+        .start(RunStart {
+            invocation_id,
+            capability_id: capability_id(),
+            scope: scope.clone(),
+        })
+        .await
+        .unwrap();
+    run_state
+        .block_auth_required(&scope, invocation_id, auth_payload(flow_id, fingerprint))
+        .await
+        .unwrap();
+
+    let request = CapabilityAuthResumeRequest {
+        context,
+        outcome: OAuthCallbackOutcome {
+            flow_id,
+            success: true,
+        },
+        capability_id: capability_id(),
+        estimate,
+        input,
+        trust_decision: trust_decision(),
+    };
+    let first = tokio::spawn({
+        let registry = registry.clone();
+        let dispatcher = dispatcher.clone();
+        let run_state = run_state.clone();
+        let authorizer = authorizer.clone();
+        let request = request.clone();
+        async move {
+            let host =
+                CapabilityHost::new(registry.as_ref(), dispatcher.as_ref(), authorizer.as_ref())
+                    .with_run_state(run_state.as_ref());
+            host.resume_auth_json(request).await
+        }
+    });
+    dispatcher.entered.notified().await;
+
+    let second = {
+        let host = CapabilityHost::new(registry.as_ref(), dispatcher.as_ref(), authorizer.as_ref())
+            .with_run_state(run_state.as_ref());
+        host.resume_auth_json(request).await.unwrap_err()
+    };
+    assert!(matches!(
+        second,
+        CapabilityInvocationError::ResumeNotBlocked {
+            status: RunStatus::Running,
+            ..
+        }
+    ));
+    dispatcher.release.notify_waiters();
+    first.await.unwrap().unwrap();
+
+    assert_eq!(dispatcher.calls(), 1);
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Completed);
+}
+
+#[tokio::test]
+async fn capability_host_rejects_blocked_auth_resume_for_wrong_flow() {
+    let registry = registry_with_echo_capability();
+    let dispatcher = RecordingDispatcher::default();
+    let run_state = InMemoryRunStateStore::new();
+    let context = execution_context(CapabilitySet {
+        grants: vec![dispatch_grant()],
+    });
+    let scope = context.resource_scope.clone();
+    let invocation_id = context.invocation_id;
+    let flow_id = Uuid::new_v4();
+    let estimate = ResourceEstimate::default();
+    let input = json!({"message": "wrong flow"});
+    let fingerprint =
+        InvocationFingerprint::for_dispatch(&scope, &capability_id(), &estimate, &input).unwrap();
+    run_state
+        .start(RunStart {
+            invocation_id,
+            capability_id: capability_id(),
+            scope: scope.clone(),
+        })
+        .await
+        .unwrap();
+    run_state
+        .block_auth_required(&scope, invocation_id, auth_payload(flow_id, fingerprint))
+        .await
+        .unwrap();
+
+    let authorizer = GrantAuthorizer::new();
+    let host = CapabilityHost::new(&registry, &dispatcher, &authorizer).with_run_state(&run_state);
+    let err = host
+        .resume_auth_json(CapabilityAuthResumeRequest {
+            context,
+            outcome: OAuthCallbackOutcome {
+                flow_id: Uuid::new_v4(),
+                success: true,
+            },
+            capability_id: capability_id(),
+            estimate,
+            input,
+            trust_decision: trust_decision(),
+        })
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        err,
+        CapabilityInvocationError::AuthResumeFlowMismatch { .. }
+    ));
+    assert!(!dispatcher.has_request());
+    let run = run_state.get(&scope, invocation_id).await.unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Failed);
+    assert_eq!(run.error_kind.as_deref(), Some("AuthFlowMismatch"));
 }
 
 #[tokio::test]
@@ -1257,6 +1502,45 @@ impl CapabilityDispatcher for FailingDispatcher {
     }
 }
 
+#[derive(Default)]
+struct BlockingDispatcher {
+    calls: AtomicUsize,
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+impl BlockingDispatcher {
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl CapabilityDispatcher for BlockingDispatcher {
+    async fn dispatch_json(
+        &self,
+        request: CapabilityDispatchRequest,
+    ) -> Result<CapabilityDispatchResult, DispatchError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.entered.notify_waiters();
+        self.release.notified().await;
+        Ok(CapabilityDispatchResult {
+            capability_id: request.capability_id,
+            provider: extension_id(),
+            runtime: RuntimeKind::Wasm,
+            output: json!({"ok": true}),
+            usage: ResourceUsage::default(),
+            receipt: ResourceReceipt {
+                id: ResourceReservationId::new(),
+                scope: request.scope,
+                status: ReservationStatus::Reconciled,
+                estimate: request.estimate,
+                actual: Some(ResourceUsage::default()),
+            },
+        })
+    }
+}
+
 struct MismatchedApprovalRequestAuthorizer {
     mismatch: ApprovalRequestMismatch,
 }
@@ -1386,6 +1670,21 @@ struct RecordingCombinedRunStateApprovalStore {
     separate_save_calls: AtomicUsize,
 }
 
+fn auth_payload(
+    flow_id: Uuid,
+    invocation_fingerprint: InvocationFingerprint,
+) -> AuthRequiredPayload {
+    AuthRequiredPayload {
+        provider_id: "google".to_string(),
+        credential_name: "google_oauth_token".to_string(),
+        missing_scopes: vec!["calendar.readonly".to_string()],
+        oauth_url: "https://accounts.example.test/oauth".to_string(),
+        flow_id,
+        extension_id: ExtensionId::new("echo").unwrap(),
+        invocation_fingerprint,
+    }
+}
+
 impl RecordingCombinedRunStateApprovalStore {
     fn new() -> Self {
         Self {
@@ -1429,6 +1728,29 @@ impl RunStateStore for RecordingCombinedRunStateApprovalStore {
         error_kind: String,
     ) -> Result<RunRecord, RunStateError> {
         self.runs.block_auth(scope, invocation_id, error_kind).await
+    }
+
+    async fn block_auth_required(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        payload: AuthRequiredPayload,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs
+            .block_auth_required(scope, invocation_id, payload)
+            .await
+    }
+
+    async fn claim_auth_resume(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        flow_id: Uuid,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<RunRecord, RunStateError> {
+        self.runs
+            .claim_auth_resume(scope, invocation_id, flow_id, invocation_fingerprint)
+            .await
     }
 
     async fn complete(
@@ -1573,6 +1895,29 @@ impl RunStateStore for FailCompleteRunStateStore {
             .await
     }
 
+    async fn block_auth_required(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        payload: AuthRequiredPayload,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .block_auth_required(scope, invocation_id, payload)
+            .await
+    }
+
+    async fn claim_auth_resume(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        flow_id: Uuid,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .claim_auth_resume(scope, invocation_id, flow_id, invocation_fingerprint)
+            .await
+    }
+
     async fn complete(
         &self,
         _scope: &ResourceScope,
@@ -1645,6 +1990,29 @@ impl RunStateStore for FailBlockApprovalRunStateStore {
     ) -> Result<RunRecord, RunStateError> {
         self.inner
             .block_auth(scope, invocation_id, error_kind)
+            .await
+    }
+
+    async fn block_auth_required(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        payload: AuthRequiredPayload,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .block_auth_required(scope, invocation_id, payload)
+            .await
+    }
+
+    async fn claim_auth_resume(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        flow_id: Uuid,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .claim_auth_resume(scope, invocation_id, flow_id, invocation_fingerprint)
             .await
     }
 
@@ -1723,6 +2091,29 @@ impl RunStateStore for CompleteNotifyingRunStateStore {
             .await
     }
 
+    async fn block_auth_required(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        payload: AuthRequiredPayload,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .block_auth_required(scope, invocation_id, payload)
+            .await
+    }
+
+    async fn claim_auth_resume(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        flow_id: Uuid,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .claim_auth_resume(scope, invocation_id, flow_id, invocation_fingerprint)
+            .await
+    }
+
     async fn complete(
         &self,
         scope: &ResourceScope,
@@ -1795,6 +2186,29 @@ impl RunStateStore for FailOnFailRunStateStore {
     ) -> Result<RunRecord, RunStateError> {
         self.inner
             .block_auth(scope, invocation_id, error_kind)
+            .await
+    }
+
+    async fn block_auth_required(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        payload: AuthRequiredPayload,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .block_auth_required(scope, invocation_id, payload)
+            .await
+    }
+
+    async fn claim_auth_resume(
+        &self,
+        scope: &ResourceScope,
+        invocation_id: InvocationId,
+        flow_id: Uuid,
+        invocation_fingerprint: &InvocationFingerprint,
+    ) -> Result<RunRecord, RunStateError> {
+        self.inner
+            .claim_auth_resume(scope, invocation_id, flow_id, invocation_fingerprint)
             .await
     }
 

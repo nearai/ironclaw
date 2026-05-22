@@ -4,7 +4,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use ironclaw_host_api::{InvocationId, ResourceScope, SecretHandle, UserId};
+use ironclaw_host_api::{
+    CapabilityId, InvocationFingerprint, InvocationId, ResourceEstimate, ResourceScope,
+    SecretHandle, UserId,
+};
 use ironclaw_network::{
     NetworkHttpEgress, NetworkHttpError, NetworkHttpRequest, NetworkHttpResponse, NetworkUsage,
 };
@@ -12,6 +15,7 @@ use ironclaw_oauth::{
     OAuthError, OAuthProvider, OAuthResumeNotifier, OAuthRuntime, ProviderMode, ProviderRegistry,
     RefreshScheduler, TokenPersister, TokenSet,
 };
+use ironclaw_run_state::{AuthRequiredPayload, InMemoryRunStateStore, RunStart, RunStateStore};
 use ironclaw_secrets::{
     SecretLease, SecretLeaseId, SecretLeaseStatus, SecretMaterial, SecretMetadata, SecretStore,
     SecretStoreError,
@@ -172,6 +176,82 @@ async fn exchange_notifies_resume_waiters_after_token_persistence() {
 }
 
 #[tokio::test]
+async fn exchange_queries_run_state_and_emits_invocation_specific_resume_signal() {
+    let mut registry = ProviderRegistry::new();
+    registry.register(Arc::new(FakeProvider)).unwrap();
+    let egress = Arc::new(RecordingEgress::default());
+    let secrets = Arc::new(MemorySecretStore::default());
+    let run_state = Arc::new(InMemoryRunStateStore::new());
+    let (notifier, mut receiver) = OAuthResumeNotifier::channel(4);
+    let runtime = OAuthRuntime::builder(registry.into(), egress.clone(), secrets.clone())
+        .mode(ProviderMode::Direct)
+        .resume(Arc::new(notifier))
+        .run_state(run_state.clone())
+        .redirect_base_url(Url::parse("https://app.example.test").unwrap())
+        .build()
+        .unwrap();
+    egress.push_json(json!({
+        "access_token": "access-direct",
+        "refresh_token": "refresh-direct",
+        "expires_in": 600,
+        "scope": "calendar.readonly"
+    }));
+
+    let scope = sample_scope();
+    let capability_id = CapabilityId::new("google-calendar.list_events").unwrap();
+    let invocation_fingerprint = InvocationFingerprint::for_dispatch(
+        &scope,
+        &capability_id,
+        &ResourceEstimate::default(),
+        &json!({"calendar": "primary"}),
+    )
+    .unwrap();
+    let started = runtime
+        .start("fake", vec!["calendar.readonly".to_string()], scope.clone())
+        .await
+        .unwrap();
+    run_state
+        .start(RunStart {
+            invocation_id: scope.invocation_id,
+            capability_id,
+            scope: scope.clone(),
+        })
+        .await
+        .unwrap();
+    run_state
+        .block_auth_required(
+            &scope,
+            scope.invocation_id,
+            AuthRequiredPayload {
+                provider_id: "fake".to_string(),
+                credential_name: "google_oauth_token".to_string(),
+                missing_scopes: vec!["calendar.readonly".to_string()],
+                oauth_url: started.oauth_url.clone(),
+                flow_id: started.flow_id,
+                extension_id: ironclaw_host_api::ExtensionId::new("google-calendar").unwrap(),
+                invocation_fingerprint,
+            },
+        )
+        .await
+        .unwrap();
+
+    runtime
+        .exchange(
+            "fake",
+            "direct-code".to_string(),
+            state_from_url(&started.oauth_url),
+        )
+        .await
+        .unwrap();
+
+    let signal = receiver.recv().await.unwrap();
+    assert_eq!(signal.invocation_id, Some(scope.invocation_id));
+    assert_eq!(signal.credential_name, "google_oauth_token");
+    assert_eq!(signal.outcome.flow_id, started.flow_id);
+    assert!(signal.outcome.success);
+}
+
+#[tokio::test]
 async fn oauth_http_failure_error_redacts_untrusted_response_body() {
     let (runtime, egress, _secrets) = runtime_with_mode(ProviderMode::Direct);
     egress.push_response(
@@ -207,6 +287,57 @@ async fn oauth_http_failure_error_redacts_untrusted_response_body() {
     assert!(!rendered.contains("secret-refresh"));
     assert!(!rendered.contains("secret-client"));
     assert!(!rendered.contains("direct-code"));
+}
+
+#[tokio::test]
+async fn resume_notifier_queries_blocked_auth_records_for_matching_credential_and_flow() {
+    let run_state = InMemoryRunStateStore::new();
+    let scope = sample_scope();
+    let flow_id = uuid::Uuid::new_v4();
+    let capability_id = CapabilityId::new("google-calendar.list_events").unwrap();
+    let invocation_fingerprint = InvocationFingerprint::for_dispatch(
+        &scope,
+        &capability_id,
+        &ResourceEstimate::default(),
+        &json!({"calendar": "primary"}),
+    )
+    .unwrap();
+    run_state
+        .start(RunStart {
+            invocation_id: scope.invocation_id,
+            capability_id,
+            scope: scope.clone(),
+        })
+        .await
+        .unwrap();
+    run_state
+        .block_auth_required(
+            &scope,
+            scope.invocation_id,
+            AuthRequiredPayload {
+                provider_id: "google".to_string(),
+                credential_name: "google_oauth_token".to_string(),
+                missing_scopes: vec!["calendar.readonly".to_string()],
+                oauth_url: "https://accounts.example.test/oauth".to_string(),
+                flow_id,
+                extension_id: ironclaw_host_api::ExtensionId::new("google-calendar").unwrap(),
+                invocation_fingerprint,
+            },
+        )
+        .await
+        .unwrap();
+    let (notifier, mut receiver) = OAuthResumeNotifier::channel(4);
+
+    let sent = notifier
+        .notify_blocked_auth(&run_state, "google_oauth_token", &scope, flow_id)
+        .await
+        .unwrap();
+
+    assert_eq!(sent, 1);
+    let signal = receiver.recv().await.unwrap();
+    assert_eq!(signal.invocation_id, Some(scope.invocation_id));
+    assert_eq!(signal.credential_name, "google_oauth_token");
+    assert_eq!(signal.outcome.flow_id, flow_id);
 }
 
 #[tokio::test]
