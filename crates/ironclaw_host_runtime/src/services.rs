@@ -480,15 +480,6 @@ where
         }
     }
 
-    /// Replaces the effective runtime policy used by dispatcher composition.
-    ///
-    /// This is an already-resolved policy, not a requested profile; callers
-    /// that need profile resolution should resolve it before wiring services.
-    pub fn with_effective_runtime_policy(mut self, runtime_policy: EffectiveRuntimePolicy) -> Self {
-        self.runtime_policy = Some(runtime_policy);
-        self
-    }
-
     #[cfg(any(feature = "postgres", feature = "libsql"))]
     fn with_root_filesystem<T>(self, filesystem: Arc<T>) -> HostRuntimeServices<T, G, S, R>
     where
@@ -2178,19 +2169,11 @@ where
             });
         };
 
-        let reservation = match request.resource_reservation {
-            Some(reservation) => reservation,
-            None => request
-                .governor
-                .reserve(request.scope.clone(), request.estimate.clone())
-                .map_err(|_| DispatchError::FirstParty {
-                    kind: RuntimeDispatchErrorKind::Resource,
-                })?,
-        };
-
         let plan =
             plan_capability(request.descriptor, request.runtime_policy).map_err(|error| {
-                release_first_party_reservation(request.governor, reservation.id);
+                if let Some(reservation) = &request.resource_reservation {
+                    release_first_party_reservation(request.governor, reservation.id);
+                }
                 DispatchError::FirstParty {
                     kind: planner_error_kind(&error),
                 }
@@ -2203,9 +2186,21 @@ where
                 mounts: request.mounts.as_ref(),
             })
             .map_err(|error| {
-                release_first_party_reservation(request.governor, reservation.id);
+                if let Some(reservation) = &request.resource_reservation {
+                    release_first_party_reservation(request.governor, reservation.id);
+                }
                 DispatchError::FirstParty { kind: error.kind() }
             })?;
+
+        let reservation = match request.resource_reservation {
+            Some(reservation) => reservation,
+            None => request
+                .governor
+                .reserve(request.scope.clone(), request.estimate.clone())
+                .map_err(|_| DispatchError::FirstParty {
+                    kind: RuntimeDispatchErrorKind::Resource,
+                })?,
+        };
 
         let result = match AssertUnwindSafe(handler.dispatch(FirstPartyCapabilityRequest {
             capability_id: request.capability_id.clone(),
@@ -2972,6 +2967,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_guard_releases_reservation_on_invocation_service_resolution_denial() {
+        let inner = Arc::new(RecordingRuntimeAdapter::default());
+        let adapter = ServiceResolvedRuntimeAdapter::new(
+            Arc::clone(&inner),
+            Arc::new(LocalInvocationServicesResolver::new(
+                Arc::new(LocalFilesystem::new()),
+                None,
+                Arc::new(LocalHostProcessPort::new()),
+                None,
+            )),
+        );
+        let filesystem = LocalFilesystem::new();
+        let governor = InMemoryResourceGovernor::new();
+        let scope = sample_scope();
+        let estimate = ResourceEstimate {
+            network_egress_bytes: Some(1),
+            ..ResourceEstimate::default()
+        };
+        let reservation = governor
+            .reserve(scope.clone(), estimate.clone())
+            .expect("test reservation should be created");
+        let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
+        assert_eq!(
+            governor.reserved_for(&tenant_account).network_egress_bytes,
+            1
+        );
+
+        let package = test_package(WASM_MANIFEST, "test-wasm");
+        let descriptor = test_descriptor(RuntimeKind::Wasm, vec![EffectKind::Network]);
+        let policy = policy_with(
+            FilesystemBackendKind::HostWorkspace,
+            ProcessBackendKind::LocalHost,
+            NetworkMode::DirectLogged,
+            SecretMode::ScrubbedEnv,
+        );
+
+        let result = adapter
+            .dispatch_json(RuntimeAdapterRequest {
+                package: &package,
+                descriptor: &descriptor,
+                filesystem: &filesystem,
+                governor: &governor,
+                runtime_policy: &policy,
+                capability_id: &descriptor.id,
+                scope,
+                estimate,
+                mounts: None,
+                resource_reservation: Some(reservation),
+                input: json!({}),
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::Wasm {
+                kind: RuntimeDispatchErrorKind::NetworkDenied
+            })
+        ));
+        assert_eq!(inner.call_count(), 0);
+        assert_eq!(
+            governor.reserved_for(&tenant_account),
+            ResourceTally::default()
+        );
+    }
+
+    #[tokio::test]
     async fn service_guard_rejects_required_secret_without_secret_store_before_dispatch() {
         let inner = Arc::new(RecordingRuntimeAdapter::default());
         let adapter = ServiceResolvedRuntimeAdapter::new(
@@ -3045,6 +3106,13 @@ mod tests {
             network_egress_bytes: Some(1),
             ..ResourceEstimate::default()
         };
+        let reservation = governor
+            .reserve(scope.clone(), estimate.clone())
+            .expect("test reservation should be created");
+        assert_eq!(
+            governor.reserved_for(&tenant_account).network_egress_bytes,
+            1
+        );
         let package = test_package(WASM_MANIFEST, "test-wasm");
         let policy = policy_with(
             FilesystemBackendKind::HostWorkspace,
@@ -3064,7 +3132,74 @@ mod tests {
                 scope,
                 estimate,
                 mounts: None,
-                resource_reservation: None,
+                resource_reservation: Some(reservation),
+                input: json!({}),
+            })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(DispatchError::FirstParty {
+                kind: RuntimeDispatchErrorKind::NetworkDenied
+            })
+        ));
+        assert_eq!(
+            governor.reserved_for(&tenant_account),
+            ResourceTally::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn first_party_adapter_releases_reservation_when_planner_denies() {
+        let descriptor = test_descriptor(RuntimeKind::FirstParty, vec![EffectKind::Network]);
+        let registry = Arc::new(
+            FirstPartyCapabilityRegistry::new()
+                .with_handler(descriptor.id.clone(), Arc::new(PanicFirstPartyHandler)),
+        );
+        let adapter = FirstPartyRuntimeAdapter::from_registry(
+            registry,
+            Arc::new(LocalInvocationServicesResolver::new(
+                Arc::new(LocalFilesystem::new()),
+                None,
+                Arc::new(LocalHostProcessPort::new()),
+                None,
+            )),
+        );
+        let filesystem = LocalFilesystem::new();
+        let governor = InMemoryResourceGovernor::new();
+        let scope = sample_scope();
+        let tenant_account = ResourceAccount::tenant(scope.tenant_id.clone());
+        let estimate = ResourceEstimate {
+            network_egress_bytes: Some(1),
+            ..ResourceEstimate::default()
+        };
+        let reservation = governor
+            .reserve(scope.clone(), estimate.clone())
+            .expect("test reservation should be created");
+        assert_eq!(
+            governor.reserved_for(&tenant_account).network_egress_bytes,
+            1
+        );
+        let package = test_package(WASM_MANIFEST, "test-wasm");
+        let policy = policy_with(
+            FilesystemBackendKind::HostWorkspace,
+            ProcessBackendKind::LocalHost,
+            NetworkMode::Deny,
+            SecretMode::ScrubbedEnv,
+        );
+
+        let result = adapter
+            .dispatch_json(RuntimeAdapterRequest {
+                package: &package,
+                descriptor: &descriptor,
+                filesystem: &filesystem,
+                governor: &governor,
+                runtime_policy: &policy,
+                capability_id: &descriptor.id,
+                scope,
+                estimate,
+                mounts: None,
+                resource_reservation: Some(reservation),
                 input: json!({}),
             })
             .await;

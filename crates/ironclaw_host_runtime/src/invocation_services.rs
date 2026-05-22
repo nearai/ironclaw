@@ -13,7 +13,9 @@ use std::{fmt, sync::Arc};
 use ironclaw_filesystem::RootFilesystem;
 use ironclaw_host_api::{
     MountView, ResourceScope, RuntimeDispatchErrorKind, RuntimeHttpEgress,
-    runtime_policy::{FilesystemBackendKind, NetworkMode, ProcessBackendKind, SecretMode},
+    runtime_policy::{
+        DeploymentMode, FilesystemBackendKind, NetworkMode, ProcessBackendKind, SecretMode,
+    },
 };
 use ironclaw_secrets::SecretStore;
 use thiserror::Error;
@@ -131,6 +133,9 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
         request: InvocationServicesResolutionRequest<'_>,
     ) -> Result<InvocationServices, InvocationServicesError> {
         let plan = request.plan;
+        if !matches!(plan.deployment, DeploymentMode::LocalSingleUser) {
+            return Err(unsupported_non_local_plan(plan));
+        }
         if plan.requires_filesystem
             && !matches!(
                 plan.filesystem_backend,
@@ -190,12 +195,41 @@ impl InvocationServicesResolver for LocalInvocationServicesResolver {
     }
 }
 
+fn unsupported_non_local_plan(plan: &ExecutionPlan) -> InvocationServicesError {
+    if plan.requires_filesystem {
+        return InvocationServicesError::UnsupportedFilesystemBackend {
+            backend: plan.filesystem_backend,
+        };
+    }
+    if plan.requires_process {
+        return InvocationServicesError::UnsupportedProcessBackend {
+            backend: plan.process_backend,
+        };
+    }
+    if plan.requires_network {
+        return InvocationServicesError::UnsupportedNetworkMode {
+            mode: plan.network_mode,
+        };
+    }
+    if plan.requires_secret {
+        return InvocationServicesError::UnsupportedSecretMode {
+            mode: plan.secret_mode,
+        };
+    }
+    InvocationServicesError::UnsupportedProcessBackend {
+        backend: plan.process_backend,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
     use ironclaw_filesystem::LocalFilesystem;
-    use ironclaw_host_api::{CapabilityId, ResourceScope, runtime_policy::SecretMode};
+    use ironclaw_host_api::{
+        CapabilityId, ResourceScope,
+        runtime_policy::{RuntimeProfile, SecretMode},
+    };
     use ironclaw_secrets::InMemorySecretStore;
 
     use crate::{
@@ -434,6 +468,41 @@ mod tests {
     }
 
     #[test]
+    fn local_resolver_rejects_hosted_brokered_required_network() {
+        let resolver = LocalInvocationServicesResolver::new(
+            Arc::new(LocalFilesystem::new()),
+            Some(Arc::new(NoopRuntimeHttpEgress)),
+            Arc::new(NoopProcessPort),
+            None,
+        );
+        let mut plan = plan(
+            ProcessBackendKind::None,
+            false,
+            true,
+            NetworkMode::Brokered,
+            false,
+        );
+        plan.deployment = DeploymentMode::HostedMultiTenant;
+        plan.resolved_profile = RuntimeProfile::HostedSafe;
+
+        let error = resolver
+            .resolve(InvocationServicesResolutionRequest {
+                plan: &plan,
+                scope: &ResourceScope::system(),
+                mounts: None,
+            })
+            .unwrap_err();
+
+        assert_eq!(error.kind(), RuntimeDispatchErrorKind::NetworkDenied);
+        assert!(matches!(
+            error,
+            InvocationServicesError::UnsupportedNetworkMode {
+                mode: NetworkMode::Brokered
+            }
+        ));
+    }
+
+    #[test]
     fn local_resolver_accepts_direct_required_network_with_egress_service() {
         let resolver = LocalInvocationServicesResolver::new(
             Arc::new(LocalFilesystem::new()),
@@ -637,6 +706,8 @@ mod tests {
     ) -> ExecutionPlan {
         ExecutionPlan {
             capability: CapabilityId::new("test.capability".to_string()).unwrap(),
+            deployment: DeploymentMode::LocalSingleUser,
+            resolved_profile: RuntimeProfile::LocalDev,
             filesystem_backend: FilesystemBackendKind::HostWorkspace,
             process_backend,
             network_mode,

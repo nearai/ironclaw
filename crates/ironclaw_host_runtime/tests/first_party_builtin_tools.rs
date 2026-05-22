@@ -2009,7 +2009,7 @@ where
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
     .with_runtime_process_port(process_port)
     .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
-    .with_effective_runtime_policy(policy)
+    .with_runtime_policy(policy)
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }

@@ -51,7 +51,8 @@
 //! planner-write-scope).
 
 use ironclaw_host_api::runtime_policy::{
-    EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, ProcessBackendKind, SecretMode,
+    DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind, NetworkMode, ProcessBackendKind,
+    RuntimeProfile, SecretMode,
 };
 use ironclaw_host_api::{CapabilityDescriptor, CapabilityId, EffectKind, RuntimeKind};
 use thiserror::Error;
@@ -67,6 +68,8 @@ use thiserror::Error;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecutionPlan {
     pub capability: CapabilityId,
+    pub deployment: DeploymentMode,
+    pub resolved_profile: RuntimeProfile,
     pub filesystem_backend: FilesystemBackendKind,
     pub process_backend: ProcessBackendKind,
     pub network_mode: NetworkMode,
@@ -153,6 +156,8 @@ pub fn plan_capability(
 
     Ok(ExecutionPlan {
         capability: descriptor.id.clone(),
+        deployment: policy.deployment,
+        resolved_profile: policy.resolved_profile,
         filesystem_backend: policy.filesystem_backend,
         process_backend: policy.process_backend,
         network_mode: policy.network_mode,
