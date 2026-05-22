@@ -2069,6 +2069,14 @@ mod tests {
             &runtime_turn_coordinator,
             &runtime.webui_turn_coordinator()
         ));
+        assert!(
+            stream.events.iter().all(|event| matches!(
+                event.payload(),
+                ProductOutboundPayload::ProjectionSnapshot { .. }
+                    | ProductOutboundPayload::ProjectionUpdate { .. }
+            )),
+            "webui bundle should expose only projection stream events"
+        );
         assert_eq!(bundle.readiness, runtime.services().readiness);
         assert_eq!(bundle.readiness.state, RebornReadinessState::DevOnly);
 
