@@ -99,6 +99,21 @@ fn network_target_patterns_reject_control_and_invalid_label_characters() {
 }
 
 #[test]
+fn runtime_credential_target_serializes_path_placeholder() {
+    let target = RuntimeCredentialTarget::PathPlaceholder {
+        placeholder: "__credential__".to_string(),
+    };
+
+    assert_eq!(
+        serde_json::to_value(target).unwrap(),
+        json!({
+            "type": "path_placeholder",
+            "placeholder": "__credential__"
+        })
+    );
+}
+
+#[test]
 fn extension_id_rejects_path_like_or_uppercase_values() {
     assert!(ExtensionId::new("github").is_ok());
     assert!(ExtensionId::new("github-mcp.v1").is_ok());

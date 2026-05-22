@@ -18,8 +18,8 @@ use ironclaw_extensions::{ExtensionPackage, ExtensionRuntime};
 use ironclaw_host_api::{
     CapabilityId, ExtensionId, NetworkMethod, NetworkPolicy, ResourceEstimate, ResourceReservation,
     ResourceReservationId, ResourceScope, ResourceUsage, RuntimeCredentialInjection,
-    RuntimeCredentialSource, RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
-    RuntimeHttpEgressResponse, RuntimeKind,
+    RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest, RuntimeHttpEgressResponse,
+    RuntimeKind,
 };
 use ironclaw_resources::{ResourceError, ResourceGovernor, ResourceReceipt};
 use serde_json::Value;
@@ -566,8 +566,8 @@ struct McpJsonRpcExchange {
 /// Known MCP JSON-RPC methods whose credential-routing behavior is host-owned.
 ///
 /// Handshake methods must remain credential-free. Only `tools/call` can receive
-/// host-planned credentials, and even then only credentials staged by satisfied
-/// obligations are forwarded to production egress.
+/// host-planned credentials; production egress remains the source-of-truth for
+/// rejecting direct secret-store leases before outbound transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum McpJsonRpcMethod {
     Initialize,
@@ -589,15 +589,7 @@ impl McpJsonRpcMethod {
         credential_injections: Vec<RuntimeCredentialInjection>,
     ) -> Vec<RuntimeCredentialInjection> {
         match self {
-            Self::ToolsCall => credential_injections
-                .into_iter()
-                .filter(|injection| {
-                    matches!(
-                        injection.source,
-                        RuntimeCredentialSource::StagedObligation { .. }
-                    )
-                })
-                .collect(),
+            Self::ToolsCall => credential_injections,
             Self::Initialize | Self::InitializedNotification => Vec::new(),
         }
     }

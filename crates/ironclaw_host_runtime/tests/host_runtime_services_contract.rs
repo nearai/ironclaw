@@ -75,7 +75,9 @@ use ironclaw_scripts::{
     ScriptBackend, ScriptBackendOutput, ScriptBackendRequest, ScriptExecutionRequest,
     ScriptExecutionResult, ScriptExecutor, ScriptRuntime, ScriptRuntimeConfig,
 };
-use ironclaw_secrets::{InMemorySecretStore, SecretMaterial, SecretStore};
+use ironclaw_secrets::{
+    InMemoryCredentialBroker, InMemorySecretStore, SecretMaterial, SecretStore,
+};
 use ironclaw_trust::{
     AdminConfig, AdminEntry, AuthorityCeiling, EffectiveTrustClass, HostTrustAssignment,
     HostTrustPolicy, TrustDecision, TrustProvenance,
@@ -1079,6 +1081,70 @@ fn host_http_egress_helper_requires_graph_secret_store() {
         ProductionWiringComponent::SecretStore,
         ProductionWiringIssueKind::Missing
     ));
+}
+
+#[test]
+fn production_wiring_validation_requires_credential_broker_when_configured() {
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    );
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]).require_credential_broker())
+        .expect_err("production credential broker requirement must fail closed when missing");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::CredentialAccountStore,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing credential account store should be reported: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::CredentialSessionStore,
+            ProductionWiringIssueKind::Missing
+        ),
+        "missing credential session store should be reported: {report:?}"
+    );
+}
+
+#[test]
+fn production_wiring_validation_rejects_local_only_credential_broker() {
+    let broker = Arc::new(InMemoryCredentialBroker::new());
+    let services = HostRuntimeServices::new(
+        Arc::new(registry_with_manifest(SCRIPT_MANIFEST)),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_credential_broker(broker);
+
+    let report = services
+        .validate_production_wiring(&ProductionWiringConfig::new([]).require_credential_broker())
+        .expect_err("in-memory credential broker must not satisfy production guardrail");
+
+    assert!(
+        report.contains(
+            ProductionWiringComponent::CredentialAccountStore,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "in-memory credential account store should be reported as local-only: {report:?}"
+    );
+    assert!(
+        report.contains(
+            ProductionWiringComponent::CredentialSessionStore,
+            ProductionWiringIssueKind::LocalOnlyImplementation
+        ),
+        "in-memory credential session store should be reported as local-only: {report:?}"
+    );
 }
 
 #[test]

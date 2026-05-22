@@ -1449,6 +1449,53 @@ fn apply_credential_injection(
             url.query_pairs_mut().append_pair(name, value);
             request.url = url.to_string();
         }
+        RuntimeCredentialTarget::PathPlaceholder { placeholder } => {
+            if placeholder.is_empty()
+                || placeholder.contains('/')
+                || placeholder.contains('?')
+                || placeholder.contains('#')
+            {
+                return Err(RuntimeHttpEgressError::Credential {
+                    reason: "credential injection path placeholder is invalid".to_string(),
+                });
+            }
+            let mut url =
+                url::Url::parse(&request.url).map_err(|_| RuntimeHttpEgressError::Credential {
+                    reason: "credential injection target URL is invalid".to_string(),
+                })?;
+            let Some(segments) = url.path_segments() else {
+                return Err(RuntimeHttpEgressError::Credential {
+                    reason: "credential injection target URL has no path segments".to_string(),
+                });
+            };
+            let mut replaced = false;
+            let rewritten = segments
+                .map(|segment| {
+                    if segment == placeholder {
+                        replaced = true;
+                        value.to_string()
+                    } else {
+                        segment.to_string()
+                    }
+                })
+                .collect::<Vec<_>>();
+            if !replaced {
+                return Err(RuntimeHttpEgressError::Credential {
+                    reason: "credential injection path placeholder was not found".to_string(),
+                });
+            }
+            let mut path_segments =
+                url.path_segments_mut()
+                    .map_err(|_| RuntimeHttpEgressError::Credential {
+                        reason: "credential injection target URL cannot be rewritten".to_string(),
+                    })?;
+            path_segments.clear();
+            for segment in &rewritten {
+                path_segments.push(segment);
+            }
+            drop(path_segments);
+            request.url = url.to_string();
+        }
     }
     Ok(())
 }

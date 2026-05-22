@@ -102,6 +102,9 @@ pub enum RuntimeCredentialTarget {
     QueryParam {
         name: String,
     },
+    PathPlaceholder {
+        placeholder: String,
+    },
 }
 
 pub fn valid_http_field_name(name: &str) -> bool {

@@ -26,6 +26,7 @@ use super::{
 use crate::LocalHostProcessPort;
 use crate::RuntimeHttpBodyStore;
 use crate::wasm_credentials::SharedHostWasmRuntimeCredentials;
+use ironclaw_secrets::{CredentialAccountStore, CredentialSessionStore};
 
 impl<F, G, S, R> HostRuntimeServices<F, G, S, R>
 where
@@ -55,6 +56,8 @@ where
             event_sink,
             audit_sink,
             secret_store,
+            credential_account_store,
+            credential_session_store,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store,
@@ -93,6 +96,8 @@ where
             event_sink,
             audit_sink,
             secret_store,
+            credential_account_store,
+            credential_session_store,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store,
@@ -152,6 +157,8 @@ where
             event_sink,
             audit_sink,
             secret_store,
+            credential_account_store,
+            credential_session_store,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store: _,
@@ -200,6 +207,8 @@ where
             event_sink,
             audit_sink,
             secret_store,
+            credential_account_store,
+            credential_session_store,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store,
@@ -567,6 +576,32 @@ where
         ));
         self.secret_store = Some(secret_store);
         self
+    }
+
+    pub fn with_credential_account_store<T>(mut self, store: Arc<T>) -> Self
+    where
+        T: CredentialAccountStore + 'static,
+    {
+        self.component_types.credential_account_store = Some(ProductionComponentType::of::<T>());
+        self.credential_account_store = Some(store);
+        self
+    }
+
+    pub fn with_credential_session_store<T>(mut self, store: Arc<T>) -> Self
+    where
+        T: CredentialSessionStore + 'static,
+    {
+        self.component_types.credential_session_store = Some(ProductionComponentType::of::<T>());
+        self.credential_session_store = Some(store);
+        self
+    }
+
+    pub fn with_credential_broker<T>(self, broker: Arc<T>) -> Self
+    where
+        T: CredentialAccountStore + CredentialSessionStore + 'static,
+    {
+        self.with_credential_account_store(Arc::clone(&broker))
+            .with_credential_session_store(broker)
     }
 
     pub fn with_runtime_http_egress<T>(mut self, runtime_http_egress: Arc<T>) -> Self

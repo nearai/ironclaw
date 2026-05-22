@@ -56,7 +56,10 @@ use ironclaw_run_state::{
     InMemoryApprovalRequestStore, InMemoryRunStateStore, RunStateApprovalStore, RunStateStore,
 };
 use ironclaw_scripts::{ScriptError, ScriptExecutionRequest, ScriptExecutor, ScriptInvocation};
-use ironclaw_secrets::{InMemorySecretStore, SecretStore};
+use ironclaw_secrets::{
+    CredentialAccountStore, CredentialSessionStore, InMemoryCredentialBroker, InMemorySecretStore,
+    SecretStore,
+};
 use ironclaw_trust::{HostTrustPolicy, TrustPolicy};
 use ironclaw_turns::{
     DefaultTurnCoordinator, FilesystemTurnStateStore, InMemoryTurnStateStore,
@@ -132,6 +135,8 @@ where
     event_sink: Option<Arc<dyn EventSink>>,
     audit_sink: Option<Arc<dyn AuditSink>>,
     secret_store: Option<Arc<dyn SecretStore>>,
+    credential_account_store: Option<Arc<dyn CredentialAccountStore>>,
+    credential_session_store: Option<Arc<dyn CredentialSessionStore>>,
     network_policy_store: Arc<NetworkObligationPolicyStore>,
     secret_injection_store: Arc<RuntimeSecretInjectionStore>,
     process_lifecycle_store: Arc<ProcessObligationLifecycleStore>,
@@ -224,6 +229,8 @@ where
             event_sink: None,
             audit_sink: None,
             secret_store: None,
+            credential_account_store: None,
+            credential_session_store: None,
             network_policy_store,
             secret_injection_store,
             process_lifecycle_store,
@@ -256,6 +263,8 @@ where
                 event_sink: None,
                 audit_sink: None,
                 secret_store: None,
+                credential_account_store: None,
+                credential_session_store: None,
                 runtime_http_egress: None,
                 runtime_http_egress_verified: false,
                 runtime_process_port: ProductionComponentType::of::<LocalHostProcessPort>(),
