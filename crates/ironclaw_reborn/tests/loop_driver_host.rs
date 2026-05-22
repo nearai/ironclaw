@@ -595,6 +595,7 @@ async fn text_only_model_reply_driver_redacts_credential_marker_reply_text() {
         output: ParentLoopOutput::AssistantReply(AssistantReply {
             content: "Use OPENAI_API_KEY in the environment".to_string(),
         }),
+        usage: None,
     }));
     let driver = TextOnlyModelReplyDriver::default();
     assign_driver_to_fixture(&mut fixture, driver.descriptor());
@@ -6568,6 +6569,7 @@ impl RecordingGateway {
     fn respond_with_capability_calls(&self) {
         *self.response.lock().unwrap() = Ok(HostManagedModelResponse {
             safe_text_deltas: Vec::new(),
+            usage: None,
             output: ParentLoopOutput::CapabilityCalls(vec![
                 ironclaw_turns::run_profile::CapabilityCallCandidate {
                     surface_version: CapabilitySurfaceVersion::new("empty:v1").unwrap(),

@@ -49,6 +49,17 @@ pub trait LoopModelBudgetAccountant: Send + Sync {
         request: &LoopModelRequest,
         outcome: ModelCallOutcome<'_>,
     ) -> Result<(), LoopModelGatewayError>;
+
+    /// Best-effort synchronous release of any in-flight reservation for this
+    /// run. Invoked from cancellation paths (parent task drop, timeout)
+    /// where awaiting [`Self::post_model_call`] is impossible. Default impl
+    /// is a no-op for accountants that do not hold per-run state.
+    ///
+    /// This is *the* cancellation-safety hook: when the model future is
+    /// dropped mid-await, the surrounding port's [`Drop`] runs synchronously
+    /// and calls `release_in_flight` so the reservation does not orphan
+    /// until period rollover.
+    fn release_in_flight(&self, _context: &LoopRunContext) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,6 +265,13 @@ where
             return Err(budget_error.into_host_error());
         }
 
+        // From here forward, a reservation has been taken. The guard below
+        // ensures it is released if `stream_model` is cancelled mid-await
+        // (tokio drop, parent timeout) without ever reaching the explicit
+        // `post_model_call` below.
+        let mut release_guard =
+            ReservationReleaseGuard::new(self.accountant.as_ref(), &self.context);
+
         if let Err(error) = self
             .milestones
             .model_started(request.model_preference.clone())
@@ -275,7 +293,11 @@ where
             .await
             .map(sanitize_model_response);
 
-        // Post-call accounting fires on BOTH success and failure.
+        // Post-call accounting fires on BOTH success and failure. Disarm
+        // the cancellation guard before awaiting `post_model_call` — that
+        // call now owns the in-flight release, so the guard's Drop would
+        // double-release if we left it armed.
+        release_guard.disarm();
         let outcome = match &gateway_result {
             Ok(response) => ModelCallOutcome::Success(response),
             Err(error) => ModelCallOutcome::Failure(error),
@@ -323,6 +345,43 @@ where
             );
         }
         Ok(response)
+    }
+}
+
+/// RAII guard that releases the in-flight reservation if the surrounding
+/// future is cancelled before `post_model_call` runs.
+///
+/// On Drop, when still armed, the guard calls
+/// [`LoopModelBudgetAccountant::release_in_flight`] — a synchronous
+/// best-effort path that the accountant uses to drop the per-run reservation
+/// id and call `governor.release` without awaiting. Callers MUST `disarm()`
+/// the guard before delegating cleanup to the async `post_model_call` path,
+/// otherwise the release would fire twice.
+struct ReservationReleaseGuard<'a> {
+    accountant: &'a dyn LoopModelBudgetAccountant,
+    context: &'a LoopRunContext,
+    armed: bool,
+}
+
+impl<'a> ReservationReleaseGuard<'a> {
+    fn new(accountant: &'a dyn LoopModelBudgetAccountant, context: &'a LoopRunContext) -> Self {
+        Self {
+            accountant,
+            context,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ReservationReleaseGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.accountant.release_in_flight(self.context);
+        }
     }
 }
 

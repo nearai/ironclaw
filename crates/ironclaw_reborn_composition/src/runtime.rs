@@ -531,36 +531,65 @@ pub async fn build_reborn_runtime(
     };
 
     #[cfg(feature = "root-llm-provider")]
-    let model_gateway = {
+    let (model_gateway, llm_cost_table) = {
         #[cfg(test)]
-        if let Some(gateway) = model_gateway_override {
-            gateway
+        let bundle = if let Some(gateway) = model_gateway_override {
+            (gateway, None)
         } else {
             match llm {
-                Some(cfg) => build_llm_gateway(cfg)?,
-                None => build_stub_gateway(),
+                Some(cfg) => {
+                    let LlmGatewayBundle { gateway, policy } = build_llm_gateway(cfg)?;
+                    (gateway, Some(policy.build_cost_table()))
+                }
+                None => (build_stub_gateway(), None),
             }
-        }
+        };
         #[cfg(not(test))]
-        {
-            match llm {
-                Some(cfg) => build_llm_gateway(cfg)?,
-                None => build_stub_gateway(),
+        let bundle = match llm {
+            Some(cfg) => {
+                let LlmGatewayBundle { gateway, policy } = build_llm_gateway(cfg)?;
+                (gateway, Some(policy.build_cost_table()))
             }
-        }
+            None => (build_stub_gateway(), None),
+        };
+        bundle
     };
     #[cfg(not(feature = "root-llm-provider"))]
-    let model_gateway = {
+    let (model_gateway, llm_cost_table) = {
         #[cfg(test)]
-        if let Some(gateway) = model_gateway_override {
-            gateway
+        let bundle = if let Some(gateway) = model_gateway_override {
+            (gateway, None::<ironclaw_loop_support::StaticModelCostTable>)
         } else {
-            build_stub_gateway()
-        }
+            (
+                build_stub_gateway(),
+                None::<ironclaw_loop_support::StaticModelCostTable>,
+            )
+        };
         #[cfg(not(test))]
-        {
-            build_stub_gateway()
+        let bundle = (
+            build_stub_gateway(),
+            None::<ironclaw_loop_support::StaticModelCostTable>,
+        );
+        bundle
+    };
+
+    // Build the model budget accountant from the resolved LLM cost table
+    // (real per-provider prices via `ironclaw_llm::costs::model_cost`) plus
+    // the local-dev governor. When the gateway is the stub (no LLM wired)
+    // we deliberately skip the accountant — there's no spend to track and
+    // the cascade would never fire. Production composition reuses the
+    // same shape over the persistent governor.
+    let model_budget_accountant: Option<
+        Arc<dyn ironclaw_turns::run_profile::LoopModelBudgetAccountant>,
+    > = match llm_cost_table {
+        Some(cost_table) => {
+            let governor = Arc::clone(&local_runtime.resource_governor);
+            let cost_table: Arc<dyn ironclaw_loop_support::ModelCostTable> = Arc::new(cost_table);
+            let accountant =
+                ironclaw_loop_support::GovernorBackedAccountant::new(governor, cost_table);
+            Some(Arc::new(accountant))
         }
+        None => None,
     };
 
     let loop_exit_evidence = Arc::new(ThreadCheckpointLoopExitEvidencePort::new_with_thread_scope(
@@ -607,7 +636,7 @@ pub async fn build_reborn_runtime(
         input_queue: None,
         identity_context_source: Arc::new(EmptyIdentityContextSource),
         model_policy_guard: None,
-        model_budget_accountant: None,
+        model_budget_accountant,
         safety_context: None,
     })?;
     let default_run_profile_id = composition
@@ -712,9 +741,16 @@ impl HostIdentityContextSource for EmptyIdentityContextSource {
 }
 
 #[cfg(feature = "root-llm-provider")]
-fn build_llm_gateway(
-    llm: ResolvedRebornLlm,
-) -> Result<Arc<dyn ironclaw_loop_support::HostManagedModelGateway>, RebornRuntimeError> {
+struct LlmGatewayBundle {
+    gateway: Arc<dyn ironclaw_loop_support::HostManagedModelGateway>,
+    /// Policy used to derive the budget accountant's cost table — kept
+    /// alongside the gateway so the composer doesn't re-derive the
+    /// `ModelProfileId → provider-model` mapping in two places.
+    policy: ironclaw_reborn::model_gateway::LlmModelProfilePolicy,
+}
+
+#[cfg(feature = "root-llm-provider")]
+fn build_llm_gateway(llm: ResolvedRebornLlm) -> Result<LlmGatewayBundle, RebornRuntimeError> {
     use ironclaw_llm::RegistryProviderConfig;
     use ironclaw_reborn::model_gateway::{LlmModelProfilePolicy, LlmProviderModelGateway};
     use ironclaw_turns::run_profile::ModelProfileId;
@@ -744,8 +780,11 @@ fn build_llm_gateway(
         RebornRuntimeError::LlmProvider(format!("invalid interactive model profile id: {reason}"))
     })?;
     let policy = LlmModelProfilePolicy::new().allow_model_profile(model_profile_id, Some(model));
-    let gateway = LlmProviderModelGateway::new(provider, policy);
-    Ok(Arc::new(gateway))
+    let gateway = LlmProviderModelGateway::new(provider, policy.clone());
+    Ok(LlmGatewayBundle {
+        gateway: Arc::new(gateway),
+        policy,
+    })
 }
 
 #[cfg(feature = "root-llm-provider")]

@@ -47,7 +47,15 @@ impl CapabilityCallSignature {
         args: &serde_json::Value,
     ) -> Result<Self, CapabilityCallSignatureError> {
         reject_non_finite_numbers(args)?;
-        let canonical = serde_jcs::to_vec(args).map_err(|error| {
+        // Normalize before canonicalizing so two calls that differ only in
+        // request-id / correlation-id / embedded UUID / ISO-8601 timestamp
+        // collapse to the same hash. Without this, the surrounding
+        // `recent_call_signatures` window false-negatives stuck-loop runs
+        // because random per-call IDs make every signature unique. The
+        // normalization rules live in `strategies::progress` (#3841
+        // follow-up F1: stuck-loop ProgressStrategy).
+        let normalized = crate::strategies::progress::normalize_for_hash(args);
+        let canonical = serde_jcs::to_vec(&normalized).map_err(|error| {
             CapabilityCallSignatureError::CanonicalizationFailed {
                 reason: error.to_string(),
             }
@@ -116,6 +124,52 @@ mod tests {
         let float_form = CapabilityCallSignature::from_call(name, &json!({"x": 1.0})).unwrap();
 
         assert_eq!(int_form.args_hash, float_form.args_hash);
+    }
+
+    #[test]
+    fn capability_call_signature_collapses_calls_that_differ_only_by_request_id() {
+        // Regression for #3841 follow-up F1: stuck-loop detection must
+        // collapse repeated calls whose only differing field is a
+        // correlation/request-id, otherwise the existing
+        // `recent_call_signatures` window false-negatives every loop where
+        // the model adds a fresh request_id each turn.
+        let name = CapabilityId::new("demo.echo").unwrap();
+        let first = CapabilityCallSignature::from_call(
+            name.clone(),
+            &json!({"request_id": "req-1", "message": "hi"}),
+        )
+        .unwrap();
+        let second = CapabilityCallSignature::from_call(
+            name.clone(),
+            &json!({"request_id": "req-2", "message": "hi"}),
+        )
+        .unwrap();
+        let third = CapabilityCallSignature::from_call(
+            name,
+            &json!({"trace_id": "550e8400-e29b-41d4-a716-446655440000", "message": "hi"}),
+        )
+        .unwrap();
+        assert_eq!(first.args_hash, second.args_hash);
+        assert_eq!(first.args_hash, third.args_hash);
+    }
+
+    #[test]
+    fn capability_call_signature_collapses_calls_that_differ_only_by_embedded_uuid() {
+        // Same shape as the request_id collapse: a UUID embedded *inside*
+        // a string value (not under a correlation key) must normalize to
+        // `<uuid>` so two otherwise-identical calls hash equally.
+        let name = CapabilityId::new("demo.echo").unwrap();
+        let first = CapabilityCallSignature::from_call(
+            name.clone(),
+            &json!({"target": "obj-550e8400-e29b-41d4-a716-446655440000"}),
+        )
+        .unwrap();
+        let second = CapabilityCallSignature::from_call(
+            name,
+            &json!({"target": "obj-11111111-2222-3333-4444-555555555555"}),
+        )
+        .unwrap();
+        assert_eq!(first.args_hash, second.args_hash);
     }
 
     #[test]

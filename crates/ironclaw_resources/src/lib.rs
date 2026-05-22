@@ -19,11 +19,13 @@
 #![warn(unreachable_pub)]
 
 mod event;
+mod filesystem_gate_store;
 mod filesystem_store;
 mod gate;
 mod period;
 
 pub use event::{BudgetEvent, BudgetEventSink, InMemoryBudgetEventSink, NoOpBudgetEventSink};
+pub use filesystem_gate_store::FilesystemBudgetGateStore;
 pub use filesystem_store::FilesystemResourceGovernorStore;
 pub use gate::{
     BudgetApprovalGate, BudgetGateError, BudgetGateId, BudgetGateOutcome, BudgetGateStatus,
@@ -347,8 +349,13 @@ impl std::fmt::Display for ResourceDimension {
 }
 
 /// Comparable amount for denial details.
+///
+/// Uses adjacent tagging because `Decimal` serializes as a JSON string via
+/// `serde-with-str`, which is incompatible with `serde(tag = …)` internal
+/// tagging on newtype variants (rust-lang/serde#1402). Adjacent tagging keeps
+/// the `kind` discriminator while embedding the inner value under `value`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum ResourceValue {
     Decimal(Decimal),
     Integer(u64),
@@ -403,14 +410,25 @@ pub struct BudgetWarning {
 /// Resource governor errors.
 #[derive(Debug, Clone, PartialEq, Error)]
 pub enum ResourceError {
-    #[error("resource limit exceeded for {dimension} at {account:?}", account = .0.account, dimension = .0.dimension)]
-    LimitExceeded(Box<ResourceDenial>),
+    /// Hard cap exceeded for a dimension. `warnings` carries any threshold
+    /// crossings that fired before this terminal denial; downstream audit
+    /// sinks emit them as their own `BudgetEvent::Warned` records so the
+    /// user sees the warn signal that preceded the stop.
+    #[error("resource limit exceeded for {dimension} at {account:?}", account = denial.account, dimension = denial.dimension)]
+    LimitExceeded {
+        denial: Box<ResourceDenial>,
+        warnings: Vec<BudgetWarning>,
+    },
     /// Reservation would push utilization past the configured pause
     /// threshold. The work is not denied; callers must surface an approval
     /// gate, capture the user's decision, and retry the reservation (with
-    /// an extended limit or after the period rolls over).
-    #[error("resource budget approval required for {dimension} at {account:?}", account = .0.account, dimension = .0.dimension)]
-    RequiresApproval(Box<ResourceApprovalNeeded>),
+    /// an extended limit or after the period rolls over). `warnings`
+    /// carries any other dimensions that crossed warn before the pause.
+    #[error("resource budget approval required for {dimension} at {account:?}", account = needed.account, dimension = needed.dimension)]
+    RequiresApproval {
+        needed: Box<ResourceApprovalNeeded>,
+        warnings: Vec<BudgetWarning>,
+    },
     #[error("resource reservation {id} already exists")]
     ReservationAlreadyExists { id: ResourceReservationId },
     #[error("invalid resource estimate for {dimension}: {reason}")]
@@ -1088,6 +1106,11 @@ where
 pub struct InMemoryResourceGovernor {
     state: Mutex<ResourceState>,
     clock: Arc<dyn Clock>,
+    /// Optional sink that receives `BudgetEvent`s as reservations,
+    /// reconciliations, warnings, and denials happen. Wired by composition;
+    /// defaults to [`NoOpBudgetEventSink`] so the governor stays usable
+    /// without observability.
+    event_sink: Arc<dyn BudgetEventSink>,
 }
 
 impl Default for InMemoryResourceGovernor {
@@ -1095,6 +1118,7 @@ impl Default for InMemoryResourceGovernor {
         Self {
             state: Mutex::new(ResourceState::default()),
             clock: Arc::new(SystemClock),
+            event_sink: Arc::new(NoOpBudgetEventSink),
         }
     }
 }
@@ -1322,7 +1346,17 @@ impl InMemoryResourceGovernor {
         Self {
             state: Mutex::new(ResourceState::default()),
             clock,
+            event_sink: Arc::new(NoOpBudgetEventSink),
         }
+    }
+
+    /// Plug in an audit/SSE sink. Every `reserve`, `reconcile`, `release`,
+    /// warning, and approval/denial emits a [`BudgetEvent`] to this sink.
+    /// Calls are best-effort and synchronous; sinks must be cheap (forward
+    /// to a `broadcast` channel for SSE).
+    pub fn with_event_sink(mut self, sink: Arc<dyn BudgetEventSink>) -> Self {
+        self.event_sink = sink;
+        self
     }
 
     pub fn reserved_for(&self, account: &ResourceAccount) -> ResourceTally {
@@ -1361,7 +1395,9 @@ impl ResourceGovernor for InMemoryResourceGovernor {
         limits: ResourceLimits,
     ) -> Result<(), ResourceError> {
         let now = self.clock.now();
-        set_limit_in_state(&mut self.lock_state(), account, limits, now);
+        set_limit_in_state(&mut self.lock_state(), account.clone(), limits, now);
+        self.event_sink
+            .emit(BudgetEvent::LimitChanged { account, at: now });
         Ok(())
     }
 
@@ -1380,7 +1416,15 @@ impl ResourceGovernor for InMemoryResourceGovernor {
         reservation_id: ResourceReservationId,
     ) -> Result<ReservationOutcome, ResourceError> {
         let now = self.clock.now();
-        reserve_with_outcome_in_state(&mut self.lock_state(), scope, estimate, reservation_id, now)
+        let result = reserve_with_outcome_in_state(
+            &mut self.lock_state(),
+            scope,
+            estimate,
+            reservation_id,
+            now,
+        );
+        emit_reserve_events(self.event_sink.as_ref(), &result, now);
+        result
     }
 
     fn reconcile(
@@ -1389,7 +1433,15 @@ impl ResourceGovernor for InMemoryResourceGovernor {
         actual: ResourceUsage,
     ) -> Result<ResourceReceipt, ResourceError> {
         let now = self.clock.now();
-        reconcile_in_state(&mut self.lock_state(), reservation_id, actual, now)
+        let result = reconcile_in_state(&mut self.lock_state(), reservation_id, actual, now);
+        if let Ok(receipt) = &result {
+            self.event_sink.emit(BudgetEvent::Reconciled {
+                account: most_specific_account(&receipt.scope),
+                receipt: receipt.clone(),
+                at: now,
+            });
+        }
+        result
     }
 
     fn release(
@@ -1397,7 +1449,15 @@ impl ResourceGovernor for InMemoryResourceGovernor {
         reservation_id: ResourceReservationId,
     ) -> Result<ResourceReceipt, ResourceError> {
         let now = self.clock.now();
-        release_in_state(&mut self.lock_state(), reservation_id, now)
+        let result = release_in_state(&mut self.lock_state(), reservation_id, now);
+        if let Ok(receipt) = &result {
+            self.event_sink.emit(BudgetEvent::Released {
+                account: most_specific_account(&receipt.scope),
+                receipt: receipt.clone(),
+                at: now,
+            });
+        }
+        result
     }
 
     fn account_snapshot(
@@ -1411,6 +1471,62 @@ impl ResourceGovernor for InMemoryResourceGovernor {
             now,
         ))
     }
+}
+
+/// Translate a `Result<ReservationOutcome, ResourceError>` to a stream of
+/// `BudgetEvent`s. Emits `Warned` for every warning regardless of the
+/// terminal outcome, then either `Reserved` (success), `ApprovalRequested`
+/// (pause), or `Denied` (hard cap).
+fn emit_reserve_events(
+    sink: &dyn BudgetEventSink,
+    result: &Result<ReservationOutcome, ResourceError>,
+    at: DateTime<Utc>,
+) {
+    let warnings: &[BudgetWarning] = match result {
+        Ok(outcome) => &outcome.warnings,
+        Err(ResourceError::RequiresApproval { warnings, .. }) => warnings,
+        Err(ResourceError::LimitExceeded { warnings, .. }) => warnings,
+        Err(_) => &[],
+    };
+    for warning in warnings {
+        sink.emit(BudgetEvent::Warned {
+            warning: warning.clone(),
+            at,
+        });
+    }
+    match result {
+        Ok(outcome) => {
+            sink.emit(BudgetEvent::Reserved {
+                account: most_specific_account(&outcome.reservation.scope),
+                reservation: outcome.reservation.clone(),
+                warnings: outcome.warnings.clone(),
+                at,
+            });
+        }
+        Err(ResourceError::RequiresApproval { needed, .. }) => {
+            sink.emit(BudgetEvent::ApprovalRequested {
+                needed: (**needed).clone(),
+                at,
+            });
+        }
+        Err(ResourceError::LimitExceeded { denial, .. }) => {
+            sink.emit(BudgetEvent::Denied {
+                denial: (**denial).clone(),
+                at,
+            });
+        }
+        Err(_) => {}
+    }
+}
+
+/// The deepest account in the cascade — the one whose limits are the
+/// "owning" cap for this reservation. Used for `Reserved`/`Reconciled`/
+/// `Released` events so subscribers can route per-thread/per-project.
+fn most_specific_account(scope: &ResourceScope) -> ResourceAccount {
+    ResourceAccount::cascade(scope)
+        .into_iter()
+        .next_back()
+        .unwrap_or_else(|| ResourceAccount::tenant(scope.tenant_id.clone()))
 }
 
 fn set_limit_in_state(
@@ -1497,11 +1613,25 @@ fn reserve_with_outcome_in_state(
                 account, limits, &usage, &reserved, &requested, period_end,
             )? {
                 CascadeOutcome::Allow(mut acc_warnings) => warnings.append(&mut acc_warnings),
-                CascadeOutcome::RequiresApproval(needed) => {
-                    return Err(ResourceError::RequiresApproval(Box::new(needed)));
+                CascadeOutcome::RequiresApproval {
+                    warnings: mut acc_warnings,
+                    needed,
+                } => {
+                    warnings.append(&mut acc_warnings);
+                    return Err(ResourceError::RequiresApproval {
+                        needed: Box::new(needed),
+                        warnings,
+                    });
                 }
-                CascadeOutcome::Deny(denial) => {
-                    return Err(ResourceError::LimitExceeded(Box::new(denial)));
+                CascadeOutcome::Deny {
+                    warnings: mut acc_warnings,
+                    denial,
+                } => {
+                    warnings.append(&mut acc_warnings);
+                    return Err(ResourceError::LimitExceeded {
+                        denial: Box::new(denial),
+                        warnings,
+                    });
                 }
             }
         }
@@ -1701,18 +1831,36 @@ fn validate_usage(usage: &ResourceUsage) -> Result<(), ResourceError> {
 }
 
 /// Result of evaluating one account in the cascade.
+///
+/// Each variant carries the *accumulated* warnings produced across every
+/// dimension and threshold check, not just the first one. Earlier
+/// implementations short-circuited on the first non-`Allow` intervention,
+/// which silently dropped warnings the UI / audit sink should still see —
+/// see the #3841 follow-up "report accumulated metrics before pausing".
 enum CascadeOutcome {
     /// Reservation allowed, optionally with warning entries (warn threshold
     /// crossed but pause threshold not yet).
     Allow(Vec<BudgetWarning>),
     /// Pause threshold crossed — caller must surface an approval gate.
-    RequiresApproval(ResourceApprovalNeeded),
+    /// `warnings` are dimensions on this same account that crossed the warn
+    /// threshold before the pause point was hit.
+    RequiresApproval {
+        warnings: Vec<BudgetWarning>,
+        needed: ResourceApprovalNeeded,
+    },
     /// Hard limit exceeded — fail closed.
-    Deny(ResourceDenial),
+    /// `warnings` are dimensions on this same account that crossed the warn
+    /// or pause threshold before this terminal denial fired.
+    Deny {
+        warnings: Vec<BudgetWarning>,
+        denial: ResourceDenial,
+    },
 }
 
 /// Evaluate one account in the cascade. Hard denial wins over approval
-/// requirement (a 100% overrun is never "ask the user", it's "stop").
+/// requirement (a 100% overrun is never "ask the user", it's "stop"). In
+/// either terminal outcome we still carry through every warning the
+/// dimensions produced so the audit sink / UI can render the full picture.
 fn evaluate_cascade_for_account(
     account: &ResourceAccount,
     limits: &ResourceLimits,
@@ -1721,19 +1869,16 @@ fn evaluate_cascade_for_account(
     requested: &ResourceTally,
     period_end: Option<DateTime<Utc>>,
 ) -> Result<CascadeOutcome, ResourceError> {
+    // Collect warnings across every dimension first. Even if a later step
+    // hard-denies or pauses, these warnings should still surface to the
+    // event sink so users see the warn signal that preceded the terminal.
+    let (warnings, approval) =
+        check_thresholds_all_interventions(account, limits, usage, reserved, requested, period_end);
     if let Some(denial) = check_limits_first_denial(account, limits, usage, reserved, requested) {
-        return Ok(CascadeOutcome::Deny(denial));
+        return Ok(CascadeOutcome::Deny { warnings, denial });
     }
-    let mut warnings = Vec::new();
-    if let Some(intervention) =
-        check_thresholds_first_intervention(account, limits, usage, reserved, requested, period_end)
-    {
-        match intervention {
-            ThresholdIntervention::Approval(needed) => {
-                return Ok(CascadeOutcome::RequiresApproval(needed));
-            }
-            ThresholdIntervention::Warning(warning) => warnings.push(warning),
-        }
+    if let Some(needed) = approval {
+        return Ok(CascadeOutcome::RequiresApproval { warnings, needed });
     }
     Ok(CascadeOutcome::Allow(warnings))
 }
@@ -1835,18 +1980,31 @@ fn check_limits_first_denial(
     })
 }
 
-fn check_thresholds_first_intervention(
+/// Walk every dimension, collecting every warning along the way. Returns
+/// the first pause-approval (a single account can only be paused on one
+/// dimension at a time, but every warning that fired before / alongside
+/// the pause is still in `warnings`).
+fn check_thresholds_all_interventions(
     account: &ResourceAccount,
     limits: &ResourceLimits,
     usage: &ResourceTally,
     reserved: &ResourceTally,
     requested: &ResourceTally,
     period_end: Option<DateTime<Utc>>,
-) -> Option<ThresholdIntervention> {
+) -> (Vec<BudgetWarning>, Option<ResourceApprovalNeeded>) {
+    let mut warnings: Vec<BudgetWarning> = Vec::new();
+    let mut approval: Option<ResourceApprovalNeeded> = None;
     if limits.thresholds.pause_at >= 1.0 && limits.thresholds.warn_at >= 1.0 {
-        return None;
+        return (warnings, approval);
     }
-    // Decimal USD threshold check.
+    let mut absorb = |intervention: ThresholdIntervention| match intervention {
+        ThresholdIntervention::Warning(warning) => warnings.push(warning),
+        ThresholdIntervention::Approval(needed) => {
+            if approval.is_none() {
+                approval = Some(needed);
+            }
+        }
+    };
     if let Some(intervention) = threshold_decimal(ThresholdInputs {
         account,
         dimension: ResourceDimension::Usd,
@@ -1857,9 +2015,8 @@ fn check_thresholds_first_intervention(
         thresholds: limits.thresholds,
         period_end,
     }) {
-        return Some(intervention);
+        absorb(intervention);
     }
-    // Integer dimensions.
     for (dimension, limit, usage_v, reserved_v, requested_v) in [
         (
             ResourceDimension::InputTokens,
@@ -1921,10 +2078,10 @@ fn check_thresholds_first_intervention(
             thresholds: limits.thresholds,
             period_end,
         }) {
-            return Some(intervention);
+            absorb(intervention);
         }
     }
-    None
+    (warnings, approval)
 }
 
 fn check_decimal(

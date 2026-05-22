@@ -27,7 +27,8 @@ mod skill_bundle_source;
 mod skill_context;
 
 pub use budget_accountant::{
-    BudgetSeedingPolicy, GovernorBackedAccountant, ModelCost, ModelCostTable, ZeroCostTable,
+    BudgetSeedingPolicy, GovernorBackedAccountant, ModelCost, ModelCostTable, StaticModelCostTable,
+    ZeroCostTable,
 };
 pub use cancellation_port::{
     AlwaysAliveLoopCancellationPort, AlwaysAliveRunCancellationFactory,
@@ -87,12 +88,11 @@ use ironclaw_turns::{
         CapabilitySurfaceVersion, FinalizeAssistantMessage, InstructionMaterializationStore,
         LoopCapabilityPort, LoopContextBundle, LoopContextMessage, LoopContextPort,
         LoopContextRequest, LoopDriverNoteKind, LoopHostMilestoneEmitter, LoopHostMilestoneSink,
-        LoopInputCursor, LoopModelBudgetAccountant, LoopModelMessage, LoopModelPort,
-        LoopModelRequest, LoopModelResponse, LoopPromptBundleAuthority, LoopRunContext,
-        LoopRunInfoPort, LoopSafeSummary, LoopTranscriptPort, ModelCallOutcome, ModelStreamChunk,
-        ParentLoopOutput, PromptMode, UpdateAssistantDraft, VisibleCapabilityRequest,
-        VisibleCapabilitySurface, sanitize_model_visible_text,
-        sort_instruction_snippets_for_prompt,
+        LoopInputCursor, LoopModelMessage, LoopModelPort, LoopModelRequest, LoopModelResponse,
+        LoopModelUsage, LoopPromptBundleAuthority, LoopRunContext, LoopRunInfoPort,
+        LoopSafeSummary, LoopTranscriptPort, ModelStreamChunk, ParentLoopOutput, PromptMode,
+        UpdateAssistantDraft, VisibleCapabilityRequest, VisibleCapabilitySurface,
+        sanitize_model_visible_text, sort_instruction_snippets_for_prompt,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -744,11 +744,6 @@ where
     skill_context_source: Option<Arc<dyn HostSkillContextSource>>,
     instruction_materialization_store: Option<Arc<dyn InstructionMaterializationStore>>,
     identity_context_source: Option<Arc<dyn HostIdentityContextSource>>,
-    /// Optional budget accountant. When set, every model call goes through
-    /// `pre_model_call` (reserve) → gateway → `post_model_call`
-    /// (reconcile/release). When `None`, no budget enforcement happens —
-    /// this preserves v1-era behavior for hosts that have not opted in.
-    budget_accountant: Option<Arc<dyn LoopModelBudgetAccountant>>,
 }
 
 impl<S, G> ThreadBackedLoopModelPort<S, G>
@@ -775,7 +770,6 @@ where
             skill_context_source: None,
             instruction_materialization_store: None,
             identity_context_source: None,
-            budget_accountant: None,
         }
     }
 
@@ -799,20 +793,7 @@ where
             skill_context_source: None,
             instruction_materialization_store: None,
             identity_context_source: None,
-            budget_accountant: None,
         }
-    }
-
-    /// Inject a budget accountant. Each `stream_model` call passes through
-    /// `pre_model_call` and `post_model_call` so a [`GovernorBackedAccountant`]
-    /// (or any custom impl) can reserve/reconcile against the resource
-    /// governor.
-    pub fn with_budget_accountant(
-        mut self,
-        accountant: Arc<dyn LoopModelBudgetAccountant>,
-    ) -> Self {
-        self.budget_accountant = Some(accountant);
-        self
     }
 
     pub fn with_skill_context_source(mut self, source: Arc<dyn HostSkillContextSource>) -> Self {
@@ -884,22 +865,14 @@ where
             &request.surface_version,
         )?;
 
-        // Resolve messages *before* the budget reservation so a message-
-        // resolution failure here cannot orphan an active hold. The
-        // reservation must only be taken once we know the call is going
-        // to reach the provider.
+        // Resolve messages *before* the budget reservation in the outer
+        // `HostManagedLoopModelPort` so a message-resolution failure here
+        // cannot orphan a reservation taken by the outer port. The inner
+        // port itself never holds a reservation — budget accounting lives
+        // exclusively in the outer port (see #3841 follow-up "delete dead
+        // with_budget_accountant").
         let resolved_messages = self.resolve_model_messages(prompt_grant.messages).await?;
 
-        // Pre-call budget check: reserve estimated cost against the
-        // governor cascade. A denial here short-circuits before any
-        // provider/credential touch. Anything fallible after this point
-        // must funnel through `finalize_post_model_call` so the hold is
-        // reconciled or released.
-        if let Some(accountant) = &self.budget_accountant
-            && let Err(budget_error) = accountant.pre_model_call(&self.run_context, &request).await
-        {
-            return Err(budget_error.into_host_error());
-        }
         self.emit_model_started(requested_model_profile_id).await;
         let host_request = HostManagedModelRequest {
             model_profile_id: model_profile_id.clone(),
@@ -928,65 +901,26 @@ where
 
         let host_response_result = match gateway_result {
             Ok(response) => {
+                let HostManagedModelResponse {
+                    safe_text_deltas,
+                    output,
+                    usage,
+                } = response;
                 let loop_response = LoopModelResponse {
-                    chunks: response
-                        .safe_text_deltas
+                    chunks: safe_text_deltas
                         .into_iter()
                         .map(|safe_text_delta| ModelStreamChunk {
                             safe_text_delta: sanitize_model_visible_text(safe_text_delta),
                         })
                         .collect(),
-                    output: response.output,
+                    output,
                     effective_model_profile_id: model_profile_id.clone(),
+                    usage,
                 };
                 Ok(loop_response)
             }
             Err(error) => Err(model_gateway_error(error)),
         };
-
-        // Post-call accounting fires on BOTH success and failure paths so
-        // the in-flight reservation never leaks.
-        if let Some(accountant) = &self.budget_accountant {
-            let outcome = match &host_response_result {
-                Ok(response) => ModelCallOutcome::Success(response),
-                Err(host_error) => {
-                    // Construct a sanitized gateway error mirroring the
-                    // host-error kind for the accountant. We do not expose
-                    // the host_error's full diagnostic_ref to the
-                    // accountant — the accountant only needs the kind.
-                    let gateway_error = ironclaw_turns::run_profile::LoopModelGatewayError::new(
-                        host_error.kind,
-                        host_error.safe_summary.clone(),
-                    )
-                    .unwrap_or_else(|_| {
-                        ironclaw_turns::run_profile::LoopModelGatewayError::new(
-                            AgentLoopHostErrorKind::Internal,
-                            "budget accountant invalid summary",
-                        )
-                        .unwrap_or_else(|_| {
-                            panic!(
-                                "internal budget-accountant invariant: cannot build safe summary"
-                            )
-                        })
-                    });
-                    return self
-                        .finalize_post_model_call(
-                            accountant,
-                            &request,
-                            ModelCallOutcome::Failure(&gateway_error),
-                            host_response_result,
-                        )
-                        .await;
-                }
-            };
-            if let Err(acc_error) = accountant
-                .post_model_call(&self.run_context, &request, outcome)
-                .await
-            {
-                self.emit_model_failed(acc_error.kind).await;
-                return Err(acc_error.into_host_error());
-            }
-        }
 
         match host_response_result {
             Ok(response) => {
@@ -1006,38 +940,6 @@ where
     S: SessionThreadService + ?Sized + Send + Sync,
     G: HostManagedModelGateway + ?Sized + Send + Sync,
 {
-    async fn finalize_post_model_call(
-        &self,
-        accountant: &Arc<dyn LoopModelBudgetAccountant>,
-        request: &LoopModelRequest,
-        outcome: ModelCallOutcome<'_>,
-        host_response_result: Result<LoopModelResponse, AgentLoopHostError>,
-    ) -> Result<LoopModelResponse, AgentLoopHostError> {
-        // Accountant contract: durable accounting/release failures must fail
-        // closed. Swallowing on the provider-error path would hide stuck
-        // reservations and misreport the failure cause, so the accountant
-        // error takes precedence over the original model error.
-        if let Err(acc_error) = accountant
-            .post_model_call(&self.run_context, request, outcome)
-            .await
-        {
-            tracing::warn!(
-                kind = ?acc_error.kind,
-                diagnostic_ref = ?acc_error.diagnostic_ref,
-                "budget accountant post-call failed during error path; reporting as host error"
-            );
-            self.emit_model_failed(acc_error.kind).await;
-            return Err(acc_error.into_host_error());
-        }
-        match host_response_result {
-            Ok(response) => Ok(response),
-            Err(error) => {
-                self.emit_model_failed(error.kind).await;
-                Err(error)
-            }
-        }
-    }
-
     async fn emit_model_started(&self, requested_model_profile_id: Option<ModelProfileId>) {
         if let Some(milestone_sink) = &self.milestone_sink {
             let milestones =
@@ -1367,6 +1269,11 @@ impl HostManagedModelMessageRole {
 pub struct HostManagedModelResponse {
     pub safe_text_deltas: Vec<String>,
     pub output: ParentLoopOutput,
+    /// Provider-reported token usage. Forwarded to [`LoopModelResponse::usage`]
+    /// by the inner port wrapper, so the budget accountant can record actual
+    /// USD spend instead of the conservative reservation estimate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LoopModelUsage>,
 }
 
 impl HostManagedModelResponse {
@@ -1378,6 +1285,7 @@ impl HostManagedModelResponse {
             output: ParentLoopOutput::AssistantReply(AssistantReply {
                 content: safe_content,
             }),
+            usage: None,
         }
     }
 
@@ -1393,7 +1301,15 @@ impl HostManagedModelResponse {
                 vec![safe_text_delta]
             },
             output: ParentLoopOutput::CapabilityCalls(calls),
+            usage: None,
         }
+    }
+
+    /// Attach provider-reported token usage. Returns the response so call
+    /// sites can chain into [`assistant_reply`] / [`capability_calls`].
+    pub fn with_usage(mut self, usage: LoopModelUsage) -> Self {
+        self.usage = Some(usage);
+        self
     }
 }
 

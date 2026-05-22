@@ -3498,6 +3498,7 @@ mod tests {
                 content: "hello".to_string(),
             }),
             effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+            usage: None,
         }
     }
 
@@ -3511,6 +3512,7 @@ mod tests {
                 provider_replay: None,
             }]),
             effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+            usage: None,
         }
     }
 
@@ -3534,6 +3536,7 @@ mod tests {
                 }),
             }]),
             effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+            usage: None,
         }
     }
 
@@ -3575,6 +3578,7 @@ mod tests {
                 },
             ]),
             effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+            usage: None,
         }
     }
 
@@ -3588,6 +3592,7 @@ mod tests {
                 provider_replay: None,
             }]),
             effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+            usage: None,
         }
     }
 
@@ -3609,6 +3614,7 @@ mod tests {
                 },
             ]),
             effective_model_profile_id: ModelProfileId::new("model").expect("valid"),
+            usage: None,
         }
     }
 

@@ -1013,6 +1013,21 @@ pub struct LoopModelResponse {
     pub chunks: Vec<ModelStreamChunk>,
     pub output: ParentLoopOutput,
     pub effective_model_profile_id: ModelProfileId,
+    /// Provider-reported token usage for this call. `None` when the gateway
+    /// could not surface real numbers (replay test stubs, providers without
+    /// a usage object); downstream budget accounting falls back to the
+    /// reservation estimate in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<LoopModelUsage>,
+}
+
+/// Token usage reported by a provider for a single model call. The accountant
+/// uses this to record actual USD spend instead of the conservative
+/// reservation estimate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopModelUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -426,7 +426,7 @@ mod tests {
                 },
             )
             .unwrap_err();
-        assert!(matches!(denied, ResourceError::LimitExceeded(_)));
+        assert!(matches!(denied, ResourceError::LimitExceeded { .. }));
 
         reloaded.release(reservation.id).unwrap();
     }

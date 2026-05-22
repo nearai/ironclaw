@@ -49,6 +49,7 @@ async fn two_fake_drivers_use_the_same_per_run_agent_loop_host_contract() {
             content: "done".to_string(),
         }),
         effective_model_profile_id: host.context.resolved_run_profile.model_profile_id.clone(),
+        usage: None,
     });
     host.push_capability_outcome(CapabilityOutcome::ApprovalRequired {
         gate_ref: LoopGateRef::new("gate:approval-needed").unwrap(),
@@ -127,6 +128,7 @@ async fn host_managed_model_port_routes_gateway_and_emits_model_milestones() {
             content: "RAW_ASSISTANT_CONTENT_SENTINEL".to_string(),
         }),
         effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+        usage: None,
     }));
     let port =
         HostManagedLoopModelPort::new(context.clone(), gateway.clone(), milestone_sink.clone());
@@ -177,6 +179,7 @@ async fn host_managed_model_port_returns_response_when_model_started_milestone_f
             content: "model response survived start milestone failure".to_string(),
         }),
         effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+        usage: None,
     }));
     let port =
         HostManagedLoopModelPort::new(context.clone(), gateway.clone(), milestone_sink.clone());
@@ -215,6 +218,7 @@ async fn host_managed_model_port_returns_response_when_model_completed_milestone
             content: "model response survived milestone failure".to_string(),
         }),
         effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+        usage: None,
     }));
     let port =
         HostManagedLoopModelPort::new(context.clone(), gateway.clone(), milestone_sink.clone());
@@ -2482,6 +2486,7 @@ fn success_response(context: &LoopRunContext) -> LoopModelResponse {
             content: "hello".to_string(),
         }),
         effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+        usage: None,
     }
 }
 
@@ -2573,6 +2578,7 @@ async fn redaction_sentinels_never_leak_through_serialized_surfaces() {
             content: "sk-test-key-12345 leaked content".to_string(),
         }),
         effective_model_profile_id: context.resolved_run_profile.model_profile_id.clone(),
+        usage: None,
     }));
 
     let port =

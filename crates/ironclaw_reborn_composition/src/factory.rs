@@ -40,6 +40,19 @@ pub(crate) struct RebornLocalRuntimeServices {
     pub(crate) checkpoint_state_store: Arc<InMemoryCheckpointStateStore>,
     pub(crate) loop_checkpoint_store: Arc<InMemoryLoopCheckpointStore>,
     pub(crate) thread_service: Arc<InMemorySessionThreadService>,
+    /// Resource governor handle used by the budget accountant. Kept here
+    /// separately from the type-erased `dyn HostRuntime` so the runtime
+    /// composer can construct a `GovernorBackedAccountant` without losing
+    /// the concrete governor type. Wired through #3841 follow-up "A1: wire
+    /// GovernorBackedAccountant into production composition".
+    pub(crate) resource_governor: Arc<dyn ironclaw_resources::ResourceGovernor>,
+    /// Sink that receives `BudgetEvent`s from the governor. Composition
+    /// hands this to downstream consumers (audit log, SSE projection)
+    /// without forcing the governor to know about them. Wired through
+    /// #3841 follow-up "A2: project BudgetEvent into the gateway event
+    /// stream".
+    #[allow(dead_code)]
+    pub(crate) budget_event_sink: Arc<dyn ironclaw_resources::BudgetEventSink>,
 }
 
 impl std::fmt::Debug for RebornServices {
@@ -137,17 +150,24 @@ async fn build_local_dev(input: RebornBuildInput) -> Result<RebornServices, Rebo
     let run_state = Arc::new(InMemoryRunStateStore::new());
     let approval_requests = Arc::new(InMemoryApprovalRequestStore::new());
     let turn_state = Arc::new(InMemoryTurnStateStore::default());
+    let budget_event_sink: Arc<dyn ironclaw_resources::BudgetEventSink> =
+        Arc::new(ironclaw_resources::InMemoryBudgetEventSink::new());
+    let resource_governor =
+        Arc::new(InMemoryResourceGovernor::new().with_event_sink(Arc::clone(&budget_event_sink)));
     let local_runtime = Arc::new(RebornLocalRuntimeServices {
         turn_state: Arc::clone(&turn_state),
         checkpoint_state_store: Arc::new(InMemoryCheckpointStateStore::default()),
         loop_checkpoint_store: Arc::new(InMemoryLoopCheckpointStore::default()),
         thread_service: Arc::new(InMemorySessionThreadService::default()),
+        resource_governor: Arc::clone(&resource_governor)
+            as Arc<dyn ironclaw_resources::ResourceGovernor>,
+        budget_event_sink,
     });
 
     let mut services = HostRuntimeServices::new(
         Arc::new(builtin_extension_registry()?),
         Arc::new(filesystem),
-        Arc::new(InMemoryResourceGovernor::new()),
+        resource_governor,
         Arc::new(GrantAuthorizer::new()),
         ProcessServices::in_memory(),
         CapabilitySurfaceVersion::new("reborn-app-v1")?,

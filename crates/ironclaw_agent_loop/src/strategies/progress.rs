@@ -66,7 +66,14 @@ impl ParamHash {
     }
 }
 
-fn normalize_for_hash(value: &Value) -> Value {
+/// Normalize a JSON tree per the rules documented at the module level:
+/// strip ISO-8601 timestamps, UUID-shaped substrings, and well-known
+/// correlation/request-id keys. Exposed `pub(crate)` so the executor's
+/// [`CapabilityCallSignature`](crate::state::CapabilityCallSignature)
+/// can apply the same normalization before hashing — two model calls that
+/// differ only by `request_id` then collapse to the same signature, which
+/// is what the stop strategy needs for robust stuck-loop detection.
+pub(crate) fn normalize_for_hash(value: &Value) -> Value {
     match value {
         Value::Null | Value::Bool(_) | Value::Number(_) => value.clone(),
         Value::String(s) => Value::String(normalize_string(s)),
