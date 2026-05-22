@@ -2,11 +2,15 @@ use async_trait::async_trait;
 use ironclaw_event_projections::ProjectionScope;
 use ironclaw_turns::TurnActor;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, MutexGuard},
+};
 use tokio::sync::broadcast;
 
 use crate::{
     error::ProjectionStreamError,
+    keys::{ProjectionScopeKey, projection_scope_key},
     types::{ProductProjectionEnvelope, ProjectionTarget, ProjectionViewClass},
 };
 
@@ -27,22 +31,42 @@ pub struct ProjectionLiveUpdateRequest {
 }
 
 pub struct InMemoryProjectionUpdateSource {
-    sender: broadcast::Sender<Arc<ProductProjectionEnvelope>>,
+    capacity: usize,
+    senders: Mutex<HashMap<ProjectionScopeKey, broadcast::Sender<Arc<ProductProjectionEnvelope>>>>,
 }
 
 impl InMemoryProjectionUpdateSource {
     pub fn new(capacity: usize) -> Self {
-        let (sender, _) = broadcast::channel(capacity.max(1));
-        Self { sender }
+        Self {
+            capacity: capacity.max(1),
+            senders: Mutex::new(HashMap::new()),
+        }
     }
 
     pub fn publish(
         &self,
         envelope: ProductProjectionEnvelope,
     ) -> Result<usize, ProjectionStreamError> {
-        self.sender
+        let key = projection_scope_key(envelope.scope());
+        let sender = self
+            .senders()
+            .get(&key)
+            .cloned()
+            .ok_or(ProjectionStreamError::Source)?;
+        sender
             .send(Arc::new(envelope))
             .map_err(|_| ProjectionStreamError::Source)
+    }
+
+    fn senders(
+        &self,
+    ) -> MutexGuard<
+        '_,
+        HashMap<ProjectionScopeKey, broadcast::Sender<Arc<ProductProjectionEnvelope>>>,
+    > {
+        self.senders
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -50,8 +74,14 @@ impl InMemoryProjectionUpdateSource {
 impl ProjectionUpdateSource for InMemoryProjectionUpdateSource {
     async fn subscribe(
         &self,
-        _request: ProjectionLiveUpdateRequest,
+        request: ProjectionLiveUpdateRequest,
     ) -> Result<broadcast::Receiver<Arc<ProductProjectionEnvelope>>, ProjectionStreamError> {
-        Ok(self.sender.subscribe())
+        let key = projection_scope_key(&request.scope);
+        let mut senders = self.senders();
+        let sender = senders.entry(key).or_insert_with(|| {
+            let (sender, _) = broadcast::channel(self.capacity);
+            sender
+        });
+        Ok(sender.subscribe())
     }
 }

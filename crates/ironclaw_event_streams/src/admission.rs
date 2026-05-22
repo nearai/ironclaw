@@ -1,11 +1,14 @@
-use std::{collections::HashMap, hash::Hash, sync::Arc};
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
 use ironclaw_event_projections::ProjectionScope;
 use ironclaw_host_api::{TenantId, UserId};
 use ironclaw_turns::TurnActor;
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 
 use crate::{
     error::ProjectionStreamError,
@@ -73,26 +76,13 @@ struct AdmissionRelease {
 
 impl AdmissionRelease {
     fn release(self) {
-        if let Ok(mut state) = self.state.try_lock() {
-            release_admission_state(
-                &mut state,
-                &self.tenant_key,
-                &self.actor_key,
-                &self.scope_key,
-            );
-            return;
-        }
-
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let state = Arc::clone(&self.state);
-            let tenant_key = self.tenant_key;
-            let actor_key = self.actor_key;
-            let scope_key = self.scope_key;
-            let _join = handle.spawn(async move {
-                let mut state = state.lock().await;
-                release_admission_state(&mut state, &tenant_key, &actor_key, &scope_key);
-            });
-        }
+        let mut state = lock_admission_state(&self.state);
+        release_admission_state(
+            &mut state,
+            &self.tenant_key,
+            &self.actor_key,
+            &self.scope_key,
+        );
     }
 }
 
@@ -159,7 +149,7 @@ impl ProjectionStreamAdmissionPolicy for InMemoryProjectionStreamAdmissionPolicy
             user_id: request.actor.user_id.clone(),
         };
         let scope_key = scope_key(&request.scope, &request.target);
-        let mut state = self.state.lock().await;
+        let mut state = lock_admission_state(&self.state);
         if state.global >= self.limits.global
             || count(&state.by_tenant, &tenant_key) >= self.limits.per_tenant
             || count(&state.by_actor, &actor_key) >= self.limits.per_actor
@@ -200,6 +190,14 @@ where
     K: Eq + Hash,
 {
     map.get(key).copied().unwrap_or(0)
+}
+
+fn lock_admission_state(
+    state: &Mutex<AdmissionState>,
+) -> std::sync::MutexGuard<'_, AdmissionState> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn increment<K>(map: &mut HashMap<K, usize>, key: &K)
