@@ -3,11 +3,12 @@ use ironclaw_auth::{
     AuthChallenge, AuthContinuationRef, AuthErrorCode, AuthFlowKind, AuthFlowManager,
     AuthFlowStatus, AuthGateRef, AuthInteractionService, AuthProductError, AuthProductScope,
     AuthProviderClient, AuthProviderId, AuthSessionId, AuthSurface, AuthorizationCodeHash,
-    CredentialAccountLabel, CredentialAccountService, CredentialAccountStatus, CredentialOwnership,
-    CredentialSetupService, InMemoryAuthProductServices, LifecyclePackageRef,
-    ManualTokenSetupRequest, NewAuthFlow, NewCredentialAccount, OAuthAuthorizationCode,
-    OAuthCallbackInput, OAuthProviderCallbackRequest, OAuthProviderExchange, OpaqueStateHash,
-    PkceVerifierHash, PkceVerifierSecret, ProviderCallbackOutcome, SecretCleanupAction,
+    CredentialAccountLabel, CredentialAccountListRequest, CredentialAccountService,
+    CredentialAccountStatus, CredentialOwnership, CredentialSetupService,
+    InMemoryAuthProductServices, LifecyclePackageRef, ManualTokenSetupRequest, NewAuthFlow,
+    NewCredentialAccount, OAuthAuthorizationCode, OAuthAuthorizationUrl, OAuthCallbackInput,
+    OAuthProviderCallbackRequest, OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash,
+    PkceVerifierSecret, ProviderCallbackOutcome, ProviderScope, SecretCleanupAction,
     SecretCleanupRequest, SecretCleanupService, SecretSubmitRequest, TurnRunRef,
 };
 use ironclaw_host_api::{ExtensionId, InvocationId, ResourceScope, SecretHandle, UserId};
@@ -42,8 +43,40 @@ fn code_hash(value: &str) -> AuthorizationCodeHash {
     AuthorizationCodeHash::new(value).expect("valid code hash")
 }
 
+fn authorization_url(value: &str) -> OAuthAuthorizationUrl {
+    OAuthAuthorizationUrl::new(value).expect("valid authorization url")
+}
+
+fn provider_scope(value: &str) -> ProviderScope {
+    ProviderScope::new(value).expect("valid provider scope")
+}
+
+fn provider_scopes(values: &[&str]) -> Vec<ProviderScope> {
+    values.iter().map(|value| provider_scope(value)).collect()
+}
+
 fn secret(value: &str) -> SecretString {
     SecretString::from(value.to_string())
+}
+
+fn account_request(
+    owner: AuthProductScope,
+    label_value: &str,
+    status: CredentialAccountStatus,
+) -> NewCredentialAccount {
+    NewCredentialAccount {
+        update_account_id: None,
+        scope: owner,
+        provider: provider(),
+        label: label(label_value),
+        status,
+        ownership: CredentialOwnership::UserReusable,
+        owner_extension: None,
+        granted_extensions: Vec::new(),
+        access_secret: None,
+        refresh_secret: None,
+        scopes: Vec::new(),
+    }
 }
 
 async fn oauth_flow(
@@ -56,7 +89,7 @@ async fn oauth_flow(
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
             challenge: AuthChallenge::OAuthUrl {
-                authorization_url: "https://provider.example/oauth".to_string(),
+                authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at: Utc::now() + Duration::minutes(5),
             },
             continuation: AuthContinuationRef::LifecycleActivation {
@@ -85,7 +118,7 @@ async fn oauth_callback_exchanges_provider_code_then_completes_once() {
         pkce_verifier: PkceVerifierSecret::new(secret("raw-pkce-verifier"))
             .expect("valid verifier"),
         pkce_verifier_hash: pkce_hash("pkce-hash"),
-        scopes: vec!["repo".to_string()],
+        scopes: provider_scopes(&["repo"]),
     };
     let debug = format!("{request:?}");
     assert!(!debug.contains("raw-auth-code"));
@@ -132,6 +165,7 @@ async fn oauth_callback_updates_existing_account_from_provider_exchange() {
     let owner = scope("alice");
     let existing = services
         .create_account(NewCredentialAccount {
+            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("work github"),
@@ -141,7 +175,7 @@ async fn oauth_callback_updates_existing_account_from_provider_exchange() {
             granted_extensions: Vec::new(),
             access_secret: Some(SecretHandle::new("github-old-access").unwrap()),
             refresh_secret: None,
-            scopes: vec!["read:user".to_string()],
+            scopes: provider_scopes(&["read:user"]),
         })
         .await
         .expect("existing account");
@@ -163,7 +197,7 @@ async fn oauth_callback_updates_existing_account_from_provider_exchange() {
                         pkce_verifier_hash: pkce_hash("pkce-hash"),
                         access_secret: access_secret.clone(),
                         refresh_secret: Some(refresh_secret.clone()),
-                        scopes: vec!["repo".to_string(), "workflow".to_string()],
+                        scopes: provider_scopes(&["repo", "workflow"]),
                         account_id: Some(existing.id),
                     },
                 },
@@ -184,10 +218,165 @@ async fn oauth_callback_updates_existing_account_from_provider_exchange() {
     assert_eq!(updated.status, CredentialAccountStatus::Configured);
     assert_eq!(updated.access_secret, Some(access_secret));
     assert_eq!(updated.refresh_secret, Some(refresh_secret));
-    assert_eq!(
-        updated.scopes,
-        vec!["repo".to_string(), "workflow".to_string()]
+    assert_eq!(updated.scopes, provider_scopes(&["repo", "workflow"]));
+}
+
+#[tokio::test]
+async fn oauth_callback_rejects_mismatched_provider_and_invalid_existing_account_exchange() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let foreign_owner = scope("bob");
+    let existing = services
+        .create_account(account_request(
+            owner.clone(),
+            "work github",
+            CredentialAccountStatus::PendingSetup,
+        ))
+        .await
+        .expect("owner account");
+    let foreign = services
+        .create_account(account_request(
+            foreign_owner,
+            "foreign github",
+            CredentialAccountStatus::PendingSetup,
+        ))
+        .await
+        .expect("foreign account");
+    let gitlab = AuthProviderId::new("gitlab").expect("valid provider");
+    let mut provider_mismatch_request = account_request(
+        owner.clone(),
+        "gitlab account",
+        CredentialAccountStatus::PendingSetup,
     );
+    provider_mismatch_request.provider = gitlab.clone();
+    let provider_mismatch = services
+        .create_account(provider_mismatch_request)
+        .await
+        .expect("other provider account");
+
+    let provider_mismatch_flow = oauth_flow(&services, owner.clone()).await;
+    let provider_mismatch_err = services
+        .complete_oauth_callback(
+            &owner,
+            OAuthCallbackInput {
+                flow_id: provider_mismatch_flow.id,
+                opaque_state_hash: state_hash("state-hash"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: OAuthProviderExchange {
+                        provider: gitlab.clone(),
+                        account_label: label("gitlab"),
+                        authorization_code_hash: code_hash("code-hash"),
+                        pkce_verifier_hash: pkce_hash("pkce-hash"),
+                        access_secret: SecretHandle::new("gitlab-access").unwrap(),
+                        refresh_secret: None,
+                        scopes: provider_scopes(&["read_user"]),
+                        account_id: None,
+                    },
+                },
+            },
+        )
+        .await
+        .expect_err("flow provider must match exchange provider");
+    assert_eq!(provider_mismatch_err, AuthProductError::TokenExchangeFailed);
+
+    let missing_account_flow = oauth_flow(&services, owner.clone()).await;
+    let missing_account_err = services
+        .complete_oauth_callback(
+            &owner,
+            OAuthCallbackInput {
+                flow_id: missing_account_flow.id,
+                opaque_state_hash: state_hash("state-hash"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: OAuthProviderExchange {
+                        provider: provider(),
+                        account_label: label("missing"),
+                        authorization_code_hash: code_hash("code-hash"),
+                        pkce_verifier_hash: pkce_hash("pkce-hash"),
+                        access_secret: SecretHandle::new("missing-access").unwrap(),
+                        refresh_secret: None,
+                        scopes: provider_scopes(&["repo"]),
+                        account_id: Some(ironclaw_auth::CredentialAccountId::new()),
+                    },
+                },
+            },
+        )
+        .await
+        .expect_err("missing account id is rejected");
+    assert_eq!(missing_account_err, AuthProductError::CredentialMissing);
+
+    let cross_scope_flow = oauth_flow(&services, owner.clone()).await;
+    let cross_scope_err = services
+        .complete_oauth_callback(
+            &owner,
+            OAuthCallbackInput {
+                flow_id: cross_scope_flow.id,
+                opaque_state_hash: state_hash("state-hash"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: OAuthProviderExchange {
+                        provider: provider(),
+                        account_label: label("foreign"),
+                        authorization_code_hash: code_hash("code-hash"),
+                        pkce_verifier_hash: pkce_hash("pkce-hash"),
+                        access_secret: SecretHandle::new("foreign-access").unwrap(),
+                        refresh_secret: None,
+                        scopes: provider_scopes(&["repo"]),
+                        account_id: Some(foreign.id),
+                    },
+                },
+            },
+        )
+        .await
+        .expect_err("cross-scope account id is rejected");
+    assert_eq!(cross_scope_err, AuthProductError::CrossScopeDenied);
+
+    let account_provider_flow = oauth_flow(&services, owner.clone()).await;
+    let account_provider_err = services
+        .complete_oauth_callback(
+            &owner,
+            OAuthCallbackInput {
+                flow_id: account_provider_flow.id,
+                opaque_state_hash: state_hash("state-hash"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: OAuthProviderExchange {
+                        provider: provider(),
+                        account_label: label("wrong provider account"),
+                        authorization_code_hash: code_hash("code-hash"),
+                        pkce_verifier_hash: pkce_hash("pkce-hash"),
+                        access_secret: SecretHandle::new("github-access").unwrap(),
+                        refresh_secret: None,
+                        scopes: provider_scopes(&["repo"]),
+                        account_id: Some(provider_mismatch.id),
+                    },
+                },
+            },
+        )
+        .await
+        .expect_err("account provider must match exchange provider");
+    assert_eq!(account_provider_err, AuthProductError::TokenExchangeFailed);
+
+    let valid_update_flow = oauth_flow(&services, owner.clone()).await;
+    services
+        .complete_oauth_callback(
+            &owner,
+            OAuthCallbackInput {
+                flow_id: valid_update_flow.id,
+                opaque_state_hash: state_hash("state-hash"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: OAuthProviderExchange {
+                        provider: provider(),
+                        account_label: label("renamed github"),
+                        authorization_code_hash: code_hash("code-hash"),
+                        pkce_verifier_hash: pkce_hash("pkce-hash"),
+                        access_secret: SecretHandle::new("github-access").unwrap(),
+                        refresh_secret: None,
+                        scopes: provider_scopes(&["repo"]),
+                        account_id: Some(existing.id),
+                    },
+                },
+            },
+        )
+        .await
+        .expect("valid existing account update still works");
 }
 
 #[tokio::test]
@@ -221,6 +410,30 @@ async fn oauth_callback_rejects_cross_scope_stale_malformed_and_denied() {
         .await
         .expect_err("wrong state denied");
     assert_eq!(wrong_state, AuthProductError::CrossScopeDenied);
+
+    let wrong_pkce = services
+        .complete_oauth_callback(
+            &owner,
+            OAuthCallbackInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("state-hash"),
+                outcome: ProviderCallbackOutcome::Authorized {
+                    exchange: OAuthProviderExchange {
+                        provider: provider(),
+                        account_label: label("work github"),
+                        authorization_code_hash: code_hash("code-hash"),
+                        pkce_verifier_hash: pkce_hash("other-pkce-hash"),
+                        access_secret: SecretHandle::new("github-access").unwrap(),
+                        refresh_secret: None,
+                        scopes: provider_scopes(&["repo"]),
+                        account_id: None,
+                    },
+                },
+            },
+        )
+        .await
+        .expect_err("pkce verifier hash must match stored flow hash");
+    assert_eq!(wrong_pkce, AuthProductError::CrossScopeDenied);
 
     let malformed_code = OAuthAuthorizationCode::new(secret("   "))
         .expect_err("empty raw code is malformed before exchange");
@@ -273,6 +486,51 @@ async fn cancel_flow_preserves_terminal_state_and_blocks_callback() {
         .await
         .expect_err("callback after cancel rejected");
     assert_eq!(callback, AuthProductError::Canceled);
+}
+
+#[tokio::test]
+async fn terminal_flow_status_is_not_rewritten_after_expiry() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let flow = services
+        .create_flow(NewAuthFlow {
+            scope: owner.clone(),
+            kind: AuthFlowKind::IntegrationCredential,
+            provider: provider(),
+            challenge: AuthChallenge::OAuthUrl {
+                authorization_url: authorization_url("https://provider.example/oauth"),
+                expires_at: Utc::now() - Duration::seconds(1),
+            },
+            continuation: AuthContinuationRef::SetupOnly,
+            opaque_state_hash: Some(state_hash("state-hash")),
+            pkce_verifier_hash: Some(pkce_hash("pkce-hash")),
+            expires_at: Utc::now() - Duration::seconds(1),
+        })
+        .await
+        .expect("expired flow");
+    services
+        .cancel_flow(&owner, flow.id)
+        .await
+        .expect("terminal cancel");
+
+    let callback = services
+        .complete_oauth_callback(
+            &owner,
+            OAuthCallbackInput {
+                flow_id: flow.id,
+                opaque_state_hash: state_hash("state-hash"),
+                outcome: ProviderCallbackOutcome::Denied,
+            },
+        )
+        .await
+        .expect_err("terminal status wins over expiry");
+    assert_eq!(callback, AuthProductError::Canceled);
+    let record = services
+        .get_flow(&owner, flow.id)
+        .await
+        .expect("lookup")
+        .expect("flow remains");
+    assert_eq!(record.status, AuthFlowStatus::Canceled);
 }
 
 #[tokio::test]
@@ -363,6 +621,18 @@ async fn manual_token_submit_is_secure_scoped_and_rejects_invalid_inputs() {
         .await
         .expect("owner submit");
     assert_eq!(result.status, CredentialAccountStatus::Configured);
+
+    let replay = services
+        .submit_manual_token(
+            &owner,
+            SecretSubmitRequest {
+                interaction_id,
+                secret: secret("ghp_second_submit"),
+            },
+        )
+        .await
+        .expect_err("manual-token interaction is consumed once");
+    assert_eq!(replay, AuthProductError::UnknownOrExpiredFlow);
 }
 
 #[tokio::test]
@@ -397,11 +667,12 @@ async fn expired_manual_token_interaction_fails_closed() {
 }
 
 #[tokio::test]
-async fn credential_setup_create_or_update_reuses_matching_account() {
+async fn credential_setup_updates_only_explicit_authorized_account() {
     let services = InMemoryAuthProductServices::new();
     let owner = scope("alice");
     let first = services
         .create_or_update_account(NewCredentialAccount {
+            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("work"),
@@ -418,31 +689,170 @@ async fn credential_setup_create_or_update_reuses_matching_account() {
     let access_secret = SecretHandle::new("github-updated-access").unwrap();
     let second = services
         .create_or_update_account(NewCredentialAccount {
+            update_account_id: Some(first.id),
             scope: owner.clone(),
             provider: provider(),
-            label: label("work"),
+            label: label("work renamed"),
             status: CredentialAccountStatus::Configured,
             ownership: CredentialOwnership::UserReusable,
             owner_extension: None,
             granted_extensions: Vec::new(),
             access_secret: Some(access_secret.clone()),
             refresh_secret: None,
-            scopes: vec!["repo".to_string()],
+            scopes: provider_scopes(&["repo"]),
         })
         .await
         .expect("update account");
 
     assert_eq!(second.id, first.id);
     assert_eq!(second.created_at, first.created_at);
+    assert_eq!(second.label, label("work renamed"));
     assert_eq!(second.status, CredentialAccountStatus::Configured);
     assert_eq!(second.access_secret, Some(access_secret));
-    assert_eq!(second.scopes, vec!["repo".to_string()]);
+    assert_eq!(second.scopes, provider_scopes(&["repo"]));
+
+    let same_label_without_target_creates_new_account = services
+        .create_or_update_account(NewCredentialAccount {
+            update_account_id: None,
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("work renamed"),
+            status: CredentialAccountStatus::PendingSetup,
+            ownership: CredentialOwnership::UserReusable,
+            owner_extension: None,
+            granted_extensions: Vec::new(),
+            access_secret: None,
+            refresh_secret: None,
+            scopes: Vec::new(),
+        })
+        .await
+        .expect("same label without target is create");
+    assert_ne!(same_label_without_target_creates_new_account.id, first.id);
+
+    let rejected_takeover = services
+        .create_or_update_account(NewCredentialAccount {
+            update_account_id: Some(first.id),
+            scope: owner.clone(),
+            provider: provider(),
+            label: label("takeover"),
+            status: CredentialAccountStatus::Configured,
+            ownership: CredentialOwnership::ExtensionOwned,
+            owner_extension: Some(ExtensionId::new("attacker").unwrap()),
+            granted_extensions: Vec::new(),
+            access_secret: Some(SecretHandle::new("github-takeover").unwrap()),
+            refresh_secret: None,
+            scopes: provider_scopes(&["repo"]),
+        })
+        .await
+        .expect_err("ownership changes require a separate authority flow");
+    assert_eq!(rejected_takeover, AuthProductError::CrossScopeDenied);
+
     let accounts = services
-        .list_accounts(&owner, &provider())
+        .list_accounts(CredentialAccountListRequest::new(owner, provider()).with_limit(10))
         .await
         .expect("list accounts");
-    assert_eq!(accounts.len(), 1);
-    assert_eq!(accounts[0].id, first.id);
+    assert_eq!(accounts.accounts.len(), 2);
+    assert!(
+        accounts
+            .accounts
+            .iter()
+            .any(|account| account.id == first.id)
+    );
+    assert!(accounts.next_cursor.is_none());
+}
+
+#[tokio::test]
+async fn credential_account_update_status_updates_owner_record_and_rejects_missing_or_cross_scope()
+{
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    let account = services
+        .create_account(account_request(
+            owner.clone(),
+            "work",
+            CredentialAccountStatus::Configured,
+        ))
+        .await
+        .expect("create account");
+
+    let updated = services
+        .update_status(&owner, account.id, CredentialAccountStatus::RefreshFailed)
+        .await
+        .expect("update status");
+    assert_eq!(updated.status, CredentialAccountStatus::RefreshFailed);
+
+    let missing = services
+        .update_status(
+            &owner,
+            ironclaw_auth::CredentialAccountId::new(),
+            CredentialAccountStatus::Revoked,
+        )
+        .await
+        .expect_err("missing account");
+    assert_eq!(missing, AuthProductError::CredentialMissing);
+
+    let cross_scope = services
+        .update_status(&scope("bob"), account.id, CredentialAccountStatus::Revoked)
+        .await
+        .expect_err("cross-scope account");
+    assert_eq!(cross_scope, AuthProductError::CrossScopeDenied);
+
+    let still_owner = services
+        .get_account(&owner, account.id)
+        .await
+        .expect("lookup")
+        .expect("owner account");
+    assert_eq!(still_owner.status, CredentialAccountStatus::RefreshFailed);
+}
+
+#[tokio::test]
+async fn credential_account_list_is_explicitly_paginated() {
+    let services = InMemoryAuthProductServices::new();
+    let owner = scope("alice");
+    for name in ["alpha", "beta", "gamma"] {
+        services
+            .create_account(account_request(
+                owner.clone(),
+                name,
+                CredentialAccountStatus::Configured,
+            ))
+            .await
+            .expect("create account");
+    }
+
+    let first_page = services
+        .list_accounts(CredentialAccountListRequest::new(owner.clone(), provider()).with_limit(2))
+        .await
+        .expect("first page");
+    assert_eq!(first_page.accounts.len(), 2);
+    let cursor = first_page
+        .next_cursor
+        .expect("cursor for remaining account");
+
+    let second_page = services
+        .list_accounts(
+            CredentialAccountListRequest::new(owner.clone(), provider())
+                .with_limit(2)
+                .with_cursor(cursor),
+        )
+        .await
+        .expect("second page");
+    assert_eq!(second_page.accounts.len(), 1);
+    assert!(second_page.next_cursor.is_none());
+
+    let zero_limit = services
+        .list_accounts(CredentialAccountListRequest::new(owner.clone(), provider()).with_limit(0))
+        .await
+        .expect_err("zero limit rejected");
+    assert_eq!(zero_limit.code(), AuthErrorCode::InvalidRequest);
+    let too_large = services
+        .list_accounts(
+            CredentialAccountListRequest::new(owner, provider())
+                .with_limit(CredentialAccountListRequest::MAX_LIMIT + 1),
+        )
+        .await
+        .expect_err("oversized limit rejected");
+    assert_eq!(too_large.code(), AuthErrorCode::InvalidRequest);
 }
 
 #[tokio::test]
@@ -458,6 +868,7 @@ async fn credential_account_selection_requires_user_choice_for_multiple_configur
 
     services
         .create_account(NewCredentialAccount {
+            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("expired"),
@@ -479,6 +890,7 @@ async fn credential_account_selection_requires_user_choice_for_multiple_configur
 
     let work = services
         .create_account(NewCredentialAccount {
+            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("work"),
@@ -500,6 +912,7 @@ async fn credential_account_selection_requires_user_choice_for_multiple_configur
 
     services
         .create_account(NewCredentialAccount {
+            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("personal"),
@@ -527,6 +940,7 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
     let extension = ExtensionId::new("github").unwrap();
     let orphan = services
         .create_account(NewCredentialAccount {
+            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("orphan"),
@@ -544,6 +958,7 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
 
     let owned = services
         .create_account(NewCredentialAccount {
+            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("owned"),
@@ -559,6 +974,7 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
         .expect("owned account");
     let reusable = services
         .create_account(NewCredentialAccount {
+            update_account_id: None,
             scope: owner.clone(),
             provider: provider(),
             label: label("reusable"),
@@ -600,6 +1016,14 @@ async fn extension_owned_accounts_require_owner_and_cleanup_is_action_specific()
 fn serde_contracts_are_validated_snake_case_and_redacted() {
     assert!(serde_json::from_str::<AuthProviderId>("\"bad\nprovider\"").is_err());
     assert!(serde_json::from_str::<AuthSessionId>("\" session \"").is_err());
+    assert!(serde_json::from_str::<ProviderScope>("\" repo \"").is_err());
+    assert!(
+        serde_json::from_str::<OAuthAuthorizationUrl>("\"http://provider.example/oauth\"").is_err()
+    );
+    assert_eq!(
+        serde_json::to_value(authorization_url("https://provider.example/oauth")).expect("url"),
+        serde_json::json!("https://provider.example/oauth")
+    );
 
     let code = serde_json::to_value(AuthErrorCode::InvalidRequest).expect("serialize");
     assert_eq!(code, serde_json::json!("invalid_request"));
@@ -632,7 +1056,7 @@ async fn serializable_records_never_include_raw_oauth_or_token_material() {
             pkce_verifier: PkceVerifierSecret::new(secret("raw-pkce-verifier"))
                 .expect("valid verifier"),
             pkce_verifier_hash: pkce_hash("pkce-hash"),
-            scopes: vec!["repo".to_string()],
+            scopes: provider_scopes(&["repo"]),
         })
         .await
         .expect("exchange");
@@ -652,4 +1076,19 @@ async fn serializable_records_never_include_raw_oauth_or_token_material() {
     assert!(!serialized.contains("raw-pkce-verifier"));
     assert!(!serialized.contains("ghp_"));
     assert!(serialized.contains("code-hash"));
+
+    let account = services
+        .get_account(
+            &owner,
+            completed
+                .credential_account_id
+                .expect("completed flow has account"),
+        )
+        .await
+        .expect("lookup")
+        .expect("account");
+    let account_debug = format!("{account:?}");
+    assert!(!account_debug.contains("oauth-access"));
+    assert!(!account_debug.contains("oauth-refresh"));
+    assert!(account_debug.contains("[REDACTED]"));
 }

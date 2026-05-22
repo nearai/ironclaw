@@ -447,6 +447,24 @@ impl RebornBinaryE2EHarness {
         .await
     }
 
+    pub async fn with_host_runtime_core_builtin_capabilities_network_policy(
+        conversation_id: &str,
+        model_gateway: RebornTraceReplayModelGateway,
+        network_policy: NetworkPolicy,
+    ) -> HarnessResult<Self> {
+        let host_runtime = Arc::new(
+            HostRuntimeCapabilityHarness::core_builtin_tools_with_network_policy(network_policy)
+                .await?,
+        );
+        Self::with_model_gateway_capability_mode(
+            conversation_id,
+            model_gateway,
+            HarnessCapabilityMode::HostRuntime(host_runtime),
+            false,
+        )
+        .await
+    }
+
     pub async fn with_harness_blocked_evidence(
         conversation_id: &str,
         model_gateway: RebornTraceReplayModelGateway,
@@ -1312,6 +1330,12 @@ impl HostRuntimeCapabilityHarness {
     }
 
     async fn core_builtin_tools() -> HarnessResult<Self> {
+        Self::core_builtin_tools_with_network_policy(http_test_policy()).await
+    }
+
+    async fn core_builtin_tools_with_network_policy(
+        network_policy: NetworkPolicy,
+    ) -> HarnessResult<Self> {
         let root = Arc::new(tempfile::tempdir()?);
         let storage_root = root.path().join("local-dev");
         let workspace_root = storage_root.join("workspace");
@@ -1342,7 +1366,7 @@ impl HostRuntimeCapabilityHarness {
                 EffectKind::WriteFilesystem,
                 EffectKind::Network,
             ],
-            network_policy: http_test_policy(),
+            network_policy,
             user_id: UserId::new("reborn-e2e-core-builtins-user")?,
             invocations: Arc::new(Mutex::new(Vec::new())),
             results: Arc::new(Mutex::new(Vec::new())),
@@ -1416,7 +1440,7 @@ impl LoopCapabilityPortFactory for HostRuntimeHarnessCapabilityPortFactory {
             visible_request,
             self.harness.io.clone(),
             result_writer,
-            Some(milestone_sink),
+            milestone_sink,
         )
         .with_execution_mounts(execution_mounts)
         .for_run_context(run_context.clone());

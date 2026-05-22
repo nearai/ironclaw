@@ -1,10 +1,12 @@
+use std::fmt;
+
 use async_trait::async_trait;
 use ironclaw_host_api::{ExtensionId, SecretHandle};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AuthProductError, CredentialAccountId, CredentialAccountLabel, Timestamp, ids::AuthProviderId,
-    scope::AuthProductScope,
+    AuthProductError, CredentialAccountId, CredentialAccountLabel, ProviderScope, Timestamp,
+    ids::AuthProviderId, scope::AuthProductScope,
 };
 
 /// Credential account status projected to product surfaces.
@@ -31,7 +33,7 @@ pub enum CredentialOwnership {
 
 /// Durable credential account metadata. Secret values live behind handles and
 /// never appear in this record.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CredentialAccount {
     pub id: CredentialAccountId,
     pub scope: AuthProductScope,
@@ -39,18 +41,40 @@ pub struct CredentialAccount {
     pub label: CredentialAccountLabel,
     pub status: CredentialAccountStatus,
     pub ownership: CredentialOwnership,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_extension: Option<ExtensionId>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub granted_extensions: Vec<ExtensionId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_secret: Option<SecretHandle>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_secret: Option<SecretHandle>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub scopes: Vec<String>,
+    pub scopes: Vec<ProviderScope>,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
+}
+
+impl fmt::Debug for CredentialAccount {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CredentialAccount")
+            .field("id", &self.id)
+            .field("scope", &self.scope)
+            .field("provider", &self.provider)
+            .field("label", &self.label)
+            .field("status", &self.status)
+            .field("ownership", &self.ownership)
+            .field("owner_extension", &self.owner_extension)
+            .field("granted_extensions", &self.granted_extensions)
+            .field(
+                "access_secret",
+                &self.access_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "refresh_secret",
+                &self.refresh_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("scopes", &self.scopes)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 impl CredentialAccount {
@@ -86,9 +110,64 @@ pub struct CredentialAccountProjection {
     pub secret_handle_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CredentialAccountListRequest {
+    pub scope: AuthProductScope,
+    pub provider: AuthProviderId,
+    pub cursor: Option<CredentialAccountId>,
+    pub limit: usize,
+}
+
+impl CredentialAccountListRequest {
+    pub const DEFAULT_LIMIT: usize = 50;
+    pub const MAX_LIMIT: usize = 100;
+
+    pub fn new(scope: AuthProductScope, provider: AuthProviderId) -> Self {
+        Self {
+            scope,
+            provider,
+            cursor: None,
+            limit: Self::DEFAULT_LIMIT,
+        }
+    }
+
+    pub fn with_cursor(mut self, cursor: CredentialAccountId) -> Self {
+        self.cursor = Some(cursor);
+        self
+    }
+
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = limit;
+        self
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), AuthProductError> {
+        if self.limit == 0 {
+            return Err(AuthProductError::invalid_request(
+                "credential account list limit must be non-zero",
+            ));
+        }
+        if self.limit > Self::MAX_LIMIT {
+            return Err(AuthProductError::invalid_request(format!(
+                "credential account list limit must be at most {}",
+                Self::MAX_LIMIT
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialAccountListPage {
+    pub accounts: Vec<CredentialAccountProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<CredentialAccountId>,
+}
+
 /// Input used to create or update an account from an OAuth/manual setup result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewCredentialAccount {
+    pub update_account_id: Option<CredentialAccountId>,
     pub scope: AuthProductScope,
     pub provider: AuthProviderId,
     pub label: CredentialAccountLabel,
@@ -98,7 +177,7 @@ pub struct NewCredentialAccount {
     pub granted_extensions: Vec<ExtensionId>,
     pub access_secret: Option<SecretHandle>,
     pub refresh_secret: Option<SecretHandle>,
-    pub scopes: Vec<String>,
+    pub scopes: Vec<ProviderScope>,
 }
 
 #[async_trait]
@@ -116,9 +195,8 @@ pub trait CredentialAccountService: Send + Sync {
 
     async fn list_accounts(
         &self,
-        scope: &AuthProductScope,
-        provider: &AuthProviderId,
-    ) -> Result<Vec<CredentialAccountProjection>, AuthProductError>;
+        request: CredentialAccountListRequest,
+    ) -> Result<CredentialAccountListPage, AuthProductError>;
 
     async fn update_status(
         &self,

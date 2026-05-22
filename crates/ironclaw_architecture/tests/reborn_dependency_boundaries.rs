@@ -159,8 +159,12 @@ fn reborn_cli_binary_crate_stays_separate_from_v1_root() {
     assert_workspace_deps_exactly(
         &dependencies,
         "ironclaw_reborn_cli",
-        ["ironclaw_reborn_composition", "ironclaw_reborn_config"],
-        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition and ironclaw_reborn_config only; the composition root is the assembled-runtime facade and the boot-config contract crate. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
+        [
+            "ironclaw_reborn_composition",
+            "ironclaw_reborn_config",
+            "ironclaw_reborn_webui_ingress",
+        ],
+        "ironclaw_reborn_cli should enter Reborn through ironclaw_reborn_composition (assembled-runtime facade), ironclaw_reborn_config (boot-config contract), and ironclaw_reborn_webui_ingress (host-owned WebUI serve lifecycle) only. Adding any other workspace crate here re-opens speculative public API access to internal Reborn types.",
     );
     assert_workspace_deps_exactly(
         &dependencies_all_kinds,
@@ -1424,6 +1428,56 @@ fn boundary_rules() -> Vec<BoundaryRule> {
                 "ironclaw_threads",
                 "ironclaw_tui",
                 "ironclaw_turns",
+            ],
+        },
+        BoundaryRule {
+            // Host-owned WebUI ingress: binds the TCP listener and runs
+            // the axum serve loop for the composed v2 Router. Deliberately
+            // narrow: it must not pull product/API internals, lower
+            // substrate handles, or v1 surface code into the binary path.
+            // Reaches Reborn through ironclaw_reborn_composition's facade
+            // only (Router + WebuiAuthenticator trait + WebuiServeConfig).
+            crate_name: "ironclaw_reborn_webui_ingress",
+            forbidden: vec![
+                "ironclaw",
+                "ironclaw_authorization",
+                "ironclaw_capabilities",
+                "ironclaw_conversations",
+                "ironclaw_dispatcher",
+                "ironclaw_engine",
+                "ironclaw_events",
+                "ironclaw_extensions",
+                "ironclaw_filesystem",
+                "ironclaw_gateway",
+                "ironclaw_host_runtime",
+                "ironclaw_llm",
+                "ironclaw_loop_support",
+                "ironclaw_mcp",
+                "ironclaw_memory",
+                "ironclaw_network",
+                "ironclaw_outbound",
+                "ironclaw_processes",
+                "ironclaw_product_adapters",
+                "ironclaw_product_adapter_registry",
+                "ironclaw_product_workflow",
+                "ironclaw_reborn",
+                "ironclaw_reborn_cli",
+                "ironclaw_reborn_config",
+                "ironclaw_reborn_event_store",
+                "ironclaw_resources",
+                "ironclaw_run_state",
+                "ironclaw_runtime_policy",
+                "ironclaw_safety",
+                "ironclaw_scripts",
+                "ironclaw_secrets",
+                "ironclaw_skills",
+                "ironclaw_threads",
+                "ironclaw_trust",
+                "ironclaw_tui",
+                "ironclaw_turns",
+                "ironclaw_wasm",
+                "ironclaw_wasm_product_adapters",
+                "ironclaw_webui_v2",
             ],
         },
         BoundaryRule {

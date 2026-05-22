@@ -5524,28 +5524,34 @@ impl ResourceGovernor for FailingCleanupResourceGovernor {
         Ok(())
     }
 
-    fn reserve(
+    fn reserve_with_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
-    ) -> Result<ResourceReservation, ResourceError> {
-        Ok(ResourceReservation {
-            id: ResourceReservationId::new(),
-            scope,
-            estimate,
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        Ok(ironclaw_resources::ReservationOutcome {
+            reservation: ResourceReservation {
+                id: ResourceReservationId::new(),
+                scope,
+                estimate,
+            },
+            warnings: Vec::new(),
         })
     }
 
-    fn reserve_with_id(
+    fn reserve_with_id_and_outcome(
         &self,
         scope: ResourceScope,
         estimate: ResourceEstimate,
         reservation_id: ResourceReservationId,
-    ) -> Result<ResourceReservation, ResourceError> {
-        Ok(ResourceReservation {
-            id: reservation_id,
-            scope,
-            estimate,
+    ) -> Result<ironclaw_resources::ReservationOutcome, ResourceError> {
+        Ok(ironclaw_resources::ReservationOutcome {
+            reservation: ResourceReservation {
+                id: reservation_id,
+                scope,
+                estimate,
+            },
+            warnings: Vec::new(),
         })
     }
 
@@ -5562,6 +5568,13 @@ impl ResourceGovernor for FailingCleanupResourceGovernor {
         reservation_id: ResourceReservationId,
     ) -> Result<ResourceReceipt, ResourceError> {
         Err(ResourceError::ReservationMismatch { id: reservation_id })
+    }
+
+    fn account_snapshot(
+        &self,
+        _account: &ResourceAccount,
+    ) -> Result<Option<ironclaw_resources::AccountSnapshot>, ResourceError> {
+        Ok(None)
     }
 }
 

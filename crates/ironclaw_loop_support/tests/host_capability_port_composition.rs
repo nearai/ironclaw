@@ -24,8 +24,8 @@ use ironclaw_turns::{
     InMemoryRunProfileResolver, LoopResultRef, RunProfileResolutionRequest, RunProfileResolver,
     TurnId, TurnRunId, TurnScope,
     run_profile::{
-        AgentLoopHostError, AgentLoopHostErrorKind, LoopCapabilityPort, LoopRunContext,
-        ProviderToolCall, VisibleCapabilityRequest,
+        AgentLoopHostError, AgentLoopHostErrorKind, InMemoryLoopHostMilestoneSink,
+        LoopCapabilityPort, LoopRunContext, ProviderToolCall, VisibleCapabilityRequest,
     },
 };
 
@@ -74,7 +74,7 @@ async fn host_capability_port_composition_factory_builds_loop_capability_port() 
         visible_request,
         Arc::new(UnusedInputResolver),
         Arc::new(UnusedResultWriter),
-        None,
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
     );
     let port: Arc<dyn LoopCapabilityPort> = factory.for_run_context(run_context);
 
@@ -115,7 +115,7 @@ async fn visible_capability_request_rejects_caller_supplied_mounts() {
         visible_request,
         Arc::new(UnusedInputResolver),
         Arc::new(UnusedResultWriter),
-        None,
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
     );
     let port: Arc<dyn LoopCapabilityPort> = factory.for_run_context(run_context);
 
@@ -155,7 +155,7 @@ async fn factory_stages_provider_tool_call_arguments_without_custom_resolver_ove
         visible_request,
         Arc::new(UnusedInputResolver),
         Arc::new(UnusedResultWriter),
-        None,
+        Arc::new(InMemoryLoopHostMilestoneSink::default()),
     );
     let port: Arc<dyn LoopCapabilityPort> = factory.for_run_context(run_context);
 

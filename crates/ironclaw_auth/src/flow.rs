@@ -6,7 +6,7 @@ use crate::{
     CredentialAccountLabel, LifecyclePackageRef, OpaqueStateHash, ProductActionRef, Timestamp,
     TurnRunRef,
     credential::CredentialAccountStatus,
-    ids::{AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId},
+    ids::{AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, OAuthAuthorizationUrl},
     scope::AuthProductScope,
 };
 
@@ -39,7 +39,7 @@ pub enum AuthFlowStatus {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AuthChallenge {
     OAuthUrl {
-        authorization_url: String,
+        authorization_url: OAuthAuthorizationUrl,
         expires_at: Timestamp,
     },
     ManualTokenRequired {

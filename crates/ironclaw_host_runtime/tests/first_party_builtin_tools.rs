@@ -240,6 +240,28 @@ async fn builtin_shell_returns_stderr_and_nonzero_exit_without_dispatch_failure(
 }
 
 #[tokio::test]
+async fn builtin_shell_rejects_hosted_process_plan_before_handler_runs() {
+    let process_port = Arc::new(RecordingProcessPort::default());
+    let runtime =
+        runtime_with_process_port_and_policy(Arc::clone(&process_port), hosted_dev_policy());
+
+    let error = invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "echo must not run"}),
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Authorization);
+    assert!(
+        process_port.requests.lock().unwrap().is_empty(),
+        "hosted shell must fail at invocation-service resolution before the handler can run"
+    );
+}
+
+#[tokio::test]
 async fn builtin_shell_reuses_v1_shell_validation() {
     for input in [
         json!({"command": "cat ~/server.key"}),
@@ -569,6 +591,26 @@ async fn builtin_http_runtime_policy_denial_stops_before_egress() {
 }
 
 #[tokio::test]
+async fn builtin_http_rejects_hosted_allowlist_network_plan_before_egress() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        br#"{"ok":true}"#.to_vec(),
+    ));
+    let runtime = runtime_with_http_egress_and_policy(Arc::clone(&egress), hosted_dev_policy());
+
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/v1/items"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Network);
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
 async fn builtin_http_defaults_json_body_content_type() {
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(b"ok".to_vec()));
     let runtime = runtime_with_http_egress(Arc::clone(&egress));
@@ -593,8 +635,8 @@ async fn builtin_http_defaults_json_body_content_type() {
 }
 
 #[tokio::test]
-async fn builtin_http_fails_closed_without_runtime_egress() {
-    let runtime = runtime();
+async fn builtin_http_fails_closed_when_policy_allows_network_but_runtime_egress_is_missing() {
+    let runtime = runtime_with_policy(local_dev_policy());
     let error = invoke_with_context(
         &runtime,
         HTTP_CAPABILITY_ID,
@@ -958,6 +1000,25 @@ async fn builtin_http_runs_blocking_egress_off_tokio_worker() {
     }
 
     invocation.await.unwrap();
+}
+
+#[tokio::test]
+async fn builtin_read_file_rejects_scoped_virtual_filesystem_plan_before_handler_access() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("README.md"), "must not be read\n").unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem_and_policy(filesystem, network_denied_policy());
+
+    let error = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/README.md"}),
+        execution_context_with_mounts([READ_FILE_CAPABILITY_ID], mounts),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Authorization);
 }
 
 #[tokio::test]
@@ -1898,6 +1959,16 @@ fn runtime_with_filesystem<F>(filesystem: F) -> impl HostRuntime
 where
     F: RootFilesystem + 'static,
 {
+    runtime_with_filesystem_and_policy(filesystem, local_dev_policy())
+}
+
+fn runtime_with_filesystem_and_policy<F>(
+    filesystem: F,
+    policy: EffectiveRuntimePolicy,
+) -> impl HostRuntime
+where
+    F: RootFilesystem + 'static,
+{
     HostRuntimeServices::new(
         Arc::new(registry()),
         Arc::new(filesystem),
@@ -1907,11 +1978,23 @@ where
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
+    .with_runtime_policy(policy)
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
 
 fn runtime_with_process_port<T>(process_port: Arc<T>) -> impl HostRuntime
+where
+    T: RuntimeProcessPort + 'static,
+{
+    runtime_with_process_port_and_policy(process_port, local_dev_policy())
+}
+
+fn runtime_with_process_port_and_policy<T>(
+    process_port: Arc<T>,
+    policy: EffectiveRuntimePolicy,
+) -> impl HostRuntime
 where
     T: RuntimeProcessPort + 'static,
 {
@@ -1925,6 +2008,8 @@ where
     )
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
     .with_runtime_process_port(process_port)
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
+    .with_runtime_policy(policy)
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -1942,6 +2027,34 @@ fn runtime_with_policy(policy: EffectiveRuntimePolicy) -> impl HostRuntime {
     .with_trust_policy(Arc::new(trust_policy()))
     .with_runtime_policy(policy)
     .host_runtime_for_local_testing()
+}
+
+fn local_dev_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn hosted_dev_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::HostedMultiTenant,
+        requested_profile: RuntimeProfile::HostedDev,
+        resolved_profile: RuntimeProfile::HostedDev,
+        filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+        process_backend: ProcessBackendKind::TenantSandbox,
+        network_mode: NetworkMode::Allowlist,
+        secret_mode: SecretMode::TenantBroker,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::Standard,
+    }
 }
 
 fn runtime_with_http_egress<T>(egress: Arc<T>) -> impl HostRuntime

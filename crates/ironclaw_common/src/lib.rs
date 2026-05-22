@@ -30,3 +30,24 @@ pub use util::{truncate_for_preview, truncate_preview};
 /// clamp in `create_job_inner`) and the worker runtime (`worker/job.rs`).
 /// A single source of truth prevents the two from drifting.
 pub const MAX_WORKER_ITERATIONS: u32 = 500;
+
+// ─── Reborn cost-based budget invariants ────────────────────────────────────
+//
+// These constants are the hard backstops behind the dollar-based budget
+// system. They guarantee that even a misconfigured per-thread limit cannot
+// let a runaway loop spend more than `HARD_CAP_BUDGET_USD` or run longer
+// than `HARD_CAP_WALL_CLOCK_SECS` / `HARD_CAP_ITERATIONS`. They are
+// invariants, not defaults: configuration that tries to exceed them must
+// fail validation at load time.
+
+/// Absolute per-thread wall-clock backstop (24h).
+pub const HARD_CAP_WALL_CLOCK_SECS: u64 = 86_400;
+
+/// Absolute per-thread iteration backstop. Catches infinite loops that
+/// somehow keep producing low-utilization steps under budget enforcement.
+pub const HARD_CAP_ITERATIONS: u32 = 10_000;
+
+/// Absolute per-thread USD ceiling. Represented as a string so callers
+/// can parse into their preferred Decimal type without forcing a
+/// workspace dep here.
+pub const HARD_CAP_BUDGET_USD: &str = "100.00";

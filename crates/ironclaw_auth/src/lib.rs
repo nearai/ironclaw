@@ -22,8 +22,9 @@ pub use cleanup::{
     SecretCleanupAction, SecretCleanupReport, SecretCleanupRequest, SecretCleanupService,
 };
 pub use credential::{
-    CredentialAccount, CredentialAccountProjection, CredentialAccountService,
-    CredentialAccountStatus, CredentialOwnership, CredentialSetupService, NewCredentialAccount,
+    CredentialAccount, CredentialAccountListPage, CredentialAccountListRequest,
+    CredentialAccountProjection, CredentialAccountService, CredentialAccountStatus,
+    CredentialOwnership, CredentialSetupService, NewCredentialAccount,
 };
 pub use error::{AuthErrorCode, AuthProductError};
 pub use fakes::InMemoryAuthProductServices;
@@ -34,7 +35,8 @@ pub use flow::{
 pub use ids::{
     AuthFlowId, AuthGateRef, AuthInteractionId, AuthProviderId, AuthSessionId,
     AuthorizationCodeHash, CredentialAccountId, CredentialAccountLabel, LifecyclePackageRef,
-    OpaqueStateHash, PkceVerifierHash, ProductActionRef, TurnRunRef,
+    OAuthAuthorizationUrl, OpaqueStateHash, PkceVerifierHash, ProductActionRef, ProviderScope,
+    TurnRunRef,
 };
 pub use interaction::{
     AuthInteractionService, ManualTokenSetupRequest, SecretSubmitRequest, SecretSubmitResult,

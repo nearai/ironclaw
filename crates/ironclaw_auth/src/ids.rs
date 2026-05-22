@@ -7,7 +7,9 @@ use crate::{AuthProductError, validate_public_text};
 
 macro_rules! uuid_id {
     ($name:ident) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
+        )]
         #[serde(transparent)]
         pub struct $name(Uuid);
 
@@ -41,8 +43,8 @@ macro_rules! uuid_id {
 
 macro_rules! validated_string {
     ($name:ident, $label:literal, $max:expr) => {
-        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
-        #[serde(transparent)]
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        #[serde(try_from = "String", into = "String")]
         pub struct $name(String);
 
         impl $name {
@@ -67,13 +69,9 @@ macro_rules! validated_string {
             }
         }
 
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                let value = String::deserialize(deserializer)?;
-                Self::try_from(value).map_err(serde::de::Error::custom)
+        impl From<$name> for String {
+            fn from(value: $name) -> Self {
+                value.0
             }
         }
 
@@ -85,12 +83,78 @@ macro_rules! validated_string {
     };
 }
 
+/// HTTPS authorization URL emitted to product surfaces for OAuth redirects.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct OAuthAuthorizationUrl(String);
+
+impl OAuthAuthorizationUrl {
+    const MAX_BYTES: usize = 2048;
+
+    pub fn new(value: impl Into<String>) -> Result<Self, AuthProductError> {
+        let value = validate_public_text(value, "oauth authorization url", Self::MAX_BYTES)?;
+        validate_https_authorization_url(&value)?;
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl TryFrom<String> for OAuthAuthorizationUrl {
+    type Error = AuthProductError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::new(value)
+    }
+}
+
+impl From<OAuthAuthorizationUrl> for String {
+    fn from(value: OAuthAuthorizationUrl) -> Self {
+        value.0
+    }
+}
+
+impl fmt::Display for OAuthAuthorizationUrl {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+fn validate_https_authorization_url(value: &str) -> Result<(), AuthProductError> {
+    let Some(rest) = value.strip_prefix("https://") else {
+        return Err(AuthProductError::invalid_request(
+            "oauth authorization url must use https",
+        ));
+    };
+    let authority = rest.split(['/', '?', '#']).next().ok_or_else(|| {
+        AuthProductError::invalid_request("oauth authorization url host is required")
+    })?;
+    if authority.is_empty() {
+        return Err(AuthProductError::invalid_request(
+            "oauth authorization url host is required",
+        ));
+    }
+    if authority.contains('@') {
+        return Err(AuthProductError::invalid_request(
+            "oauth authorization url must not contain userinfo",
+        ));
+    }
+    Ok(())
+}
+
 uuid_id!(AuthFlowId);
 uuid_id!(CredentialAccountId);
 uuid_id!(AuthInteractionId);
 
 validated_string!(AuthProviderId, "auth provider id", 128);
 validated_string!(CredentialAccountLabel, "credential account label", 256);
+validated_string!(ProviderScope, "provider scope", 256);
 validated_string!(ProductActionRef, "product action ref", 256);
 validated_string!(LifecyclePackageRef, "lifecycle package ref", 256);
 validated_string!(TurnRunRef, "turn run ref", 256);

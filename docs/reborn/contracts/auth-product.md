@@ -73,6 +73,7 @@ AuthContinuationRef::{setup_only, lifecycle_activation, turn_gate_resume,
 
 Rules:
 
+- OAuth redirect challenges carry a validated HTTPS `OAuthAuthorizationUrl`.
 - Durable records may store state/verifier/code hashes, ids, handles, and
   redacted metadata only.
 - Raw OAuth state, authorization code, PKCE verifier, access token, refresh
@@ -101,7 +102,7 @@ owner_extension?
 granted_extensions[]
 access_secret?
 refresh_secret?
-scopes[]
+ProviderScope[]
 ```
 
 Statuses are `configured`, `missing`, `expired`, `refresh_failed`, `revoked`,
@@ -119,6 +120,11 @@ Rules:
   `account_selection_required` instead of guessing.
 - Admin/shared credentials must be explicit accounts/grants, not implicit
   `default` fallback authority.
+- Account updates must name the target `CredentialAccountId` and preserve the
+  existing ownership/grant authority. Matching label/provider/scope is not
+  enough to replace handles or ownership.
+- Account listing uses explicit limit/cursor pagination and returns redacted
+  projections only.
 
 ---
 
@@ -154,7 +160,7 @@ OAuthProviderCallbackRequest {
   pkce_verifier_hash,
   provider,
   account_label,
-  scopes
+  ProviderScope[]
 }
 ```
 

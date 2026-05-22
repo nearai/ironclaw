@@ -6,7 +6,7 @@ use secrecy::{ExposeSecret, SecretString};
 
 use crate::{
     AuthProductError, AuthorizationCodeHash, CredentialAccountId, CredentialAccountLabel,
-    PkceVerifierHash, ids::AuthProviderId,
+    PkceVerifierHash, ProviderScope, ids::AuthProviderId,
 };
 
 macro_rules! one_shot_secret {
@@ -62,7 +62,7 @@ pub struct OAuthProviderCallbackRequest {
     pub authorization_code_hash: AuthorizationCodeHash,
     pub pkce_verifier: PkceVerifierSecret,
     pub pkce_verifier_hash: PkceVerifierHash,
-    pub scopes: Vec<String>,
+    pub scopes: Vec<ProviderScope>,
 }
 
 impl fmt::Debug for OAuthProviderCallbackRequest {
@@ -89,7 +89,7 @@ pub struct OAuthProviderExchange {
     pub pkce_verifier_hash: PkceVerifierHash,
     pub access_secret: SecretHandle,
     pub refresh_secret: Option<SecretHandle>,
-    pub scopes: Vec<String>,
+    pub scopes: Vec<ProviderScope>,
     pub account_id: Option<CredentialAccountId>,
 }
 

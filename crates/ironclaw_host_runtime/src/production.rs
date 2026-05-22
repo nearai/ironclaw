@@ -1143,6 +1143,9 @@ fn dispatch_kind_to_failure(kind: DispatchFailureKind) -> RuntimeFailureKind {
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::FilesystemDenied) => {
             RuntimeFailureKind::Authorization
         }
+        DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::SecretDenied) => {
+            RuntimeFailureKind::Authorization
+        }
         DispatchFailureKind::Runtime(RuntimeDispatchErrorKind::ExitFailure) => {
             RuntimeFailureKind::Process
         }
@@ -1257,6 +1260,10 @@ mod tests {
             (
                 RuntimeDispatchErrorKind::Resource,
                 RuntimeFailureKind::Resource,
+            ),
+            (
+                RuntimeDispatchErrorKind::SecretDenied,
+                RuntimeFailureKind::Authorization,
             ),
             (
                 RuntimeDispatchErrorKind::UndeclaredCapability,
