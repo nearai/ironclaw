@@ -132,7 +132,7 @@ pub struct HostRuntimeLoopCapabilityPortFactory {
     visible_request: ironclaw_host_runtime::VisibleCapabilityRequest,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+    milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     execution_mounts: MountView,
 }
 
@@ -142,7 +142,7 @@ impl HostRuntimeLoopCapabilityPortFactory {
         visible_request: ironclaw_host_runtime::VisibleCapabilityRequest,
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
-        milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+        milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     ) -> Self {
         Self {
             runtime,
@@ -152,26 +152,6 @@ impl HostRuntimeLoopCapabilityPortFactory {
             milestone_sink,
             execution_mounts: MountView::default(),
         }
-    }
-
-    pub fn without_milestone_sink(
-        runtime: Arc<dyn HostRuntime>,
-        visible_request: ironclaw_host_runtime::VisibleCapabilityRequest,
-        input_resolver: Arc<dyn LoopCapabilityInputResolver>,
-        result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    ) -> Self {
-        Self::new(
-            runtime,
-            visible_request,
-            input_resolver,
-            result_writer,
-            None,
-        )
-    }
-
-    pub fn with_milestone_sink(mut self, sink: Arc<dyn LoopHostMilestoneSink>) -> Self {
-        self.milestone_sink = Some(sink);
-        self
     }
 
     pub fn with_execution_mounts(mut self, mounts: MountView) -> Self {
@@ -184,17 +164,15 @@ impl HostRuntimeLoopCapabilityPortFactory {
     }
 
     fn port_for_run_context(&self, run_context: LoopRunContext) -> HostRuntimeLoopCapabilityPort {
-        let mut port = HostRuntimeLoopCapabilityPort::new(
+        HostRuntimeLoopCapabilityPort::new(
             Arc::clone(&self.runtime),
             run_context,
             self.visible_request.clone(),
             Arc::clone(&self.input_resolver),
             Arc::clone(&self.result_writer),
-        );
-        if let Some(sink) = &self.milestone_sink {
-            port = port.with_milestone_sink(Arc::clone(sink));
-        }
-        port.with_execution_mounts(self.execution_mounts.clone())
+            Arc::clone(&self.milestone_sink),
+        )
+        .with_execution_mounts(self.execution_mounts.clone())
     }
 }
 
@@ -360,17 +338,63 @@ enum DispatchReservation {
     LoopCompleted(Result<CapabilityOutcome, AgentLoopHostError>),
 }
 
+/// RAII guard for an `InFlight` dispatch reservation: if the holder drops
+/// without calling [`Self::commit`], the reservation is cleared and any
+/// waiters are notified. Clearing failures are logged but do not panic, since
+/// dropping happens on unwind paths where there's nothing useful to propagate.
+struct DispatchReservationGuard<'a> {
+    port: &'a HostRuntimeLoopCapabilityPort,
+    key: IdempotencyKey,
+    committed: bool,
+}
+
+impl DispatchReservationGuard<'_> {
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for DispatchReservationGuard<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        if let Err(error) = self.port.clear_dispatch(&self.key) {
+            tracing::warn!(
+                cleanup_error = %error,
+                "failed to clean up dispatch reservation after early return"
+            );
+        }
+    }
+}
+
 pub struct HostRuntimeLoopCapabilityPort {
     runtime: Arc<dyn HostRuntime>,
     run_context: LoopRunContext,
     visible_request: ironclaw_host_runtime::VisibleCapabilityRequest,
     input_resolver: Arc<dyn LoopCapabilityInputResolver>,
     result_writer: Arc<dyn LoopCapabilityResultWriter>,
-    milestone_sink: Option<Arc<dyn LoopHostMilestoneSink>>,
+    milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     execution_mounts: MountView,
     snapshots: Mutex<HashMap<String, SurfaceSnapshot>>,
     current_surface_version: Mutex<Option<String>>,
     dispatch_records: Mutex<DispatchRecordStore>,
+}
+
+/// Lock a poisoned-aware `Mutex` and wrap a poison error as the canonical
+/// "<label> is unavailable" host error. Every store in this module is reached
+/// via this helper so the error message stays consistent and the call sites
+/// shrink to one line.
+fn lock_mut<'a, T>(
+    mutex: &'a Mutex<T>,
+    label: &'static str,
+) -> Result<std::sync::MutexGuard<'a, T>, AgentLoopHostError> {
+    mutex.lock().map_err(|_| {
+        AgentLoopHostError::new(
+            AgentLoopHostErrorKind::Unavailable,
+            format!("{label} is unavailable"),
+        )
+    })
 }
 
 impl HostRuntimeLoopCapabilityPort {
@@ -380,6 +404,7 @@ impl HostRuntimeLoopCapabilityPort {
         visible_request: ironclaw_host_runtime::VisibleCapabilityRequest,
         input_resolver: Arc<dyn LoopCapabilityInputResolver>,
         result_writer: Arc<dyn LoopCapabilityResultWriter>,
+        milestone_sink: Arc<dyn LoopHostMilestoneSink>,
     ) -> Self {
         let input_resolver: Arc<dyn LoopCapabilityInputResolver> =
             Arc::new(ProviderToolCallInputResolver::new(input_resolver));
@@ -389,17 +414,12 @@ impl HostRuntimeLoopCapabilityPort {
             visible_request,
             input_resolver,
             result_writer,
-            milestone_sink: None,
+            milestone_sink,
             execution_mounts: MountView::default(),
             snapshots: Mutex::new(HashMap::new()),
             current_surface_version: Mutex::new(None),
             dispatch_records: Mutex::new(DispatchRecordStore::default()),
         }
-    }
-
-    pub fn with_milestone_sink(mut self, sink: Arc<dyn LoopHostMilestoneSink>) -> Self {
-        self.milestone_sink = Some(sink);
-        self
     }
 
     pub fn with_execution_mounts(mut self, mounts: MountView) -> Self {
@@ -411,12 +431,7 @@ impl HostRuntimeLoopCapabilityPort {
         &self,
         version: &ironclaw_turns::run_profile::CapabilitySurfaceVersion,
     ) -> Result<SurfaceSnapshot, AgentLoopHostError> {
-        let snapshots = self.snapshots.lock().map_err(|_| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Unavailable,
-                "capability surface snapshot store is unavailable",
-            )
-        })?;
+        let snapshots = lock_mut(&self.snapshots, "capability surface snapshot store")?;
         snapshots.get(version.as_str()).cloned().ok_or_else(|| {
             AgentLoopHostError::new(
                 AgentLoopHostErrorKind::StaleSurface,
@@ -426,22 +441,12 @@ impl HostRuntimeLoopCapabilityPort {
     }
 
     fn current_snapshot(&self) -> Result<Option<(String, SurfaceSnapshot)>, AgentLoopHostError> {
-        let snapshots = self.snapshots.lock().map_err(|_| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Unavailable,
-                "capability surface snapshot store is unavailable",
-            )
-        })?;
-        let version = self
-            .current_surface_version
-            .lock()
-            .map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "capability surface snapshot pointer is unavailable",
-                )
-            })?
-            .clone();
+        let snapshots = lock_mut(&self.snapshots, "capability surface snapshot store")?;
+        let version = lock_mut(
+            &self.current_surface_version,
+            "capability surface snapshot pointer",
+        )?
+        .clone();
         let Some(version) = version else {
             return Ok(None);
         };
@@ -458,15 +463,7 @@ impl HostRuntimeLoopCapabilityPort {
         &self,
         key: &IdempotencyKey,
     ) -> Result<DispatchReservation, AgentLoopHostError> {
-        self.dispatch_records
-            .lock()
-            .map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "capability dispatch record store is unavailable",
-                )
-            })?
-            .reserve(key)
+        lock_mut(&self.dispatch_records, "capability dispatch record store")?.reserve(key)
     }
 
     fn dispatch_in_flight_matches(
@@ -474,15 +471,10 @@ impl HostRuntimeLoopCapabilityPort {
         key: &IdempotencyKey,
         notify: &Arc<Notify>,
     ) -> Result<bool, AgentLoopHostError> {
-        self.dispatch_records
-            .lock()
-            .map(|records| records.in_flight_matches(key, notify))
-            .map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "capability dispatch record store is unavailable",
-                )
-            })
+        Ok(
+            lock_mut(&self.dispatch_records, "capability dispatch record store")?
+                .in_flight_matches(key, notify),
+        )
     }
 
     fn record_runtime_completed(
@@ -491,22 +483,13 @@ impl HostRuntimeLoopCapabilityPort {
         requested_capability_id: CapabilityId,
         outcome: RuntimeCapabilityOutcome,
     ) -> Result<(), AgentLoopHostError> {
-        let notify = self
-            .dispatch_records
-            .lock()
-            .map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "capability dispatch record store is unavailable",
-                )
-            })?
-            .record(
-                key,
-                DispatchRecord::RuntimeCompleted {
-                    requested_capability_id,
-                    outcome,
-                },
-            );
+        let notify = lock_mut(&self.dispatch_records, "capability dispatch record store")?.record(
+            key,
+            DispatchRecord::RuntimeCompleted {
+                requested_capability_id,
+                outcome,
+            },
+        );
         if let Some(notify) = notify {
             notify.notify_waiters();
         }
@@ -518,15 +501,7 @@ impl HostRuntimeLoopCapabilityPort {
         key: &IdempotencyKey,
         result: Result<CapabilityOutcome, AgentLoopHostError>,
     ) -> Result<(), AgentLoopHostError> {
-        let notify = self
-            .dispatch_records
-            .lock()
-            .map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "capability dispatch record store is unavailable",
-                )
-            })?
+        let notify = lock_mut(&self.dispatch_records, "capability dispatch record store")?
             .record(key, DispatchRecord::LoopCompleted(result));
         if let Some(notify) = notify {
             notify.notify_waiters();
@@ -535,20 +510,28 @@ impl HostRuntimeLoopCapabilityPort {
     }
 
     fn clear_dispatch(&self, key: &IdempotencyKey) -> Result<(), AgentLoopHostError> {
-        let notify = self
-            .dispatch_records
-            .lock()
-            .map_err(|_| {
-                AgentLoopHostError::new(
-                    AgentLoopHostErrorKind::Unavailable,
-                    "capability dispatch record store is unavailable",
-                )
-            })?
-            .remove(key);
+        let notify =
+            lock_mut(&self.dispatch_records, "capability dispatch record store")?.remove(key);
         if let Some(notify) = notify {
             notify.notify_waiters();
         }
         Ok(())
+    }
+
+    /// Drop guard for an `InFlight` dispatch reservation. Releases the
+    /// reservation (and wakes any waiters) unless [`commit`] is called first.
+    /// Use after a successful `reserve_dispatch` returns `Reserved` so any
+    /// early-return error path between reservation and outcome recording
+    /// unwinds the reservation automatically.
+    fn dispatch_reservation_guard<'a>(
+        &'a self,
+        key: &IdempotencyKey,
+    ) -> DispatchReservationGuard<'a> {
+        DispatchReservationGuard {
+            port: self,
+            key: key.clone(),
+            committed: false,
+        }
     }
 
     fn validate_visible_request_scope(&self) -> Result<(), AgentLoopHostError> {
@@ -620,12 +603,11 @@ impl HostRuntimeLoopCapabilityPort {
         &self,
         capability_id: CapabilityId,
     ) -> Result<(), AgentLoopHostError> {
-        if let Some(milestone_sink) = &self.milestone_sink {
-            let milestones =
-                LoopHostMilestoneEmitter::new(self.run_context.clone(), Arc::clone(milestone_sink));
-            milestones.capability_invoked(capability_id).await?;
-        }
-        Ok(())
+        let milestones = LoopHostMilestoneEmitter::new(
+            self.run_context.clone(),
+            Arc::clone(&self.milestone_sink),
+        );
+        milestones.capability_invoked(capability_id).await
     }
 
     fn prepare_provider_tool_call(
@@ -790,20 +772,13 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
             })
             .collect();
 
-        let mut snapshots = self.snapshots.lock().map_err(|_| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Unavailable,
-                "capability surface snapshot store is unavailable",
-            )
-        })?;
+        let mut snapshots = lock_mut(&self.snapshots, "capability surface snapshot store")?;
         snapshots.clear();
         snapshots.insert(version.as_str().to_string(), snapshot);
-        *self.current_surface_version.lock().map_err(|_| {
-            AgentLoopHostError::new(
-                AgentLoopHostErrorKind::Unavailable,
-                "capability surface snapshot pointer is unavailable",
-            )
-        })? = Some(version.as_str().to_string());
+        *lock_mut(
+            &self.current_surface_version,
+            "capability surface snapshot pointer",
+        )? = Some(version.as_str().to_string());
 
         Ok(VisibleCapabilitySurface {
             version,
@@ -852,39 +827,21 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 DispatchReservation::LoopCompleted(result) => return result,
             }
         }
-        let input = match self
+
+        // Any early `?` between reservation and `finish_runtime_outcome` unwinds
+        // the in-flight reservation via the guard's `Drop`. The success path
+        // calls `guard.commit()` so the dispatch record is replaced by
+        // `finish_runtime_outcome` rather than cleared.
+        let guard = self.dispatch_reservation_guard(&idempotency_key);
+
+        let input = self
             .input_resolver
             .resolve_capability_input(&self.run_context, &request.input_ref)
-            .await
-        {
-            Ok(input) => input,
-            Err(error) => {
-                if let Err(clear_error) = self.clear_dispatch(&idempotency_key) {
-                    tracing::warn!(
-                        cleanup_error = %clear_error,
-                        original_error = ?error,
-                        "failed to clean up state after input resolution failure"
-                    );
-                }
-                return Err(error);
-            }
-        };
+            .await?;
         let requested_capability_id = request.capability_id.clone();
-
-        if let Err(error) = self
-            .emit_capability_invoked(request.capability_id.clone())
-            .await
-        {
-            if let Err(clear_error) = self.clear_dispatch(&idempotency_key) {
-                tracing::warn!(
-                    cleanup_error = %clear_error,
-                    original_error = ?error,
-                    "failed to clean up state after milestone emission failure"
-                );
-            }
-            return Err(error);
-        }
-        let outcome = match self
+        self.emit_capability_invoked(request.capability_id.clone())
+            .await?;
+        let outcome = self
             .runtime
             .invoke_capability(
                 RuntimeCapabilityRequest::new(
@@ -905,19 +862,9 @@ impl LoopCapabilityPort for HostRuntimeLoopCapabilityPort {
                 .with_idempotency_key(idempotency_key.clone()),
             )
             .await
-        {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                if let Err(clear_error) = self.clear_dispatch(&idempotency_key) {
-                    tracing::warn!(
-                        cleanup_error = %clear_error,
-                        original_error = ?error,
-                        "failed to clean up state after host runtime failure"
-                    );
-                }
-                return Err(host_runtime_error(error));
-            }
-        };
+            .map_err(host_runtime_error)?;
+
+        guard.commit();
         self.finish_runtime_outcome(&idempotency_key, &requested_capability_id, outcome)
             .await
     }
@@ -2260,7 +2207,7 @@ mod tests {
             visible_request(context),
             dummy_input_resolver(),
             dummy_result_writer(),
-            None,
+            dummy_milestone_sink(),
         )
         .with_execution_mounts(execution_mounts.clone());
 
@@ -2280,6 +2227,7 @@ mod tests {
             visible_request(context),
             dummy_input_resolver(),
             dummy_result_writer(),
+            dummy_milestone_sink(),
         )
         .with_execution_mounts(execution_mounts.clone());
 
@@ -2593,6 +2541,10 @@ mod tests {
 
     fn dummy_result_writer() -> Arc<dyn LoopCapabilityResultWriter> {
         Arc::new(NoopCapabilityIo)
+    }
+
+    fn dummy_milestone_sink() -> Arc<dyn LoopHostMilestoneSink> {
+        Arc::new(ironclaw_turns::run_profile::InMemoryLoopHostMilestoneSink::default())
     }
 
     struct NoopHostRuntime;

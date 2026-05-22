@@ -48,6 +48,14 @@ caller before accepting messages, streaming events, canceling runs, or resolving
 gates. Browser/session metadata is not authority by itself, and send-message
 must not implicitly create missing threads.
 
+WebUI-facing facade errors must expose stable, sanitized taxonomy. Keep
+`RebornServicesErrorCode` aligned with coarse transport/status shape and
+`RebornServicesErrorKind` aligned with M1-renderable user-safe families such as
+validation, duplicate, busy, participant denied, blocked approval/auth/resource,
+replay/timeline unavailable, service unavailable, conflict, not found, and
+internal. Do not surface backend strings, host paths, provider/runtime details,
+raw prompts, tool args, or secrets through the facade error payload.
+
 Product adapter bindings must choose `TenantId` only from trusted host
 installation configuration, never from inbound adapter payloads. Default
 `AgentId`/`ProjectId` for first-contact product turns are also trusted

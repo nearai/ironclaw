@@ -93,6 +93,38 @@ pub struct WebUiCancelRunRequest {
     pub reason: Option<String>,
 }
 
+/// Browser query for WebUI list-threads read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WebUiListThreadsRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// Browser body for WebUI extension-setup interaction.
+///
+/// This is the v2 entrypoint inventory's "extensions onboarding" row.
+/// The native facade exposes the route surface so callers can
+/// inventory the API without v1 dependency, but the underlying
+/// onboarding controller remains v1 today — concrete impl returns
+/// `RebornSetupExtensionStatus::NotImplemented` until a v2-aware
+/// extension lifecycle lands.
+///
+/// `extension_name` is not part of the body — it is bound from the
+/// route path as an [`ironclaw_common::ExtensionName`] and threaded
+/// through the facade as a typed parameter. The handler/facade
+/// boundary validates the path segment so a malformed identifier
+/// never crosses into facade-internal request/response state as a
+/// raw `String`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct WebUiSetupExtensionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<serde_json::Value>,
+}
+
 /// Browser body for WebUI gate-resolution mutation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WebUiResolveGateRequest {

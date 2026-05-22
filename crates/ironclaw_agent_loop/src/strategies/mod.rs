@@ -23,6 +23,7 @@ mod context;
 mod drain;
 pub(crate) mod gate;
 mod model;
+pub mod progress;
 pub(crate) mod recovery;
 mod stop;
 

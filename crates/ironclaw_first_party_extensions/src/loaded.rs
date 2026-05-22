@@ -58,7 +58,7 @@ mod tests {
     use crate::{FirstPartySkillsExtensionHandles, skills::FirstPartySkillsExtension};
     use ironclaw_filesystem::{InMemoryBackend, ScopedFilesystem};
     use ironclaw_host_api::{
-        MountAlias, MountGrant, MountPermissions, MountView, ScopedPath, VirtualPath,
+        MountAlias, MountGrant, MountPermissions, MountView, ScopedPath, TenantId, VirtualPath,
     };
 
     fn filesystem() -> Arc<ScopedFilesystem<InMemoryBackend>> {
@@ -83,7 +83,9 @@ mod tests {
                 None,
             )
             .unwrap(),
+            TenantId::new("tenant-a").unwrap(),
         )
+        .unwrap()
     }
 
     #[test]

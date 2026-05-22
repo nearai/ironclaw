@@ -1728,6 +1728,18 @@ mod reborn_support_tests {
     }
 
     #[test]
+    fn test_adapter_rejects_actor_spoofing_against_verified_subject() {
+        let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
+        let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "alice");
+        let raw = RebornTestProductAdapter::text_payload("event-1", "bob", "thread-1", "hi")
+            .expect("payload");
+        let error = adapter
+            .parse_inbound(&raw, &evidence)
+            .expect_err("actor mismatch should reject");
+        assert!(matches!(error, ProductAdapterError::Authentication(_)));
+    }
+
+    #[test]
     fn test_adapter_rejects_malformed_inbound_payload() {
         let adapter = RebornTestProductAdapter::new("reborn-test", "install-1").expect("adapter");
         let evidence = ProtocolAuthEvidence::test_verified(AuthRequirement::BearerToken, "alice");

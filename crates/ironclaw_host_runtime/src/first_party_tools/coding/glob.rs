@@ -42,6 +42,7 @@ pub(super) async fn glob(
     let mut files_with_mtime = Vec::with_capacity(files.len());
     for (relative, path) in files {
         let stat = request
+            .services
             .filesystem
             .stat(&path)
             .await
@@ -77,6 +78,7 @@ async fn walk_entries(
     let mut visited = 0usize;
     while let Some(dir) = stack.pop() {
         let entries = request
+            .services
             .filesystem
             .list_dir(&dir)
             .await

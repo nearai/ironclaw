@@ -110,8 +110,8 @@ impl ProductWorkflow for DefaultProductWorkflow {
 
                 match result {
                     Ok(dispatched) => {
-                        action.mark_dispatched(dispatched.dispatch_kind);
                         if should_settle_ack(&dispatched.ack) {
+                            action.mark_dispatched(dispatched.dispatch_kind);
                             action.settle(dispatched.ack.clone());
                             self.idempotency_ledger.settle(action).await.map_err(|e| {
                                 ProductAdapterError::from(ProductWorkflowError::Transient {
@@ -410,7 +410,7 @@ fn terminal_ack_for_error(error: &ProductWorkflowError) -> Option<ProductInbound
             permanent: true,
         } => Some(ProductInboundAck::Rejected(ProductRejection::permanent(
             ProductRejectionKind::PolicyDenied,
-            format!("before-inbound policy failed: {reason}"),
+            reason.clone(),
         ))),
         ProductWorkflowError::BindingResolutionFailed { .. }
         | ProductWorkflowError::TurnSubmissionRejected { .. }
@@ -552,5 +552,15 @@ mod tests {
             accepted_message_ref: AcceptedMessageRef::new("msg:busy").expect("valid ref"),
             active_run_id: TurnRunId::new(),
         }));
+    }
+
+    #[test]
+    fn should_settle_ack_respects_rejection_disposition() {
+        assert!(should_settle_ack(&ProductInboundAck::Rejected(
+            ProductRejection::permanent(ProductRejectionKind::PolicyDenied, "blocked")
+        )));
+        assert!(!should_settle_ack(&ProductInboundAck::Rejected(
+            ProductRejection::retryable(ProductRejectionKind::PolicyDenied, "try later")
+        )));
     }
 }

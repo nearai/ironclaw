@@ -35,6 +35,7 @@ pub(super) async fn grep(
         ));
     }
     let root_stat = request
+        .services
         .filesystem
         .stat(&resolved.virtual_path)
         .await
@@ -192,6 +193,7 @@ async fn walk_files(
     let mut visited = 0usize;
     while let Some(dir) = stack.pop() {
         let entries = request
+            .services
             .filesystem
             .list_dir(&dir)
             .await
@@ -219,6 +221,7 @@ async fn walk_files(
                         continue;
                     }
                     let stat = request
+                        .services
                         .filesystem
                         .stat(&entry.path)
                         .await
@@ -266,6 +269,7 @@ async fn visit_file(
         ));
     }
     let bytes = request
+        .services
         .filesystem
         .read_file(path)
         .await
