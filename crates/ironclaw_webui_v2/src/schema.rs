@@ -20,11 +20,8 @@ pub struct WebChatV2EventFrame {
 }
 
 impl WebChatV2EventFrame {
-    pub fn from_outbound(envelope: &ProductOutboundEnvelope) -> Self {
-        Self {
-            cursor: envelope.projection_cursor().clone(),
-            event: WebChatV2Event::from(envelope.payload().clone()),
-        }
+    pub fn from_outbound(envelope: ProductOutboundEnvelope) -> Self {
+        Self::from(envelope)
     }
 
     pub fn cursor(&self) -> &ProjectionCursor {
@@ -33,6 +30,20 @@ impl WebChatV2EventFrame {
 
     pub fn event_name(&self) -> &'static str {
         self.event.event_name()
+    }
+}
+
+impl From<ProductOutboundEnvelope> for WebChatV2EventFrame {
+    fn from(envelope: ProductOutboundEnvelope) -> Self {
+        let ProductOutboundEnvelope {
+            projection_cursor,
+            payload,
+            ..
+        } = envelope;
+        Self {
+            cursor: projection_cursor,
+            event: WebChatV2Event::from(payload),
+        }
     }
 }
 

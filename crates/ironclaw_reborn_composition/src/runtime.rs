@@ -1212,13 +1212,6 @@ mod tests {
             .len()
     }
 
-    fn recorded_request_count(requests: &StdMutex<Vec<HostManagedModelRequest>>) -> usize {
-        requests
-            .lock()
-            .expect("recording gateway requests lock poisoned")
-            .len()
-    }
-
     #[tokio::test]
     async fn send_user_message_returns_completed_assistant_text_with_recording_gateway() {
         let root = tempfile::tempdir().expect("tempdir");

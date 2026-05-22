@@ -1,7 +1,7 @@
 use chrono::Utc;
 use ironclaw_host_api::ThreadId;
 use ironclaw_product_workflow::{
-    FinalReplyView, GatePromptView, ProductOutboundPayload, ProductProjectionItem,
+    AuthPromptView, FinalReplyView, GatePromptView, ProductOutboundPayload, ProductProjectionItem,
     ProductProjectionState, ProgressKind, ProgressUpdateView, ProjectionCursor,
     RebornCancelRunResponse, RebornGetRunStateResponse, RebornSubmitTurnResponse,
 };
@@ -42,6 +42,15 @@ fn gate_prompt() -> GatePromptView {
         gate_ref: "gate:approval".to_string(),
         headline: "Approve action".to_string(),
         body: "Review the requested action.".to_string(),
+    }
+}
+
+fn auth_prompt() -> AuthPromptView {
+    AuthPromptView {
+        turn_run_id: run_id(),
+        auth_request_ref: "auth:oauth".to_string(),
+        headline: "Connect account".to_string(),
+        body: "Connect before continuing.".to_string(),
     }
 }
 
@@ -128,6 +137,12 @@ fn webchat_v2_event_schema_has_stable_wire_names() {
             "gate",
         ),
         (
+            WebChatV2Event::AuthRequired {
+                prompt: auth_prompt(),
+            },
+            "auth_required",
+        ),
+        (
             WebChatV2Event::FinalReply {
                 reply: final_reply(),
             },
@@ -174,19 +189,51 @@ fn webchat_v2_event_schema_has_stable_wire_names() {
 }
 
 #[test]
-fn outbound_payload_mapping_splits_tool_progress_from_generic_running() {
-    let typing = WebChatV2Event::from(ProductOutboundPayload::Progress(progress(
-        ProgressKind::Typing,
-    )));
-    assert_eq!(typing.event_name(), "running");
+fn outbound_payload_mapping_covers_every_browser_event_variant() {
+    let cases = vec![
+        (
+            ProductOutboundPayload::FinalReply(final_reply()),
+            "final_reply",
+        ),
+        (
+            ProductOutboundPayload::Progress(progress(ProgressKind::Typing)),
+            "running",
+        ),
+        (
+            ProductOutboundPayload::Progress(progress(ProgressKind::ToolRunning)),
+            "capability_progress",
+        ),
+        (ProductOutboundPayload::GatePrompt(gate_prompt()), "gate"),
+        (
+            ProductOutboundPayload::AuthPrompt(auth_prompt()),
+            "auth_required",
+        ),
+        (
+            ProductOutboundPayload::ProjectionSnapshot {
+                state: projection_state(),
+            },
+            "projection_snapshot",
+        ),
+        (
+            ProductOutboundPayload::ProjectionUpdate {
+                state: projection_state(),
+            },
+            "projection_update",
+        ),
+    ];
 
-    let tool = WebChatV2Event::from(ProductOutboundPayload::Progress(progress(
-        ProgressKind::ToolRunning,
-    )));
-    assert_eq!(tool.event_name(), "capability_progress");
-
-    let reply = WebChatV2Event::from(ProductOutboundPayload::FinalReply(final_reply()));
-    assert_eq!(reply.event_name(), "final_reply");
+    for (payload, expected_type) in cases {
+        let event = WebChatV2Event::from(payload);
+        assert_eq!(event.event_name(), expected_type);
+        let frame = WebChatV2EventFrame {
+            cursor: cursor(),
+            event,
+        };
+        let json = serde_json::to_value(&frame).expect("serialize frame");
+        assert_eq!(json["cursor"], "cursor:webchat:v2:1");
+        assert_eq!(json["type"], expected_type);
+        assert_no_forbidden_metadata(&json);
+    }
 }
 
 fn assert_no_forbidden_metadata(json: &Value) {

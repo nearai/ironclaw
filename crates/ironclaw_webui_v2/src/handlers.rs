@@ -248,7 +248,7 @@ fn build_sse_stream(
                         after_cursor = Some(latest.projection_cursor.clone());
                     }
                     for envelope in response.events {
-                        let frame = WebChatV2EventFrame::from_outbound(&envelope);
+                        let frame = WebChatV2EventFrame::from_outbound(envelope);
                         let id = cursor_token(frame.cursor());
                         match serde_json::to_string(&frame) {
                             Ok(payload) => {
