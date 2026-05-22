@@ -7,8 +7,8 @@ use ironclaw_auth::{
     AuthFlowKind, AuthProductError, AuthProductScope, AuthProviderClient, AuthProviderId,
     AuthSessionId, AuthSurface, AuthorizationCodeHash, CredentialAccountLabel,
     InMemoryAuthProductServices, LifecyclePackageRef, NewAuthFlow, OAuthAuthorizationCode,
-    OAuthProviderCallbackRequest, OAuthProviderExchange, OpaqueStateHash, PkceVerifierHash,
-    PkceVerifierSecret,
+    OAuthAuthorizationUrl, OAuthProviderCallbackRequest, OAuthProviderExchange, OpaqueStateHash,
+    PkceVerifierHash, PkceVerifierSecret, ProviderScope,
 };
 use ironclaw_host_api::{InvocationId, ResourceScope, UserId};
 use ironclaw_reborn_composition::{
@@ -59,6 +59,20 @@ impl AuthProviderClient for FailingProviderClient {
     }
 }
 
+struct FailingContinuationDispatcher {
+    error: AuthProductError,
+}
+
+#[async_trait]
+impl RebornAuthContinuationDispatcher for FailingContinuationDispatcher {
+    async fn dispatch_auth_continuation(
+        &self,
+        _event: AuthContinuationEvent,
+    ) -> Result<(), AuthProductError> {
+        Err(self.error.clone())
+    }
+}
+
 fn auth_services(dispatcher: Arc<RecordingContinuationDispatcher>) -> RebornProductAuthServices {
     RebornProductAuthServices::from_shared(Arc::new(InMemoryAuthProductServices::new()))
         .with_continuation_dispatcher(dispatcher)
@@ -81,15 +95,32 @@ fn label() -> CredentialAccountLabel {
 }
 
 fn state_hash(value: &str) -> OpaqueStateHash {
-    OpaqueStateHash::new(value).unwrap()
+    OpaqueStateHash::new(fake_digest(value)).unwrap()
 }
 
 fn pkce_hash(value: &str) -> PkceVerifierHash {
-    PkceVerifierHash::new(value).unwrap()
+    PkceVerifierHash::new(fake_digest(value)).unwrap()
 }
 
 fn code_hash(value: &str) -> AuthorizationCodeHash {
-    AuthorizationCodeHash::new(value).unwrap()
+    AuthorizationCodeHash::new(fake_digest(value)).unwrap()
+}
+
+fn fake_digest(value: &str) -> String {
+    format!(
+        "{:064x}",
+        value.bytes().fold(0_u64, |hash, byte| {
+            hash.wrapping_mul(31).wrapping_add(u64::from(byte))
+        })
+    )
+}
+
+fn authorization_url(value: &str) -> OAuthAuthorizationUrl {
+    OAuthAuthorizationUrl::new(value).unwrap()
+}
+
+fn provider_scope(value: &str) -> ProviderScope {
+    ProviderScope::new(value).unwrap()
 }
 
 fn secret(value: &str) -> SecretString {
@@ -104,12 +135,13 @@ async fn create_flow(services: &RebornProductAuthServices, scope: AuthProductSco
             kind: AuthFlowKind::IntegrationCredential,
             provider: provider(),
             challenge: AuthChallenge::OAuthUrl {
-                authorization_url: "https://provider.example/oauth".to_string(),
+                authorization_url: authorization_url("https://provider.example/oauth"),
                 expires_at: Utc::now() + Duration::minutes(5),
             },
             continuation: AuthContinuationRef::LifecycleActivation {
                 package_ref: LifecyclePackageRef::new("github-extension").unwrap(),
             },
+            update_binding: None,
             opaque_state_hash: Some(state_hash("state-hash")),
             pkce_verifier_hash: Some(pkce_hash("pkce-hash")),
             expires_at: Utc::now() + Duration::minutes(5),
@@ -132,7 +164,7 @@ fn authorized_request(scope: AuthProductScope, flow_id: AuthFlowId) -> RebornOAu
                 authorization_code_hash: code_hash("code-hash"),
                 pkce_verifier: PkceVerifierSecret::new(secret("raw-pkce-verifier")).unwrap(),
                 pkce_verifier_hash: pkce_hash("pkce-hash"),
-                scopes: vec!["repo".to_string()],
+                scopes: vec![provider_scope("repo")],
             },
         },
     }
@@ -178,6 +210,37 @@ async fn oauth_callback_handler_completes_flow_and_dispatches_typed_continuation
     assert!(!serialized.contains("raw-pkce-verifier"));
     assert!(!serialized.contains("oauth-access-"));
     assert!(!serialized.contains("oauth-refresh-"));
+}
+
+#[tokio::test]
+async fn oauth_callback_handler_preserves_success_when_continuation_dispatch_fails() {
+    let services =
+        RebornProductAuthServices::from_shared(Arc::new(InMemoryAuthProductServices::new()))
+            .with_continuation_dispatcher(Arc::new(FailingContinuationDispatcher {
+                error: AuthProductError::BackendUnavailable,
+            }));
+    let owner = scope("alice");
+    let flow_id = create_flow(&services, owner.clone()).await;
+
+    let response = services
+        .handle_oauth_callback(authorized_request(owner.clone(), flow_id))
+        .await
+        .expect("completed flow success is preserved");
+
+    assert_eq!(response.flow_id, flow_id);
+    assert_eq!(response.status, ironclaw_auth::AuthFlowStatus::Completed);
+    assert!(response.credential_account_id.is_some());
+
+    let retry = services
+        .handle_oauth_callback(RebornOAuthCallbackRequest {
+            scope: owner,
+            flow_id,
+            opaque_state_hash: state_hash("state-hash"),
+            outcome: RebornOAuthCallbackOutcome::ProviderDenied,
+        })
+        .await
+        .expect_err("terminal flow rejects retry");
+    assert_eq!(retry.code, AuthErrorCode::FlowAlreadyTerminal);
 }
 
 #[tokio::test]

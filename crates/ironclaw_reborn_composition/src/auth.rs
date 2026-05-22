@@ -256,10 +256,17 @@ impl RebornProductAuthServices {
             credential_account_id: completed.credential_account_id,
             emitted_at: Utc::now(),
         };
-        self.continuation_dispatcher
+        if let Err(error) = self
+            .continuation_dispatcher
             .dispatch_auth_continuation(event)
             .await
-            .map_err(RebornOAuthCallbackError::from)?;
+        {
+            tracing::warn!(
+                flow_id = %completed.id,
+                error_code = ?error.code(),
+                "reborn auth callback completed but continuation dispatch failed"
+            );
+        }
 
         Ok(RebornOAuthCallbackResponse {
             flow_id: completed.id,
