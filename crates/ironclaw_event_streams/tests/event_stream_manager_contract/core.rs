@@ -148,6 +148,37 @@ async fn fetch_snapshot_rejects_actor_stream_user_mismatch_before_projection_cal
 }
 
 #[tokio::test]
+async fn fetch_snapshot_rejects_unsupported_view_target_before_projection_call() {
+    let scope = projection_scope("thread-a");
+    let projection = Arc::new(FakeProjectionService::new(scope.clone()));
+    let manager = EventStreamManager::new(
+        Arc::clone(&projection),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let error = manager
+        .fetch_snapshot(ProjectionFetchRequest {
+            view: ProjectionViewClass::ProductMission,
+            target: ProjectionTarget::Mission {
+                mission_id: MissionId::new("mission-a").unwrap(),
+            },
+            ..fetch_request(scope)
+        })
+        .await
+        .expect_err("unsupported fetch target rejected before projection");
+
+    assert!(matches!(
+        error,
+        ProjectionStreamError::InvalidRequest { .. }
+    ));
+    assert_eq!(projection.calls(), Vec::<&'static str>::new());
+}
+
+#[tokio::test]
 async fn fetch_snapshot_rejects_projection_scope_mismatch() {
     let requested = projection_scope("thread-a");
     let returned = projection_scope("thread-b");

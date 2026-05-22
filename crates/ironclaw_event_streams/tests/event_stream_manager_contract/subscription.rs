@@ -160,6 +160,29 @@ async fn valid_resume_rejects_projection_payload_thread_mismatch() {
 }
 
 #[tokio::test]
+async fn subscribe_resume_rejects_redaction_failure() {
+    let requested = projection_scope("thread-a");
+    let manager = EventStreamManager::new(
+        Arc::new(FakeProjectionService::new(requested.clone())),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(RejectLiveUpdateRedactionValidator),
+        Arc::new(InMemoryOutboundStateStore::default()),
+    );
+
+    let error = manager
+        .subscribe(subscribe_request(
+            requested.clone(),
+            Some(ProjectionCursor::for_scope(requested, EventCursor::new(1))),
+        ))
+        .await
+        .expect_err("unsafe replay payload rejected");
+
+    assert!(matches!(error, ProjectionStreamError::Redaction));
+}
+
+#[tokio::test]
 async fn subscribe_resume_maps_projection_update_errors() {
     let scope = projection_scope("thread-a");
     for (projection_error, expected) in [

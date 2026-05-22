@@ -74,6 +74,32 @@ fn in_memory_update_source_publish_without_subscribers_returns_source() {
 }
 
 #[tokio::test]
+async fn in_memory_update_source_publish_after_subscriber_drop_returns_source() {
+    let scope = projection_scope("thread-a");
+    let source = InMemoryProjectionUpdateSource::new(8);
+    let receiver = source
+        .subscribe(ProjectionLiveUpdateRequest {
+            actor: actor("user-a"),
+            scope: scope.clone(),
+            view: ProjectionViewClass::ProductThread,
+            target: ProjectionTarget::Thread {
+                thread_id: scope.read_scope.thread_id.clone().unwrap(),
+            },
+        })
+        .await
+        .expect("source subscription");
+    drop(receiver);
+
+    let error = source
+        .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
+            &scope, 11, 11,
+        )))
+        .expect_err("retained sender without receivers fails");
+
+    assert!(matches!(error, ProjectionStreamError::Source));
+}
+
+#[tokio::test]
 async fn redaction_gate_blocks_sentinel_payloads_at_stream_boundary() {
     let scope = projection_scope("thread-a");
     let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
@@ -332,6 +358,62 @@ async fn live_forwarding_advances_cursor_and_reports_latest_reconnect_cursor() {
 }
 
 #[tokio::test]
+async fn terminal_lag_waits_for_already_buffered_update() {
+    let scope = projection_scope("thread-a");
+    let source = Arc::new(InMemoryProjectionUpdateSource::new(8));
+    let manager = manager_with_source(scope.clone(), Arc::clone(&source));
+    let mut subscription = manager
+        .subscribe(ProjectionSubscribeRequest {
+            capabilities: SubscriberCapabilities { buffer_capacity: 2 },
+            ..subscribe_request(scope.clone(), None)
+        })
+        .await
+        .expect("authorized subscription");
+    assert!(matches!(
+        subscription.next().await,
+        Some(ProjectionStreamItem::Snapshot(_))
+    ));
+
+    source
+        .publish(ProductProjectionEnvelope::ThreadUpdates(replay(
+            &scope, 11, 11,
+        )))
+        .expect("publish valid update");
+    source
+        .publish(ProductProjectionEnvelope::Debug(
+            ironclaw_event_streams::DebugProjectionPayload {
+                cursor: ProjectionCursor::for_scope(scope.clone(), EventCursor::new(12)),
+                redacted_summary: "redacted".to_string(),
+            },
+        ))
+        .expect("publish blocked update");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let replay = expect_thread_update(
+        timeout(Duration::from_secs(1), subscription.next())
+            .await
+            .expect("buffered update")
+            .expect("buffered update"),
+    );
+    assert_eq!(replay.next_cursor.runtime, EventCursor::new(11));
+
+    match timeout(Duration::from_secs(1), subscription.next())
+        .await
+        .expect("terminal lag")
+        .expect("terminal lag")
+    {
+        ProjectionStreamItem::Lagged {
+            reason,
+            snapshot_cursor,
+        } => {
+            assert_eq!(reason, LagReason::AccessBlocked);
+            assert_eq!(snapshot_cursor.runtime, EventCursor::new(11));
+        }
+        other => panic!("expected access lag marker, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn subscription_ignores_live_updates_from_other_scope() {
     let scope = projection_scope("thread-a");
     let foreign_scope = projection_scope("thread-b");
@@ -443,6 +525,14 @@ async fn slow_subscriber_gets_backpressure_lag_marker() {
         .expect("publish update");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert!(matches!(
+        timeout(Duration::from_secs(1), subscription.next())
+            .await
+            .expect("buffered snapshot")
+            .expect("buffered snapshot"),
+        ProjectionStreamItem::Snapshot(_)
+    ));
 
     match timeout(Duration::from_secs(1), subscription.next())
         .await

@@ -48,14 +48,21 @@ impl InMemoryProjectionUpdateSource {
         envelope: ProductProjectionEnvelope,
     ) -> Result<usize, ProjectionStreamError> {
         let key = projection_scope_key(envelope.scope());
-        let sender = self
-            .senders()
-            .get(&key)
-            .cloned()
-            .ok_or(ProjectionStreamError::Source)?;
-        sender
-            .send(Arc::new(envelope))
-            .map_err(|_| ProjectionStreamError::Source)
+        let sender = {
+            let mut senders = self.senders();
+            prune_inactive_senders(&mut senders);
+            senders
+                .get(&key)
+                .cloned()
+                .ok_or(ProjectionStreamError::Source)?
+        };
+        match sender.send(Arc::new(envelope)) {
+            Ok(count) => Ok(count),
+            Err(_) => {
+                self.remove_inactive_sender(&key);
+                Err(ProjectionStreamError::Source)
+            }
+        }
     }
 
     fn senders(
@@ -68,6 +75,16 @@ impl InMemoryProjectionUpdateSource {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    fn remove_inactive_sender(&self, key: &ProjectionScopeKey) {
+        let mut senders = self.senders();
+        if senders
+            .get(key)
+            .is_some_and(|sender| sender.receiver_count() == 0)
+        {
+            senders.remove(key);
+        }
+    }
 }
 
 #[async_trait]
@@ -78,10 +95,17 @@ impl ProjectionUpdateSource for InMemoryProjectionUpdateSource {
     ) -> Result<broadcast::Receiver<Arc<ProductProjectionEnvelope>>, ProjectionStreamError> {
         let key = projection_scope_key(&request.scope);
         let mut senders = self.senders();
+        prune_inactive_senders(&mut senders);
         let sender = senders.entry(key).or_insert_with(|| {
             let (sender, _) = broadcast::channel(self.capacity);
             sender
         });
         Ok(sender.subscribe())
     }
+}
+
+fn prune_inactive_senders(
+    senders: &mut HashMap<ProjectionScopeKey, broadcast::Sender<Arc<ProductProjectionEnvelope>>>,
+) {
+    senders.retain(|_, sender| sender.receiver_count() > 0);
 }

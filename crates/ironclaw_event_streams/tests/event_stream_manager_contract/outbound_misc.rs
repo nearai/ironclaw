@@ -87,6 +87,46 @@ async fn push_candidates_reject_mismatched_projection_scope() {
 }
 
 #[tokio::test]
+async fn push_candidates_reject_extra_projection_scope_filters() {
+    let scope = projection_scope("thread-a");
+    let turn_scope = turn_scope("thread-a");
+    let mut request = push_request(&turn_scope, OutboundPushKind::Progress);
+    request.projection_scope.read_scope.mission_id = Some(MissionId::new("mission-a").unwrap());
+    let manager = manager(scope);
+
+    let error = manager
+        .push_candidates_for_update(request)
+        .await
+        .expect_err("extra projection filters must not authorize whole-thread push");
+
+    assert!(matches!(error, ProjectionStreamError::AccessDenied));
+}
+
+#[tokio::test]
+async fn push_candidates_reject_actor_stream_user_mismatch_before_outbound_lookup() {
+    let turn_scope = turn_scope("thread-a");
+    let mut request = push_request(&turn_scope, OutboundPushKind::Progress);
+    request.actor = actor("user-b");
+    let manager = EventStreamManager::new(
+        Arc::new(FakeProjectionService::new(projection_scope("thread-a"))),
+        Arc::new(AllowAllProjectionAccessPolicy),
+        Arc::new(InMemoryProjectionStreamAdmissionPolicy::default()),
+        Arc::new(InMemoryProjectionUpdateSource::new(8)),
+        Arc::new(NoExposureProjectionRedactionValidator),
+        Arc::new(FailingOutboundStore {
+            kind: FailingOutboundKind::Backend,
+        }),
+    );
+
+    let error = manager
+        .push_candidates_for_update(request)
+        .await
+        .expect_err("actor user mismatch rejected before outbound lookup");
+
+    assert!(matches!(error, ProjectionStreamError::AccessDenied));
+}
+
+#[tokio::test]
 async fn push_candidates_maps_outbound_store_failures() {
     let scope = turn_scope("thread-a");
     for (kind, expected) in [
