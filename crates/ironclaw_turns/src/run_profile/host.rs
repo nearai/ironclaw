@@ -557,6 +557,15 @@ pub enum AgentLoopHostErrorKind {
     Invalid,
     PolicyDenied,
     BudgetExceeded,
+    /// The model call would push utilization past the configured pause
+    /// threshold. Callers surface an approval gate (foreground or
+    /// background) and retry after the user resolves it.
+    BudgetApprovalRequired,
+    /// Durable budget accounting (reservation read/write/reconcile)
+    /// failed. Distinct from `BudgetExceeded`/`BudgetApprovalRequired`
+    /// because the failure is in the governor itself, not in the budget
+    /// outcome — callers must fail closed.
+    BudgetAccountingFailed,
     Unavailable,
     Cancelled,
     CheckpointRejected,
@@ -575,6 +584,8 @@ impl AgentLoopHostErrorKind {
             Self::Invalid => "invalid",
             Self::PolicyDenied => "policy_denied",
             Self::BudgetExceeded => "budget_exceeded",
+            Self::BudgetApprovalRequired => "budget_approval_required",
+            Self::BudgetAccountingFailed => "budget_accounting_failed",
             Self::Unavailable => "unavailable",
             Self::Cancelled => "cancelled",
             Self::CheckpointRejected => "checkpoint_rejected",

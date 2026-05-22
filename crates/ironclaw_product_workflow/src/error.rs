@@ -137,6 +137,9 @@ impl From<ProductWorkflowError> for ProductAdapterError {
                 reason: RedactedString::new(reason),
             },
             ProductWorkflowError::BeforeInboundPolicyFailed { reason, permanent } => {
+                // Adapter error surfaces wrap the reason in RedactedString, so
+                // diagnostics remain available internally without leaking to
+                // public protocol output.
                 if permanent {
                     ProductAdapterError::WorkflowRejected {
                         kind: ProductWorkflowRejectionKind::AdmissionRejected,

@@ -49,9 +49,11 @@ mod capability_catalog;
 mod extension_contracts;
 mod first_party;
 mod first_party_tools;
+mod invocation_services;
 pub mod memory_context;
 mod obligations;
 mod planner;
+mod process_port;
 mod production;
 mod services;
 mod surface;
@@ -77,11 +79,19 @@ pub use first_party_tools::{
     TIME_CAPABILITY_ID, WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers,
     builtin_first_party_package,
 };
+pub use invocation_services::{
+    InvocationServices, InvocationServicesError, InvocationServicesResolutionRequest,
+    InvocationServicesResolver, LocalInvocationServicesResolver,
+};
 pub use obligations::{
     BuiltinObligationHandler, BuiltinObligationServices, ProcessObligationLifecycleStore,
 };
 use obligations::{NetworkObligationPolicyStore, RuntimeSecretInjectionStore};
 pub use planner::{ExecutionPlan, PlannerError, plan_capability};
+pub use process_port::{
+    CommandExecutionOutput, CommandExecutionRequest, LocalHostProcessPort, RuntimeProcessError,
+    RuntimeProcessPort, SandboxCommandTransport, TenantSandboxProcessPort,
+};
 pub use production::DefaultHostRuntime;
 pub use services::{
     HostRuntimeServices, ProductionWiringComponent, ProductionWiringConfig, ProductionWiringIssue,

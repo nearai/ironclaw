@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 mod activation;
+mod error;
 mod loaded;
 mod skills;
 
@@ -14,7 +15,6 @@ pub use activation::{
     SkillActivationMode, SkillActivationRequest, SkillActivationSelection,
     SkillActivationSelectionError, SkillActivationSelectorConfig,
 };
+pub use error::FirstPartySkillsExtensionError;
 pub use loaded::LoadedFirstPartyExtensions;
-pub use skills::{
-    FirstPartySkillsExtension, FirstPartySkillsExtensionError, FirstPartySkillsExtensionHandles,
-};
+pub use skills::{FirstPartySkillsExtension, FirstPartySkillsExtensionHandles};

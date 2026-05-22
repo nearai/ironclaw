@@ -1530,6 +1530,11 @@ fn model_error_class(error: &AgentLoopHostError) -> Option<ModelErrorClass> {
         AgentLoopHostErrorKind::Unavailable => Some(ModelErrorClass::Unavailable),
         AgentLoopHostErrorKind::Internal => Some(ModelErrorClass::Internal),
         AgentLoopHostErrorKind::BudgetExceeded => Some(ModelErrorClass::ContextOverflow),
+        AgentLoopHostErrorKind::BudgetAccountingFailed => Some(ModelErrorClass::Unavailable),
+        // Budget approval requirement is a gate, not a transient model
+        // error — pass it through unclassified so the loop's gate handling
+        // path takes over rather than the recovery strategy.
+        AgentLoopHostErrorKind::BudgetApprovalRequired => None,
         AgentLoopHostErrorKind::Cancelled => None,
         AgentLoopHostErrorKind::CredentialUnavailable => None,
         AgentLoopHostErrorKind::Unauthorized

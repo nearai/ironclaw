@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use ironclaw_authorization::GrantAuthorizer;
 use ironclaw_extensions::ExtensionRegistry;
@@ -20,10 +21,12 @@ use ironclaw_host_api::runtime_policy::{
 use ironclaw_host_api::*;
 use ironclaw_host_runtime::{
     APPLY_PATCH_CAPABILITY_ID, CapabilitySurfacePolicy, CapabilitySurfaceVersion,
-    ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID, GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime,
-    HostRuntimeServices, JSON_CAPABILITY_ID, LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID,
-    RuntimeCapabilityOutcome, RuntimeCapabilityRequest, RuntimeFailureKind, SHELL_CAPABILITY_ID,
-    SurfaceKind, TIME_CAPABILITY_ID, VisibleCapabilityAccess, VisibleCapabilityRequest,
+    CommandExecutionOutput, CommandExecutionRequest, ECHO_CAPABILITY_ID, GLOB_CAPABILITY_ID,
+    GREP_CAPABILITY_ID, HTTP_CAPABILITY_ID, HostRuntime, HostRuntimeServices, JSON_CAPABILITY_ID,
+    LIST_DIR_CAPABILITY_ID, READ_FILE_CAPABILITY_ID, RuntimeCapabilityOutcome,
+    RuntimeCapabilityRequest, RuntimeFailureKind, RuntimeProcessError, RuntimeProcessPort,
+    SHELL_CAPABILITY_ID, SandboxCommandTransport, SurfaceKind, TIME_CAPABILITY_ID,
+    TenantSandboxProcessPort, VisibleCapabilityAccess, VisibleCapabilityRequest,
     WRITE_FILE_CAPABILITY_ID, builtin_first_party_handlers, builtin_first_party_package,
 };
 use ironclaw_network::{
@@ -189,6 +192,99 @@ async fn builtin_shell_invokes_copied_shell_core_through_host_runtime() {
             .contains("hello reborn")
     );
     assert_eq!(completed.usage.process_count, 1);
+}
+
+#[tokio::test]
+async fn builtin_shell_delegates_command_execution_to_process_port() {
+    let process_port = Arc::new(RecordingProcessPort::default());
+    let runtime = runtime_with_process_port(Arc::clone(&process_port));
+
+    let output = invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "echo via port", "timeout": 9, "workdir": "port-workdir"}),
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["exit_code"], json!(0));
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["sandboxed"], json!(true));
+    assert_eq!(output["output"], json!("process port: echo via port"));
+    let requests = process_port.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].command, "echo via port");
+    assert_eq!(requests[0].workdir.as_deref(), Some("port-workdir"));
+    assert_eq!(requests[0].timeout_secs, Some(9));
+    assert!(
+        requests[0]
+            .mounts
+            .as_ref()
+            .is_some_and(|mounts| mounts.mounts.is_empty())
+    );
+    assert!(requests[0].extra_env.is_empty());
+    assert_eq!(requests[0].scope.user_id.as_str(), "user");
+}
+
+#[tokio::test]
+async fn builtin_shell_returns_stderr_and_nonzero_exit_without_dispatch_failure() {
+    let output = invoke_shell(json!({"command": "printf shell-error >&2; exit 7"}))
+        .await
+        .unwrap();
+
+    assert_eq!(output["exit_code"], json!(7));
+    assert_eq!(output["success"], json!(false));
+    assert_eq!(output["sandboxed"], json!(false));
+    assert_eq!(output["output"], json!("shell-error"));
+}
+
+#[tokio::test]
+async fn builtin_shell_uses_configured_tenant_sandbox_process_port() {
+    let local_process = Arc::new(RecordingProcessPort::default());
+    let sandbox_transport = Arc::new(RecordingSandboxTransport::default());
+    let sandbox_process = Arc::new(TenantSandboxProcessPort::new(sandbox_transport.clone()));
+    let runtime = runtime_with_local_and_sandbox_process_ports(
+        Arc::clone(&local_process),
+        Arc::clone(&sandbox_process),
+        tenant_sandbox_process_policy(),
+    );
+
+    let output = invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "echo in sandbox"}),
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(output["sandboxed"], json!(true));
+    assert_eq!(output["output"], json!("process port: echo in sandbox"));
+    assert!(local_process.requests.lock().unwrap().is_empty());
+    assert_eq!(sandbox_transport.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn builtin_shell_rejects_hosted_process_plan_before_handler_runs() {
+    let process_port = Arc::new(RecordingProcessPort::default());
+    let runtime =
+        runtime_with_process_port_and_policy(Arc::clone(&process_port), hosted_dev_policy());
+
+    let error = invoke_with_context(
+        &runtime,
+        SHELL_CAPABILITY_ID,
+        json!({"command": "echo must not run"}),
+        execution_context_with_network([SHELL_CAPABILITY_ID], shell_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Authorization);
+    assert!(
+        process_port.requests.lock().unwrap().is_empty(),
+        "hosted shell must fail at invocation-service resolution before the handler can run"
+    );
 }
 
 #[tokio::test]
@@ -521,6 +617,26 @@ async fn builtin_http_runtime_policy_denial_stops_before_egress() {
 }
 
 #[tokio::test]
+async fn builtin_http_rejects_hosted_allowlist_network_plan_before_egress() {
+    let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(
+        br#"{"ok":true}"#.to_vec(),
+    ));
+    let runtime = runtime_with_http_egress_and_policy(Arc::clone(&egress), hosted_dev_policy());
+
+    let error = invoke_with_context(
+        &runtime,
+        HTTP_CAPABILITY_ID,
+        json!({"url": "https://api.example.test/v1/items"}),
+        execution_context_with_network([HTTP_CAPABILITY_ID], http_test_policy()),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Network);
+    assert!(egress.requests().is_empty());
+}
+
+#[tokio::test]
 async fn builtin_http_defaults_json_body_content_type() {
     let egress = Arc::new(RecordingRuntimeHttpEgress::with_body(b"ok".to_vec()));
     let runtime = runtime_with_http_egress(Arc::clone(&egress));
@@ -545,8 +661,8 @@ async fn builtin_http_defaults_json_body_content_type() {
 }
 
 #[tokio::test]
-async fn builtin_http_fails_closed_without_runtime_egress() {
-    let runtime = runtime();
+async fn builtin_http_fails_closed_when_policy_allows_network_but_runtime_egress_is_missing() {
+    let runtime = runtime_with_policy(local_dev_policy());
     let error = invoke_with_context(
         &runtime,
         HTTP_CAPABILITY_ID,
@@ -910,6 +1026,44 @@ async fn builtin_http_runs_blocking_egress_off_tokio_worker() {
     }
 
     invocation.await.unwrap();
+}
+
+#[tokio::test]
+async fn builtin_read_file_rejects_scoped_virtual_filesystem_plan_before_handler_access() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("README.md"), "must not be read\n").unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem_and_policy(filesystem, network_denied_policy());
+
+    let error = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/README.md"}),
+        execution_context_with_mounts([READ_FILE_CAPABILITY_ID], mounts),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Authorization);
+}
+
+#[tokio::test]
+async fn builtin_read_file_rejects_tenant_workspace_before_filesystem_access() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("README.md"), "must not be read\n").unwrap();
+    let (filesystem, mounts) = mounted_filesystem(temp.path(), MountPermissions::read_only());
+    let runtime = runtime_with_filesystem_and_policy(filesystem, hosted_dev_policy());
+
+    let error = invoke_with_context(
+        &runtime,
+        READ_FILE_CAPABILITY_ID,
+        json!({"path": "/workspace/README.md"}),
+        execution_context_with_mounts([READ_FILE_CAPABILITY_ID], mounts),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, RuntimeFailureKind::Authorization);
 }
 
 #[tokio::test]
@@ -1850,6 +2004,16 @@ fn runtime_with_filesystem<F>(filesystem: F) -> impl HostRuntime
 where
     F: RootFilesystem + 'static,
 {
+    runtime_with_filesystem_and_policy(filesystem, local_dev_policy())
+}
+
+fn runtime_with_filesystem_and_policy<F>(
+    filesystem: F,
+    policy: EffectiveRuntimePolicy,
+) -> impl HostRuntime
+where
+    F: RootFilesystem + 'static,
+{
     HostRuntimeServices::new(
         Arc::new(registry()),
         Arc::new(filesystem),
@@ -1859,6 +2023,63 @@ where
         CapabilitySurfaceVersion::new("surface-v1").unwrap(),
     )
     .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
+    .with_runtime_policy(policy)
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
+fn runtime_with_process_port<T>(process_port: Arc<T>) -> impl HostRuntime
+where
+    T: RuntimeProcessPort + 'static,
+{
+    runtime_with_process_port_and_policy(process_port, local_dev_policy())
+}
+
+fn runtime_with_process_port_and_policy<T>(
+    process_port: Arc<T>,
+    policy: EffectiveRuntimePolicy,
+) -> impl HostRuntime
+where
+    T: RuntimeProcessPort + 'static,
+{
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_process_port(process_port)
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
+    .with_runtime_policy(policy)
+    .with_trust_policy(Arc::new(trust_policy()))
+    .host_runtime_for_local_testing()
+}
+
+fn runtime_with_local_and_sandbox_process_ports<L>(
+    local_process: Arc<L>,
+    sandbox_process: Arc<TenantSandboxProcessPort>,
+    policy: EffectiveRuntimePolicy,
+) -> impl HostRuntime
+where
+    L: RuntimeProcessPort + 'static,
+{
+    HostRuntimeServices::new(
+        Arc::new(registry()),
+        Arc::new(LocalFilesystem::new()),
+        Arc::new(InMemoryResourceGovernor::new()),
+        Arc::new(GrantAuthorizer::new()),
+        ironclaw_processes::ProcessServices::in_memory(),
+        CapabilitySurfaceVersion::new("surface-v1").unwrap(),
+    )
+    .with_first_party_capabilities(Arc::new(builtin_first_party_handlers().unwrap()))
+    .with_runtime_process_port(local_process)
+    .with_tenant_sandbox_process_port(sandbox_process)
+    .with_runtime_http_egress(Arc::new(RecordingRuntimeHttpEgress::default()))
+    .with_runtime_policy(policy)
     .with_trust_policy(Arc::new(trust_policy()))
     .host_runtime_for_local_testing()
 }
@@ -1876,6 +2097,41 @@ fn runtime_with_policy(policy: EffectiveRuntimePolicy) -> impl HostRuntime {
     .with_trust_policy(Arc::new(trust_policy()))
     .with_runtime_policy(policy)
     .host_runtime_for_local_testing()
+}
+
+fn local_dev_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
+    }
+}
+
+fn tenant_sandbox_process_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        process_backend: ProcessBackendKind::TenantSandbox,
+        ..local_dev_policy()
+    }
+}
+
+fn hosted_dev_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::HostedMultiTenant,
+        requested_profile: RuntimeProfile::HostedDev,
+        resolved_profile: RuntimeProfile::HostedDev,
+        filesystem_backend: FilesystemBackendKind::TenantWorkspace,
+        process_backend: ProcessBackendKind::TenantSandbox,
+        network_mode: NetworkMode::Allowlist,
+        secret_mode: SecretMode::TenantBroker,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::Standard,
+    }
 }
 
 fn runtime_with_http_egress<T>(egress: Arc<T>) -> impl HostRuntime
@@ -1995,6 +2251,48 @@ fn mounted_filesystem(path: &Path, permissions: MountPermissions) -> (LocalFiles
     )])
     .unwrap();
     (filesystem, mounts)
+}
+
+#[derive(Debug, Default)]
+struct RecordingProcessPort {
+    requests: std::sync::Mutex<Vec<CommandExecutionRequest>>,
+}
+
+#[async_trait]
+impl RuntimeProcessPort for RecordingProcessPort {
+    async fn run_command(
+        &self,
+        request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        self.requests.lock().unwrap().push(request.clone());
+        Ok(CommandExecutionOutput {
+            output: format!("process port: {}", request.command),
+            exit_code: 0,
+            sandboxed: true,
+            duration: Duration::from_millis(7),
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecordingSandboxTransport {
+    requests: std::sync::Mutex<Vec<CommandExecutionRequest>>,
+}
+
+#[async_trait]
+impl SandboxCommandTransport for RecordingSandboxTransport {
+    async fn run_command(
+        &self,
+        request: CommandExecutionRequest,
+    ) -> Result<CommandExecutionOutput, RuntimeProcessError> {
+        self.requests.lock().unwrap().push(request.clone());
+        Ok(CommandExecutionOutput {
+            output: format!("process port: {}", request.command),
+            exit_code: 0,
+            sandboxed: false,
+            duration: Duration::from_millis(7),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default)]

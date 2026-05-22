@@ -654,11 +654,16 @@ fn skill_bundle_source_error_to_selection_error(
         }
         SkillBundleSourceError::InvalidBundleId
         | SkillBundleSourceError::InvalidFilePath
-        | SkillBundleSourceError::InvalidSkillBundle => SkillActivationSelectionError::ParseFailed,
-        SkillBundleSourceError::ContentTooLarge => {
+        | SkillBundleSourceError::InvalidSkillBundle
+        | SkillBundleSourceError::BundleUtf8DecodeFailed
+        | SkillBundleSourceError::ManifestParseFailed => SkillActivationSelectionError::ParseFailed,
+        SkillBundleSourceError::ContentTooLarge
+        | SkillBundleSourceError::BundleScanLimitExceeded => {
             SkillActivationSelectionError::ContextBudgetExceeded
         }
-        SkillBundleSourceError::Internal => SkillActivationSelectionError::Internal,
+        SkillBundleSourceError::DuplicateSourceKind | SkillBundleSourceError::Internal => {
+            SkillActivationSelectionError::Internal
+        }
     }
 }
 

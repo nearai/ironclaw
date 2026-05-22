@@ -9,7 +9,13 @@ use ironclaw_dispatcher::*;
 use ironclaw_events::{InMemoryEventSink, RuntimeEventKind};
 use ironclaw_extensions::*;
 use ironclaw_filesystem::*;
-use ironclaw_host_api::*;
+use ironclaw_host_api::{
+    runtime_policy::{
+        ApprovalPolicy, AuditMode, DeploymentMode, EffectiveRuntimePolicy, FilesystemBackendKind,
+        ProcessBackendKind, RuntimeProfile, SecretMode,
+    },
+    *,
+};
 use ironclaw_resources::*;
 use serde_json::{Value, json};
 
@@ -84,6 +90,7 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
         CapabilityId::new("echo.say").unwrap()
     );
     assert_eq!(requests[0].runtime, RuntimeKind::Wasm);
+    assert_eq!(requests[0].network_mode, NetworkMode::Deny);
     assert_eq!(requests[0].scope, scope);
     assert_eq!(requests[0].mounts, Some(mounts));
     assert_eq!(
@@ -102,6 +109,36 @@ async fn runtime_dispatcher_routes_already_authorized_request_through_public_tra
     assert_eq!(recorded[1].runtime, Some(RuntimeKind::Wasm));
     assert_eq!(recorded[2].kind, RuntimeEventKind::DispatchSucceeded);
     assert_eq!(recorded[2].output_bytes, Some(result.usage.output_bytes));
+}
+
+#[tokio::test]
+async fn runtime_dispatcher_forwards_configured_runtime_policy_to_adapter() {
+    let registry = Arc::new(registry_with_package(WASM_MANIFEST));
+    let filesystem = Arc::new(mounted_empty_extension_root());
+    let governor = Arc::new(InMemoryResourceGovernor::new());
+    let adapter = Arc::new(RecordingAdapter::new(
+        RuntimeKind::Wasm,
+        json!({"reply": "from adapter"}),
+    ));
+    let dispatcher = RuntimeDispatcher::from_arcs(registry, filesystem, governor)
+        .with_runtime_policy(local_dev_policy())
+        .with_runtime_adapter_arc(RuntimeKind::Wasm, Arc::clone(&adapter));
+
+    dispatcher
+        .dispatch_json(CapabilityDispatchRequest {
+            capability_id: CapabilityId::new("echo.say").unwrap(),
+            scope: sample_scope(),
+            estimate: ResourceEstimate::default(),
+            mounts: None,
+            resource_reservation: None,
+            input: json!({"message": "hello through configured policy"}),
+        })
+        .await
+        .unwrap();
+
+    let requests = adapter.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].network_mode, NetworkMode::DirectLogged);
 }
 
 #[tokio::test]
@@ -195,6 +232,7 @@ struct RecordedAdapterRequest {
     provider: ExtensionId,
     capability_id: CapabilityId,
     runtime: RuntimeKind,
+    network_mode: NetworkMode,
     scope: ResourceScope,
     mounts: Option<MountView>,
     input: Value,
@@ -210,6 +248,7 @@ impl RuntimeAdapter<LocalFilesystem, InMemoryResourceGovernor> for RecordingAdap
             provider: request.package.id.clone(),
             capability_id: request.capability_id.clone(),
             runtime: request.descriptor.runtime,
+            network_mode: request.runtime_policy.network_mode,
             scope: request.scope.clone(),
             mounts: request.mounts.clone(),
             input: request.input.clone(),
@@ -303,6 +342,20 @@ fn sample_scope() -> ResourceScope {
         mission_id: Some(MissionId::new("mission-a").unwrap()),
         thread_id: Some(ThreadId::new("thread-a").unwrap()),
         invocation_id: InvocationId::new(),
+    }
+}
+
+fn local_dev_policy() -> EffectiveRuntimePolicy {
+    EffectiveRuntimePolicy {
+        deployment: DeploymentMode::LocalSingleUser,
+        requested_profile: RuntimeProfile::LocalDev,
+        resolved_profile: RuntimeProfile::LocalDev,
+        filesystem_backend: FilesystemBackendKind::HostWorkspace,
+        process_backend: ProcessBackendKind::LocalHost,
+        network_mode: NetworkMode::DirectLogged,
+        secret_mode: SecretMode::ScrubbedEnv,
+        approval_policy: ApprovalPolicy::AskDestructive,
+        audit_mode: AuditMode::LocalMinimal,
     }
 }
 

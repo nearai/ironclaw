@@ -53,6 +53,7 @@ pub use instruction_bundle::{
     InMemoryInstructionMaterializationStore, InstructionBundle, InstructionBundleBuilder,
     InstructionBundleFingerprint, InstructionBundleMaterializedMessage, InstructionBundleRequest,
     InstructionMaterializationStore, InstructionSafetyContext,
+    sort_instruction_snippets_for_prompt,
 };
 pub use memory_context::{
     EmptyMemoryPromptContextService, MemoryPromptContextRequest, MemoryPromptContextService,

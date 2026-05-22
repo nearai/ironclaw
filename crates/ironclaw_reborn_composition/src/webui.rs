@@ -1,24 +1,25 @@
 use std::sync::Arc;
 
 use ironclaw_product_adapters::ProjectionStream;
-use ironclaw_product_workflow::RebornServicesErrorCode;
 use ironclaw_product_workflow::{
     RebornServices as ProductRebornServices, RebornServicesApi, RebornServicesError,
+    RebornServicesErrorCode, RebornServicesErrorKind,
 };
 
 use crate::{RebornBuildError, RebornReadiness, RebornRuntime};
 
 /// WebUI-facing Reborn service bundle for host composition.
 ///
-/// This bundle deliberately exposes only the product facade consumed by WebChat
-/// v2 routes. HTTP routing, auth middleware, static assets, and SSE transport
-/// stay in the WebUI crate; lower runtime handles stay behind the existing
-/// Reborn runtime/composition services.
-#[allow(dead_code)] // Private follow-up hook for WebUI route mounting.
+/// This bundle deliberately exposes only the product facade consumed by
+/// WebChat v2 routes. HTTP routing, auth middleware, static assets, and
+/// SSE transport stay in the WebUI crate (or, when the `webui-v2-beta`
+/// feature is on, the [`crate::webui_serve`] module in this crate);
+/// lower runtime handles stay behind the existing Reborn runtime /
+/// composition services.
 #[derive(Clone)]
-pub(crate) struct RebornWebuiBundle {
-    pub(crate) api: Arc<dyn RebornServicesApi>,
-    pub(crate) readiness: RebornReadiness,
+pub struct RebornWebuiBundle {
+    pub api: Arc<dyn RebornServicesApi>,
+    pub readiness: RebornReadiness,
 }
 
 impl std::fmt::Debug for RebornWebuiBundle {
@@ -37,8 +38,7 @@ impl std::fmt::Debug for RebornWebuiBundle {
 /// host runtime, route server, or event stream. It reuses the runtime's existing
 /// task-level composition and accepts an optional projection stream owned by the
 /// caller's event-stream composition layer.
-#[allow(dead_code)] // Private follow-up hook for WebUI route mounting.
-pub(crate) fn build_webui_services(
+pub fn build_webui_services(
     runtime: &RebornRuntime,
     event_stream: Option<Arc<dyn ProjectionStream>>,
 ) -> Result<RebornWebuiBundle, RebornBuildError> {
@@ -57,6 +57,7 @@ pub(crate) fn build_webui_services(
                     .record_user_message(scope.clone(), accepted_message_ref.clone(), message)
                     .map_err(|_| RebornServicesError {
                         code: RebornServicesErrorCode::Internal,
+                        kind: RebornServicesErrorKind::Internal,
                         status_code: 500,
                         retryable: false,
                         field: None,
@@ -68,6 +69,7 @@ pub(crate) fn build_webui_services(
                     .clear_accepted_message(scope, accepted_message_ref)
                     .map_err(|_| RebornServicesError {
                         code: RebornServicesErrorCode::Internal,
+                        kind: RebornServicesErrorKind::Internal,
                         status_code: 500,
                         retryable: false,
                         field: None,
