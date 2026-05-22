@@ -82,7 +82,8 @@ pub use run_profile::{
 pub use scope::{TurnActor, TurnScope};
 pub use status::{
     AdmissionRejection, AdmissionRejectionReason, BlockedReason, SanitizedCancelReason,
-    SanitizedFailure, TurnError, TurnErrorCategory, TurnRunProfile, TurnRunState, TurnStatus,
+    SanitizedFailure, TurnCapacityResource, TurnError, TurnErrorCategory, TurnRunProfile,
+    TurnRunState, TurnStatus,
 };
 pub use store::{
     SpawnTreeReservation, SpawnTreeReservationKey, TurnActiveLockKey, TurnActiveLockRecord,

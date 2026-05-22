@@ -8,8 +8,9 @@ use crate::{
     GetRunStateRequest, IdempotencyKey, LoopCheckpointRecord, ReplyTargetBindingRef,
     ResumeTurnRequest, ResumeTurnResponse, RunProfileResolver, SourceBindingRef, SubmitTurnRequest,
     SubmitTurnResponse, ThreadBusy, TurnActor, TurnAdmissionPolicy, TurnAdmissionReservationRecord,
-    TurnCheckpointId, TurnError, TurnErrorCategory, TurnId, TurnLeaseToken, TurnLifecycleEvent,
-    TurnRunId, TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp,
+    TurnCapacityResource, TurnCheckpointId, TurnError, TurnErrorCategory, TurnId, TurnLeaseToken,
+    TurnLifecycleEvent, TurnRunId, TurnRunProfile, TurnRunState, TurnRunnerId, TurnScope,
+    TurnStatus, TurnTimestamp,
     events::EventCursor,
     run_profile::{LoopCheckpointKind, LoopCheckpointStateRef, LoopModelRouteSnapshot},
 };
@@ -272,7 +273,7 @@ pub struct TurnIdempotencyErrorReplay {
     pub category: TurnErrorCategory,
     pub adapter_status_code: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capacity_resource: Option<String>,
+    pub capacity_resource: Option<TurnCapacityResource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_cap: Option<u64>,
 }
@@ -280,9 +281,7 @@ pub struct TurnIdempotencyErrorReplay {
 impl TurnIdempotencyErrorReplay {
     pub fn from_error(error: &TurnError) -> Self {
         let (capacity_resource, capacity_cap) = match error {
-            TurnError::CapacityExceeded { resource, cap } => {
-                (Some((*resource).to_string()), Some(*cap))
-            }
+            TurnError::CapacityExceeded { resource, cap } => (Some(*resource), Some(*cap)),
             _ => (None, None),
         };
         Self {
@@ -307,7 +306,9 @@ impl TurnIdempotencyErrorReplay {
                 reason: "replayed conflict".to_string(),
             },
             TurnErrorCategory::CapacityExceeded => TurnError::CapacityExceeded {
-                resource: replayed_capacity_resource(self.capacity_resource.as_deref()),
+                resource: self
+                    .capacity_resource
+                    .unwrap_or(TurnCapacityResource::Replayed),
                 cap: self.capacity_cap.unwrap_or_default(),
             },
             TurnErrorCategory::ThreadBusy => TurnError::Conflict {
@@ -317,13 +318,6 @@ impl TurnIdempotencyErrorReplay {
                 reason: "replayed malformed admission idempotency record".to_string(),
             },
         }
-    }
-}
-
-fn replayed_capacity_resource(resource: Option<&str>) -> &'static str {
-    match resource {
-        Some("spawn_tree_descendants") => "spawn_tree_descendants",
-        _ => "replayed",
     }
 }
 

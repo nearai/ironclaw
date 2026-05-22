@@ -1280,6 +1280,36 @@ async fn spawned_child_run_result_append_failure_propagates_without_completed_re
 }
 
 #[tokio::test]
+async fn spawned_child_run_rejects_unsafe_safe_summary_without_appending_result() {
+    let result_ref = LoopResultRef::new("result:spawned-child").expect("valid");
+    let host = MockHost::new(vec![calls_response()]).with_batch_outcomes(vec![
+        ironclaw_turns::run_profile::CapabilityBatchOutcome {
+            outcomes: vec![CapabilityOutcome::SpawnedChildRun {
+                child_run_id: TurnRunId::new(),
+                result_ref,
+                safe_summary: "/Users/alice/.ssh/id_rsa".to_string(),
+            }],
+            stopped_on_suspension: false,
+        },
+    ]);
+    let executor = CanonicalAgentLoopExecutor;
+    let state = LoopExecutionState::initial_for_run(host.run_context());
+
+    let error = executor
+        .execute_family(&crate::families::default(), &host, state)
+        .await
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        AgentLoopExecutorError::PlannerContract {
+            detail: "host returned unsafe strategy summary"
+        }
+    );
+    assert!(host.appended_result_refs().is_empty());
+}
+
+#[tokio::test]
 async fn completed_provider_call_appends_provider_replay_metadata() {
     let result_ref = LoopResultRef::new("result:provider-call").expect("valid");
     let host = MockHost::new(vec![provider_calls_response()]).with_batch_outcomes(vec![

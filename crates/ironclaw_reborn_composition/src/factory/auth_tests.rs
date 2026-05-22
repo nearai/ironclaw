@@ -79,6 +79,10 @@ async fn local_dev_oauth_turn_gate_callback_resumes_default_turn_coordinator() {
             requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
             idempotency_key: IdempotencyKey::new("submit-auth-callback").unwrap(),
             received_at: Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
         })
         .await
         .expect("submit turn");
@@ -363,6 +367,10 @@ async fn submit_and_block_auth_run(
             requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
             idempotency_key: IdempotencyKey::new("submit-auth-callback-2").unwrap(),
             received_at: Utc::now(),
+            requested_run_id: None,
+            parent_run_id: None,
+            subagent_depth: 0,
+            spawn_tree_root_run_id: None,
         })
         .await
         .expect("submit turn");

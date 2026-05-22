@@ -591,6 +591,10 @@ mod tests {
                 requested_run_profile: Some(RunProfileRequest::new("default").unwrap()),
                 idempotency_key: IdempotencyKey::new("idem-auth-real-submit").unwrap(),
                 received_at: Utc::now(),
+                requested_run_id: None,
+                parent_run_id: None,
+                subagent_depth: 0,
+                spawn_tree_root_run_id: None,
             })
             .await
             .expect("submit turn");

@@ -2850,7 +2850,10 @@ impl TurnCoordinator for CapacityFailureTurnCoordinator {
         request: SubmitTurnRequest,
     ) -> Result<SubmitTurnResponse, TurnError> {
         self.submissions.lock().unwrap().push(request);
-        Err(TurnError::capacity_exceeded("submit_turn", 1))
+        Err(TurnError::capacity_exceeded(
+            ironclaw_turns::TurnCapacityResource::SubmitTurn,
+            1,
+        ))
     }
 
     async fn resume_turn(

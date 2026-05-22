@@ -10,7 +10,9 @@ use crate::{GateRef, TurnError, TurnRunId, TurnScope, TurnStatus};
 const MAX_IN_MEMORY_EVENTS: usize = 10_000;
 pub const MAX_TURN_EVENT_PROJECTION_LIMIT: usize = 1_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, Default,
+)]
 #[serde(transparent)]
 pub struct EventCursor(pub u64);
 

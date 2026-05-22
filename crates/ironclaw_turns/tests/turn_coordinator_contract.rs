@@ -21,13 +21,13 @@ use ironclaw_turns::{
     SourceBindingRef, StaticTurnAdmissionLimitProvider, SubmitTurnRequest, SubmitTurnResponse,
     ThreadBusy, TurnActor, TurnAdmissionAxisKind, TurnAdmissionBucketKind,
     TurnAdmissionBucketScope, TurnAdmissionCapacityDenial, TurnAdmissionClass, TurnAdmissionPolicy,
-    TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory, TurnEventKind,
-    TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
-    TurnEventProjectionService, TurnEventProjectionSource, TurnEventSink,
-    TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind,
-    TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent,
-    TurnLockVersion, TurnRunId, TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier,
-    TurnRunWakeNotifyError, TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
+    TurnCapacityResource, TurnCheckpointId, TurnCoordinator, TurnError, TurnErrorCategory,
+    TurnEventKind, TurnEventProjectionCursor, TurnEventProjectionError, TurnEventProjectionRequest,
+    TurnEventProjectionService, TurnEventSink, TurnIdempotencyErrorReplay,
+    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
+    TurnIdempotencyReplay, TurnLeaseToken, TurnLifecycleEvent, TurnLockVersion, TurnRunId,
+    TurnRunProfile, TurnRunState, TurnRunWake, TurnRunWakeNotifier, TurnRunWakeNotifyError,
+    TurnRunnerId, TurnScope, TurnStateStore, TurnStatus,
     events::EventCursor,
     run_profile::{CapabilityOutcome, LoopGateKind, LoopModelRouteSnapshot},
     runner::{
@@ -357,6 +357,18 @@ async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
             .unwrap(),
         None
     );
+    assert!(matches!(
+        store
+            .reserve_tree_descendants(&child_scope, child_a_id, 1, 3)
+            .await,
+        Err(TurnError::InvalidRequest { .. })
+    ));
+    assert!(matches!(
+        store
+            .release_tree_descendants(&child_scope, child_a_id, 1)
+            .await,
+        Err(TurnError::InvalidRequest { .. })
+    ));
 
     let reservation = store
         .reserve_tree_descendants(&scope("thread-parent"), parent, 2, 3)
@@ -391,7 +403,7 @@ async fn children_of_get_run_record_and_tree_reservation_are_scope_checked() {
 
 #[tokio::test]
 async fn child_lineage_is_validated_against_parent_record() {
-    let (coordinator, _store) = coordinator();
+    let (coordinator, store) = coordinator();
     let parent = accepted_run_id(
         &coordinator
             .submit_turn(submit_request(
@@ -427,6 +439,49 @@ async fn child_lineage_is_validated_against_parent_record() {
         coordinator.submit_turn(top_level_with_root).await,
         Err(TurnError::InvalidRequest { .. })
     ));
+
+    let missing_child_run_id = TurnRunId::new();
+    let mut missing_parent = submit_request("thread-lineage-missing", "idem-lineage-missing");
+    missing_parent.requested_run_id = Some(missing_child_run_id);
+    missing_parent.parent_run_id = Some(TurnRunId::new());
+    missing_parent.subagent_depth = 1;
+    missing_parent.spawn_tree_root_run_id = Some(parent);
+    assert!(matches!(
+        coordinator.submit_turn(missing_parent.clone()).await,
+        Err(TurnError::InvalidRequest { .. })
+    ));
+    assert!(
+        store
+            .get_run_record(&missing_parent.scope, missing_child_run_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let cross_scope_child_run_id = TurnRunId::new();
+    let cross_scope = TurnScope::new(
+        TenantId::new("tenant-lineage-foreign").unwrap(),
+        Some(AgentId::new("agent1").unwrap()),
+        Some(ProjectId::new("project1").unwrap()),
+        ThreadId::new("thread-lineage-child").unwrap(),
+    );
+    let mut cross_scope_parent = submit_request("thread-lineage-child", "idem-lineage-cross-scope");
+    cross_scope_parent.scope = cross_scope.clone();
+    cross_scope_parent.requested_run_id = Some(cross_scope_child_run_id);
+    cross_scope_parent.parent_run_id = Some(parent);
+    cross_scope_parent.subagent_depth = 1;
+    cross_scope_parent.spawn_tree_root_run_id = Some(parent);
+    assert!(matches!(
+        coordinator.submit_turn(cross_scope_parent).await,
+        Err(TurnError::InvalidRequest { .. })
+    ));
+    assert!(
+        store
+            .get_run_record(&cross_scope, cross_scope_child_run_id)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -469,6 +524,7 @@ async fn blocked_dependent_run_can_resume_and_cancel_directly() {
             source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
             reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
             idempotency_key: IdempotencyKey::new("idem-dependent-resume").unwrap(),
+            precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
         })
         .await
         .unwrap();
@@ -536,6 +592,98 @@ async fn default_turn_coordinator_publishes_lifecycle_events_to_sink() {
 }
 
 #[tokio::test]
+async fn default_turn_coordinator_dedupes_idempotency_replay_events_by_cursor() {
+    let store = Arc::new(InMemoryTurnStateStore::default());
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let coordinator = DefaultTurnCoordinator::new(store.clone()).with_event_sink(sink.clone());
+
+    let submit = submit_request("thread-event-replay-submit", "idem-event-replay-submit");
+    coordinator.submit_turn(submit.clone()).await.unwrap();
+    coordinator.submit_turn(submit).await.unwrap();
+    assert_eq!(
+        sink.events()
+            .iter()
+            .filter(|event| event.kind == TurnEventKind::Submitted)
+            .count(),
+        1
+    );
+
+    let resume_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-event-replay-resume",
+                "idem-event-replay-resume-submit",
+            ))
+            .await
+            .unwrap(),
+    );
+    let resume_runner_id = TurnRunnerId::new();
+    let resume_lease = TurnLeaseToken::new();
+    store
+        .claim_next_run(ClaimRunRequest {
+            runner_id: resume_runner_id,
+            lease_token: resume_lease,
+            scope_filter: Some(scope("thread-event-replay-resume")),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    let resume_gate_ref = LoopGateRef::new("gate:event-replay-resume").unwrap();
+    apply_test_loop_exit(
+        store.as_ref(),
+        resume_run_id,
+        resume_runner_id,
+        resume_lease,
+        dependent_blocked_mapping(TurnCheckpointId::new(), block_state_ref(), &resume_gate_ref),
+    )
+    .await
+    .unwrap();
+    let resume = ResumeTurnRequest {
+        scope: scope("thread-event-replay-resume"),
+        actor: actor(),
+        run_id: resume_run_id,
+        gate_resolution_ref: GateRef::new(resume_gate_ref.as_str()).unwrap(),
+        source_binding_ref: SourceBindingRef::new("source-web-resumed").unwrap(),
+        reply_target_binding_ref: ReplyTargetBindingRef::new("reply-web-resumed").unwrap(),
+        idempotency_key: IdempotencyKey::new("idem-event-replay-resume").unwrap(),
+        precondition: ironclaw_turns::ResumeTurnPrecondition::AnyBlockedGate,
+    };
+    coordinator.resume_turn(resume.clone()).await.unwrap();
+    coordinator.resume_turn(resume).await.unwrap();
+    assert_eq!(
+        sink.events()
+            .iter()
+            .filter(|event| event.kind == TurnEventKind::Resumed)
+            .count(),
+        1
+    );
+
+    let cancel_run_id = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-event-replay-cancel",
+                "idem-event-replay-cancel-submit",
+            ))
+            .await
+            .unwrap(),
+    );
+    let cancel = cancel_request(
+        "thread-event-replay-cancel",
+        cancel_run_id,
+        "idem-event-replay-cancel",
+    );
+    coordinator.cancel_run(cancel.clone()).await.unwrap();
+    coordinator.cancel_run(cancel).await.unwrap();
+    assert_eq!(
+        sink.events()
+            .iter()
+            .filter(|event| event.kind == TurnEventKind::Cancelled)
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn default_turn_coordinator_does_not_publish_cancel_event_for_terminal_retry() {
     let store = Arc::new(InMemoryTurnStateStore::default());
     let sink = Arc::new(InMemoryTurnEventSink::default());
@@ -571,7 +719,6 @@ async fn event_publishing_transition_port_publishes_blocked_and_terminal_events(
     let sink = Arc::new(InMemoryTurnEventSink::default());
     let transition_port = EventPublishingTurnRunTransitionPort::new(
         Arc::clone(&store) as Arc<dyn TurnRunTransitionPort>,
-        Arc::clone(&store) as Arc<dyn TurnEventProjectionSource>,
         Arc::clone(&sink) as Arc<dyn TurnEventSink>,
     );
 
@@ -650,6 +797,79 @@ async fn event_publishing_transition_port_publishes_blocked_and_terminal_events(
             && event.kind == TurnEventKind::Completed
             && event.status == TurnStatus::Completed
     }));
+}
+
+#[tokio::test]
+async fn event_publishing_transition_port_publishes_recovered_lease_events() {
+    let (coordinator, store) = coordinator();
+    let sink = Arc::new(InMemoryTurnEventSink::default());
+    let transition_port = EventPublishingTurnRunTransitionPort::new(
+        Arc::clone(&store) as Arc<dyn TurnRunTransitionPort>,
+        Arc::clone(&sink) as Arc<dyn TurnEventSink>,
+    );
+
+    let empty = transition_port
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: Utc::now() + ChronoDuration::seconds(120),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert!(empty.recovered.is_empty());
+    assert!(sink.events().is_empty());
+
+    let first = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-recover-event-a",
+                "idem-recover-event-a",
+            ))
+            .await
+            .unwrap(),
+    );
+    let second = accepted_run_id(
+        &coordinator
+            .submit_turn(submit_request(
+                "thread-recover-event-b",
+                "idem-recover-event-b",
+            ))
+            .await
+            .unwrap(),
+    );
+    for scope_filter in [
+        Some(scope("thread-recover-event-a")),
+        Some(scope("thread-recover-event-b")),
+    ] {
+        transition_port
+            .claim_next_run(ClaimRunRequest {
+                runner_id: TurnRunnerId::new(),
+                lease_token: TurnLeaseToken::new(),
+                scope_filter,
+            })
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    let recovered = transition_port
+        .recover_expired_leases(RecoverExpiredLeasesRequest {
+            now: Utc::now() + ChronoDuration::seconds(120),
+            scope_filter: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(recovered.recovered.len(), 2);
+    let events = sink.events();
+    let recovered_events = events
+        .iter()
+        .filter(|event| {
+            event.kind == TurnEventKind::RecoveryRequired
+                && event.sanitized_reason.as_deref() == Some("lease_expired")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(recovered_events.len(), 2);
+    assert!(recovered_events.iter().any(|event| event.run_id == first));
+    assert!(recovered_events.iter().any(|event| event.run_id == second));
 }
 
 #[tokio::test]
@@ -3232,7 +3452,7 @@ fn capacity_exceeded_idempotency_replay_preserves_resource_and_cap() {
         run_id: None,
         outcome: TurnIdempotencyOutcomeKind::CapacityExceeded,
         replay: TurnIdempotencyReplay::Error(TurnIdempotencyErrorReplay::from_error(
-            &TurnError::capacity_exceeded("spawn_tree_descendants", 3),
+            &TurnError::capacity_exceeded(TurnCapacityResource::SpawnTreeDescendants, 3),
         )),
         created_at: Utc::now(),
         expires_at: None,
@@ -3241,7 +3461,7 @@ fn capacity_exceeded_idempotency_replay_preserves_resource_and_cap() {
     assert_eq!(
         record.replay_submit(),
         Some(Err(TurnError::CapacityExceeded {
-            resource: "spawn_tree_descendants",
+            resource: TurnCapacityResource::SpawnTreeDescendants,
             cap: 3,
         }))
     );

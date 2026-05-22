@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     BlockedReason, LoopExitMapping, ResolvedRunProfile, SanitizedFailure, TurnCheckpointId,
-    TurnError, TurnEventProjectionSource, TurnEventSink, TurnLeaseToken, TurnRunId, TurnRunState,
-    TurnRunnerId, TurnScope, TurnTimestamp,
+    TurnError, TurnEventKind, TurnEventSink, TurnLeaseToken, TurnLifecycleEvent, TurnRunId,
+    TurnRunState, TurnRunnerId, TurnScope, TurnStatus, TurnTimestamp,
     events::EventCursor,
     run_profile::{LoopCheckpointStateRef, LoopModelRouteSnapshot},
 };
@@ -157,50 +158,70 @@ pub trait TurnRunTransitionPort: Send + Sync {
 
 pub struct EventPublishingTurnRunTransitionPort {
     inner: Arc<dyn TurnRunTransitionPort>,
-    source: Arc<dyn TurnEventProjectionSource>,
     sink: Arc<dyn TurnEventSink>,
 }
 
 impl EventPublishingTurnRunTransitionPort {
-    pub fn new(
-        inner: Arc<dyn TurnRunTransitionPort>,
-        source: Arc<dyn TurnEventProjectionSource>,
-        sink: Arc<dyn TurnEventSink>,
-    ) -> Self {
-        Self {
-            inner,
-            source,
-            sink,
-        }
+    pub fn new(inner: Arc<dyn TurnRunTransitionPort>, sink: Arc<dyn TurnEventSink>) -> Self {
+        Self { inner, sink }
     }
 
-    async fn publish_state_event_best_effort(&self, state: &TurnRunState) {
-        let after = EventCursor(state.event_cursor.0.saturating_sub(1));
-        let page = match self
-            .source
-            .read_turn_events_after(&state.scope, Some(after), 8)
-            .await
-        {
-            Ok(page) => page,
-            Err(error) => {
-                tracing::debug!(error = %error, "turn transition event source read failed");
-                return;
-            }
+    async fn publish_state_event_best_effort(
+        &self,
+        state: &TurnRunState,
+        kind: TurnEventKind,
+        sanitized_reason: Option<String>,
+    ) {
+        let blocked_gate = if kind == TurnEventKind::Blocked {
+            state.gate_ref.clone().and_then(|gate_ref| {
+                crate::events::TurnBlockedGateKind::from_status(state.status).map(|gate_kind| {
+                    crate::events::TurnBlockedGateMetadata {
+                        gate_ref,
+                        gate_kind,
+                    }
+                })
+            })
+        } else {
+            None
         };
-        let Some(event) = page
-            .entries
-            .into_iter()
-            .find(|event| event.run_id == state.run_id && event.cursor == state.event_cursor)
-        else {
-            tracing::debug!(
-                run_id = %state.run_id,
-                cursor = state.event_cursor.0,
-                "turn transition event not found after committed state"
-            );
-            return;
+        let event = TurnLifecycleEvent {
+            cursor: state.event_cursor,
+            scope: state.scope.clone(),
+            occurred_at: Some(Utc::now()),
+            owner_user_id: state.actor.as_ref().map(|actor| actor.user_id.clone()),
+            run_id: state.run_id,
+            status: state.status,
+            kind,
+            blocked_gate,
+            sanitized_reason,
         };
         if let Err(error) = self.sink.publish(event).await {
             tracing::debug!(error = %error, "turn transition event sink publish failed");
+        }
+    }
+
+    fn event_kind_for_state(state: &TurnRunState) -> TurnEventKind {
+        match state.status {
+            TurnStatus::Running => TurnEventKind::RunnerClaimed,
+            TurnStatus::BlockedApproval
+            | TurnStatus::BlockedAuth
+            | TurnStatus::BlockedResource
+            | TurnStatus::BlockedDependentRun => TurnEventKind::Blocked,
+            TurnStatus::Completed => TurnEventKind::Completed,
+            TurnStatus::Cancelled => TurnEventKind::Cancelled,
+            TurnStatus::Failed => TurnEventKind::Failed,
+            TurnStatus::RecoveryRequired => TurnEventKind::RecoveryRequired,
+            TurnStatus::Queued | TurnStatus::CancelRequested => TurnEventKind::RunnerHeartbeat,
+        }
+    }
+
+    fn sanitized_reason_for_state(state: &TurnRunState) -> Option<String> {
+        match state.status {
+            TurnStatus::Failed | TurnStatus::RecoveryRequired => state
+                .failure
+                .as_ref()
+                .map(|failure| failure.category().to_string()),
+            _ => None,
         }
     }
 }
@@ -213,7 +234,12 @@ impl TurnRunTransitionPort for EventPublishingTurnRunTransitionPort {
     ) -> Result<Option<ClaimedTurnRun>, TurnError> {
         let claimed = self.inner.claim_next_run(request).await?;
         if let Some(claimed) = &claimed {
-            self.publish_state_event_best_effort(&claimed.state).await;
+            self.publish_state_event_best_effort(
+                &claimed.state,
+                TurnEventKind::RunnerClaimed,
+                None,
+            )
+            .await;
         }
         Ok(claimed)
     }
@@ -228,7 +254,12 @@ impl TurnRunTransitionPort for EventPublishingTurnRunTransitionPort {
     ) -> Result<RecoverExpiredLeasesResponse, TurnError> {
         let response = self.inner.recover_expired_leases(request).await?;
         for state in &response.recovered {
-            self.publish_state_event_best_effort(state).await;
+            self.publish_state_event_best_effort(
+                state,
+                TurnEventKind::RecoveryRequired,
+                Some("lease_expired".to_string()),
+            )
+            .await;
         }
         Ok(response)
     }
@@ -242,13 +273,15 @@ impl TurnRunTransitionPort for EventPublishingTurnRunTransitionPort {
 
     async fn block_run(&self, request: BlockRunRequest) -> Result<TurnRunState, TurnError> {
         let state = self.inner.block_run(request).await?;
-        self.publish_state_event_best_effort(&state).await;
+        self.publish_state_event_best_effort(&state, TurnEventKind::Blocked, None)
+            .await;
         Ok(state)
     }
 
     async fn complete_run(&self, request: CompleteRunRequest) -> Result<TurnRunState, TurnError> {
         let state = self.inner.complete_run(request).await?;
-        self.publish_state_event_best_effort(&state).await;
+        self.publish_state_event_best_effort(&state, TurnEventKind::Completed, None)
+            .await;
         Ok(state)
     }
 
@@ -257,13 +290,19 @@ impl TurnRunTransitionPort for EventPublishingTurnRunTransitionPort {
         request: CancelRunCompletionRequest,
     ) -> Result<TurnRunState, TurnError> {
         let state = self.inner.cancel_run(request).await?;
-        self.publish_state_event_best_effort(&state).await;
+        self.publish_state_event_best_effort(&state, TurnEventKind::Cancelled, None)
+            .await;
         Ok(state)
     }
 
     async fn fail_run(&self, request: FailRunRequest) -> Result<TurnRunState, TurnError> {
         let state = self.inner.fail_run(request).await?;
-        self.publish_state_event_best_effort(&state).await;
+        self.publish_state_event_best_effort(
+            &state,
+            TurnEventKind::Failed,
+            Self::sanitized_reason_for_state(&state),
+        )
+        .await;
         Ok(state)
     }
 
@@ -272,7 +311,12 @@ impl TurnRunTransitionPort for EventPublishingTurnRunTransitionPort {
         request: RecordRecoveryRequiredRequest,
     ) -> Result<TurnRunState, TurnError> {
         let state = self.inner.record_recovery_required(request).await?;
-        self.publish_state_event_best_effort(&state).await;
+        self.publish_state_event_best_effort(
+            &state,
+            TurnEventKind::RecoveryRequired,
+            Self::sanitized_reason_for_state(&state),
+        )
+        .await;
         Ok(state)
     }
 
@@ -281,7 +325,12 @@ impl TurnRunTransitionPort for EventPublishingTurnRunTransitionPort {
         request: ApplyValidatedLoopExitRequest,
     ) -> Result<TurnRunState, TurnError> {
         let state = self.inner.apply_validated_loop_exit(request).await?;
-        self.publish_state_event_best_effort(&state).await;
+        self.publish_state_event_best_effort(
+            &state,
+            Self::event_kind_for_state(&state),
+            Self::sanitized_reason_for_state(&state),
+        )
+        .await;
         Ok(state)
     }
 }

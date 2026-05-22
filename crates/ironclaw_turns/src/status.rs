@@ -300,6 +300,31 @@ pub enum TurnErrorCategory {
     CapacityExceeded,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnCapacityResource {
+    SpawnTreeDescendants,
+    SubmitTurn,
+    #[serde(other)]
+    Replayed,
+}
+
+impl TurnCapacityResource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SpawnTreeDescendants => "spawn_tree_descendants",
+            Self::SubmitTurn => "submit_turn",
+            Self::Replayed => "replayed",
+        }
+    }
+}
+
+impl std::fmt::Display for TurnCapacityResource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum TurnError {
     #[error("thread already has an active run")]
@@ -317,7 +342,10 @@ pub enum TurnError {
     #[error("turn conflict: {reason}")]
     Conflict { reason: String },
     #[error("turn capacity exceeded for {resource}: cap {cap}")]
-    CapacityExceeded { resource: &'static str, cap: u64 },
+    CapacityExceeded {
+        resource: TurnCapacityResource,
+        cap: u64,
+    },
     #[error("invalid turn transition from {from:?} to {to:?}")]
     InvalidTransition { from: TurnStatus, to: TurnStatus },
     #[error("turn run lease mismatch")]
@@ -347,7 +375,7 @@ impl TurnError {
         }
     }
 
-    pub fn capacity_exceeded(resource: &'static str, cap: u64) -> Self {
+    pub fn capacity_exceeded(resource: TurnCapacityResource, cap: u64) -> Self {
         Self::CapacityExceeded { resource, cap }
     }
 

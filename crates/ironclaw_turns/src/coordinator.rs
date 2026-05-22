@@ -1,9 +1,10 @@
 use async_trait::async_trait;
 use chrono::Utc;
 use std::{
+    collections::HashSet,
     fmt,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 use tracing::debug;
 
@@ -92,6 +93,7 @@ pub struct DefaultTurnCoordinator<S: ?Sized> {
     run_profile_resolver: Arc<dyn RunProfileResolver>,
     wake_notifier: Arc<dyn TurnRunWakeNotifier>,
     event_sink: Option<Arc<dyn TurnEventSink>>,
+    delivered_event_cursors: Mutex<HashSet<EventCursor>>,
 }
 
 impl<S> DefaultTurnCoordinator<S>
@@ -105,6 +107,7 @@ where
             run_profile_resolver: Arc::new(InMemoryRunProfileResolver::default()),
             wake_notifier: Arc::new(NoopTurnRunWakeNotifier),
             event_sink: None,
+            delivered_event_cursors: Mutex::new(HashSet::new()),
         }
     }
 
@@ -126,6 +129,13 @@ where
     pub fn with_event_sink(mut self, sink: Arc<dyn TurnEventSink>) -> Self {
         self.event_sink = Some(sink);
         self
+    }
+
+    fn claim_event_cursor_for_publish(&self, cursor: EventCursor) -> bool {
+        match self.delivered_event_cursors.lock() {
+            Ok(mut delivered) => delivered.insert(cursor),
+            Err(poisoned) => poisoned.into_inner().insert(cursor),
+        }
     }
 }
 
@@ -228,21 +238,23 @@ where
             event_cursor,
             ..
         } = &response;
-        publish_turn_event_best_effort(
-            self.event_sink.as_ref(),
-            TurnLifecycleEvent {
-                cursor: *event_cursor,
-                scope: event_scope,
-                occurred_at: Some(occurred_at),
-                owner_user_id: Some(actor.user_id),
-                run_id: *run_id,
-                status: *status,
-                kind: TurnEventKind::Submitted,
-                blocked_gate: None,
-                sanitized_reason: None,
-            },
-        )
-        .await;
+        if self.claim_event_cursor_for_publish(*event_cursor) {
+            publish_turn_event_best_effort(
+                self.event_sink.as_ref(),
+                TurnLifecycleEvent {
+                    cursor: *event_cursor,
+                    scope: event_scope,
+                    occurred_at: Some(occurred_at),
+                    owner_user_id: Some(actor.user_id),
+                    run_id: *run_id,
+                    status: *status,
+                    kind: TurnEventKind::Submitted,
+                    blocked_gate: None,
+                    sanitized_reason: None,
+                },
+            )
+            .await;
+        }
         Ok(response)
     }
 
@@ -257,21 +269,23 @@ where
             self.wake_notifier.as_ref(),
             resume_wake(scope.clone(), &response),
         );
-        publish_turn_event_best_effort(
-            self.event_sink.as_ref(),
-            TurnLifecycleEvent {
-                cursor: response.event_cursor,
-                scope,
-                occurred_at: Some(Utc::now()),
-                owner_user_id: Some(actor.user_id),
-                run_id: response.run_id,
-                status: response.status,
-                kind: TurnEventKind::Resumed,
-                blocked_gate: None,
-                sanitized_reason: None,
-            },
-        )
-        .await;
+        if self.claim_event_cursor_for_publish(response.event_cursor) {
+            publish_turn_event_best_effort(
+                self.event_sink.as_ref(),
+                TurnLifecycleEvent {
+                    cursor: response.event_cursor,
+                    scope,
+                    occurred_at: Some(Utc::now()),
+                    owner_user_id: Some(actor.user_id),
+                    run_id: response.run_id,
+                    status: response.status,
+                    kind: TurnEventKind::Resumed,
+                    blocked_gate: None,
+                    sanitized_reason: None,
+                },
+            )
+            .await;
+        }
         Ok(response)
     }
 
@@ -290,7 +304,8 @@ where
                 cancel_wake(scope.clone(), &response),
             );
         }
-        if !response.already_terminal {
+        if !response.already_terminal && self.claim_event_cursor_for_publish(response.event_cursor)
+        {
             let kind = if response.status == TurnStatus::CancelRequested {
                 TurnEventKind::CancelRequested
             } else {

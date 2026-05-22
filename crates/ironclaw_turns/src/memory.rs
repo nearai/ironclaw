@@ -16,11 +16,12 @@ use crate::{
     RunProfileResolver, SanitizedFailure, SourceBindingRef, SpawnTreeReservation,
     SpawnTreeReservationKey, SubmitTurnRequest, SubmitTurnResponse, ThreadBusy, TurnActiveLockKey,
     TurnActiveLockRecord, TurnActor, TurnAdmissionClass, TurnAdmissionLimitProvider,
-    TurnAdmissionPolicy, TurnAdmissionReservationRecord, TurnCheckpointId, TurnCheckpointRecord,
-    TurnError, TurnEventKind, TurnIdempotencyErrorReplay, TurnIdempotencyOperationKind,
-    TurnIdempotencyOutcomeKind, TurnIdempotencyRecord, TurnIdempotencyReplay, TurnLifecycleEvent,
-    TurnLockVersion, TurnPersistenceSnapshot, TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord,
-    TurnRunState, TurnScope, TurnStateStore, TurnStatus,
+    TurnAdmissionPolicy, TurnAdmissionReservationRecord, TurnCapacityResource, TurnCheckpointId,
+    TurnCheckpointRecord, TurnError, TurnEventKind, TurnIdempotencyErrorReplay,
+    TurnIdempotencyOperationKind, TurnIdempotencyOutcomeKind, TurnIdempotencyRecord,
+    TurnIdempotencyReplay, TurnLifecycleEvent, TurnLockVersion, TurnPersistenceSnapshot,
+    TurnRecord, TurnRunId, TurnRunProfile, TurnRunRecord, TurnRunState, TurnScope, TurnStateStore,
+    TurnStatus,
     admission::{TurnAdmissionBucket, admission_buckets},
     events::{EventCursor, TurnEventPage, TurnEventProjectionSource, project_turn_events},
     runner::{
@@ -732,21 +733,27 @@ impl TurnStateStore for InMemoryTurnStateStore {
         if !same_scope_envelope(&root.scope, scope) {
             return Err(TurnError::Unauthorized);
         }
-        let key = SpawnTreeReservationKey::new(scope, root_run_id);
+        let canonical_root_run_id = root.spawn_tree_root_run_id.unwrap_or(root.run_id);
+        if canonical_root_run_id != root.run_id {
+            return Err(TurnError::InvalidRequest {
+                reason: "root_run_id must identify the spawn tree root".to_string(),
+            });
+        }
+        let key = SpawnTreeReservationKey::new(scope, canonical_root_run_id);
         let current = *inner.tree_reservations.get(&key).unwrap_or(&0);
         let next = current.checked_add(u64::from(delta)).ok_or_else(|| {
-            TurnError::capacity_exceeded("spawn_tree_descendants", u64::from(cap))
+            TurnError::capacity_exceeded(TurnCapacityResource::SpawnTreeDescendants, u64::from(cap))
         })?;
         if next > u64::from(cap) {
             return Err(TurnError::capacity_exceeded(
-                "spawn_tree_descendants",
+                TurnCapacityResource::SpawnTreeDescendants,
                 u64::from(cap),
             ));
         }
         inner.tree_reservations.insert(key, next);
         Ok(SpawnTreeReservation {
             scope: scope.clone(),
-            root_run_id,
+            root_run_id: canonical_root_run_id,
             descendant_count: next,
         })
     }
@@ -764,14 +771,20 @@ impl TurnStateStore for InMemoryTurnStateStore {
         if !same_scope_envelope(&root.scope, scope) {
             return Err(TurnError::Unauthorized);
         }
-        let key = SpawnTreeReservationKey::new(scope, root_run_id);
+        let canonical_root_run_id = root.spawn_tree_root_run_id.unwrap_or(root.run_id);
+        if canonical_root_run_id != root.run_id {
+            return Err(TurnError::InvalidRequest {
+                reason: "root_run_id must identify the spawn tree root".to_string(),
+            });
+        }
+        let key = SpawnTreeReservationKey::new(scope, canonical_root_run_id);
         let mut released_reservation = false;
         if let Some(count) = inner.tree_reservations.get_mut(&key) {
             let previous = *count;
             *count = count.saturating_sub(u64::from(delta));
             if previous < u64::from(delta) {
                 tracing::debug!(
-                    root_run_id = %root_run_id,
+                    root_run_id = %canonical_root_run_id,
                     attempted = delta,
                     available = previous,
                     "tree descendant release underflowed; saturated at zero"
@@ -785,16 +798,16 @@ impl TurnStateStore for InMemoryTurnStateStore {
         if released_reservation
             && inner
                 .records
-                .get(&root_run_id)
+                .get(&canonical_root_run_id)
                 .is_some_and(|record| record.status.is_terminal())
-            && !inner.terminal_runs.contains(&root_run_id)
+            && !inner.terminal_runs.contains(&canonical_root_run_id)
         {
             if inner.terminal_runs.len() >= inner.limits.max_terminal_records {
-                inner.records.remove(&root_run_id);
-                inner.admission_reservations.remove(&root_run_id);
+                inner.records.remove(&canonical_root_run_id);
+                inner.admission_reservations.remove(&canonical_root_run_id);
                 return Ok(());
             }
-            inner.terminal_runs.push_back(root_run_id);
+            inner.terminal_runs.push_back(canonical_root_run_id);
             inner.prune_terminal_records();
         }
         Ok(())
